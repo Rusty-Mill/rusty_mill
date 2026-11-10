@@ -52,11 +52,14 @@ mod hosts;
 #[cfg(any(unix, windows))]
 mod own;
 mod render;
+mod ssh;
 mod stop;
 pub mod target;
+mod terminfo;
 mod wait;
 mod watch;
 
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
@@ -135,6 +138,8 @@ pub struct Env {
     pub agent_homes: AgentHomes,
     /// This program, which the agent's session-start hook runs.
     pub ctl: Option<PathBuf>,
+    /// `$RUSTY_MUX_SSH`: the `ssh` that `terminfo` runs; `ssh` when unset.
+    pub ssh: Option<OsString>,
 }
 
 impl Env {
@@ -156,6 +161,7 @@ impl Env {
             hosts: hosts::default_path(),
             agent_homes: AgentHomes::from_process(),
             ctl: std::env::current_exe().ok(),
+            ssh: std::env::var_os("RUSTY_MUX_SSH"),
         }
     }
 }
@@ -422,6 +428,18 @@ pub fn run_until(
                 Ok(()) => Exit::Ok,
                 Err((exit, reason)) => report(err, exit, &reason),
             };
+        }
+        Command::Ssh(command) => {
+            let program = env.ssh.clone().unwrap_or_else(|| "ssh".into());
+            let home = env.agent_homes.home.as_deref();
+            let config = home.map(|h| h.join(".ssh").join("config"));
+            return ssh::run(&command, &program, config.as_deref(), home, out)
+                .unwrap_or_else(|(exit, reason)| report(err, exit, &reason));
+        }
+        Command::Terminfo(command) => {
+            let ssh = env.ssh.clone().unwrap_or_else(|| "ssh".into());
+            return terminfo::run(&command, &ssh, out)
+                .unwrap_or_else(|(exit, reason)| report(err, exit, &reason));
         }
         Command::Agent(AgentCommand::Report(hook)) => {
             return send_hook_report(hook_socket.as_deref(), env, &hook, stop);
@@ -710,6 +728,8 @@ fn execute(
         | Command::Do { .. }
         | Command::Config(_)
         | Command::Hosts(_)
+        | Command::Ssh(_)
+        | Command::Terminfo(_)
         | Command::Agent(_)
         | Command::Watch { .. }
         | Command::Bridge
@@ -788,8 +808,9 @@ fn follow(
 
 /// How long the agent hook waits for the server to tell a session's name,
 /// well inside the 5 s the OpenCode and Pi scripts give the whole hook.
-/// A hard bound only where [`conn::connect`] bounds connecting and writes
-/// (Linux); elsewhere the host's hook timeout is the bound.
+/// A hard bound on reads and writes, and on connecting where
+/// [`conn::connect`] bounds it (Linux); elsewhere the host's hook timeout
+/// bounds a connect.
 const HOOK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Sends an agent hook's report on `block` to the server at `socket` with
@@ -1364,6 +1385,7 @@ mod tests {
             hosts: None,
             agent_homes: AgentHomes::default(),
             ctl: None,
+            ssh: None,
         };
         let stop = Stop::after(std::time::Duration::ZERO);
         let (mut out, mut err) = (Vec::new(), Vec::new());

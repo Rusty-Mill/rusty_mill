@@ -41,6 +41,10 @@ pub enum Command {
     Config(ConfigCommand),
     /// Lists, adds or removes saved hosts (C35).
     Hosts(HostsCommand),
+    /// Checks a host for `rusty-mux --ssh`, or prints its config (C48).
+    Ssh(SshCommand),
+    /// Checks, installs or removes our terminfo entry on an SSH host (C47).
+    Terminfo(Terminfo),
     /// Follows events from `after` (or from now) and runs the config's
     /// rules for each, until the server goes away.
     Watch { after: Option<Cursor> },
@@ -196,6 +200,47 @@ pub enum ConfigCommand {
     List,
 }
 
+/// `terminfo VERB DEST`: our terminfo entry on the SSH host `dest`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Terminfo {
+    pub verb: TerminfoVerb,
+    /// What `ssh` gets after `--`.
+    pub dest: String,
+    /// Print the command and run nothing (`setup` and `remove` only).
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminfoVerb {
+    /// Reports whether the entry is installed; reads only.
+    Check,
+    /// Compiles the entry into the remote `~/.terminfo`.
+    Setup,
+    /// Removes the entry from the remote `~/.terminfo`.
+    Remove,
+}
+
+/// `ssh`: none of its verbs connects or writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SshCommand {
+    /// Problems and warnings for `rusty-mux --ssh DEST`.
+    Check(String),
+    /// As `check`, with every value it used and a fix for each finding.
+    Diagnose(String),
+    /// Prints a `Host` block for the ssh config.
+    Setup(SshSetup),
+}
+
+/// What `ssh setup` puts in its block; only what is given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshSetup {
+    pub dest: String,
+    pub hostname: Option<String>,
+    pub user: Option<String>,
+    pub port: Option<String>,
+    pub identity: Option<String>,
+}
+
 /// What `api` prints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Api {
@@ -338,6 +383,8 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "do" => run_action(rest),
         "config" => config(rest),
         "hosts" => hosts(rest).map(Command::Hosts),
+        "ssh" => ssh(rest).map(Command::Ssh),
+        "terminfo" => terminfo(rest).map(Command::Terminfo),
         "watch" => watch(rest),
         "wait" => wait(rest).map(Command::Wait),
         "run" => run(rest, defaults).map(Command::Run),
@@ -456,6 +503,81 @@ fn hosts(args: &[String]) -> Result<HostsCommand, String> {
         }
         _ => Err(HOSTS_USAGE.into()),
     }
+}
+
+const TERMINFO_USAGE: &str = "usage: terminfo check DEST | terminfo setup|remove DEST [--dry-run]";
+
+fn terminfo(args: &[String]) -> Result<Terminfo, String> {
+    let (verb, dest, dry_run) = match args {
+        [verb, dest] => (verb, dest, false),
+        [verb, dest, flag] if flag == "--dry-run" && verb != "check" => (verb, dest, true),
+        _ => return Err(TERMINFO_USAGE.into()),
+    };
+    let verb = match verb.as_str() {
+        "check" => TerminfoVerb::Check,
+        "setup" => TerminfoVerb::Setup,
+        "remove" => TerminfoVerb::Remove,
+        _ => return Err(TERMINFO_USAGE.into()),
+    };
+    if dest.is_empty() || dest.starts_with('-') {
+        return Err(format!("terminfo: `{dest}` is not an ssh destination"));
+    }
+    Ok(Terminfo {
+        verb,
+        dest: dest.clone(),
+        dry_run,
+    })
+}
+
+const SSH_USAGE: &str = "usage: ssh check DEST | ssh diagnose DEST | \
+     ssh setup DEST [--hostname H] [--user U] [--port N] [--identity FILE]";
+
+fn ssh(args: &[String]) -> Result<SshCommand, String> {
+    let [verb, dest, rest @ ..] = args else {
+        return Err(SSH_USAGE.into());
+    };
+    if dest.is_empty() || dest.starts_with('-') || dest.contains(char::is_whitespace) {
+        return Err(format!("ssh: `{dest}` is not an ssh destination"));
+    }
+    match (verb.as_str(), rest) {
+        ("check", []) => Ok(SshCommand::Check(dest.clone())),
+        ("diagnose", []) => Ok(SshCommand::Diagnose(dest.clone())),
+        ("setup", rest) => ssh_setup(dest, rest).map(SshCommand::Setup),
+        _ => Err(SSH_USAGE.into()),
+    }
+}
+
+fn ssh_setup(dest: &str, rest: &[String]) -> Result<SshSetup, String> {
+    let mut setup = SshSetup {
+        dest: dest.to_owned(),
+        hostname: None,
+        user: None,
+        port: None,
+        identity: None,
+    };
+    for (flag, value) in flags("ssh setup", rest, |_| false)? {
+        let slot = match flag {
+            "hostname" => &mut setup.hostname,
+            "user" => &mut setup.user,
+            "port" => &mut setup.port,
+            "identity" => &mut setup.identity,
+            _ => return Err(format!("ssh setup: unknown flag --{flag}")),
+        };
+        if value.is_empty() || value.contains(char::is_whitespace) {
+            return Err(format!("ssh setup: --{flag} needs one word"));
+        }
+        if slot.replace(value.to_owned()).is_some() {
+            return Err(format!("ssh setup: --{flag} given twice"));
+        }
+    }
+    if setup
+        .port
+        .as_deref()
+        .is_some_and(|p| p.parse::<u16>().map_or(true, |p| p == 0))
+    {
+        return Err("ssh setup: --port needs a port from 1 to 65535".into());
+    }
+    Ok(setup)
 }
 
 fn watch(args: &[String]) -> Result<Command, String> {
@@ -853,6 +975,19 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
          \x20                  hosts add NAME --socket PATH |\n\
          \x20                  hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] |\n\
          \x20                  hosts remove NAME",
+    ),
+    (
+        "ssh",
+        "Check a host for rusty-mux --ssh, read-only, or print a Host block\n\
+         \x20                  for ~/.ssh/config: ssh check DEST | ssh diagnose DEST |\n\
+         \x20                  ssh setup DEST [--hostname H] [--user U] [--port N]\n\
+         \x20                  [--identity FILE]; check exits 1 on a problem",
+    ),
+    (
+        "terminfo",
+        "Check, install or remove rusty_term's terminfo entry in ~/.terminfo\n\
+         \x20                  on an SSH host: terminfo check DEST |\n\
+         \x20                  terminfo setup|remove DEST [--dry-run]",
     ),
     (
         "watch",

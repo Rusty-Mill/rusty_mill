@@ -2,7 +2,8 @@
 //!
 //! Feeds pre-generated VT/ANSI byte-stream workloads (see
 //! `bench/gen_workloads.py`) through `AnsiParser::advance` in realistic
-//! PTY-read-sized chunks and reports MB/s, plus the per-chunk processing
+//! PTY-read-sized chunks and reports MB/s (aggregate, plus best and median
+//! per pass), plus the per-chunk processing
 //! latency distribution (p50/p95/p99/p99.9). No process spawn, no PTY, no
 //! display — this is the rusty_term-only half of the benchmark harness in
 //! `bench/`, useful as a fast regression signal in CI. The other half
@@ -28,7 +29,7 @@
 
 use std::env;
 use std::fs;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rusty_term::core::{AnsiParser, Grid};
 
@@ -38,21 +39,50 @@ const ROWS: usize = 40;
 const DEFAULT_ITERATIONS: u32 = 20;
 const DEFAULT_WORKLOAD_DIR: &str = "bench/workloads";
 
-fn feed(data: &[u8], iterations: u32) {
-    for _ in 0..iterations {
-        let mut grid = Grid::new(COLS, ROWS);
-        let mut parser = AnsiParser::new();
-        for chunk in data.chunks(CHUNK) {
-            parser.advance(&mut grid, chunk);
-            parser.take_responses();
-            grid.take_host_out();
-        }
-        std::hint::black_box(&grid);
+/// One pass: a fresh grid and parser fed the whole input in `CHUNK` reads.
+fn feed(data: &[u8]) {
+    let mut grid = Grid::new(COLS, ROWS);
+    let mut parser = AnsiParser::new();
+    for chunk in data.chunks(CHUNK) {
+        parser.advance(&mut grid, chunk);
+        parser.take_responses();
+        grid.take_host_out();
     }
+    std::hint::black_box(&grid);
 }
 
-/// Same work as `feed`, but timed per chunk instead of once for the whole
-/// run. Kept as a separate pass (not folded into `feed`'s hot loop) so the
+/// Runs `iterations` passes and returns each pass's wall-clock time. One
+/// `Instant::now()` per pass of a whole workload is noise next to the pass.
+fn feed_timed(data: &[u8], iterations: u32) -> Vec<Duration> {
+    (0..iterations)
+        .map(|_| {
+            let t0 = Instant::now();
+            feed(data);
+            t0.elapsed()
+        })
+        .collect()
+}
+
+/// MB/s for `bytes` processed in `elapsed`.
+fn mb_per_s(bytes: u64, elapsed: Duration) -> f64 {
+    (bytes as f64 / 1_000_000.0) / elapsed.as_secs_f64().max(1e-9)
+}
+
+/// Best (fastest pass) and median per-pass MB/s. `None` for no passes.
+fn best_and_median(bytes: u64, passes: &[Duration]) -> Option<(f64, f64)> {
+    let mut sorted = passes.to_vec();
+    sorted.sort_unstable();
+    let best = *sorted.first()?;
+    let mid = sorted.len() / 2;
+    let median = if sorted.len().is_multiple_of(2) {
+        (sorted[mid - 1] + sorted[mid]) / 2
+    } else {
+        sorted[mid]
+    };
+    Some((mb_per_s(bytes, best), mb_per_s(bytes, median)))
+}
+
+/// Same work as `feed`, but timed per chunk instead of once per pass. Kept as a separate pass (not folded into `feed`'s hot loop) so the
 /// `Instant::now()` call per chunk never perturbs the MB/s number above —
 /// this exists purely to characterize the latency *distribution* of one
 /// PTY-read-sized `advance()` call, not to replace the throughput figure.
@@ -93,15 +123,13 @@ fn bench_one(path: &str, iterations: u32) {
         return;
     }
 
-    feed(&data, 1); // warmup
+    feed(&data); // warmup
 
     let start = Instant::now();
-    feed(&data, iterations);
+    let passes = feed_timed(&data, iterations);
     let elapsed = start.elapsed();
 
     let total_bytes = data.len() as u64 * iterations as u64;
-    let secs = elapsed.as_secs_f64();
-    let mb_per_s = (total_bytes as f64 / 1_000_000.0) / secs.max(1e-9);
     let name = std::path::Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -111,8 +139,15 @@ fn bench_one(path: &str, iterations: u32) {
         "{name:22} {:>10} bytes  x{iterations:<5} {:>9.1} ms total  {:>9.1} MB/s",
         data.len(),
         elapsed.as_secs_f64() * 1000.0,
-        mb_per_s,
+        mb_per_s(total_bytes, elapsed),
     );
+    // Indented so `floors.py`, which parses the line above, never matches it.
+    if let Some((best, median)) = best_and_median(data.len() as u64, &passes) {
+        println!(
+            "{:22} per pass  best {best:>9.1} MB/s  median {median:>9.1} MB/s",
+            ""
+        );
+    }
 
     // Latency-distribution pass, capped independently of `iterations` so a
     // large `-- 1000` throughput run doesn't also multiply this pass by
@@ -153,7 +188,7 @@ fn main() {
         args.remove(i);
         for path in &args {
             match fs::read(path) {
-                Ok(data) => feed(&data, 1),
+                Ok(data) => feed(&data),
                 Err(e) => {
                     eprintln!("{path}: {e}");
                     std::process::exit(2);
@@ -188,5 +223,32 @@ fn main() {
     );
     for path in &paths {
         bench_one(path, iterations);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn best_is_the_fastest_pass_and_median_the_middle_one() {
+        // 1 MB per pass: 10 ms is 100 MB/s, 20 ms is 50 MB/s.
+        let got = best_and_median(1_000_000, &[ms(40), ms(10), ms(20)]);
+        assert_eq!(got, Some((100.0, 50.0)));
+    }
+
+    #[test]
+    fn median_of_an_even_count_averages_the_middle_two() {
+        let got = best_and_median(1_000_000, &[ms(10), ms(30), ms(20), ms(40)]);
+        assert_eq!(got, Some((100.0, 40.0)));
+    }
+
+    #[test]
+    fn no_passes_gives_no_figures() {
+        assert_eq!(best_and_median(1_000_000, &[]), None);
     }
 }

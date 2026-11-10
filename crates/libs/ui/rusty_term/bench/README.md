@@ -61,6 +61,18 @@ cargo run --release --bin bench_vt_throughput -- 200          # 200 iterations e
 cargo run --release --bin bench_vt_throughput -- 50 bench/workloads/sgr_churn.vt
 ```
 
+Each workload prints three throughput figures: the aggregate MB/s over all
+passes, and the best and median MB/s of a single pass. Each pass is timed on
+its own, so the median shows the typical run and the best shows the run least
+disturbed by the host.
+
+**Which figure to quote in PRs:** best-of-N, with N at least 20, run before
+and after on the same machine. Wall-clock time on a shared host swings about
+±10% run to run. The best pass is the most repeatable of the three, because
+noise only ever makes a pass slower. Quote the median beside it when the two
+differ by more than a few percent. The aggregate is still the figure that
+`floors.py` judges and CI prints.
+
 Each workload also prints a per-chunk processing-latency distribution
 (p50/p95/p99/p99.9, in ns per `advance()` call on one 4 KB chunk), timed in
 a separate pass — capped at 50 iterations regardless of the `-- N` argument,

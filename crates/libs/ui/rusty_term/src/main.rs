@@ -330,7 +330,7 @@ fn main() -> Result<(), std::io::Error> {
 
     // `rusty_term ctl`: retired with the GUI's local mode (D159).
     if args.first().map(String::as_str) == Some("ctl") {
-        return run_ctl(&args[1..]);
+        retired_ctl();
     }
 
     // Typo'd or unknown flags (`--fullscren`, `--tittle foo`) would otherwise
@@ -421,9 +421,10 @@ fn main() -> Result<(), std::io::Error> {
 
 /// `rusty_term ctl`: retired with the GUI's local mode (pack D159). The
 /// mux has its own control tool, `rusty-mux-ctl`.
-fn run_ctl(_args: &[String]) -> std::io::Result<()> {
+/// Says `ctl` is retired and exits 1, with no error dump after it.
+fn retired_ctl() -> ! {
     eprintln!("rusty_term: `ctl` was retired with the GUI's local mode; use `rusty-mux-ctl`");
-    Err(std::io::Error::other("ctl retired"))
+    std::process::exit(1)
 }
 
 /// The TUI's grid at `cols` x `rows` with the config's pane defaults:

@@ -13,7 +13,7 @@ Status: items 1, 2 and 4 landed (#872, #894, #939); item 3 landed as #930 plus #
 
 Engine tuning stops here. Backlog #3 (GUI frame path) and #4 (printable fast path) wait unless a mux benchmark shows they are the bottleneck.
 
-## Phase 1: vertical slice (Linux; Windows once spike 1 answers) (done 2026-10-25, except C03's background history and C09)
+## Phase 1: vertical slice (Linux; Windows since, see Phase 4) (done 2026-10-25, except C03's background history and C09)
 
 Status: every exit criterion has its test in `server/tests/phase1.rs` (#994; the TUI client #1030 was the last Phase 1 crate), and the owner accepted Phase 1 when starting Phase 2 on 2026-10-25 (DECISIONS). The file also runs on Windows, except the 4 MiB reattach test (DECISIONS 2026-10-26). C01, C02, C10 and C11 are done (CAPABILITIES; closed 2026-11-10, rusty_term D155). Open: C03's newest-first background history (the history travels inside the checkpoint, before Ready; rusty_term Q33) and C09, whose evidence is Phase 5's outbound-connection audit.
 
@@ -81,7 +81,7 @@ From the [Rex delta check](REX-DELTA.md) §4 (owner, 2026-10-31). After Phase 3'
 
 Web and native clients, ConPTY server and client; floating layers (C42), key sequences and modes (C43), client actions (C44) and directory browse with `terminal.list-dir` (C08), from the Rex delta check. From the [Rex app check](REX-APP.md) (owner, 2026-11-02): kitty graphics through the mux, with a method to read an image's bytes (C53), clipboard and selection on the server (C54), prompt marks and find in scrollback (C55), a WebSocket API transport for the web client (C56), QR device pairing (C57), a hub of several servers (C58), a client settings overlay (C59), config migration from eight tools (C60, outside-the-repo access needs the owner's approval), client themes and typography (C61), pane focus and gestures (C62), link safety (C63), sessions across client windows (C64), named layouts (C65), and a theme kept through a reset (C72; C40 stays as shipped). Exit: the Phase 1 acceptance suite passes on Windows; web and native clients pass the convergence test.
 
-Windows, ahead of the phase (owner, 2026-10-26): the server, `rusty-mux-ctl`, `rusty-mux-mcp` and the attach client run on Windows (#1109, #1136, #1142, #1148). `server/tests/phase1.rs` passes on CI's Windows leg except `reattach_after_more_than_four_mib_of_real_pty_output`, which stays Linux-only because ConPTY re-renders output. Still Linux-only: the attach client's lifecycle tests, `rusty-mux-mcp`'s stdio tests, and the ctl interrupt, `terminal.pwd`/`title` and `watch` rules tests. Open: spike 1 (R1) and the two-account check (R10).
+Windows, ahead of the phase (owner, 2026-10-26): the server, `rusty-mux-ctl`, `rusty-mux-mcp` and the attach client run on Windows (#1109, #1136, #1142, #1148). `server/tests/phase1.rs` passes on CI's Windows leg except `reattach_after_more_than_four_mib_of_real_pty_output`, which stays Linux-only because ConPTY re-renders output. Still Linux-only: the attach client's lifecycle tests, `rusty-mux-mcp`'s stdio tests, and the ctl interrupt, `terminal.pwd`/`title` and `watch` rules tests. Open: resize under R1 (card #84; R1 is mitigated for rusty_conhost, the default host, and spike 1 is superseded for it) and the two-account check (R10).
 
 ## Phase 5: scale and hardening
 
