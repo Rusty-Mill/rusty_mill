@@ -25,6 +25,17 @@ pub trait Store: Send + Sync {
     fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError>;
     /// All cards, oldest first.
     fn list(&self) -> Result<Vec<Card>, BoardError>;
+    /// The cards carrying `number`: normally one, more only if a number was edited by hand.
+    /// This default scans [`Store::list`]; an adapter that can find a number directly
+    /// overrides it, so a lookup by number does not grow with the board.
+    ///
+    /// # Errors
+    /// If the store fails.
+    fn numbered(&self, number: u64) -> Result<Vec<Card>, BoardError> {
+        let mut cards = self.list()?;
+        cards.retain(|c| c.number == Some(number));
+        Ok(cards)
+    }
     /// Commit a new card (rev 0) and its event. The event's `id` is ignored
     /// and assigned here. Returns the revision committed, which a later `replace`
     /// must follow: `card.rev`, or more when the adapter commits in several steps.
@@ -191,6 +202,9 @@ impl<T: Store + ?Sized> Store for Box<T> {
     }
     fn list(&self) -> Result<Vec<Card>, BoardError> {
         (**self).list()
+    }
+    fn numbered(&self, number: u64) -> Result<Vec<Card>, BoardError> {
+        (**self).numbered(number)
     }
     fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         (**self).insert(card, event)

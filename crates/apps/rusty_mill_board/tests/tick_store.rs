@@ -1131,3 +1131,72 @@ fn bad_storage_pages_fail_instead_of_returning_partial_cards() {
     }
     assert_eq!(board.list(None).expect("recovery").len(), 1);
 }
+
+/// Records the path of every request it passes on.
+#[derive(Clone, Default)]
+struct Recording {
+    inner: FakeTick,
+    paths: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Recording {
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.paths.lock().expect("paths"))
+    }
+}
+
+impl TickApi for Recording {
+    fn send(&self, request: &TickRequest<'_>) -> Result<(u16, serde_json::Value), BoardError> {
+        self.paths
+            .lock()
+            .expect("paths")
+            .push(format!("{} {}", request.method, request.path));
+        self.inner.send(request)
+    }
+}
+
+#[test]
+fn a_card_named_by_number_is_read_without_the_rest_of_the_board() {
+    let tick = Recording::default();
+    let board = Board::with_clock(TickStore::new(tick.clone()), Roles::default(), clock);
+    let human = board.roles().actor("nano", "human").expect("role");
+    let cards: Vec<Card> = (0..40)
+        .map(|i| {
+            board
+                .add(&human, &format!("card {i}"), "", vec![])
+                .expect("add")
+        })
+        .collect();
+    let wanted = &cards[17];
+    let number = wanted.number.expect("numbered");
+    tick.take();
+
+    assert_eq!(board.get_number(number).expect("by number").id, wanted.id);
+    let paths = tick.take();
+    let whole = ["/tags/agent/tasks", "/docs/board?", "/docs/comment?limit"];
+    assert!(
+        !paths.iter().any(|p| whole.iter().any(|w| p.contains(w))),
+        "a numbered read touched a whole collection: {paths:?}"
+    );
+    assert!(paths.len() <= 8, "{} requests: {paths:?}", paths.len());
+
+    // A number nobody has, and one a card lost when it left the board.
+    assert!(board.get_number(number + 1000).is_err());
+    tick.inner.owner_edit(wanted.id, |t| {
+        t["tags"] = json!(["board:ready", format!("number:{number}")])
+    });
+    assert!(board.get_number(number).is_err());
+}
+
+#[test]
+fn a_number_edited_onto_two_cards_by_hand_is_refused_not_guessed() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let a = board.add(&human, "a", "", vec![]).expect("add");
+    let b = board.add(&human, "b", "", vec![]).expect("add");
+    let n = a.number.expect("numbered");
+    tick.owner_edit(b.id, |t| {
+        t["tags"] = json!(["agent", "board:backlog", format!("number:{n}")])
+    });
+    assert!(board.get_number(n).is_err());
+}
