@@ -86,11 +86,31 @@ impl Mux {
             windows: Vec::new(),
             active: None,
             generated,
+            creator: None,
         };
         self.sessions.insert(id, session);
         self.session_order.push(id);
         self.events.push(Event::SessionCreated { session: id });
         Ok(id)
+    }
+
+    /// Records `creator` as the principal that created `session`, which
+    /// decides who may disconnect the clients attached to it (D164).
+    pub fn set_creator(&mut self, session: SessionId, creator: Principal) -> Result<(), Error> {
+        let session = self
+            .sessions
+            .get_mut(&session)
+            .ok_or(Error::UnknownSession(session))?;
+        session.creator = Some(creator);
+        Ok(())
+    }
+
+    /// The session `client` is attached to, through its block's window.
+    pub fn session_of_client(&self, client: ClientId) -> Option<&Session> {
+        let block = self.clients.get(&client)?.attached?;
+        let window = self.blocks.get(&block)?.window;
+        let session = self.windows.get(&window)?.session;
+        self.sessions.get(&session)
     }
 
     /// Creates a session with a generated name, such as `quiet-harbor`,

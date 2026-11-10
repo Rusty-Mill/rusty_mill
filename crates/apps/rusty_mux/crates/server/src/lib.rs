@@ -306,6 +306,7 @@ async fn serve_for(
         .and_then(Result::ok);
     let owner = owner()?;
     let state = state::State::shared(config, socket);
+    state.borrow_mut().serve_as(owner.clone());
     state
         .borrow_mut()
         .load_config()
@@ -313,7 +314,7 @@ async fn serve_for(
     state.borrow_mut().restore(&state);
     rusty_tokio::task::spawn_local(state::watch_processes(std::rc::Rc::downgrade(&state)));
     rusty_tokio::task::spawn_local(state::save_periodically(std::rc::Rc::downgrade(&state)));
-    let requested = state.borrow_mut().stop_on_request(owner.clone());
+    let requested = state.borrow_mut().stop_on_request();
     let served = rusty_tokio::select! {
         result = serve_clients(listener, state.clone(), udp, allowed, owner) => result,
         () = stop => Ok(()),

@@ -70,3 +70,17 @@ fn refuses_trees_that_break_the_rules() {
     broken(|s| s.sessions[0].windows[0].layout = Some(Layout::Block(BlockId::random())));
     broken(|s| s.sessions[0].name = "x".repeat(MAX_NAME + 1));
 }
+
+/// D164: a creator is not saved, so a restored session has none and
+/// belongs to the server's own account.
+#[test]
+fn a_restored_session_has_no_creator() {
+    let (mut mux, a) = model();
+    let session = mux.sessions().next().unwrap().id();
+    let them = crate::Principal::unix(1001, Some("them".into())).unwrap();
+    mux.set_creator(session, them).unwrap();
+    assert!(mux.sessions().any(|s| s.creator().is_some()));
+    let restored = Mux::restore(mux.save()).unwrap();
+    assert!(restored.sessions().all(|s| s.creator().is_none()));
+    assert!(restored.block(a).is_some());
+}

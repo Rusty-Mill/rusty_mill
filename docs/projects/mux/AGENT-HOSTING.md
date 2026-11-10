@@ -72,6 +72,9 @@ a grant (C77).
 **C33 for owners.** `disconnect-client` aimed at an owner connection is refused for every other
 client. An operator who must cut orch off stops the account server. This narrows D35's "anyone
 may disconnect anyone" for owner connections only, which is the first step of card 507.
+Card 507 itself then restricts the rest (rusty_term D161, D164): past the owner check, the
+server's own account may disconnect any client, and any other principal only its own
+principal's connections and those attached to a session it created.
 
 **Owner gone past the grace** (question A). The block becomes *orphaned*:
 - it stays, and so does its program;

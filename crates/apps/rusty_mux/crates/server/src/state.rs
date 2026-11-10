@@ -364,16 +364,12 @@ pub(crate) struct State {
     saved_at: Option<u64>,
     /// Numbers each save, newest highest.
     generation: u64,
-    /// Set by [`State::stop_on_request`]: who may stop the server with
-    /// `shutdown`, and the stop to start. Taken by the first request.
-    shutdown: Option<Shutdown>,
-}
-
-/// A stop by request (C36b): only `owner`, the server's own account, may
-/// ask; asking sends on `stop`.
-struct Shutdown {
-    owner: Principal,
-    stop: oneshot::Sender<()>,
+    /// The server's own account, set by [`State::serve_as`]: unrestricted
+    /// on a server other principals share (D164).
+    account: Option<Principal>,
+    /// Set by [`State::stop_on_request`]: the stop the server's own
+    /// account may start with `shutdown`. Taken by the first request.
+    shutdown: Option<oneshot::Sender<()>>,
 }
 
 /// How long a UDP client outlives silence or an overflow: its lease for
@@ -422,6 +418,7 @@ impl State {
             store: None,
             saved_at: None,
             generation: 0,
+            account: None,
             shutdown: None,
         }))
     }
@@ -509,18 +506,24 @@ impl State {
         self.blocks.is_empty() && self.clients.is_empty() && self.orphans.is_empty()
     }
 
+    /// Serves as `account`, the server's own: it may disconnect any client
+    /// and owns every session no client of another principal created.
+    pub(crate) fn serve_as(&mut self, account: Principal) {
+        self.account = Some(account);
+    }
+
+    /// Lets clients of the server's own account ([`State::serve_as`]) stop
+    /// it with `shutdown`; the receiver resolves on the first such request.
+    pub(crate) fn stop_on_request(&mut self) -> oneshot::Receiver<()> {
+        let (stop, requested) = oneshot::channel();
+        self.shutdown = Some(stop);
+        requested
+    }
+
     /// The server is stopping: starts no more blocks, and ends every
     /// block's program now, as dropping the block would, except that an
     /// owned block's program is only hung up (D87). The consoles to
     /// wait for, which still hold the ones closing when this was called.
-    /// Lets clients of `owner` stop the server with `shutdown`; the
-    /// receiver resolves on the first such request.
-    pub(crate) fn stop_on_request(&mut self, owner: Principal) -> oneshot::Receiver<()> {
-        let (stop, requested) = oneshot::channel();
-        self.shutdown = Some(Shutdown { owner, stop });
-        requested
-    }
-
     pub(crate) fn stop(&mut self) -> pty::Hosts {
         self.save_now();
         self.stopping = true;
@@ -956,7 +959,8 @@ impl State {
                 let result = match name.is_empty() && self.has(client, Features::SESSION_NAMES) {
                     true => self.mux.create_generated_session(name_seed()),
                     false => self.mux.create_session(name),
-                };
+                }
+                .and_then(|session| self.record_creator(session, client).map(|()| session));
                 (
                     req,
                     result
@@ -1406,10 +1410,24 @@ impl State {
         reply(method, &[Message::Text { req, text }])
     }
 
+    /// Records the principal of `client`, which created `session`, as its
+    /// creator (D164).
+    fn record_creator(
+        &mut self,
+        session: rusty_mux_core::SessionId,
+        client: ClientId,
+    ) -> Result<(), rusty_mux_core::Error> {
+        let Some(principal) = self.mux.client(client).map(|c| c.principal().clone()) else {
+            return Ok(());
+        };
+        self.mux.set_creator(session, principal)
+    }
+
     /// Ends `target`'s connection for `client`, as the budget does a slow
-    /// client's. Any client may end any other's: everyone who can reach
-    /// the socket is trusted alike. A client cannot end its own, since its
-    /// reply would be lost with the connection.
+    /// client's. A client cannot end its own, since its reply would be lost
+    /// with the connection, nor an owner's (C46). Otherwise the server's
+    /// own account may end any; another principal only its own principal's
+    /// connections and those attached to a session it created (D161, D164).
     fn disconnect_other(&mut self, client: ClientId, target: ClientId) -> Result<Outcome, Refusal> {
         if target == client {
             return Err("a client cannot disconnect itself; close the connection instead".into());
@@ -1423,8 +1441,33 @@ impl State {
                 format!("client {target} owns blocks; only it may end its connection").into(),
             );
         }
+        if !self.may_disconnect(client, target) {
+            return Err(format!(
+                "client {target} belongs to another account; only it, its session's \
+                 creator or the server's own account may disconnect it"
+            )
+            .into());
+        }
         self.drop_client(target);
         Ok(Outcome::Done(None))
+    }
+
+    /// Whether `client`'s principal may end `target`'s connection: it is
+    /// the server's own account, `target`'s principal, or the creator of
+    /// the session `target` is attached to.
+    fn may_disconnect(&self, client: ClientId, target: ClientId) -> bool {
+        let (Some(asker), Some(other)) = (self.mux.client(client), self.mux.client(target)) else {
+            return false;
+        };
+        let asker = asker.principal().id();
+        if self.account.as_ref().is_some_and(|a| a.id() == asker) || other.principal().id() == asker
+        {
+            return true;
+        }
+        self.mux
+            .session_of_client(target)
+            .and_then(|session| session.creator())
+            .is_some_and(|creator| creator.id() == asker)
     }
 
     /// Every session, window and block, in creation order, each parent
@@ -1702,19 +1745,19 @@ impl State {
     /// own account. A stop ends every session, so no lesser owner may ask.
     fn shutdown(&mut self, client: ClientId) -> Result<Outcome, Refusal> {
         let asker = self.mux.client(client).ok_or("unknown client")?.principal();
-        let Some(shutdown) = &self.shutdown else {
+        let Some(account) = self.account.as_ref().filter(|_| self.shutdown.is_some()) else {
             return Err(
                 "this server is not stopped by request; it is stopping already, or \
                         its owner stops it"
                     .into(),
             );
         };
-        if asker.id() != shutdown.owner.id() {
-            return Err(format!("only {} may stop this server", shutdown.owner.id()).into());
+        if asker.id() != account.id() {
+            return Err(format!("only {} may stop this server", account.id()).into());
         }
-        if let Some(shutdown) = self.shutdown.take() {
+        if let Some(stop) = self.shutdown.take() {
             // The receiver is serve_for's; gone only once it has stopped.
-            let _ = shutdown.stop.send(());
+            let _ = stop.send(());
         }
         Ok(Outcome::Done(None))
     }
@@ -3041,6 +3084,91 @@ mod regression {
         (client, inbox)
     }
 
+    /// A `LABELS` client of the principal with `uid`.
+    fn client_of(shared: &Shared, uid: u32) -> (ClientId, Inbox) {
+        let (out, inbox, _) = outbox();
+        let principal = Principal::unix(uid, Some(format!("user{uid}"))).expect("valid");
+        let client = shared.borrow_mut().connect(
+            out,
+            principal,
+            Transport::Socket,
+            Features::LABELS,
+            None,
+            None,
+        );
+        (client, inbox)
+    }
+
+    /// Asks `asker` to disconnect `target`: `Ok` on Done, else the reason.
+    async fn disconnect(
+        shared: &Shared,
+        asker: &mut (ClientId, Inbox),
+        target: ClientId,
+        req: u64,
+    ) -> Result<(), String> {
+        State::request(
+            shared,
+            asker.0,
+            Message::Disconnect {
+                req,
+                client: target,
+            },
+        );
+        match reply_to(&mut asker.1, req).await {
+            Message::Done { .. } => Ok(()),
+            Message::Failed { reason, .. } => Err(reason),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Arc 1 (D161, D164): on a server several principals share, a client
+    /// may disconnect its own principal's connections and those attached to
+    /// a session it created; the server's own account may disconnect any.
+    #[test]
+    fn only_a_session_creator_its_own_principal_or_the_server_disconnects() {
+        runtime().block_on(async {
+            let (shared, ..) = stalled_reloads();
+            shared.borrow_mut().serve_as(test_owner());
+            let mut alice = client_of(&shared, 1001);
+            let bob = client_of(&shared, 1002);
+            let carol = client_of(&shared, 1003);
+            let mut carol_too = client_of(&shared, 1003);
+            let mut server = client_of(&shared, 1000);
+
+            State::request(
+                &shared,
+                alice.0,
+                Message::CreateSession {
+                    req: 1,
+                    name: "a".into(),
+                },
+            );
+            assert!(matches!(
+                reply_to(&mut alice.1, 1).await,
+                Message::Done { .. }
+            ));
+            {
+                let mut state = shared.borrow_mut();
+                let session = state.mux.sessions().next().expect("a session").id();
+                let window = state.mux.create_window(session, "w").expect("window");
+                let size = Size::new(80, 24).expect("size");
+                let block = state.mux.create_block(window, size).expect("block");
+                state.mux.attach(bob.0, block).expect("attach");
+            }
+
+            let refused = disconnect(&shared, &mut alice, carol.0, 2).await;
+            assert!(refused.is_err_and(|r| r.contains("another account")));
+            assert_eq!(disconnect(&shared, &mut alice, bob.0, 3).await, Ok(()));
+            assert_eq!(
+                disconnect(&shared, &mut carol_too, carol.0, 4).await,
+                Ok(())
+            );
+            let refused = disconnect(&shared, &mut carol_too, alice.0, 5).await;
+            assert!(refused.is_err_and(|r| r.contains("another account")));
+            assert_eq!(disconnect(&shared, &mut server, alice.0, 6).await, Ok(()));
+        });
+    }
+
     /// A `SHUTDOWN` client of `principal`.
     fn shutdown_client(shared: &Shared, principal: Principal) -> (ClientId, Inbox) {
         let (out, inbox, _) = outbox();
@@ -3061,7 +3189,8 @@ mod regression {
     fn only_the_servers_own_account_stops_it_and_only_once() {
         runtime().block_on(async {
             let (shared, ..) = stalled_reloads();
-            let requested = shared.borrow_mut().stop_on_request(test_owner());
+            shared.borrow_mut().serve_as(test_owner());
+            let requested = shared.borrow_mut().stop_on_request();
             let stranger = Principal::unix(1001, Some("other".into())).expect("valid");
             let (other, mut others) = shutdown_client(&shared, stranger);
             let (owner, mut owners) = shutdown_client(&shared, test_owner());

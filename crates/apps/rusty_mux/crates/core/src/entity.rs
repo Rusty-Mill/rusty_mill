@@ -41,6 +41,8 @@ pub struct Session {
     pub(crate) active: Option<WindowId>,
     /// Whether the server made up `name` and nobody has renamed it since.
     pub(crate) generated: bool,
+    /// The principal whose client created the session (arc 1, D164).
+    pub(crate) creator: Option<Principal>,
 }
 
 impl Session {
@@ -67,6 +69,13 @@ impl Session {
     /// The window clients show for the session unless told otherwise.
     pub fn active(&self) -> Option<WindowId> {
         self.active
+    }
+
+    /// The principal whose client created the session; `None` for one
+    /// restored from the store or made without a client, which belongs to
+    /// the server's own account (D164).
+    pub fn creator(&self) -> Option<&Principal> {
+        self.creator.as_ref()
     }
 }
 
