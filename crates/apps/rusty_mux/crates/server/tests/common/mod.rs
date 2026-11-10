@@ -128,6 +128,9 @@ pub struct Client {
     next_req: u64,
     terms: HashMap<BlockId, (Grid, AnsiParser)>,
     checkpoints: HashMap<BlockId, rusty_mux_server::checkpoint::Receiver>,
+    histories: HashMap<BlockId, rusty_mux_server::checkpoint::HistoryReceiver>,
+    /// History batches applied, with `BACKGROUND_HISTORY`.
+    pub batches: usize,
     /// Raw output received since attach, per block.
     output: HashMap<BlockId, Vec<u8>>,
     ready: HashMap<BlockId, bool>,
@@ -172,6 +175,8 @@ impl Client {
             next_req: 1,
             terms: HashMap::new(),
             checkpoints: HashMap::new(),
+            histories: HashMap::new(),
+            batches: 0,
             output: HashMap::new(),
             ready: HashMap::new(),
             parse: true,
@@ -254,7 +259,28 @@ impl Client {
                     grid.resize(size.cols().into(), size.rows().into());
                 }
             }
+            Message::History {
+                block,
+                offset,
+                total,
+                data,
+            } => {
+                assert_eq!(self.ready.get(block), Some(&true), "history before ready");
+                let batch = self
+                    .histories
+                    .entry(*block)
+                    .or_default()
+                    .push(*offset, *total, data)
+                    .expect("valid history chunk");
+                if let Some(batch) = batch {
+                    let (grid, _) = self.terms.get_mut(block).expect("attached");
+                    grid.prepend_history(&batch, None)
+                        .expect("valid history batch");
+                    self.batches += 1;
+                }
+            }
             Message::Ready { block } => {
+                self.histories.remove(block);
                 let terminal = self
                     .checkpoints
                     .remove(block)
@@ -475,6 +501,11 @@ impl Client {
         while self.ready.get(&block) != Some(&true) {
             self.recv();
         }
+    }
+
+    /// How many history rows `block`'s terminal holds.
+    pub fn history_rows(&self, block: BlockId) -> usize {
+        self.terms[&block].0.scrollback_len()
     }
 
     pub fn snapshot(&self, block: BlockId) -> Vec<u8> {

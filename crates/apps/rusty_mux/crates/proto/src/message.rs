@@ -203,6 +203,11 @@ impl Features {
     /// then close every connection. Only the server's own account may ask.
     pub const SHUTDOWN: Self = Self(1 << 38);
 
+    /// Newest-first history (C03): an attach's checkpoint carries only the
+    /// screen, and after Ready the older history follows as
+    /// [`Message::History`] batches, newest first, between live output.
+    pub const BACKGROUND_HISTORY: Self = Self(1 << 41);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -289,6 +294,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::INPUT_GATE, "the input gate"),
     (Features::LEASE_REQUESTS, "lease requests"),
     (Features::SHUTDOWN, "clean stop on request"),
+    (Features::BACKGROUND_HISTORY, "background history"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -740,6 +746,17 @@ pub enum Message {
         total: u64,
         data: Vec<u8>,
     },
+    /// A chunk of one history batch (RTHB, see
+    /// `rusty_term_core::checkpoint::encode_split`), negotiated with
+    /// BACKGROUND_HISTORY and sent only after Ready. Offsets are contiguous
+    /// from zero within the batch and `total` is the batch's size; each
+    /// batch starts again from zero. Batches arrive newest first.
+    History {
+        block: BlockId,
+        offset: u64,
+        total: u64,
+        data: Vec<u8>,
+    },
     /// The snapshot is complete; raw output follows.
     Ready {
         block: BlockId,
@@ -932,6 +949,7 @@ mod ty {
     pub const DATAGRAM: u8 = 0x8d;
     pub const INPUT_BATCH: u8 = 0x8e;
     pub const LEASE_REQUESTED: u8 = 0x8f;
+    pub const HISTORY: u8 = 0x90;
 }
 
 impl Message {
@@ -1225,6 +1243,18 @@ impl Message {
                     .bytes(DATA, data);
                 ty::CHECKPOINT
             }
+            M::History {
+                block,
+                offset,
+                total,
+                data,
+            } => {
+                out.uuid(BLOCK, block.uuid())
+                    .varint(OFFSET, *offset)
+                    .varint(TOTAL, *total)
+                    .bytes(DATA, data);
+                ty::HISTORY
+            }
             M::Ready { block } => {
                 out.uuid(BLOCK, block.uuid());
                 ty::READY
@@ -1460,6 +1490,12 @@ impl Message {
                 data: f.bytes(DATA)?.to_vec(),
             },
             ty::CHECKPOINT => M::Checkpoint {
+                block: block(&f, BLOCK)?,
+                offset: f.varint(OFFSET)?,
+                total: f.varint(TOTAL)?,
+                data: f.bytes(DATA)?.to_vec(),
+            },
+            ty::HISTORY => M::History {
                 block: block(&f, BLOCK)?,
                 offset: f.varint(OFFSET)?,
                 total: f.varint(TOTAL)?,

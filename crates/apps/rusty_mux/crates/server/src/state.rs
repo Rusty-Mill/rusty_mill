@@ -96,7 +96,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::OWNERSHIP)
     .union(Features::INPUT_GATE)
     .union(Features::LEASE_REQUESTS)
-    .union(Features::SHUTDOWN);
+    .union(Features::SHUTDOWN)
+    .union(Features::BACKGROUND_HISTORY);
 
 /// An owner whose outbox holds more than this can't be told of more
 /// input, so an owner-only block refuses it (C77): half the budget, so a
@@ -1105,7 +1106,12 @@ impl State {
                         .map_err(Refusal::from),
                 )
             }
-            M::Detach { req } => (req, done(self.mux.detach(client))),
+            M::Detach { req } => {
+                if let Some(out) = self.clients.get(&client) {
+                    out.end_history();
+                }
+                (req, done(self.mux.detach(client)))
+            }
             M::AcquireLease { req, block } => (req, done(self.mux.acquire_lease(client, block))),
             M::ReleaseLease { req, block } => (req, done(self.mux.release_lease(client, block))),
             M::Input { req, block, data } => (req, self.input(client, req, block, data)),
@@ -2108,8 +2114,19 @@ impl State {
         let Some(rt) = self.blocks.get(&block) else {
             return;
         };
-        let data = match rusty_term_core::checkpoint::encode(&rt.grid, &rt.parser) {
-            Ok(data) => data,
+        // With C03 the checkpoint carries the screen only and the history
+        // follows Ready, newest first.
+        let encoded = if self.has(client, Features::BACKGROUND_HISTORY) {
+            rusty_term_core::checkpoint::encode_split(
+                &rt.grid,
+                &rt.parser,
+                crate::checkpoint::CHUNK_BYTES,
+            )
+        } else {
+            rusty_term_core::checkpoint::encode(&rt.grid, &rt.parser).map(|data| (data, Vec::new()))
+        };
+        let (data, history) = match encoded {
+            Ok(encoded) => encoded,
             Err(err) => {
                 eprintln!("rusty-mux-server: encoding checkpoint: {err}");
                 self.drop_client(client);
@@ -2119,7 +2136,7 @@ impl State {
         if !self
             .clients
             .get(&client)
-            .is_some_and(|out| out.checkpoint(block, data))
+            .is_some_and(|out| out.checkpoint(block, data, history))
         {
             self.drop_client(client);
         }
@@ -2557,7 +2574,11 @@ impl State {
         self.tokens[&client].current
     }
     pub(crate) fn test_checkpoint(&self, client: ClientId, data: Vec<u8>) {
-        assert!(self.clients[&client].checkpoint(BlockId::from_uuid(Uuid::nil()), data));
+        assert!(self.clients[&client].checkpoint(
+            BlockId::from_uuid(Uuid::nil()),
+            data,
+            Vec::new()
+        ));
     }
     pub(crate) fn test_send(&mut self, client: ClientId, data: Vec<u8>) {
         self.send_frame(client, data);
