@@ -24,6 +24,7 @@ fn a_client_of_another_user_is_refused() {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
                 state_dir: None,
+                grapheme_clustering: false,
                 config_file: None,
             };
             let other = rusty_libc::process::geteuid().wrapping_add(1);

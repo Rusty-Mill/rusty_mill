@@ -60,7 +60,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 
 **VT behaviour relevant to a mux**
 - DECCOLM: see D5. The PTY size belongs to the server, and the engine never changes size by itself.
-- Widths: see D7. Mode 2027 is per terminal and reported by DECRQM; RIS resets it, DECSTR keeps it. There is no config key for it. Server and client must agree on width rules.
+- Widths: see D7. Mode 2027 is per terminal and reported by DECRQM; RIS resets it, DECSTR keeps it. The config key `grapheme_clustering` (rusty_term TUI) and the mux config's `server.grapheme_clustering` start new panes with it set (card #787, pack D156). Server and client must agree on width rules.
 - BCE: see D8. RIS and DECSTR reset the erase colour.
 - Synchronized output (mode 2026) is honoured with an 800 ms timeout. Expiry is only noticed on the next event.
 - The XTVERSION reply reads the core crate's version (0.1.1, kept in lockstep with `rusty_term`).
@@ -106,7 +106,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 4. ~~When does the compact cell (backlog row 5) land, and how does it bump the snapshot version?~~ Landed in PR 2 of the compact cell plan with no version bump: RTCP and RTSN bytes are unchanged and pinned by hash.
 5. The rest of #3 (GUI frame path) is row 7, dirty rows; it needs the owner's go-ahead. Rows 9 and 8 landed in #952 and #974.
 6. ConPTY spike 1 results and a Windows fidelity corpus: pending on the owner's side.
-7. A config key to make mode 2027 clustering the default: none exists. Is one wanted? Unconfirmed.
+7. A config key to make mode 2027 clustering the default: answered yes (Nano 2026-11-04, question 13 B); built as `grapheme_clustering` (pack D156).
 8. Is the backlog's source reading compatible with the mux's clean-room rule? See the ⚠ above. Unconfirmed.
 
 ## 4. Action items
