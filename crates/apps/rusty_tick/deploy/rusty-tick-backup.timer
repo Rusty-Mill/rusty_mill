@@ -1,0 +1,11 @@
+# Daily rusty_tick backup at 03:30 local time; a missed run (host off) runs at next boot.
+[Unit]
+Description=Daily rusty_tick backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
