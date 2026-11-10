@@ -1,5 +1,3 @@
-#[cfg(feature = "gui")]
-use rusty_term::gui;
 use rusty_term::{backend, config, core, runtime, shells, term};
 
 use std::path::PathBuf;
@@ -65,7 +63,6 @@ fn print_help() {
     println!();
     println!("USAGE:");
     println!("    rusty_term [FLAGS] [-- <command> [args...]]");
-    println!("    rusty_term ctl <command> [key=value...]");
     println!();
     println!("FLAGS:");
     println!("    -h, --help                    Print this help message and exit");
@@ -331,8 +328,7 @@ fn main() -> Result<(), std::io::Error> {
         return Ok(());
     }
 
-    // `rusty_term ctl <command…>`: talk to a running instance's control
-    // socket and print its reply — the whole scripting surface (G33).
+    // `rusty_term ctl`: retired with the GUI's local mode (D159).
     if args.first().map(String::as_str) == Some("ctl") {
         return run_ctl(&args[1..]);
     }
@@ -391,9 +387,9 @@ fn main() -> Result<(), std::io::Error> {
         config::ConsoleHost::Own => Box::new(OwnBackend::new()),
     };
 
-    // A session file describes tabs, which only the windowed front-end has.
+    // Session files retired with the GUI's local mode (D159).
     if config.session.is_some() {
-        eprintln!("rusty_term: `session` requires the windowed front-end (--gui); ignored");
+        eprintln!("rusty_term: `session` is ignored since local mode retired");
     }
 
     // Start at the host terminal's actual size, falling back to 80x24. The
@@ -432,42 +428,11 @@ fn main() -> Result<(), std::io::Error> {
     std::process::exit(code);
 }
 
-/// `rusty_term ctl <command> [key=value]…`: forward one control request to
-/// the running instance and print its reply. Exits nonzero on `err`.
-fn run_ctl(args: &[String]) -> std::io::Result<()> {
-    #[cfg(feature = "gui")]
-    {
-        if args.is_empty() {
-            eprintln!(
-                "usage: rusty_term ctl <new-tab|new-window|quake|send-text|list-tabs|focus-tab|ping> [key=value]…"
-            );
-            return Err(std::io::Error::other("no control command"));
-        }
-        // Re-quote each token so values with spaces survive the round trip.
-        let line = args
-            .iter()
-            .map(|a| match a.split_once('=') {
-                Some((k, v)) if !v.starts_with('"') => {
-                    format!("{k}=\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
-                }
-                _ => a.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        let reply = gui::control::request(&line)
-            .map_err(|e| std::io::Error::other(format!("no running rusty_term instance ({e})")))?;
-        print!("{reply}");
-        if reply.lines().last().is_some_and(|l| l.starts_with("err")) {
-            return Err(std::io::Error::other("control command failed"));
-        }
-        Ok(())
-    }
-    #[cfg(not(feature = "gui"))]
-    {
-        let _ = args;
-        eprintln!("rusty_term: `ctl` needs the `gui` feature");
-        Err(std::io::Error::other("ctl unsupported on this build"))
-    }
+/// `rusty_term ctl`: retired with the GUI's local mode (pack D159). The
+/// mux has its own control tool, `rusty-mux-ctl`.
+fn run_ctl(_args: &[String]) -> std::io::Result<()> {
+    eprintln!("rusty_term: `ctl` was retired with the GUI's local mode; use `rusty-mux-ctl`");
+    Err(std::io::Error::other("ctl retired"))
 }
 
 #[cfg(test)]
