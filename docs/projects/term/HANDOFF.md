@@ -91,7 +91,7 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
 - **Every change goes through a PR on its own branch. Never push to `main`.**
   - Merge through the merge queue ("Merge when ready"), with a **merge commit**.
   - Never force-push or rebase shared history. To update a branch, merge `main` into it.
-- **Reviews and merges follow [AGENTS.md](../../../AGENTS.md) and [CONTRIBUTING.md](../../../CONTRIBUTING.md).** In short: agents never queue or merge; DottiusMaximus reviews and merges (owner, 2026-10-27). An agent opens the PR, drives CI green, requests review from `dottiusmaximus` and stops. Those files win over anything restated here.
+- **Reviews and merges follow [AGENTS.md](../../../AGENTS.md) and [CONTRIBUTING.md](../../../CONTRIBUTING.md).** Those files win over anything restated here. Who queues and merges is open while AGENTS.md and the owner's 2026-11-06 instruction disagree (rusty_term pack OPEN_QUESTIONS Q1).
 - **Code:**
   - No `unwrap`/`expect` in production code.
   - Tests for non-trivial logic, including boundary cases: scroll regions, resize, wide glyphs at row edges, scrollback eviction.
