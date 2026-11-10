@@ -2352,7 +2352,8 @@ fn server_stop_waits_for_the_stop_and_then_finds_no_server() {
 /// A directory of its own for one ssh test.
 #[cfg(unix)]
 fn ssh_config_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rusty-mux-ctl-sshcfg-{}-{tag}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("rusty-mux-ctl-sshcfg-{}-{tag}", std::process::id()));
     let _fresh = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("dir");
     dir
