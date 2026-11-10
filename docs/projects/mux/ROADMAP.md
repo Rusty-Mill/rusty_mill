@@ -13,7 +13,9 @@ Status: items 1, 2 and 4 landed (#872, #894, #939); item 3 landed as #930 plus #
 
 Engine tuning stops here. Backlog #3 (GUI frame path) and #4 (printable fast path) wait unless a mux benchmark shows they are the bottleneck.
 
-## Phase 1: vertical slice (Linux; Windows once spike 1 answers)
+## Phase 1: vertical slice (Linux; Windows once spike 1 answers) (done 2026-10-25, except C03's background history and C09)
+
+Status: every exit criterion has its test in `server/tests/phase1.rs` (#994; the TUI client #1030 was the last Phase 1 crate), and the owner accepted Phase 1 when starting Phase 2 on 2026-10-25 (DECISIONS). The file also runs on Windows, except the 4 MiB reattach test (DECISIONS 2026-10-26). C01, C02, C10 and C11 are done (CAPABILITIES; closed 2026-11-10, rusty_term D155). Open: C03's newest-first background history (the history travels inside the checkpoint, before Ready; rusty_term Q33) and C09, whose evidence is Phase 5's outbound-connection audit.
 
 Runtime: `rusty_tokio` (DECISIONS), extended where needed; no tokio in any mux binary.
 
