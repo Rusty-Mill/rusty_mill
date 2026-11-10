@@ -53,11 +53,9 @@ impl WindowsChild {
     /// `sys::proc::spawn`, so has no [`proc::ParentPipes`] of its own (a
     /// pty-hosted child's stdio is the pseudo console, never a
     /// `Stdio::Pipe`) and no [`Spawner::spawn`] call site to construct
-    /// one from. `job` is currently always `None` — `sys::pty` doesn't
-    /// create one yet (see that module's own doc comment) — but the
-    /// parameter stays `Option` rather than being dropped entirely so
-    /// restoring job-based grouping later doesn't need this constructor
-    /// touched again.
+    /// one from. `job` is the child's kill-on-close Job Object
+    /// when it was spawned with `GroupSpec::NewGroup` (both pty spawns
+    /// honour it), else `None`.
     pub(crate) fn from_parts(
         process: OwnedWinHandle,
         job: Option<OwnedWinHandle>,

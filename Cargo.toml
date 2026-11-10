@@ -928,7 +928,7 @@ nexus-plugin-api = { path = "crates/apps/nexus/crates/nexus-plugin-api" }
 nexus-hashline = { path = "crates/apps/nexus/crates/nexus-hashline" }
 
 # rusty_mux family (docs/projects/mux/).
-rusty_mux_client = { path = "crates/apps/rusty_mux/crates/client" }
+rusty_mux_client = { path = "crates/apps/rusty_mux/crates/client", default-features = false }
 rusty_mux_core = { path = "crates/apps/rusty_mux/crates/core" }
 rusty_mux_ctl = { path = "crates/apps/rusty_mux/crates/ctl" }
 rusty_mux_proto = { path = "crates/apps/rusty_mux/crates/proto" }

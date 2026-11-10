@@ -28,6 +28,7 @@ mod trim_tests;
 pub use snapshot::SnapshotError;
 #[cfg(any(test, feature = "gui"))]
 mod frame;
+mod history;
 #[cfg(any(test, feature = "gui"))]
 mod view;
 #[cfg(any(test, feature = "gui"))]
@@ -153,6 +154,18 @@ pub(crate) struct Search {
     anchors: Vec<(usize, usize)>,
     /// The active match — highlighted distinctly and the target of next/prev.
     current: usize,
+}
+
+#[cfg(any(test, feature = "gui"))]
+impl Search {
+    /// `rows` history lines went in front: every match moves down by them.
+    fn shift(&mut self, rows: usize) {
+        self.rows = std::mem::take(&mut self.rows)
+            .into_iter()
+            .map(|(row, spans)| (row + rows, spans))
+            .collect();
+        self.anchors.iter_mut().for_each(|a| a.0 += rows);
+    }
 }
 
 /// Cap on retained search matches, bounding work and highlight storage.
@@ -5885,6 +5898,21 @@ pub(crate) fn row_text(cells: impl IntoIterator<Item = Cell>, clusters: &[String
 // recycled spare rows, pending host actions and L13 channel state.
 impl crate::checkpoint::Wire for Grid {
     fn write(&self, w: &mut crate::checkpoint::Writer) -> crate::checkpoint::Result<()> {
+        self.write_from(w, 0)
+    }
+    fn read(r: &mut crate::checkpoint::Reader<'_>) -> crate::checkpoint::Result<Self> {
+        Self::read_wire(r)
+    }
+}
+
+impl Grid {
+    /// The checkpoint form of this grid without its oldest `split` history
+    /// rows (and the prompt marks on them): `0` writes it whole.
+    pub(crate) fn write_from(
+        &self,
+        w: &mut crate::checkpoint::Writer,
+        split: usize,
+    ) -> crate::checkpoint::Result<()> {
         crate::checkpoint::Wire::write(&self.cols, w)?;
         crate::checkpoint::Wire::write(&self.rows, w)?;
         crate::checkpoint::Wire::write(&self.screen, w)?;
@@ -5897,7 +5925,10 @@ impl crate::checkpoint::Wire for Grid {
         crate::checkpoint::Wire::write(&self.title_stack, w)?;
         crate::checkpoint::Wire::write(&self.kitty_flags_stack, w)?;
         crate::checkpoint::Wire::write(&self.cwd, w)?;
-        crate::checkpoint::Wire::write(&self.scrollback, w)?;
+        crate::checkpoint::write_deque(
+            self.scrollback.range(split.min(self.scrollback.len())..),
+            w,
+        )?;
         crate::checkpoint::Wire::write(&self.scrollback_max, w)?;
         crate::checkpoint::Wire::write(&self.current_link, w)?;
         crate::checkpoint::Wire::write(&self.tab_stops, w)?;
@@ -5940,7 +5971,9 @@ impl crate::checkpoint::Wire for Grid {
         crate::checkpoint::Wire::write(&self.cursor_blink, w)?;
         crate::checkpoint::Wire::write(&self.default_cursor_shape, w)?;
         crate::checkpoint::Wire::write(&self.default_cursor_blink, w)?;
-        crate::checkpoint::Wire::write(&self.prompt_marks, w)?;
+        let marks = &self.prompt_marks;
+        let marks: Vec<usize> = marks.iter().filter_map(|&l| l.checked_sub(split)).collect();
+        crate::checkpoint::Wire::write(&marks, w)?;
         crate::checkpoint::Wire::write(&self.last_exit, w)?;
         crate::checkpoint::Wire::write(&self.status_line, w)?;
         crate::checkpoint::Wire::write(&self.clusters, w)?;
@@ -5948,7 +5981,8 @@ impl crate::checkpoint::Wire for Grid {
         w.charge(self.table_cache_cost().saturating_add(self.rows))?;
         Ok(())
     }
-    fn read(r: &mut crate::checkpoint::Reader<'_>) -> crate::checkpoint::Result<Self> {
+
+    fn read_wire(r: &mut crate::checkpoint::Reader<'_>) -> crate::checkpoint::Result<Self> {
         let mut grid = Self::new(1, 1);
         grid.cols = crate::checkpoint::Wire::read(r)?;
         grid.rows = crate::checkpoint::Wire::read(r)?;

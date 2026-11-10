@@ -29,11 +29,13 @@ pub(crate) struct Process {
 }
 
 /// Starts `config`'s program on a new PTY of `size`, with this process's
-/// environment plus `env`.
+/// environment plus `env`. `owned` matters only on Windows: the program
+/// leads its own session and process group here either way.
 pub(crate) fn spawn(
     config: &Config,
     size: Size,
     env: &[(&str, OsString)],
+    _owned: bool,
 ) -> io::Result<(Pty, Process)> {
     let cmd = command(config, env);
     let (master, child) = LinuxPty

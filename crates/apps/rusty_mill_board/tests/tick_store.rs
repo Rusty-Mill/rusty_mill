@@ -3,7 +3,7 @@
 
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{
-    BoardError, Card, Column, Dates, Edit, Event, EventKind, Plan, Shelf, Span,
+    BoardError, Card, CardSummary, Column, Dates, Edit, Event, EventKind, Plan, Shelf, Span,
 };
 use rusty_mill_board::milestones::{MilestoneEdit, MilestoneStore};
 use rusty_mill_board::projects::Projects;
@@ -1199,4 +1199,204 @@ fn a_number_edited_onto_two_cards_by_hand_is_refused_not_guessed() {
         t["tags"] = json!(["agent", "board:backlog", format!("number:{n}")])
     });
     assert!(board.get_number(n).is_err());
+}
+
+/// A summary is the full card's task fields: the cheap read loses nothing a summary shows.
+#[test]
+fn summaries_match_the_full_read_on_every_summary_field() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let first = board
+        .add(&human, "first", "body", vec!["x".into()])
+        .expect("add");
+    let second = board.add(&human, "second", "", vec![]).expect("add");
+    board
+        .plan(second.id, &human, &plan(Some(3), Some(vec![first.id])))
+        .expect("plan");
+    board.comment(second.id, &human, "note").expect("comment");
+    board
+        .edit(first.id, &human, Some("renamed"), None, None)
+        .expect("edit");
+    board.assign(second.id, "orch", &human).expect("assign");
+    board
+        .move_card(first.id, &Column::READY, &human)
+        .expect("move");
+
+    let store = TickStore::new(tick);
+    let summarise =
+        |cards: Vec<Card>| -> Vec<CardSummary> { cards.iter().map(CardSummary::from).collect() };
+    let full = summarise(store.list().expect("list"));
+    assert_eq!(full.len(), 2);
+    assert_eq!(summarise(store.summaries().expect("summaries")), full);
+}
+
+/// A clock that moves on 1 ms per reading, so cards list in the order they were made.
+fn ticking() -> i64 {
+    static NOW: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+    NOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The MCP surface over a rusty_tick store, on [`ticking`] time.
+fn tick_shared(tick: FakeTick) -> rusty_mill_board::api::Shared {
+    let store: Box<dyn Store> = Box::new(TickStore::new(tick));
+    Board::with_clock(store, Roles::default(), ticking)
+}
+
+/// Run the MCP operation `name` as nano, a human.
+fn op(
+    board: &rusty_mill_board::api::Shared,
+    name: &str,
+    mut args: serde_json::Value,
+) -> serde_json::Value {
+    args["actor"] = json!("nano");
+    args["role"] = json!("human");
+    rusty_mill_board::api::ops()
+        .into_iter()
+        .find(|o| o.name == name)
+        .expect("op")
+        .call(board, None, args)
+        .expect(name)
+}
+
+/// Every card of a `board_list` scan of `args` in pages of `limit`.
+fn scan_all(
+    board: &rusty_mill_board::api::Shared,
+    args: &serde_json::Value,
+    limit: u32,
+) -> Vec<serde_json::Value> {
+    let mut page = args.clone();
+    page["limit"] = json!(limit);
+    let mut seen = Vec::new();
+    loop {
+        let out = op(board, "board_list", page.clone());
+        seen.extend(out["cards"].as_array().expect("cards").iter().cloned());
+        match out["next_cursor"].as_str() {
+            Some(c) => page["cursor"] = json!(c),
+            None => return seen,
+        }
+    }
+}
+
+/// The largest records the board holds come through a paged scan whole, from rusty_tick.
+#[test]
+fn a_paged_scan_over_rusty_tick_never_truncates_large_records() {
+    let board = tick_shared(FakeTick::default());
+    let body = "b".repeat(28 * 1024);
+    let prompt = "p".repeat(rusty_mill_board::domain::MAX_PROMPT_BYTES);
+    let comment = "c".repeat(31 * 1024);
+    op(&board, "card_add", json!({"title": "before"}));
+    let big = op(&board, "card_add", json!({"title": "big", "body": body}))["card"]["id"].clone();
+    op(&board, "card_update", json!({"id": big, "prompt": prompt}));
+    op(&board, "card_comment", json!({"id": big, "text": comment}));
+    op(&board, "card_add", json!({"title": "after"}));
+
+    let all = op(&board, "board_list", json!({}))["cards"].clone();
+    let seen = scan_all(&board, &json!({}), 1);
+    assert_eq!(json!(seen), all);
+    let card = seen.iter().find(|c| c["id"] == big).expect("big card");
+    assert_eq!(card["body"].as_str().map(str::len), Some(body.len()));
+    assert_eq!(card["prompt"].as_str().map(str::len), Some(prompt.len()));
+    assert_eq!(
+        card["comments"][0]["text"].as_str().map(str::len),
+        Some(comment.len())
+    );
+}
+
+/// A scan over rusty_tick with fenced writes between pages: an unchanged card comes once, an
+/// edited one once with its edit if it was still ahead, and a card added mid-scan at the end.
+#[test]
+fn writes_during_a_paged_scan_over_rusty_tick_never_repeat_or_drop_a_card() {
+    let board = tick_shared(FakeTick::default());
+    let ids: Vec<serde_json::Value> = (1..=6)
+        .map(|i| {
+            op(&board, "card_add", json!({"title": format!("card {i}")}))["card"]["id"].clone()
+        })
+        .collect();
+    let first = op(&board, "board_list", json!({"limit": 3}));
+    let rev =
+        |id: &serde_json::Value| op(&board, "card_get", json!({"id": id}))["card"]["rev"].clone();
+    for (id, title) in [(&ids[0], "edited behind"), (&ids[4], "edited ahead")] {
+        let rev = rev(id);
+        op(
+            &board,
+            "card_update",
+            json!({"id": id, "title": title, "rev": rev}),
+        );
+    }
+    let added = op(&board, "card_add", json!({"title": "added"}))["card"]["id"].clone();
+
+    let mut seen: Vec<serde_json::Value> = first["cards"].as_array().expect("cards").clone();
+    let mut page = json!({"limit": 3, "cursor": first["next_cursor"]});
+    loop {
+        let out = op(&board, "board_list", page.clone());
+        seen.extend(out["cards"].as_array().expect("cards").iter().cloned());
+        match out["next_cursor"].as_str() {
+            Some(c) => page["cursor"] = json!(c),
+            None => break,
+        }
+    }
+    let seen_ids: Vec<_> = seen.iter().map(|c| c["id"].clone()).collect();
+    let mut expected = ids.clone();
+    expected.push(added);
+    assert_eq!(seen_ids, expected);
+    assert_eq!(seen[0]["title"], "card 1", "returned before the edit");
+    assert_eq!(seen[4]["title"], "edited ahead");
+}
+
+/// `card_take` over rusty_tick keeps take's order and skips (priority first, then the oldest;
+/// a card waiting on an open dependency or superseded is passed over) while reading only the
+/// queue columns' tags and the candidates it tries: never a whole collection.
+#[test]
+fn take_over_rusty_tick_keeps_its_order_and_reads_only_the_queues() {
+    let tick = Recording::default();
+    let board = Board::with_clock(TickStore::new(tick.clone()), Roles::default(), ticking);
+    let human = board.roles().actor("nano", "human").expect("role");
+    let ids: Vec<uuid::Uuid> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|t| {
+            let id = board.add(&human, t, "", vec![]).expect("add").id;
+            board.move_card(id, &Column::READY, &human).expect("ready");
+            id
+        })
+        .collect();
+    let (a, b, c, d, e) = (ids[0], ids[1], ids[2], ids[3], ids[4]);
+    board
+        .plan(b, &human, &plan(Some(5), None))
+        .expect("priority");
+    board
+        .plan(e, &human, &plan(None, Some(vec![a])))
+        .expect("deps");
+    let superseded = Plan {
+        superseded_by: Some(vec![d]),
+        ..Plan::default()
+    };
+    board.plan(c, &human, &superseded).expect("supersede");
+    // A card in Backlog is never a candidate, however old.
+    board.add(&human, "backlog", "", vec![]).expect("add");
+    tick.take();
+
+    let taken: Vec<Option<uuid::Uuid>> = ["w1", "w2", "w3", "w4"]
+        .iter()
+        .map(|w| {
+            let dev = board.roles().actor(w, "builder").expect("role");
+            board.take(&dev, None).expect("take").map(|c| c.id)
+        })
+        .collect();
+    assert_eq!(taken, [Some(b), Some(a), Some(d), None]);
+
+    let paths = tick.take();
+    let whole = ["/tags/agent/tasks", "/docs/board?", "/docs/comment?limit"];
+    assert!(
+        !paths.iter().any(|p| whole.iter().any(|w| p.contains(w))),
+        "a take touched a whole collection: {paths:?}"
+    );
+    // Named, a waiting card says why; once its dependency is Done it is taken.
+    let dev = board.roles().actor("w5", "builder").expect("role");
+    assert!(matches!(
+        board.take(&dev, Some(e)),
+        Err(BoardError::Refused(_))
+    ));
+    // The owner closes a in rusty_tick: Done.
+    tick.inner.owner_edit(a, |t| t["status"] = json!("done"));
+    assert_eq!(board.take(&dev, None).expect("take").map(|c| c.id), Some(e));
 }

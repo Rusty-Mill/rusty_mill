@@ -57,15 +57,19 @@ impl Stop {
     }
 
     /// Time left until the deadline, if there is one: zero once it passed.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn left(&self) -> Option<Duration> {
         self.deadline
             .map(|d| d.saturating_duration_since(Instant::now()))
     }
 
+    /// Whether the command was cancelled, whatever the deadline.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.as_ref().is_some_and(|cancelled| cancelled())
+    }
+
     /// `Interrupted` once cancelled, `TimedOut` past the deadline.
     pub(crate) fn check(&self) -> io::Result<()> {
-        if self.cancelled.as_ref().is_some_and(|cancelled| cancelled()) {
+        if self.is_cancelled() {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
         if self.deadline.is_some_and(|d| Instant::now() >= d) {
@@ -137,7 +141,9 @@ mod tests {
         let stop =
             Stop::after(Duration::from_secs(60)).or_when(move || raised.load(Ordering::SeqCst));
         assert!(stop.check().is_ok());
+        assert!(!stop.is_cancelled());
         flag.store(true, Ordering::SeqCst);
+        assert!(stop.is_cancelled());
         let err = stop.check().expect_err("cancelled");
         assert_eq!(err.kind(), io::ErrorKind::Interrupted);
     }

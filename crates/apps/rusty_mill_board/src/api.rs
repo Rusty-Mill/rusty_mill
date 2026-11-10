@@ -8,10 +8,11 @@ use uuid::Uuid;
 
 use crate::board::{Board, NewCard};
 use crate::domain::{
-    Actor, BoardError, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit, ExecutionLink,
-    Plan, Shelf, Span,
+    Actor, BoardError, Card, CardSummary, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit,
+    ExecutionLink, Plan, Shelf, Span, View,
 };
 use crate::milestones::MilestoneEdit;
+use crate::page::{Cursor, Key, checked_limit, page, query_hash};
 use crate::store::Store;
 
 /// The board every surface shares.
@@ -160,8 +161,9 @@ fn bound_acting(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Ac
 #[derive(Deserialize, JsonSchema)]
 struct Nothing {}
 
+/// The arguments of an operation that takes only who is acting.
 #[derive(Deserialize, JsonSchema)]
-struct InboxListArgs {
+struct WhoArgs {
     #[serde(flatten)]
     who: Who,
 }
@@ -218,9 +220,40 @@ struct ListArgs {
     moved_from: Option<i64>,
     /// Only cards that changed column before this time (Unix ms).
     moved_to: Option<i64>,
+    /// `full` (default): whole cards. `summary`: id, number, rev, title, project, column,
+    /// priority, claim, tags and times only, without body, prompt, links or comments; much
+    /// smaller, and read without loading any card's prompt or comments.
+    #[serde(default)]
+    view: View,
+    /// Page size, 1 to 500. With it (or `cursor`) the result also has `next_cursor` (null
+    /// on the last page) and `as_of_ms`. A page also stops at 512 KiB of cards; one card always
+    /// fits. Without it every matching card comes back at once, as before.
+    limit: Option<u32>,
+    /// `next_cursor` from the previous page of the same query (same arguments apart from
+    /// `limit`). Pages follow creation order; an edit never moves a card between pages.
+    cursor: Option<String>,
 }
 
 impl ListArgs {
+    /// The query's arguments apart from `limit` and `cursor`, in a fixed order: what a cursor
+    /// is bound to.
+    fn canonical(&self) -> String {
+        format!(
+            "column={:?};project={:?};archived={:?};done_days={:?};created={:?},{:?};updated={:?},{:?};moved={:?},{:?};view={:?}",
+            self.column.as_ref().map(Column::as_str),
+            self.project,
+            self.archived,
+            self.done_days,
+            self.created_from,
+            self.created_to,
+            self.updated_from,
+            self.updated_to,
+            self.moved_from,
+            self.moved_to,
+            self.view,
+        )
+    }
+
     fn dates(&self) -> Dates {
         let span = |from, to| Span { from, to };
         Dates {
@@ -518,6 +551,68 @@ fn card(c: Card) -> Result<Value, BoardError> {
     serde_json::to_value(json!({ "card": c })).map_err(|e| BoardError::Storage(e.to_string()))
 }
 
+/// `board_list`'s result: every card, or a page of them, as `view` asks.
+fn list_result(b: &Shared, a: &ListArgs, cards: Vec<Card>) -> Result<Value, BoardError> {
+    let as_of_ms = b.now_ms();
+    let unpaged = a.limit.is_none() && a.cursor.is_none();
+    if unpaged {
+        return match a.view {
+            View::Full => to_json(json!({ "cards": cards })),
+            View::Summary => {
+                let cards: Vec<CardSummary> = cards.iter().map(CardSummary::from).collect();
+                to_json(json!({ "cards": cards }))
+            }
+        };
+    }
+    let limit = checked_limit(a.limit.unwrap_or(100))?;
+    let query = query_hash(&a.canonical());
+    let after = a
+        .cursor
+        .as_deref()
+        .map(|c| Cursor::decode(c, query))
+        .transpose()?
+        .map(|c| c.after);
+    match a.view {
+        View::Full => paged(
+            cards,
+            |c| (c.created_ms, c.id),
+            after,
+            limit,
+            query,
+            as_of_ms,
+        ),
+        View::Summary => {
+            let cards: Vec<CardSummary> = cards.iter().map(CardSummary::from).collect();
+            paged(
+                cards,
+                |c| (c.created_ms, c.id),
+                after,
+                limit,
+                query,
+                as_of_ms,
+            )
+        }
+    }
+}
+
+/// The page of `items` after `after`, as `board_list` returns it. Only the page's items are
+/// serialized, so a full-view page costs its own size, not the board's.
+fn paged<T: serde::Serialize>(
+    items: Vec<T>,
+    key: impl Fn(&T) -> Key,
+    after: Option<Key>,
+    limit: usize,
+    query: u64,
+    as_of_ms: i64,
+) -> Result<Value, BoardError> {
+    let p = page(items, key, after, limit, query)?;
+    to_json(json!({
+        "cards": p.items,
+        "next_cursor": p.next.map(|c| c.encode()),
+        "as_of_ms": as_of_ms,
+    }))
+}
+
 fn to_json(v: impl serde::Serialize) -> Result<Value, BoardError> {
     serde_json::to_value(v).map_err(|e| BoardError::Storage(e.to_string()))
 }
@@ -527,17 +622,18 @@ pub fn ops() -> Vec<Op> {
     vec![
         op(
             "board_list",
-            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those. Done cards that are archived, or done more than `done_days` (default 14) ago, are left out unless `archived` is `include` or `only`. `created_*`, `updated_*` and `moved_*` (Unix ms, `from` inclusive, `to` exclusive) keep cards created, last changed or moved column in a range.",
+            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those. Done cards that are archived, or done more than `done_days` (default 14) ago, are left out unless `archived` is `include` or `only`. `created_*`, `updated_*` and `moved_*` (Unix ms, `from` inclusive, `to` exclusive) keep cards created, last changed or moved column in a range. `view: summary` returns small cards without body, prompt, links or comments. `limit` pages the result in creation order: pass the page's `next_cursor` as `cursor` with the same arguments until it is null.",
             |b, i, a: ListArgs| {
                 checked_project(b, scope(i), a.project.as_deref())?;
                 let days = a.done_days.unwrap_or(DONE_WINDOW_DAYS);
-                let mut cards = b.list_shelf(a.column.as_ref(), a.archived, days)?;
+                let mut cards = b.list_view(a.column.as_ref(), a.archived, days, a.view)?;
+                // Scope and filters first: pages, and cursors, only ever span visible cards.
                 cards.retain(|c| {
                     in_scope(scope(i), &c.project)
                         && a.project.as_deref().is_none_or(|p| c.project == p)
                 });
                 b.retain_dates(&mut cards, &a.dates())?;
-                to_json(json!({ "cards": cards }))
+                list_result(b, &a, cards)
             },
         ),
         op(
@@ -869,7 +965,7 @@ pub fn ops() -> Vec<Op> {
         op(
             "inbox_list",
             "The decisions waiting for the owner (needs an authenticated admin credential): open BBP escalations of the tasks linked from cards, irreversible first, then oldest. Each has an `id`, a `rev`, the `reason` (and `label` in plain words), the claim with its confidence and budget, the strongest evidence, and its card. Empty means nothing needs you.",
-            |b, i, a: InboxListArgs| {
+            |b, i, a: WhoArgs| {
                 let who = bound_acting(b, i, &a.who)?;
                 Ok(json!(b.inbox(&who)?))
             },
@@ -882,6 +978,14 @@ pub fn ops() -> Vec<Op> {
                 Ok(json!(
                     b.inbox_act(&who, &a.id, a.rev, &a.action, a.dry_run)?
                 ))
+            },
+        ),
+        op(
+            "board_number_cards",
+            "Number the cards that have no number yet: tasks tagged `agent` directly in rusty_tick since the board started (the board also does this when it starts). Needs admin, unlimited to projects. {numbered: count}.",
+            |b, i, a: WhoArgs| {
+                let who = acting(b, i, &a.who)?;
+                to_json(json!({ "numbered": b.number_cards_as(&who)? }))
             },
         ),
         op(
@@ -976,6 +1080,195 @@ mod tests {
             call_as(&board, None, "card_archive", with(json!({"id": "#1"}))),
             Err(CallError::Board(BoardError::Invalid(_)))
         ));
+    }
+
+    /// A clock that moves on 1 ms per reading, so cards list in the order they were made.
+    fn ticking() -> i64 {
+        static NOW: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+        NOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// An in-memory board on [`ticking`] time, for tests that depend on list order.
+    fn paged_board() -> Shared {
+        Board::with_clock(Box::new(MemStore::default()), Roles::default(), ticking)
+    }
+
+    /// `board_list` pages of `args`, followed to the end with `limit`: every card's JSON.
+    fn scan(board: &Shared, who: Option<&Identity>, args: Value, limit: u32) -> Vec<Value> {
+        let mut cards = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut a = args.clone();
+            a["limit"] = json!(limit);
+            if let Some(c) = &cursor {
+                a["cursor"] = json!(c);
+            }
+            let out = call_as(board, who, "board_list", a).expect("page");
+            let page = out["cards"].as_array().expect("cards");
+            assert!(page.len() <= limit as usize);
+            assert!(out["as_of_ms"].is_i64());
+            cards.extend(page.iter().cloned());
+            match out["next_cursor"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => return cards,
+            }
+        }
+    }
+
+    fn add_cards(board: &Shared, n: usize) {
+        let human = json!({"actor": "nano", "role": "human"});
+        for i in 0..n {
+            let mut args = human.clone();
+            args["title"] = json!(format!("card {i}"));
+            args["body"] = json!("body text");
+            call_as(board, None, "card_add", args).expect("add");
+            let mut c = human.clone();
+            c["id"] = json!(format!("#{}", i + 1));
+            c["text"] = json!("a comment");
+            call_as(board, None, "card_comment", c).expect("comment");
+        }
+    }
+
+    #[test]
+    fn board_list_without_new_arguments_keeps_its_shape() {
+        let board = paged_board();
+        add_cards(&board, 2);
+        let out = call_as(&board, None, "board_list", json!({})).expect("list");
+        let keys: Vec<&String> = out.as_object().expect("object").keys().collect();
+        assert_eq!(keys, ["cards"]);
+        assert_eq!(out["cards"][0]["body"], "body text");
+        assert_eq!(out["cards"][0]["comments"][0]["text"], "a comment");
+    }
+
+    #[test]
+    fn summaries_leave_out_body_prompt_links_and_comments() {
+        let board = paged_board();
+        add_cards(&board, 1);
+        let out = call_as(&board, None, "board_list", json!({"view": "summary"})).expect("summary");
+        let card = out["cards"][0].as_object().expect("card");
+        for absent in ["body", "prompt", "comments", "deps", "parent", "execution"] {
+            assert!(!card.contains_key(absent), "{absent}");
+        }
+        for present in [
+            "id",
+            "number",
+            "rev",
+            "title",
+            "project",
+            "column",
+            "created_ms",
+        ] {
+            assert!(card.contains_key(present), "{present}");
+        }
+    }
+
+    #[test]
+    fn a_paged_scan_returns_exactly_the_unpaged_list() {
+        let board = paged_board();
+        add_cards(&board, 11);
+        for view in ["full", "summary"] {
+            let args = json!({"view": view, "archived": "include"});
+            let all = call_as(&board, None, "board_list", args.clone()).expect("all")["cards"]
+                .as_array()
+                .expect("cards")
+                .clone();
+            for limit in [1, 3, 11, 500] {
+                assert_eq!(
+                    scan(&board, None, args.clone(), limit),
+                    all,
+                    "{view} {limit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn edits_and_new_cards_during_a_scan_never_repeat_or_drop_a_card() {
+        let board = paged_board();
+        add_cards(&board, 6);
+        let human = json!({"actor": "nano", "role": "human"});
+        let first = call_as(&board, None, "board_list", json!({"limit": 3})).expect("page");
+        let cursor = first["next_cursor"].as_str().expect("more").to_owned();
+        // An edit to a card already returned and to one still ahead, and a new card.
+        for (id, title) in [("#1", "edited back"), ("#5", "edited ahead")] {
+            let mut a = human.clone();
+            a["id"] = json!(id);
+            a["title"] = json!(title);
+            call_as(&board, None, "card_update", a).expect("edit");
+        }
+        let mut a = human.clone();
+        a["title"] = json!("added");
+        call_as(&board, None, "card_add", a).expect("add");
+        let rest = call_as(
+            &board,
+            None,
+            "board_list",
+            json!({"limit": 100, "cursor": cursor}),
+        )
+        .expect("rest");
+        let titles = |v: &Value| -> Vec<String> {
+            v["cards"]
+                .as_array()
+                .expect("cards")
+                .iter()
+                .map(|c| c["title"].as_str().expect("t").to_owned())
+                .collect()
+        };
+        assert_eq!(titles(&first), ["card 0", "card 1", "card 2"]);
+        assert_eq!(titles(&rest), ["card 3", "edited ahead", "card 5", "added"]);
+        assert!(rest["next_cursor"].is_null());
+    }
+
+    #[test]
+    fn bad_limits_and_cursors_are_refused_not_answered_empty() {
+        let board = paged_board();
+        add_cards(&board, 3);
+        let first = call_as(&board, None, "board_list", json!({"limit": 1})).expect("page");
+        let cursor = first["next_cursor"].as_str().expect("more").to_owned();
+        let refused = |args: Value| {
+            matches!(
+                call_as(&board, None, "board_list", args),
+                Err(CallError::Board(BoardError::Invalid(_)))
+            )
+        };
+        assert!(refused(json!({"limit": 0})));
+        assert!(refused(json!({"limit": 501})));
+        assert!(refused(json!({"limit": 1, "cursor": "garbage"})));
+        assert!(refused(json!({"limit": 1, "cursor": format!("{cursor}x")})));
+        // The same cursor with other arguments is another query.
+        assert!(refused(
+            json!({"limit": 1, "cursor": cursor, "view": "summary"})
+        ));
+        assert!(refused(
+            json!({"limit": 1, "cursor": cursor, "archived": "include"})
+        ));
+        // With the query unchanged and only the limit different, it continues.
+        let next = call_as(
+            &board,
+            None,
+            "board_list",
+            json!({"limit": 5, "cursor": cursor}),
+        )
+        .expect("continue");
+        assert_eq!(next["cards"].as_array().expect("cards").len(), 2);
+    }
+
+    #[test]
+    fn a_page_stops_at_its_byte_budget_and_keeps_every_card_whole() {
+        let board = paged_board();
+        let human = json!({"actor": "nano", "role": "human"});
+        let body = "b".repeat(300 * 1024);
+        for i in 0..3 {
+            let mut a = human.clone();
+            a["title"] = json!(format!("big {i}"));
+            a["body"] = json!(body);
+            call_as(&board, None, "card_add", a).expect("add");
+        }
+        let first = call_as(&board, None, "board_list", json!({"limit": 500})).expect("page");
+        assert_eq!(first["cards"].as_array().expect("cards").len(), 1);
+        let cards = scan(&board, None, json!({}), 500);
+        assert_eq!(cards.len(), 3);
+        assert!(cards.iter().all(|c| c["body"] == body.as_str()));
     }
 
     #[test]
@@ -1146,6 +1439,35 @@ mod tests {
         )
         .expect("add");
         assert_eq!(out["card"]["column"], "backlog");
+    }
+
+    #[test]
+    fn board_number_cards_numbers_strays_for_an_unlimited_admin_only() {
+        let store = MemStore::default();
+        let stray = Card::new("stray", "", vec![], 1).expect("card");
+        store
+            .insert(
+                &stray,
+                crate::domain::Event::of(&stray, crate::domain::EventKind::Created, "x"),
+            )
+            .expect("insert");
+        let board: Shared = Board::new(Box::new(store), Roles::default());
+        let refused = |who: &Identity| {
+            matches!(
+                call_as(&board, Some(who), "board_number_cards", json!({})),
+                Err(CallError::Board(BoardError::Forbidden(_)))
+            )
+        };
+        assert!(refused(&ident("claude", "builder")));
+        let mut limited = ident("nano", "human");
+        limited.projects = Some(vec!["default".into()]);
+        assert!(refused(&limited), "it writes every project's cards");
+        let human = ident("nano", "human");
+        let out = call_as(&board, Some(&human), "board_number_cards", json!({})).expect("number");
+        assert_eq!(out["numbered"], 1);
+        assert_eq!(board.get(stray.id).expect("get").number, Some(1));
+        let again = call_as(&board, Some(&human), "board_number_cards", json!({})).expect("again");
+        assert_eq!(again["numbered"], 0);
     }
 
     fn ident(actor: &str, role: &str) -> Identity {
@@ -1381,6 +1703,61 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn pages_and_cursors_only_ever_span_the_callers_projects() {
+        use crate::projects::Projects;
+        let projects =
+            Projects::parse(r#"{"rl": ["crates/rl"], "orch": ["crates/orch"]}"#).expect("projects");
+        let board = paged_board().with_projects(projects);
+        let human = ident("nano", "human");
+        let mut dev = ident("claude", "builder");
+        dev.projects = Some(vec!["rl".into()]);
+        // Interleaved, so every page of the whole board mixes the two projects.
+        for i in 0..8 {
+            let project = if i % 2 == 0 { "rl" } else { "orch" };
+            call_as(
+                &board,
+                Some(&human),
+                "card_add",
+                json!({"title": format!("{project} {i}"), "project": project}),
+            )
+            .expect("add");
+        }
+        for view in ["full", "summary"] {
+            let seen = scan(&board, Some(&dev), json!({"view": view}), 2);
+            assert_eq!(seen.len(), 4, "{view}");
+            assert!(seen.iter().all(|c| c["project"] == "rl"), "{view}");
+        }
+        // An admin's cursor replayed by the limited credential continues over its cards only.
+        let first = call_as(
+            &board,
+            Some(&human),
+            "board_list",
+            json!({"limit": 1, "view": "summary"}),
+        )
+        .expect("admin page");
+        let cursor = first["next_cursor"].as_str().expect("more");
+        let replay = call_as(
+            &board,
+            Some(&dev),
+            "board_list",
+            json!({"limit": 500, "view": "summary", "cursor": cursor}),
+        )
+        .expect("replay");
+        let replayed = replay["cards"].as_array().expect("cards");
+        assert_eq!(replayed.len(), 3, "rl cards after the first");
+        assert!(replayed.iter().all(|c| c["project"] == "rl"));
+        assert!(matches!(
+            call_as(
+                &board,
+                Some(&dev),
+                "board_list",
+                json!({"limit": 5, "project": "orch"})
+            ),
+            Err(CallError::Board(BoardError::OutOfScope(_)))
+        ));
     }
 
     #[test]

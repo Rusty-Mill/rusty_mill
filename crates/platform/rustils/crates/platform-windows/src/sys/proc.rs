@@ -566,36 +566,45 @@ pub fn spawn(
         return Ok((process, None, pi.dwProcessId, parent_pipes));
     }
 
-    // Suspended → assign → resume. On any failure the suspended child
-    // must not be leaked: terminate it directly (it never ran an
-    // instruction, so this is clean).
-    //
-    // The assign and resume steps are Track W-migrated (`job::assign`,
-    // `process::resume`); the `CreateProcessW` call above is not, and
-    // cannot be — see this function's own doc comment.
+    // Suspended → assign → resume (see `join_new_job`). The
+    // `CreateProcessW` call above is not Track W-migrated, and cannot be —
+    // see this function's own doc comment.
+    let job = join_new_job(&process, thread.as_ref())?;
+    Ok((process, Some(job), pi.dwProcessId, parent_pipes))
+}
+
+/// Suspended → assign → resume: puts `process`, started
+/// `CREATE_SUSPENDED`, into a fresh kill-on-close Job Object, then resumes
+/// its main `thread`, so the job holds it (and anything it later starts)
+/// before its first instruction. Shared by [`spawn`]'s `new_group` path
+/// and the pty spawns (`sys::pty::spawn_attached`, `sys::condrv::spawn`).
+///
+/// On any failure the suspended (or at worst just-assigned) child must
+/// not be leaked: it is terminated once here before the error returns.
+/// The kill's own result is deliberately discarded: this is the cleanup
+/// path of an already-failing spawn, and the reason it failed is the
+/// error worth reporting, not what a best-effort kill of a process that
+/// never ran an instruction has to say.
+///
+/// The assign and resume steps are Track W-migrated (`job::assign`,
+/// `process::resume`).
+pub(crate) fn join_new_job(
+    process: &OwnedWinHandle,
+    thread: Option<&OwnedWinHandle>,
+) -> Result<OwnedWinHandle> {
     let sequence = (|| -> Result<OwnedWinHandle> {
         let job = create_kill_on_close_job()?;
-        assign_to_job(&job, &process)?;
-        let thread = thread.as_ref().ok_or_else(|| {
+        assign_to_job(&job, process)?;
+        let thread = thread.ok_or_else(|| {
             PlatformError::new(ErrorKind::Other, OsCode::None, "CreateProcessW thread")
         })?;
         resume_thread(thread)?;
         Ok(job)
     })();
-    match sequence {
-        Ok(job) => Ok((process, Some(job), pi.dwProcessId, parent_pipes)),
-        Err(e) => {
-            // The suspended (or at worst just-assigned) child this call
-            // created is terminated exactly once here before the handles
-            // drop. The result is deliberately discarded: this is the
-            // cleanup path of an already-failing spawn, and `e` — the
-            // reason the spawn failed — is the error worth reporting, not
-            // whatever a best-effort kill of a process that never ran an
-            // instruction has to say.
-            let _ = terminate_process(&process);
-            Err(e)
-        }
+    if sequence.is_err() {
+        let _ = terminate_process(process);
     }
+    sequence
 }
 
 /// `AssignProcessToJobObject` — Track W (D-15): `rusty_win32::job::assign`.

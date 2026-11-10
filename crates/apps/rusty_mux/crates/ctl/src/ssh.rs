@@ -11,21 +11,17 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use rusty_mux_client::ssh::{BATCH, OWNED};
+
 use crate::Exit;
 use crate::cli::{SshCommand, SshSetup};
 
-/// The options `rusty-mux --ssh` passes (`rusty_mux_tui::ssh`), plus the
-/// `BatchMode` its reconnects add. A copy, since ctl does not depend on
-/// the TUI; a test checks each is still there.
-pub(crate) const OPTIONS: [&str; 7] = [
-    "ControlMaster=no",
-    "ControlPath=none",
-    "ControlPersist=no",
-    "ForkAfterAuthentication=no",
-    "ExitOnForwardFailure=yes",
-    "StreamLocalBindUnlink=yes",
-    "BatchMode=yes",
-];
+/// The options `rusty-mux --ssh` passes, plus the `BatchMode` its
+/// reconnects and ctl's own forwards add: the client library's, shared.
+pub(crate) const OPTIONS: [&str; 7] = {
+    let [a, b, c, d, e, f] = OWNED;
+    [a, b, c, d, e, f, BATCH]
+};
 
 /// What the checks found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,7 +319,7 @@ fn details(
         };
         lines.push(format!("{key}: {shown}"));
     }
-    let options: Vec<String> = OPTIONS[..6].iter().map(|o| format!("-o {o}")).collect();
+    let options: Vec<String> = OWNED.iter().map(|o| format!("-o {o}")).collect();
     lines.push(format!(
         "rusty-mux runs: {} -N -T {} -L LOCAL:REMOTE -- {dest}",
         ssh.to_string_lossy(),
@@ -422,15 +418,6 @@ mod tests {
             .filter(|f| f.problem)
             .map(|f| f.text.as_str())
             .collect()
-    }
-
-    #[test]
-    fn the_options_match_what_rusty_mux_passes() {
-        let tui = include_str!("../../tui/src/ssh.rs");
-        for option in &OPTIONS[..6] {
-            assert!(tui.contains(&format!("\"{option}\"")), "{option}");
-        }
-        assert!(tui.contains("\"BatchMode=yes\""));
     }
 
     #[test]

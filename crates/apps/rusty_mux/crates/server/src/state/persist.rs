@@ -160,6 +160,8 @@ impl State {
             size: revive.size,
             config: &config,
             started,
+            // A restored block has no owner (D117 (7)).
+            owned: false,
         })?;
         let rt = unscreened.screened(shared, grid, parser);
         self.adopt(revive.block, rt);
