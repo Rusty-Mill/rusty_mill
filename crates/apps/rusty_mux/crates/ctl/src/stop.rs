@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// How long a bounded connection blocks in one read or write before it
-/// checks its [`Stop`] again (in one read only, on Windows).
+/// checks its [`Stop`] again (in one read only, on Windows: there a write
+/// is bounded by the deadline itself, see [`Stop::left`]).
 pub(crate) const POLL: Duration = Duration::from_millis(50);
 
 /// A deadline and a cancellation check for a command's socket I/O. The
@@ -46,6 +47,13 @@ impl Stop {
         self.deadline.is_some() || self.cancelled.is_some()
     }
 
+    /// Time left until the deadline, if there is one: zero once it passed.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn left(&self) -> Option<Duration> {
+        self.deadline
+            .map(|d| d.saturating_duration_since(Instant::now()))
+    }
+
     /// `Interrupted` once cancelled, `TimedOut` past the deadline.
     pub(crate) fn check(&self) -> io::Result<()> {
         if self.cancelled.as_ref().is_some_and(|cancelled| cancelled()) {
@@ -75,6 +83,17 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+
+    #[test]
+    fn only_a_deadline_leaves_time() {
+        assert_eq!(Stop::default().left(), None);
+        assert_eq!(Stop::default().or_when(|| false).left(), None);
+        let left = Stop::after(Duration::from_secs(60))
+            .left()
+            .expect("a deadline");
+        assert!(left > Duration::from_secs(59) && left <= Duration::from_secs(60));
+        assert_eq!(Stop::after(Duration::ZERO).left(), Some(Duration::ZERO));
+    }
 
     #[test]
     fn the_default_never_stops() {

@@ -723,8 +723,9 @@ fn follow(
 
 /// How long the agent hook waits for the server to tell a session's name,
 /// well inside the 5 s the OpenCode and Pi scripts give the whole hook.
-/// A hard bound only where [`conn::connect`] bounds connecting and writes
-/// (Linux); elsewhere the host's hook timeout is the bound.
+/// A hard bound on reads and writes, and on connecting where
+/// [`conn::connect`] bounds it (Linux); elsewhere the host's hook timeout
+/// bounds a connect.
 const HOOK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Sends an agent hook's report on `block` to the server at `socket` with
