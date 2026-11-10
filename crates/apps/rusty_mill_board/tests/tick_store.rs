@@ -1440,6 +1440,29 @@ fn a_comment_added_in_rusty_tick_shows_as_an_event_once() {
 }
 
 #[test]
+fn comments_over_more_than_one_page_are_all_logged() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let cursor = board.cursor().expect("cursor");
+
+    for n in 0..1001 {
+        tick.owner_comment(card.id, &format!("note {n}"));
+    }
+    let events = board.events(cursor, 2000).expect("events");
+    let commented = events
+        .iter()
+        .filter(|e| e.kind == EventKind::Commented)
+        .count();
+    assert_eq!(commented, 1001, "every page of comments is read");
+    let after = events.last().map(|e| e.id);
+    assert!(
+        board.events(after, 10).expect("next poll").is_empty(),
+        "the window moves on"
+    );
+}
+
+#[test]
 fn an_edit_in_a_millisecond_already_read_is_not_missed() {
     let (board, tick) = board();
     let human = board.roles().actor("nano", "human").expect("role");

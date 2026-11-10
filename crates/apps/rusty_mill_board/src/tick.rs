@@ -546,8 +546,19 @@ impl<T: TickApi> TickStore<T> {
         path: &str,
         key: &str,
     ) -> Result<Vec<D>, BoardError> {
+        self.collection_after(path, key, None)
+    }
+
+    /// As [`Self::collection`], but only records whose id sorts after `start`. The start
+    /// rides the page cursor, because rusty_tick reads only the first `after` in a query.
+    fn collection_after<D: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        key: &str,
+        start: Option<Uuid>,
+    ) -> Result<Vec<D>, BoardError> {
         let separator = if path.contains('?') { '&' } else { '?' };
-        let mut after: Option<Uuid> = None;
+        let mut after = start;
         let mut records = Vec::new();
         loop {
             let mut target = format!("{path}{separator}limit=1000");
@@ -897,7 +908,7 @@ impl<T: TickApi> TickStore<T> {
                 self.changed_since(high_water)?
             };
             let comments: Vec<Doc> =
-                self.collection(&format!("/docs/comment?after={comments_from}"), "docs")?;
+                self.collection_after("/docs/comment", "docs", Some(comments_from))?;
             let events = self.events.lock().map_err(poisoned)?;
             if events.write_epoch == epoch {
                 break (tasks, comments, full, events);
