@@ -304,3 +304,57 @@ fn the_drill_fails_when_one_user_cannot_be_read_even_if_another_can() {
         text(&drill)
     );
 }
+
+#[test]
+fn a_destination_that_cannot_be_listed_is_never_pruned() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let data = root.path().join("data");
+    let local = root.path().join("backups");
+    let off = root.path().join("offhost");
+    std::fs::create_dir(&off).expect("destination");
+    tick(&data, &["user", "add", "nano"]);
+    let env = [
+        ("RUSTY_TICK_DATA_DIR", path(&data)),
+        ("RUSTY_TICK_BACKUP_DIR", path(&local)),
+        ("RUSTY_TICK_BACKUP_DEST", path(&off)),
+    ];
+    for _ in 0..2 {
+        let out = run("backup.sh", &env, &[]);
+        assert!(out.status.success(), "{}", text(&out));
+        sleep(Duration::from_millis(1100)); // archive names are per second
+    }
+
+    // An rsync whose listing fails (ssh down, timeout) but whose copy works.
+    let shim = root.path().join("bin");
+    std::fs::create_dir(&shim).expect("bin");
+    let real = Command::new("sh")
+        .args(["-c", "command -v rsync"])
+        .output()
+        .expect("which rsync");
+    let real = String::from_utf8(real.stdout).expect("utf-8");
+    let fake = shim.join("rsync");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = --list-only ] && exit 255; done\nexec {} \"$@\"\n",
+            real.trim()
+        ),
+    )
+    .expect("shim");
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+    let search = format!("{}:{}", path(&shim), std::env::var("PATH").expect("PATH"));
+
+    std::fs::remove_dir_all(&local).expect("wipe");
+    let mut with_shim = env.to_vec();
+    with_shim.push(("PATH", &search));
+    let out = run("backup.sh", &with_shim, &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("could not list"), "{}", text(&out));
+    assert_eq!(
+        archives(&host_dir(&off)).len(),
+        6,
+        "{:?}",
+        archives(&host_dir(&off))
+    );
+}

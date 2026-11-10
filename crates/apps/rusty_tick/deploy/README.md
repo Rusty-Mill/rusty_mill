@@ -128,7 +128,7 @@ again, if it was running, and mirrors the archives off the host with rsync into
 `$RUSTY_TICK_BACKUP_DEST/<hostname>/` (the destination itself must exist). Mill Board answers 503 while tick is stopped. The newest
 `RUSTY_TICK_BACKUP_KEEP` archives are kept, each with a `.sha256`. If this host has fewer
 archives than that and fewer than the destination (a wiped local directory), the copy adds
-without pruning the destination. A run that takes over an hour fails.
+without pruning the destination; so does a destination that cannot be listed. A run that takes over an hour fails.
 
 A copy of a running store can catch a write halfway. So `backup.sh snapshot` refuses while
 `RUSTY_TICK_ADDR` answers or any lock in the data directory is held. It then holds those locks

@@ -22,6 +22,7 @@ dir=${RUSTY_TICK_BACKUP_DIR:?set RUSTY_TICK_BACKUP_DIR}
 keep=${RUSTY_TICK_BACKUP_KEEP:-14}
 [[ $keep =~ ^[1-9][0-9]*$ ]] || die "RUSTY_TICK_BACKUP_KEEP must be a positive whole number, not '$keep'"
 umask 077
+held=()
 
 # A copy of a live store can catch a write halfway. A multi-user server locks a user's store
 # only once it opens that user, so a free lock does not prove the server is down: refuse while
@@ -35,8 +36,18 @@ hold_locks() {
     local lock fd
     while IFS= read -r -d '' lock; do
         exec {fd}<"$lock"
+        held+=("$fd")
         flock -n "$fd" || die "$lock is held: stop rusty-tick before a snapshot"
     done < <(find "$data" -name '*.lock' -print0)
+}
+
+# Let the locks go once the archive is written, so `ship` runs with the store free.
+release_locks() {
+    local fd
+    for fd in "${held[@]}"; do
+        exec {fd}<&-
+    done
+    held=()
 }
 
 snapshot() {
@@ -53,6 +64,7 @@ snapshot() {
         die "could not write a readable archive of $data"
     fi
     mv "$partial" "$dir/$name"
+    release_locks
     (cd "$dir" && sha256sum "$name" >"$name.sha256")
     # Keep the newest N; names sort by time.
     local old
@@ -74,13 +86,19 @@ ship() {
     dest="$base/$(hostname -s)"
     here=$({ compgen -G "$dir/rusty-tick-*.tar.gz" || true; } | archives_in)
     ((here > 0)) || die "no archive in $dir to ship"
-    there=$({ rsync --list-only --timeout=60 "$dest/" 2>/dev/null || true; } | archives_in)
     # Mirror the newest N, unless this host now has fewer than it should and fewer than the
-    # destination (a wiped local directory): then add without pruning, and say so.
-    local prune=(--delete)
-    if ((here < keep && here < there)); then
+    # destination (a wiped local directory), or the destination cannot be listed (down, or not
+    # made yet): then add without pruning, and say so.
+    local prune=(--delete) listing
+    if ! listing=$(rsync --list-only --timeout=60 "$dest/" 2>/dev/null); then
         prune=()
-        echo "rusty-tick-backup: only $here archives here, $there at the destination; not pruning it" >&2
+        echo "rusty-tick-backup: could not list $dest (normal on the first run); not pruning it" >&2
+    else
+        there=$(archives_in <<<"$listing")
+        if ((here < keep && here < there)); then
+            prune=()
+            echo "rusty-tick-backup: only $here archives here, $there at the destination; not pruning it" >&2
+        fi
     fi
     rsync -a "${prune[@]}" --timeout=600 --include='rusty-tick-*' --exclude='*' "$dir/" "$dest/"
     echo "rusty-tick-backup: shipped to $dest"
