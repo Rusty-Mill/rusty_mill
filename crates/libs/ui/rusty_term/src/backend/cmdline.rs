@@ -201,9 +201,11 @@ fn command_start(params: &[u16]) -> Option<usize> {
 /// `None` when `line` holds only spaces and tabs.
 ///
 /// Quoted, the program runs to the next quote, with no escapes. Unquoted,
-/// it is the shortest prefix ending at a space or tab (or the whole line)
+/// it is the longest prefix ending at a space or tab (or the whole line)
 /// for which `is_program` holds, so `C:\Program Files\x.exe -a` finds
-/// `x.exe`; when none does, it is the first word.
+/// `x.exe` even when a `C:\Program.exe` was planted; when none does, it is
+/// the first word. `CreateProcessW` takes the shortest; the longest is the
+/// safe reading of an unquoted path with spaces (review of e80dc55e).
 pub(crate) fn split_program(line: &str, is_program: impl Fn(&str) -> bool) -> Option<(&str, &str)> {
     let line = line.trim_start_matches(is_blank);
     if line.is_empty() {
@@ -291,7 +293,8 @@ fn unquoted_end(line: &str, is_program: impl Fn(&str) -> bool) -> usize {
     line.match_indices(is_blank)
         .map(|(i, _)| i)
         .chain(std::iter::once(line.len()))
-        .find(|&i| is_program(&line[..i]))
+        .filter(|&i| is_program(&line[..i]))
+        .last()
         .unwrap_or(first)
 }
 
@@ -390,14 +393,18 @@ mod tests {
     }
 
     #[test]
-    fn an_unquoted_program_is_the_shortest_prefix_that_exists() {
+    fn an_unquoted_program_is_the_longest_prefix_that_exists() {
         let pwsh = r"C:\Program Files\PowerShell\7\pwsh.exe";
         let exists = |p: &str| p == pwsh;
         let line = format!("{pwsh} -NoLogo");
         assert_eq!(split_program(&line, exists), Some((pwsh, "-NoLogo")));
         assert_eq!(split_program(pwsh, exists), Some((pwsh, "")));
-        // The shortest wins, as CreateProcessW tries `C:\Program` first.
-        let short = |p: &str| p == r"C:\Program" || p == pwsh;
+        // A planted `C:\Program` loses to the real program.
+        let planted = |p: &str| p == r"C:\Program" || p == pwsh;
+        assert_eq!(split_program(&line, planted), Some((pwsh, "-NoLogo")));
+        assert_eq!(split_program(pwsh, planted), Some((pwsh, "")));
+        // With only the short one there, it is the program.
+        let short = |p: &str| p == r"C:\Program";
         assert_eq!(
             split_program(&line, short),
             Some((r"C:\Program", r"Files\PowerShell\7\pwsh.exe -NoLogo"))

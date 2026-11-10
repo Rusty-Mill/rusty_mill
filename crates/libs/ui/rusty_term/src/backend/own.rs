@@ -246,16 +246,10 @@ pub(super) fn shell_command(shell: &str, args: &[String], cwd: OsString) -> io::
     Ok(with_raw(cmd.args(args), &rest))
 }
 
-/// `shell` as (program, the rest). A shell that names an existing file
-/// as a whole is that program, so an unquoted `C:\Program Files\x.exe`
-/// can't run a planted `C:\Program.exe` (review of 66a8fb5f); otherwise
-/// [`split_program`] finds the shortest existing prefix, as
-/// `CreateProcessW` does.
+/// `shell` as (program, the rest): [`split_program`]'s longest prefix that
+/// [`locate`] finds, so an unquoted `C:\Program Files\x` (with or without
+/// `.exe` and arguments) can't run a planted `C:\Program.exe`.
 fn program_and_rest(shell: &str) -> Option<(&str, &str)> {
-    let whole = shell.trim_matches([' ', '\t']);
-    if whole.contains([' ', '\t']) && !whole.starts_with('"') && Path::new(whole).is_file() {
-        return Some((whole, ""));
-    }
     split_program(shell, |p| locate(p).is_some())
 }
 
@@ -639,8 +633,9 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
-    /// Review of 66a8fb5f: an unquoted shell path with spaces that names a
-    /// file runs that file, not a planted shorter prefix.
+    /// Reviews of 66a8fb5f and e80dc55e: an unquoted shell path with spaces
+    /// runs its file, with or without `.exe` and arguments, not a planted
+    /// shorter prefix.
     #[test]
     fn a_whole_unquoted_shell_path_beats_a_planted_prefix() {
         let dir = std::env::temp_dir().join(format!("rt-shell-{}", std::process::id()));
@@ -649,11 +644,26 @@ mod tests {
         let real = dir.join("x y.exe");
         std::fs::copy(&cmd_exe, &real).expect("copy cmd");
         std::fs::copy(&cmd_exe, dir.join("x.exe")).expect("plant the prefix");
-        let shell = real.to_str().expect("utf-8").to_owned();
-        let cmd = super::shell_command(&shell, &[], std::env::temp_dir().into_os_string())
-            .expect("command");
+        let path = real.to_str().expect("utf-8").to_owned();
+        let bare = path.trim_end_matches(".exe").to_owned();
+        let shells = [
+            path.clone(),
+            bare.clone(),
+            format!("{path} /d"),
+            format!("{bare} /d"),
+        ];
+        let programs: Vec<_> = shells
+            .iter()
+            .map(|shell| {
+                super::shell_command(shell, &[], std::env::temp_dir().into_os_string())
+                    .expect("command")
+                    .program
+            })
+            .collect();
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(cmd.program, real.into_os_string());
+        for (shell, program) in shells.iter().zip(programs) {
+            assert_eq!(program, real.clone().into_os_string(), "{shell}");
+        }
     }
 
     #[test]

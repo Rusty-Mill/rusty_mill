@@ -327,28 +327,39 @@ impl BackendHandle for ConptyHandle {
 
 impl Drop for ConptyHandle {
     /// The original hangs up, which asks the child to exit, gives it
-    /// [`GRACE`], then kills it if it is still running. Both run on
-    /// threads of their own, so Drop returns at once: `hang_up` blocks
-    /// while conhost is stuck writing into a full, unread output pipe.
-    /// A clone only drops its reference; the last one closes the console
-    /// (`WindowsPtyMaster`'s draining Drop).
+    /// [`GRACE`], then kills it if it is still running. All of it runs on
+    /// threads of their own, so Drop returns at once. `hang_up` blocks
+    /// while conhost is stuck writing into a full, unread output pipe, and
+    /// its thread's reference keeps `WindowsPtyMaster`'s draining Drop from
+    /// running, so a drain thread reads the output away until the console
+    /// is closed (review of e80dc55e). The pane is closing, so any clone
+    /// still reading loses nothing it would show.
     fn drop(&mut self) {
         let Some(child) = self.child.take() else {
             return;
         };
+        let drained = Arc::clone(&self.master);
+        spawn_or_log("conpty-drain", move || drain(&drained));
         let master = Arc::clone(&self.master);
-        // If no thread can be had, the last reference's Drop still closes
-        // the console, which tells the child to exit.
-        let _ = std::thread::Builder::new()
-            .name("conpty-hang-up".into())
-            .spawn(move || master.hang_up());
-        let end = move || end_survivor(&child);
-        if let Err(e) = std::thread::Builder::new()
-            .name("conpty-reap".into())
-            .spawn(end)
-        {
-            eprintln!("rusty_term: can't start the shell's reaper: {e}");
-        }
+        // Without this thread the last reference's Drop still closes the
+        // console, which tells the child to exit.
+        spawn_or_log("conpty-hang-up", move || master.hang_up());
+        spawn_or_log("conpty-reap", move || end_survivor(&child));
+    }
+}
+
+/// Reads `master`'s output away until the console is closed and conhost
+/// has flushed (`Ok(0)`) or the pipe breaks.
+fn drain(master: &WindowsPtyMaster) {
+    let mut buf = [0u8; 8192];
+    while matches!(master.read(&mut buf), Ok(n) if n > 0) {}
+}
+
+/// Runs `work` on a thread named `name`; a thread that can't be had is
+/// logged, as its work is a best effort the console's last close backs up.
+fn spawn_or_log(name: &str, work: impl FnOnce() + Send + 'static) {
+    if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(work) {
+        eprintln!("rusty_term: can't start {name}: {e}");
     }
 }
 
@@ -510,23 +521,22 @@ mod tests {
         assert_eq!(quote(r"C:\some\path"), r"C:\some\path");
     }
 
-    /// Smoke test: a ConPTY child spawns and its output reaches our reader.
-    ///
-    /// The pipe read is a blocking `ReadFile`, so the reads happen on a
-    /// detached thread and the deadline is enforced by polling the shared
-    /// buffer; a hung read can never wedge the test harness. It fails without
-    /// `STARTF_USESTDHANDLES` in platform-windows' `spawn_concrete` whenever
-    /// the test runner's own std handles are redirected
-    /// (docs/research/conpty-attach-2026-07.md).
-    /// Review of 66a8fb5f: Drop returns at once, and the hang-up or the
-    /// kill ends a running child; the exit watcher must not hold the
-    /// child's lock while it sleeps, or the reaper never gets it.
+    /// Reviews of 66a8fb5f and e80dc55e: Drop returns at once, and the
+    /// hang-up or the kill ends a running child, even one flooding output
+    /// nobody reads; the exit watcher must not hold the child's lock while
+    /// it sleeps, or the reaper never gets it.
     #[test]
     fn dropping_the_original_conpty_handle_ends_a_running_child() {
         use crate::backend::Backend as _;
         use std::time::{Duration, Instant};
         let h = super::WindowsBackend
-            .spawn_shell(80, 24, Some("ping.exe -n 60 127.0.0.1"), &[], None)
+            .spawn_shell(
+                80,
+                24,
+                Some("cmd.exe /d /c for /l %i in (0,0,1) do @echo flooding the unread pipe"),
+                &[],
+                None,
+            )
             .expect("spawn");
         let exited = h.exit_token().expect("exit token");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -544,6 +554,14 @@ mod tests {
             .expect("the child ended after the hang-up");
     }
 
+    /// Smoke test: a ConPTY child spawns and its output reaches our reader.
+    ///
+    /// The pipe read is a blocking `ReadFile`, so the reads happen on a
+    /// detached thread and the deadline is enforced by polling the shared
+    /// buffer; a hung read can never wedge the test harness. It fails without
+    /// `STARTF_USESTDHANDLES` in platform-windows' `spawn_concrete` whenever
+    /// the test runner's own std handles are redirected
+    /// (docs/research/conpty-attach-2026-07.md).
     #[test]
     fn conpty_child_output_reaches_the_reader() {
         use crate::backend::Backend as _;
