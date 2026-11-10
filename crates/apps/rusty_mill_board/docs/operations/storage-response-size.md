@@ -80,7 +80,7 @@ record rewrite, dependencies or HTTP limit increase is required.
 The complete Store/MCP list contract still needs O(total returned data) memory.
 The wire/read buffer is bounded; this change does not claim constant-memory
 whole-board responses. ID selection is O(matching IDs). Project/column filtering
-still occurs in the application; numbered lookup reads only the `number:<n>` tag and the matching card (#1421).
+still occurs in the application; numbered lookup reads only the `number:<n>` tag and the matching card (Mill Board card #1421).
 Lists of project names use the existing small `/lists` read. Legacy unpaged
 storage clients still need to opt into paging as their own collections grow.
 
