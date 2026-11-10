@@ -115,9 +115,9 @@ impl State {
     fn revive(&mut self, shared: &Shared, revive: Revive) -> Result<(), super::Refusal> {
         crate::checkpoint::validate_size(revive.size)?;
         let (cols, rows) = (revive.size.cols().into(), revive.size.rows().into());
-        let (mut grid, mut parser) = revive
-            .screen
-            .unwrap_or_else(|| (Grid::new(cols, rows), AnsiParser::new()));
+        let (mut grid, mut parser) = revive.screen.unwrap_or_else(|| {
+            super::fresh_screen(Grid::new(cols, rows), self.config.grapheme_clustering)
+        });
         if (grid.cols, grid.rows) != (cols, rows) {
             grid.resize(cols, rows);
         }

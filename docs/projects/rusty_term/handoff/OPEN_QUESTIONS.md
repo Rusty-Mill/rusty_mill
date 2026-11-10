@@ -22,7 +22,7 @@ Resolved items are checked and point to the D# that answers them.
 - [x] Q12 (2026-10-31, n; answered: D144): Version-mismatch errors, with C36. Behaviour from term ROADMAP question 9 (Nano, 2026-11-04 12:23Z); the wire fields still need Nano on the C36 (a) PR.
 - [ ] Q13 (2026-10-28, y before shared mode): Restrict C33 force-disconnect (card 507, D35).
 - [ ] Q14 (2026-10-23, n): Is snapshot encode speed against libghostty a hard target? (NOTES §3 Q2; ROADMAP Phase 0 "Open: reliable ≤ 11.2 ms encode")
-- [ ] Q15 (2026-10-23, n): A config key to make mode 2027 clustering the default? (NOTES §3 Q7, D13)
+- [x] Q15 (2026-10-23, n; answered: D156): A config key to make mode 2027 clustering the default? (NOTES §3 Q7, D13) Nano "B. Yes", 2026-11-04 12:32:57Z; built for card #787.
 - [ ] Q16 (2026-10-29, n): After Phase B, unify rusty_term's ConPTY backend onto platform-windows, or retire it? (conhost design §13 Q2)
 
 ## Added by the expert
@@ -43,3 +43,5 @@ Resolved items are checked and point to the D# that answers them.
 - [ ] Q30 (2026-11-06, n): D74 (`[stated]`) says the C45 state dir uses the socket's file *stem*; the code uses its file *name* (`server/src/main.rs` `default_state_dir`, `socket.file_name()`, test `rusty_mux/mux.sock`). Code wins (D135). Should D74's wording be superseded to match, or the code changed to the stem? — interim choice: keep the code (file name).
 - [ ] Q31 (2026-11-07, n): Follow-up to D148: session files (`--session`, `config.session`) are lost when GUI local mode retires; C45 keeps sessions on the server but there is no file-based layout restore. Bring it back on the mux (e.g. a ctl or GUI import), or drop it for good? — interim choice: lost for now (D148, Nano "All recommended").
 - [ ] Q32 (2026-11-07, n): Follow-up to D148: the GUI-window `rusty_term ctl` commands `new-window`, `quake` and `focus-tab` (single-instance control socket, `gui/control.rs`) have no mux equivalent once local mode retires. Give `rusty-mux-gui` a way to take them, or leave them out? — interim choice: lost for now (D148, Nano "All recommended").
+- [ ] Q34 (2026-11-10, n): Should RIS restore the configured mode 2027 default instead of turning clustering off? It needs the default in the checkpoint (a new RTCP field, a wire change old peers see). — interim choice: D156, RIS turns it off on server and client alike.
+- [ ] Q35 (2026-11-10, n): Should rusty-mux-gui carry rusty_term's `grapheme_clustering` key per block (a `Launch` field plus a Features bit, a wire change)? — interim choice: D156, the mux uses `config.json` `server.grapheme_clustering` and rusty-mux-gui warns when rusty_term's key is set.

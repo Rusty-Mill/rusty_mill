@@ -130,6 +130,11 @@ pub struct Config {
     /// Whether the cursor leaves a brief fading trail when it jumps
     /// (`cursor_trail`; default off) — pure renderer eye candy (G36).
     pub cursor_trail: Option<bool>,
+    /// Start new panes with DEC mode 2027 (grapheme clustering) set
+    /// (`grapheme_clustering`; default off). A program can still reset it.
+    /// Applies where this config builds the pane's grid (the TUI); mux
+    /// blocks take `server.grapheme_clustering` from the mux config.
+    pub grapheme_clustering: Option<bool>,
     /// Reduced motion override (`[window] reduce_motion`); `None` follows the
     /// OS setting.
     pub reduce_motion: Option<ReduceMotion>,
@@ -313,6 +318,7 @@ impl Config {
 # clipboard = "write-only"  # OSC 52 policy: "off", "write-only" (default), or "read-write"
 # cursor_trail = true       # fading trail when the cursor jumps
 # bidi = "auto"             # reorder RTL text at render time (UAX #9)
+# grapheme_clustering = true # start panes with mode 2027 (clustered widths) on
 
 # [colors]                 # override individual colors (after any preset)
 # foreground = "#d8d8d8"
@@ -916,6 +922,7 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
             });
         }
         ("", "cursor_trail") => cfg.cursor_trail = Some(expect_bool(key, value)?),
+        ("", "grapheme_clustering") => cfg.grapheme_clustering = Some(expect_bool(key, value)?),
         ("", "bidi") => {
             cfg.bidi = Some(match expect_str(key, value)?.as_str() {
                 "auto" => true,
@@ -1620,6 +1627,17 @@ color15 = "ffffff"
         let (cfg, warns) = parse("bidi = \"sideways\"\n");
         assert_eq!(cfg.bidi, None);
         assert_eq!(warns.len(), 1);
+    }
+
+    #[test]
+    fn grapheme_clustering_key_parses_and_defaults_off() {
+        let (cfg, warns) = parse("grapheme_clustering = true\n");
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(cfg.grapheme_clustering, Some(true));
+        assert_eq!(parse("").0.grapheme_clustering, None);
+        let (cfg, warns) = parse("grapheme_clustering = \"yes\"\n");
+        assert_eq!(cfg.grapheme_clustering, None);
+        assert_eq!(warns.len(), 1, "{warns:?}");
     }
 
     #[test]

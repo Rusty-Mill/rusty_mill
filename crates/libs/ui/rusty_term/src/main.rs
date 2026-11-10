@@ -400,16 +400,7 @@ fn main() -> Result<(), std::io::Error> {
     // configured cols/rows are a *window* size; the TUI renders into the host
     // terminal, whose size is not ours to choose.
     let (init_cols, init_rows) = backend.terminal_size().unwrap_or((80, 24));
-    let mut grid = Grid::new(init_cols as usize, init_rows as usize);
-    if let Some(max) = config.scrollback {
-        grid.set_scrollback_max(max);
-    }
-    grid.apply_theme(&config.theme);
-    grid.set_default_cursor(
-        config.cursor_style.unwrap_or_default(),
-        config.cursor_blink.unwrap_or(false),
-    );
-    let grid = Arc::new(Mutex::new(grid));
+    let grid = Arc::new(Mutex::new(tui_grid(&config, init_cols, init_rows)));
 
     // The child renders through rusty_term, not the host terminal, so it should
     // see *our* identity and capabilities. We advertise our self-describing
@@ -470,9 +461,59 @@ fn run_ctl(args: &[String]) -> std::io::Result<()> {
     }
 }
 
+/// The TUI's grid at `cols` x `rows` with the config's pane defaults:
+/// scrollback cap, theme, cursor, and mode 2027 when `grapheme_clustering`
+/// is on (set through the parser, so DECRQM reports it and a program can
+/// reset it).
+fn tui_grid(config: &Config, cols: u16, rows: u16) -> Grid {
+    let mut grid = Grid::new(cols as usize, rows as usize);
+    if let Some(max) = config.scrollback {
+        grid.set_scrollback_max(max);
+    }
+    grid.apply_theme(&config.theme);
+    grid.set_default_cursor(
+        config.cursor_style.unwrap_or_default(),
+        config.cursor_blink.unwrap_or(false),
+    );
+    if config.grapheme_clustering == Some(true) {
+        core::AnsiParser::new().advance(&mut grid, b"\x1b[?2027h");
+    }
+    grid
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DECRQM's reply for mode 2027 after `bytes` on a TUI grid.
+    fn mode_2027(config: &Config, bytes: &[u8]) -> Vec<u8> {
+        let mut grid = tui_grid(config, 20, 2);
+        let mut parser = core::AnsiParser::new();
+        parser.advance(&mut grid, bytes);
+        parser.advance(&mut grid, b"\x1b[?2027$p");
+        parser.take_responses()
+    }
+
+    #[test]
+    fn grapheme_clustering_key_starts_the_tui_grid_in_mode_2027() {
+        let off = Config::default();
+        assert_eq!(mode_2027(&off, b""), b"\x1b[?2027;2$y", "off by default");
+        let on = Config {
+            grapheme_clustering: Some(true),
+            ..Config::default()
+        };
+        assert_eq!(mode_2027(&on, b""), b"\x1b[?2027;1$y");
+        assert_eq!(
+            mode_2027(&on, b"\x1b[?2027l"),
+            b"\x1b[?2027;2$y",
+            "a program resets it"
+        );
+        assert_eq!(
+            mode_2027(&on, b"\x1bc"),
+            b"\x1b[?2027;2$y",
+            "RIS turns it off"
+        );
+    }
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()

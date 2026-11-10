@@ -318,6 +318,7 @@ fn the_server_section_gives_new_block_defaults() {
         command: Some("fish".into()),
         args: vec!["-l".into()],
         cwd: Some(cwd.into()),
+        grapheme_clustering: None,
     };
     assert_eq!(parse(&text).expect("valid").server, expected);
     assert_eq!(parse_server(&text), Ok(expected));
@@ -326,6 +327,16 @@ fn the_server_section_gives_new_block_defaults() {
         parse(r#"{"server": {}}"#).expect("valid").server,
         Defaults::default()
     );
+}
+
+#[test]
+fn the_server_section_takes_grapheme_clustering() {
+    let on = parse_server(r#"{"server": {"grapheme_clustering": true}}"#).expect("valid");
+    assert_eq!(on.grapheme_clustering, Some(true));
+    let found =
+        parse_server(r#"{"server": {"grapheme_clustering": "yes"}}"#).expect_err("not a bool");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].at, "server.grapheme_clustering");
 }
 
 #[test]
