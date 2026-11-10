@@ -1,9 +1,13 @@
-//! Windows ConPTY backend.
+//! Windows ConPTY backend, the rollback to our own host (`[console] host =
+//! "conpty"`).
 //!
-//! Allocates a [pseudoconsole](https://learn.microsoft.com/windows/console/pseudoconsoles),
-//! wires it to a pair of pipes, and spawns the shell (`%COMSPEC%`, default
-//! `cmd.exe`) attached to it. The master side (our pipe ends plus the `HPCON`)
-//! is exposed as a [`BackendHandle`], mirroring the Unix PTY backend.
+//! Spawns the shell (`%COMSPEC%`, default `cmd.exe`) on a
+//! [pseudoconsole](https://learn.microsoft.com/windows/console/pseudoconsoles)
+//! through platform-windows' [`WindowsPty`], the wrapper rusty_mux_server
+//! uses, with the same command line our own host gets (`own::shell_command`).
+//! The master side is exposed as a [`BackendHandle`], mirroring the Unix PTY
+//! backend. This module also owns the host console's raw mode and size,
+//! which both Windows backends share.
 //!
 //! This module is only compiled on Windows (gated in `backend/mod.rs`).
 //!
@@ -13,26 +17,22 @@
 //! wire, so `resize_poll` in `src/runtime/reactor.rs` polls the console size
 //! on a timer and calls [`BackendHandle::set_winsize`] on change.
 
-use crate::backend::cmdline::{self, CmdRules, Reader, locate, split_program};
+use std::io;
+use std::path::Path;
+use std::sync::Arc;
+
+use crate::backend::cmdline::{self, CmdRules, Reader};
+use crate::backend::own::{GRACE, POLL, exited_within, shell_command, to_io};
 use crate::backend::{Backend, BackendHandle};
 use crate::sync::Mutex;
-use platform_windows::winargv;
+use platform::process::{Child as _, ExitStatus, Signal};
+use platform::pty::PtyMaster as _;
+use platform::term::WinSize;
+use platform_windows::{WindowsChild, WindowsPty, WindowsPtyMaster, winargv};
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE, HANDLE,
-};
-use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows_sys::Win32::System::Console::{
-    CONSOLE_SCREEN_BUFFER_INFO, COORD, ClosePseudoConsole, CreatePseudoConsole,
-    ENABLE_PROCESSED_OUTPUT, GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, HPCON,
-    ResizePseudoConsole, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
-};
-use windows_sys::Win32::System::Pipes::CreatePipe;
-use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
-    GetExitCodeProcess, InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject,
+    CONSOLE_SCREEN_BUFFER_INFO, ENABLE_PROCESSED_OUTPUT, GetConsoleMode,
+    GetConsoleScreenBufferInfo, GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
 };
 
 /// Unit type implementing [`Backend`](crate::backend::Backend) for Windows.
@@ -41,20 +41,6 @@ pub struct WindowsBackend;
 /// Host console modes captured when raw mode was enabled, restored on exit.
 /// Tuple is `(stdin_mode, stdout_mode)`.
 static ORIGINAL_MODES: Mutex<Option<(u32, u32)>> = Mutex::new(None);
-
-/// Render a ConPTY HRESULT as an `io::Error`. `CreatePseudoConsole` and
-/// `ResizePseudoConsole` return HRESULTs, not Win32 error codes; an
-/// `HRESULT_FROM_WIN32` value (`0x8007xxxx`) carries the real Win32 code in its
-/// low 16 bits, which `from_raw_os_error` renders correctly. Passing the raw
-/// HRESULT straight through (as before) produced a garbled message.
-fn hresult_to_io_error(hr: i32) -> std::io::Error {
-    let u = hr as u32;
-    if u >> 16 == 0x8007 {
-        std::io::Error::from_raw_os_error((u & 0xFFFF) as i32)
-    } else {
-        std::io::Error::from_raw_os_error(hr)
-    }
-}
 
 /// `GetConsoleMode` fails with `ERROR_INVALID_HANDLE` (raw OS error 6)
 /// whenever `GetStdHandle(STD_INPUT_HANDLE)`/`GetStdHandle(STD_OUTPUT_HANDLE)`
@@ -83,126 +69,20 @@ impl Backend for WindowsBackend {
         rows: u16,
         shell: Option<&str>,
         args: &[String],
-        cwd: Option<&std::path::Path>,
-    ) -> Result<Box<dyn BackendHandle>, std::io::Error> {
-        use std::os::windows::ffi::OsStrExt;
-
-        // Built first: a refused argument leaves nothing to clean up.
-        let mut cmdline = command_line(shell, args)?;
-        unsafe {
-            // Two anonymous pipes. The child reads its input from `input_read`
-            // and writes its output to `output_write`; we keep the opposite ends.
-            let mut input_read: HANDLE = std::ptr::null_mut();
-            let mut input_write: HANDLE = std::ptr::null_mut();
-            let mut output_read: HANDLE = std::ptr::null_mut();
-            let mut output_write: HANDLE = std::ptr::null_mut();
-            if CreatePipe(&mut input_read, &mut input_write, std::ptr::null(), 0) == 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if CreatePipe(&mut output_read, &mut output_write, std::ptr::null(), 0) == 0 {
-                // The first pipe succeeded; don't leak its ends on this path.
-                let e = std::io::Error::last_os_error();
-                CloseHandle(input_read);
-                CloseHandle(input_write);
-                return Err(e);
-            }
-
-            // Allocate the pseudoconsole over the child-side pipe ends.
-            let size = COORD {
-                X: cols as i16,
-                Y: rows as i16,
-            };
-            let mut hpc: HPCON = 0;
-            let hr = CreatePseudoConsole(size, input_read, output_write, 0, &mut hpc);
-            // ConPTY duplicates the child-side handles; release our copies.
-            CloseHandle(input_read);
-            CloseHandle(output_write);
-            if hr != 0 {
-                CloseHandle(input_write);
-                CloseHandle(output_read);
-                return Err(hresult_to_io_error(hr));
-            }
-
-            // Build STARTUPINFOEXW carrying the pseudoconsole attribute.
-            let mut si: STARTUPINFOEXW = std::mem::zeroed();
-            si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-            // Without this, a parent whose own std handles are redirected
-            // (any `cargo test` or CI run) has them duplicated into the
-            // child, which then writes there instead of the pseudo console.
-            // Null std handles plus this flag stop that; platform-windows'
-            // `sys::pty::spawn_attached` carries the full history.
-            si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
-            let mut attr_size: usize = 0;
-            // First call "fails" by design, only to report the required size.
-            InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attr_size);
-            let mut attr_buf = vec![0u8; attr_size];
-            si.lpAttributeList = attr_buf.as_mut_ptr() as *mut _;
-            if InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &mut attr_size) == 0 {
-                let e = std::io::Error::last_os_error();
-                ClosePseudoConsole(hpc);
-                CloseHandle(input_write);
-                CloseHandle(output_read);
-                return Err(e);
-            }
-            if UpdateProcThreadAttribute(
-                si.lpAttributeList,
-                0,
-                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-                hpc as *const core::ffi::c_void,
-                std::mem::size_of::<HPCON>(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ) == 0
-            {
-                let e = std::io::Error::last_os_error();
-                DeleteProcThreadAttributeList(si.lpAttributeList);
-                ClosePseudoConsole(hpc);
-                CloseHandle(input_write);
-                CloseHandle(output_read);
-                return Err(e);
-            }
-
-            let cwd_wide: Option<Vec<u16>> = cwd.map(|p| {
-                p.as_os_str()
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect()
-            });
-            let cwd_ptr = cwd_wide.as_ref().map_or(std::ptr::null(), |w| w.as_ptr());
-
-            let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
-            let ok = CreateProcessW(
-                std::ptr::null(),
-                cmdline.as_mut_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                0, // bInheritHandles = FALSE: handles flow via the pseudoconsole
-                EXTENDED_STARTUPINFO_PRESENT,
-                std::ptr::null(),
-                cwd_ptr,
-                &si.StartupInfo,
-                &mut pi,
-            );
-            // The attribute list is only needed through CreateProcessW.
-            DeleteProcThreadAttributeList(si.lpAttributeList);
-            drop(attr_buf);
-            if ok == 0 {
-                let e = std::io::Error::last_os_error();
-                ClosePseudoConsole(hpc);
-                CloseHandle(input_write);
-                CloseHandle(output_read);
-                return Err(e);
-            }
-
-            Ok(Box::new(WindowsHandle {
-                input_write,
-                output_read,
-                hpc,
-                process: pi.hProcess,
-                thread: pi.hThread,
-                owns: true,
-            }))
-        }
+        cwd: Option<&Path>,
+    ) -> Result<Box<dyn BackendHandle>, io::Error> {
+        let cwd = match cwd {
+            Some(dir) => dir.to_path_buf(),
+            None => std::env::current_dir()?,
+        };
+        let cmd = shell_command(&shell_or_default(shell), args, cwd.into_os_string())?;
+        let (master, child) = WindowsPty
+            .spawn_concrete(&cmd, WinSize { rows, cols })
+            .map_err(to_io)?;
+        Ok(Box::new(ConptyHandle {
+            master: Arc::new(master),
+            child: Some(Arc::new(Mutex::new(child))),
+        }))
     }
 
     fn set_raw_mode(&self, enabled: bool) -> Result<(), std::io::Error> {
@@ -254,41 +134,6 @@ impl Backend for WindowsBackend {
             }
         }
     }
-}
-
-/// The NUL-terminated command line ConPTY's `CreateProcessW` gets for
-/// `shell` and the launcher `args`.
-fn command_line(shell: Option<&str>, args: &[String]) -> std::io::Result<Vec<u16>> {
-    use std::os::windows::ffi::OsStrExt;
-
-    // Bare names (`powershell`, `pwsh`, `wsl`) resolve through the
-    // standard CreateProcessW search path, and arguments pass through
-    // (`wsl -d Ubuntu`, `cmd /K ...`). An unquoted path containing
-    // spaces is ambiguous to CreateProcessW (it would try
-    // `C:\Program.exe` first), so when the whole string names an
-    // existing file we quote it.
-    let shell = shell_or_default(shell);
-    let (reader, rest_len) = match split_program(&shell, |p| locate(p).is_some()) {
-        Some((program, rest)) => (cmdline::reader(program), rest.encode_utf16().count()),
-        None => (Reader::Crt, 0),
-    };
-    let shell =
-        if shell.contains(' ') && !shell.starts_with('"') && std::path::Path::new(&shell).is_file()
-        {
-            format!("\"{shell}\"")
-        } else {
-            shell
-        };
-    // CreateProcessW needs a mutable, null-terminated wide command line.
-    // `shell` may already carry its own args (CreateProcessW parses the
-    // whole string itself); explicit `args` — the caller's pre-split
-    // argv, e.g. a trailing `-- prog arg...` — are appended, each
-    // quoted for whoever reads them.
-    let mut line: Vec<u16> = std::ffi::OsStr::new(&shell).encode_wide().collect();
-    let params = line.len() - rest_len;
-    push_launcher_args(&mut line, params, reader, args)?;
-    line.push(0);
-    Ok(line)
 }
 
 /// The configured shell, else `%COMSPEC%`, else `cmd.exe`. Shared with the
@@ -409,222 +254,98 @@ pub(super) fn push_quoted_arg(arg: &str, out: &mut Vec<u16>) {
     out.push(b'"' as u16);
 }
 
-/// Owns the master side of a ConPTY: the pipe ends we read/write and the
-/// `HPCON` used for resizing. The handle returned by `spawn_shell` also owns the
-/// child process/thread handles and the pseudoconsole, closing them on drop;
-/// cloned handles own only their duplicated pipe ends.
-struct WindowsHandle {
-    input_write: HANDLE,
-    output_read: HANDLE,
-    hpc: HPCON,
-    process: HANDLE,
-    thread: HANDLE,
-    owns: bool,
+/// The terminal's side of a ConPTY. The handle `spawn_shell` returns also
+/// owns the child; clones share the console only. The last reference closes
+/// the console (`WindowsPtyMaster`'s Drop).
+struct ConptyHandle {
+    master: Arc<WindowsPtyMaster>,
+    /// Shared with the exit token's watcher, which polls it.
+    child: Option<Arc<Mutex<WindowsChild>>>,
 }
 
-// The raw handles are only ever touched by one thread at a time (each clone is
-// handed to a single thread), so moving a handle across threads is sound.
-unsafe impl Send for WindowsHandle {}
-
-impl BackendHandle for WindowsHandle {
-    fn read_into(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
-        let mut read: u32 = 0;
-        let ok = unsafe {
-            ReadFile(
-                self.output_read,
-                buf.as_mut_ptr() as *mut _,
-                buf.len().min(u32::MAX as usize) as u32,
-                &mut read,
-                std::ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            let err = std::io::Error::last_os_error();
-            // The child closing its end surfaces as a broken pipe; treat it as a
-            // clean EOF (the contract's `Ok(0)`).
-            if err.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
-                return Ok(0);
-            }
-            return Err(err);
-        }
-        Ok(read as usize)
+impl BackendHandle for ConptyHandle {
+    fn read_into(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
+        self.master.read(buf).map_err(to_io)
     }
 
-    fn write(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
+    fn write(&mut self, data: &[u8]) -> Result<(), io::Error> {
         // Pipes accept short writes; loop until everything is taken.
-        let mut written_total = 0;
-        while written_total < data.len() {
-            let mut written: u32 = 0;
-            let ok = unsafe {
-                WriteFile(
-                    self.input_write,
-                    data[written_total..].as_ptr() as *const _,
-                    (data.len() - written_total) as u32,
-                    &mut written,
-                    std::ptr::null_mut(),
-                )
-            };
-            if ok == 0 {
-                return Err(std::io::Error::last_os_error());
+        let mut rest = data;
+        while !rest.is_empty() {
+            let n = self.master.write(rest).map_err(to_io)?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "ConPTY took no input",
+                ));
             }
-            if written == 0 {
-                return Err(std::io::Error::other("ConPTY write returned 0"));
-            }
-            written_total += written as usize;
+            rest = &rest[n..];
         }
         Ok(())
     }
 
-    fn try_clone(&self) -> Result<Box<dyn BackendHandle>, std::io::Error> {
-        unsafe {
-            let proc = GetCurrentProcess();
-            let mut dup_in: HANDLE = std::ptr::null_mut();
-            let mut dup_out: HANDLE = std::ptr::null_mut();
-            if DuplicateHandle(
-                proc,
-                self.input_write,
-                proc,
-                &mut dup_in,
-                0,
-                0,
-                DUPLICATE_SAME_ACCESS,
-            ) == 0
-                || DuplicateHandle(
-                    proc,
-                    self.output_read,
-                    proc,
-                    &mut dup_out,
-                    0,
-                    0,
-                    DUPLICATE_SAME_ACCESS,
-                ) == 0
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-            // The clone shares the owner's `hpc` (an opaque value, not a kernel
-            // handle to duplicate) but does not own it; the owner must outlive
-            // its clones. It closes only its own duplicated pipe ends.
-            Ok(Box::new(WindowsHandle {
-                input_write: dup_in,
-                output_read: dup_out,
-                hpc: self.hpc,
-                process: std::ptr::null_mut(),
-                thread: std::ptr::null_mut(),
-                owns: false,
-            }))
-        }
+    fn try_clone(&self) -> Result<Box<dyn BackendHandle>, io::Error> {
+        Ok(Box::new(ConptyHandle {
+            master: Arc::clone(&self.master),
+            child: None,
+        }))
     }
 
-    fn set_winsize(&mut self, cols: u16, rows: u16) -> Result<(), std::io::Error> {
-        let size = COORD {
-            X: cols as i16,
-            Y: rows as i16,
-        };
-        let hr = unsafe { ResizePseudoConsole(self.hpc, size) };
-        if hr != 0 {
-            return Err(hresult_to_io_error(hr));
-        }
-        Ok(())
+    fn set_winsize(&mut self, cols: u16, rows: u16) -> Result<(), io::Error> {
+        self.master.resize(WinSize { rows, cols }).map_err(to_io)
     }
 
     fn exit_token(&self) -> Option<Box<dyn FnOnce() + Send>> {
-        // Only the owning handle holds the child process handle.
-        if self.process.is_null() {
-            return None;
-        }
-        // Duplicate it so a watcher thread can wait without owning the child
-        // (the owner still reaps/terminates it on drop).
-        let dup = unsafe {
-            let proc = GetCurrentProcess();
-            let mut dup: HANDLE = std::ptr::null_mut();
-            if DuplicateHandle(
-                proc,
-                self.process,
-                proc,
-                &mut dup,
-                0,
-                0,
-                DUPLICATE_SAME_ACCESS,
-            ) == 0
-            {
-                return None;
+        // Only the original holds the child. `WindowsChild` has no
+        // blocking wait that leaves it usable, so the watcher polls.
+        let child = Arc::clone(self.child.as_ref()?);
+        Some(Box::new(move || {
+            while let Ok(None) = child.lock().try_wait() {
+                std::thread::sleep(POLL);
             }
-            dup
-        };
-        // HANDLE isn't `Send`; wrap it so the watcher thread can own it. A
-        // `self`-consuming method forces the closure to capture the whole
-        // wrapper (not the bare field, which disjoint captures would pick).
-        struct Waitable(HANDLE);
-        unsafe impl Send for Waitable {}
-        impl Waitable {
-            fn wait(self) {
-                unsafe {
-                    WaitForSingleObject(self.0, u32::MAX); // u32::MAX == INFINITE
-                    CloseHandle(self.0);
-                }
-            }
-        }
-        let waitable = Waitable(dup);
-        Some(Box::new(move || waitable.wait()))
+        }))
     }
 
     fn reap_exit_status(&mut self) -> Option<i32> {
-        // Only the owning handle holds the child process handle.
-        if self.process.is_null() {
-            return None;
-        }
-        unsafe {
-            // By the time the runtime calls this, the `exit_token` watcher
-            // (if one was started) has already observed the process signal,
-            // so this wait is expected to return immediately; the bound just
-            // guards against calling this directly without going through
-            // that watcher first.
-            WaitForSingleObject(self.process, 2000);
-            let mut code: u32 = 0;
-            if GetExitCodeProcess(self.process, &mut code) == 0 {
-                return None;
-            }
-            Some(code as i32)
+        let child = self.child.as_ref()?;
+        match exited_within(&mut child.lock(), GRACE) {
+            Some(ExitStatus::Code(code)) => Some(code),
+            _ => None,
         }
     }
 }
 
-impl Drop for WindowsHandle {
+impl Drop for ConptyHandle {
+    /// The original hangs up, which asks the child to exit, gives it
+    /// [`GRACE`], then kills it if it is still running. A clone only drops
+    /// its reference.
     fn drop(&mut self) {
-        unsafe {
-            if !self.input_write.is_null() {
-                CloseHandle(self.input_write);
-            }
-            if !self.output_read.is_null() {
-                CloseHandle(self.output_read);
-            }
-            if self.owns {
-                // Closing the pseudoconsole asks the child to exit; give it a
-                // brief grace period, then make sure it's gone.
-                ClosePseudoConsole(self.hpc);
-                if !self.process.is_null() {
-                    WaitForSingleObject(self.process, 2000);
-                    TerminateProcess(self.process, 0);
-                    CloseHandle(self.process);
-                }
-                if !self.thread.is_null() {
-                    CloseHandle(self.thread);
-                }
-            }
+        let Some(child) = self.child.take() else {
+            return;
+        };
+        self.master.hang_up();
+        let mut child = child.lock();
+        if exited_within(&mut child, GRACE).is_none()
+            && let Err(e) = child.kill_single(Signal::Kill)
+        {
+            eprintln!("rusty_term: the shell outlived its pseudoconsole and can't be killed: {e}");
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{command_line, push_quoted_arg};
+    use super::{push_launcher_args, push_quoted_arg};
+    use crate::backend::cmdline::{locate, reader, split_program};
     use std::io::ErrorKind;
 
-    /// ConPTY's command line for `shell` and `args`, without its NUL.
+    /// `shell` with `args` appended by the launcher rules both hosts use.
     fn line(shell: &str, args: &[&str]) -> std::io::Result<String> {
         let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
-        let mut line = command_line(Some(shell), &args)?;
-        assert_eq!(line.pop(), Some(0));
+        let (program, rest) = split_program(shell, |p| locate(p).is_some()).expect("a program");
+        let mut line: Vec<u16> = shell.encode_utf16().collect();
+        let params = line.len() - rest.encode_utf16().count();
+        push_launcher_args(&mut line, params, reader(program), &args)?;
         Ok(String::from_utf16(&line).expect("utf-16"))
     }
 
@@ -765,8 +486,9 @@ mod tests {
     /// The pipe read is a blocking `ReadFile`, so the reads happen on a
     /// detached thread and the deadline is enforced by polling the shared
     /// buffer; a hung read can never wedge the test harness. It fails without
-    /// `STARTF_USESTDHANDLES` in `spawn_shell` whenever the test runner's own
-    /// std handles are redirected (docs/research/conpty-attach-2026-07.md).
+    /// `STARTF_USESTDHANDLES` in platform-windows' `spawn_concrete` whenever
+    /// the test runner's own std handles are redirected
+    /// (docs/research/conpty-attach-2026-07.md).
     #[test]
     fn conpty_child_output_reaches_the_reader() {
         use crate::backend::Backend as _;

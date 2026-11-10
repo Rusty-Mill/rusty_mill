@@ -30,7 +30,7 @@ use crate::backend::{Backend, BackendHandle};
 /// How long the child gets to exit after a hang-up, or to report its exit
 /// status, before it is killed or given up on. The ConPTY handle's bound,
 /// and the console's own close grace.
-const GRACE: Duration = Duration::from_secs(2);
+pub(super) const GRACE: Duration = Duration::from_secs(2);
 
 /// How long Drop waits for the console to shut down: it closes 2 s after
 /// the hang-up at the latest, and ends the clients still attached 5 s
@@ -41,7 +41,7 @@ const SHUTDOWN: Duration = Duration::from_secs(6);
 const SETTLE: Duration = Duration::from_millis(250);
 
 /// How often [`exited_within`] looks at the child.
-const POLL: Duration = Duration::from_millis(10);
+pub(super) const POLL: Duration = Duration::from_millis(10);
 
 /// [`Backend`] on our own console host. Dropping it waits for the
 /// consoles its handles hung up to shut down (#1259), so drop it last,
@@ -210,7 +210,7 @@ fn end_survivor(child: &mut WindowsChild, done: bool) {
 /// The child's exit status once it exits, or `None` if it is still running
 /// after `grace` or its status can't be read. `WindowsChild` has no timed
 /// wait, so this polls.
-fn exited_within(child: &mut WindowsChild, grace: Duration) -> Option<ExitStatus> {
+pub(super) fn exited_within(child: &mut WindowsChild, grace: Duration) -> Option<ExitStatus> {
     let deadline = Instant::now() + grace;
     loop {
         match child.try_wait() {
@@ -224,7 +224,7 @@ fn exited_within(child: &mut WindowsChild, grace: Duration) -> Option<ExitStatus
 /// The `Command` that runs `shell` and then `args` as `CreateProcessW`
 /// would. The shell's own arguments go on verbatim, as ConPTY's would;
 /// only the trailing `args` are quoted, for whoever reads them.
-fn shell_command(shell: &str, args: &[String], cwd: OsString) -> io::Result<Command> {
+pub(super) fn shell_command(shell: &str, args: &[String], cwd: OsString) -> io::Result<Command> {
     let Some((word, rest)) = split_program(shell, |p| locate(p).is_some()) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -297,7 +297,7 @@ fn batch_line(shell: &str, args: &[String]) -> io::Result<OsString> {
 
 /// A platform error as an `io::Error`, keeping its message and the kinds
 /// the runtime tells apart.
-fn to_io(e: PlatformError) -> io::Error {
+pub(super) fn to_io(e: PlatformError) -> io::Error {
     let kind = match e.kind {
         ErrorKind::NotFound => io::ErrorKind::NotFound,
         ErrorKind::PermissionDenied => io::ErrorKind::PermissionDenied,
