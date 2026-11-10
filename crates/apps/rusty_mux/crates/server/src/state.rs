@@ -1352,7 +1352,7 @@ impl State {
             "terminal.process" => {
                 let live = rt.live()?;
                 let pid = live.process.pid().ok_or("the program has exited")?;
-                process::text(&process::chain(pid, live.pty.foreground(), process::lookup))
+                process::text(&live.pty.processes(pid))
             }
             "terminal.size" => format!("{}x{}", rt.grid.cols, rt.grid.rows),
             "terminal.reset" => {
@@ -1649,10 +1649,7 @@ impl State {
         // its own program once it has exec'd.
         let foreground = process.pid().map(|pid| process::Foreground {
             pid,
-            name: std::path::Path::new(&config.program)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            name: process::started_name(pid, &config.program),
         });
         let echo = pty.echo();
         Ok(Unscreened {

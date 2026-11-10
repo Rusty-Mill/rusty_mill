@@ -21,6 +21,13 @@ pub fn is_current_user(pid: u32) -> Result<bool> {
     proc::is_current_user(pid)
 }
 
+/// The full path of the program process `pid` runs. `Err` if the process
+/// is gone or this process may not query it. Re-exported at the crate
+/// root as `platform_windows::process_image_path`.
+pub fn process_image_path(pid: u32) -> Result<PathBuf> {
+    proc::image_path(pid)
+}
+
 /// The Windows process backend.
 #[derive(Debug, Default)]
 pub struct WindowsSpawner;

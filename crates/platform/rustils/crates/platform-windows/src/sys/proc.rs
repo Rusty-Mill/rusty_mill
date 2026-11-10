@@ -14,7 +14,9 @@
 
 #![allow(unsafe_code)]
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+use std::os::windows::ffi::OsStringExt;
+use std::path::PathBuf;
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::process::{EnvSpec, ExitStatus, Stdio};
@@ -903,6 +905,41 @@ pub fn is_alive(pid: u32) -> Result<bool> {
         return Err(errmap::last_win32_err("GetExitCodeProcess", OsStr::new("")));
     }
     Ok(code == w::STILL_ACTIVE as u32)
+}
+
+/// The full path of the program process `pid` runs: `OpenProcess` with
+/// `PROCESS_QUERY_LIMITED_INFORMATION`, then `QueryFullProcessImageNameW`.
+/// `Err` if the process is gone or cannot be opened, as a protected
+/// process cannot be.
+pub fn image_path(pid: u32) -> Result<PathBuf> {
+    // SAFETY: `pid` may name no process; `OpenProcess` reports that as a
+    // `NULL` return, checked below.
+    let handle = unsafe { w::OpenProcess(w::PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    // SAFETY: `handle` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let process = unsafe { OwnedWinHandle::from_raw(handle) }
+        .ok_or_else(|| errmap::last_win32_err("OpenProcess", OsStr::new("")))?;
+    // The Win32 path limit for long paths; the call fails rather than cut.
+    let mut buf = vec![0u16; 32_768];
+    let mut len = buf.len() as u32;
+    // SAFETY: `process` is a valid handle; `buf` holds `len` u16s, and
+    // `len` is a valid in/out pointer the call sets to the chars written.
+    let ok = unsafe {
+        w::QueryFullProcessImageNameW(
+            process.as_raw(),
+            w::PROCESS_NAME_WIN32,
+            buf.as_mut_ptr(),
+            &mut len,
+        )
+    };
+    if ok == 0 {
+        return Err(errmap::last_win32_err(
+            "QueryFullProcessImageNameW",
+            OsStr::new(""),
+        ));
+    }
+    buf.truncate(len as usize);
+    Ok(PathBuf::from(OsString::from_wide(&buf)))
 }
 
 /// Whether process `pid` runs as the same user as this process: the

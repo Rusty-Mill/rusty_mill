@@ -2,7 +2,8 @@
 //! console, a flooding block closes without stalling the server, a server
 //! stopped with Ctrl+Break ends every program on its blocks' consoles
 //! before it exits, and a server that dies takes its blocks with it. A program that exits by
-//! itself reports its exit code, and `terminal.process` names its pid.
+//! itself reports its exit code, and `terminal.process` names its pid; on
+//! our host it follows the newest process on the console.
 //! Each runs on ConPTY and on our own console host.
 
 #![cfg(windows)]
@@ -385,5 +386,67 @@ fn terminal_process_names_the_programs_pid(host: ConsoleHost) {
     let [Message::Text { text, .. }] = answer.as_slice() else {
         panic!("expected Text, got {answer:?}")
     };
-    assert_eq!(text.as_str(), format!("{shell}\t\t"), "{text:?}");
+    let (pid, name) = text.split_once('\t').expect("pid and name");
+    assert_eq!(pid, shell.to_string(), "{text:?}");
+    assert!(
+        name.eq_ignore_ascii_case("cmd.exe\t"),
+        "named by its image: {text:?}"
+    );
+}
+
+/// On our host a job the shell starts becomes the block's process: it
+/// attached to the console last (term pack D186). `process-changed` names
+/// it, `terminal.process` lists it first, and the shell is back once it
+/// ends. ConPTY tells no process but the program.
+#[test]
+fn own_host_follows_the_newest_console_process() {
+    let path = start_server_on(ConsoleHost::Own);
+    let wanted = Features::CHECKPOINT_V6
+        .union(Features::BLOCK_CALL)
+        .union(Features::PROCESS);
+    let mut a = Client::connect_with(&path, wanted, None);
+    let block = block_for(&mut a);
+    let shell = shell_pid(&mut a, block);
+    let changed_to = |client: &Client, program: &str| {
+        client.events.iter().any(|(_, e)| {
+            matches!(e, Event::ProcessChanged { block: b, name, .. }
+                if *b == block && name.eq_ignore_ascii_case(program))
+        })
+    };
+    a.input(block, b"ping -n 1000 127.0.0.1\r");
+    let deadline = Instant::now() + PATIENCE;
+    while !changed_to(&a, "ping.exe") {
+        assert!(Instant::now() < deadline, "no process-changed for ping");
+        a.recv();
+    }
+    let answer = a.answer(|req| Message::BlockCall {
+        req,
+        block,
+        method: "terminal.process".into(),
+        args: Vec::<(String, Value)>::new(),
+    });
+    let [Message::Text { text, .. }] = answer.as_slice() else {
+        panic!("expected Text, got {answer:?}")
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines.len() >= 2, "{text:?}");
+    assert!(
+        lines[0].to_ascii_lowercase().contains("\tping.exe\t"),
+        "{text:?}"
+    );
+    assert!(
+        lines[lines.len() - 1].starts_with(&format!("{shell}\t")),
+        "{text:?}"
+    );
+
+    a.events.clear();
+    a.input(block, b"\x03");
+    let deadline = Instant::now() + PATIENCE;
+    while !changed_to(&a, "cmd.exe") {
+        assert!(
+            Instant::now() < deadline,
+            "no process-changed back to the shell"
+        );
+        a.recv();
+    }
 }
