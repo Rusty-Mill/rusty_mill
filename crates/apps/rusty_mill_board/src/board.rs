@@ -804,11 +804,7 @@ impl<S: Store> Board<S> {
     /// If no card has that number, if more than one has (a number tag edited by hand in
     /// rusty_tick): never a guess at which was meant. Or on storage failure.
     pub fn get_number(&self, number: u64) -> Result<Card, BoardError> {
-        let mut found = self
-            .store
-            .list()?
-            .into_iter()
-            .filter(|c| c.number == Some(number));
+        let mut found = self.store.numbered(number)?.into_iter();
         match (found.next(), found.next()) {
             (Some(card), None) => Ok(card),
             (None, _) => Err(BoardError::Invalid("no card has that number")),

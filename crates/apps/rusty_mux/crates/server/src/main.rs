@@ -434,6 +434,7 @@ fn default_config(console_host: ConsoleHost, config_file: Option<PathBuf>) -> Co
         args: Vec::new(),
         cwd: std::env::var_os("HOME").unwrap_or_else(|| OsString::from("/")),
         console_host,
+        grapheme_clustering: false,
         config_file,
         state_dir: None,
     }
@@ -446,6 +447,7 @@ fn default_config(console_host: ConsoleHost, config_file: Option<PathBuf>) -> Co
         args: Vec::new(),
         cwd: std::env::var_os("USERPROFILE").unwrap_or_else(|| OsString::from("C:\\")),
         console_host,
+        grapheme_clustering: false,
         config_file,
         state_dir: None,
     }

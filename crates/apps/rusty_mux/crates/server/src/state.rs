@@ -1567,7 +1567,11 @@ impl State {
         if launch.own {
             in_step("own", self.mux.own(client, block, launch.input));
         }
-        let rt = rt.screened(shared, crate::checkpoint::grid(size), AnsiParser::new());
+        let (grid, parser) = fresh_screen(
+            crate::checkpoint::grid(size),
+            self.config.grapheme_clustering,
+        );
+        let rt = rt.screened(shared, grid, parser);
         self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
     }
@@ -2205,6 +2209,18 @@ fn receives(features: Features, event: &Event) -> bool {
 }
 
 /// A principal for tests, which build a state without a peer check.
+/// A new block's screen: `grid` and a fresh parser, with DEC mode 2027
+/// (grapheme clustering) set when `clustering`. Set through the parser, so
+/// DECRQM reports it, a program can reset it, and the checkpoint carries it
+/// to every client.
+pub(crate) fn fresh_screen(mut grid: Grid, clustering: bool) -> (Grid, AnsiParser) {
+    let mut parser = AnsiParser::new();
+    if clustering {
+        parser.advance(&mut grid, b"\x1b[?2027h");
+    }
+    (grid, parser)
+}
+
 #[cfg(test)]
 pub(crate) fn test_owner() -> Principal {
     Principal::unix(1000, Some("tester".into())).expect("valid")
@@ -2529,6 +2545,7 @@ mod regression {
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
                     state_dir: None,
+                    grapheme_clustering: false,
                     config_file: None,
                 },
                 None,
@@ -2546,6 +2563,11 @@ mod regression {
     }
 
     fn fixture() -> (Shared, ClientId, BlockId, Inbox) {
+        fixture_with(false)
+    }
+
+    /// [`fixture`] with the config's `grapheme_clustering` set to `clustering`.
+    fn fixture_with(clustering: bool) -> (Shared, ClientId, BlockId, Inbox) {
         let shared = State::shared(
             Config {
                 program: "/bin/sh".into(),
@@ -2553,6 +2575,7 @@ mod regression {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
                 state_dir: None,
+                grapheme_clustering: clustering,
                 config_file: None,
             },
             None,
@@ -2705,6 +2728,83 @@ mod regression {
                 takeover,
             );
             assert_eq!(again, client, "the token still works for its owner");
+        });
+    }
+
+    /// Attaches to `block` and returns the client's grid and parser as the
+    /// checkpoint leaves them at Ready.
+    async fn attached(
+        shared: &Shared,
+        client: ClientId,
+        block: BlockId,
+        inbox: &mut Inbox,
+    ) -> (Grid, AnsiParser) {
+        State::request(shared, client, Message::Attach { req: 78, block });
+        let mut receiver = Receiver::default();
+        loop {
+            match rusty_mux_proto::decode(&inbox.next().await.unwrap())
+                .unwrap()
+                .unwrap()
+                .0
+            {
+                Message::Checkpoint {
+                    offset,
+                    total,
+                    data,
+                    ..
+                } => receiver.push(offset, total, &data).unwrap(),
+                Message::Ready { .. } => break receiver.finish().unwrap(),
+                _ => {}
+            }
+        }
+    }
+
+    /// DECRQM's reply for mode 2027 on a client's copy.
+    fn mode_2027(grid: &mut Grid, parser: &mut AnsiParser) -> Vec<u8> {
+        parser.advance(grid, b"\x1b[?2027$p");
+        parser.take_responses()
+    }
+
+    #[test]
+    fn a_new_block_starts_in_mode_2027_when_the_config_says_so() {
+        runtime().block_on(async {
+            for (clustering, reply) in [(false, &b"\x1b[?2027;2$y"[..]), (true, b"\x1b[?2027;1$y")]
+            {
+                let (shared, client, block, mut inbox) = fixture_with(clustering);
+                let (mut grid, mut parser) = attached(&shared, client, block, &mut inbox).await;
+                assert_eq!(
+                    mode_2027(&mut grid, &mut parser),
+                    reply,
+                    "clustering {clustering}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn a_clustered_block_attaches_to_the_same_cells() {
+        runtime().block_on(async {
+            let (shared, client, block, mut inbox) = fixture_with(true);
+            // A ZWJ sequence split across the attach point.
+            shared.borrow_mut().output(block, "👨".as_bytes());
+            let (mut grid, mut parser) = attached(&shared, client, block, &mut inbox).await;
+            let rest = "\u{200d}💻".as_bytes();
+            shared.borrow_mut().output(block, rest);
+            parser.advance(&mut grid, rest);
+            let state = shared.borrow();
+            let server = &state.blocks[&block].grid;
+            assert_eq!(grid.encode_snapshot(), server.encode_snapshot());
+            assert_eq!(server.cursor, (2, 0), "one cluster, two columns");
+        });
+    }
+
+    #[test]
+    fn a_program_can_reset_the_configured_mode_2027() {
+        runtime().block_on(async {
+            let (shared, client, block, mut inbox) = fixture_with(true);
+            shared.borrow_mut().output(block, b"\x1b[?2027l");
+            let (mut grid, mut parser) = attached(&shared, client, block, &mut inbox).await;
+            assert_eq!(mode_2027(&mut grid, &mut parser), b"\x1b[?2027;2$y");
         });
     }
 
@@ -2918,6 +3018,7 @@ mod regression {
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            grapheme_clustering: false,
             config_file: Some("/stalled.json".into()),
         };
         let shared = State::shared(base, None);
@@ -3166,6 +3267,7 @@ mod regression {
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
                     state_dir: None,
+                    grapheme_clustering: false,
                     config_file: None,
                 },
                 None,

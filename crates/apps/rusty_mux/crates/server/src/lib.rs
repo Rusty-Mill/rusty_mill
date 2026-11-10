@@ -76,6 +76,10 @@ pub struct Config {
     /// Which console host runs a block's program on Windows; other
     /// platforms ignore it.
     pub console_host: ConsoleHost,
+    /// Whether a new block starts with DEC mode 2027 (grapheme clustering)
+    /// set; the config file's `server.grapheme_clustering` replaces it.
+    /// Running and restored blocks keep their own mode.
+    pub grapheme_clustering: bool,
     /// The config file whose `server` section replaces `program`, `args`
     /// and `cwd` (see [`rusty_mux_script::Defaults`]), read at start and on
     /// `reload-config`; `None` reads none and refuses a reload.

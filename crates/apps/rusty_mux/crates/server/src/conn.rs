@@ -244,6 +244,7 @@ mod regression {
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
                     state_dir: None,
+                    grapheme_clustering: false,
                     config_file: None,
                 },
                 None,
@@ -340,6 +341,7 @@ mod tests {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
                 state_dir: None,
+                grapheme_clustering: false,
                 config_file: None,
             };
             let state = State::shared(config, None);
@@ -437,6 +439,7 @@ mod tests {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
                 state_dir: None,
+                grapheme_clustering: false,
                 config_file: Some("/stalled.json".into()),
             };
             let state = State::shared(config, None);

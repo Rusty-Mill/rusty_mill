@@ -64,6 +64,9 @@ pub struct Defaults {
     pub args: Vec<String>,
     /// An absolute directory to start in.
     pub cwd: Option<String>,
+    /// Start new blocks with DEC mode 2027 (grapheme clustering) set;
+    /// `None` keeps the server's default, off.
+    pub grapheme_clustering: Option<bool>,
 }
 
 /// The config file: `$RUSTY_MUX_CONFIG`, else `rusty_mux/config.json` under

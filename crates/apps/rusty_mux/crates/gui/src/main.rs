@@ -205,6 +205,12 @@ fn run(socket: PathBuf, args: &Args) -> Result<(), String> {
     for w in &warnings {
         eprintln!("rusty-mux-gui: {w}");
     }
+    if config.grapheme_clustering == Some(true) {
+        eprintln!(
+            "rusty-mux-gui: `grapheme_clustering` does not reach mux blocks; set \
+             \"grapheme_clustering\": true in the mux config's \"server\" section"
+        );
+    }
     if let Some(warning) = args
         .profile
         .as_deref()

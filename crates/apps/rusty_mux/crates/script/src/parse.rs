@@ -128,7 +128,11 @@ impl Check {
     }
 
     fn defaults(&mut self, at: &str, value: &Value) -> Defaults {
-        let Some(map) = self.object(at, value, &["command", "args", "cwd"]) else {
+        let Some(map) = self.object(
+            at,
+            value,
+            &["command", "args", "cwd", "grapheme_clustering"],
+        ) else {
             return Defaults::default();
         };
         let command = map
@@ -169,10 +173,14 @@ impl Check {
         for key in nul {
             self.problem(&format!("{at}.{key}"), "must not hold a NUL");
         }
+        let grapheme_clustering = map
+            .get("grapheme_clustering")
+            .and_then(|v| self.boolean(&format!("{at}.grapheme_clustering"), v));
         Defaults {
             command: command.map(str::to_owned),
             args,
             cwd: cwd.map(str::to_owned),
+            grapheme_clustering,
         }
     }
 
@@ -467,6 +475,15 @@ impl Check {
                 &[]
             }
         }
+    }
+
+    /// A value that must be `true` or `false`.
+    fn boolean(&mut self, at: &str, value: &Value) -> Option<bool> {
+        let flag = value.as_bool();
+        if flag.is_none() {
+            self.problem(at, "expected true or false");
+        }
+        flag
     }
 
     /// A required string.

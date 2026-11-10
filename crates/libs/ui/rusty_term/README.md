@@ -145,6 +145,10 @@ theme = "gruvbox-dark"   # preset: default, gruvbox-dark, dracula,
                          # catppuccin-mocha, catppuccin-latte, tokyo-night,
                          # tokyo-night-storm, monokai, rose-pine,
                          # github-dark, kanagawa, nebula
+grapheme_clustering = true # start panes with DEC mode 2027 (clustered
+                         # widths); default off. A program can still reset
+                         # it. Mux blocks (--gui) read the mux config's
+                         # "server": {"grapheme_clustering": true} instead.
 ```
 
 On Windows, `shell` accepts a bare name resolved through the standard search
