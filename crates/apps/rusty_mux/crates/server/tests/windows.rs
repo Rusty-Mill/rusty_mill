@@ -428,8 +428,8 @@ fn a_program_that_exits_reports_its_code(host: ConsoleHost) {
     assert!(Some(exited_at) < at(&closed), "exit after the close");
 }
 
-/// `terminal.process` names the block's own program by its pid and its
-/// image file name, on both console hosts.
+/// `terminal.process` names the block's own program, last, by its pid and
+/// its image file name, on both console hosts.
 fn terminal_process_names_the_programs_pid(host: ConsoleHost) {
     let path = start_server_on(host);
     let wanted = Features::CHECKPOINT_V6.union(Features::BLOCK_CALL);
@@ -445,7 +445,11 @@ fn terminal_process_names_the_programs_pid(host: ConsoleHost) {
     let [Message::Text { text, .. }] = answer.as_slice() else {
         panic!("expected Text, got {answer:?}")
     };
-    let (pid, name) = text.split_once('\t').expect("pid and name");
+    // The program is listed last. On our host anything still attached to
+    // the console comes first, newest first (term pack D186): CI runners
+    // can have a short-lived helper attached when the block starts.
+    let last = text.lines().last().expect("a line");
+    let (pid, name) = last.split_once('\t').expect("pid and name");
     assert_eq!(pid, shell.to_string(), "{text:?}");
     assert!(
         name.eq_ignore_ascii_case("cmd.exe\t"),
