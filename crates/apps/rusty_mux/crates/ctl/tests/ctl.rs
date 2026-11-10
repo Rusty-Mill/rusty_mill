@@ -585,13 +585,21 @@ fn type_into(socket: &Path, block: &str, data: &str) {
     );
 }
 
-/// Polls `args` until its output passes `want`, named `what`.
+/// Polls `args` until it succeeds with output that passes `want`, named
+/// `what`. A failure counts as "not yet": until the shell's report lands,
+/// `terminal.pwd` exits 1 with "the program's working directory is
+/// unknown".
 #[cfg(windows)]
 fn eventually(socket: &Path, args: &[&str], what: &str, want: impl Fn(&str) -> bool) {
     let deadline = std::time::Instant::now() + PATIENCE;
     loop {
-        let got = ok(socket, args);
-        if want(&got) {
+        let output = ctl(socket, args);
+        let got = if output.status.success() {
+            stdout(&output).trim().to_owned()
+        } else {
+            String::from_utf8_lossy(&output.stderr).trim().to_owned()
+        };
+        if output.status.success() && want(&got) {
             return;
         }
         assert!(
