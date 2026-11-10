@@ -223,6 +223,27 @@ impl WindowsUnixStream {
         sysnet::set_read_timeout(&self.sock, timeout).map_err(to_io)
     }
 
+    /// `SO_SNDTIMEO`, with the contract of
+    /// `std::os::unix::net::UnixStream::set_write_timeout`: a write that
+    /// waits longer fails with `TimedOut`, and `None` waits forever. Zero
+    /// and sub-millisecond durations are handled as in
+    /// [`Self::set_read_timeout`].
+    ///
+    /// Unlike Unix, Winsock leaves a connection whose blocking send timed
+    /// out in an indeterminate state: part of the buffer may have been
+    /// sent. Treat a timed-out write as the end of the connection, not as
+    /// a retry point.
+    pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        if timeout == Some(Duration::ZERO) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot set a 0 duration timeout",
+            ));
+        }
+        let timeout = timeout.map(|d| d.max(Duration::from_millis(1)));
+        sysnet::set_write_timeout(&self.sock, timeout).map_err(to_io)
+    }
+
     /// A second handle to the same connection, as
     /// `std::os::unix::net::UnixStream::try_clone` gives: one thread can
     /// read while another writes. Options set later through one handle
