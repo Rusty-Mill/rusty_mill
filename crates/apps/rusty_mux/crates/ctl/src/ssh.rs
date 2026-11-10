@@ -133,7 +133,11 @@ pub(crate) fn findings(resolved: &Resolved, machine: &Machine<'_>) -> Vec<Findin
 /// A problem when no known-hosts file has the host's key, so a batch
 /// reconnect cannot accept it.
 fn known_host(resolved: &Resolved, machine: &Machine<'_>) -> Option<Finding> {
-    if resolved.get("stricthostkeychecking") == Some("false") {
+    // `accept-new` takes an unknown key on its own; `false` takes any.
+    if matches!(
+        resolved.get("stricthostkeychecking"),
+        Some("false" | "no" | "off" | "accept-new")
+    ) {
         return None;
     }
     let name = resolved
@@ -145,6 +149,7 @@ fn known_host(resolved: &Resolved, machine: &Machine<'_>) -> Option<Finding> {
     };
     let files: Vec<PathBuf> = resolved
         .all("userknownhostsfile")
+        .chain(resolved.all("globalknownhostsfile"))
         .flat_map(str::split_whitespace)
         .map(|f| expand(f, machine.home))
         .collect();
@@ -196,26 +201,31 @@ pub(crate) fn block(setup: &SshSetup) -> String {
 
 /// Whether a `Host` line in `config`, or a file it includes by a plain
 /// path, names `dest` without a wildcard.
-pub(crate) fn has_host(config: &Path, dest: &str, depth: u8) -> bool {
+/// `ssh_dir` is `~/.ssh`, which every relative `Include` is read against,
+/// in nested files too.
+pub(crate) fn has_host(config: &Path, ssh_dir: &Path, dest: &str, depth: u8) -> bool {
     let Ok(text) = std::fs::read_to_string(config) else {
         return false;
     };
-    let dir = config.parent().unwrap_or(Path::new("."));
     text.lines().map(str::trim).any(|line| {
-        let mut words = line.split_whitespace();
-        let key = words.next().unwrap_or("").to_ascii_lowercase();
-        match key.as_str() {
+        // `Key value`, `Key=value` and `Key = value` all name a key.
+        let (key, value) = match line.split_once(|c: char| c == '=' || c.is_whitespace()) {
+            Some((key, value)) => (key, value.trim_start_matches(['=', ' ', '\t'])),
+            None => (line, ""),
+        };
+        let mut words = value.split_whitespace().map(|w| w.trim_matches('"'));
+        match key.to_ascii_lowercase().as_str() {
             "host" => words.any(|w| w == dest),
             "include" if depth < 4 => words
                 .filter(|w| !w.contains(['*', '?']))
-                .any(|w| has_host(&included(dir, w), dest, depth + 1)),
+                .any(|w| has_host(&included(ssh_dir, w), ssh_dir, dest, depth + 1)),
             _ => false,
         }
     })
 }
 
-/// Where an `Include` of `word` in a file in `dir` (`~/.ssh`) points: `~`
-/// is the home above it, and a relative path is in `~/.ssh`.
+/// Where an `Include` of `word` points: `~` is the home above `dir`
+/// (`~/.ssh`), and a relative path is in `~/.ssh`.
 fn included(dir: &Path, word: &str) -> PathBuf {
     match word.strip_prefix("~/") {
         Some(rest) => dir.parent().unwrap_or(dir).join(rest),
@@ -236,7 +246,9 @@ pub(crate) fn run(
     let (dest, verbose) = match command {
         SshCommand::Check(dest) => (dest, false),
         SshCommand::Diagnose(dest) => (dest, true),
+        SshCommand::Setup(setup) if setup.write => return write_setup(setup, ssh, config, out),
         SshCommand::Setup(setup) => return print_setup(setup, config, out).map_err(fail),
+        SshCommand::Remove { dest, write } => return remove(dest, *write, config, out),
     };
     let version = version(ssh);
     let resolved = match resolve(ssh, dest) {
@@ -244,7 +256,7 @@ pub(crate) fn run(
         Err(reason) => {
             writeln!(out, "problem: {reason}").map_err(fail)?;
             writeln!(out, "  ssh -V: {version}").map_err(fail)?;
-            writeln!(out, "  fix: rusty-mux --ssh needs OpenSSH 8.7 or later").map_err(fail)?;
+            writeln!(out, "  fix: {}", resolve_fix(&reason)).map_err(fail)?;
             return Ok(Exit::Failed);
         }
     };
@@ -277,9 +289,95 @@ pub(crate) fn run(
     Ok(Exit::Ok)
 }
 
+/// The fix for an `ssh -G` failure: only an option ssh does not know
+/// points at an old OpenSSH.
+fn resolve_fix(reason: &str) -> &'static str {
+    let unknown = [
+        "Bad configuration option",
+        "unsupported option",
+        "forkafterauthentication",
+    ];
+    match unknown.iter().any(|u| {
+        reason
+            .to_ascii_lowercase()
+            .contains(&u.to_ascii_lowercase())
+    }) {
+        true => "rusty-mux --ssh needs OpenSSH 8.7 or later",
+        false => "fix what ssh reports above (a missing ssh, or an error in the config)",
+    }
+}
+
+/// The ssh folder `config` sits in.
+fn ssh_dir(config: Option<&Path>) -> Result<&Path, (Exit, String)> {
+    config.and_then(Path::parent).ok_or((
+        Exit::Failed,
+        "no home folder: set HOME (USERPROFILE on Windows)".to_owned(),
+    ))
+}
+
+/// `setup --write`: the block into our file, read through one Include line.
+fn write_setup(
+    setup: &SshSetup,
+    ssh: &OsStr,
+    config: Option<&Path>,
+    out: &mut dyn Write,
+) -> Result<Exit, (Exit, String)> {
+    let files = crate::ssh_write::Files::under(ssh_dir(config)?);
+    let done = crate::ssh_write::setup(&files, &setup.dest, &block(setup), ssh)
+        .map_err(|e| (Exit::Failed, e))?;
+    let what = format!("{} in {}", setup.dest, files.ours.display());
+    written(&done, &what, &files, out)
+}
+
+/// `remove`: the block out of our file, or what that would do.
+fn remove(
+    dest: &str,
+    write: bool,
+    config: Option<&Path>,
+    out: &mut dyn Write,
+) -> Result<Exit, (Exit, String)> {
+    let files = crate::ssh_write::Files::under(ssh_dir(config)?);
+    let fail = |e: io::Error| (Exit::Failed, e.to_string());
+    if !write {
+        writeln!(
+            out,
+            "would take {dest}'s block out of {}, and the Include line out of {} once no block is left; add --write to do it",
+            files.ours.display(),
+            files.config.display()
+        )
+        .map_err(fail)?;
+        return Ok(Exit::Ok);
+    }
+    let done = crate::ssh_write::remove(&files, dest).map_err(|e| (Exit::Failed, e))?;
+    let what = format!("{dest} removed from {}", files.ours.display());
+    written(&done, &what, &files, out)
+}
+
+fn written(
+    done: &crate::ssh_write::Done,
+    what: &str,
+    files: &crate::ssh_write::Files,
+    out: &mut dyn Write,
+) -> Result<Exit, (Exit, String)> {
+    let fail = |e: io::Error| (Exit::Failed, e.to_string());
+    match done {
+        crate::ssh_write::Done::Nothing => writeln!(out, "nothing to change: {what}"),
+        crate::ssh_write::Done::Changed { backup: None } => writeln!(out, "done: {what}"),
+        crate::ssh_write::Done::Changed { backup: Some(b) } => writeln!(
+            out,
+            "done: {what}; {} was first copied to {}",
+            files.config.display(),
+            b.display()
+        ),
+    }
+    .map_err(fail)?;
+    Ok(Exit::Ok)
+}
+
 /// `setup`: the block to add, or that the config already has the host.
 fn print_setup(setup: &SshSetup, config: Option<&Path>, out: &mut dyn Write) -> io::Result<Exit> {
-    match config.filter(|c| has_host(c, &setup.dest, 0)) {
+    let dir = config.and_then(Path::parent).unwrap_or(Path::new("."));
+    match config.filter(|c| has_host(c, dir, &setup.dest, 0)) {
         Some(config) => writeln!(
             out,
             "{} already has a Host entry for {}; nothing to add",
@@ -496,6 +594,7 @@ mod tests {
             user: None,
             port: None,
             identity: Some("~/.ssh/box".into()),
+            write: false,
         };
         assert_eq!(
             block(&setup),
@@ -510,9 +609,9 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         std::fs::write(dir.join("config"), "Include extra\nHost *\n  User x\n").expect("write");
         std::fs::write(dir.join("extra"), "Host other box\n  HostName b\n").expect("write");
-        assert!(has_host(&dir.join("config"), "box", 0));
-        assert!(!has_host(&dir.join("config"), "bo", 0));
-        assert!(!has_host(&dir.join("missing"), "box", 0));
+        assert!(has_host(&dir.join("config"), &dir, "box", 0));
+        assert!(!has_host(&dir.join("config"), &dir, "bo", 0));
+        assert!(!has_host(&dir.join("missing"), &dir, "box", 0));
         let _gone = std::fs::remove_dir_all(dir);
     }
 }
