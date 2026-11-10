@@ -3,8 +3,8 @@
 #
 # The store must not be copied while served, so tick stops for the snapshot (seconds) and
 # starts again before the copy off the host. Mill Board stays up and answers 503 meanwhile,
-# keeping its in-memory event log. The `+` lines run as root; the
-# script itself runs as the tick account and never needs root.
+# keeping its in-memory event log. Tick is started again only if it was running: a marker in
+# /run records that. The `+` lines run as root; the script runs as the tick account.
 [Unit]
 Description=rusty_tick backup
 After=rusty-tick.service
@@ -13,9 +13,11 @@ After=rusty-tick.service
 Type=oneshot
 User=baileyrd
 EnvironmentFile=/home/baileyrd/.rusty_tick/tick.env
-ExecStartPre=+/bin/systemctl stop rusty-tick.service
+# A hung copy must not hold off later runs: fail after an hour (rsync also times out idle I/O).
+TimeoutStartSec=1h
+ExecStartPre=+/bin/sh -c 'rm -f /run/rusty-tick-backup.restart; if systemctl is-active --quiet rusty-tick.service; then touch /run/rusty-tick-backup.restart; fi; systemctl stop rusty-tick.service'
 ExecStart=/usr/local/bin/rusty-tick-backup snapshot
-ExecStartPost=+/bin/systemctl start rusty-tick.service
+ExecStartPost=+/bin/sh -c 'if [ -e /run/rusty-tick-backup.restart ]; then systemctl start rusty-tick.service; fi'
 ExecStartPost=/usr/local/bin/rusty-tick-backup ship
-# Whatever failed above, the services come back.
-ExecStopPost=+/bin/systemctl start rusty-tick.service
+# Whatever failed above, tick comes back if it was running.
+ExecStopPost=+/bin/sh -c 'if [ -e /run/rusty-tick-backup.restart ]; then rm -f /run/rusty-tick-backup.restart; systemctl start rusty-tick.service; fi'

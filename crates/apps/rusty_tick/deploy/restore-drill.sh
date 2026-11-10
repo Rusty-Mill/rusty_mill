@@ -6,8 +6,10 @@
 # Checks the archive's sha256, unpacks it into a temporary directory, serves it with a
 # throwaway rusty_tick on a spare loopback port, and counts each user's tasks through the API.
 # Tokens it needs are minted in the temporary copy only and deleted with it. Fails if the
-# archive is damaged, the server does not come up, or no task is found.
+# archive is damaged, the server does not come up, any enabled user's tasks cannot be read, or
+# no task is found.
 set -euo pipefail
+shopt -s inherit_errexit
 trap 'echo "restore-drill: failed at line $LINENO" >&2' ERR
 
 die() {
@@ -49,23 +51,33 @@ top=$(tar -tzf "$archive" | awk -F/ 'NR == 1 { print $1 }')
 data=$scratch/$top
 [[ -d $data ]] || die "$archive holds no data directory"
 
-# One drill token per enabled user (multi-user), or a throwaway shared token (single-user).
-declare -A tokens
+# One drill token per enabled user (multi-user), or a throwaway shared token (single-user). Each
+# is kept as a header file in the temporary copy, so no token reaches a command line.
+declare -A auth=()
+users=0
 if [[ -f $data/users.json ]]; then
     while IFS= read -r user; do
-        tokens[$user]=$("$bin" user add "$user" drill --data-dir "$data")
-    done < <("$bin" user list --data-dir "$data" | grep -v '^ ' | grep -v ' (disabled)$')
+        users=$((users + 1))
+        auth[$user]=$scratch/auth-$users
+        printf 'Authorization: Bearer %s\n' "$("$bin" user add "$user" drill --data-dir "$data")" \
+            >"${auth[$user]}"
+    done < <("$bin" user list --data-dir "$data" | grep -v '^ ' | grep -v ' (disabled)$' || true)
     unset RUSTY_TICK_TOKEN
 else
-    tokens[single]=drill-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-    export RUSTY_TICK_TOKEN=${tokens[single]}
+    token=drill-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    auth[single]=$scratch/auth-0
+    printf 'Authorization: Bearer %s\n' "$token" >"${auth[single]}"
+    export RUSTY_TICK_TOKEN=$token
 fi
-(( ${#tokens[@]} > 0 )) || die "the backup has no enabled user"
+((${#auth[@]} > 0)) || die "the backup has no enabled user"
 
 unset RUSTY_TICK_ISSUER
+base=http://127.0.0.1:$port
+if curl -fsS --max-time 2 "$base/health" >/dev/null 2>&1; then
+    die "port $port is already in use; set RUSTY_TICK_DRILL_PORT to a free one"
+fi
 "$bin" --data-dir "$data" --addr "127.0.0.1:$port" >"$scratch/server.log" 2>&1 &
 server=$!
-base=http://127.0.0.1:$port
 for _ in $(seq 50); do
     curl -fsS "$base/health" >/dev/null 2>&1 && break
     kill -0 "$server" 2>/dev/null || die "rusty_tick did not start: $(tail -n 5 "$scratch/server.log")"
@@ -73,23 +85,30 @@ for _ in $(seq 50); do
 done
 curl -fsS "$base/health" >/dev/null || die "rusty_tick did not answer /health on port $port"
 
-# Tasks of every list in every status, counted by their one listId field each.
+# How many times a pattern occurs in some text (0 when none).
+occurrences() {
+    { grep -o "$1" <<<"$2" || true; } | wc -l
+}
+
+# A user's tasks in every list and status, counted by their one listId field each. Fails if
+# any request fails.
 count() {
-    local auth=(-H "Authorization: Bearer $1") n=0 list status
-    for list in $(curl -fsS "${auth[@]}" "$base/api/v1/lists" | grep -o '"id":"[0-9a-f-]*"' | cut -d'"' -f4); do
+    local header=$1 lists list status page n=0
+    lists=$(curl -fsS -H "@$header" "$base/api/v1/lists") || return 1
+    for list in $({ grep -o '"id":"[0-9a-f-]*"' <<<"$lists" || true; } | cut -d'"' -f4); do
         for status in open "done" wontdo; do
-            n=$((n + $(curl -fsS "${auth[@]}" "$base/api/v1/lists/$list/tasks?status=$status" |
-                grep -o '"listId"' | wc -l)))
+            page=$(curl -fsS -H "@$header" "$base/api/v1/lists/$list/tasks?status=$status") || return 1
+            n=$((n + $(occurrences '"listId"' "$page")))
         done
     done
     echo "$n"
 }
 
 total=0
-for user in "${!tokens[@]}"; do
-    n=$(count "${tokens[$user]}")
+for user in "${!auth[@]}"; do
+    n=$(count "${auth[$user]}") || die "could not read $user's tasks from the restored copy"
     echo "restore-drill: $user has $n tasks"
     total=$((total + n))
 done
-(( total > 0 )) || die "the backup opened but holds no tasks"
+((total > 0)) || die "the backup opened but holds no tasks"
 echo "restore-drill: ok, $(basename "$archive") restores $total tasks"

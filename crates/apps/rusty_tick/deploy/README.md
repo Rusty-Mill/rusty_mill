@@ -124,10 +124,15 @@ restoring the two env files.
 
 `rusty-tick-backup.timer` runs nightly at 03:30. It stops rusty-tick for a few seconds and
 archives the whole data directory (users, OAuth grants, move history). Then it starts tick
-again and mirrors the archives off the host with rsync. Mill Board answers 503 while tick is
-stopped. The newest `RUSTY_TICK_BACKUP_KEEP` archives are kept, each with a `.sha256`. A copy of
-a running store can catch a write halfway, so `backup.sh snapshot` refuses a store whose
-`store.lock` is held.
+again, if it was running, and mirrors the archives off the host with rsync into
+`$RUSTY_TICK_BACKUP_DEST/<hostname>/` (the destination itself must exist). Mill Board answers 503 while tick is stopped. The newest
+`RUSTY_TICK_BACKUP_KEEP` archives are kept, each with a `.sha256`. If this host has fewer
+archives than that and fewer than the destination (a wiped local directory), the copy adds
+without pruning the destination. A run that takes over an hour fails.
+
+A copy of a running store can catch a write halfway. So `backup.sh snapshot` refuses while
+`RUSTY_TICK_ADDR` answers or any lock in the data directory is held. It then holds those locks
+until the archive is written. To run it by hand, stop rusty-tick first.
 
 Install, after setting `RUSTY_TICK_BACKUP_DIR`, `RUSTY_TICK_BACKUP_KEEP` and
 `RUSTY_TICK_BACKUP_DEST` in `tick.env` (see `tick.env.example`). The destination is any rsync
@@ -157,8 +162,9 @@ rusty-tick-restore-drill /path/to/rusty-tick-YYYYMMDDTHHMMSSZ.tar.gz   # e.g. on
 
 It checks the sha256 and unpacks into a temporary directory. There it serves the copy on
 `127.0.0.1:18788` (`RUSTY_TICK_DRILL_PORT`) and counts each enabled user's tasks through the API.
-It needs a throwaway token for each user, which it mints in the temporary copy only. It fails on
-a damaged archive, a server that does not start, or zero tasks.
+It needs a throwaway token for each user, which it mints in the temporary copy only and passes to
+curl from a file. It fails on a damaged archive, a busy port, a server that does not start, any
+user whose tasks cannot be read, or zero tasks.
 
 **Restore for real.** Stop mill-board and rusty-tick. Move the damaged `~/.rusty_tick/data`
 aside; never delete it before the restore works. Then

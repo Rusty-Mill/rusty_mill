@@ -93,11 +93,13 @@ fn add_task(port: u16, token: &str, title: &str) {
     );
 }
 
-fn run(script_name: &str, env: &[(&str, &Path)], args: &[&str]) -> Output {
+/// Run a deploy script with `env` on top of the test defaults (KEEP=2, a free drill port).
+fn run(script_name: &str, env: &[(&str, &str)], args: &[&str]) -> Output {
     let mut command = Command::new(script(script_name));
     command
         .args(args)
         .env_remove("RUSTY_TICK_TOKEN")
+        .env_remove("RUSTY_TICK_ADDR")
         .env("RUSTY_TICK_BIN", BIN)
         .env("RUSTY_TICK_DRILL_PORT", free_port().to_string())
         .env("RUSTY_TICK_BACKUP_KEEP", "2");
@@ -105,6 +107,19 @@ fn run(script_name: &str, env: &[(&str, &Path)], args: &[&str]) -> Output {
         command.env(key, value);
     }
     command.output().expect("script")
+}
+
+fn path(p: &Path) -> &str {
+    p.to_str().expect("utf-8 path")
+}
+
+/// Where `ship` puts this host's archives under a destination.
+fn host_dir(dest: &Path) -> PathBuf {
+    let out = Command::new("hostname")
+        .arg("-s")
+        .output()
+        .expect("hostname");
+    dest.join(String::from_utf8(out.stdout).expect("utf-8").trim())
 }
 
 fn text(out: &Output) -> String {
@@ -130,6 +145,7 @@ fn a_backup_ships_rotates_and_restores_and_a_damaged_one_fails_the_drill() {
     let data = root.path().join("data");
     let local = root.path().join("backups");
     let off = root.path().join("offhost");
+    std::fs::create_dir(&off).expect("destination");
     let token = tick(&data, &["user", "add", "nano"]);
     tick(&data, &["user", "add", "gone"]);
     tick(&data, &["user", "disable", "gone"]);
@@ -139,9 +155,9 @@ fn a_backup_ships_rotates_and_restores_and_a_damaged_one_fails_the_drill() {
         add_task(port, &token, title);
     }
     let env = [
-        ("RUSTY_TICK_DATA_DIR", data.as_path()),
-        ("RUSTY_TICK_BACKUP_DIR", local.as_path()),
-        ("RUSTY_TICK_BACKUP_DEST", off.as_path()),
+        ("RUSTY_TICK_DATA_DIR", path(&data)),
+        ("RUSTY_TICK_BACKUP_DIR", path(&local)),
+        ("RUSTY_TICK_BACKUP_DEST", path(&off)),
     ];
 
     let live = run("backup.sh", &env, &["snapshot"]);
@@ -149,22 +165,41 @@ fn a_backup_ships_rotates_and_restores_and_a_damaged_one_fails_the_drill() {
     assert!(text(&live).contains("is held"), "{}", text(&live));
     drop(server);
 
+    // A multi-user server that has opened no user yet holds no store lock: its address gives it
+    // away.
+    let idle = Server::start(&data, port);
+    let addr = format!("127.0.0.1:{port}");
+    let mut with_addr = env.to_vec();
+    with_addr.push(("RUSTY_TICK_ADDR", &addr));
+    let live = run("backup.sh", &with_addr, &["snapshot"]);
+    assert!(!live.status.success());
+    assert!(text(&live).contains("answers on"), "{}", text(&live));
+    drop(idle);
+
     for _ in 0..3 {
         let out = run("backup.sh", &env, &[]);
         assert!(out.status.success(), "{}", text(&out));
         sleep(Duration::from_millis(1100)); // archive names are per second
     }
+    let shipped = host_dir(&off);
     let kept = archives(&local);
     assert_eq!(kept.len(), 4, "two archives and their sums: {kept:?}");
     assert_eq!(
-        archives(&off),
+        archives(&shipped),
         kept,
         "the off-host copy mirrors the local one"
     );
 
+    // A wiped local directory must not prune the destination down to one archive.
+    std::fs::remove_dir_all(&local).expect("wipe");
+    let out = run("backup.sh", &env, &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("not pruning"), "{}", text(&out));
+    assert_eq!(archives(&shipped).len(), 6, "{:?}", archives(&shipped));
+
     let drill = run(
         "restore-drill.sh",
-        &[("RUSTY_TICK_BACKUP_DIR", off.as_path())],
+        &[("RUSTY_TICK_BACKUP_DIR", path(&shipped))],
         &[],
     );
     assert!(drill.status.success(), "{}", text(&drill));
@@ -180,11 +215,26 @@ fn a_backup_ships_rotates_and_restores_and_a_damaged_one_fails_the_drill() {
         "drill tokens never reach the live registry"
     );
 
-    let newest = off.join(&kept[2]);
+    // A busy drill port is named as such, not read as an empty backup.
+    let busy = Server::start(&data, port);
+    let newest = shipped.join(&kept[2]);
+    let blocked = run(
+        "restore-drill.sh",
+        &[("RUSTY_TICK_DRILL_PORT", &port.to_string())],
+        &[path(&newest)],
+    );
+    assert!(!blocked.status.success());
+    assert!(
+        text(&blocked).contains("already in use"),
+        "{}",
+        text(&blocked)
+    );
+    drop(busy);
+
     let mut bytes = std::fs::read(&newest).expect("read");
     bytes.push(b'x');
     std::fs::write(&newest, bytes).expect("write");
-    let damaged = run("restore-drill.sh", &[], &[newest.to_str().expect("utf-8")]);
+    let damaged = run("restore-drill.sh", &[], &[path(&newest)]);
     assert!(!damaged.status.success());
     assert!(
         text(&damaged).contains("does not match its sha256"),
@@ -200,8 +250,8 @@ fn shipping_needs_a_destination_and_keep_must_be_a_count() {
     std::fs::create_dir_all(&data).expect("mkdir");
     let local = root.path().join("backups");
     let env = [
-        ("RUSTY_TICK_DATA_DIR", data.as_path()),
-        ("RUSTY_TICK_BACKUP_DIR", local.as_path()),
+        ("RUSTY_TICK_DATA_DIR", path(&data)),
+        ("RUSTY_TICK_BACKUP_DIR", path(&local)),
     ];
     let out = run("backup.sh", &env, &[]);
     assert!(!out.status.success());
@@ -223,5 +273,34 @@ fn shipping_needs_a_destination_and_keep_must_be_a_count() {
         text(&out).contains("positive whole number"),
         "{}",
         text(&out)
+    );
+}
+
+#[test]
+fn the_drill_fails_when_one_user_cannot_be_read_even_if_another_can() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let data = root.path().join("data");
+    let local = root.path().join("backups");
+    let token = tick(&data, &["user", "add", "nano"]);
+    let other = tick(&data, &["user", "add", "bob"]);
+    let port = free_port();
+    let server = Server::start(&data, port);
+    add_task(port, &token, "kept");
+    add_task(port, &other, "lost");
+    drop(server);
+    std::fs::write(data.join("users/bob/tasks.mmap"), b"not a store").expect("corrupt");
+
+    let env = [
+        ("RUSTY_TICK_DATA_DIR", path(&data)),
+        ("RUSTY_TICK_BACKUP_DIR", path(&local)),
+    ];
+    let out = run("backup.sh", &env, &["snapshot"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let drill = run("restore-drill.sh", &env, &[]);
+    assert!(!drill.status.success(), "{}", text(&drill));
+    assert!(
+        text(&drill).contains("could not read bob's tasks"),
+        "{}",
+        text(&drill)
     );
 }
