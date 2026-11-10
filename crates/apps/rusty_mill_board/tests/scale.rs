@@ -29,7 +29,7 @@ const TOKEN: &str = "scale-test-token";
 const PROFILE: &str = include_str!("fixtures/board-profile-2026-11-10.json");
 /// The profile's largest project (145 cards).
 const BIG_PROJECT: &str = "p01";
-/// A project of 112 cards, the size of the one in the audit (`pythrust`).
+/// A project of 112 cards, the size of the project-filtered list in the audit.
 const MID_PROJECT: &str = "p03";
 
 /// One card of the size profile.
@@ -160,53 +160,52 @@ fn run(server: &Running, board: &Shared, name: &str, args: Value) -> Cost {
     }
 }
 
-/// Every measured operation, in an order that leaves the reads unaffected by the writes.
-fn operations(server: &Running, board: &Shared) -> Vec<(&'static str, Cost)> {
-    let builder = json!({ "actor": "scale", "role": "builder" });
-    // The first observation only primes the event log; measure a steady-state poll.
-    run(server, board, "board_events", json!({}));
+/// The measured reads: (label, MCP operation, arguments).
+fn reads() -> Vec<(&'static str, &'static str, Value)> {
     vec![
-        ("board_list", run(server, board, "board_list", json!({}))),
+        ("board_list", "board_list", json!({})),
         (
             "board_list project",
-            run(
-                server,
-                board,
-                "board_list",
-                json!({ "project": MID_PROJECT }),
-            ),
+            "board_list",
+            json!({ "project": MID_PROJECT }),
         ),
         (
             "card_get id",
-            run(
-                server,
-                board,
-                "card_get",
-                json!({ "id": Uuid::from_u128(700) }),
-            ),
+            "card_get",
+            json!({ "id": Uuid::from_u128(700) }),
         ),
-        (
-            "card_get number",
-            run(server, board, "card_get", json!({ "id": "#700" })),
-        ),
-        (
-            "board_events",
-            run(server, board, "board_events", json!({})),
-        ),
-        (
-            "card_take",
-            run(server, board, "card_take", builder.clone()),
-        ),
-        (
-            "card_add",
-            run(
-                server,
-                board,
-                "card_add",
-                json!({ "actor": "scale", "role": "builder", "title": "scale card", "project": BIG_PROJECT }),
-            ),
-        ),
+        ("card_get number", "card_get", json!({ "id": "#700" })),
+        ("board_events", "board_events", json!({})),
     ]
+}
+
+/// Every measured operation: the reads, then the writes, so the writes cannot affect them.
+fn operations(server: &Running, board: &Shared) -> Vec<(&'static str, Cost)> {
+    // The first observation only primes the event log; measure a steady-state poll.
+    run(server, board, "board_events", json!({}));
+    let mut costs: Vec<_> = reads()
+        .into_iter()
+        .map(|(label, name, args)| (label, run(server, board, name, args)))
+        .collect();
+    costs.push((
+        "card_take",
+        run(
+            server,
+            board,
+            "card_take",
+            json!({ "actor": "scale", "role": "builder" }),
+        ),
+    ));
+    costs.push((
+        "card_add",
+        run(
+            server,
+            board,
+            "card_add",
+            json!({ "actor": "scale", "role": "builder", "title": "scale card", "project": BIG_PROJECT }),
+        ),
+    ));
+    costs
 }
 
 #[test]
@@ -252,23 +251,8 @@ fn bench() {
         println!("## {times}x ({} cards)", times * shapes().len());
         println!("| operation | p50 | p95 | tick requests | tick bytes | payload |");
         println!("|---|---:|---:|---:|---:|---:|");
-        let reads: [(&str, Value, &str); 5] = [
-            ("board_list", json!({}), "board_list"),
-            (
-                "board_list project",
-                json!({ "project": MID_PROJECT }),
-                "board_list",
-            ),
-            (
-                "card_get id",
-                json!({ "id": Uuid::from_u128(700) }),
-                "card_get",
-            ),
-            ("card_get number", json!({ "id": "#700" }), "card_get"),
-            ("board_events", json!({}), "board_events"),
-        ];
         run(&server, &board, "board_events", json!({}));
-        for (label, args, name) in reads {
+        for (label, name, args) in reads() {
             let mut walls = Vec::with_capacity(RUNS);
             let mut cost = run(&server, &board, name, args.clone());
             for _ in 0..RUNS {

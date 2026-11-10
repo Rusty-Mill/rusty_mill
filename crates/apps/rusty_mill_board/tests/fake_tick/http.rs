@@ -30,16 +30,6 @@ pub struct Traffic {
     pub bytes: usize,
 }
 
-impl Running {
-    /// The traffic since the previous call (or since start), resetting the counters.
-    pub fn take_counts(&self) -> Traffic {
-        Traffic {
-            requests: self.counters.requests.swap(0, Ordering::SeqCst),
-            bytes: self.counters.bytes.swap(0, Ordering::SeqCst),
-        }
-    }
-}
-
 /// A [`FakeTick`] served over real loopback HTTP, counting what it answers.
 pub struct Running {
     /// Base URL for [`rusty_mill_board::tick::TickHttp::new`].
@@ -72,6 +62,14 @@ impl Running {
             addr,
             stop,
             thread,
+        }
+    }
+
+    /// The traffic since the previous call (or since start), resetting the counters.
+    pub fn take_counts(&self) -> Traffic {
+        Traffic {
+            requests: self.counters.requests.swap(0, Ordering::SeqCst),
+            bytes: self.counters.bytes.swap(0, Ordering::SeqCst),
         }
     }
 }
