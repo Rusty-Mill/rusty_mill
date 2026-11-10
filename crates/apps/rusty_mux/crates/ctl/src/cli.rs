@@ -36,6 +36,8 @@ pub enum Command {
     },
     /// Works with the config file.
     Config(ConfigCommand),
+    /// Checks, installs or removes our terminfo entry on an SSH host (C47).
+    Terminfo(Terminfo),
     /// Follows events from `after` (or from now) and runs the config's
     /// rules for each, until the server goes away.
     Watch { after: Option<Cursor> },
@@ -191,6 +193,26 @@ pub enum ConfigCommand {
     List,
 }
 
+/// `terminfo VERB DEST`: our terminfo entry on the SSH host `dest`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Terminfo {
+    pub verb: TerminfoVerb,
+    /// What `ssh` gets after `--`.
+    pub dest: String,
+    /// Print the command and run nothing (`setup` and `remove` only).
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminfoVerb {
+    /// Reports whether the entry is installed; reads only.
+    Check,
+    /// Compiles the entry into the remote `~/.terminfo`.
+    Setup,
+    /// Removes the entry from the remote `~/.terminfo`.
+    Remove,
+}
+
 /// What `api` prints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Api {
@@ -319,6 +341,7 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "events" => events(rest),
         "do" => run_action(rest),
         "config" => config(rest),
+        "terminfo" => terminfo(rest).map(Command::Terminfo),
         "watch" => watch(rest),
         "wait" => wait(rest).map(Command::Wait),
         "run" => run(rest, defaults).map(Command::Run),
@@ -383,6 +406,30 @@ fn config(args: &[String]) -> Result<Command, String> {
         [verb] if verb == "list" => Ok(Command::Config(ConfigCommand::List)),
         _ => Err("usage: config check [PATH] | config list".into()),
     }
+}
+
+const TERMINFO_USAGE: &str = "usage: terminfo check DEST | terminfo setup|remove DEST [--dry-run]";
+
+fn terminfo(args: &[String]) -> Result<Terminfo, String> {
+    let (verb, dest, dry_run) = match args {
+        [verb, dest] => (verb, dest, false),
+        [verb, dest, flag] if flag == "--dry-run" && verb != "check" => (verb, dest, true),
+        _ => return Err(TERMINFO_USAGE.into()),
+    };
+    let verb = match verb.as_str() {
+        "check" => TerminfoVerb::Check,
+        "setup" => TerminfoVerb::Setup,
+        "remove" => TerminfoVerb::Remove,
+        _ => return Err(TERMINFO_USAGE.into()),
+    };
+    if dest.is_empty() || dest.starts_with('-') {
+        return Err(format!("terminfo: `{dest}` is not an ssh destination"));
+    }
+    Ok(Terminfo {
+        verb,
+        dest: dest.clone(),
+        dry_run,
+    })
 }
 
 fn watch(args: &[String]) -> Result<Command, String> {
@@ -767,6 +814,12 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     (
         "config",
         "Check or list the config: config check [PATH] | config list",
+    ),
+    (
+        "terminfo",
+        "Check, install or remove rusty_term's terminfo entry in ~/.terminfo\n\
+         \x20                  on an SSH host: terminfo check DEST |\n\
+         \x20                  terminfo setup|remove DEST [--dry-run]",
     ),
     (
         "watch",
