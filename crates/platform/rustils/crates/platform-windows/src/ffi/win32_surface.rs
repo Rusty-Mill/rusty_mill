@@ -183,6 +183,9 @@ pub use windows_sys::Win32::Networking::WinSock::{recvfrom, sendto, SOCK_DGRAM};
 // representation difference, not a behavior one, so not a registered
 // divergence.
 pub use windows_sys::Win32::Networking::WinSock::SO_RCVTIMEO;
+// WindowsUnixStream::set_write_timeout (rusty_mux ctl, card #282): the
+// send-side twin of `SO_RCVTIMEO`, also a millisecond `DWORD`.
+pub use windows_sys::Win32::Networking::WinSock::SO_SNDTIMEO;
 // Raw-socket-handle + non-blocking escape hatch (rustils#59, mirroring
 // the rustils#41/#42 Linux precedent): `ioctlsocket(FIONBIO, ...)` is
 // Winsock's equivalent of `fcntl(F_SETFL, O_NONBLOCK)` — forced by

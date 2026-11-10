@@ -439,6 +439,45 @@ fn a_none_read_timeout_waits_for_data() {
     drop(writer.join().expect("writer"));
 }
 
+/// Writes to a peer that never reads until one fails, on its own thread
+/// so a missing timeout fails the test instead of hanging it.
+fn write_until_stuck(mut stream: WindowsUnixStream, budget: Duration) -> std::io::Result<usize> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let chunk = [0u8; 64 * 1024];
+        let result = loop {
+            if let Err(e) = stream.write(&chunk) {
+                break Err(e);
+            }
+        };
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(budget)
+        .expect("the writes did not stop within their budget")
+}
+
+/// A peer that stops reading fills the buffers; the next write then ends
+/// at the timeout instead of blocking for ever.
+#[test]
+fn write_timeout_ends_a_write_the_peer_never_reads() {
+    let path = socket_path("wtimeout");
+    let (_listener, _server, client) = pair(&path);
+    client
+        .set_write_timeout(Some(Duration::from_millis(200)))
+        .expect("set_write_timeout");
+    assert_timed_out(write_until_stuck(client, Duration::from_secs(20)));
+}
+
+#[test]
+fn a_zero_write_timeout_is_refused() {
+    let path = socket_path("wtimeout-zero");
+    let (_listener, _server, client) = pair(&path);
+    let err = client
+        .set_write_timeout(Some(Duration::ZERO))
+        .expect_err("zero must be refused, as std does");
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+}
+
 #[test]
 fn a_clone_shares_the_connection_both_ways() {
     let path = socket_path("clone");

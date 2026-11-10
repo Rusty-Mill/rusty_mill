@@ -56,9 +56,10 @@ const LLMS_INTRO: &str = "# rusty_mux API
 out blocks, and a block runs a program in a terminal. Every method below is a \
 command and each of its parameters a `--flag`.
 
-- Run `rusty-mux-ctl [--socket PATH] [--json] METHOD [--FLAG VALUE]...`. The \
+- Run `rusty-mux-ctl [--socket PATH | --host NAME] [--json] METHOD [--FLAG VALUE]...`. The \
 socket defaults to `$RUSTY_MUX_SOCKET`, else the default socket \
-(`$XDG_RUNTIME_DIR/rusty_mux/default.sock`).
+(`$XDG_RUNTIME_DIR/rusty_mux/default.sock`). `--host NAME` uses a saved host \
+(`hosts list`), trying its addresses in order.
 - Join commands with ` + ` to run them in order on one connection, stopping at \
 the first failure.
 - An id flag takes a full id, a name, a position from 1, or the last four or \

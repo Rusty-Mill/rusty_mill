@@ -15,7 +15,7 @@ use rusty_mux_proto::schema::{self, Ty};
 use crate::cli::Shell;
 
 /// Global flags, before the first command.
-const GLOBAL: &[&str] = &["--socket", "--json"];
+const GLOBAL: &[&str] = &["--socket", "--host", "--json"];
 
 /// Flags whose value is a path.
 const PATH_FLAGS: &[&str] = &["--socket", "--cwd", "--dir"];
@@ -26,6 +26,23 @@ const COMMAND_WORDS: &[(&str, &[&str])] = &[
     ("events", &["--after", "--follow"]),
     ("do", &[]),
     ("config", &["check", "list"]),
+    (
+        "hosts",
+        &["list", "add", "remove", "--socket", "--ssh", "--udp-host"],
+    ),
+    (
+        "ssh",
+        &[
+            "check",
+            "diagnose",
+            "setup",
+            "--hostname",
+            "--user",
+            "--port",
+            "--identity",
+        ],
+    ),
+    ("terminfo", &["check", "setup", "remove", "--dry-run"]),
     ("watch", &["--after"]),
     (
         "wait",
@@ -165,7 +182,7 @@ _rusty_mux_ctl() {{
     COMPREPLY=()
     for ((i = 1; i < COMP_CWORD; i++)); do
         case ${{COMP_WORDS[i]}} in
-            --socket) ((i++)) ;;
+            --socket|--host) ((i++)) ;;
             --json) ;;
             +) cmd= ;;
             *) [[ -z $cmd ]] && cmd=${{COMP_WORDS[i]}} ;;
@@ -206,7 +223,7 @@ _rusty_mux_ctl() {{
     local cmd= prev=${{words[CURRENT-1]}} i
     for ((i = 2; i < CURRENT; i++)); do
         case ${{words[i]}} in
-            --socket) ((i++)) ;;
+            --socket|--host) ((i++)) ;;
             --json) ;;
             +) cmd= ;;
             *) [[ -z $cmd ]] && cmd=${{words[i]}} ;;
@@ -256,7 +273,7 @@ function __rusty_mux_ctl_words
             continue
         end
         switch $t
-            case --socket
+            case --socket --host
                 set skip 1
             case --json
             case +
@@ -317,7 +334,7 @@ def "nu-complete rusty-mux-ctl" [context: string] {{
     for t in $tokens {{
         if $skip {{
             $skip = false
-        }} else if $t == '--socket' {{
+        }} else if $t in ['--socket', '--host'] {{
             $skip = true
         }} else if $t == '+' {{
             $cmd = ''
@@ -373,7 +390,7 @@ Register-ArgumentCompleter -Native -CommandName rusty-mux-ctl, rusty-mux-ctl.exe
     $skip = $false
     foreach ($t in $done) {{
         if ($skip) {{ $skip = $false }}
-        elseif ($t -ceq '--socket') {{ $skip = $true }}
+        elseif ($t -cin @('--socket', '--host')) {{ $skip = $true }}
         elseif ($t -ceq '+') {{ $cmd = '' }}
         elseif ($t -cne '--json' -and $cmd -eq '') {{ $cmd = $t }}
     }}

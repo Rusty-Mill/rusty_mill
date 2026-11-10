@@ -7,12 +7,15 @@ use std::time::Duration;
 
 use rusty_mux_proto::Cursor;
 use rusty_mux_proto::schema::{self, CallError, Entity, Method, Presence, Ty, Value};
+use rusty_mux_script::hosts::Address;
 use rusty_uuid::Uuid;
 
 /// A parsed command line.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Invocation {
     pub socket: Option<PathBuf>,
+    /// `--host NAME`: a saved host (C35), never with `socket`.
+    pub host: Option<String>,
     pub json: bool,
     pub command: Command,
 }
@@ -36,6 +39,12 @@ pub enum Command {
     },
     /// Works with the config file.
     Config(ConfigCommand),
+    /// Lists, adds or removes saved hosts (C35).
+    Hosts(HostsCommand),
+    /// Checks a host for `rusty-mux --ssh`, or prints its config (C48).
+    Ssh(SshCommand),
+    /// Checks, installs or removes our terminfo entry on an SSH host (C47).
+    Terminfo(Terminfo),
     /// Follows events from `after` (or from now) and runs the config's
     /// rules for each, until the server goes away.
     Watch { after: Option<Cursor> },
@@ -191,6 +200,47 @@ pub enum ConfigCommand {
     List,
 }
 
+/// `terminfo VERB DEST`: our terminfo entry on the SSH host `dest`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Terminfo {
+    pub verb: TerminfoVerb,
+    /// What `ssh` gets after `--`.
+    pub dest: String,
+    /// Print the command and run nothing (`setup` and `remove` only).
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminfoVerb {
+    /// Reports whether the entry is installed; reads only.
+    Check,
+    /// Compiles the entry into the remote `~/.terminfo`.
+    Setup,
+    /// Removes the entry from the remote `~/.terminfo`.
+    Remove,
+}
+
+/// `ssh`: none of its verbs connects or writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SshCommand {
+    /// Problems and warnings for `rusty-mux --ssh DEST`.
+    Check(String),
+    /// As `check`, with every value it used and a fix for each finding.
+    Diagnose(String),
+    /// Prints a `Host` block for the ssh config.
+    Setup(SshSetup),
+}
+
+/// What `ssh setup` puts in its block; only what is given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshSetup {
+    pub dest: String,
+    pub hostname: Option<String>,
+    pub user: Option<String>,
+    pub port: Option<String>,
+    pub identity: Option<String>,
+}
+
 /// What `api` prints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Api {
@@ -286,12 +336,21 @@ impl Defaults {
 /// from `defaults`. The error is a one-line reason.
 pub fn parse(args: &[String], defaults: &Defaults) -> Result<Invocation, String> {
     let mut socket = None;
+    let mut host = None;
     let mut json = false;
     let mut rest = args;
     loop {
         match rest {
             [flag, path, tail @ ..] if flag == "--socket" => {
                 socket = Some(PathBuf::from(path));
+                rest = tail;
+            }
+            [flag, name, tail @ ..] if flag == "--host" => {
+                host = Some(name.clone());
+                rest = tail;
+            }
+            [flag, tail @ ..] if flag.starts_with("--host=") => {
+                host = Some(flag["--host=".len()..].to_owned());
                 rest = tail;
             }
             [flag, tail @ ..] if flag == "--json" => {
@@ -301,9 +360,13 @@ pub fn parse(args: &[String], defaults: &Defaults) -> Result<Invocation, String>
             _ => break,
         }
     }
+    if socket.is_some() && host.is_some() {
+        return Err("--host and --socket name the server twice: pass one".into());
+    }
     let command = command(rest, defaults)?;
     Ok(Invocation {
         socket,
+        host,
         json,
         command,
     })
@@ -319,6 +382,9 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "events" => events(rest),
         "do" => run_action(rest),
         "config" => config(rest),
+        "hosts" => hosts(rest).map(Command::Hosts),
+        "ssh" => ssh(rest).map(Command::Ssh),
+        "terminfo" => terminfo(rest).map(Command::Terminfo),
         "watch" => watch(rest),
         "wait" => wait(rest).map(Command::Wait),
         "run" => run(rest, defaults).map(Command::Run),
@@ -383,6 +449,135 @@ fn config(args: &[String]) -> Result<Command, String> {
         [verb] if verb == "list" => Ok(Command::Config(ConfigCommand::List)),
         _ => Err("usage: config check [PATH] | config list".into()),
     }
+}
+
+/// `hosts`: each verb works on the hosts file alone, with no server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostsCommand {
+    List,
+    /// Appends `address` to the host called `name`, creating it.
+    Add {
+        name: String,
+        address: Address,
+    },
+    Remove(String),
+}
+
+const HOSTS_USAGE: &str = "usage: hosts list | hosts add NAME --socket PATH | \
+     hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] | hosts remove NAME";
+
+fn hosts(args: &[String]) -> Result<HostsCommand, String> {
+    match args {
+        [verb] if verb == "list" => Ok(HostsCommand::List),
+        [verb, name] if verb == "remove" => Ok(HostsCommand::Remove(name.clone())),
+        [verb, name, rest @ ..] if verb == "add" => {
+            let flags = flags("hosts add", rest, |_| false)?;
+            let mut socket = None;
+            let mut dest = None;
+            let mut udp_host = None;
+            for (flag, value) in flags {
+                let slot = match flag {
+                    "socket" => &mut socket,
+                    "ssh" => &mut dest,
+                    "udp-host" => &mut udp_host,
+                    _ => return Err(format!("hosts add: unknown flag --{flag}")),
+                };
+                if slot.replace(value.to_owned()).is_some() {
+                    return Err(format!("hosts add: --{flag} given twice"));
+                }
+            }
+            let socket = socket.ok_or("hosts add: --socket PATH is required")?;
+            let address = match (dest, udp_host) {
+                (None, None) => Address::Socket { socket },
+                (None, Some(_)) => return Err("hosts add: --udp-host needs --ssh".into()),
+                (Some(dest), udp_host) => Address::Ssh {
+                    dest,
+                    socket,
+                    udp_host,
+                },
+            };
+            Ok(HostsCommand::Add {
+                name: name.clone(),
+                address,
+            })
+        }
+        _ => Err(HOSTS_USAGE.into()),
+    }
+}
+
+const TERMINFO_USAGE: &str = "usage: terminfo check DEST | terminfo setup|remove DEST [--dry-run]";
+
+fn terminfo(args: &[String]) -> Result<Terminfo, String> {
+    let (verb, dest, dry_run) = match args {
+        [verb, dest] => (verb, dest, false),
+        [verb, dest, flag] if flag == "--dry-run" && verb != "check" => (verb, dest, true),
+        _ => return Err(TERMINFO_USAGE.into()),
+    };
+    let verb = match verb.as_str() {
+        "check" => TerminfoVerb::Check,
+        "setup" => TerminfoVerb::Setup,
+        "remove" => TerminfoVerb::Remove,
+        _ => return Err(TERMINFO_USAGE.into()),
+    };
+    if dest.is_empty() || dest.starts_with('-') {
+        return Err(format!("terminfo: `{dest}` is not an ssh destination"));
+    }
+    Ok(Terminfo {
+        verb,
+        dest: dest.clone(),
+        dry_run,
+    })
+}
+
+const SSH_USAGE: &str = "usage: ssh check DEST | ssh diagnose DEST | \
+     ssh setup DEST [--hostname H] [--user U] [--port N] [--identity FILE]";
+
+fn ssh(args: &[String]) -> Result<SshCommand, String> {
+    let [verb, dest, rest @ ..] = args else {
+        return Err(SSH_USAGE.into());
+    };
+    if dest.is_empty() || dest.starts_with('-') || dest.contains(char::is_whitespace) {
+        return Err(format!("ssh: `{dest}` is not an ssh destination"));
+    }
+    match (verb.as_str(), rest) {
+        ("check", []) => Ok(SshCommand::Check(dest.clone())),
+        ("diagnose", []) => Ok(SshCommand::Diagnose(dest.clone())),
+        ("setup", rest) => ssh_setup(dest, rest).map(SshCommand::Setup),
+        _ => Err(SSH_USAGE.into()),
+    }
+}
+
+fn ssh_setup(dest: &str, rest: &[String]) -> Result<SshSetup, String> {
+    let mut setup = SshSetup {
+        dest: dest.to_owned(),
+        hostname: None,
+        user: None,
+        port: None,
+        identity: None,
+    };
+    for (flag, value) in flags("ssh setup", rest, |_| false)? {
+        let slot = match flag {
+            "hostname" => &mut setup.hostname,
+            "user" => &mut setup.user,
+            "port" => &mut setup.port,
+            "identity" => &mut setup.identity,
+            _ => return Err(format!("ssh setup: unknown flag --{flag}")),
+        };
+        if value.is_empty() || value.contains(char::is_whitespace) {
+            return Err(format!("ssh setup: --{flag} needs one word"));
+        }
+        if slot.replace(value.to_owned()).is_some() {
+            return Err(format!("ssh setup: --{flag} given twice"));
+        }
+    }
+    if setup
+        .port
+        .as_deref()
+        .is_some_and(|p| p.parse::<u16>().map_or(true, |p| p == 0))
+    {
+        return Err("ssh setup: --port needs a port from 1 to 65535".into());
+    }
+    Ok(setup)
 }
 
 fn watch(args: &[String]) -> Result<Command, String> {
@@ -531,6 +726,12 @@ fn wait(args: &[String]) -> Result<Wait, String> {
 /// An event kind and the field values to match, checked against
 /// [`rusty_mux_script::EVENTS`].
 fn event_filter(kind: &str, fields: &[(&str, &str)]) -> Result<Until, String> {
+    if kind == "hosts-changed" {
+        return Err(
+            "wait: hosts-changed is ctl's own event: follow it with events --follow or watch"
+                .into(),
+        );
+    }
     let (kind, names) = rusty_mux_script::EVENTS
         .iter()
         .find(|(name, _)| *name == kind)
@@ -769,6 +970,26 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "Check or list the config: config check [PATH] | config list",
     ),
     (
+        "hosts",
+        "List, add or remove saved hosts for --host: hosts list |\n\
+         \x20                  hosts add NAME --socket PATH |\n\
+         \x20                  hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] |\n\
+         \x20                  hosts remove NAME",
+    ),
+    (
+        "ssh",
+        "Check a host for rusty-mux --ssh, read-only, or print a Host block\n\
+         \x20                  for ~/.ssh/config: ssh check DEST | ssh diagnose DEST |\n\
+         \x20                  ssh setup DEST [--hostname H] [--user U] [--port N]\n\
+         \x20                  [--identity FILE]; check exits 1 on a problem",
+    ),
+    (
+        "terminfo",
+        "Check, install or remove rusty_term's terminfo entry in ~/.terminfo\n\
+         \x20                  on an SSH host: terminfo check DEST |\n\
+         \x20                  terminfo setup|remove DEST [--dry-run]",
+    ),
+    (
         "watch",
         "Run the config's rules on events: watch [--after EPOCH:SEQ]",
     ),
@@ -834,9 +1055,10 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
 pub fn usage(method: Option<&Method>) -> String {
     let Some(m) = method else {
         let mut text = String::from(
-            "usage: rusty-mux-ctl [--socket PATH] [--json] COMMAND [--FLAG VALUE]... [+ COMMAND ...]\n\
+            "usage: rusty-mux-ctl [--socket PATH | --host NAME] [--json] COMMAND [--FLAG VALUE]... [+ COMMAND ...]\n\
              The socket defaults to $RUSTY_MUX_SOCKET, else the default socket\n\
-             ($XDG_RUNTIME_DIR/rusty_mux/default.sock). An id flag also takes a name, a\n\
+             ($XDG_RUNTIME_DIR/rusty_mux/default.sock). --host tries a saved host's\n\
+             addresses in order (see hosts). An id flag also takes a name, a\n\
              position or an id suffix, optionally as a path SESSION/WINDOW/BLOCK, and\n\
              defaults to $RUSTY_MUX_SESSION, $RUSTY_MUX_WINDOW or $RUSTY_MUX_BLOCK.\n\
              Actions come from $RUSTY_MUX_CONFIG, or rusty_mux/config.json in the\n\

@@ -17,8 +17,9 @@ use crate::stop::{Stop, is_wait};
 /// A stream to the server at `path`. When `stop` is bounded, connecting
 /// gives up with it too (on Linux; elsewhere only once connected), and the
 /// stream times out every [`POLL`] so [`Conn`] notices a stop. On Windows
-/// only reads time out, so a write to a server that stopped reading is not
-/// bounded.
+/// a timed-out send leaves the connection unusable, so writes time out
+/// once, at the deadline (see [`write_timeout`]); a stop with no deadline
+/// leaves them unbounded.
 #[cfg(any(unix, windows))]
 pub(crate) fn connect(path: &Path, stop: &Stop) -> io::Result<UnixStream> {
     if !stop.is_bounded() {
@@ -28,7 +29,17 @@ pub(crate) fn connect(path: &Path, stop: &Stop) -> io::Result<UnixStream> {
     stream.set_read_timeout(Some(POLL))?;
     #[cfg(unix)]
     stream.set_write_timeout(Some(POLL))?;
+    #[cfg(windows)]
+    stream.set_write_timeout(write_timeout(stop))?;
     Ok(stream)
+}
+
+/// The Windows write timeout for `stop`: the time left to its deadline,
+/// at least 1 ms (Winsock reads 0 as "never"), or none without a deadline.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn write_timeout(stop: &Stop) -> Option<std::time::Duration> {
+    stop.left()
+        .map(|left| left.max(std::time::Duration::from_millis(1)))
 }
 
 #[cfg(unix)]
@@ -108,6 +119,11 @@ impl<S: Read + Write> Conn<S> {
             match self.stream.write(rest) {
                 Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
                 Ok(n) => rest = &rest[n..],
+                // Winsock's timed-out send may have sent part of the
+                // frame: the connection is done, so report the stop.
+                Err(e) if cfg!(windows) && e.kind() == io::ErrorKind::TimedOut => {
+                    return Err(self.stop.check().err().unwrap_or(e));
+                }
                 Err(e) if is_wait(&e) => {}
                 Err(e) => return Err(e),
             }
@@ -119,22 +135,92 @@ impl<S: Read + Write> Conn<S> {
     /// `InvalidData` for a frame that does not decode, and the
     /// [`Stop::check`] error once stopped.
     pub(crate) fn recv(&mut self) -> io::Result<Message> {
+        loop {
+            if let Some(message) = self.poll()? {
+                return Ok(message);
+            }
+        }
+    }
+
+    /// As [`Conn::recv`], but `None` once a read times out with no whole
+    /// message, so a caller can do other work between reads.
+    pub(crate) fn poll(&mut self) -> io::Result<Option<Message>> {
         let mut chunk = [0u8; 65536];
         loop {
             let decoded =
                 decode(&self.buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             if let Some((message, used)) = decoded {
                 self.buf.drain(..used);
-                return Ok(message);
+                return Ok(Some(message));
             }
             self.stop.check()?;
             let n = match self.stream.read(&mut chunk) {
                 Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
                 Ok(n) => n,
-                Err(e) if is_wait(&e) => continue,
+                Err(e) if is_wait(&e) => return Ok(None),
                 Err(e) => return Err(e),
             };
             self.buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn a_write_timeout_needs_a_deadline() {
+        assert_eq!(write_timeout(&Stop::default().or_when(|| false)), None);
+        let left = write_timeout(&Stop::after(Duration::from_secs(5))).expect("a deadline");
+        assert!(left > Duration::from_secs(4) && left <= Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_passed_deadline_still_times_out() {
+        // 0 would be Winsock's "never", and std refuses it.
+        assert_eq!(
+            write_timeout(&Stop::after(Duration::ZERO)),
+            Some(Duration::from_millis(1))
+        );
+    }
+
+    /// A stream whose every write times out, counting the attempts.
+    struct Stuck(usize);
+
+    impl Read for Stuck {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Write for Stuck {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            self.0 += 1;
+            Err(io::ErrorKind::TimedOut.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// On Windows a timed-out write ends the send at once; elsewhere it is
+    /// a poll tick, retried until the stop.
+    #[test]
+    fn a_timed_out_write_is_retried_only_off_windows() {
+        let stop = Stop::after(Duration::from_millis(200));
+        let mut conn = Conn::new(Stuck(0), stop);
+        let err = conn
+            .send(&Message::Shutdown { req: 1 })
+            .expect_err("every write times out");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        if cfg!(windows) {
+            assert_eq!(conn.stream.0, 1);
+        } else {
+            assert!(conn.stream.0 > 1);
         }
     }
 }

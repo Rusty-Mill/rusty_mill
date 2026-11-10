@@ -188,6 +188,9 @@ struct Start<'a> {
     size: Size,
     config: &'a Config,
     started: Started,
+    /// Launched with an owner (`Launch.own`): on Windows its program gets
+    /// no Job Object, so the mux never ends what it started (pack D182).
+    owned: bool,
 }
 
 /// A started program whose block has no screen or reader yet.
@@ -1608,6 +1611,7 @@ impl State {
             size,
             config: &config,
             started,
+            owned: launch.own,
         })?;
         match beside {
             None => self.mux.add_block(block, window, size)?,
@@ -1645,9 +1649,10 @@ impl State {
             size,
             config,
             started,
+            owned,
         } = start;
         let env = self.block_env(session, window, block);
-        let (pty, process) = pty::spawn(config, size, &env)
+        let (pty, process) = pty::spawn(config, size, &env, owned)
             .map_err(|e| format!("spawning the block's program: {e}"))?;
         self.hosts.track(&process);
         let pty = Rc::new(pty);

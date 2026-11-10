@@ -1,12 +1,15 @@
 //! The resumable event stream (C05): numbered events, and replay of the
-//! events a client missed while disconnected.
+//! events a client missed while disconnected. Linux and Windows; the
+//! tests that need a Unix shell's job control, `stty` or `sh` stay Linux-only.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", windows))]
 
 mod common;
 
 use common::{Client, block_for, start_server, window_for};
-use rusty_mux_core::{BlockId, Event, ExitStatus, Progress, Selection, SessionId, Size};
+use rusty_mux_core::{BlockId, Event, Selection, SessionId, Size};
+#[cfg(target_os = "linux")]
+use rusty_mux_core::{ExitStatus, Progress};
 use rusty_mux_proto::{Cursor, Features, Launch, Message, Program};
 use rusty_uuid::Uuid;
 
@@ -20,6 +23,21 @@ fn create_session(client: &mut Client, name: &str) -> SessionId {
         })
         .expect("id");
     SessionId::from_uuid(id)
+}
+
+/// Input that makes the block's shell print each of `oscs` (the text
+/// after `ESC ]`) as an OSC: with `printf`, ended by BEL, on Unix; on
+/// Windows `cmd.exe` takes ESC from a `prompt $E` child shell and echoes
+/// each ended by ST.
+fn print_oscs(oscs: &[&str]) -> Vec<u8> {
+    let input = if cfg!(windows) {
+        let each: String = oscs.iter().map(|o| format!("%ESC%]{o}%ESC%\\")).collect();
+        format!("for /F %a in ('echo prompt $E ^| cmd') do @set \"ESC=%a\"\recho {each}\r")
+    } else {
+        let each: String = oscs.iter().map(|o| format!("\\033]{o}\\007")).collect();
+        format!("printf '{each}'\r")
+    };
+    input.into_bytes()
 }
 
 /// Reads until the event announcing `session` arrives.
@@ -121,7 +139,7 @@ fn status_changes_reach_only_clients_that_asked() {
         .union(Features::FOCUS);
     let mut plain = Client::connect_with(&path, others, None);
     let block = block_for(&mut watcher);
-    watcher.input(block, b"printf '\\033]7501;state=working\\007'\r");
+    watcher.input(block, &print_oscs(&["7501;state=working"]));
     let status = Event::BlockStatus { block };
     while !watcher.events.iter().any(|(_, e)| *e == status) {
         watcher.recv();
@@ -154,7 +172,7 @@ fn replay_sends_status_events_only_to_clients_that_asked() {
     // While both are away: a status change, then a later event.
     let mut writer = Client::connect_with(&path, status.union(Features::CHECKPOINT_V6), None);
     let block = block_for(&mut writer);
-    writer.input(block, b"printf '\\033]7501;state=working\\007'\r");
+    writer.input(block, &print_oscs(&["7501;state=working"]));
     let changed = Event::BlockStatus { block };
     while !writer.events.iter().any(|(_, e)| *e == changed) {
         writer.recv();
@@ -183,10 +201,7 @@ fn pwd_and_title_changes_reach_only_clients_that_asked() {
     let mut watcher = Client::connect_with(&path, wanted, None);
     let mut plain = Client::connect_with(&path, SEQ.union(Features::STATUS), None);
     let block = block_for(&mut watcher);
-    watcher.input(
-        block,
-        b"printf '\\033]7;file://host/tmp\\007\\033]2;job\\007'\r",
-    );
+    watcher.input(block, &print_oscs(&["7;file://host/tmp", "2;job"]));
     let changes = [Event::PwdChanged { block }, Event::TitleChanged { block }];
     while !changes
         .iter()
@@ -200,6 +215,7 @@ fn pwd_and_title_changes_reach_only_clients_that_asked() {
     assert!(!plain.events.iter().any(|(_, e)| changes.contains(e)));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn program_events_reach_only_clients_that_asked() {
     let path = start_server();
@@ -271,14 +287,14 @@ fn clipboard_writes_and_status_removals_reach_only_clients_that_asked() {
     let mut plain = Client::connect_with(&path, SEQ.union(Features::STATUS), None);
     let block = block_for(&mut watcher);
     // The record is set first, so the clear ends it. "aGk=" is "hi".
-    watcher.input(block, b"printf '\\033]7501;state=working:id=job\\007'\r");
+    watcher.input(block, &print_oscs(&["7501;state=working:id=job"]));
     let status = Event::BlockStatus { block };
     while !watcher.events.iter().any(|(_, e)| *e == status) {
         watcher.recv();
     }
     watcher.input(
         block,
-        b"printf '\\033]52;p;aGk=\\007\\033]7501;state=clear:id=job\\007'\r",
+        &print_oscs(&["52;p;aGk=", "7501;state=clear:id=job"]),
     );
     let removed = Event::StatusRemoved {
         block,
@@ -318,6 +334,7 @@ fn clipboard_writes_and_status_removals_reach_only_clients_that_asked() {
 /// A job that starts in the foreground without writing anything is seen by
 /// the poll, and the shell taking the terminal back by its prompt; only
 /// clients that asked hear of either.
+#[cfg(target_os = "linux")]
 #[test]
 fn process_changes_reach_only_clients_that_asked() {
     let path = start_server();
@@ -375,6 +392,7 @@ fn a_closed_block_reports_no_exit() {
 
 /// The answer and DA1's, in the order the program asked, even when both
 /// questions arrive in one write.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_status_query_is_answered_in_order() {
     let path = start_server();
@@ -400,6 +418,7 @@ fn a_status_query_is_answered_in_order() {
 
 /// A block can run a given program in a given directory instead of the
 /// shell, and its exit code comes back as an event.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_launched_program_reports_its_exit_code() {
     let path = start_server();

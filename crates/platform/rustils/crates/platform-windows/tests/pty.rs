@@ -546,3 +546,72 @@ fn drop_after_exit_with_a_full_pipe_returns() {
     std::thread::sleep(Duration::from_millis(100));
     within(WAIT_BUDGET, "dropping the master", move || drop(master));
 }
+
+/// Whether `tasklist` lists process `pid`.
+fn alive(pid: u32) -> bool {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .expect("tasklist");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|line| line.starts_with('"'))
+}
+
+/// With `NewGroup` the child runs in a kill-on-close Job Object (card
+/// #282, R11): `kill_tree` also ends a program it started on a console of
+/// its own, outside the pseudo console.
+#[test]
+fn new_group_kill_tree_ends_a_detached_grandchild() {
+    let _guard = lock_pty_tests();
+    let cmd = Command::new("powershell", ".")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "$p = Start-Process ping -ArgumentList '-n','1000','127.0.0.1' -WindowStyle Hidden -PassThru; \
+             'GC=' + $p.Id + ' GC-END'; Start-Sleep -Seconds 600",
+        ])
+        .group(GroupSpec::NewGroup);
+    let (master, mut child) = WindowsPty
+        .spawn_concrete(&cmd, size())
+        .expect("spawn_concrete");
+    let seen = read_until(master.output_handle(), "GC-END", 64);
+    let pid: u32 = seen
+        .split("GC=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no grandchild pid in {seen:?}"));
+    assert!(alive(pid), "the grandchild {pid} never ran");
+
+    child.kill_tree(Signal::Kill).expect("kill_tree");
+    reap(&mut child);
+    let deadline = Instant::now() + WAIT_BUDGET;
+    while alive(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "grandchild {pid} outlived kill_tree"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let master = Arc::new(master);
+    drain(Arc::clone(&master));
+    master.hang_up();
+}
+
+/// With `Inherit` the child runs in no job, as before: there is no tree
+/// to kill.
+#[test]
+fn inherit_has_no_tree_to_kill() {
+    let _guard = lock_pty_tests();
+    let (master, mut child) = concrete("ping", &["-n", "1000", "127.0.0.1"]);
+    let err = child
+        .kill_tree(Signal::Kill)
+        .expect_err("an Inherit child has no job");
+    assert_eq!(err.kind, ErrorKind::Unsupported);
+    child.kill_single(Signal::Kill).expect("kill_single");
+    reap(&mut child);
+    let master = Arc::new(master);
+    drain(Arc::clone(&master));
+    master.hang_up();
+}

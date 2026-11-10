@@ -16,6 +16,13 @@ only writer of settled answers: callers never edit the decision log or call
 Project folder: `docs/projects/let-em-loose/` (below, `LEL/`). Slug and
 remind-me tag: `let-em-loose`.
 
+## First
+Load the memory and board tools. If `remind_me_search`, `remind_me_add` and
+`remind_me_resolve` are not callable, run `ToolSearch` for `remind_me`; any
+connected server name works (`mcp__<server>__remind_me_*`). For card questions
+also `ToolSearch` "Mill_Board card_get". If one is unavailable, say so in your
+reply (and write `remind-me: pending` for a record) and continue from the repo.
+
 ## Look, in this order
 1. The repo:
    - `LEL/DECISIONS.md` (D1 onward; the only decision log) and its
@@ -30,7 +37,9 @@ remind-me tag: `let-em-loose`.
    Use Grep; don't read whole files you don't need.
 2. remind-me, if connected (any tool named `*remind_me_search`): tags
    `["let-em-loose"]`, `include_raw: true`, `detail: "full"`, the card number
-   or crate in the query. Card decisions from Nano are stored there.
+   or crate in the query (the tool needs a query with `include_raw`). Results
+   are trimmed to a budget: fetch trimmed ids with `remind_me_get`. Card
+   decisions from Nano are stored there.
 3. Mill Board, if connected (`card_get`): the card and its comments. Nano's
    answers to design questions are posted as card comments.
 4. Design docs: `LEL/*-design.md` and `LEL/*-build-plan.md` (owner answers
@@ -87,8 +96,8 @@ An answer settles *what* to build, not permission. Design approval, ask-first
 gates, spending, deployment and review/merge rules still apply after an ANSWER.
 
 ## Record a settled answer (best effort, at most once per key)
-When a DECISIONS.md entry or QA line already answers it, cite that and add no
-new entry or memory. If the entry has a key, run step 1 for that key first.
+When a DECISIONS.md entry, a QA line or merged code and tests already answer
+it, cite that and add no new entry or memory. If the entry has a key, run step 1 for that key first.
 That fills a `remind-me: pending` (step 2, keeping its D-number) and merges any
 duplicate memories or entries, so repeat questions are where duplicates get
 cleaned up.
@@ -132,8 +141,14 @@ Answer or default:
     ANSWER: <one or two lines>
     SOURCE: <file § / D# / card / memory id>
     TIER: answered | default (logged D<n>, remind-me <id|pending>, key <key>)
+Recording Nano's answer (`[stated]`):
+    ANSWER: Recorded: <one line>
+    SOURCE: <his reference> · <D# it confirms or supersedes>
+    TIER: recorded [stated] (D<n>, remind-me <id|pending>, key <key>)
+A `[stated]` answer without a reference is not recorded:
+    NEED: <the reference to send: thread message id or link, card comment, baileyrd GitHub comment, or remind-me id>
 Escalation, kept short:
     ESCALATE: <question, one line>
     OPTIONS: a) … b) … (at most c)
     RECOMMEND: <letter> — <one-line why>
-    REVERSES: <D# if it would reverse a [stated]/[agreed] entry, else none>
+    REVERSES: <D# if it would reverse a [stated]/[agreed] entry, else none; main row first, then others it touches>
