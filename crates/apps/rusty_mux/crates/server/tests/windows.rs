@@ -413,7 +413,10 @@ fn own_host_follows_the_newest_console_process() {
                 if *b == block && name.eq_ignore_ascii_case(program))
         })
     };
-    a.input(block, b"ping -n 1000 127.0.0.1\r");
+    // About 5 s: long enough to be seen and listed, and it ends by
+    // itself (Ctrl+C would not reach it: test runners start with Ctrl+C
+    // ignored, which children inherit).
+    a.input(block, b"ping -n 6 127.0.0.1\r");
     let deadline = Instant::now() + PATIENCE;
     while !changed_to(&a, "ping.exe") {
         assert!(Instant::now() < deadline, "no process-changed for ping");
@@ -440,7 +443,6 @@ fn own_host_follows_the_newest_console_process() {
     );
 
     a.events.clear();
-    a.input(block, b"\x03");
     let deadline = Instant::now() + PATIENCE;
     while !changed_to(&a, "cmd.exe") {
         assert!(
