@@ -85,6 +85,18 @@ pub trait Store: Send + Sync {
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError>;
     /// The id of the newest committed event: a cursor that has seen everything so far.
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError>;
+    /// Whether the event log holds `id`. A cursor it does not hold comes from before a
+    /// restart (the log lives as long as the process) or from somewhere else, so the
+    /// events after it cannot be known: the reader must re-read the board.
+    ///
+    /// # Errors
+    /// If the store fails.
+    fn holds_event(&self, id: Uuid) -> Result<bool, BoardError> {
+        Ok(self
+            .events_since(None, usize::MAX)?
+            .iter()
+            .any(|e| e.id == id))
+    }
     /// Reserve a card number for `card`: one above `floor` that no reservation holds. A
     /// reservation is durable and never released, so no two cards get the same number,
     /// whichever boards share the store and whatever leaves the board meanwhile. Callers pass
@@ -237,6 +249,11 @@ impl Store for MemStore {
         Ok(self.log.lock().map_err(poisoned)?.last_id())
     }
 
+    fn holds_event(&self, id: Uuid) -> Result<bool, BoardError> {
+        let log = self.log.lock().map_err(poisoned)?;
+        Ok(log.events.binary_search_by_key(&id, |e| e.id).is_ok())
+    }
+
     fn reserve_number(&self, _card: Uuid, floor: u64) -> Result<u64, BoardError> {
         let mut log = self.log.lock().map_err(poisoned)?;
         log.numbers = log.numbers.max(floor) + 1;
@@ -272,6 +289,9 @@ impl<T: Store + ?Sized> Store for Box<T> {
     }
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
         (**self).last_event_id()
+    }
+    fn holds_event(&self, id: Uuid) -> Result<bool, BoardError> {
+        (**self).holds_event(id)
     }
     fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
         (**self).reserve_number(card, floor)

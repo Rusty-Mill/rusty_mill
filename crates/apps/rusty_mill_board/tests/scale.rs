@@ -69,7 +69,7 @@ const CEILINGS: &[(&str, usize, usize, usize)] = &[
     ("card_get number", 11, 10_270, 2_130),
     ("card_take", 29, 47_400, 3_200),
     ("card_add", 3, 2_300, 500),
-    ("board_events", 2, 1_301_000, 100),
+    ("board_events", 2, 1_500, 100),
 ];
 
 fn shapes() -> Vec<Shape> {

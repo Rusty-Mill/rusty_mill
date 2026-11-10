@@ -753,15 +753,23 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_events",
-            "Poll the change log, oldest first. Send the `cursor` of your last reply as `after` to get only newer events (the reply's `cursor` is the last event returned, or your `after` if none). `tail: true` returns just the current end of the log, to start a watcher.",
+            "Poll the change log, oldest first. Send the `cursor` of your last reply as `after` to get only newer events (the reply's `cursor` is the last event returned, or your `after` if none). `tail: true` returns just the current end of the log, to start a watcher. `resync: true` means your `after` is not in the log (the board restarted since you read it): changes may have been missed, so re-read the board (`board_list`, `view: summary` is cheapest) and go on from the reply's `cursor`.",
             |b, _, a: EventsArgs| {
                 if a.tail == Some(true) {
-                    return to_json(json!({ "events": [], "cursor": b.cursor()? }));
+                    return to_json(
+                        json!({ "events": [], "cursor": b.cursor()?, "resync": false }),
+                    );
                 }
                 let after = a.after.as_deref().map(id).transpose()?;
+                let resync = match after {
+                    Some(a) => !b.knows_cursor(a)?,
+                    None => false,
+                };
+                // An unknown cursor says nothing about where to resume: read the log from its start.
+                let after = after.filter(|_| !resync);
                 let events = b.events(after, a.limit.unwrap_or(100))?;
                 let cursor = events.last().map(|e| e.id).or(after);
-                to_json(json!({ "events": events, "cursor": cursor }))
+                to_json(json!({ "events": events, "cursor": cursor, "resync": resync }))
             },
         ),
         op(

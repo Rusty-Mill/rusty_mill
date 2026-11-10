@@ -138,6 +138,15 @@ impl FakeTick {
         bump(task, now);
     }
 
+    /// As [`FakeTick::owner_edit`], but stamped at `at_ms`: a write in a millisecond
+    /// already seen.
+    pub fn owner_edit_at(&self, id: Uuid, at_ms: i64, edit: impl FnOnce(&mut Value)) {
+        let mut state = self.0.lock().expect("lock");
+        let task = state.tasks.get_mut(&id).expect("task");
+        edit(task);
+        bump(task, at_ms);
+    }
+
     /// The owner adds a comment in rusty_tick, which does not move the task's version.
     pub fn owner_comment(&self, task: Uuid, text: &str) {
         let mut state = self.0.lock().expect("lock");
@@ -261,6 +270,21 @@ impl FakeTick {
                 }
                 bump(task, now);
                 (200, task.clone())
+            }
+            ("GET", ["search"]) => {
+                // Only the date-only form the board uses: every live task changed in range.
+                let from = r
+                    .path
+                    .split_once("updatedFrom=")
+                    .and_then(|(_, v)| v.split('&').next()?.parse::<i64>().ok())
+                    .unwrap_or(i64::MIN);
+                let tasks: Vec<Value> = state
+                    .tasks
+                    .values()
+                    .filter(|t| t["deletedMs"].is_null() && t["updatedMs"].as_i64() >= Some(from))
+                    .cloned()
+                    .collect();
+                (200, json!({ "tasks": tasks }))
             }
             ("GET", ["tags", tag, "tasks"]) => {
                 let tasks: Vec<Value> = state
