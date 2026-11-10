@@ -42,8 +42,9 @@ Mill Board column per card, read 2026-11-10; decision numbers from ../DECISIONS.
 - Unticked questions that still need Nano or an unreachable source are in OPEN_QUESTIONS.md (14 at this refresh).
 
 ## Acceptance for this pack
-- [ ] The expert answers erosion-gate questions from D41–D45 with a cited source.
-- [ ] Implementation detail gets a logged `[default]`, not an escalation.
-- [ ] Anything reversing a `[stated]`/`[agreed]` row escalates to Nano.
-- [ ] Each settled answer lands once in ../DECISIONS.md and once in remind-me, best effort: a stable key reconciles duplicates from concurrent sessions or a crash between the two writes.
-- [ ] A conflict between sources is settled by date and provenance (newest attributable Nano decision; merged contract for behaviour), or escalated.
+Run 2026-11-10 @ d91956c by a separate agent acting as the expert on a copy (no real writes). All passed.
+- [x] The expert answers erosion-gate questions from D41–D45 with a cited source (QA.md § Erosion gate; D41, D43, D45, D30; addendum C-R8).
+- [x] Implementation detail gets a logged `[default]`, not an escalation (when merged code already names it, it cites that and logs nothing).
+- [x] Anything reversing a `[stated]`/`[agreed]` row escalates to Nano (an `--override` on `bbp erosion` escalated with `REVERSES: D43`).
+- [x] Each settled answer lands once in ../DECISIONS.md and once in remind-me, best effort: a stable key reconciles duplicates (a repeated answer added no second row; a `[stated]` answer with no reference was refused).
+- [x] A conflict between sources is settled by date and provenance (D115 over QA's "report-only" for what "approved" means).

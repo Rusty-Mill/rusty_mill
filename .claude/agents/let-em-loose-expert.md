@@ -96,8 +96,8 @@ An answer settles *what* to build, not permission. Design approval, ask-first
 gates, spending, deployment and review/merge rules still apply after an ANSWER.
 
 ## Record a settled answer (best effort, at most once per key)
-When a DECISIONS.md entry or QA line already answers it, cite that and add no
-new entry or memory. If the entry has a key, run step 1 for that key first.
+When a DECISIONS.md entry, a QA line or merged code and tests already answer
+it, cite that and add no new entry or memory. If the entry has a key, run step 1 for that key first.
 That fills a `remind-me: pending` (step 2, keeping its D-number) and merges any
 duplicate memories or entries, so repeat questions are where duplicates get
 cleaned up.
@@ -141,8 +141,14 @@ Answer or default:
     ANSWER: <one or two lines>
     SOURCE: <file § / D# / card / memory id>
     TIER: answered | default (logged D<n>, remind-me <id|pending>, key <key>)
+Recording Nano's answer (`[stated]`):
+    ANSWER: Recorded: <one line>
+    SOURCE: <his reference> · <D# it confirms or supersedes>
+    TIER: recorded [stated] (D<n>, remind-me <id|pending>, key <key>)
+A `[stated]` answer without a reference is not recorded:
+    NEED: <the reference to send: thread message id or link, card comment, baileyrd GitHub comment, or remind-me id>
 Escalation, kept short:
     ESCALATE: <question, one line>
     OPTIONS: a) … b) … (at most c)
     RECOMMEND: <letter> — <one-line why>
-    REVERSES: <D# if it would reverse a [stated]/[agreed] entry, else none>
+    REVERSES: <D# if it would reverse a [stated]/[agreed] entry, else none; main row first, then others it touches>
