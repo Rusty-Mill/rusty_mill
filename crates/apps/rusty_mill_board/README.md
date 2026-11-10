@@ -74,7 +74,7 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
   `card_get`, `card_trace`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_archive`,
   `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `board_milestones`, `milestone_add`,
-  `milestone_update`, `inbox_list`, `inbox_act`. The web API
+  `milestone_update`, `inbox_list`, `inbox_act`, `board_number_cards`. The web API
   exposes the same table, so the two cannot drift.
 - **Milestones.** A project's dated goals (`src/milestones.rs`): a title and a target date, closed when reached, never
   deleted. `milestone_add` and `milestone_update` need Triage and the project in scope; `board_milestones` lists what the

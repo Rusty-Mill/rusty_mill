@@ -161,8 +161,9 @@ fn bound_acting(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Ac
 #[derive(Deserialize, JsonSchema)]
 struct Nothing {}
 
+/// The arguments of an operation that takes only who is acting.
 #[derive(Deserialize, JsonSchema)]
-struct InboxListArgs {
+struct WhoArgs {
     #[serde(flatten)]
     who: Who,
 }
@@ -964,7 +965,7 @@ pub fn ops() -> Vec<Op> {
         op(
             "inbox_list",
             "The decisions waiting for the owner (needs an authenticated admin credential): open BBP escalations of the tasks linked from cards, irreversible first, then oldest. Each has an `id`, a `rev`, the `reason` (and `label` in plain words), the claim with its confidence and budget, the strongest evidence, and its card. Empty means nothing needs you.",
-            |b, i, a: InboxListArgs| {
+            |b, i, a: WhoArgs| {
                 let who = bound_acting(b, i, &a.who)?;
                 Ok(json!(b.inbox(&who)?))
             },
@@ -977,6 +978,14 @@ pub fn ops() -> Vec<Op> {
                 Ok(json!(
                     b.inbox_act(&who, &a.id, a.rev, &a.action, a.dry_run)?
                 ))
+            },
+        ),
+        op(
+            "board_number_cards",
+            "Number the cards that have no number yet: tasks tagged `agent` directly in rusty_tick since the board started (the board also does this when it starts). Needs admin, unlimited to projects. {numbered: count}.",
+            |b, i, a: WhoArgs| {
+                let who = acting(b, i, &a.who)?;
+                to_json(json!({ "numbered": b.number_cards_as(&who)? }))
             },
         ),
         op(
@@ -1430,6 +1439,35 @@ mod tests {
         )
         .expect("add");
         assert_eq!(out["card"]["column"], "backlog");
+    }
+
+    #[test]
+    fn board_number_cards_numbers_strays_for_an_unlimited_admin_only() {
+        let store = MemStore::default();
+        let stray = Card::new("stray", "", vec![], 1).expect("card");
+        store
+            .insert(
+                &stray,
+                crate::domain::Event::of(&stray, crate::domain::EventKind::Created, "x"),
+            )
+            .expect("insert");
+        let board: Shared = Board::new(Box::new(store), Roles::default());
+        let refused = |who: &Identity| {
+            matches!(
+                call_as(&board, Some(who), "board_number_cards", json!({})),
+                Err(CallError::Board(BoardError::Forbidden(_)))
+            )
+        };
+        assert!(refused(&ident("claude", "builder")));
+        let mut limited = ident("nano", "human");
+        limited.projects = Some(vec!["default".into()]);
+        assert!(refused(&limited), "it writes every project's cards");
+        let human = ident("nano", "human");
+        let out = call_as(&board, Some(&human), "board_number_cards", json!({})).expect("number");
+        assert_eq!(out["numbered"], 1);
+        assert_eq!(board.get(stray.id).expect("get").number, Some(1));
+        let again = call_as(&board, Some(&human), "board_number_cards", json!({})).expect("again");
+        assert_eq!(again["numbered"], 0);
     }
 
     fn ident(actor: &str, role: &str) -> Identity {

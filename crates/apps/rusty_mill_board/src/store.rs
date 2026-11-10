@@ -46,6 +46,34 @@ pub trait Store: Send + Sync {
         cards.retain(|c| c.number == Some(number));
         Ok(cards)
     }
+    /// The cards in `columns`, read only as far as [`Store::summaries`] reads them: the queue
+    /// scan of `card_take`. Never write one back. This default filters [`Store::summaries`];
+    /// an adapter that can read a column directly overrides it.
+    ///
+    /// # Errors
+    /// If the store fails.
+    fn in_columns(&self, columns: &[Column]) -> Result<Vec<Card>, BoardError> {
+        let mut cards = self.summaries()?;
+        cards.retain(|c| columns.contains(&c.column));
+        Ok(cards)
+    }
+    /// Which of `ids` are cards on the board that are not Done. An id no longer on the board
+    /// is not open. This default scans [`Store::list`]; an adapter that can read one card's
+    /// state cheaply overrides it.
+    ///
+    /// # Errors
+    /// If the store fails.
+    fn open_among(&self, ids: &[Uuid]) -> Result<BTreeSet<Uuid>, BoardError> {
+        if ids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|c| c.column != Column::DONE && ids.contains(&c.id))
+            .map(|c| c.id)
+            .collect())
+    }
     /// Commit a new card (rev 0) and its event. The event's `id` is ignored
     /// and assigned here. Returns the revision committed, which a later `replace`
     /// must follow: `card.rev`, or more when the adapter commits in several steps.
@@ -57,10 +85,20 @@ pub trait Store: Send + Sync {
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError>;
     /// The id of the newest committed event: a cursor that has seen everything so far.
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError>;
-    /// Reserve a card number for `card`: the lowest above `floor` and above every number
-    /// reserved before. A reservation is durable and never released, so no two cards get the
-    /// same number, whichever boards share the store and whatever leaves the board meanwhile.
+    /// Reserve a card number for `card`: one above `floor` that no reservation holds. A
+    /// reservation is durable and never released, so no two cards get the same number,
+    /// whichever boards share the store and whatever leaves the board meanwhile. Callers pass
+    /// the highest number they know of, so numbers count up.
     fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError>;
+    /// The highest number reserved so far: where numbering resumes after a restart. Only a
+    /// starting point, since [`Store::reserve_number`] never hands out a reserved number;
+    /// this default of 0 is safe, if slow for an adapter that must skip every one.
+    ///
+    /// # Errors
+    /// If the store fails.
+    fn highest_reserved(&self) -> Result<u64, BoardError> {
+        Ok(0)
+    }
     /// `Err` once the store can no longer commit and must be reopened.
     ///
     /// # Errors
@@ -204,6 +242,10 @@ impl Store for MemStore {
         log.numbers = log.numbers.max(floor) + 1;
         Ok(log.numbers)
     }
+
+    fn highest_reserved(&self) -> Result<u64, BoardError> {
+        Ok(self.log.lock().map_err(poisoned)?.numbers)
+    }
 }
 
 impl<T: Store + ?Sized> Store for Box<T> {
@@ -233,6 +275,15 @@ impl<T: Store + ?Sized> Store for Box<T> {
     }
     fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
         (**self).reserve_number(card, floor)
+    }
+    fn highest_reserved(&self) -> Result<u64, BoardError> {
+        (**self).highest_reserved()
+    }
+    fn in_columns(&self, columns: &[Column]) -> Result<Vec<Card>, BoardError> {
+        (**self).in_columns(columns)
+    }
+    fn open_among(&self, ids: &[Uuid]) -> Result<BTreeSet<Uuid>, BoardError> {
+        (**self).open_among(ids)
     }
     fn health(&self) -> Result<(), BoardError> {
         (**self).health()
