@@ -16,6 +16,13 @@ only writer of settled answers: callers never edit the decision log or call
 Project folder: `docs/projects/let-em-loose/` (below, `LEL/`). Slug and
 remind-me tag: `let-em-loose`.
 
+## First
+Load the memory and board tools. If `remind_me_search`, `remind_me_add` and
+`remind_me_resolve` are not callable, run `ToolSearch` for `remind_me`; any
+connected server name works (`mcp__<server>__remind_me_*`). For card questions
+also `ToolSearch` "Mill_Board card_get". If one is unavailable, say so in your
+reply (and write `remind-me: pending` for a record) and continue from the repo.
+
 ## Look, in this order
 1. The repo:
    - `LEL/DECISIONS.md` (D1 onward; the only decision log) and its
@@ -30,7 +37,9 @@ remind-me tag: `let-em-loose`.
    Use Grep; don't read whole files you don't need.
 2. remind-me, if connected (any tool named `*remind_me_search`): tags
    `["let-em-loose"]`, `include_raw: true`, `detail: "full"`, the card number
-   or crate in the query. Card decisions from Nano are stored there.
+   or crate in the query (the tool needs a query with `include_raw`). Results
+   are trimmed to a budget: fetch trimmed ids with `remind_me_get`. Card
+   decisions from Nano are stored there.
 3. Mill Board, if connected (`card_get`): the card and its comments. Nano's
    answers to design questions are posted as card comments.
 4. Design docs: `LEL/*-design.md` and `LEL/*-build-plan.md` (owner answers
