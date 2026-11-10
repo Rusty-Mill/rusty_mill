@@ -119,12 +119,12 @@ impl Host {
 }
 
 /// The hosts file: `rusty_mux/hosts.json` under `$XDG_CONFIG_HOME`, else
-/// under `$HOME/.config`. `$RUSTY_MUX_CONFIG` names only the config file
-/// and does not move this one.
+/// under `$HOME/.config`. An empty or relative value is ignored, as the XDG
+/// spec says, so the file is never written relative to the current folder.
+/// `$RUSTY_MUX_CONFIG` names only the config file and does not move this one.
 pub fn hosts_path(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    let base = var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| var("HOME").map(|home| Path::new(&home).join(".config")))?;
+    let absolute = |name: &str| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
+    let base = absolute("XDG_CONFIG_HOME").or_else(|| Some(absolute("HOME")?.join(".config")))?;
     Some(base.join("rusty_mux").join("hosts.json"))
 }
 
@@ -467,5 +467,21 @@ mod tests {
             Some(PathBuf::from("/x/rusty_mux/hosts.json"))
         );
         assert_eq!(hosts_path(|_| None), None);
+    }
+
+    #[test]
+    fn an_empty_or_relative_base_is_ignored() {
+        let var = |xdg: &'static str, home: &'static str| {
+            move |name: &str| match name {
+                "XDG_CONFIG_HOME" => Some(OsString::from(xdg)),
+                "HOME" => Some(OsString::from(home)),
+                _ => None,
+            }
+        };
+        let home = Some(PathBuf::from("/home/me/.config/rusty_mux/hosts.json"));
+        assert_eq!(hosts_path(var("", "/home/me")), home);
+        assert_eq!(hosts_path(var("cfg", "/home/me")), home);
+        assert_eq!(hosts_path(var("", "")), None);
+        assert_eq!(hosts_path(var("", "me")), None);
     }
 }
