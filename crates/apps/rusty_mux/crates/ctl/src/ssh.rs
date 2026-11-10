@@ -203,7 +203,16 @@ pub(crate) fn block(setup: &SshSetup) -> String {
 /// path, names `dest` without a wildcard.
 /// `ssh_dir` is `~/.ssh`, which every relative `Include` is read against,
 /// in nested files too.
-pub(crate) fn has_host(config: &Path, ssh_dir: &Path, dest: &str, depth: u8) -> bool {
+pub(crate) fn has_host(
+    config: &Path,
+    ssh_dir: &Path,
+    dest: &str,
+    skip: Option<&Path>,
+    depth: u8,
+) -> bool {
+    if skip == Some(config) {
+        return false;
+    }
     let Ok(text) = std::fs::read_to_string(config) else {
         return false;
     };
@@ -218,7 +227,7 @@ pub(crate) fn has_host(config: &Path, ssh_dir: &Path, dest: &str, depth: u8) -> 
             "host" => words.any(|w| w == dest),
             "include" if depth < 4 => words
                 .filter(|w| !w.contains(['*', '?']))
-                .any(|w| has_host(&included(ssh_dir, w), ssh_dir, dest, depth + 1)),
+                .any(|w| has_host(&included(ssh_dir, w), ssh_dir, dest, skip, depth + 1)),
             _ => false,
         }
     })
@@ -322,7 +331,20 @@ fn write_setup(
     config: Option<&Path>,
     out: &mut dyn Write,
 ) -> Result<Exit, (Exit, String)> {
-    let files = crate::ssh_write::Files::under(ssh_dir(config)?);
+    let dir = ssh_dir(config)?;
+    let files = crate::ssh_write::Files::under(dir);
+    crate::ssh_write::alias(&setup.dest).map_err(|e| (Exit::Usage, e))?;
+    // Our Include comes first, so our block would win over theirs.
+    if has_host(&files.config, dir, &setup.dest, Some(&files.ours), 0) {
+        return Err((
+            Exit::Failed,
+            format!(
+                "{} already has a Host entry for {}; edit that one, or pick another name",
+                files.config.display(),
+                setup.dest
+            ),
+        ));
+    }
     let done = crate::ssh_write::setup(&files, &setup.dest, &block(setup), ssh)
         .map_err(|e| (Exit::Failed, e))?;
     let what = format!("{} in {}", setup.dest, files.ours.display());
@@ -377,7 +399,7 @@ fn written(
 /// `setup`: the block to add, or that the config already has the host.
 fn print_setup(setup: &SshSetup, config: Option<&Path>, out: &mut dyn Write) -> io::Result<Exit> {
     let dir = config.and_then(Path::parent).unwrap_or(Path::new("."));
-    match config.filter(|c| has_host(c, dir, &setup.dest, 0)) {
+    match config.filter(|c| has_host(c, dir, &setup.dest, None, 0)) {
         Some(config) => writeln!(
             out,
             "{} already has a Host entry for {}; nothing to add",
@@ -587,6 +609,34 @@ mod tests {
     }
 
     #[test]
+    fn write_refuses_a_pattern_and_a_host_the_user_already_has() {
+        let dir = std::env::temp_dir().join(format!("rusty-mux-ssh-own-{}", std::process::id()));
+        let _fresh = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("made");
+        let config = dir.join("config");
+        std::fs::write(&config, "Host box\n    User me\n").expect("written");
+        let setup = |dest: &str| SshSetup {
+            dest: dest.into(),
+            hostname: None,
+            user: Some("root".into()),
+            port: None,
+            identity: None,
+            write: true,
+        };
+        let mut out = Vec::new();
+        let ssh = OsStr::new("/nonexistent/ssh");
+        let theirs = write_setup(&setup("box"), ssh, Some(&config), &mut out);
+        assert!(matches!(theirs, Err((Exit::Failed, ref e)) if e.contains("already has")));
+        let pattern = write_setup(&setup("*"), ssh, Some(&config), &mut out);
+        assert!(matches!(pattern, Err((Exit::Usage, _))));
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("read"),
+            "Host box\n    User me\n"
+        );
+        assert!(!dir.join("rusty_mux").exists(), "nothing written");
+    }
+
+    #[test]
     fn the_block_holds_only_what_was_given() {
         let setup = SshSetup {
             dest: "box".into(),
@@ -609,9 +659,9 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         std::fs::write(dir.join("config"), "Include extra\nHost *\n  User x\n").expect("write");
         std::fs::write(dir.join("extra"), "Host other box\n  HostName b\n").expect("write");
-        assert!(has_host(&dir.join("config"), &dir, "box", 0));
-        assert!(!has_host(&dir.join("config"), &dir, "bo", 0));
-        assert!(!has_host(&dir.join("missing"), &dir, "box", 0));
+        assert!(has_host(&dir.join("config"), &dir, "box", None, 0));
+        assert!(!has_host(&dir.join("config"), &dir, "bo", None, 0));
+        assert!(!has_host(&dir.join("missing"), &dir, "box", None, 0));
         let _gone = std::fs::remove_dir_all(dir);
     }
 }

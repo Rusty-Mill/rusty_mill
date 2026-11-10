@@ -78,24 +78,54 @@ pub(crate) fn with_block(ours: &str, dest: &str, block: &str) -> String {
     joined(&lines)
 }
 
+/// Why `dest` cannot name a Host block we write, if it cannot: only a
+/// plain alias, so the block matches that one name and no pattern (`*`,
+/// `?`, `!`) or `user@host` slips in ahead of the user's own config.
+pub(crate) fn alias(dest: &str) -> Result<(), String> {
+    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
+    if dest.is_empty() || dest.starts_with('-') || !dest.chars().all(plain) {
+        return Err(format!(
+            "`{dest}`: --write takes a plain host alias (letters, digits, `.`, `-`, `_`); \
+             set the user with --user"
+        ));
+    }
+    Ok(())
+}
+
+/// How many bytes at the start of `config` are ours: the mark, the
+/// Include line, and the blank line [`with_include`] puts after them.
+/// Any line ending is accepted, so an editor's CRLF still counts.
+fn ours_at_top(config: &str) -> Option<usize> {
+    let mut lines = config.split_inclusive('\n');
+    let mark = lines.next()?;
+    let include = lines.next()?;
+    if mark.trim_end() != MARK || include.trim_end() != INCLUDE {
+        return None;
+    }
+    let blank = lines
+        .next()
+        .filter(|l| l.trim().is_empty())
+        .map_or(0, str::len);
+    Some(mark.len() + include.len() + blank)
+}
+
 /// `config` with our marked Include line at the top, or `None` when it
-/// already has it. At the top, ahead of any `Host` or `Match`, it applies
-/// to every host.
+/// already starts with it. At the top, ahead of any `Host` or `Match`, it
+/// applies to every host.
 pub(crate) fn with_include(config: &str) -> Option<String> {
-    if config.lines().any(|l| l.trim() == INCLUDE) {
+    if ours_at_top(config).is_some() {
         return None;
     }
     Some(format!("{MARK}\n{INCLUDE}\n\n{config}"))
 }
 
-/// `config` without our marked Include line (and its mark).
+/// `config` without the lines [`with_include`] added at its top; every
+/// other byte is kept, including an Include line the user wrote.
 pub(crate) fn without_include(config: &str) -> String {
-    let lines: Vec<&str> = config
-        .lines()
-        .filter(|l| l.trim() != INCLUDE && l.trim() != MARK)
-        .collect();
-    let text = joined(&lines);
-    text.trim_start_matches('\n').to_owned()
+    match ours_at_top(config) {
+        Some(len) => config[len..].to_owned(),
+        None => config.to_owned(),
+    }
 }
 
 /// Lines joined with a final newline; nothing for no lines.
@@ -121,7 +151,7 @@ pub(crate) fn setup(files: &Files, dest: &str, block: &str, ssh: &OsStr) -> Resu
         let _gone = std::fs::remove_file(&temp);
         return Err(reason);
     }
-    std::fs::rename(&temp, &files.ours).map_err(|e| failed(&files.ours, e))?;
+    rename(&temp, &files.ours)?;
     let backup = match new_config {
         Some(text) => replace_config(files, &config, &text)?,
         None => None,
@@ -147,7 +177,7 @@ pub(crate) fn remove(files: &Files, dest: &str) -> Result<Done, String> {
         },
         false => {
             let temp = write_temp(&files.ours, &new_ours)?;
-            std::fs::rename(&temp, &files.ours).map_err(|e| failed(&files.ours, e))?;
+            rename(&temp, &files.ours)?;
         }
     }
     let backup = match empty && new_config != config {
@@ -161,15 +191,18 @@ pub(crate) fn remove(files: &Files, dest: &str) -> Result<Done, String> {
 /// time only, so the backup is the config from before rusty-mux-ctl.
 fn replace_config(files: &Files, old: &str, text: &str) -> Result<Option<PathBuf>, String> {
     let backup = files.backup();
-    let made = match files.config.exists() && !backup.exists() {
-        true => {
-            write_private(&backup, old).map_err(|e| failed(&backup, e))?;
-            Some(backup)
-        }
+    let made = match files.config.exists() {
+        // `create_new`: an existing backup, or a link where it would go,
+        // is left alone.
+        true => match create_private(&backup, old) {
+            Ok(()) => Some(backup),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => None,
+            Err(e) => return Err(failed(&backup, e)),
+        },
         false => None,
     };
     let temp = write_temp(&files.config, text)?;
-    std::fs::rename(&temp, &files.config).map_err(|e| failed(&files.config, e))?;
+    rename(&temp, &files.config)?;
     Ok(made)
 }
 
@@ -238,12 +271,40 @@ fn write_temp(path: &Path, text: &str) -> Result<PathBuf, String> {
     Ok(temp)
 }
 
+/// Moves `temp` over `path`; on failure `temp` is removed too, as far as
+/// it can be.
+fn rename(temp: &Path, path: &Path) -> Result<(), String> {
+    std::fs::rename(temp, path).map_err(|e| {
+        let left = match std::fs::remove_file(temp) {
+            Ok(()) => String::new(),
+            Err(gone) => format!("; {} is left: {gone}", temp.display()),
+        };
+        format!("{}{left}", failed(path, e))
+    })
+}
+
+/// `text` in a new private file at `path`; `AlreadyExists` if anything,
+/// even a dangling link, is there.
+fn create_private(path: &Path, text: &str) -> io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    write_with(options, path, text)
+}
+
 fn write_private(path: &Path, text: &str) -> io::Result<()> {
-    use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
+    write_with(options, path, text)
+}
+
+fn write_with(options: std::fs::OpenOptions, path: &Path, text: &str) -> io::Result<()> {
+    use std::io::Write;
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let options = {
+        let mut options = options;
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options
+    };
     let mut file = options.open(path)?;
     file.write_all(text.as_bytes())?;
     file.sync_all()
@@ -294,6 +355,32 @@ mod tests {
             with_include("").as_deref(),
             Some(&*format!("{MARK}\n{INCLUDE}\n\n"))
         );
+    }
+
+    #[test]
+    fn remove_keeps_every_byte_but_ours() {
+        // CRLF, no final newline, and the user's own identical Include
+        // inside a Match block: all theirs.
+        let config = "\r\nMatch host x\r\n    Include ~/.ssh/rusty_mux/config\r\nHost y";
+        let with = with_include(config).expect("theirs is not ours at the top");
+        assert_eq!(without_include(&with), config);
+        assert_eq!(
+            without_include(config),
+            config,
+            "nothing of ours: untouched"
+        );
+        let edited = format!("{MARK}\r\n{INCLUDE}\r\n\r\nHost z\r\n");
+        assert_eq!(without_include(&edited), "Host z\r\n", "an editor's CRLF");
+    }
+
+    #[test]
+    fn only_a_plain_alias_is_written() {
+        for good in ["box", "my-box.lan", "box_2"] {
+            assert!(alias(good).is_ok(), "{good}");
+        }
+        for bad in ["*", "b?x", "!box", "me@box", "-box", "a b", "a,b", ""] {
+            assert!(alias(bad).is_err(), "{bad}");
+        }
     }
 
     #[cfg(unix)]
