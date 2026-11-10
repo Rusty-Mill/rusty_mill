@@ -58,7 +58,7 @@ def gen_unicode_heavy(target_bytes, seed):
         list("日本語漢字あいうえおカタカナ")
         + list("한국어테스트문자")
         + list("😀😁😂🤣😃😄😅😆👍🎉")
-        + list("éàüñô")
+        + list("e\u0301a\u0300u\u0308n\u0303o\u0302")
         + list("Ω≈ç√∫˜µ≤≥÷")
     )
     out = bytearray(CSI + b"2J" + CSI + b"H")

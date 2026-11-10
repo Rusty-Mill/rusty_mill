@@ -38,6 +38,7 @@ const COMMAND_WORDS: &[(&str, &[&str])] = &[
             "--identity",
         ],
     ),
+    ("terminfo", &["check", "setup", "remove", "--dry-run"]),
     ("watch", &["--after"]),
     (
         "wait",
