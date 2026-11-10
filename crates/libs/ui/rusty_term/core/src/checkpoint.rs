@@ -155,6 +155,11 @@ fn read_batch(r: &mut Reader<'_>, clusters: usize, links: usize) -> Result<Batch
     if !r.styles.iter().all(bounded) {
         return Err(Error("style bounds"));
     }
+    // A batch ends on a logical line, so its newest row never wraps into
+    // the history below it, whatever the bytes say.
+    if let Some((newest, _)) = rows.first_mut() {
+        newest.wrapped = false;
+    }
     rows.reverse();
     Ok(Batch {
         cols,

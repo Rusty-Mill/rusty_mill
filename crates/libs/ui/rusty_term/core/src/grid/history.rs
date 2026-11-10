@@ -386,4 +386,16 @@ mod tests {
             encode(&whole, &whole_parser).unwrap()
         );
     }
+
+    #[test]
+    fn a_batch_never_wraps_into_the_history_below_it() {
+        let (grid, _) = sample(20, 30);
+        let wrapped = (0..grid.scrollback_len())
+            .find(|&i| grid.scrollback[i].wrapped)
+            .expect("a wrapped row");
+        let mut w = crate::checkpoint::BatchWriter::new(grid.styles(), 20).unwrap();
+        w.row(&grid.scrollback[wrapped], false).unwrap();
+        let batch = crate::checkpoint::decode_batch(&w.finish(), usize::MAX, usize::MAX).unwrap();
+        assert!(!batch.rows[0].0.wrapped);
+    }
 }
