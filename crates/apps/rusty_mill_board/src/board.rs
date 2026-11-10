@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit,
-    Event, EventKind, ExecutionLink, MoveRules, Plan, Shelf, import_id, text_hash,
+    Event, EventKind, ExecutionLink, MoveRules, Plan, Shelf, View, import_id, text_hash,
 };
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
 use crate::metrics::{Metrics, metrics};
@@ -659,11 +659,44 @@ impl<S: Store> Board<S> {
         shelf: Shelf,
         window_days: u32,
     ) -> Result<Vec<Card>, BoardError> {
+        self.list_view(column, shelf, window_days, View::Full)
+    }
+
+    /// As [`Board::list_shelf`], reading each card only as far as `view` needs. With
+    /// [`View::Summary`] the cards come from [`Store::summaries`]: their prompts, links and
+    /// comments may be empty, so they are only for building
+    /// [`CardSummary`](crate::domain::CardSummary) values.
+    ///
+    /// # Errors
+    /// On storage failure.
+    pub fn list_view(
+        &self,
+        column: Option<&Column>,
+        shelf: Shelf,
+        window_days: u32,
+        view: View,
+    ) -> Result<Vec<Card>, BoardError> {
         let now = (self.clock)();
         let window = window_ms(window_days);
-        let mut cards = self.list(column)?;
+        let mut cards = match view {
+            View::Full => self.cards()?,
+            View::Summary => {
+                let flow = self.flow();
+                self.store
+                    .summaries()?
+                    .into_iter()
+                    .map(|c| placed(&flow, c))
+                    .collect()
+            }
+        };
+        cards.retain(|c| column.is_none_or(|col| c.column == *col));
         cards.retain(|c| shelf.keeps(c.shelved(now, window)));
         Ok(cards)
+    }
+
+    /// The board's clock, Unix ms.
+    pub fn now_ms(&self) -> i64 {
+        (self.clock)()
     }
 
     /// Keep the `cards` that `dates` selects. Moves come from the store's history.

@@ -62,6 +62,9 @@ struct Cost {
 const CEILINGS: &[(&str, usize, usize, usize)] = &[
     ("board_list", 7, 3_878_000, 2_059_000),
     ("board_list project", 7, 3_878_000, 169_000),
+    ("board_list summary", 3, 1_303_000, 218_000),
+    ("board_list summary project", 3, 1_303_000, 13_000),
+    ("board_list first page", 7, 3_878_000, 231_000),
     ("card_get id", 5, 4_900, 2_130),
     ("card_get number", 11, 10_270, 2_130),
     ("card_take", 33, 3_912_000, 3_200),
@@ -174,6 +177,21 @@ fn reads() -> Vec<(&'static str, &'static str, Value)> {
             "card_get",
             json!({ "id": Uuid::from_u128(700) }),
         ),
+        (
+            "board_list summary",
+            "board_list",
+            json!({ "view": "summary" }),
+        ),
+        (
+            "board_list summary project",
+            "board_list",
+            json!({ "view": "summary", "project": MID_PROJECT }),
+        ),
+        (
+            "board_list first page",
+            "board_list",
+            json!({ "limit": 100 }),
+        ),
         ("card_get number", "card_get", json!({ "id": "#700" })),
         ("board_events", "board_events", json!({})),
     ]
@@ -229,6 +247,49 @@ fn traffic_stays_within_ceilings() {
         }
     }
     assert!(over.is_empty(), "over ceiling:\n{}", over.join("\n"));
+}
+
+/// A cursor names a place in the listing, not a board process: a scan started on one board
+/// continues on another (a restart) and returns exactly the unpaged list.
+#[test]
+fn a_paged_summary_scan_continues_across_a_board_restart() {
+    let server = Running::start(seed(1), TOKEN);
+    let ids = |out: &Value| -> Vec<String> {
+        out["cards"]
+            .as_array()
+            .expect("cards")
+            .iter()
+            .map(|c| c["id"].as_str().expect("id").to_owned())
+            .collect()
+    };
+    let query = json!({ "view": "summary", "archived": "include" });
+    let list = |board: &Shared, args: Value| {
+        ops()
+            .into_iter()
+            .find(|o| o.name == "board_list")
+            .expect("op")
+            .call(board, None, args)
+            .expect("board_list")
+    };
+    let first_board = board(&server);
+    let all = ids(&list(&first_board, query.clone()));
+    let mut page = query.clone();
+    page["limit"] = json!(500);
+    let first = list(&first_board, page.clone());
+    drop(first_board);
+
+    let restarted = board(&server);
+    let mut seen = ids(&first);
+    let mut cursor = first["next_cursor"].clone();
+    while let Some(c) = cursor.as_str() {
+        let mut next = page.clone();
+        next["cursor"] = json!(c);
+        let out = list(&restarted, next);
+        seen.extend(ids(&out));
+        cursor = out["next_cursor"].clone();
+    }
+    assert_eq!(seen.len(), shapes().len());
+    assert_eq!(seen, all);
 }
 
 /// The value at quantile `q` of `samples` (sorted here).

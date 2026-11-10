@@ -848,6 +848,27 @@ impl<T: TickApi> Store for TickStore<T> {
         Ok(cards)
     }
 
+    /// The tasks alone: one read of the project lists and the tag's pages, never the board
+    /// documents or comments, so prompts, links and comments are left empty.
+    fn summaries(&self) -> Result<Vec<Card>, BoardError> {
+        let tasks = self.tagged()?;
+        let projects = self.projects()?;
+        let mut cards = tasks
+            .into_iter()
+            .map(|task| {
+                let project = projects.of(&task);
+                card_of(Parts {
+                    task,
+                    project,
+                    doc: None,
+                    comments: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        cards.sort_by_key(|c| (c.created_ms, c.id));
+        Ok(cards)
+    }
+
     /// Through the card's `number:<n>` tag: one tag read and one read per match, whatever
     /// the size of the board.
     fn numbered(&self, number: u64) -> Result<Vec<Card>, BoardError> {

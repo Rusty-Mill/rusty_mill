@@ -25,6 +25,16 @@ pub trait Store: Send + Sync {
     fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError>;
     /// All cards, oldest first.
     fn list(&self) -> Result<Vec<Card>, BoardError>;
+    /// Every card as [`Store::list`] returns it, but read only as far as a
+    /// [`CardSummary`](crate::domain::CardSummary) needs: an adapter may leave the prompt,
+    /// links and comments empty. Only for listings that return summaries; never write one
+    /// of these cards back. This default is [`Store::list`].
+    ///
+    /// # Errors
+    /// If the store fails.
+    fn summaries(&self) -> Result<Vec<Card>, BoardError> {
+        self.list()
+    }
     /// The cards carrying `number`: normally one, more only if a number was edited by hand.
     /// This default scans [`Store::list`]; an adapter that can find a number directly
     /// overrides it, so a lookup by number does not grow with the board.
@@ -205,6 +215,9 @@ impl<T: Store + ?Sized> Store for Box<T> {
     }
     fn numbered(&self, number: u64) -> Result<Vec<Card>, BoardError> {
         (**self).numbered(number)
+    }
+    fn summaries(&self) -> Result<Vec<Card>, BoardError> {
+        (**self).summaries()
     }
     fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         (**self).insert(card, event)
