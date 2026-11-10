@@ -17,7 +17,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | DECCOLM side effects, never a resize | done | #856 |
 | Ring-buffer screen + recycled scrollback rows | done | #930 merged (memmove 4.6%); MB/s floors met on the 4 MB workloads (#1019, `rusty_term/bench/floors.py`), #889 closed 2026-10-25 |
 | Printable-ASCII fast path | done | #936 (backlog #4) |
-| Snapshot serializer | done | #939: 2.09 MB for 200x50 + 10k lines (target ≤ 7.8 MB); encode 9.3-14.3 ms (target ≤ 11.2 ms, not met reliably) |
+| Snapshot serializer | done | #939: 2.09 MB for 200x50 + 10k lines (target ≤ 7.8 MB); encode 9.3-14.3 ms then. The RTCP v6 checkpoint that replaced it meets ≤ 11.2 ms reliably: on Beast 2026-11-10 (main db325fada, release), 1.51 ms best, 1.6-1.7 ms median, 3.6 ms worst over 147 runs, 403 KB (`measure_checkpoint_encode`; card #786). The old RTSN path measured 6.0-10.6 ms |
 
 ## Capability matrix
 

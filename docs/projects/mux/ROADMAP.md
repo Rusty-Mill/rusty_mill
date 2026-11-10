@@ -4,7 +4,7 @@ Phases from the design brief §9. Each exit criterion is a test or a measured nu
 
 ## Phase 0: engine prerequisites (done 2026-10-23, one target open)
 
-Status: items 1, 2 and 4 landed (#872, #894, #939); item 3 landed as #930 plus #936. The MB/s floors (#889) are met on the 4 MB workloads (#1019; #889 closed 2026-10-25). Open: reliable ≤ 11.2 ms encode (#939). See CAPABILITIES.
+Status: items 1, 2 and 4 landed (#872, #894, #939); item 3 landed as #930 plus #936. The MB/s floors (#889) are met on the 4 MB workloads (#1019; #889 closed 2026-10-25). The ≤ 11.2 ms encode is met reliably (card #786, Beast 2026-11-10: the RTCP v6 checkpoint encodes 200x50 + 10k lines in 1.51 ms best, 3.6 ms worst over 147 runs, 403 KB). See CAPABILITIES.
 
 1. #872 lands: instruction-count gate in `required-gate`.
 2. #855 lands: per-code-point widths by default, mode 2027 opt-in; `vim_edit` matches the oracle.
