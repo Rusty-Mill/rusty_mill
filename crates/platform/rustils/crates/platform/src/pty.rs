@@ -65,7 +65,10 @@ pub trait Pty {
     /// terminal session. `cmd.group` accepts
     /// [`GroupSpec::Inherit`](crate::process::GroupSpec::Inherit) and
     /// [`GroupSpec::NewGroup`](crate::process::GroupSpec::NewGroup)
-    /// (both are effectively the same request here — see below) but
+    /// (on Unix both are effectively the same request — see below; on
+    /// Windows `NewGroup` also puts the child in a kill-on-close Job
+    /// Object, so `kill_tree` and dropping the child end everything it
+    /// started, where `Inherit` leaves it in none) but
     /// [`GroupSpec::JoinGroup`](crate::process::GroupSpec::JoinGroup)
     /// fails with `InvalidInput`: a pty-hosted child unconditionally
     /// becomes a new *session* leader (the mechanism that makes it own
