@@ -2468,6 +2468,9 @@ fn hosts_ctl(home: &Path, args: &[&str]) -> Output {
         .env_remove("RUSTY_MUX_BLOCK")
         .env_remove("RUSTY_MUX_CONFIG")
         .env("XDG_CONFIG_HOME", home)
+        // An ssh address runs this `ssh`, which only a test that wants one
+        // writes; otherwise it fails to start and the address is skipped.
+        .env("RUSTY_MUX_SSH", home.join("ssh"))
         .args(args)
         .output()
         .expect("run rusty-mux-ctl")
@@ -2600,7 +2603,11 @@ fn a_host_reaches_its_first_address_that_answers() {
     assert_eq!(output.status.code(), Some(4));
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(said.contains("no server is running"), "{said}");
-    assert!(said.contains("not supported yet"), "{said}");
+    let skipped = match cfg!(unix) {
+        true => "starting",
+        false => "need Unix",
+    };
+    assert!(said.contains(skipped), "{said}");
 
     // An unknown host, or a host and a socket together, are usage errors.
     assert_eq!(
@@ -2675,6 +2682,53 @@ fn following_events_reports_and_watch_runs_rules_for_changed_hosts() {
 fn wait_refuses_ctls_own_event() {
     let output = hosts_ctl(&config_home("wait"), &["wait", "--event", "hosts-changed"]);
     assert_eq!(output.status.code(), Some(2));
+}
+
+/// `--host` reaches an ssh address through the shared forward: `ssh`
+/// gets the owned options and `BatchMode`, and the call goes through the
+/// local socket it forwards (here a link to the server's socket).
+#[cfg(unix)]
+#[test]
+fn a_host_reaches_an_ssh_address_through_a_forward() {
+    use std::os::unix::fs::PermissionsExt;
+    let socket = start_server();
+    let home = config_home("forward");
+    hosts_ok(
+        &home,
+        &[
+            "hosts",
+            "add",
+            "far",
+            "--ssh",
+            "me@far",
+            "--socket",
+            path_text(&socket),
+        ],
+    );
+    let ssh = home.join("ssh");
+    std::fs::write(
+        &ssh,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv\"\n\
+         while [ $# -gt 0 ]; do [ \"$1\" = -L ] && f=$2; shift; done\n\
+         ln -s \"${f#*:}\" \"${f%%:*}\"\nexec sleep 30\n",
+    )
+    .expect("write fake ssh");
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    hosts_ok(
+        &home,
+        &["--host", "far", "create-session", "--name", "via-ssh"],
+    );
+    assert!(ok(&socket, &["list"]).contains("via-ssh"));
+    let argv = std::fs::read_to_string(home.join("argv")).expect("ssh ran");
+    for option in [
+        "ControlMaster=no",
+        "ExitOnForwardFailure=yes",
+        "BatchMode=yes",
+    ] {
+        assert!(argv.lines().any(|a| a == option), "{option}: {argv}");
+    }
+    assert!(argv.ends_with("--\nme@far\n"), "{argv}");
 }
 
 /// A stand-in `ssh` that runs the remote command here, with `HOME` as the

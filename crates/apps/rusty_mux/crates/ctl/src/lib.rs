@@ -139,7 +139,8 @@ pub struct Env {
     pub agent_homes: AgentHomes,
     /// This program, which the agent's session-start hook runs.
     pub ctl: Option<PathBuf>,
-    /// `$RUSTY_MUX_SSH`: the `ssh` that `terminfo` runs; `ssh` when unset.
+    /// `$RUSTY_MUX_SSH`: the `ssh` that `terminfo`, `ssh` and `--host`'s
+    /// ssh addresses run; `ssh` when unset.
     pub ssh: Option<OsString>,
 }
 
@@ -277,7 +278,7 @@ pub fn run_process(args: &[String], env: &Env) -> Exit {
         Ok(invocation) if matches!(invocation.command, Command::Bridge) => invocation,
         Ok(invocation) if matches!(invocation.command, Command::Own) => {
             return match socket(&invocation, env, &Stop::default()) {
-                Ok(socket) => finish(own(&socket), &socket, &mut err),
+                Ok(reached) => finish(own(&reached.socket), &reached.socket, &mut err),
                 Err((exit, reason)) => report(&mut err, exit, &reason),
             };
         }
@@ -297,7 +298,7 @@ pub fn run_process(args: &[String], env: &Env) -> Exit {
         _ => return run(args, env, &mut io::stdout(), &mut err),
     };
     match socket(&bridged, env, &Stop::default()) {
-        Ok(socket) => finish(bridge(&socket), &socket, &mut err),
+        Ok(reached) => finish(bridge(&reached.socket), &reached.socket, &mut err),
         Err((exit, reason)) => report(&mut err, exit, &reason),
     }
 }
@@ -371,7 +372,11 @@ pub fn hook_tool_name(input: &[u8]) -> Option<String> {
 /// The socket of the host `invocation` names (see [`hosts::resolve`]),
 /// else the socket it names, else `$RUSTY_MUX_SOCKET`, else the default
 /// socket; the error carries its exit code.
-fn socket(invocation: &Invocation, env: &Env, stop: &Stop) -> Result<PathBuf, (Exit, String)> {
+fn socket(
+    invocation: &Invocation,
+    env: &Env,
+    stop: &Stop,
+) -> Result<hosts::Reached, (Exit, String)> {
     if let Some(name) = &invocation.host {
         return hosts::resolve(name, env, stop);
     }
@@ -380,6 +385,7 @@ fn socket(invocation: &Invocation, env: &Env, stop: &Stop) -> Result<PathBuf, (E
         .clone()
         .or_else(|| env.socket.clone())
         .or_else(|| env.default_socket.clone())
+        .map(hosts::Reached::local)
         .ok_or((Exit::Usage, "no socket: pass --socket or --host, set RUSTY_MUX_SOCKET, or set XDG_RUNTIME_DIR (LOCALAPPDATA on Windows) for the default".to_owned()))
 }
 
@@ -468,10 +474,11 @@ pub fn run_until(
         | Command::Run(_)
         | Command::ServerStop => {}
     }
-    let socket = match socket(&invocation, env, stop) {
-        Ok(socket) => socket,
+    let reached = match socket(&invocation, env, stop) {
+        Ok(reached) => reached,
         Err((exit, reason)) => return report(err, exit, &reason),
     };
+    let socket = &reached.socket;
     // A follower also looks at the hosts file between reads.
     let follows = matches!(
         invocation.command,
@@ -489,7 +496,7 @@ pub fn run_until(
     if let Command::Watch { after } = invocation.command {
         return run_watch(
             after,
-            &socket,
+            socket,
             env,
             invocation.json,
             &stop,
@@ -502,14 +509,14 @@ pub fn run_until(
     let stop = deadline.map_or_else(|| stop.clone(), |d| stop.sooner(d));
     let result = execute(
         &invocation,
-        &socket,
+        socket,
         env.here.session,
         &stop,
         tracker,
         out,
         err,
     );
-    finish(timed_out(result, deadline), &socket, err)
+    finish(timed_out(result, deadline), socket, err)
 }
 
 /// How long `server stop` waits for the server to finish stopping.

@@ -85,6 +85,33 @@ impl Receiver {
     }
 }
 
+/// Assembles one [`Message::History`](crate::Message::History) batch at
+/// a time from its chunks, as [`Receiver`] does a checkpoint: a bad chunk
+/// fails the whole stream.
+#[derive(Default)]
+pub struct HistoryReceiver {
+    batch: Receiver,
+}
+impl HistoryReceiver {
+    /// Add a chunk; returns the batch it completes, if it does.
+    pub fn push(
+        &mut self,
+        offset: u64,
+        total: u64,
+        bytes: &[u8],
+    ) -> Result<Option<Vec<u8>>, String> {
+        if offset == 0 && self.batch.total.is_some() {
+            self.batch.failed = true;
+            return Err("history batch cut short".into());
+        }
+        self.batch.push(offset, total, bytes)?;
+        if self.batch.total != Some(self.batch.data.len()) {
+            return Ok(None);
+        }
+        Ok(Some(std::mem::take(&mut self.batch).data))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +136,19 @@ mod tests {
         receiver.push(0, 8, b"1234").unwrap();
         assert!(receiver.push(4, 9, b"5678").is_err());
         assert!(receiver.push(0, 8, b"12345678").is_err());
+    }
+
+    #[test]
+    fn history_batches_assemble_one_at_a_time() {
+        let mut history = HistoryReceiver::default();
+        assert_eq!(history.push(0, 8, b"1234"), Ok(None));
+        assert_eq!(history.push(4, 8, b"5678"), Ok(Some(b"12345678".to_vec())));
+        assert_eq!(history.push(0, 2, b"ab"), Ok(Some(b"ab".to_vec())));
+        assert_eq!(history.push(0, 4, b"ab"), Ok(None));
+        assert!(history.push(0, 4, b"cd").is_err(), "a batch cut short");
+        assert!(
+            history.push(0, 2, b"ab").is_err(),
+            "a failed stream stays failed"
+        );
     }
 }

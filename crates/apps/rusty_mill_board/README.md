@@ -74,7 +74,7 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
   `card_get`, `card_trace`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_archive`,
   `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `board_milestones`, `milestone_add`,
-  `milestone_update`, `inbox_list`, `inbox_act`. The web API
+  `milestone_update`, `inbox_list`, `inbox_act`, `board_number_cards`. The web API
   exposes the same table, so the two cannot drift.
 - **Milestones.** A project's dated goals (`src/milestones.rs`): a title and a target date, closed when reached, never
   deleted. `milestone_add` and `milestone_update` need Triage and the project in scope; `board_milestones` lists what the
@@ -107,6 +107,11 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 - **By date (#744).** `board_list` takes `created_from`/`created_to`, `updated_from`/`updated_to` and
   `moved_from`/`moved_to` (Unix ms, `from` inclusive, `to` exclusive). Moves come from rusty_tick's durable move
   history (`GET /moves`), so they survive restarts; entering the board counts as a move.
+- **Summaries and pages (#1429).** `board_list` with `view: "summary"` returns each card's task fields only (no
+  body, prompt, comments or links) and reads only rusty_tick's tasks, about a third of a full read. `limit` (1–500)
+  pages either view in list order, `(created_ms, id)`, and returns `next_cursor` until the listing is done; a page also
+  stops at 512 KiB. A cursor is opaque, tied to its query, and survives a restart; scope is applied to every page. Left
+  out, both keep `board_list` as it was: every matching card, full.
 - **Decision inbox (#595).** `inbox_list` and `inbox_act` (admin only, and only through a token or OAuth credential, never a caller-named actor) show and decide the open BBP escalations
   of the tasks linked from cards. Mill Board stores none of it: run with `--bbp-bin PATH --bbp-root DIR` on the
   orch host and it runs `bbp inbox` and fenced `bbp human` commands, so the host stays the only writer of the log.

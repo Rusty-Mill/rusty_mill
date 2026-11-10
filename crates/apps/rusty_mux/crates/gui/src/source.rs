@@ -35,7 +35,7 @@ use rusty_mux_client::attach::{
     CONTROL, HANDSHAKE, Missed, Opened, PANE, Plan, Requests, Welcomed, backoff, clone, connect,
     first_session_name, reach_with, take_over_with,
 };
-use rusty_mux_client::checkpoint::Receiver;
+use rusty_mux_client::checkpoint::{HistoryReceiver, Receiver};
 use rusty_mux_client::older::Older;
 use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Side, Size, WindowId};
 use rusty_mux_proto::{Features, Launch, Message, Program, Takeover};
@@ -71,7 +71,8 @@ pub const GUI: Features = CONTROL
 /// over (handoff D153). The TUI's [`PANE`] stays as it is.
 pub const BLOCK: Features = PANE
     .union(Features::INPUT_GATE)
-    .union(Features::LEASE_REQUESTS);
+    .union(Features::LEASE_REQUESTS)
+    .union(Features::BACKGROUND_HISTORY);
 
 /// Never set: the handshakes here are not cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -1236,6 +1237,8 @@ impl Block {
     fn read_one(&self, conn: &mut Conn<UnixStream>, feed: &SyncSender<Feed>) -> Read {
         let block = self.block;
         let mut checkpoint = Some(Receiver::default());
+        // `None` once the history stream failed: the rest is ignored.
+        let mut history = Some(HistoryReceiver::default());
         while let Ok(message) = conn.recv() {
             let step = match message {
                 Message::Checkpoint {
@@ -1257,6 +1260,26 @@ impl Block {
                         _ => {
                             eprintln!("rusty-mux-gui: block {block}: a bad checkpoint");
                             return Read::Ended;
+                        }
+                    }
+                }
+                Message::History {
+                    block: b,
+                    offset,
+                    total,
+                    data,
+                } if b == block && checkpoint.is_none() => {
+                    let Some(receiver) = history.as_mut() else {
+                        continue;
+                    };
+                    match receiver.push(offset, total, &data) {
+                        Ok(Some(batch)) => Feed::History(batch),
+                        Ok(None) => continue,
+                        Err(err) => {
+                            // The screen stands; only older history is lost.
+                            eprintln!("rusty-mux-gui: block {block}: bad history: {err}");
+                            history = None;
+                            continue;
                         }
                     }
                 }

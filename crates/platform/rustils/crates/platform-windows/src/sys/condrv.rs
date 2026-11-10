@@ -821,14 +821,18 @@ impl Drop for Server {
 /// Spawn `command_line` attached to `server`: the console reference
 /// attribute, plus a handle list holding only the three std handles,
 /// which are inheritable duplicates of `\Input`, `\Output`, `\Output`
-/// closed again once `CreateProcessW` returns. Returns the process handle
+/// closed again once `CreateProcessW` returns. With `new_group` the child
+/// starts `CREATE_SUSPENDED`, joins a fresh kill-on-close Job Object and
+/// only then resumes (`proc::join_new_job`, card #282, pack D181).
+/// Returns the process handle, its job (`Some` exactly when `new_group`)
 /// and pid.
 pub fn spawn(
     server: &Server,
     command_line: &[u16],
     cwd: &OsStr,
     env: &EnvSpec,
-) -> Result<(OwnedWinHandle, u32)> {
+    new_group: bool,
+) -> Result<(OwnedWinHandle, Option<OwnedWinHandle>, u32)> {
     let (input, output) = server.open_std()?;
     let std_in = handle::duplicate(&input, true)?;
     let std_out = handle::duplicate(&output, true)?;
@@ -868,6 +872,9 @@ pub fn spawn(
     siex.lpAttributeList = attrs.raw();
 
     let mut flags = w::EXTENDED_STARTUPINFO_PRESENT;
+    if new_group {
+        flags |= w::CREATE_SUSPENDED;
+    }
     if block.is_some() {
         flags |= w::CREATE_UNICODE_ENVIRONMENT;
     }
@@ -901,11 +908,16 @@ pub fn spawn(
         return Err(errmap::last_win32_err("CreateProcessW", cwd));
     }
     // SAFETY: fresh handles from the successful call above, owned by nobody else.
-    drop(unsafe { OwnedWinHandle::from_raw(pi.hThread) });
+    let thread = unsafe { OwnedWinHandle::from_raw(pi.hThread) };
     // SAFETY: as above.
     let process = unsafe { OwnedWinHandle::from_raw(pi.hProcess) }
         .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreateProcessW"))?;
-    Ok((process, pi.dwProcessId))
+    if !new_group {
+        return Ok((process, None, pi.dwProcessId));
+    }
+    // Suspended → assign → resume; a failure terminates the child.
+    let job = proc::join_new_job(&process, thread.as_ref())?;
+    Ok((process, Some(job), pi.dwProcessId))
 }
 
 /// A `PROC_THREAD_ATTRIBUTE_LIST`, deleted on drop.

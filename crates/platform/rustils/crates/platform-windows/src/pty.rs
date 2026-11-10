@@ -64,11 +64,12 @@ impl WindowsPty {
 
         let _serial = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
         let (hpc, input, output) = syspty::create_pty(size)?;
-        match syspty::spawn_attached(hpc, &line, &cmd.cwd, &cmd.env) {
-            Ok((process, pid)) => {
-                // No Job Object — see `sys::pty::spawn_attached`'s own
-                // doc comment for why (a real, deliberate scope
-                // reduction, not a settled design choice).
+        // `NewGroup` gives the child a kill-on-close Job Object, so
+        // `kill_tree` ends everything it started and dropping the child
+        // ends it too (card #282, pack D181); `Inherit` runs it in none.
+        let new_group = cmd.group == GroupSpec::NewGroup;
+        match syspty::spawn_attached_grouped(hpc, &line, &cmd.cwd, &cmd.env, new_group) {
+            Ok((process, job, pid)) => {
                 let closed = Arc::new(CloseGuard::new());
                 // `Ok(0)` once the child exits is this trait's own
                 // documented contract (`platform::pty::PtyMaster::read`)
@@ -78,7 +79,7 @@ impl WindowsPty {
                 // `output` itself (see its own doc comment for why), so
                 // only `closed` needs to be shared with it.
                 syspty::spawn_exit_watcher(&process, hpc, Arc::clone(&closed));
-                let child = WindowsChild::from_parts(process, None, pid);
+                let child = WindowsChild::from_parts(process, job, pid);
                 Ok((
                     WindowsPtyMaster {
                         hpc,

@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 # The one mux crate that links the rusty_term front end (pack D96).
 rusty_term = { workspace = true, features = ["gui"] }
-rusty_mux_client = { workspace = true }
+rusty_mux_client = { workspace = true, features = ["screen"] }
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
 # Reads the blocks' OSC 7501 reports for their headers (gui-design D48).

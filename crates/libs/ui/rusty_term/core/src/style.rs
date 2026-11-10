@@ -169,6 +169,26 @@ impl Remap {
     }
 }
 
+/// `style` with its colours mapped as [`StyleTable::retheme`] maps them.
+pub(crate) fn rethemed(
+    mut style: CellStyle,
+    map: &impl Fn(u32) -> u32,
+    entry: &impl Fn(u8, u32) -> u32,
+) -> CellStyle {
+    // A default colour is stored as 0 and resolved on read: only the
+    // colours the child chose are remapped. A palette colour goes
+    // through `entry` with its entry, so it follows the palette rather
+    // than whatever RGB it happens to equal.
+    let colour = |c: u32, tag: u16, default: bool| match Source::entry(tag) {
+        _ if default => c,
+        Some(n) => entry(n, c),
+        None => map(c),
+    };
+    style.fg = colour(style.fg, style.fg_index, style.attrs & ATTR_FG_DEFAULT != 0);
+    style.bg = colour(style.bg, style.bg_index, style.attrs & ATTR_BG_DEFAULT != 0);
+    style
+}
+
 /// Fewest live styles before either sweep trigger can fire.
 pub(crate) const SWEEP_MIN: usize = 4096;
 /// Fewest entries before a compaction is worth its full rewrite.
@@ -485,19 +505,7 @@ impl StyleTable {
         map: impl Fn(u32) -> u32,
         entry: impl Fn(u8, u32) -> u32,
     ) -> Option<Remap> {
-        // A default colour is stored as 0 and resolved on read: only the
-        // colours the child chose are remapped. A palette colour goes
-        // through `entry` with its entry, so it follows the palette rather
-        // than whatever RGB it happens to equal.
-        let colour = |c: u32, tag: u16, default: bool| match Source::entry(tag) {
-            _ if default => c,
-            Some(n) => entry(n, c),
-            None => map(c),
-        };
-        self.restyle(|style| {
-            style.fg = colour(style.fg, style.fg_index, style.attrs & ATTR_FG_DEFAULT != 0);
-            style.bg = colour(style.bg, style.bg_index, style.attrs & ATTR_BG_DEFAULT != 0);
-        })
+        self.restyle(|style| *style = rethemed(*style, &map, &entry))
     }
 
     /// Recolour every entry in a palette colour from `palette` (OSC 4 and

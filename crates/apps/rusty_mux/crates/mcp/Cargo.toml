@@ -2,7 +2,7 @@
 name = "rusty_mux_mcp"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.98.1"
 license = "MIT"
 description = "rusty-mux-mcp: the rusty_mux request catalog as MCP tools over stdio, each call run as rusty-mux-ctl would run it."
 repository = "https://github.com/Rusty-Mill/rusty_mill"

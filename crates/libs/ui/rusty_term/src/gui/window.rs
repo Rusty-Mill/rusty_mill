@@ -516,6 +516,9 @@ fn reader_loop(
     wake: WakeFlag,
     mut send: impl FnMut(UserEvent) -> bool,
 ) {
+    // The theme pair the last screen was recoloured with; its history
+    // batches are recoloured the same way.
+    let mut themed = None;
     for step in feed {
         if let Feed::Take(take) = step {
             if !send(UserEvent::Take(id, take)) {
@@ -523,7 +526,7 @@ fn reader_loop(
             }
             continue;
         }
-        let response = apply(step, &grid, &parser);
+        let response = apply(step, &grid, &parser, &mut themed);
         if let Some(replies) = replies.as_mut().filter(|_| !response.is_empty()) {
             let _ = replies.write(&response);
         }
@@ -541,8 +544,14 @@ fn reader_loop(
 }
 
 /// Apply one feed step to a pane's terminal, returning the parser's
-/// replies to the program.
-fn apply(step: Feed, grid: &Mutex<Grid>, parser: &Mutex<AnsiParser>) -> Vec<u8> {
+/// replies to the program. `themed` is the `(source's, pane's)` theme pair
+/// the last screen was recoloured with, for the history that follows it.
+fn apply(
+    step: Feed,
+    grid: &Mutex<Grid>,
+    parser: &Mutex<AnsiParser>,
+    themed: &mut Option<(Theme, Theme)>,
+) -> Vec<u8> {
     match step {
         Feed::Bytes(data) => {
             // Bulk: step aside for the UI thread between chunks.
@@ -562,6 +571,7 @@ fn apply(step: Feed, grid: &Mutex<Grid>, parser: &Mutex<AnsiParser>) -> Vec<u8> 
             let ours = p.retheme(Theme::default());
             let theirs = new_p.retheme(ours);
             new_g.retheme(&theirs, &ours);
+            *themed = Some((theirs, ours));
             new_g.cell_px = g.cell_px;
             new_g.min_contrast = g.min_contrast;
             new_g.bidi = g.bidi;
@@ -570,6 +580,13 @@ fn apply(step: Feed, grid: &Mutex<Grid>, parser: &Mutex<AnsiParser>) -> Vec<u8> 
         }
         Feed::Resized { cols, rows } => {
             grid.lock().resize(cols.into(), rows.into());
+            Vec::new()
+        }
+        Feed::History(batch) => {
+            let theme = themed.as_ref().map(|(theirs, ours)| (theirs, ours));
+            if let Err(err) = grid.lock().prepend_history(&batch, theme) {
+                eprintln!("rusty-term: a bad history batch: {err}");
+            }
             Vec::new()
         }
         // The reader loop tells the window instead.

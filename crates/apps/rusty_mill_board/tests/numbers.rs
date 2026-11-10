@@ -102,7 +102,7 @@ fn a_number_never_changes_and_is_not_a_tag_people_set() {
 }
 
 #[test]
-fn a_task_made_in_rusty_tick_gets_a_number_with_the_next_card() {
+fn a_task_made_in_rusty_tick_is_numbered_by_the_startup_job_not_by_the_next_card() {
     let tick = FakeTick::default();
     let board = tick_board(&tick);
     let human = board.roles().actor("nano", "human").expect("role");
@@ -117,11 +117,53 @@ fn a_task_made_in_rusty_tick_gets_a_number_with_the_next_card() {
     tick.owner_edit(stray.id, |t| t["tags"] = json!(["agent"]));
     assert_eq!(board.get(stray.id).expect("get").number, None);
 
+    // Adding reads no other card, so the stray waits for the job main runs at startup.
     let next = board.add(&human, "next", "", vec![]).expect("add");
+    assert_eq!(next.number, Some(3));
+    assert_eq!(board.get(stray.id).expect("get").number, None);
+
     // #2 stays reserved for the stray's first life; numbers are never handed out twice.
-    assert_eq!(board.get(stray.id).expect("get").number, Some(3));
-    assert_eq!(next.number, Some(4));
-    assert_eq!(board.get_number(4).expect("by number").id, next.id);
+    assert_eq!(board.number_cards(), Ok(1));
+    assert_eq!(board.get(stray.id).expect("get").number, Some(4));
+    assert_eq!(board.get_number(3).expect("by number").id, next.id);
+}
+
+#[test]
+fn a_restarted_board_numbers_above_every_reservation_even_a_trashed_cards() {
+    let tick = FakeTick::default();
+    let human_of = |b: &Board<TickStore<FakeTick>>| b.roles().actor("nano", "human").expect("role");
+    let before = tick_board(&tick);
+    let human = human_of(&before);
+    for title in ["a", "b", "c"] {
+        before.add(&human, title, "", vec![]).expect("add");
+    }
+    let trashed = before.add(&human, "trashed", "", vec![]).expect("add");
+    assert_eq!(trashed.number, Some(4));
+    tick.owner_edit(trashed.id, |t| t["deletedMs"] = json!(1));
+    drop(before);
+
+    let after = tick_board(&tick);
+    assert_eq!(after.number_cards(), Ok(0));
+    let next = after
+        .add(&human_of(&after), "next", "", vec![])
+        .expect("add");
+    assert_eq!(next.number, Some(5), "never #4 again, and never below it");
+}
+
+/// A board that never ran the startup job (its store was down) still numbers correctly: the
+/// first new card does the job once.
+#[test]
+fn the_first_card_numbers_strays_when_the_startup_job_did_not_run() {
+    let store = MemStore::default();
+    let stray = Card::new("stray", "", vec![], 1).expect("card");
+    store
+        .insert(&stray, Event::of(&stray, EventKind::Created, "x"))
+        .expect("insert");
+    let board = Board::with_clock(store, Roles::default(), clock);
+    let human = board.roles().actor("nano", "human").expect("role");
+    let first = board.add(&human, "first", "", vec![]).expect("add");
+    assert_eq!(board.get(stray.id).expect("get").number, Some(1));
+    assert_eq!(first.number, Some(2));
 }
 
 #[test]

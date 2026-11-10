@@ -353,6 +353,18 @@ fn task_tags(card: &Card) -> Vec<String> {
     tags
 }
 
+/// The column a task's card is in: its `board:` tag while open, else Done.
+fn column_of(task: &Task) -> Column {
+    if task.status != "open" {
+        return Column::DONE;
+    }
+    task.tags
+        .iter()
+        .find_map(|t| t.strip_prefix("board:"))
+        .and_then(|c| Column::new(c).ok())
+        .unwrap_or(Column::BACKLOG)
+}
+
 fn card_of(parts: Parts) -> Result<Card, BoardError> {
     let Parts {
         task,
@@ -361,15 +373,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         comments,
     } = parts;
     let rev = task.version()?.saturating_sub(1);
-    let column = if task.status == "open" {
-        task.tags
-            .iter()
-            .find_map(|t| t.strip_prefix("board:"))
-            .and_then(|c| Column::new(c).ok())
-            .unwrap_or(Column::BACKLOG)
-    } else {
-        Column::DONE
-    };
+    let column = column_of(&task);
     let claim = task
         .tags
         .iter()
@@ -618,6 +622,55 @@ impl<T: TickApi> TickStore<T> {
         Ok(by_task)
     }
 
+    /// Reserve the first free number of `RESERVE_ATTEMPTS` from `first`; `None` if another
+    /// board holds them all.
+    fn reserve_from(&self, card: Uuid, first: u64) -> Result<Option<u64>, BoardError> {
+        for n in first..first + RESERVE_ATTEMPTS {
+            let mut request =
+                TickRequest::new("PUT", format!("/docs/{NUMBER_KIND}/{}", number_doc(n)))
+                    .body(json!({ "v": 1, "number": n, "taskId": card }));
+            request.if_absent = true;
+            match self.tick.send(&request)?.0 {
+                200 => return Ok(Some(n)),
+                412 => continue,
+                status => {
+                    return Err(BoardError::Storage(format!(
+                        "rusty_tick answered {status} reserving card number {n}"
+                    )));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Every card on the board in list order; with `whole`, also their board documents and
+    /// comments, otherwise the tasks alone.
+    fn board(&self, whole: bool) -> Result<Vec<Card>, BoardError> {
+        let tasks = self.tagged()?;
+        let projects = self.projects()?;
+        let (mut docs, mut comments) = if whole {
+            (self.board_docs()?, self.comments(None)?)
+        } else {
+            (BTreeMap::new(), BTreeMap::new())
+        };
+        let mut cards = tasks
+            .into_iter()
+            .map(|task| {
+                let project = projects.of(&task);
+                let doc = docs.remove(&task.id);
+                let comments = comments.remove(&task.id).unwrap_or_default();
+                card_of(Parts {
+                    task,
+                    project,
+                    doc,
+                    comments,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        cards.sort_by_key(|c| (c.created_ms, c.id));
+        Ok(cards)
+    }
+
     fn tagged(&self) -> Result<Vec<Task>, BoardError> {
         let tasks: Vec<Task> = self.collection(&format!("/tags/{AGENT_TAG}/tasks"), "tasks")?;
         Ok(tasks.into_iter().filter(Task::on_board).collect())
@@ -826,26 +879,13 @@ impl<T: TickApi> Store for TickStore<T> {
     }
 
     fn list(&self) -> Result<Vec<Card>, BoardError> {
-        let tasks = self.tagged()?;
-        let projects = self.projects()?;
-        let mut docs = self.board_docs()?;
-        let mut comments = self.comments(None)?;
-        let mut cards = tasks
-            .into_iter()
-            .map(|task| {
-                let project = projects.of(&task);
-                let doc = docs.remove(&task.id);
-                let comments = comments.remove(&task.id).unwrap_or_default();
-                card_of(Parts {
-                    task,
-                    project,
-                    doc,
-                    comments,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        cards.sort_by_key(|c| (c.created_ms, c.id));
-        Ok(cards)
+        self.board(true)
+    }
+
+    /// The tasks alone: one read of the project lists and the tag's pages, never the board
+    /// documents or comments, so prompts, links and comments are left empty.
+    fn summaries(&self) -> Result<Vec<Card>, BoardError> {
+        self.board(false)
     }
 
     /// Through the card's `number:<n>` tag: one tag read and one read per match, whatever
@@ -1011,31 +1051,65 @@ impl<T: TickApi> Store for TickStore<T> {
     }
 
     /// Reservations are `board_number` documents, created with `If-None-Match: *` and kept
-    /// whatever happens to the task, so a number never comes back.
+    /// whatever happens to the task, so a number never comes back. Tries the numbers above
+    /// `floor` in turn, one write each; if another board has taken all of a run of them, it
+    /// reads every reservation once and goes on above the highest.
     fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+        if let Some(n) = self.reserve_from(card, floor + 1)? {
+            return Ok(n);
+        }
+        let first = self.highest_reserved()?.max(floor + RESERVE_ATTEMPTS) + 1;
+        self.reserve_from(card, first)?.ok_or(BoardError::Conflict)
+    }
+
+    fn highest_reserved(&self) -> Result<u64, BoardError> {
         let docs: Vec<Doc> = self.collection(&format!("/docs/{NUMBER_KIND}"), "docs")?;
-        let reserved = docs
+        Ok(docs
             .iter()
             .filter_map(|d| d.body["number"].as_u64())
             .max()
-            .unwrap_or(0);
-        let first = reserved.max(floor) + 1;
-        for n in first..first + RESERVE_ATTEMPTS {
-            let mut request =
-                TickRequest::new("PUT", format!("/docs/{NUMBER_KIND}/{}", number_doc(n)))
-                    .body(json!({ "v": 1, "number": n, "taskId": card }));
-            request.if_absent = true;
-            match self.tick.send(&request)?.0 {
-                200 => return Ok(n),
-                412 => continue,
-                status => {
-                    return Err(BoardError::Storage(format!(
-                        "rusty_tick answered {status} reserving card number {n}"
-                    )));
+            .unwrap_or(0))
+    }
+
+    /// The tasks tagged with each column, never a board document or comment: one paged tag
+    /// read per column and one of the project lists.
+    fn in_columns(&self, columns: &[Column]) -> Result<Vec<Card>, BoardError> {
+        let projects = self.projects()?;
+        let mut cards: BTreeMap<Uuid, Card> = BTreeMap::new();
+        for column in columns {
+            let tasks: Vec<Task> =
+                self.collection(&format!("/tags/board:{column}/tasks"), "tasks")?;
+            for task in tasks.into_iter().filter(Task::on_board) {
+                let project = projects.of(&task);
+                let card = card_of(Parts {
+                    task,
+                    project,
+                    doc: None,
+                    comments: Vec::new(),
+                })?;
+                // A task tagged with two columns is in the first one only, as everywhere.
+                if columns.contains(&card.column) {
+                    cards.insert(card.id, card);
                 }
             }
         }
-        Err(BoardError::Conflict)
+        let mut cards: Vec<Card> = cards.into_values().collect();
+        cards.sort_by_key(|c| (c.created_ms, c.id));
+        Ok(cards)
+    }
+
+    /// One task read per id.
+    fn open_among(&self, ids: &[Uuid]) -> Result<BTreeSet<Uuid>, BoardError> {
+        let mut open = BTreeSet::new();
+        for id in ids {
+            if self
+                .task(*id)?
+                .is_some_and(|t| t.on_board() && column_of(&t) != Column::DONE)
+            {
+                open.insert(*id);
+            }
+        }
+        Ok(open)
     }
 
     fn health(&self) -> Result<(), BoardError> {
