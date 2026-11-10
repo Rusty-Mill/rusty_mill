@@ -35,7 +35,7 @@ use rusty_mux_client::attach::{
     CONTROL, HANDSHAKE, Missed, Opened, PANE, Plan, Requests, Welcomed, backoff, clone, connect,
     first_session_name, reach_with, take_over_with,
 };
-use rusty_mux_client::checkpoint::Receiver;
+use rusty_mux_client::checkpoint::{HistoryReceiver, Receiver};
 use rusty_mux_client::older::Older;
 use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Side, Size, WindowId};
 use rusty_mux_proto::{Features, Launch, Message, Program, Takeover};
@@ -71,7 +71,8 @@ pub const GUI: Features = CONTROL
 /// over (handoff D153). The TUI's [`PANE`] stays as it is.
 pub const BLOCK: Features = PANE
     .union(Features::INPUT_GATE)
-    .union(Features::LEASE_REQUESTS);
+    .union(Features::LEASE_REQUESTS)
+    .union(Features::BACKGROUND_HISTORY);
 
 /// Never set: the handshakes here are not cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -1236,6 +1237,7 @@ impl Block {
     fn read_one(&self, conn: &mut Conn<UnixStream>, feed: &SyncSender<Feed>) -> Read {
         let block = self.block;
         let mut checkpoint = Some(Receiver::default());
+        let mut history = HistoryReceiver::default();
         while let Ok(message) = conn.recv() {
             let step = match message {
                 Message::Checkpoint {
@@ -1260,6 +1262,21 @@ impl Block {
                         }
                     }
                 }
+                Message::History {
+                    block: b,
+                    offset,
+                    total,
+                    data,
+                } if b == block && checkpoint.is_none() => match history.push(offset, total, &data)
+                {
+                    Ok(Some(batch)) => Feed::History(batch),
+                    Ok(None) => continue,
+                    Err(err) => {
+                        // The screen stands; only older history is lost.
+                        eprintln!("rusty-mux-gui: block {block}: bad history: {err}");
+                        continue;
+                    }
+                },
                 Message::Output { block: b, data } if b == block => Feed::Bytes(data),
                 Message::Event {
                     event: Event::BlockResized { block: b, size },

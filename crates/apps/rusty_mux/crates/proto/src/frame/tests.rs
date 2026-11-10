@@ -379,6 +379,12 @@ fn every_message_round_trips() {
             block,
             data: vec![0; 70_000],
         },
+        Message::History {
+            block,
+            offset: 65_536,
+            total: 70_000,
+            data: vec![7; 4_464],
+        },
         Message::Ready { block },
         Message::Output {
             block,

@@ -1,12 +1,15 @@
 //! A client's queue of encoded frames, with a byte budget.
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use rusty_mux_core::BlockId;
 use rusty_mux_proto::{Message, encode};
 use rusty_tokio::sync::Notify;
-use rusty_tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use rusty_tokio::sync::mpsc::{
+    TryRecvError, UnboundedReceiver, UnboundedSender, unbounded_channel,
+};
 
 /// Frames queued but not yet written beyond this many bytes mean the client
 /// cannot keep up; the server drops it rather than stall the PTY or grow
@@ -29,6 +32,8 @@ pub(crate) struct Inbox {
     rx: UnboundedReceiver<Item>,
     attaching: Rc<Cell<bool>>,
     transfer: Option<Transfer>,
+    /// History batches still to send after Ready (C03), between live frames.
+    history: Option<History>,
     queued: Rc<Cell<usize>>,
 }
 
@@ -50,6 +55,7 @@ pub(crate) fn outbox() -> (Outbox, Inbox, Rc<Notify>) {
             queued,
             attaching,
             transfer: None,
+            history: None,
         },
         cancel,
     )
@@ -78,11 +84,41 @@ impl Outbox {
 enum Item {
     Frame(Vec<u8>),
     Checkpoint(Transfer),
+    /// The client detached: history not yet sent is dropped.
+    EndHistory,
 }
 struct Transfer {
     block: BlockId,
     data: Vec<u8>,
     offset: usize,
+    /// History batches to follow Ready, newest first; empty without C03.
+    history: VecDeque<Vec<u8>>,
+}
+/// The history batches of one attach still to send, the first one from
+/// `offset` on.
+struct History {
+    block: BlockId,
+    batches: VecDeque<Vec<u8>>,
+    offset: usize,
+}
+impl History {
+    /// The next chunk of the current batch, or `None` once all are sent.
+    fn next(&mut self) -> Option<Message> {
+        let batch = self.batches.front()?;
+        let end = (self.offset + crate::checkpoint::CHUNK_BYTES).min(batch.len());
+        let message = Message::History {
+            block: self.block,
+            offset: self.offset as u64,
+            total: batch.len() as u64,
+            data: batch[self.offset..end].to_vec(),
+        };
+        self.offset = end;
+        if end == batch.len() {
+            self.batches.pop_front();
+            self.offset = 0;
+        }
+        Some(message)
+    }
 }
 
 impl Outbox {
@@ -107,8 +143,15 @@ impl Outbox {
     pub(crate) fn attaching(&self) -> bool {
         self.attaching.get()
     }
-    pub(crate) fn checkpoint(&self, block: BlockId, data: Vec<u8>) -> bool {
-        if data.len() > rusty_term_core::checkpoint::MAX_ENCODED || self.attaching.replace(true) {
+    /// Queues an attach's checkpoint, then Ready, then `history` (newest
+    /// batch first) between live frames. History is outside the live
+    /// budget, like the checkpoint; together they stay within one
+    /// checkpoint's size.
+    pub(crate) fn checkpoint(&self, block: BlockId, data: Vec<u8>, history: Vec<Vec<u8>>) -> bool {
+        let size = history
+            .iter()
+            .fold(data.len(), |n, b| n.saturating_add(b.len()));
+        if size > rusty_term_core::checkpoint::MAX_ENCODED || self.attaching.replace(true) {
             return false;
         }
         self.tx
@@ -116,8 +159,14 @@ impl Outbox {
                 block,
                 data,
                 offset: 0,
+                history: history.into(),
             }))
             .is_ok()
+    }
+
+    /// Drops history not yet sent: the client detached.
+    pub(crate) fn end_history(&self) -> bool {
+        self.tx.send(Item::EndHistory).is_ok()
     }
 }
 impl Inbox {
@@ -141,6 +190,11 @@ impl Inbox {
                     let message = Message::Ready {
                         block: transfer.block,
                     };
+                    self.history = Some(History {
+                        block: transfer.block,
+                        batches: std::mem::take(&mut transfer.history),
+                        offset: 0,
+                    });
                     self.transfer = None;
                     self.attaching.set(false);
                     message
@@ -153,14 +207,44 @@ impl Inbox {
                     }
                 };
             }
-            match self.rx.recv().await? {
+            let item = match self.history.as_mut() {
+                // Live output goes first; history fills the gaps.
+                Some(history) => match self.rx.try_recv() {
+                    Ok(item) => item,
+                    Err(TryRecvError::Empty) => match history.next() {
+                        Some(message) => return encode_history(&message),
+                        None => {
+                            self.history = None;
+                            continue;
+                        }
+                    },
+                    Err(TryRecvError::Disconnected) => return None,
+                },
+                None => self.rx.recv().await?,
+            };
+            match item {
                 Item::Frame(frame) => {
                     self.queued
                         .set(self.queued.get().saturating_sub(frame.len()));
                     return Some(frame);
                 }
-                Item::Checkpoint(transfer) => self.transfer = Some(transfer),
+                // A new attach ends the old one's history.
+                Item::Checkpoint(transfer) => {
+                    self.history = None;
+                    self.transfer = Some(transfer);
+                }
+                Item::EndHistory => self.history = None,
             }
+        }
+    }
+}
+
+fn encode_history(message: &Message) -> Option<Vec<u8>> {
+    match encode(message) {
+        Ok(frame) => Some(frame),
+        Err(err) => {
+            eprintln!("rusty-mux-server: encoding history: {err}");
+            None
         }
     }
 }
@@ -175,5 +259,96 @@ impl Drop for Outbox {
 impl Outbox {
     pub(crate) fn test_queue(&self) -> Rc<Cell<usize>> {
         self.queued.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusty_mux_proto::decode;
+    use rusty_tokio::runtime::{Builder, LocalOptions};
+    use rusty_uuid::Uuid;
+
+    /// The next message the writer would send, decoded.
+    async fn next(inbox: &mut Inbox) -> Message {
+        let frame = inbox.next().await.expect("a frame");
+        decode(&frame).expect("decodes").expect("whole").0
+    }
+
+    fn output(n: u8) -> Vec<u8> {
+        let block = BlockId::from_uuid(Uuid::nil());
+        encode(&Message::Output {
+            block,
+            data: vec![n],
+        })
+        .expect("encodes")
+    }
+
+    #[test]
+    fn history_follows_ready_and_gives_way_to_live_output() {
+        let runtime = Builder::new_current_thread()
+            .build_local(&LocalOptions::default())
+            .unwrap();
+        runtime.block_on(async {
+            let (out, mut inbox, _) = outbox();
+            let block = BlockId::from_uuid(Uuid::nil());
+            let big = vec![2; crate::checkpoint::CHUNK_BYTES + 1];
+            assert!(out.checkpoint(block, vec![9], vec![big, vec![1]]));
+            assert!(matches!(next(&mut inbox).await, Message::Checkpoint { .. }));
+            assert!(out.push(output(7)));
+            assert!(matches!(next(&mut inbox).await, Message::Ready { .. }));
+            // Live output queued during the transfer goes before history.
+            assert!(matches!(next(&mut inbox).await, Message::Output { data, .. } if data == [7]));
+            let Message::History {
+                offset: 0, total, ..
+            } = next(&mut inbox).await
+            else {
+                panic!("history");
+            };
+            assert_eq!(total as usize, crate::checkpoint::CHUNK_BYTES + 1);
+            assert!(out.push(output(8)));
+            assert!(matches!(next(&mut inbox).await, Message::Output { data, .. } if data == [8]));
+            assert!(matches!(
+                next(&mut inbox).await,
+                Message::History { offset, data, .. }
+                    if offset as usize == crate::checkpoint::CHUNK_BYTES && data == [2]
+            ));
+            assert!(matches!(
+                next(&mut inbox).await,
+                Message::History {
+                    offset: 0,
+                    total: 1,
+                    ..
+                }
+            ));
+            assert!(out.push(output(9)));
+            assert!(matches!(next(&mut inbox).await, Message::Output { data, .. } if data == [9]));
+        });
+    }
+
+    #[test]
+    fn a_detach_or_a_new_attach_ends_unsent_history() {
+        let runtime = Builder::new_current_thread()
+            .build_local(&LocalOptions::default())
+            .unwrap();
+        runtime.block_on(async {
+            let (out, mut inbox, _) = outbox();
+            let block = BlockId::from_uuid(Uuid::nil());
+            assert!(out.checkpoint(block, vec![9], vec![vec![1], vec![2]]));
+            next(&mut inbox).await;
+            assert!(matches!(next(&mut inbox).await, Message::Ready { .. }));
+            assert!(out.end_history());
+            assert!(out.push(output(7)));
+            assert!(matches!(next(&mut inbox).await, Message::Output { .. }));
+            assert!(out.checkpoint(block, vec![9], vec![vec![3]]));
+            next(&mut inbox).await;
+            assert!(matches!(next(&mut inbox).await, Message::Ready { .. }));
+            // A second attach before the first one's history is out.
+            assert!(out.checkpoint(block, vec![9], vec![]));
+            assert!(matches!(next(&mut inbox).await, Message::Checkpoint { .. }));
+            assert!(matches!(next(&mut inbox).await, Message::Ready { .. }));
+            assert!(out.push(output(8)));
+            assert!(matches!(next(&mut inbox).await, Message::Output { .. }));
+        });
     }
 }

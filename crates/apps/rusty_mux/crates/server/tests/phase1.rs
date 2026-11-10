@@ -171,3 +171,38 @@ fn reattach_after_more_than_four_mib_of_real_pty_output() {
     }
     a.request(|req| Message::CloseBlock { req, block });
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn attach_sends_ready_before_history_and_history_converges() {
+    let path = start_server();
+    let mut a = Client::connect(&path);
+    let block = block_for(&mut a);
+    a.input(
+        block,
+        b"i=0; while [ $i -lt 600 ]; do echo history line $i; i=$((i+1)); done; echo HIST_''DONE\r",
+    );
+    a.wait_for_text(block, "HIST_DONE");
+    // `plain` gets the whole history in its checkpoint; `newest` gets the
+    // screen, Ready, then the history in batches.
+    let mut plain = Client::connect(&path);
+    plain.request(|req| Message::Attach { req, block });
+    plain.wait_ready(block);
+    let features = Features::CHECKPOINT_V6.union(Features::BACKGROUND_HISTORY);
+    let mut newest = Client::connect_with(&path, features, None);
+    newest.request(|req| Message::Attach { req, block });
+    newest.wait_ready(block);
+    assert!(newest.history_rows(block) < plain.history_rows(block));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while newest.history_rows(block) < plain.history_rows(block) {
+        assert!(Instant::now() < deadline, "history did not converge");
+        newest.recv();
+    }
+    assert!(newest.batches > 0);
+    let marker = run_and_wait(&mut a, block, 41);
+    plain.wait_for_text(block, &marker);
+    newest.wait_for_text(block, &marker);
+    assert_eq!(newest.history_rows(block), plain.history_rows(block));
+    assert_eq!(newest.snapshot(block), plain.snapshot(block));
+    assert_eq!(newest.text(block), plain.text(block));
+}

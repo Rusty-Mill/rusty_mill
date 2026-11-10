@@ -25,6 +25,9 @@ pub enum Feed {
     /// A whole terminal to show instead of the pane's own, such as a mux
     /// block's screen on attach.
     Screen(Box<Grid>, Box<AnsiParser>),
+    /// A batch of older history for the screen last shown (mux C03),
+    /// newest batch first: it goes above the history the pane holds.
+    History(Vec<u8>),
     /// The source resized the pane: a mux block's size is the server's.
     Resized { cols: u16, rows: u16 },
     /// Where this window's taking over of an owner-only block stands
