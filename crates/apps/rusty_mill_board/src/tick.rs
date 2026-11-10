@@ -618,6 +618,34 @@ impl<T: TickApi> TickStore<T> {
         Ok(by_task)
     }
 
+    /// Every card on the board in list order; with `whole`, also their board documents and
+    /// comments, otherwise the tasks alone.
+    fn board(&self, whole: bool) -> Result<Vec<Card>, BoardError> {
+        let tasks = self.tagged()?;
+        let projects = self.projects()?;
+        let (mut docs, mut comments) = if whole {
+            (self.board_docs()?, self.comments(None)?)
+        } else {
+            (BTreeMap::new(), BTreeMap::new())
+        };
+        let mut cards = tasks
+            .into_iter()
+            .map(|task| {
+                let project = projects.of(&task);
+                let doc = docs.remove(&task.id);
+                let comments = comments.remove(&task.id).unwrap_or_default();
+                card_of(Parts {
+                    task,
+                    project,
+                    doc,
+                    comments,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        cards.sort_by_key(|c| (c.created_ms, c.id));
+        Ok(cards)
+    }
+
     fn tagged(&self) -> Result<Vec<Task>, BoardError> {
         let tasks: Vec<Task> = self.collection(&format!("/tags/{AGENT_TAG}/tasks"), "tasks")?;
         Ok(tasks.into_iter().filter(Task::on_board).collect())
@@ -826,47 +854,13 @@ impl<T: TickApi> Store for TickStore<T> {
     }
 
     fn list(&self) -> Result<Vec<Card>, BoardError> {
-        let tasks = self.tagged()?;
-        let projects = self.projects()?;
-        let mut docs = self.board_docs()?;
-        let mut comments = self.comments(None)?;
-        let mut cards = tasks
-            .into_iter()
-            .map(|task| {
-                let project = projects.of(&task);
-                let doc = docs.remove(&task.id);
-                let comments = comments.remove(&task.id).unwrap_or_default();
-                card_of(Parts {
-                    task,
-                    project,
-                    doc,
-                    comments,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        cards.sort_by_key(|c| (c.created_ms, c.id));
-        Ok(cards)
+        self.board(true)
     }
 
     /// The tasks alone: one read of the project lists and the tag's pages, never the board
     /// documents or comments, so prompts, links and comments are left empty.
     fn summaries(&self) -> Result<Vec<Card>, BoardError> {
-        let tasks = self.tagged()?;
-        let projects = self.projects()?;
-        let mut cards = tasks
-            .into_iter()
-            .map(|task| {
-                let project = projects.of(&task);
-                card_of(Parts {
-                    task,
-                    project,
-                    doc: None,
-                    comments: Vec::new(),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        cards.sort_by_key(|c| (c.created_ms, c.id));
-        Ok(cards)
+        self.board(false)
     }
 
     /// Through the card's `number:<n>` tag: one tag read and one read per match, whatever

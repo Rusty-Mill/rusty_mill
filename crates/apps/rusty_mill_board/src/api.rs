@@ -553,8 +553,8 @@ fn card(c: Card) -> Result<Value, BoardError> {
 /// `board_list`'s result: every card, or a page of them, as `view` asks.
 fn list_result(b: &Shared, a: &ListArgs, cards: Vec<Card>) -> Result<Value, BoardError> {
     let as_of_ms = b.now_ms();
-    let paged = a.limit.is_some() || a.cursor.is_some();
-    if !paged {
+    let unpaged = a.limit.is_none() && a.cursor.is_none();
+    if unpaged {
         return match a.view {
             View::Full => to_json(json!({ "cards": cards })),
             View::Summary => {
@@ -571,23 +571,42 @@ fn list_result(b: &Shared, a: &ListArgs, cards: Vec<Card>) -> Result<Value, Boar
         .map(|c| Cursor::decode(c, query))
         .transpose()?
         .map(|c| c.after);
-    // Each card with its place in the listing's order: creation time, then id.
-    let keyed =
-        |value: Result<Value, BoardError>, c: &Card| value.map(|v| ((c.created_ms, c.id), v));
-    let items: Vec<(Key, Value)> = match a.view {
-        View::Full => cards
-            .iter()
-            .map(|c| keyed(to_json(c), c))
-            .collect::<Result<_, _>>()?,
-        View::Summary => cards
-            .iter()
-            .map(|c| keyed(to_json(CardSummary::from(c)), c))
-            .collect::<Result<_, _>>()?,
-    };
-    let p = page(items, |(key, _)| *key, after, limit, query)?;
-    let cards: Vec<Value> = p.items.into_iter().map(|(_, card)| card).collect();
+    match a.view {
+        View::Full => paged(
+            cards,
+            |c| (c.created_ms, c.id),
+            after,
+            limit,
+            query,
+            as_of_ms,
+        ),
+        View::Summary => {
+            let cards: Vec<CardSummary> = cards.iter().map(CardSummary::from).collect();
+            paged(
+                cards,
+                |c| (c.created_ms, c.id),
+                after,
+                limit,
+                query,
+                as_of_ms,
+            )
+        }
+    }
+}
+
+/// The page of `items` after `after`, as `board_list` returns it. Only the page's items are
+/// serialized, so a full-view page costs its own size, not the board's.
+fn paged<T: serde::Serialize>(
+    items: Vec<T>,
+    key: impl Fn(&T) -> Key,
+    after: Option<Key>,
+    limit: usize,
+    query: u64,
+    as_of_ms: i64,
+) -> Result<Value, BoardError> {
+    let p = page(items, key, after, limit, query)?;
     to_json(json!({
-        "cards": cards,
+        "cards": p.items,
         "next_cursor": p.next.map(|c| c.encode()),
         "as_of_ms": as_of_ms,
     }))
@@ -1054,6 +1073,17 @@ mod tests {
         ));
     }
 
+    /// A clock that moves on 1 ms per reading, so cards list in the order they were made.
+    fn ticking() -> i64 {
+        static NOW: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+        NOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// An in-memory board on [`ticking`] time, for tests that depend on list order.
+    fn paged_board() -> Shared {
+        Board::with_clock(Box::new(MemStore::default()), Roles::default(), ticking)
+    }
+
     /// `board_list` pages of `args`, followed to the end with `limit`: every card's JSON.
     fn scan(board: &Shared, who: Option<&Identity>, args: Value, limit: u32) -> Vec<Value> {
         let mut cards = Vec::new();
@@ -1092,7 +1122,7 @@ mod tests {
 
     #[test]
     fn board_list_without_new_arguments_keeps_its_shape() {
-        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let board = paged_board();
         add_cards(&board, 2);
         let out = call_as(&board, None, "board_list", json!({})).expect("list");
         let keys: Vec<&String> = out.as_object().expect("object").keys().collect();
@@ -1103,7 +1133,7 @@ mod tests {
 
     #[test]
     fn summaries_leave_out_body_prompt_links_and_comments() {
-        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let board = paged_board();
         add_cards(&board, 1);
         let out = call_as(&board, None, "board_list", json!({"view": "summary"})).expect("summary");
         let card = out["cards"][0].as_object().expect("card");
@@ -1125,7 +1155,7 @@ mod tests {
 
     #[test]
     fn a_paged_scan_returns_exactly_the_unpaged_list() {
-        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let board = paged_board();
         add_cards(&board, 11);
         for view in ["full", "summary"] {
             let args = json!({"view": view, "archived": "include"});
@@ -1145,7 +1175,7 @@ mod tests {
 
     #[test]
     fn edits_and_new_cards_during_a_scan_never_repeat_or_drop_a_card() {
-        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let board = paged_board();
         add_cards(&board, 6);
         let human = json!({"actor": "nano", "role": "human"});
         let first = call_as(&board, None, "board_list", json!({"limit": 3})).expect("page");
@@ -1182,7 +1212,7 @@ mod tests {
 
     #[test]
     fn bad_limits_and_cursors_are_refused_not_answered_empty() {
-        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let board = paged_board();
         add_cards(&board, 3);
         let first = call_as(&board, None, "board_list", json!({"limit": 1})).expect("page");
         let cursor = first["next_cursor"].as_str().expect("more").to_owned();
@@ -1216,7 +1246,7 @@ mod tests {
 
     #[test]
     fn a_page_stops_at_its_byte_budget_and_keeps_every_card_whole() {
-        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let board = paged_board();
         let human = json!({"actor": "nano", "role": "human"});
         let body = "b".repeat(300 * 1024);
         for i in 0..3 {
@@ -1642,11 +1672,7 @@ mod tests {
         use crate::projects::Projects;
         let projects =
             Projects::parse(r#"{"rl": ["crates/rl"], "orch": ["crates/orch"]}"#).expect("projects");
-        let board: Shared = Board::new(
-            Box::new(MemStore::default()) as Box<dyn Store>,
-            Roles::default(),
-        )
-        .with_projects(projects);
+        let board = paged_board().with_projects(projects);
         let human = ident("nano", "human");
         let mut dev = ident("claude", "builder");
         dev.projects = Some(vec!["rl".into()]);
