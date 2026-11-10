@@ -5967,7 +5967,6 @@ impl WindowState<'_> {
         }
     }
 
-    /// Whether pane `id` (a reader-thread wakeup tag) belongs to this window.
     /// Show the source's `tree` in the attached window's one tab: open the
     /// panes new to it, drop the ones it left out (which ends them at the
     /// source), keep the focus if it is still shown. `None` closes the
@@ -6605,6 +6604,7 @@ impl WindowState<'_> {
         true
     }
 
+    /// Whether pane `id` (a reader-thread wakeup tag) belongs to this window.
     fn has_pane(&self, id: u64) -> bool {
         self.tabs.iter().any(|t| t.panes.iter().any(|p| p.id == id))
     }
