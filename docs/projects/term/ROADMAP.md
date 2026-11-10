@@ -26,8 +26,8 @@ the board is current and this file is refreshed (last refresh 2026-11-10, main 0
   (principals, login mode without PAM). Phase 3b done (C37–C41, C50–C52, C71, C73 #1481, C74
   #1490 and #1516). Arc 3 (C45, C70, C69, C36a) done; agent hosting C46 and C77 done.
 - **GUI as a mux client (arc 2).** S1-S5 merged (#1532 to #1554), Take over (#1577), and
-  `rusty_term --gui` now runs `rusty-mux-gui` (#1569). Deleting the local-mode code (R2) waits
-  for its own go.
+  `rusty_term --gui` now runs `rusty-mux-gui` (#1569). The local-mode code is deleted (R2,
+  #1588); the GUI is a mux client only. R3 (card #1422) tidies what is left.
 
 ## Next, in proposed order
 
@@ -54,9 +54,9 @@ Each arc needs the owner's go before it starts, and its own plan.
    Gates: C33's force-disconnect must be restricted first (card 507); C27 needs the
    `rusty_tail` move (ADR-0003); PAM links libpam (native dependency); C47/C48 write to
    remote hosts and `~/.ssh/config`; TLS (card 506) touches `rusty_tls`.
-2. **One GUI for terminal and mux.** *Under way: S1-S5 and Take over merged; R1 merged (#1569), R2 waits for its go.* The terminal-mux design (session switcher, split-tree
+2. **One GUI for terminal and mux.** *Under way: S1-S5 and Take over merged; R1 (#1569) and R2 (#1588) done; the GUI is mux-client only. R3 (card #1422) left.* The terminal-mux design (session switcher, split-tree
    thumbnails, server-owned layout, per-block status) is a requirement. The GUI becomes a mux
-   client only, keeping its local mode until C69 and C45 land (question 1). Both have landed: `rusty_term --gui` now runs `rusty-mux-gui` (retirement step R1, handoff D146), and deleting the local-mode code (R2) waits for its own go. This is where mux Phase 4's native client (C16) and C21,
+   client only, keeping its local mode until C69 and C45 land (question 1). Both have landed: `rusty_term --gui` now runs `rusty-mux-gui` (retirement step R1, handoff D146), and the local-mode code is deleted (R2, #1588, handoff D158/D159). This is where mux Phase 4's native client (C16) and C21,
    C42, C53–C55, C61–C64 land. Visual design goes to the design pack once it is on main.
 3. **Sessions that survive restarts.** *Done except C36b clean stop (card 1010, owner call) and C69 (d) utmp (deferred, Q29): C45 #1488, C70 #1493, C69 (a) #1555, (b) #1558, (c) #1563, C36a #1570.* C45 (state survives a server restart) plus C70
    (scrollback spooled to disk), pulled forward from Phase 5 (question 2); it gates arc 2.

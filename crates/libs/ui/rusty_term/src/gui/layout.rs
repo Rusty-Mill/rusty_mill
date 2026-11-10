@@ -88,6 +88,7 @@ impl Node {
     }
 
     /// Replace the leaf for `target` with a split of `[target, new]`.
+    #[cfg(test)]
     fn split(&mut self, target: u64, new: u64, dir: Dir) -> bool {
         match self {
             Node::Leaf(id) if *id == target => {
@@ -226,7 +227,9 @@ impl Layout {
         }
     }
 
-    /// A layout with a single full-area pane.
+    /// A layout with a single full-area pane. Tests build layouts with it;
+    /// windows take theirs from the source (D159).
+    #[cfg(test)]
     pub fn single(id: u64) -> Self {
         Self {
             root: Node::Leaf(id),
@@ -235,6 +238,7 @@ impl Layout {
 
     /// Split the `target` pane, giving its new sibling `new`. No-op (returns
     /// `false`) if `target` isn't present.
+    #[cfg(test)]
     pub fn split(&mut self, target: u64, new: u64, dir: Dir) -> bool {
         self.root.split(target, new, dir)
     }

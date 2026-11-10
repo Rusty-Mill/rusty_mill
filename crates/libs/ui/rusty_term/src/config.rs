@@ -80,21 +80,6 @@ pub struct Profile {
     pub theme: Option<Theme>,
 }
 
-/// One tab of a session file (`[tab]` sections in order): what to run,
-/// where, how it looks, and how it's split.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct SessionTab {
-    /// Profile supplying shell/cwd/theme defaults for this tab.
-    pub profile: Option<String>,
-    pub cwd: Option<PathBuf>,
-    /// Program to run instead of the shell, split on whitespace (no shell
-    /// quoting — run a wrapper script for anything fancier).
-    pub command: Option<String>,
-    /// Extra panes: a comma-separated sequence of `right` / `down` splits
-    /// applied after the tab spawns.
-    pub splits: Vec<String>,
-}
-
 /// Parsed configuration with everything optional; `None` / the [`Theme`]
 /// defaults mean "keep the built-in behavior".
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -156,26 +141,21 @@ pub struct Config {
     /// is the one that owns the system clipboard; the TUI relays OSC 52 to
     /// the host terminal, whose own policy applies.
     pub clipboard: Option<ClipboardPolicy>,
-    /// Height of the quake (dropdown) window as a fraction of the monitor's
-    /// height, `0.1..=1.0` (`[window] quake_height`; default 0.4). The window
-    /// itself is created/toggled with `rusty_term ctl quake`.
+    /// `[window] quake_height`, `0.1..=1.0`: parsed and ignored since the
+    /// quake window retired with the GUI's local mode (pack D159).
     pub quake_height: Option<f32>,
-    /// Global hotkey that toggles the quake window without an external
-    /// binding tool (`[window] quake_hotkey`, e.g. `"win+grave"`; Windows
-    /// only — Unix desktops bind `rusty_term ctl quake` at the WM/DE level
-    /// instead). A malformed spec is a startup warning, not a hard error.
+    /// `[window] quake_hotkey`: parsed and ignored since the quake window
+    /// retired with the GUI's local mode (pack D159).
     pub quake_hotkey: Option<String>,
     /// Named launch profiles (`[profile.<name>]` sections): a shell + cwd +
     /// theme bundle, surfaced in the shell-launcher dropdown and selectable
     /// at startup with `--profile <name>`.
     pub profiles: Vec<Profile>,
-    /// Serve the control socket and let a second `--single-instance` launch
-    /// reuse this instance (windowed front-end, Unix). Also enabled by the
-    /// `--single-instance` flag.
+    /// `single_instance`: parsed and ignored since the control socket
+    /// retired with the GUI's local mode (pack D159).
     pub single_instance: Option<bool>,
-    /// Session file to open at startup (`session = "path"` or `--session`):
-    /// a list of tabs (cwd/command/profile/splits) the window builds instead
-    /// of the single default shell. Windowed front-end only.
+    /// `session = "path"` (or `--session`): parsed and ignored since session
+    /// files retired with the GUI's local mode (pack D159).
     pub session: Option<PathBuf>,
     /// Minimum WCAG contrast ratio enforced between text and its background
     /// at render time (`minimum_contrast = 4.5`); `None`/1.0 disables. Fixes
@@ -308,8 +288,6 @@ impl Config {
 # launch_mode = "maximized" # or "fullscreen"
 # opacity = 0.9            # 0.0-1.0; GPU renderer (--features gui-gpu) only
 # padding = 8               # pixels of inner margin around the terminal (0 = flush)
-# quake_height = 0.4       # dropdown-window height fraction (rusty_term ctl quake)
-# quake_hotkey = "win+grave" # global hotkey toggling the quake window (Windows only)
 # status_bar = false        # hide the bottom status ribbon (default on)
 # reduce_motion = "on"      # "system" (default, follow the OS), "on" or "off"
 # command_marks = false     # hide the per-command gutter marks (default on)
@@ -1242,83 +1220,6 @@ impl Config {
     }
 }
 
-/// Parse a session file: each `[tab]` (or `[tab.<label>]`) section starts a
-/// tab, applied in order; keys are `profile`, `cwd`, `command`, and
-/// `splits = "right,down,…"`. Same forgiving contract as the config file —
-/// malformed lines warn and are skipped, never fatal.
-pub fn load_session(path: &std::path::Path) -> (Vec<SessionTab>, Vec<String>) {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return (
-            Vec::new(),
-            vec![format!("session file {} is unreadable", path.display())],
-        );
-    };
-    let mut tabs: Vec<SessionTab> = Vec::new();
-    let mut warnings = Vec::new();
-    let mut in_tab = false;
-    for (idx, raw) in text.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('[') {
-            match rest.split_once(']') {
-                Some((name, tail)) if tail.trim().is_empty() || tail.trim().starts_with('#') => {
-                    let name = name.trim().to_ascii_lowercase();
-                    in_tab = name == "tab" || name.starts_with("tab.");
-                    if in_tab {
-                        tabs.push(SessionTab::default());
-                    } else {
-                        warnings.push(format!("line {}: unknown section [{name}]", idx + 1));
-                    }
-                }
-                _ => warnings.push(format!("line {}: malformed section header", idx + 1)),
-            }
-            continue;
-        }
-        let Some((key, rest)) = line.split_once('=') else {
-            warnings.push(format!("line {}: expected `key = value`", idx + 1));
-            continue;
-        };
-        if !in_tab {
-            warnings.push(format!("line {}: key outside a [tab] section", idx + 1));
-            continue;
-        }
-        let key = key.trim().to_ascii_lowercase().replace('-', "_");
-        let value = match parse_value(rest.trim()) {
-            Ok(v) => v,
-            Err(e) => {
-                warnings.push(format!("line {}: {} ({})", idx + 1, e, key));
-                continue;
-            }
-        };
-        let tab = tabs.last_mut().expect("in_tab implies a tab exists");
-        let res: Result<(), String> = (|| {
-            match key.as_str() {
-                "profile" => tab.profile = Some(expect_str(&key, value)?),
-                "cwd" => tab.cwd = Some(PathBuf::from(expect_str(&key, value)?)),
-                "command" => tab.command = Some(expect_str(&key, value)?),
-                "splits" => {
-                    for part in expect_str(&key, value)?.split(',') {
-                        let part = part.trim().to_ascii_lowercase();
-                        match part.as_str() {
-                            "right" | "down" => tab.splits.push(part),
-                            "" => {}
-                            other => return Err(format!("unknown split `{other}`")),
-                        }
-                    }
-                }
-                other => return Err(format!("unknown key `{other}` in [tab]")),
-            }
-            Ok(())
-        })();
-        if let Err(e) = res {
-            warnings.push(format!("line {}: {}", idx + 1, e));
-        }
-    }
-    (tabs, warnings)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1468,29 +1369,6 @@ color15 = "ffffff"
         assert_eq!(flag_value(&eq, "--profile"), Some("dev"));
         let absent = vec!["--other".to_string()];
         assert_eq!(flag_value(&absent, "--profile"), None);
-    }
-
-    #[test]
-    fn session_file_parses_tabs_in_order() {
-        let dir = std::env::temp_dir().join(format!("rt_session_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("s.toml");
-        std::fs::write(
-            &path,
-            "[tab]\ncwd = \"/a\"\ncommand = \"htop -d 10\"\n[tab.logs]\nprofile = \"dev\"\nsplits = \"right, down\"\nbad = 1\n",
-        )
-        .unwrap();
-        let (tabs, warns) = load_session(&path);
-        assert_eq!(tabs.len(), 2);
-        assert_eq!(tabs[0].cwd.as_deref(), Some(std::path::Path::new("/a")));
-        assert_eq!(tabs[0].command.as_deref(), Some("htop -d 10"));
-        assert_eq!(tabs[1].profile.as_deref(), Some("dev"));
-        assert_eq!(tabs[1].splits, vec!["right", "down"]);
-        assert_eq!(warns.len(), 1, "{warns:?}"); // the `bad` key
-        // Unreadable file: no tabs, one warning, never fatal.
-        let (none, w) = load_session(std::path::Path::new("/nonexistent/s.toml"));
-        assert!(none.is_empty() && w.len() == 1);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

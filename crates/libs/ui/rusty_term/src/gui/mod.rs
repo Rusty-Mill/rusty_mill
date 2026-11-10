@@ -27,13 +27,11 @@ mod blocks;
 mod boxdraw;
 mod chrome;
 mod confirm;
-pub mod control;
 mod cpu;
 mod damage;
 mod font;
 #[cfg(feature = "gui-gpu")]
 mod gpu;
-mod hotkey;
 pub(crate) mod input;
 mod layout;
 mod motion;
@@ -52,4 +50,4 @@ mod taskbar;
 mod text;
 mod window;
 
-pub use window::{run, run_attached};
+pub use window::run_attached;
