@@ -198,6 +198,11 @@ impl Features {
     /// at all.
     pub const LEASE_REQUESTS: Self = Self(1 << 37);
 
+    /// A clean stop on request (C36b): [`Message::Shutdown`] has the server
+    /// answer, save its state, hang up owned blocks and release its name,
+    /// then close every connection. Only the server's own account may ask.
+    pub const SHUTDOWN: Self = Self(1 << 38);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -283,6 +288,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::OWNERSHIP, "block ownership"),
     (Features::INPUT_GATE, "the input gate"),
     (Features::LEASE_REQUESTS, "lease requests"),
+    (Features::SHUTDOWN, "clean stop on request"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -662,6 +668,13 @@ pub enum Message {
         req: u64,
         block: BlockId,
     },
+    /// Stops the server cleanly, as SIGTERM or Ctrl+C does. Done comes
+    /// first; the connection closes once the stop has finished. Refused
+    /// for a client that isn't the server's own account. Negotiated with
+    /// [`Features::SHUTDOWN`].
+    Shutdown {
+        req: u64,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -903,6 +916,7 @@ mod ty {
     pub const GRANT_LEASE: u8 = 0x21;
     pub const REVOKE_LEASE: u8 = 0x22;
     pub const REQUEST_LEASE: u8 = 0x23;
+    pub const SHUTDOWN: u8 = 0x24;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -1046,6 +1060,10 @@ impl Message {
             M::ReloadConfig { req } => {
                 out.varint(REQ, *req);
                 ty::RELOAD_CONFIG
+            }
+            M::Shutdown { req } => {
+                out.varint(REQ, *req);
+                ty::SHUTDOWN
             }
             M::ResizeSplit {
                 req,
@@ -1335,6 +1353,9 @@ impl Message {
                 window: window(&f, WINDOW)?,
             },
             ty::RELOAD_CONFIG => M::ReloadConfig {
+                req: f.varint(REQ)?,
+            },
+            ty::SHUTDOWN => M::Shutdown {
                 req: f.varint(REQ)?,
             },
             ty::RESIZE_SPLIT => M::ResizeSplit {

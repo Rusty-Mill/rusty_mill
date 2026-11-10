@@ -13,7 +13,7 @@ question 9.
 | Slice | What | State |
 |---|---|---|
 | (a) | Hello and Welcome carry each side's version; a client names what an older server lacks | this PR |
-| (b) | A clean stop for upgrades (`Shutdown`, `rusty-mux-ctl server stop`, a clean stop on SIGTERM) | needs Nano's call between three options (pack D144) |
+| (b) | A clean stop for upgrades (`Shutdown`, `rusty-mux-ctl server stop`, a clean stop on SIGTERM) | built (pack D160, D162, D163); see (b) below |
 
 ## (a) Version notice
 
@@ -60,3 +60,22 @@ of rusty_mux 0.1.0", and the feature names tell the user what is missing.
 Raising the version is a release question, not a C36 question. A server test
 checks that every feature it offers has a name, so a new bit can't drop out of
 the notice.
+
+## (b) Clean stop
+
+Nano chose the recommended shape (pack D160). One stop path serves every trigger: the
+store is saved, owned blocks are hung up rather than killed (D87), the socket name is
+removed while it is still this server's (Linux), and connections close last.
+
+- **Signals.** On Linux, SIGTERM and SIGINT are clean stops, as Ctrl+C and Ctrl+Break are on
+  Windows. Before, a Linux signal killed the server without saving.
+- **Wire.** Client message `Shutdown { req }`, type 0x24, behind `Features::SHUTDOWN`
+  (bit 38). Only a client of the server's own account may send it, since a stop ends every
+  session; anyone else is refused, as is a second request. The server answers `Done`, then
+  stops (pack D162). It is not a catalog method, so agents' `api` and MCP tools don't offer it.
+- **ctl.** `rusty-mux-ctl server stop` sends it and waits for the connection to close, which
+  happens only after the save and the name release. It exits 0 once stopped, 4 when no server
+  answers, 1 when refused or when the server predates `SHUTDOWN`, and 124 if the stop takes
+  over 15 s (pack D163). A second `server stop` right after exits 4.
+- **Upgrade recipe.** `rusty-mux-ctl server stop`, install the new binaries, then connect: the
+  first client auto-starts the new server (C69), which restores the saved sessions (C45).
