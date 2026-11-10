@@ -15,6 +15,9 @@ Keep changes focused, preserve unrelated work, and add or update the PR's
 - **Agents never queue or merge PRs.** DottiusMaximus (`dottiusmaximus`) manages reviews
   and merges (owner decision, 2026-10-27). An agent opens the PR, drives CI green,
   requests review from `dottiusmaximus`, and stops there.
+  **One exception:** the PR queue watcher also works the queue and queues and merges
+  PRs (owner, 2026-11-06 "you merge too", confirmed 2026-11-10). It follows every
+  merge rule here; no other agent queues or merges.
 - Merges go through the merge queue using "Merge when ready", wait for `required-gate`
   on the queued entry, and use a **merge commit**, never squash or rebase merge. Do not
   bypass red or stuck checks.
