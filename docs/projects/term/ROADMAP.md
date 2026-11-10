@@ -30,6 +30,33 @@ the board is current and this file is refreshed (last refresh 2026-11-10, main 0
   #1588), and R3 (card #1422, handoff D167) finished it: local mode is fully retired and
   the GUI is a mux client only.
 
+## MVP
+
+**MVP means Nano uses Rusty Term as his daily terminal on Windows** in place of Windows Terminal.
+The gate is the switch-over test (card #84, [plan](https://claude.ai/artifact/YFsSHFFyQUdWYN4kpVf43s)):
+MVP is reached when Nano has run it on the current `main` build and every failure is either fixed
+or accepted by him. Each failure becomes its own card under the "Arc 2 done" milestone; those cards
+are the only MVP work left.
+
+In the MVP (all merged):
+
+- The GUI as a mux client only: `rusty_term --gui` runs `rusty-mux-gui`, local mode is retired
+  (R1 #1569, R2 #1588, R3 #1592), first-run setup (#1471).
+- Arc 2: top strip and block headers, session switcher, reconnecting, lease re-ask and Take over
+  (S1-S5, #1532 to #1554, #1577).
+- Our own console host as the Windows default, ConPTY as rollback (#1403); checked by Nano on Lap.
+- A server that looks after itself: auto-start (C69), sessions that survive a restart (C45, C70),
+  a version notice when the server is older (C36a, #1570) and a clean stop (C36b, #1589).
+- Agent panes with status and hooks (C46, C74, C77).
+
+Not in the MVP (still on the roadmap, each with its own go):
+
+- The rest of arc 1 (sharing and identity) past the force-disconnect restriction (#1590).
+- Arc 2's "Later" rows: run and prompt marks, images, clipboard, C61-C64.
+- Arcs 3 to 5 remainders: C69 (d) utmp, agent hosting C75, C76, C78, C79, Phase 4 rest and Phase 5.
+- SSH from the GUI (the mux tunnel through SSH that the TUI already has).
+- The remaining "Next" items below.
+
 ## Next, in proposed order
 
 Each item is small and needs no new crate or dependency. Order avoids file conflicts.

@@ -471,6 +471,71 @@ pub struct Card {
     pub target_ms: Option<i64>,
 }
 
+/// How much of each card a listing returns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum View {
+    /// The whole card: body, prompt, links and comments.
+    #[default]
+    Full,
+    /// [`CardSummary`]: what a board or queue view needs, without body, prompt, links or
+    /// comments.
+    Summary,
+}
+
+/// A card without its body, prompt, links or comments: `board_list` with `view: summary`.
+/// Every field comes from the card's rusty_tick task, so a listing of summaries never reads
+/// board documents or comments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CardSummary {
+    /// The card's id.
+    pub id: Uuid,
+    /// Its board-wide number, once given one.
+    pub number: Option<u64>,
+    /// Its revision.
+    pub rev: u64,
+    /// Short title.
+    pub title: String,
+    /// Its project.
+    pub project: String,
+    /// Its column.
+    pub column: Column,
+    /// Priority: 0 none, 1 low, 3 medium, 5 high.
+    pub priority: u8,
+    /// Who holds it, if anyone.
+    pub claim: Option<String>,
+    /// Labels.
+    pub tags: Vec<String>,
+    /// Creation time, Unix ms.
+    pub created_ms: i64,
+    /// Last change, Unix ms.
+    pub updated_ms: i64,
+    /// When it shipped, Unix ms.
+    pub done_ms: Option<i64>,
+    /// When it was archived, Unix ms.
+    pub archived_ms: Option<i64>,
+}
+
+impl From<&Card> for CardSummary {
+    fn from(c: &Card) -> Self {
+        Self {
+            id: c.id,
+            number: c.number,
+            rev: c.rev,
+            title: c.title.clone(),
+            project: c.project.clone(),
+            column: c.column.clone(),
+            priority: c.priority,
+            claim: c.claim.clone(),
+            tags: c.tags.clone(),
+            created_ms: c.created_ms,
+            updated_ms: c.updated_ms,
+            done_ms: c.done_ms,
+            archived_ms: c.archived_ms,
+        }
+    }
+}
+
 /// Stable cross-component ids for the one logical execution a card may own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionLink {
