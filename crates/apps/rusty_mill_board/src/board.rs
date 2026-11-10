@@ -91,6 +91,15 @@ impl Roles {
 /// Makes a changed project registry durable (the projects file); see [`Board::set_projects`].
 pub type ProjectsSink = Box<dyn Fn(&Projects) -> Result<(), String> + Send + Sync>;
 
+/// Where this board's numbering stands.
+#[derive(Debug, Default)]
+struct Numbering {
+    /// Whether the board has been read once for strays and its highest number.
+    primed: bool,
+    /// The highest number this board knows is taken; the next reservation starts above it.
+    floor: u64,
+}
+
 /// The board over a store.
 pub struct Board<S> {
     store: S,
@@ -101,7 +110,7 @@ pub struct Board<S> {
     projects_sink: Option<ProjectsSink>,
     /// Held while numbers are handed out, so this process does not race itself for them.
     /// Uniqueness does not rest on it: the store reserves each number (`Store::reserve_number`).
-    numbering: Mutex<()>,
+    numbering: Mutex<Numbering>,
     clock: fn() -> i64,
     /// The decision inbox's source (#595); `None` when no BBP host is configured.
     escalations: Option<Arc<dyn Escalations>>,
@@ -165,7 +174,7 @@ impl<S: Store> Board<S> {
             workflow: RwLock::new(Workflow::default()),
             projects: RwLock::new(Projects::default()),
             projects_sink: None,
-            numbering: Mutex::new(()),
+            numbering: Mutex::new(Numbering::default()),
             clock,
             escalations: None,
             milestones: Box::new(MemMilestones::default()),
@@ -853,23 +862,28 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// On storage failure; cards numbered before it keep their numbers.
     pub fn number_cards(&self) -> Result<usize, BoardError> {
-        let _numbering = self
+        let mut numbering = self
             .numbering
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        self.number_strays().map(|(numbered, _)| numbered)
+        self.number_strays(&mut numbering)
     }
 
-    /// Number the cards that have none, each with a number the store reserves; returns how many
-    /// it numbered and the highest number on the board. The caller holds `numbering`.
-    fn number_strays(&self) -> Result<(usize, u64), BoardError> {
+    /// Number the cards that have none, each with a number the store reserves, and start
+    /// `numbering` from the highest number on the board or reserved. Reads the whole board:
+    /// it runs at startup, and on the first new card if that failed, never on every add.
+    /// Returns how many cards it numbered.
+    fn number_strays(&self, numbering: &mut Numbering) -> Result<usize, BoardError> {
         let numberer = Actor {
             name: NUMBERER.into(),
             caps: BTreeSet::new(),
             projects: None,
         };
         let cards = self.store.list()?;
-        let mut highest = cards.iter().filter_map(|c| c.number).max().unwrap_or(0);
+        let on_board = cards.iter().filter_map(|c| c.number).max().unwrap_or(0);
+        let mut highest = on_board
+            .max(self.store.highest_reserved()?)
+            .max(numbering.floor);
         let strays: Vec<Uuid> = cards
             .iter()
             .filter(|c| c.number.is_none())
@@ -877,22 +891,32 @@ impl<S: Store> Board<S> {
             .collect();
         for id in &strays {
             highest = self.store.reserve_number(*id, highest)?;
+            numbering.floor = highest;
             // Another board may number the card first; then this reservation goes unused.
             self.apply(*id, &numberer, EventKind::Numbered, |c, _| {
                 Ok(c.numbered(highest))
             })?;
         }
-        Ok((strays.len(), highest))
+        *numbering = Numbering {
+            primed: true,
+            floor: highest,
+        };
+        Ok(strays.len())
     }
 
-    /// Commit a new card under a newly reserved number.
+    /// Commit a new card under a newly reserved number. Reads no other card once numbering
+    /// has started (see [`Board::number_cards`]).
     fn insert_numbered(&self, by: &Actor, mut card: Card) -> Result<Card, BoardError> {
-        let _numbering = self
+        let mut numbering = self
             .numbering
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let highest = self.number_strays()?.1;
-        card.number = Some(self.store.reserve_number(card.id, highest)?);
+        if !numbering.primed {
+            self.number_strays(&mut numbering)?;
+        }
+        let number = self.store.reserve_number(card.id, numbering.floor)?;
+        numbering.floor = number;
+        card.number = Some(number);
         card.rev = self
             .store
             .insert(&card, Event::of(&card, EventKind::Created, &by.name))?;
@@ -1130,24 +1154,28 @@ impl<S: Store> Board<S> {
         let flow = self.flow();
         let queues = flow.work_queues();
         let rank = |c: &Card| queues.iter().position(|q| *q == c.column);
-        let cards = self.cards_in(&flow)?;
-        let waiting = waiting_on_deps(&cards);
-        if let Some(i) = id
-            && waiting.contains(&i)
-        {
-            return Err(waits_on_deps());
-        }
-        if let Some(named) = id.and_then(|i| cards.iter().find(|c| c.id == i)) {
-            check_not_superseded(named)?;
-        }
-        let mut candidates: Vec<Card> = cards
+        // Named, the card itself; else the work queues' cards as far as a summary reads them.
+        // Links are read per candidate when it is claimed (`check_takeable`), so a card that
+        // waits on dependencies or is superseded is refused there and the scan moves on.
+        let listed = match id {
+            Some(i) => {
+                let named = self.get_in(&flow, i)?;
+                self.check_deps_done(&named)?;
+                check_not_superseded(&named)?;
+                vec![named]
+            }
+            None => self
+                .store
+                .in_columns(&queues)?
+                .into_iter()
+                .map(|c| placed(&flow, c))
+                .collect(),
+        };
+        let mut candidates: Vec<Card> = listed
             .into_iter()
-            .filter(|c| id.is_none_or(|i| c.id == i))
             .filter(|c| project.is_none_or(|p| c.project == p))
             .filter(|c| rank(c).is_some() && flow.actionable(&c.column, &by.caps))
             .filter(|c| id.is_some() || c.claim.as_deref().is_none_or(|h| h == by.name))
-            .filter(|c| !waiting.contains(&c.id))
-            .filter(|c| c.superseded_by.is_empty())
             .collect();
         // Nearest Done first; within a queue the highest priority, then the manual order,
         // then the oldest.
@@ -1244,16 +1272,11 @@ impl<S: Store> Board<S> {
     /// committed, so dependencies planned after `take` listed it still count; a Done
     /// dependency stays Done (it is terminal), so the check cannot go stale.
     fn check_deps_done(&self, card: &Card) -> Result<(), BoardError> {
-        for dep in &card.deps {
-            if self
-                .store
-                .get(*dep)?
-                .is_some_and(|d| d.column != Column::DONE)
-            {
-                return Err(waits_on_deps());
-            }
+        if self.store.open_among(&card.deps)?.is_empty() {
+            Ok(())
+        } else {
+            Err(waits_on_deps())
         }
-        Ok(())
     }
 
     /// Apply `op` to the card and commit, re-reading on conflict.
@@ -1598,21 +1621,6 @@ fn check_not_superseded(card: &Card) -> Result<(), BoardError> {
         "card is superseded by a newer card: close it, or re-scope it and clear superseded_by"
             .into(),
     ))
-}
-
-/// Ids of the cards that wait on a dependency that is not Done. A dependency
-/// that is no longer on the board does not hold anything up.
-fn waiting_on_deps(cards: &[Card]) -> BTreeSet<Uuid> {
-    let open: BTreeSet<Uuid> = cards
-        .iter()
-        .filter(|c| c.column != Column::DONE)
-        .map(|c| c.id)
-        .collect();
-    cards
-        .iter()
-        .filter(|c| c.deps.iter().any(|d| open.contains(d)))
-        .map(|c| c.id)
-        .collect()
 }
 
 /// One inbox entry: the escalation, its reason in plain words, and its card.

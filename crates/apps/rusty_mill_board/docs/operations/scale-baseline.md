@@ -75,8 +75,12 @@ These are lower bounds for production: the fixture tick is in memory, and there 
 | Slice | PR | Operation | Requests | Tick bytes | Payload | p50 (1×) |
 |---|---|---|---:|---:|---:|---:|
 | S6 baseline | #1607 | see above | | | | |
-| S1 summaries (#1429) | this PR | `board_list view=summary` | 7 → 3 | 3,692,846 → 1,240,682 | 1,960,215 → 207,451 | 71.7 → 32.9 ms |
-| S1 summaries (#1429) | this PR | `board_list view=summary project=p03` | 7 → 3 | 3,692,846 → 1,240,682 | 160,758 → 12,288 | 58.7 → 26.7 ms |
-| S1 paging (#1429) | this PR | `board_list limit=100` (first page, full view) | 7 | 3,692,846 | 1,960,215 → 219,641 | 71.7 → 65.3 ms |
+| S1 summaries (#1429) | #1611 | `board_list view=summary` | 7 → 3 | 3,692,846 → 1,240,682 | 1,960,215 → 207,451 | 71.7 → 32.9 ms |
+| S1 summaries (#1429) | #1611 | `board_list view=summary project=p03` | 7 → 3 | 3,692,846 → 1,240,682 | 160,758 → 12,288 | 58.7 → 26.7 ms |
+| S1 paging (#1429) | #1611 | `board_list limit=100` (first page, full view) | 7 | 3,692,846 | 1,960,215 → 219,641 | 71.7 → 65.3 ms |
+| S3 bounded writes (#1430) | this PR | `card_add` | 11 → 3 | 3,694,995 → 2,110 | 465 | |
+| S3 bounded writes (#1430) | this PR | `card_take` | 33 → 29 | 3,724,888 → 45,057 | 3,016 | |
 
 S1 notes: a summary reads tasks only, 33.6% of a full read's tick bytes, just over the card's one-third target; the rest is task notes, which the summary drops but the task listing still carries. A full-view page bounds the payload, not the storage read. p50 compares full and summary in the same release run on this branch (full `board_list` 71.7 ms here against 82.9 ms in the S6 run; same code, different machine load). At 4× a summary is 364.9 ms against 759.6 ms full, and a `p03` summary 315.1 ms against 636.1 ms: halved, but still linear in the board, because the task listing is read whole. S4 (tick-side filters) is what bounds that.
+
+S3 notes: `card_add` reserves its number from the one it reserved last, so it reads no other card; strays (tasks tagged `agent` in rusty_tick by hand) are numbered by the startup job, or by the first new card if that job failed. `card_take` reads the work-queue columns' tags and then, per candidate it tries, that card and its dependencies' tasks, never a board document or comment collection. Its requests grow with the candidates it passes over (waiting on dependencies, superseded or claimed); in the fixture every card depends on the one before, which is the worst case for that.

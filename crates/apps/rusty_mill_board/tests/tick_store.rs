@@ -1342,3 +1342,61 @@ fn writes_during_a_paged_scan_over_rusty_tick_never_repeat_or_drop_a_card() {
     assert_eq!(seen[0]["title"], "card 1", "returned before the edit");
     assert_eq!(seen[4]["title"], "edited ahead");
 }
+
+/// `card_take` over rusty_tick keeps take's order and skips (priority first, then the oldest;
+/// a card waiting on an open dependency or superseded is passed over) while reading only the
+/// queue columns' tags and the candidates it tries: never a whole collection.
+#[test]
+fn take_over_rusty_tick_keeps_its_order_and_reads_only_the_queues() {
+    let tick = Recording::default();
+    let board = Board::with_clock(TickStore::new(tick.clone()), Roles::default(), ticking);
+    let human = board.roles().actor("nano", "human").expect("role");
+    let ids: Vec<uuid::Uuid> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|t| {
+            let id = board.add(&human, t, "", vec![]).expect("add").id;
+            board.move_card(id, &Column::READY, &human).expect("ready");
+            id
+        })
+        .collect();
+    let (a, b, c, d, e) = (ids[0], ids[1], ids[2], ids[3], ids[4]);
+    board
+        .plan(b, &human, &plan(Some(5), None))
+        .expect("priority");
+    board
+        .plan(e, &human, &plan(None, Some(vec![a])))
+        .expect("deps");
+    let superseded = Plan {
+        superseded_by: Some(vec![d]),
+        ..Plan::default()
+    };
+    board.plan(c, &human, &superseded).expect("supersede");
+    // A card in Backlog is never a candidate, however old.
+    board.add(&human, "backlog", "", vec![]).expect("add");
+    tick.take();
+
+    let taken: Vec<Option<uuid::Uuid>> = ["w1", "w2", "w3", "w4"]
+        .iter()
+        .map(|w| {
+            let dev = board.roles().actor(w, "builder").expect("role");
+            board.take(&dev, None).expect("take").map(|c| c.id)
+        })
+        .collect();
+    assert_eq!(taken, [Some(b), Some(a), Some(d), None]);
+
+    let paths = tick.take();
+    let whole = ["/tags/agent/tasks", "/docs/board?", "/docs/comment?limit"];
+    assert!(
+        !paths.iter().any(|p| whole.iter().any(|w| p.contains(w))),
+        "a take touched a whole collection: {paths:?}"
+    );
+    // Named, a waiting card says why; once its dependency is Done it is taken.
+    let dev = board.roles().actor("w5", "builder").expect("role");
+    assert!(matches!(
+        board.take(&dev, Some(e)),
+        Err(BoardError::Refused(_))
+    ));
+    // The owner closes a in rusty_tick: Done.
+    tick.inner.owner_edit(a, |t| t["status"] = json!("done"));
+    assert_eq!(board.take(&dev, None).expect("take").map(|c| c.id), Some(e));
+}

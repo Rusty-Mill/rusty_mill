@@ -67,8 +67,8 @@ const CEILINGS: &[(&str, usize, usize, usize)] = &[
     ("board_list first page", 7, 3_878_000, 231_000),
     ("card_get id", 5, 4_900, 2_130),
     ("card_get number", 11, 10_270, 2_130),
-    ("card_take", 33, 3_912_000, 3_200),
-    ("card_add", 11, 3_880_000, 500),
+    ("card_take", 29, 47_400, 3_200),
+    ("card_add", 3, 2_300, 500),
     ("board_events", 2, 1_301_000, 100),
 ];
 
@@ -149,7 +149,10 @@ fn board(server: &Running) -> Shared {
     let store: Box<dyn Store> = Box::new(TickStore::new(
         TickHttp::new(&server.url, TOKEN).expect("client"),
     ));
-    Board::new(store, Roles::default()).with_projects(projects)
+    let board = Board::new(store, Roles::default()).with_projects(projects);
+    // As main does at startup: number strays and learn where numbering stands.
+    board.number_cards().expect("numbering");
+    board
 }
 
 /// Run the MCP operation `name` and report what it cost.

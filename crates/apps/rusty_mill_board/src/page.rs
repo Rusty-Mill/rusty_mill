@@ -117,11 +117,12 @@ pub fn page<T: Serialize>(
         .peekable();
     let mut taken = Vec::new();
     let mut bytes = 0;
-    while let Some(item) = rest.peek() {
+    while taken.len() < limit {
+        let Some(item) = rest.peek() else { break };
         let size = serde_json::to_vec(item)
             .map_err(|e| BoardError::Storage(e.to_string()))?
             .len();
-        if taken.len() == limit || (!taken.is_empty() && bytes + size > PAGE_BYTES) {
+        if !taken.is_empty() && bytes + size > PAGE_BYTES {
             break;
         }
         bytes += size;
