@@ -1237,7 +1237,8 @@ impl Block {
     fn read_one(&self, conn: &mut Conn<UnixStream>, feed: &SyncSender<Feed>) -> Read {
         let block = self.block;
         let mut checkpoint = Some(Receiver::default());
-        let mut history = HistoryReceiver::default();
+        // `None` once the history stream failed: the rest is ignored.
+        let mut history = Some(HistoryReceiver::default());
         while let Ok(message) = conn.recv() {
             let step = match message {
                 Message::Checkpoint {
@@ -1267,16 +1268,21 @@ impl Block {
                     offset,
                     total,
                     data,
-                } if b == block && checkpoint.is_none() => match history.push(offset, total, &data)
-                {
-                    Ok(Some(batch)) => Feed::History(batch),
-                    Ok(None) => continue,
-                    Err(err) => {
-                        // The screen stands; only older history is lost.
-                        eprintln!("rusty-mux-gui: block {block}: bad history: {err}");
+                } if b == block && checkpoint.is_none() => {
+                    let Some(receiver) = history.as_mut() else {
                         continue;
+                    };
+                    match receiver.push(offset, total, &data) {
+                        Ok(Some(batch)) => Feed::History(batch),
+                        Ok(None) => continue,
+                        Err(err) => {
+                            // The screen stands; only older history is lost.
+                            eprintln!("rusty-mux-gui: block {block}: bad history: {err}");
+                            history = None;
+                            continue;
+                        }
                     }
-                },
+                }
                 Message::Output { block: b, data } if b == block => Feed::Bytes(data),
                 Message::Event {
                     event: Event::BlockResized { block: b, size },
