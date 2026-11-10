@@ -47,6 +47,16 @@ fn shell() -> Config {
     }
 }
 
+/// Input that makes the block's shell print `OSC 7` naming `/tmp`. On
+/// Windows `cmd.exe` has no `printf`: it takes ESC from a `prompt $E` a
+/// child shell prints, then echoes the sequence ended by ST.
+const REPORT_TMP: &str = if cfg!(windows) {
+    "for /F %a in ('echo prompt $E ^| cmd') do @set \"ESC=%a\"\r\
+     echo %ESC%]7;file://host/tmp%ESC%\\\r"
+} else {
+    "printf '\\033]7;file://host/tmp\\007'\r"
+};
+
 /// A command that does nothing and prints nothing.
 const NOTHING: &str = if cfg!(windows) { "rem" } else { "true" };
 
@@ -541,7 +551,7 @@ fn format_prints_the_screen_and_list_the_tree() {
 }
 
 /// Unix only: on Windows `pwd` is known only from OSC 7, which `cmd.exe`
-/// does not send, and `cmd.exe` sets a title.
+/// does not send, and `cmd.exe` sets a title. Its Windows twin follows.
 #[cfg(unix)]
 #[test]
 fn terminal_methods_read_the_block() {
@@ -551,6 +561,64 @@ fn terminal_methods_read_the_block() {
     assert_eq!(ok(&socket, &["terminal.title", "--block", &block]), "");
     let json = ok(&socket, &["--json", "terminal.pwd", "--block", &block]);
     assert!(json.contains("\"text\":\"/\""), "{json}");
+}
+
+/// Types `data` into `block` under a lease.
+fn type_into(socket: &Path, block: &str, data: &str) {
+    ok(
+        socket,
+        &[
+            "attach",
+            "--block",
+            block,
+            "+",
+            "acquire-lease",
+            "--block",
+            block,
+            "+",
+            "input",
+            "--block",
+            block,
+            "--data",
+            data,
+        ],
+    );
+}
+
+/// Polls `args` until its output is `want`.
+#[cfg(windows)]
+fn eventually(socket: &Path, args: &[&str], want: &str) {
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        let got = ok(socket, args);
+        if got == want {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{args:?}: {got:?}, never {want:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// On Windows `pwd` comes only from an OSC 7 the shell prints, and the
+/// title from `title`, which the console host mirrors as OSC 0.
+#[cfg(windows)]
+#[test]
+fn terminal_methods_read_the_block() {
+    let socket = start_server();
+    let block = block(&socket);
+    type_into(&socket, &block, REPORT_TMP);
+    eventually(&socket, &["terminal.pwd", "--block", &block], "/tmp");
+    type_into(&socket, &block, "title rusty-mux-title\r");
+    eventually(
+        &socket,
+        &["terminal.title", "--block", &block],
+        "rusty-mux-title",
+    );
+    let json = ok(&socket, &["--json", "terminal.pwd", "--block", &block]);
+    assert!(json.contains("\"text\":\"/tmp\""), "{json}");
 }
 
 #[test]
@@ -1285,6 +1353,52 @@ fn an_interrupted_follow_ends_with_sigint() {
     assert_eq!(status.signal(), Some(2));
 }
 
+/// Windows' twin: Ctrl+Break, aimed at a follow in a process group of
+/// its own, ends it as the default handler does, with
+/// `STATUS_CONTROL_C_EXIT`.
+#[cfg(windows)]
+#[test]
+fn a_ctrl_break_ends_a_follow() {
+    use std::os::windows::process::CommandExt;
+
+    /// `CREATE_NEW_PROCESS_GROUP` (winbase.h): the child leads a group of
+    /// its own, whose id is its pid.
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
+
+    let socket = start_server();
+    let mut child = ctl_command(&socket, &["events", "--follow"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .expect("spawn");
+    let mut lines = BufReader::new(child.stdout.take().expect("stdout")).lines();
+    let first = lines.next().expect("a line").expect("read");
+    assert!(first.starts_with("cursor "), "{first}");
+
+    // GenerateConsoleCtrlEvent through PowerShell, which shares this
+    // console, so the test needs no Win32 binding of its own.
+    let group = child.id();
+    let script = format!(
+        "$k = Add-Type -Name K -Namespace RustyMuxCtlTest -PassThru -MemberDefinition \
+         '[DllImport(\"kernel32.dll\")] public static extern bool GenerateConsoleCtrlEvent(uint e, uint g);'; \
+         if (-not $k::GenerateConsoleCtrlEvent(1, {group})) {{ exit 1 }}"
+    );
+    let sent = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdin(Stdio::null())
+        .status()
+        .expect("run powershell");
+    assert!(sent.success(), "Ctrl+Break to group {group}: {sent:?}");
+    let status = child.wait().expect("wait");
+    assert_eq!(
+        status.code().map(|c| c as u32),
+        Some(STATUS_CONTROL_C_EXIT),
+        "{status:?}"
+    );
+}
+
 /// Writes `text` as a config file for one test; returns its path.
 fn config_file(tag: &str, text: &str) -> PathBuf {
     let path =
@@ -1391,9 +1505,7 @@ const RULES: &str = r#"{
   ]
 }"#;
 
-/// Unix only: it reports the directory with `printf` and OSC 7, which
-/// `cmd.exe` cannot print and ConPTY may not pass through.
-#[cfg(unix)]
+/// The shell reports the directory with OSC 7 ([`REPORT_TMP`]).
 #[test]
 fn watch_runs_rules_for_events_and_survives_a_failing_one() {
     let socket = start_server();
@@ -1410,25 +1522,7 @@ fn watch_runs_rules_for_events_and_survives_a_failing_one() {
 
     // Creating the block's session fails rule 0; the watch goes on.
     let block = block(&socket);
-    let report = "printf '\\033]7;file://host/tmp\\007'\r";
-    ok(
-        &socket,
-        &[
-            "attach",
-            "--block",
-            &block,
-            "+",
-            "acquire-lease",
-            "--block",
-            &block,
-            "+",
-            "input",
-            "--block",
-            &block,
-            "--data",
-            report,
-        ],
-    );
+    type_into(&socket, &block, REPORT_TMP);
     let deadline = std::time::Instant::now() + PATIENCE;
     while !ok(&socket, &["list"]).contains("at /tmp") {
         assert!(std::time::Instant::now() < deadline, "rule 1 never ran");
