@@ -100,7 +100,7 @@ pub(crate) fn started_name(child: u32, program: &std::ffi::OsStr) -> String {
 /// Whether a block's program `child` waits for input, by who has the
 /// terminal: `idle` while its own process group does, `busy` while another
 /// does (a job it started), and `unknown` where the platform tells no
-/// foreground group, as on Windows. A program that exits closes its block,
+/// foreground, as on Windows under ConPTY. A program that exits closes its block,
 /// so there is no state for that.
 pub(crate) fn activity(child: u32, foreground: Option<u32>) -> &'static str {
     match foreground {

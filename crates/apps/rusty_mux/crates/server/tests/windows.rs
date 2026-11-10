@@ -369,8 +369,8 @@ fn a_program_that_exits_reports_its_code(host: ConsoleHost) {
     assert!(Some(exited_at) < at(&closed), "exit after the close");
 }
 
-/// Windows has no foreground process group, so `terminal.process` lists
-/// only the block's own program, by pid alone.
+/// `terminal.process` names the block's own program by its pid and its
+/// image file name, on both console hosts.
 fn terminal_process_names_the_programs_pid(host: ConsoleHost) {
     let path = start_server_on(host);
     let wanted = Features::CHECKPOINT_V6.union(Features::BLOCK_CALL);
