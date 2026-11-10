@@ -1,0 +1,21 @@
+# systemd unit: one rusty_tick backup, run by rusty-tick-backup.timer.
+# Install to /etc/systemd/system/ with the timer (see README.md in this directory).
+#
+# The store must not be copied while served, so tick stops for the snapshot (seconds) and
+# starts again before the copy off the host. Mill Board stays up and answers 503 meanwhile,
+# keeping its in-memory event log. The `+` lines run as root; the
+# script itself runs as the tick account and never needs root.
+[Unit]
+Description=rusty_tick backup
+After=rusty-tick.service
+
+[Service]
+Type=oneshot
+User=baileyrd
+EnvironmentFile=/home/baileyrd/.rusty_tick/tick.env
+ExecStartPre=+/bin/systemctl stop rusty-tick.service
+ExecStart=/usr/local/bin/rusty-tick-backup snapshot
+ExecStartPost=+/bin/systemctl start rusty-tick.service
+ExecStartPost=/usr/local/bin/rusty-tick-backup ship
+# Whatever failed above, the services come back.
+ExecStopPost=+/bin/systemctl start rusty-tick.service

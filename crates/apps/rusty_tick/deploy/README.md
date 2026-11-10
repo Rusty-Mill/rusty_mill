@@ -120,7 +120,52 @@ restoring the two env files.
 
 ## Backups, upgrade and rollback
 
-Back up `~/.rusty_tick/data` with the service stopped, and copy it off the host.
+### Backups
+
+`rusty-tick-backup.timer` runs nightly at 03:30. It stops rusty-tick for a few seconds and
+archives the whole data directory (users, OAuth grants, move history). Then it starts tick
+again and mirrors the archives off the host with rsync. Mill Board answers 503 while tick is
+stopped. The newest `RUSTY_TICK_BACKUP_KEEP` archives are kept, each with a `.sha256`. A copy of
+a running store can catch a write halfway, so `backup.sh snapshot` refuses a store whose
+`store.lock` is held.
+
+Install, after setting `RUSTY_TICK_BACKUP_DIR`, `RUSTY_TICK_BACKUP_KEEP` and
+`RUSTY_TICK_BACKUP_DEST` in `tick.env` (see `tick.env.example`). The destination is any rsync
+target off this host: `user@host:/path` over SSH, with a key the tick account can use without a
+prompt, or a mounted share.
+
+```sh
+sudo install -m 755 crates/apps/rusty_tick/deploy/backup.sh /usr/local/bin/rusty-tick-backup
+sudo install -m 755 crates/apps/rusty_tick/deploy/restore-drill.sh /usr/local/bin/rusty-tick-restore-drill
+sudo cp crates/apps/rusty_tick/deploy/rusty-tick-backup.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start rusty-tick-backup.service   # a first run now; check it
+journalctl -u rusty-tick-backup -n 20 --no-pager
+sudo systemctl enable --now rusty-tick-backup.timer
+```
+
+A failed run shows in `systemctl --failed` and the journal. Whatever failed, the unit starts
+rusty-tick again.
+
+**Restore drill.** Run it after installing and then monthly. It never touches the live store:
+
+```sh
+set -a; . ~/.rusty_tick/tick.env; set +a
+rusty-tick-restore-drill                      # newest local archive
+rusty-tick-restore-drill /path/to/rusty-tick-YYYYMMDDTHHMMSSZ.tar.gz   # e.g. one fetched back from off-host
+```
+
+It checks the sha256 and unpacks into a temporary directory. There it serves the copy on
+`127.0.0.1:18788` (`RUSTY_TICK_DRILL_PORT`) and counts each enabled user's tasks through the API.
+It needs a throwaway token for each user, which it mints in the temporary copy only. It fails on
+a damaged archive, a server that does not start, or zero tasks.
+
+**Restore for real.** Stop mill-board and rusty-tick. Move the damaged `~/.rusty_tick/data`
+aside; never delete it before the restore works. Then
+`tar -xzf <archive> -C ~/.rusty_tick` and start rusty-tick, then mill-board.
+
+Board settings (`~/.mill-board/settings`) and the env files are not in these archives. Keep a
+copy of them off the host as well; the env files hold tokens.
 
 Upgrade the binary and the web UI together, keeping the previous pair for rollback. Rebuild both as
 in Install, then swap whole directories (`cp -r dist web` onto an existing `web` would nest `dist`
