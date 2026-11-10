@@ -71,6 +71,102 @@ pub fn decode(data: &[u8]) -> Result<(Grid, AnsiParser)> {
     Ok((grid, parser))
 }
 
+/// RTCP v6 of `grid` and `parser` without most of the history, plus that
+/// history as batches for [`Grid::prepend_history`], newest batch first.
+/// The checkpoint keeps the scrollback rows that wrap into the top screen
+/// row, so the logical line there stays whole; each batch holds whole
+/// logical lines and is closed once it reaches `batch_bytes`, so it exceeds
+/// that by at most one logical line. Cluster and hyperlink ids in a batch
+/// refer to the tables the checkpoint carries, which only grow.
+pub fn encode_split(
+    grid: &Grid,
+    parser: &AnsiParser,
+    batch_bytes: usize,
+) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
+    grid.validate_checkpoint()?;
+    parser.validate_checkpoint()?;
+    let split = grid.history_split();
+    let mut w = Writer::new(MAX_DECODED, Some(grid.styles()));
+    w.put(HEADER)?;
+    grid.write_from(&mut w, split)?;
+    parser.write(&mut w)?;
+    Ok((w.bytes, grid.history_batches(split, batch_bytes)?))
+}
+
+/// Magic and version that open one history batch.
+pub(crate) const HISTORY: &[u8; 5] = b"RTHB\x01";
+
+/// One history batch being written: [`HISTORY`], the grid width, then rows
+/// newest first, each a prompt-mark flag and the RTCP line form, with run
+/// styles defined inline.
+pub(crate) struct BatchWriter<'a>(Writer<'a>);
+impl<'a> BatchWriter<'a> {
+    pub(crate) fn new(table: &'a StyleTable, cols: usize) -> Result<Self> {
+        let mut w = Writer::new(MAX_DECODED, Some(table));
+        w.put(HISTORY)?;
+        w.varint(cols as u64)?;
+        Ok(BatchWriter(w))
+    }
+    pub(crate) fn row(&mut self, line: &crate::grid::Line, mark: bool) -> Result<()> {
+        mark.write(&mut self.0)?;
+        line.write(&mut self.0)
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.0.bytes.len()
+    }
+    pub(crate) fn finish(self) -> Vec<u8> {
+        self.0.bytes
+    }
+}
+
+/// A decoded history batch: its width and rows oldest first, each with
+/// whether a prompt mark was on it.
+pub(crate) struct Batch {
+    pub(crate) cols: usize,
+    pub(crate) rows: Vec<(crate::grid::Line, bool)>,
+}
+
+/// Decode an untrusted batch, interning its styles into `table`. A style
+/// naming a cluster or hyperlink id past `clusters` or `links` is refused.
+/// On error `table` may hold extra unused styles; a sweep drops them.
+pub(crate) fn decode_batch(
+    data: &[u8],
+    table: &mut StyleTable,
+    clusters: usize,
+    links: usize,
+) -> Result<Batch> {
+    let body = data
+        .strip_prefix(HISTORY)
+        .filter(|_| data.len() <= MAX_ENCODED)
+        .ok_or(Error("history batch header/version/size"))?;
+    let mut r = Reader::new(body, MAX_DECODED);
+    r.table = std::mem::take(table);
+    let batch = read_batch(&mut r, clusters, links);
+    *table = r.take_styles();
+    batch
+}
+
+fn read_batch(r: &mut Reader<'_>, clusters: usize, links: usize) -> Result<Batch> {
+    let cols = usize::try_from(r.varint()?)
+        .ok()
+        .filter(|c| (1..=4096).contains(c))
+        .ok_or(Error("history batch width"))?;
+    let mut rows = Vec::new();
+    while !r.bytes.is_empty() {
+        r.charge(size_of::<(crate::grid::Line, bool)>())?;
+        let mark = bool::read(r)?;
+        rows.push((crate::grid::Line::read(r)?, mark));
+    }
+    let bounded = |c: &(Cell, StyleId)| {
+        usize::from(c.0.cluster) <= clusters && usize::from(c.0.link) <= links
+    };
+    if !r.styles.iter().all(bounded) {
+        return Err(Error("style bounds"));
+    }
+    rows.reverse();
+    Ok(Batch { cols, rows })
+}
+
 /// Magic and version that open one spilled line (the mux's C70 scrollback
 /// spool). Independent of [`HEADER`]: a spool outlives checkpoints.
 const SPILL: &[u8; 5] = b"RTSL\x01";
@@ -470,23 +566,31 @@ impl<T: Wire> Wire for Vec<T> {
 }
 impl<T: Wire> Wire for VecDeque<T> {
     fn write(&self, w: &mut Writer) -> Result<()> {
-        w.charge(
-            self.len()
-                .checked_mul(size_of::<T>().max(1))
-                .and_then(|n| n.checked_mul(2))
-                .ok_or(Error("allocation overflow"))?,
-        )?;
-        self.len().write(w)?;
-        for v in self {
-            v.write(w)?;
-        }
-        Ok(())
+        write_deque(self.iter(), w)
     }
     fn read(r: &mut Reader<'_>) -> Result<Self> {
         let v = Vec::<T>::read(r)?;
         r.charge(v.len().saturating_mul(size_of::<T>()))?;
         Ok(v.into())
     }
+}
+/// A [`VecDeque`] of `items` on the wire: read back as one.
+pub(crate) fn write_deque<'t, T: Wire + 't>(
+    items: impl ExactSizeIterator<Item = &'t T>,
+    w: &mut Writer,
+) -> Result<()> {
+    w.charge(
+        items
+            .len()
+            .checked_mul(size_of::<T>().max(1))
+            .and_then(|n| n.checked_mul(2))
+            .ok_or(Error("allocation overflow"))?,
+    )?;
+    items.len().write(w)?;
+    for v in items {
+        v.write(w)?;
+    }
+    Ok(())
 }
 impl<T: Wire> Wire for Arc<[T]> {
     fn write(&self, w: &mut Writer) -> Result<()> {
@@ -833,10 +937,10 @@ mod tests {
             .unwrap()
             .0;
         let codec = source
-            .split_once("impl crate::checkpoint::Wire for Grid")
+            .split_once("    pub(crate) fn write_from(")
             .unwrap()
             .1;
-        let (write, read) = codec.split_once("    fn read(").unwrap();
+        let (write, read) = codec.split_once("    fn read_wire(").unwrap();
         let fields: Vec<_> = declaration
             .lines()
             .filter_map(|line| {
@@ -856,7 +960,8 @@ mod tests {
                 continue;
             }
             assert!(
-                write.contains(&format!("&self.{field},")),
+                // `scrollback` and `prompt_marks` are written from `split` on.
+                write.contains(&format!("self.{field}")),
                 "Grid::{field} missing from encoder"
             );
             assert!(
