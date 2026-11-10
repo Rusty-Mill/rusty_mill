@@ -80,8 +80,7 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
    - Linux recordings only.
 5. **Windows:**
    - Nothing was measured on Windows.
-   - ConPTY spike 1 (`spike1-conpty.ps1`) waits on the owner's Windows machine.
-   - A Windows ConPTY fidelity corpus is still owed.
+   - The Windows fidelity corpus runs on rusty_conhost, the default host, and passes 34 of 34 ([conhost/fidelity-2026-11-10.md](conhost/fidelity-2026-11-10.md)). ConPTY spike 1 is superseded by it.
 6. **#850 is fixed** (#949): the core's `l13` feature no longer pulls in tokio. A new in-workspace consumer of `rusty_lsp`'s server or client must enable its `runtime` feature.
 7. **Mode 2027:** off by default; `grapheme_clustering = true` (rusty_term) or the mux config's `server.grapheme_clustering` starts new panes with it set (pack D156).
 8. **Clean-room:** the backlog's technique rows were informed by reading Ghostty, Alacritty and WezTerm source, and kitty (described only). If the mux policy is strict clean-room, ask before reusing those designs (seqno and stable row index come from WezTerm).
