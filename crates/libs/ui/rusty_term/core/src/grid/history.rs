@@ -5,6 +5,8 @@
 
 use super::{Grid, Line, LineAttr, PROMPT_MARKS_MAX, reflow_history, trim_padding};
 use crate::checkpoint::{self, Batch, BatchWriter, Error, Result};
+use crate::color::{self, Theme};
+use crate::style::{StyleId, rethemed};
 use std::collections::VecDeque;
 
 impl Grid {
@@ -55,19 +57,22 @@ impl Grid {
     /// the bottom, and every history index (prompt marks, search matches,
     /// folds) shifts by the rows added. Returns how many were added.
     ///
+    /// `theme`, `(from, to)`, recolours the batch as [`Grid::retheme`]
+    /// would: pass the pair this grid's checkpoint was rethemed with.
+    ///
     /// The batch is untrusted: one naming a cluster or hyperlink this grid
     /// does not hold is refused, and the grid is unchanged.
-    pub fn prepend_history(&mut self, batch: &[u8]) -> Result<usize> {
+    pub fn prepend_history(
+        &mut self,
+        batch: &[u8],
+        theme: Option<(&Theme, &Theme)>,
+    ) -> Result<usize> {
         let room = self.scrollback_max.saturating_sub(self.scrollback.len());
         if room == 0 {
             return Ok(0);
         }
-        let decoded = checkpoint::decode_batch(
-            batch,
-            &mut self.styles,
-            self.clusters.len(),
-            self.links.len(),
-        )?;
+        let mut decoded = checkpoint::decode_batch(batch, self.clusters.len(), self.links.len())?;
+        self.adopt_styles(&mut decoded, theme)?;
         let (mut rows, mut marks) = self.rewrap(decoded, room)?;
         let drop = rows.len().saturating_sub(room);
         rows.drain(..drop);
@@ -82,6 +87,32 @@ impl Grid {
         self.shift_history(added, marks);
         self.touch_hist();
         Ok(added)
+    }
+
+    /// Moves `batch`'s cells onto this grid's style table, recoloured
+    /// through `theme`. Each batch style is interned once.
+    fn adopt_styles(&mut self, batch: &mut Batch, theme: Option<(&Theme, &Theme)>) -> Result<()> {
+        let mut ids: Vec<Option<StyleId>> = vec![None; batch.styles.len()];
+        for (line, _) in &mut batch.rows {
+            for cell in line.cells_restyle() {
+                let from = cell.style();
+                let slot = ids.get_mut(from.0 as usize).ok_or(Error("style index"))?;
+                let id = *slot.get_or_insert_with(|| {
+                    let style = batch.styles.get(from);
+                    let style = match theme {
+                        Some((old, new)) => {
+                            rethemed(style, &|c| color::remap(c, old, new), &|n, c| {
+                                color::remap_entry(n, c, old, new)
+                            })
+                        }
+                        None => style,
+                    };
+                    self.styles.intern(style)
+                });
+                *cell = cell.with_style(id);
+            }
+        }
+        Ok(())
     }
 
     /// A batch's rows at this grid's width, oldest first, and the indexes
@@ -190,7 +221,7 @@ mod tests {
         let (head, batches) = encode_split(grid, parser, batch_bytes).unwrap();
         let (mut back, parser) = decode(&head).unwrap();
         for batch in &batches {
-            back.prepend_history(batch).unwrap();
+            back.prepend_history(batch, None).unwrap();
         }
         (back, parser, batches.len())
     }
@@ -237,11 +268,11 @@ mod tests {
         whole.resize(13, 3);
         back.resize(13, 3);
         let (first, rest) = batches.split_first().unwrap();
-        back.prepend_history(first).unwrap();
+        back.prepend_history(first, None).unwrap();
         whole.resize(31, 3);
         back.resize(31, 3);
         for batch in rest {
-            back.prepend_history(batch).unwrap();
+            back.prepend_history(batch, None).unwrap();
         }
         let text =
             |g: &Grid| -> Vec<String> { (0..g.scrollback_len()).map(|i| row(g, i)).collect() };
@@ -258,8 +289,8 @@ mod tests {
         back.set_scrollback_max(kept + 5);
         back.view_offset = 1;
         let top = row(&back, kept - 1);
-        assert_eq!(back.prepend_history(&batches[0]).unwrap(), 5);
-        assert_eq!(back.prepend_history(&batches[0]).unwrap(), 0);
+        assert_eq!(back.prepend_history(&batches[0], None).unwrap(), 5);
+        assert_eq!(back.prepend_history(&batches[0], None).unwrap(), 0);
         assert_eq!(back.view_offset, 1);
         assert_eq!(row(&back, back.scrollback_len() - 1), top);
         let newest = grid.history_split() - 1;
@@ -272,15 +303,43 @@ mod tests {
         let (head, batches) = encode_split(&grid, &parser, 1 << 16).unwrap();
         // A grid without the checkpoint's hyperlink and cluster tables.
         let mut bare = Grid::new(20, 4);
-        assert!(bare.prepend_history(&batches[0]).is_err());
+        assert!(bare.prepend_history(&batches[0], None).is_err());
         assert_eq!(bare.scrollback_len(), 0);
         let mut back = decode(&head).unwrap().0;
         let before = back.scrollback_len();
         let batch = &batches[0];
         for bad in [&b"RTHB\x02"[..], &batch[..batch.len() - 1], b"RTHB\x01\x00"] {
-            assert!(back.prepend_history(bad).is_err(), "{bad:?}");
+            assert!(back.prepend_history(bad, None).is_err(), "{bad:?}");
         }
         assert_eq!(back.scrollback_len(), before);
-        assert!(back.prepend_history(&batches[0]).is_ok());
+        assert!(back.prepend_history(&batches[0], None).is_ok());
+    }
+
+    #[test]
+    fn a_batch_takes_the_theme_its_checkpoint_was_given() {
+        let (grid, parser) = sample(20, 40);
+        let ours = crate::Theme {
+            fg: 0x101010,
+            bg: 0xf0f0f0,
+            cursor: 0x101010,
+            palette16: [0x123456; 16],
+        };
+        let rethemed = |mut g: Grid, mut p: AnsiParser| {
+            let theirs = p.retheme(ours);
+            g.retheme(&theirs, &ours);
+            (g, p, theirs)
+        };
+        let (whole, whole_parser) = decode(&encode(&grid, &parser).unwrap()).unwrap();
+        let (whole, whole_parser, _) = rethemed(whole, whole_parser);
+        let (head, batches) = encode_split(&grid, &parser, 200).unwrap();
+        let (back, back_parser) = decode(&head).unwrap();
+        let (mut back, back_parser, theirs) = rethemed(back, back_parser);
+        for batch in &batches {
+            back.prepend_history(batch, Some((&theirs, &ours))).unwrap();
+        }
+        assert_eq!(
+            encode(&back, &back_parser).unwrap(),
+            encode(&whole, &whole_parser).unwrap()
+        );
     }
 }

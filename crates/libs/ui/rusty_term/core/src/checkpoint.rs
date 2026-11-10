@@ -119,31 +119,23 @@ impl<'a> BatchWriter<'a> {
     }
 }
 
-/// A decoded history batch: its width and rows oldest first, each with
-/// whether a prompt mark was on it.
+/// A decoded history batch: its width, rows oldest first, each with
+/// whether a prompt mark was on it, and the styles its cells name.
 pub(crate) struct Batch {
     pub(crate) cols: usize,
     pub(crate) rows: Vec<(crate::grid::Line, bool)>,
+    pub(crate) styles: StyleTable,
 }
 
-/// Decode an untrusted batch, interning its styles into `table`. A style
-/// naming a cluster or hyperlink id past `clusters` or `links` is refused.
-/// On error `table` may hold extra unused styles; a sweep drops them.
-pub(crate) fn decode_batch(
-    data: &[u8],
-    table: &mut StyleTable,
-    clusters: usize,
-    links: usize,
-) -> Result<Batch> {
+/// Decode an untrusted batch. A style naming a cluster or hyperlink id
+/// past `clusters` or `links` is refused.
+pub(crate) fn decode_batch(data: &[u8], clusters: usize, links: usize) -> Result<Batch> {
     let body = data
         .strip_prefix(HISTORY)
         .filter(|_| data.len() <= MAX_ENCODED)
         .ok_or(Error("history batch header/version/size"))?;
     let mut r = Reader::new(body, MAX_DECODED);
-    r.table = std::mem::take(table);
-    let batch = read_batch(&mut r, clusters, links);
-    *table = r.take_styles();
-    batch
+    read_batch(&mut r, clusters, links)
 }
 
 fn read_batch(r: &mut Reader<'_>, clusters: usize, links: usize) -> Result<Batch> {
@@ -164,7 +156,11 @@ fn read_batch(r: &mut Reader<'_>, clusters: usize, links: usize) -> Result<Batch
         return Err(Error("style bounds"));
     }
     rows.reverse();
-    Ok(Batch { cols, rows })
+    Ok(Batch {
+        cols,
+        rows,
+        styles: r.take_styles(),
+    })
 }
 
 /// Magic and version that open one spilled line (the mux's C70 scrollback
