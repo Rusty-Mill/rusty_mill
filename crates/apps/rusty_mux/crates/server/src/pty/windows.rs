@@ -365,7 +365,8 @@ impl Process {
     pub(crate) fn abandon(mut self) {
         if let Some(mut child) = self.child.take() {
             // Only an owned block is abandoned, and it never has a job.
-            debug_assert!(child.disown().is_none(), "an owned block has a job");
+            let job = child.disown();
+            debug_assert!(job.is_none(), "an owned block has a job");
             hang_up(&self.master, None);
         }
     }
