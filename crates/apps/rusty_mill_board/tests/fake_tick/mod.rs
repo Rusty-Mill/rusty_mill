@@ -156,6 +156,20 @@ impl FakeTick {
             .insert(("comment".into(), Uuid::now_v7()), (body, 1));
     }
 
+    /// The owner adds a comment from a device whose clock reads `at_ms`: the id is a UUIDv7
+    /// of that time, as rusty_tick's web UI mints it.
+    pub fn owner_comment_at(&self, task: Uuid, text: &str, at_ms: u64) {
+        let mut state = self.0.lock().expect("lock");
+        let body = json!({ "v": 1, "taskId": task, "text": text, "createdMs": at_ms });
+        let id = Uuid::from_u128(
+            (u128::from(at_ms) << 80)
+                | (0x7 << 76)
+                | (1 << 63)
+                | u128::from(state.docs.len() as u64),
+        );
+        state.docs.insert(("comment".into(), id), (body, 1));
+    }
+
     /// Fail the next `method` request whose path starts with `path`, before it is served.
     pub fn fail_next(&self, method: &str, path: &str) {
         self.0.lock().expect("lock").fail_next = Some((method.into(), path.into()));

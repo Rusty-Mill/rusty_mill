@@ -1535,6 +1535,68 @@ fn a_comment_whose_card_read_failed_is_logged_by_the_next_poll() {
     assert_eq!(kinds(&events), [(EventKind::Commented, "tick".to_owned())]);
 }
 
+#[test]
+fn a_comment_from_a_fast_clock_does_not_hide_later_ones() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let cursor = board.cursor().expect("cursor");
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("ms");
+
+    tick.owner_comment_at(card.id, "from a phone ten minutes fast", now + 600_000);
+    assert_eq!(board.events(cursor, 10).expect("events").len(), 1);
+    let cursor = board.cursor().expect("cursor");
+    tick.owner_comment_at(card.id, "from a correct clock", now + 1);
+    let events = board.events(cursor, 10).expect("events");
+    assert_eq!(kinds(&events), [(EventKind::Commented, "tick".to_owned())]);
+}
+
+#[test]
+fn an_outside_edit_racing_a_board_write_is_read_next_poll() {
+    let tick = FakeTick::default();
+    let gated = ReverseFinishTick::new(tick.clone());
+    let store = Arc::new(TickStore::new(gated.clone()));
+    let raced = Card::new("raced", "", vec![], 0).expect("card");
+    let other = Card::new("other", "", vec![], 0).expect("card");
+    for card in [&raced, &other] {
+        store
+            .insert(card, Event::of(card, EventKind::Created, "insert"))
+            .expect("insert");
+    }
+    store.last_event_id().expect("prime observations");
+
+    let edit = raced.edit(Some("board"), None, None, 1).expect("edit");
+    let writer = Arc::clone(&store);
+    let write = std::thread::spawn(move || {
+        writer
+            .replace(&edit, Event::of(&edit, EventKind::Edited, "board"))
+            .expect("board write")
+    });
+    gated.mutated.wait();
+    // While the board's write to `raced` is in flight, the owner edits it, and later `other`.
+    tick.owner_edit_at(raced.id, 2_000_000_000_000, |t| {
+        t["title"] = json!("outside")
+    });
+    tick.owner_edit_at(other.id, 2_000_000_100_000, |t| t["title"] = json!("later"));
+    let cursor = store.last_event_id().expect("observe mid-write");
+    gated.release.wait();
+    write.join().expect("writer");
+
+    let events = store.events_since(cursor, 10).expect("events");
+    assert!(
+        events
+            .iter()
+            .any(|e| e.card == raced.id && e.actor == "tick"),
+        "the outside edit shows on the next poll, not the next full read: {events:?}"
+    );
+}
+
 /// After the first read, an idle poll asks only what changed: no whole collection.
 #[test]
 fn an_idle_poll_reads_only_what_changed() {
@@ -1554,7 +1616,7 @@ fn an_idle_poll_reads_only_what_changed() {
         paths
             .iter()
             .all(|p| p.starts_with("GET /search?updatedFrom=")
-                || p.starts_with("GET /docs/comment?after=")),
+                || (p.starts_with("GET /docs/comment?") && p.contains("after="))),
         "{paths:?}"
     );
 }

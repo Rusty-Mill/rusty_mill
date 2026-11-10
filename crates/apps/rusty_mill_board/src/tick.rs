@@ -450,9 +450,10 @@ struct Events {
     high_water: i64,
     /// When `observe` last read every card; `None` before the first read.
     reconciled: Option<Instant>,
-    /// The newest comment id observed; the next comment read starts
-    /// [`COMMENT_OVERLAP_MS`] before it.
-    newest_comment: Option<Uuid>,
+    /// When (Unix ms, this board's clock) the last comment read began; the next starts
+    /// [`COMMENT_OVERLAP_MS`] before it. Not the newest comment id: a writer whose clock
+    /// runs fast would push that ahead and hide comments from correct clocks.
+    comments_read_ms: Option<u64>,
     /// Comments already accounted for: written by this board, or observed.
     comments_seen: BTreeSet<Uuid>,
     /// Cards whose rusty_tick write has started but is not yet in `log`.
@@ -470,16 +471,10 @@ impl Events {
     }
 }
 
-/// Where a comment read starts: [`COMMENT_OVERLAP_MS`] before the newest comment seen, or
-/// that long before now when none has been.
-fn comment_window(newest: Option<Uuid>) -> Uuid {
-    let ms = newest
-        .and_then(|id| id.get_timestamp())
-        .map(|ts| ts.to_unix())
-        .map_or_else(now_unix_ms, |(secs, nanos)| {
-            secs * 1000 + u64::from(nanos) / 1_000_000
-        });
-    let from = ms.saturating_sub(COMMENT_OVERLAP_MS);
+/// Where a comment read starts: [`COMMENT_OVERLAP_MS`] before `since`, the start of the
+/// last comment read (or now, for the first).
+fn comment_window(since: u64) -> Uuid {
+    let from = since.saturating_sub(COMMENT_OVERLAP_MS);
     // A UUIDv7 holds its millisecond in the top 48 bits; all else zero sorts first.
     Uuid::from_u128(u128::from(from) << 80)
 }
@@ -890,6 +885,7 @@ impl<T: TickApi> TickStore<T> {
         // fetch it again. Holding this lock across I/O would let a busy
         // observer starve writers that need it to commit their event.
         let (tasks, comments, full, mut events) = loop {
+            let now = now_unix_ms();
             let (epoch, full, high_water, comments_from) = {
                 let e = self.events.lock().map_err(poisoned)?;
                 let full = e
@@ -899,7 +895,7 @@ impl<T: TickApi> TickStore<T> {
                     e.write_epoch,
                     full,
                     e.high_water,
-                    comment_window(e.newest_comment),
+                    comment_window(e.comments_read_ms.unwrap_or(now)),
                 )
             };
             let tasks = if full {
@@ -909,8 +905,9 @@ impl<T: TickApi> TickStore<T> {
             };
             let comments: Vec<Doc> =
                 self.collection_after("/docs/comment", "docs", Some(comments_from))?;
-            let events = self.events.lock().map_err(poisoned)?;
+            let mut events = self.events.lock().map_err(poisoned)?;
             if events.write_epoch == epoch {
+                events.comments_read_ms = Some(now);
                 break (tasks, comments, full, events);
             }
         };
@@ -918,10 +915,18 @@ impl<T: TickApi> TickStore<T> {
             events.reconciled = Some(Instant::now());
         }
         let primed = std::mem::replace(&mut events.primed, true);
+        let mut high_water = events.high_water;
+        // A task skipped because a board write to it is in flight is read again next poll:
+        // an outside edit racing that write must not wait for the next full read.
+        let mut in_flight = i64::MAX;
         for task in tasks {
-            events.high_water = events.high_water.max(task.updated_ms);
+            high_water = high_water.max(task.updated_ms);
             let version = task.version()?;
-            if !task.on_board() || events.writing.contains_key(&task.id) {
+            if events.writing.contains_key(&task.id) {
+                in_flight = in_flight.min(task.updated_ms);
+                continue;
+            }
+            if !task.on_board() {
                 continue;
             }
             let before = events.seen.insert(task.id, version);
@@ -941,9 +946,9 @@ impl<T: TickApi> TickStore<T> {
             })?;
             events.push(Event::of(&card, kind, TICK_ACTOR));
         }
+        events.high_water = high_water.min(in_flight);
         let mut commented = Vec::new();
         for doc in comments {
-            events.newest_comment = events.newest_comment.max(Some(doc.id));
             if !events.comments_seen.insert(doc.id) || !primed {
                 continue;
             }
