@@ -418,7 +418,8 @@ pub fn run_until(
         | Command::Events { .. }
         | Command::Watch { .. }
         | Command::Wait(_)
-        | Command::Run(_) => {}
+        | Command::Run(_)
+        | Command::ServerStop => {}
     }
     let socket = match socket(&invocation, env) {
         Ok(socket) => socket,
@@ -433,11 +434,23 @@ pub fn run_until(
     finish(timed_out(result, deadline), &socket, err)
 }
 
+/// How long `server stop` waits for the server to finish stopping.
+const STOP_PATIENCE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Whether `e` says the server closed the connection.
+fn closed(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+    )
+}
+
 /// How long a `wait` or `run --wait` may wait.
 fn timeout(command: &Command) -> Option<std::time::Duration> {
     match command {
         Command::Wait(wait) => wait.timeout,
         Command::Run(run) => run.wait.flatten(),
+        Command::ServerStop => Some(STOP_PATIENCE),
         _ => None,
     }
 }
@@ -618,6 +631,7 @@ fn execute(
             .map(|()| Exit::Ok),
         Command::Wait(wait) => session.wait(&wait.until),
         Command::Run(run) => session.run(run),
+        Command::ServerStop => session.stop_server(),
         Command::Help(_)
         | Command::Api(_)
         | Command::Do { .. }
@@ -856,6 +870,28 @@ impl<S: io::Read + Write> Session<'_, S> {
                 Ok((granted, cursor))
             }
             other => Err(Failure::Failed(format!("expected Welcome, got {other:?}"))),
+        }
+    }
+
+    /// `server stop` (C36b): asks for a clean stop, then waits for the
+    /// server to close the connection, which it does only once its state
+    /// is saved and its name released.
+    fn stop_server(&mut self) -> Result<Exit, Failure> {
+        const REQ: u64 = 1;
+        let (features, _) = self.hello(Features::SHUTDOWN, None)?;
+        if !features.contains(Features::SHUTDOWN) {
+            return Err(Failure::Failed(
+                "server stop: this server cannot be stopped by request".into(),
+            ));
+        }
+        self.conn.send(&Message::Shutdown { req: REQ })?;
+        self.reply(REQ, REQ, "server stop")?;
+        loop {
+            match self.conn.recv() {
+                Ok(_) => {}
+                Err(e) if closed(&e) => return Ok(Exit::Ok),
+                Err(e) => return Err(e.into()),
+            }
         }
     }
 

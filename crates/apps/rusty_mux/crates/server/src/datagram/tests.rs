@@ -36,6 +36,7 @@ async fn server_on(bind: &str, idle: Duration) -> (Shared, Registry, SocketAddr)
         cwd: "/".into(),
         console_host: ConsoleHost::default(),
         state_dir: None,
+        grapheme_clustering: false,
         config_file: None,
     };
     server_with(bind, program, idle, LEASE_SILENCE).await
@@ -467,6 +468,7 @@ async fn bare_link(peer: &mut Peer, server: Rc<UdpSocket>, registry: Registry) -
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            grapheme_clustering: false,
             config_file: None,
         },
         None,
@@ -628,6 +630,7 @@ fn shell() -> Config {
             cwd: std::env::temp_dir().into_os_string(),
             console_host: ConsoleHost::from_env().expect("RUSTY_CONSOLE_HOST"),
             state_dir: None,
+            grapheme_clustering: false,
             config_file: None,
         }
     } else {
@@ -637,6 +640,7 @@ fn shell() -> Config {
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            grapheme_clustering: false,
             config_file: None,
         }
     }

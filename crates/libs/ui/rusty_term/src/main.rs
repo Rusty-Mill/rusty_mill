@@ -1,5 +1,3 @@
-#[cfg(feature = "gui")]
-use rusty_term::gui;
 use rusty_term::{backend, config, core, runtime, shells, term};
 
 use std::path::PathBuf;
@@ -65,7 +63,6 @@ fn print_help() {
     println!();
     println!("USAGE:");
     println!("    rusty_term [FLAGS] [-- <command> [args...]]");
-    println!("    rusty_term ctl <command> [key=value...]");
     println!();
     println!("FLAGS:");
     println!("    -h, --help                    Print this help message and exit");
@@ -331,8 +328,7 @@ fn main() -> Result<(), std::io::Error> {
         return Ok(());
     }
 
-    // `rusty_term ctl <command…>`: talk to a running instance's control
-    // socket and print its reply — the whole scripting surface (G33).
+    // `rusty_term ctl`: retired with the GUI's local mode (D159).
     if args.first().map(String::as_str) == Some("ctl") {
         return run_ctl(&args[1..]);
     }
@@ -391,25 +387,16 @@ fn main() -> Result<(), std::io::Error> {
         config::ConsoleHost::Own => Box::new(OwnBackend::new()),
     };
 
-    // A session file describes tabs, which only the windowed front-end has.
+    // Session files retired with the GUI's local mode (D159).
     if config.session.is_some() {
-        eprintln!("rusty_term: `session` requires the windowed front-end (--gui); ignored");
+        eprintln!("rusty_term: `session` is ignored since local mode retired");
     }
 
     // Start at the host terminal's actual size, falling back to 80x24. The
     // configured cols/rows are a *window* size; the TUI renders into the host
     // terminal, whose size is not ours to choose.
     let (init_cols, init_rows) = backend.terminal_size().unwrap_or((80, 24));
-    let mut grid = Grid::new(init_cols as usize, init_rows as usize);
-    if let Some(max) = config.scrollback {
-        grid.set_scrollback_max(max);
-    }
-    grid.apply_theme(&config.theme);
-    grid.set_default_cursor(
-        config.cursor_style.unwrap_or_default(),
-        config.cursor_blink.unwrap_or(false),
-    );
-    let grid = Arc::new(Mutex::new(grid));
+    let grid = Arc::new(Mutex::new(tui_grid(&config, init_cols, init_rows)));
 
     // The child renders through rusty_term, not the host terminal, so it should
     // see *our* identity and capabilities. We advertise our self-describing
@@ -432,47 +419,66 @@ fn main() -> Result<(), std::io::Error> {
     std::process::exit(code);
 }
 
-/// `rusty_term ctl <command> [key=value]…`: forward one control request to
-/// the running instance and print its reply. Exits nonzero on `err`.
-fn run_ctl(args: &[String]) -> std::io::Result<()> {
-    #[cfg(feature = "gui")]
-    {
-        if args.is_empty() {
-            eprintln!(
-                "usage: rusty_term ctl <new-tab|new-window|quake|send-text|list-tabs|focus-tab|ping> [key=value]…"
-            );
-            return Err(std::io::Error::other("no control command"));
-        }
-        // Re-quote each token so values with spaces survive the round trip.
-        let line = args
-            .iter()
-            .map(|a| match a.split_once('=') {
-                Some((k, v)) if !v.starts_with('"') => {
-                    format!("{k}=\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
-                }
-                _ => a.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        let reply = gui::control::request(&line)
-            .map_err(|e| std::io::Error::other(format!("no running rusty_term instance ({e})")))?;
-        print!("{reply}");
-        if reply.lines().last().is_some_and(|l| l.starts_with("err")) {
-            return Err(std::io::Error::other("control command failed"));
-        }
-        Ok(())
+/// `rusty_term ctl`: retired with the GUI's local mode (pack D159). The
+/// mux has its own control tool, `rusty-mux-ctl`.
+fn run_ctl(_args: &[String]) -> std::io::Result<()> {
+    eprintln!("rusty_term: `ctl` was retired with the GUI's local mode; use `rusty-mux-ctl`");
+    Err(std::io::Error::other("ctl retired"))
+}
+
+/// The TUI's grid at `cols` x `rows` with the config's pane defaults:
+/// scrollback cap, theme, cursor, and mode 2027 when `grapheme_clustering`
+/// is on (set through the parser, so DECRQM reports it and a program can
+/// reset it).
+fn tui_grid(config: &Config, cols: u16, rows: u16) -> Grid {
+    let mut grid = Grid::new(cols as usize, rows as usize);
+    if let Some(max) = config.scrollback {
+        grid.set_scrollback_max(max);
     }
-    #[cfg(not(feature = "gui"))]
-    {
-        let _ = args;
-        eprintln!("rusty_term: `ctl` needs the `gui` feature");
-        Err(std::io::Error::other("ctl unsupported on this build"))
+    grid.apply_theme(&config.theme);
+    grid.set_default_cursor(
+        config.cursor_style.unwrap_or_default(),
+        config.cursor_blink.unwrap_or(false),
+    );
+    if config.grapheme_clustering == Some(true) {
+        core::AnsiParser::new().advance(&mut grid, b"\x1b[?2027h");
     }
+    grid
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DECRQM's reply for mode 2027 after `bytes` on a TUI grid.
+    fn mode_2027(config: &Config, bytes: &[u8]) -> Vec<u8> {
+        let mut grid = tui_grid(config, 20, 2);
+        let mut parser = core::AnsiParser::new();
+        parser.advance(&mut grid, bytes);
+        parser.advance(&mut grid, b"\x1b[?2027$p");
+        parser.take_responses()
+    }
+
+    #[test]
+    fn grapheme_clustering_key_starts_the_tui_grid_in_mode_2027() {
+        let off = Config::default();
+        assert_eq!(mode_2027(&off, b""), b"\x1b[?2027;2$y", "off by default");
+        let on = Config {
+            grapheme_clustering: Some(true),
+            ..Config::default()
+        };
+        assert_eq!(mode_2027(&on, b""), b"\x1b[?2027;1$y");
+        assert_eq!(
+            mode_2027(&on, b"\x1b[?2027l"),
+            b"\x1b[?2027;2$y",
+            "a program resets it"
+        );
+        assert_eq!(
+            mode_2027(&on, b"\x1bc"),
+            b"\x1b[?2027;2$y",
+            "RIS turns it off"
+        );
+    }
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()

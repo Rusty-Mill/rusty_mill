@@ -31,6 +31,7 @@ fn shell() -> Config {
             cwd: std::env::temp_dir().into_os_string(),
             console_host: ConsoleHost::from_env().expect("RUSTY_CONSOLE_HOST"),
             state_dir: None,
+            grapheme_clustering: false,
             config_file: None,
         }
     } else {
@@ -40,6 +41,7 @@ fn shell() -> Config {
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            grapheme_clustering: false,
             config_file: None,
         }
     }
@@ -2327,4 +2329,22 @@ fn bridge_carries_the_protocol_over_stdin_and_stdout() {
 fn bridge_to_no_server_is_unreachable() {
     let output = ctl(&socket_path("bridge-none"), &["bridge"]);
     assert_eq!(output.status.code(), Some(4), "{output:?}");
+}
+
+/// C36b: `server stop` returns once the server has stopped, so a second
+/// finds no server and exits 4.
+#[test]
+fn server_stop_waits_for_the_stop_and_then_finds_no_server() {
+    let socket = start_server();
+    ok(&socket, &["create-session", "--name", "kept"]);
+    assert_eq!(ok(&socket, &["server", "stop"]), "");
+    let again = ctl(&socket, &["server", "stop"]);
+    assert_eq!(
+        again.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    let usage = ctl(&socket, &["server", "start"]);
+    assert_eq!(usage.status.code(), Some(2));
 }

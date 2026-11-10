@@ -76,6 +76,10 @@ pub struct Config {
     /// Which console host runs a block's program on Windows; other
     /// platforms ignore it.
     pub console_host: ConsoleHost,
+    /// Whether a new block starts with DEC mode 2027 (grapheme clustering)
+    /// set; the config file's `server.grapheme_clustering` replaces it.
+    /// Running and restored blocks keep their own mode.
+    pub grapheme_clustering: bool,
     /// The config file whose `server` section replaces `program`, `args`
     /// and `cwd` (see [`rusty_mux_script::Defaults`]), read at start and on
     /// `reload-config`; `None` reads none and refuses a reload.
@@ -310,10 +314,12 @@ async fn serve_for(
     state.borrow_mut().restore(&state);
     rusty_tokio::task::spawn_local(state::watch_processes(std::rc::Rc::downgrade(&state)));
     rusty_tokio::task::spawn_local(state::save_periodically(std::rc::Rc::downgrade(&state)));
+    let requested = state.borrow_mut().stop_on_request(owner.clone());
     let served = rusty_tokio::select! {
         result = serve_clients(listener, state.clone(), udp, allowed, owner) => result,
         () = stop => Ok(()),
         () = idle_for(&state, idle) => Ok(()),
+        () = stop_requested(requested) => Ok(()),
     };
     let hosts = state.borrow_mut().stop();
     if !hosts.shut_down(pty::SHUTDOWN).await {
@@ -323,6 +329,17 @@ async fn serve_for(
         );
     }
     served
+}
+
+/// Resolves once a client has asked for a clean stop (C36b), after its
+/// connection has had a turn to send the answer. Never if the request
+/// can no longer come.
+#[cfg(any(target_os = "linux", windows))]
+async fn stop_requested(requested: rusty_tokio::sync::oneshot::Receiver<()>) {
+    if requested.await.is_err() {
+        return std::future::pending().await;
+    }
+    rusty_tokio::task::yield_now().await;
 }
 
 /// How often [`idle_for`] looks.

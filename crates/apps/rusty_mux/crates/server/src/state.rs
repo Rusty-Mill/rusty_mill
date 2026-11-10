@@ -95,7 +95,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_HISTORY)
     .union(Features::OWNERSHIP)
     .union(Features::INPUT_GATE)
-    .union(Features::LEASE_REQUESTS);
+    .union(Features::LEASE_REQUESTS)
+    .union(Features::SHUTDOWN);
 
 /// An owner whose outbox holds more than this can't be told of more
 /// input, so an owner-only block refuses it (C77): half the budget, so a
@@ -366,6 +367,16 @@ pub(crate) struct State {
     /// The server's own account, set by [`State::serve_as`]: unrestricted
     /// on a server other principals share (D164).
     account: Option<Principal>,
+    /// Set by [`State::stop_on_request`]: who may stop the server with
+    /// `shutdown`, and the stop to start. Taken by the first request.
+    shutdown: Option<Shutdown>,
+}
+
+/// A stop by request (C36b): only `owner`, the server's own account, may
+/// ask; asking sends on `stop`.
+struct Shutdown {
+    owner: Principal,
+    stop: oneshot::Sender<()>,
 }
 
 /// How long a UDP client outlives silence or an overflow: its lease for
@@ -415,6 +426,7 @@ impl State {
             saved_at: None,
             generation: 0,
             account: None,
+            shutdown: None,
         }))
     }
 
@@ -501,16 +513,24 @@ impl State {
         self.blocks.is_empty() && self.clients.is_empty() && self.orphans.is_empty()
     }
 
-    /// The server is stopping: starts no more blocks, and ends every
-    /// block's program now, as dropping the block would, except that an
-    /// owned block's program is only hung up (D87). The consoles to
-    /// wait for, which still hold the ones closing when this was called.
     /// Serves as `account`, the server's own: it may disconnect any client
     /// and owns every session no client of another principal created.
     pub(crate) fn serve_as(&mut self, account: Principal) {
         self.account = Some(account);
     }
 
+    /// Lets clients of `owner` stop the server with `shutdown`; the
+    /// receiver resolves on the first such request.
+    pub(crate) fn stop_on_request(&mut self, owner: Principal) -> oneshot::Receiver<()> {
+        let (stop, requested) = oneshot::channel();
+        self.shutdown = Some(Shutdown { owner, stop });
+        requested
+    }
+
+    /// The server is stopping: starts no more blocks, and ends every
+    /// block's program now, as dropping the block would, except that an
+    /// owned block's program is only hung up (D87). The consoles to
+    /// wait for, which still hold the ones closing when this was called.
     pub(crate) fn stop(&mut self) -> pty::Hosts {
         self.save_now();
         self.stopping = true;
@@ -1169,6 +1189,11 @@ impl State {
                 self.require(client, Features::LEASE_REQUESTS, "request-lease")
                     .and_then(|()| self.request_lease(client, block)),
             ),
+            M::Shutdown { req } => (
+                req,
+                self.require(client, Features::SHUTDOWN, "shutdown")
+                    .and_then(|()| self.shutdown(client)),
+            ),
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
@@ -1592,7 +1617,11 @@ impl State {
         if launch.own {
             in_step("own", self.mux.own(client, block, launch.input));
         }
-        let rt = rt.screened(shared, crate::checkpoint::grid(size), AnsiParser::new());
+        let (grid, parser) = fresh_screen(
+            crate::checkpoint::grid(size),
+            self.config.grapheme_clustering,
+        );
+        let rt = rt.screened(shared, grid, parser);
         self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
     }
@@ -1717,6 +1746,27 @@ impl State {
             .into());
         }
         Ok(Some((block, client)))
+    }
+
+    /// `shutdown` (C36b): starts the clean stop for a client of the server's
+    /// own account. A stop ends every session, so no lesser owner may ask.
+    fn shutdown(&mut self, client: ClientId) -> Result<Outcome, Refusal> {
+        let asker = self.mux.client(client).ok_or("unknown client")?.principal();
+        let Some(shutdown) = &self.shutdown else {
+            return Err(
+                "this server is not stopped by request; it is stopping already, or \
+                        its owner stops it"
+                    .into(),
+            );
+        };
+        if asker.id() != shutdown.owner.id() {
+            return Err(format!("only {} may stop this server", shutdown.owner.id()).into());
+        }
+        if let Some(shutdown) = self.shutdown.take() {
+            // The receiver is serve_for's; gone only once it has stopped.
+            let _ = shutdown.stop.send(());
+        }
+        Ok(Outcome::Done(None))
     }
 
     /// Tells `block`'s owner that `client` asks for its lease (Q26): one
@@ -2209,6 +2259,18 @@ fn receives(features: Features, event: &Event) -> bool {
 }
 
 /// A principal for tests, which build a state without a peer check.
+/// A new block's screen: `grid` and a fresh parser, with DEC mode 2027
+/// (grapheme clustering) set when `clustering`. Set through the parser, so
+/// DECRQM reports it, a program can reset it, and the checkpoint carries it
+/// to every client.
+pub(crate) fn fresh_screen(mut grid: Grid, clustering: bool) -> (Grid, AnsiParser) {
+    let mut parser = AnsiParser::new();
+    if clustering {
+        parser.advance(&mut grid, b"\x1b[?2027h");
+    }
+    (grid, parser)
+}
+
 #[cfg(test)]
 pub(crate) fn test_owner() -> Principal {
     Principal::unix(1000, Some("tester".into())).expect("valid")
@@ -2533,6 +2595,7 @@ mod regression {
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
                     state_dir: None,
+                    grapheme_clustering: false,
                     config_file: None,
                 },
                 None,
@@ -2550,6 +2613,11 @@ mod regression {
     }
 
     fn fixture() -> (Shared, ClientId, BlockId, Inbox) {
+        fixture_with(false)
+    }
+
+    /// [`fixture`] with the config's `grapheme_clustering` set to `clustering`.
+    fn fixture_with(clustering: bool) -> (Shared, ClientId, BlockId, Inbox) {
         let shared = State::shared(
             Config {
                 program: "/bin/sh".into(),
@@ -2557,6 +2625,7 @@ mod regression {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
                 state_dir: None,
+                grapheme_clustering: clustering,
                 config_file: None,
             },
             None,
@@ -2709,6 +2778,83 @@ mod regression {
                 takeover,
             );
             assert_eq!(again, client, "the token still works for its owner");
+        });
+    }
+
+    /// Attaches to `block` and returns the client's grid and parser as the
+    /// checkpoint leaves them at Ready.
+    async fn attached(
+        shared: &Shared,
+        client: ClientId,
+        block: BlockId,
+        inbox: &mut Inbox,
+    ) -> (Grid, AnsiParser) {
+        State::request(shared, client, Message::Attach { req: 78, block });
+        let mut receiver = Receiver::default();
+        loop {
+            match rusty_mux_proto::decode(&inbox.next().await.unwrap())
+                .unwrap()
+                .unwrap()
+                .0
+            {
+                Message::Checkpoint {
+                    offset,
+                    total,
+                    data,
+                    ..
+                } => receiver.push(offset, total, &data).unwrap(),
+                Message::Ready { .. } => break receiver.finish().unwrap(),
+                _ => {}
+            }
+        }
+    }
+
+    /// DECRQM's reply for mode 2027 on a client's copy.
+    fn mode_2027(grid: &mut Grid, parser: &mut AnsiParser) -> Vec<u8> {
+        parser.advance(grid, b"\x1b[?2027$p");
+        parser.take_responses()
+    }
+
+    #[test]
+    fn a_new_block_starts_in_mode_2027_when_the_config_says_so() {
+        runtime().block_on(async {
+            for (clustering, reply) in [(false, &b"\x1b[?2027;2$y"[..]), (true, b"\x1b[?2027;1$y")]
+            {
+                let (shared, client, block, mut inbox) = fixture_with(clustering);
+                let (mut grid, mut parser) = attached(&shared, client, block, &mut inbox).await;
+                assert_eq!(
+                    mode_2027(&mut grid, &mut parser),
+                    reply,
+                    "clustering {clustering}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn a_clustered_block_attaches_to_the_same_cells() {
+        runtime().block_on(async {
+            let (shared, client, block, mut inbox) = fixture_with(true);
+            // A ZWJ sequence split across the attach point.
+            shared.borrow_mut().output(block, "👨".as_bytes());
+            let (mut grid, mut parser) = attached(&shared, client, block, &mut inbox).await;
+            let rest = "\u{200d}💻".as_bytes();
+            shared.borrow_mut().output(block, rest);
+            parser.advance(&mut grid, rest);
+            let state = shared.borrow();
+            let server = &state.blocks[&block].grid;
+            assert_eq!(grid.encode_snapshot(), server.encode_snapshot());
+            assert_eq!(server.cursor, (2, 0), "one cluster, two columns");
+        });
+    }
+
+    #[test]
+    fn a_program_can_reset_the_configured_mode_2027() {
+        runtime().block_on(async {
+            let (shared, client, block, mut inbox) = fixture_with(true);
+            shared.borrow_mut().output(block, b"\x1b[?2027l");
+            let (mut grid, mut parser) = attached(&shared, client, block, &mut inbox).await;
+            assert_eq!(mode_2027(&mut grid, &mut parser), b"\x1b[?2027;2$y");
         });
     }
 
@@ -2922,6 +3068,7 @@ mod regression {
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            grapheme_clustering: false,
             config_file: Some("/stalled.json".into()),
         };
         let shared = State::shared(base, None);
@@ -3026,6 +3173,55 @@ mod regression {
             let refused = disconnect(&shared, &mut carol_too, alice.0, 5).await;
             assert!(refused.is_err_and(|r| r.contains("another account")));
             assert_eq!(disconnect(&shared, &mut server, alice.0, 6).await, Ok(()));
+        });
+    }
+
+    /// A `SHUTDOWN` client of `principal`.
+    fn shutdown_client(shared: &Shared, principal: Principal) -> (ClientId, Inbox) {
+        let (out, inbox, _) = outbox();
+        let client = shared.borrow_mut().connect(
+            out,
+            principal,
+            Transport::Socket,
+            Features::SHUTDOWN,
+            None,
+            None,
+        );
+        (client, inbox)
+    }
+
+    /// C36b: only the server's own account may stop it, once; anyone else
+    /// is refused and the stop does not start.
+    #[test]
+    fn only_the_servers_own_account_stops_it_and_only_once() {
+        runtime().block_on(async {
+            let (shared, ..) = stalled_reloads();
+            let requested = shared.borrow_mut().stop_on_request(test_owner());
+            let stranger = Principal::unix(1001, Some("other".into())).expect("valid");
+            let (other, mut others) = shutdown_client(&shared, stranger);
+            let (owner, mut owners) = shutdown_client(&shared, test_owner());
+
+            State::request(&shared, other, Message::Shutdown { req: 1 });
+            let refused = reply_to(&mut others, 1).await;
+            assert!(
+                matches!(&refused, Message::Failed { reason, .. } if reason.contains("only")),
+                "{refused:?}"
+            );
+            assert!(
+                shared.borrow().shutdown.is_some(),
+                "a refusal starts no stop"
+            );
+
+            State::request(&shared, owner, Message::Shutdown { req: 2 });
+            assert!(matches!(
+                reply_to(&mut owners, 2).await,
+                Message::Done { .. }
+            ));
+            assert_eq!(requested.await, Ok(()), "the owner's request starts it");
+
+            State::request(&shared, owner, Message::Shutdown { req: 3 });
+            let again = reply_to(&mut owners, 3).await;
+            assert!(matches!(again, Message::Failed { .. }), "{again:?}");
         });
     }
 
@@ -3206,6 +3402,7 @@ mod regression {
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
                     state_dir: None,
+                    grapheme_clustering: false,
                     config_file: None,
                 },
                 None,

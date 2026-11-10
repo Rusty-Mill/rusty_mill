@@ -3,10 +3,9 @@
 //!
 //! [`App`] is a thin router owning a [`WindowState`] per open window: window
 //! events dispatch by `WindowId`, PTY wakeups by pane id (ids come from a
-//! shared counter so they're unique across windows). New windows open with
-//! Ctrl+Shift+N or `rusty_term ctl new-window`; `rusty_term ctl quake`
-//! toggles a dropdown "quake" window docked to the top of the monitor (G30).
-//! The loop exits when the last window closes.
+//! shared counter so they're unique across windows). Every window shows a
+//! source's panes ([`run_attached`]); local mode is retired (pack D146,
+//! D159). The loop exits when the last window closes.
 //!
 //! Each window is borderless (`decorations(false)`) and draws its own chrome: a
 //! one-cell-row bar across the top holding the session tabs, a `+` new-tab
@@ -35,7 +34,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::sync::Mutex;
-use std::path::PathBuf;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -56,7 +54,7 @@ use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use super::source::{Act, Feed, PaneIo, Remote, Source, Tree};
 use super::strip::{self, Spot, StripState};
-use crate::backend::{Backend, BackendHandle};
+use crate::backend::BackendHandle;
 use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
 use crate::core::{
@@ -141,11 +139,6 @@ pub(crate) enum UserEvent {
     Exit(u64),
     /// The config file changed on disk; reload and apply what can change live.
     ConfigChanged,
-    /// A control-socket request (`--single-instance` / `rusty_term ctl`),
-    /// with the channel its connection thread waits on for the reply.
-    #[cfg_attr(windows, allow(dead_code))]
-    // constructed once the Windows named-pipe transport lands (G31)
-    Control(super::control::CtlCommand, std::sync::mpsc::Sender<String>),
     /// An AccessKit event (initial-tree request, AT action, deactivation)
     /// routed back through the winit loop (C20).
     Accessibility(accesskit_winit::Event),
@@ -307,10 +300,6 @@ struct MenuItem {
 
 #[derive(Clone)]
 enum MenuKind {
-    /// Launch a new tab running detected shell `[index]`.
-    LaunchShell(usize),
-    /// Launch a new tab from configured profile `[index]`.
-    LaunchProfile(usize),
     /// Open this URL with the OS handler (the visible-links menu).
     OpenUrl(String),
     /// Open the in-app settings page.
@@ -418,42 +407,10 @@ impl Tab {
 
 /// Launch the windowed terminal. Blocks until the window closes or the last
 /// tab's child exits. Returns an error if the window/PTY/font can't be set up.
-pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    launch(backend, None, config, |first, args| {
-        // A session file builds the initial tab set; otherwise one default
-        // shell (more come from Ctrl+Shift+T / the + button either way).
-        let session = first.config.session.clone();
-        let mut opened = 0usize;
-        if let Some(path) = &session {
-            let (tabs, warns) = crate::config::load_session(path);
-            for w in &warns {
-                eprintln!("rusty_term: session: {w}");
-            }
-            for t in tabs {
-                if let Err(e) = first.spawn_session_tab(&t) {
-                    eprintln!("rusty_term: session tab: {e}");
-                } else {
-                    opened += 1;
-                }
-            }
-            if opened > 0 {
-                first.active = 0; // land on the session's first tab
-            }
-        }
-        if opened == 0 {
-            first.spawn_tab()?;
-        }
-        if crate::config::wants_setup(args) || crate::config::is_first_run(args) {
-            first.open_setup();
-        }
-        Ok(())
-    })
-}
-
 /// Launch a window that shows `source`'s panes, laid out as `first` with
 /// pane `focus` focused and then as the source says through the [`Remote`]
 /// handed to `on_start` before the window opens. It opens no local shells.
-/// Setup opens as it does for [`run`]: on `--setup`, or on a first run.
+/// Setup opens on `--setup`, or on a first run.
 /// Blocks until the window closes or the source's window is gone.
 pub fn run_attached(
     source: &dyn Source,
@@ -462,7 +419,7 @@ pub fn run_attached(
     config: &Config,
     on_start: impl FnOnce(Remote),
 ) -> Result<(), Box<dyn std::error::Error>> {
-    launch(&NoShells, Some(source), config, |window, args| {
+    launch(source, config, |window, args| {
         on_start(Remote(window.proxy.clone()));
         window.told = Some(focus);
         window.show_tree(Some(first));
@@ -473,35 +430,10 @@ pub fn run_attached(
     })
 }
 
-/// The backend of an attached window: its panes come from its source.
-struct NoShells;
-
-impl Backend for NoShells {
-    fn spawn_shell(
-        &self,
-        _cols: u16,
-        _rows: u16,
-        _shell: Option<&str>,
-        _args: &[String],
-        _cwd: Option<&std::path::Path>,
-    ) -> Result<Box<dyn BackendHandle>, std::io::Error> {
-        Err(std::io::Error::other(
-            "an attached window opens no local shells",
-        ))
-    }
-    fn set_raw_mode(&self, _enabled: bool) -> Result<(), std::io::Error> {
-        Ok(())
-    }
-    fn terminal_size(&self) -> Option<(u16, u16)> {
-        None
-    }
-}
-
 /// The event loop and first window shared by [`run`] and [`run_attached`];
 /// `seed` fills the first window, given the launch arguments.
 fn launch<'a>(
-    backend: &'a dyn Backend,
-    source: Option<&'a dyn Source>,
+    source: &'a dyn Source,
     config: &Config,
     seed: impl FnOnce(&mut WindowState<'a>, &[String]) -> Result<(), std::io::Error>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -512,36 +444,7 @@ fn launch<'a>(
     }
 
     let mut event_loop_builder = EventLoop::<UserEvent>::with_user_event();
-    // Global quake hotkey (G30 stretch, Windows only): `with_msg_hook` sees
-    // WM_HOTKEY before winit does, since RegisterHotKey posts it to this
-    // thread's queue rather than a window's. The parsed spec can't be
-    // registered until the loop below runs on this thread, so just remember
-    // it here; a bad spec warns and the app runs on without a hotkey.
-    #[cfg(windows)]
-    let quake_hotkey =
-        config
-            .quake_hotkey
-            .as_ref()
-            .and_then(|spec| match super::hotkey::parse(spec) {
-                Ok(hk) => Some(hk),
-                Err(e) => {
-                    eprintln!("rusty_term: quake_hotkey `{spec}`: {e}");
-                    None
-                }
-            });
-    #[cfg(windows)]
-    let hotkey_pressed = quake_hotkey.map(|_| std::rc::Rc::new(std::cell::Cell::new(false)));
-    #[cfg(windows)]
-    if let Some(pressed) = &hotkey_pressed {
-        use winit::platform::windows::EventLoopBuilderExtWindows;
-        event_loop_builder.with_msg_hook(super::hotkey::make_msg_hook(pressed.clone()));
-    }
-    #[cfg(not(windows))]
-    let hotkey_pressed: Option<std::rc::Rc<std::cell::Cell<bool>>> = None;
     let event_loop = build_event_loop(&mut event_loop_builder)?;
-    // Now that the loop's thread is established, actually register.
-    #[cfg(windows)]
-    let hotkey_registered = quake_hotkey.is_some_and(super::hotkey::register);
     let proxy = event_loop.create_proxy();
 
     // Config live reload: watch the file and wake the loop on changes.
@@ -555,40 +458,22 @@ fn launch<'a>(
         });
     }
 
-    // Control socket/pipe (`single_instance` config / `--single-instance`):
-    // serve `rusty_term ctl` requests and let a second launch reuse this
-    // instance.
-    if config.single_instance.unwrap_or(false) || args.iter().any(|a| a == "--single-instance") {
-        match super::control::serve(proxy.clone()) {
-            Ok(path) => eprintln!("rusty_term: control socket at {}", path.display()),
-            Err(e) => eprintln!("rusty_term: control socket unavailable: {e}"),
-        }
-    }
-
     let profile_override = crate::config::flag_value(args, "--profile").map(str::to_string);
     let mut app = App {
-        backend,
-        source,
+        source: Some(source),
         config: config.clone(),
         config_path,
         profile_override,
         proxy,
-        next_id: std::rc::Rc::new(std::cell::Cell::new(0)),
         shells: crate::shells::detect_all(),
         windows: Vec::new(),
-        focused_window: None,
-        quake_hotkey_pressed: hotkey_pressed,
     };
     // The first window (its OS window comes with the loop's `resumed`).
     // Building it up front surfaces font/shell errors before the loop runs.
-    let mut first = app.new_window_state(false)?;
+    let mut first = app.new_window_state()?;
     seed(&mut first, &all)?;
     app.windows.push(first);
     event_loop.run_app(&mut app)?;
-    #[cfg(windows)]
-    if hotkey_registered {
-        super::hotkey::unregister();
-    }
     Ok(())
 }
 
@@ -740,10 +625,9 @@ struct TabDrag {
 /// [`App`] router owns one of these per open window and dispatches winit
 /// events to the right one by `WindowId`.
 struct WindowState<'a> {
-    /// Spawns the shell behind each new tab.
-    backend: &'a dyn Backend,
-    /// An attached window's source of panes and layout; `None` for local
-    /// shells. With one, the window never edits its layout (pack D102).
+    /// The window's source of panes and layout; always `Some` since local
+    /// mode retired (D159; R3 makes it plain). The window never edits its
+    /// layout (pack D102).
     source: Option<&'a dyn Source>,
     /// The focus last told to `source` or told by it.
     told: Option<u64>,
@@ -772,9 +656,6 @@ struct WindowState<'a> {
     tabs: Vec<Tab>,
     /// Index into `tabs` of the session being shown and fed input.
     active: usize,
-    /// Monotonic id source for panes, shared by every window so reader-thread
-    /// wakeups (`Redraw(id)`/`Exit(id)`) route unambiguously across windows.
-    next_id: std::rc::Rc<std::cell::Cell<u64>>,
     proxy: EventLoopProxy<UserEvent>,
     font: FontCache,
     cell_w: usize,
@@ -896,18 +777,11 @@ struct WindowState<'a> {
     /// request); the [`App`] router drops it and exits the loop when none are
     /// left.
     closed: bool,
-    /// Set by `Action::NewWindow` (Ctrl+Shift+N); the router picks it up after
-    /// the event dispatch and opens a sibling window.
-    wants_new_window: bool,
     /// Cursor-trail state (G36): where the focused pane's cursor was last
     /// frame, and the in-flight trail if it just jumped. Tracked per window
     /// for its focused pane only.
     cursor_prev: Option<(u64, (usize, usize))>,
     trail: Option<Trail>,
-    /// Whether this is the quake (dropdown) window: borderless strip docked to
-    /// the top of the monitor, kept above other windows, toggled with
-    /// `rusty_term ctl quake`.
-    quake: bool,
     /// Cached git branch for the status ribbon: `(cwd it was resolved for,
     /// branch or None, when)`. `.git/HEAD` is re-read at most every
     /// [`GIT_BRANCH_TTL`] instead of on every frame.
@@ -926,28 +800,6 @@ struct WindowState<'a> {
 }
 
 impl WindowState<'_> {
-    /// Spawn one shell sized `cols × rows`, wire its reader + exit-watcher
-    /// threads (which signal by pane id), and return the pane.
-    fn new_pane(
-        &mut self,
-        cols: u16,
-        rows: u16,
-        shell: Option<&str>,
-        args: &[String],
-        cwd: Option<&std::path::Path>,
-        theme: Option<Theme>,
-    ) -> Result<Pane, std::io::Error> {
-        let handle = self.backend.spawn_shell(cols, rows, shell, args, cwd)?;
-        let id = self.next_id.get();
-        self.next_id.set(id + 1);
-        // Child-exit watcher (Windows ConPTY: the output pipe only EOFs at
-        // teardown, so block on the child handle; `None` on Unix where read-EOF
-        // already signals exit).
-        let exit = handle.exit_token();
-        let io = PaneIo::local(handle, format!("pty-read-{id}"))?;
-        self.pane_from(id, io, exit, cols, rows, theme)
-    }
-
     /// The pane `id` drawn from `io`, sized `cols × rows`, with its reader
     /// thread and, given `exit`, a thread that reports the child's exit.
     fn pane_from(
@@ -1015,240 +867,6 @@ impl WindowState<'_> {
             shown: std::cell::RefCell::new(None),
             compactor: Compactor::default(),
         })
-    }
-
-    /// The active tab's focused pane's cwd, as last reported via OSC 7 —
-    /// `None` if it hasn't reported one yet (or there's no active tab). A new
-    /// tab/pane spawned from here starts in that directory instead of
-    /// wherever the launch `--cwd` pointed, so "open a new tab" follows where
-    /// the user actually navigated to.
-    fn focused_pane_cwd(&self) -> Option<std::path::PathBuf> {
-        let tab = self.tabs.get(self.active)?;
-        let pane = tab.focused()?;
-        let uri = pane.grid.lock().cwd.clone();
-        path_from_file_uri(&uri)
-    }
-
-    /// Open a new tab (one full-area pane) and make it active.
-    fn spawn_tab(&mut self) -> Result<(), std::io::Error> {
-        self.spawn_tab_with(None)
-    }
-
-    /// Open a new tab running `shell` (or the configured default when `None`)
-    /// and make it active. Backs the `+` button, `Ctrl+Shift+T`, and the
-    /// shell-launcher menu (which passes a detected shell's path).
-    fn spawn_tab_with(&mut self, shell: Option<String>) -> Result<(), std::io::Error> {
-        self.spawn_tab_opts(shell, &[], None, None)
-    }
-
-    /// Spawn a tab from a profile: its shell/cwd/theme, top-level config for
-    /// anything the profile leaves unset.
-    fn spawn_tab_profile(&mut self, i: usize) -> Result<(), std::io::Error> {
-        let Some(p) = self.config.profiles.get(i).cloned() else {
-            return Ok(());
-        };
-        self.spawn_tab_opts(p.shell, &[], p.cwd, p.theme)
-    }
-
-    /// Execute one control-socket command and produce its reply text
-    /// (data lines + a trailing `ok` / `err …` line).
-    fn handle_control(&mut self, cmd: super::control::CtlCommand) -> String {
-        use super::control::CtlCommand;
-        match cmd {
-            CtlCommand::Ping => "ok\n".to_string(),
-            // Window-level commands are handled by the App router before any
-            // per-window dispatch; reaching here is a routing bug, not user
-            // error, so answer with a stable diagnostic rather than panicking.
-            CtlCommand::NewWindow { .. } | CtlCommand::Quake => {
-                "err window-level command not routed\n".to_string()
-            }
-            CtlCommand::NewTab {
-                cwd,
-                profile,
-                shell,
-            } => {
-                let p = profile
-                    .as_deref()
-                    .and_then(|n| self.config.profile(n))
-                    .cloned();
-                if profile.is_some() && p.is_none() {
-                    return format!("err no profile named `{}`\n", profile.unwrap_or_default());
-                }
-                let p = p.unwrap_or_default();
-                let shell = shell.or(p.shell);
-                let cwd = cwd.or(p.cwd);
-                match self.spawn_tab_opts(shell, &[], cwd, p.theme) {
-                    Ok(()) => {
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                            window.focus_window();
-                        }
-                        "ok\n".to_string()
-                    }
-                    Err(e) => format!("err {e}\n"),
-                }
-            }
-            CtlCommand::SendText(text) => match self.pane_mut() {
-                Some(p) => {
-                    let _ = p.writer.write(text.as_bytes());
-                    "ok\n".to_string()
-                }
-                None => "err no pane\n".to_string(),
-            },
-            CtlCommand::ListTabs => {
-                let mut out = String::new();
-                for (i, tab) in self.tabs.iter().enumerate() {
-                    let title = tab
-                        .focused()
-                        .map(|p| p.grid.lock().title.clone())
-                        .unwrap_or_default();
-                    let marker = if i == self.active { "*" } else { " " };
-                    out.push_str(&format!("{i}\t{marker}\t{title}\n"));
-                }
-                out.push_str("ok\n");
-                out
-            }
-            CtlCommand::FocusTab(n) => {
-                if n >= self.tabs.len() {
-                    return format!("err no tab {n}\n");
-                }
-                self.active = n;
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
-                "ok\n".to_string()
-            }
-        }
-    }
-
-    /// Spawn one session-file tab: profile defaults, then the tab's own
-    /// cwd/command overrides, then its splits (each split pane runs the same
-    /// shell and inherits the tab's cwd).
-    fn spawn_session_tab(&mut self, t: &crate::config::SessionTab) -> Result<(), std::io::Error> {
-        let profile = t
-            .profile
-            .as_deref()
-            .and_then(|n| self.config.profile(n))
-            .cloned();
-        if t.profile.is_some() && profile.is_none() {
-            eprintln!(
-                "rusty_term: session: no profile named `{}`",
-                t.profile.as_deref().unwrap_or_default()
-            );
-        }
-        let profile = profile.unwrap_or_default();
-        // A `command` runs directly (whitespace-split argv); else the
-        // profile's shell; else the configured default.
-        let (shell, args): (Option<String>, Vec<String>) = match &t.command {
-            Some(cmd) => {
-                let mut it = cmd.split_whitespace().map(str::to_string);
-                (it.next(), it.collect())
-            }
-            None => (profile.shell.clone(), Vec::new()),
-        };
-        let cwd = t.cwd.clone().or_else(|| profile.cwd.clone());
-        self.spawn_tab_opts(shell, &args, cwd.clone(), profile.theme)?;
-        for split in &t.splits {
-            let dir = if split == "right" {
-                Dir::Vertical
-            } else {
-                Dir::Horizontal
-            };
-            self.split_pane_with(dir, profile.shell.clone(), cwd.clone(), profile.theme);
-        }
-        Ok(())
-    }
-
-    /// The general tab spawner: explicit shell/args/cwd/theme, each falling
-    /// back to the config (and, for cwd, the focused pane) when `None`.
-    fn spawn_tab_opts(
-        &mut self,
-        shell: Option<String>,
-        args: &[String],
-        cwd: Option<PathBuf>,
-        theme: Option<Theme>,
-    ) -> Result<(), std::io::Error> {
-        let shell = shell.or_else(|| self.config.shell.clone());
-        // The launch-time `-- prog arg...` argv only applies when spawning
-        // that same configured shell; a shell picked fresh from the menu
-        // starts bare rather than replaying args meant for a different program.
-        let args: Vec<String> = if !args.is_empty() {
-            args.to_vec()
-        } else if shell == self.config.shell {
-            self.config.command_args.clone()
-        } else {
-            Vec::new()
-        };
-        // An explicit cwd (profile/session) wins; else the focused pane's
-        // cwd (so a new tab follows where the user navigated to); the launch
-        // `--cwd` is the final fallback.
-        let cwd = cwd
-            .or_else(|| self.focused_pane_cwd())
-            .or_else(|| self.config.cwd.clone());
-        let pane = self.new_pane(
-            self.cols,
-            self.rows,
-            shell.as_deref(),
-            &args,
-            cwd.as_deref(),
-            theme,
-        )?;
-        let focus = pane.id;
-        self.tabs.push(Tab {
-            panes: vec![pane],
-            layout: Layout::single(focus),
-            focus,
-            attention: false,
-            zoomed: false,
-        });
-        self.active = self.tabs.len() - 1;
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
-        Ok(())
-    }
-
-    /// Split the active tab's focused pane, spawning a new shell beside it and
-    /// focusing it. `dir` is the divider orientation.
-    fn split_pane(&mut self, dir: Dir) {
-        let shell = self.config.shell.clone();
-        let cwd = self.focused_pane_cwd().or_else(|| self.config.cwd.clone());
-        self.split_pane_with(dir, shell, cwd, None);
-    }
-
-    /// [`Self::split_pane`] with explicit shell/cwd/theme (session tabs pass
-    /// their profile's, so a split doesn't fall back to the global config).
-    fn split_pane_with(
-        &mut self,
-        dir: Dir,
-        shell: Option<String>,
-        cwd: Option<PathBuf>,
-        theme: Option<Theme>,
-    ) {
-        let shell = shell.or_else(|| self.config.shell.clone());
-        let Ok(pane) = self.new_pane(
-            self.cols.max(1),
-            self.rows.max(1),
-            shell.as_deref(),
-            &[],
-            cwd.as_deref(),
-            theme,
-        ) else {
-            return;
-        };
-        let new_id = pane.id;
-        let Some(tab) = self.tabs.get_mut(self.active) else {
-            return;
-        };
-        tab.zoomed = false; // the pane set changed; zoom no longer meaningful
-        let target = tab.focus;
-        tab.panes.push(pane);
-        tab.layout.split(target, new_id, dir);
-        tab.focus = new_id;
-        self.layout_panes(self.active);
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
     }
 
     /// Move focus to the next (`forward`) or previous pane of the active tab.
@@ -3174,12 +2792,9 @@ impl WindowState<'_> {
                     self.close_tab_at(i);
                 }
             }
-            Hit::NewTab => {
-                self.close_overlay();
-                if let Err(e) = self.spawn_tab() {
-                    eprintln!("rusty_term: new tab: {e}");
-                }
-            }
+            // The local chrome bar's `+`: a window's blocks come from its
+            // source now (D159); R3 removes the bar.
+            Hit::NewTab => self.close_overlay(),
             Hit::Window(key) => {
                 self.close_overlay();
                 if let Some(source) = self.source {
@@ -3489,14 +3104,9 @@ impl WindowState<'_> {
                 self.copy_or_send();
             }
             Action::Paste => self.paste(),
-            Action::NewTab => {
-                if let Err(e) = self.spawn_tab() {
-                    eprintln!("rusty_term: new tab: {e}");
-                }
-            }
-            // Window creation needs the event loop, which lives above this
-            // per-window layer — flag it for the router to act on.
-            Action::NewWindow => self.wants_new_window = true,
+            // Local tabs and windows retired with local mode (D159); the
+            // actions stay bindable (public `keymap`) and do nothing here.
+            Action::NewTab | Action::NewWindow => {}
             // Collapse/expand the last finished command's output (C17'):
             // its rows fold to a one-line "N lines hidden" summary.
             Action::FoldOutput => {
@@ -3533,15 +3143,13 @@ impl WindowState<'_> {
             Action::OpenSetup => self.open_setup(),
             Action::Search => self.start_search(),
             Action::OpenLinks => self.open_links_menu(),
-            Action::SplitRight | Action::SplitDown if self.source.is_some() => {
+            Action::SplitRight | Action::SplitDown => {
                 let dir = match action {
                     Action::SplitRight => Dir::Vertical,
                     _ => Dir::Horizontal,
                 };
                 self.act_on_source(|key, _| Act::Split { key, dir });
             }
-            Action::SplitRight => self.split_pane(Dir::Vertical),
-            Action::SplitDown => self.split_pane(Dir::Horizontal),
             Action::FocusNext => self.focus_pane(true),
             Action::FocusLeft => self.focus_block_dir(-1, 0),
             Action::FocusRight => self.focus_block_dir(1, 0),
@@ -3572,12 +3180,8 @@ impl WindowState<'_> {
     }
 
     /// Flip the window in/out of fullscreen (F11 / Alt+Enter conventions —
-    /// previously only reachable via `launch_mode` at startup). A quake
-    /// window docks to the monitor edge instead and never toggles.
+    /// previously only reachable via `launch_mode` at startup).
     fn toggle_fullscreen(&mut self) {
-        if self.quake {
-            return;
-        }
         let Some(window) = &self.window else { return };
         let now_fullscreen = window.fullscreen().is_some();
         window.set_fullscreen((!now_fullscreen).then_some(Fullscreen::Borderless(None)));
@@ -4264,19 +3868,10 @@ impl WindowState<'_> {
         }
     }
 
-    /// Open the shell-launcher dropdown (the `▾` button): the detected shells
-    /// plus *Settings* and *Open config file* entries.
+    /// Open the `▾` dropdown: *Settings* and *Open config file*. The server
+    /// spawns a window's blocks (gui-design D45 b), so it launches nothing.
     fn open_menu(&mut self) {
-        let mut items = shell_menu_items(&self.config.profiles, &self.shells);
-        if self.source.is_some() {
-            // The server spawns an attached window's blocks (gui-design D45 b).
-            items.retain(|i| {
-                !matches!(
-                    i.kind,
-                    MenuKind::LaunchProfile(_) | MenuKind::LaunchShell(_)
-                )
-            });
-        }
+        let items = menu_items();
         self.overlay = Some(Overlay::Menu { items, sel: 0 });
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -4532,21 +4127,6 @@ impl WindowState<'_> {
     /// Carry out a chosen menu item.
     fn menu_pick(&mut self, kind: MenuKind) {
         match kind {
-            MenuKind::LaunchShell(i) => {
-                let shell = self
-                    .shells
-                    .get(i)
-                    .map(|s| s.path.to_string_lossy().into_owned());
-                self.overlay = None;
-                if let Err(e) = self.spawn_tab_with(shell) {
-                    eprintln!("rusty_term: new tab: {e}");
-                }
-            }
-            MenuKind::LaunchProfile(i) => {
-                if let Err(e) = self.spawn_tab_profile(i) {
-                    eprintln!("rusty_term: profile tab: {e}");
-                }
-            }
             MenuKind::OpenUrl(url) => {
                 open_url(&url);
             }
@@ -5313,34 +4893,18 @@ impl WindowState<'_> {
     }
 }
 
-/// Build the shell-launcher dropdown: configured profiles first, then each
-/// detected shell (launching a new tab), then the *Settings* and *Open
-/// config file* entries.
-fn shell_menu_items(
-    profiles: &[crate::config::Profile],
-    shells: &[crate::shells::DetectedShell],
-) -> Vec<MenuItem> {
-    let mut items: Vec<MenuItem> = profiles
-        .iter()
-        .enumerate()
-        .map(|(i, p)| MenuItem {
-            label: format!("Profile: {}", p.name),
-            kind: MenuKind::LaunchProfile(i),
-        })
-        .collect();
-    items.extend(shells.iter().enumerate().map(|(i, s)| MenuItem {
-        label: s.name.to_string(),
-        kind: MenuKind::LaunchShell(i),
-    }));
-    items.push(MenuItem {
-        label: "Settings".to_string(),
-        kind: MenuKind::Settings,
-    });
-    items.push(MenuItem {
-        label: "Open config file".to_string(),
-        kind: MenuKind::EditConfig,
-    });
-    items
+/// The `▾` dropdown's items: *Settings* and *Open config file*.
+fn menu_items() -> Vec<MenuItem> {
+    vec![
+        MenuItem {
+            label: "Settings".to_string(),
+            kind: MenuKind::Settings,
+        },
+        MenuItem {
+            label: "Open config file".to_string(),
+            kind: MenuKind::EditConfig,
+        },
+    ]
 }
 
 /// Whether setup is on its notifications step (where `t` sends a test).
@@ -5878,37 +5442,13 @@ impl WindowState<'_> {
             attrs.with_undecorated_shadow(true)
         };
         // `--maximized` / `--fullscreen` (or a `[window] launch_mode` config
-        // key); unset leaves the normal windowed default. The quake window
-        // instead docks to the top of the monitor: full monitor width, a
-        // configured fraction of its height, and kept above other windows so
-        // it drops over whatever has focus.
-        let quake_geom = self.quake.then(|| {
-            let mon = event_loop
-                .primary_monitor()
-                .or_else(|| event_loop.available_monitors().next());
-            let (mw, mh, pos) = mon
-                .map(|m| (m.size().width, m.size().height, m.position()))
-                .unwrap_or((1920, 1080, winit::dpi::PhysicalPosition::new(0, 0)));
-            let frac = self.config.quake_height.unwrap_or(0.4).clamp(0.1, 1.0);
-            (
-                mw.max(1),
-                ((mh as f32 * frac) as u32).max(self.cell_h as u32 * 2),
-                pos,
-            )
-        });
-        let attrs = if let Some((w, h, pos)) = quake_geom {
-            attrs
-                .with_inner_size(winit::dpi::PhysicalSize::new(w, h))
-                .with_position(pos)
-                .with_window_level(winit::window::WindowLevel::AlwaysOnTop)
-        } else {
-            match self.config.launch_mode {
-                Some(LaunchMode::Maximized) => attrs.with_maximized(true),
-                Some(LaunchMode::Fullscreen) => {
-                    attrs.with_fullscreen(Some(Fullscreen::Borderless(None)))
-                }
-                None => attrs,
+        // key); unset leaves the normal windowed default.
+        let attrs = match self.config.launch_mode {
+            Some(LaunchMode::Maximized) => attrs.with_maximized(true),
+            Some(LaunchMode::Fullscreen) => {
+                attrs.with_fullscreen(Some(Fullscreen::Borderless(None)))
             }
+            None => attrs,
         };
         let Ok(window) = event_loop.create_window(attrs) else {
             self.closed = true;
@@ -6386,16 +5926,9 @@ impl WindowState<'_> {
     }
 
     /// The menu's items an attached window lists under its sessions: the
-    /// `▾` menu's, less the launchers, as the server spawns blocks (D45 b).
+    /// `▾` menu's (D45 b).
     fn switcher_items(&self) -> Vec<MenuItem> {
-        let mut items = shell_menu_items(&self.config.profiles, &self.shells);
-        items.retain(|i| {
-            !matches!(
-                i.kind,
-                MenuKind::LaunchProfile(_) | MenuKind::LaunchShell(_)
-            )
-        });
-        items
+        menu_items()
     }
 
     /// A key while a popover is open: Up/Down move, Enter picks, Esc
@@ -7263,7 +6796,6 @@ impl WindowState<'_> {
 /// route to the owning window by `WindowId` (window events) or pane id
 /// (reader-thread wakeups); the loop exits when the last window closes.
 struct App<'a> {
-    backend: &'a dyn Backend,
     source: Option<&'a dyn Source>,
     /// The launch config, template for every new window.
     config: Config,
@@ -7272,24 +6804,15 @@ struct App<'a> {
     /// into every [`WindowState`] (see its field doc).
     profile_override: Option<String>,
     proxy: EventLoopProxy<UserEvent>,
-    /// Shared pane-id source (see [`WindowState::next_id`]).
-    next_id: std::rc::Rc<std::cell::Cell<u64>>,
     shells: Vec<crate::shells::DetectedShell>,
     windows: Vec<WindowState<'a>>,
-    /// The window that last had OS focus — control-socket commands without a
-    /// window of their own (`new-tab`, `send-text`, …) act on it.
-    focused_window: Option<WindowId>,
-    /// Set by the Windows global-hotkey message hook (G30 stretch) on every
-    /// press; checked and cleared in [`ApplicationHandler::about_to_wait`].
-    /// Always `None` off Windows or when no `quake_hotkey` is configured.
-    quake_hotkey_pressed: Option<std::rc::Rc<std::cell::Cell<bool>>>,
 }
 
 impl<'a> App<'a> {
     /// Build a [`WindowState`] from the launch config (its OS window comes
     /// later via `ensure_window`). Each window owns its font, clipboard, and
     /// config copy so per-window settings changes stay per-window.
-    fn new_window_state(&self, quake: bool) -> Result<WindowState<'a>, String> {
+    fn new_window_state(&self) -> Result<WindowState<'a>, String> {
         let font_px = self.config.font_size.unwrap_or(FONT_PX);
         let font_set = font::load_set(
             self.config.font.as_deref(),
@@ -7306,7 +6829,6 @@ impl<'a> App<'a> {
         let (cell_w, cell_h) = font.cell_size();
         let (bar_w, bar_h) = ui_font.cell_size();
         Ok(WindowState {
-            backend: self.backend,
             source: self.source,
             told: None,
             armed: false,
@@ -7328,7 +6850,6 @@ impl<'a> App<'a> {
             profile_override: self.profile_override.clone(),
             tabs: Vec::new(),
             active: 0,
-            next_id: self.next_id.clone(),
             proxy: self.proxy.clone(),
             font,
             cell_w: cell_w.max(1),
@@ -7376,10 +6897,8 @@ impl<'a> App<'a> {
             // `ensure_window`); 1.0 is the correct assumption until then.
             scale_factor: 1.0,
             closed: false,
-            wants_new_window: false,
             cursor_prev: None,
             trail: None,
-            quake,
             git_branch: None,
             dock_open: false,
             dock_items: Vec::new(),
@@ -7387,81 +6906,10 @@ impl<'a> App<'a> {
         })
     }
 
-    /// Open a new top-level window at runtime: state, first tab, OS window.
-    /// `spawn` seeds the first tab (shell/cwd/theme); errors are reported,
-    /// not fatal — the existing windows keep running.
-    fn spawn_window(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        quake: bool,
-        shell: Option<String>,
-        cwd: Option<std::path::PathBuf>,
-        theme: Option<Theme>,
-    ) -> Result<(), String> {
-        let mut ws = self.new_window_state(quake)?;
-        ws.spawn_tab_opts(shell, &[], cwd, theme)
-            .map_err(|e| format!("spawn shell: {e}"))?;
-        if !ws.ensure_window(event_loop) {
-            return Err("could not create a window".into());
-        }
-        self.windows.push(ws);
-        Ok(())
-    }
-
-    /// The window that should act on window-less control commands: the
-    /// focused one, else the first non-quake one, else any.
-    fn control_target(&mut self) -> Option<&mut WindowState<'a>> {
-        let focused = self.focused_window;
-        if let Some(i) = self
-            .windows
-            .iter()
-            .position(|w| w.window_id() == focused && focused.is_some())
-        {
-            return self.windows.get_mut(i);
-        }
-        if let Some(i) = self.windows.iter().position(|w| !w.quake) {
-            return self.windows.get_mut(i);
-        }
-        self.windows.first_mut()
-    }
-
-    /// Toggle the quake window (G30): create it on first use, otherwise flip
-    /// its visibility, focusing it when shown.
-    fn toggle_quake(&mut self, event_loop: &ActiveEventLoop) -> String {
-        if let Some(ws) = self.windows.iter_mut().find(|w| w.quake) {
-            if let Some(window) = &ws.window {
-                let visible = window.is_visible().unwrap_or(true);
-                window.set_visible(!visible);
-                if !visible {
-                    window.focus_window();
-                    window.request_redraw();
-                }
-            }
-            return "ok\n".to_string();
-        }
-        match self.spawn_window(event_loop, true, None, None, None) {
-            Ok(()) => "ok\n".to_string(),
-            Err(e) => format!("err {e}\n"),
-        }
-    }
-
-    /// Drop windows marked closed and open ones requested via
-    /// `Action::NewWindow`; exits the loop when no window remains.
+    /// Drop windows marked closed; exits the loop when no window remains.
     fn reap_and_spawn(&mut self, event_loop: &ActiveEventLoop) {
         for w in &mut self.windows {
             w.tell_focus();
-        }
-        let mut open = 0usize;
-        for i in 0..self.windows.len() {
-            if std::mem::take(&mut self.windows[i].wants_new_window) {
-                open += 1;
-            }
-        }
-        for _ in 0..open {
-            let cwd = self.control_target().and_then(|w| w.focused_pane_cwd());
-            if let Err(e) = self.spawn_window(event_loop, false, None, cwd, None) {
-                eprintln!("rusty_term: new window: {e}");
-            }
         }
         self.windows.retain(|w| !w.closed);
         if self.windows.is_empty() {
@@ -7474,11 +6922,6 @@ impl ApplicationHandler<UserEvent> for App<'_> {
     /// Drive cursor blink and Kitty animations across every window, waking at
     /// the earliest deadline any of them needs (no idle wakeups otherwise).
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(pressed) = &self.quake_hotkey_pressed
-            && pressed.replace(false)
-        {
-            self.toggle_quake(event_loop);
-        }
         let now = Instant::now();
         let next = self.windows.iter_mut().filter_map(|w| w.tick(now)).min();
         event_loop.set_control_flow(match next {
@@ -7495,13 +6938,6 @@ impl ApplicationHandler<UserEvent> for App<'_> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        if let WindowEvent::Focused(gained) = event {
-            if gained {
-                self.focused_window = Some(id);
-            } else if self.focused_window == Some(id) {
-                self.focused_window = None;
-            }
-        }
         if let Some(w) = self.windows.iter_mut().find(|w| w.window_id() == Some(id)) {
             w.on_window_event(event);
         }
@@ -7574,44 +7010,6 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                 for w in &mut self.windows {
                     w.reload_config();
                 }
-            }
-            UserEvent::Control(cmd, reply) => {
-                use super::control::CtlCommand;
-                // Window-level commands are the router's; everything else
-                // acts on the focused window.
-                let text = match cmd {
-                    CtlCommand::NewWindow {
-                        cwd,
-                        profile,
-                        shell,
-                    } => {
-                        let p = profile
-                            .as_deref()
-                            .and_then(|n| self.config.profile(n))
-                            .cloned();
-                        if profile.is_some() && p.is_none() {
-                            format!("err no profile named `{}`\n", profile.unwrap_or_default())
-                        } else {
-                            let p = p.unwrap_or_default();
-                            match self.spawn_window(
-                                event_loop,
-                                false,
-                                shell.or(p.shell),
-                                cwd.or(p.cwd),
-                                p.theme,
-                            ) {
-                                Ok(()) => "ok\n".to_string(),
-                                Err(e) => format!("err {e}\n"),
-                            }
-                        }
-                    }
-                    CtlCommand::Quake => self.toggle_quake(event_loop),
-                    cmd => match self.control_target() {
-                        Some(w) => w.handle_control(cmd),
-                        None => "err no window\n".to_string(),
-                    },
-                };
-                let _ = reply.send(text);
             }
             UserEvent::Accessibility(event) => {
                 if let Some(w) = self
@@ -8373,10 +7771,10 @@ mod tests {
         SETTINGS_FOOTER_H, SETTINGS_ROW_H, SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SelectionDrag,
         SettingsHit, UI_FONT_PX, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text,
         display_path, drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
-        ime_cursor_area_origin, is_openable_url, osc52_reply, pane_pixel_point, path_from_file_uri,
-        physical_px, pressed_after_focus, pressed_after_reorder, put_text, read_git_branch,
-        release_input, route_key_down, settings_hit, settings_value_end, settings_visible,
-        shell_menu_items, tab_drag_target, tab_spans, tab_widths, visible_tab_range, widget_text,
+        ime_cursor_area_origin, is_openable_url, menu_items, osc52_reply, pane_pixel_point,
+        path_from_file_uri, physical_px, pressed_after_focus, pressed_after_reorder, put_text,
+        read_git_branch, release_input, route_key_down, settings_hit, settings_value_end,
+        settings_visible, tab_drag_target, tab_spans, tab_widths, visible_tab_range, widget_text,
         zoom_px,
     };
     use crate::core::Cell;
@@ -9090,32 +8488,11 @@ mod tests {
     }
 
     #[test]
-    fn shell_menu_lists_shells_then_settings_and_config() {
-        use crate::shells::DetectedShell;
-        use std::path::PathBuf;
-        let shells = vec![
-            DetectedShell {
-                name: "pwsh",
-                path: PathBuf::from("/x/pwsh"),
-            },
-            DetectedShell {
-                name: "bash",
-                path: PathBuf::from("/bin/bash"),
-            },
-        ];
-        let profiles = vec![crate::config::Profile {
-            name: "dev".into(),
-            ..Default::default()
-        }];
-        let with_profiles = shell_menu_items(&profiles, &shells);
-        assert_eq!(with_profiles[0].label, "Profile: dev");
-        assert!(matches!(with_profiles[0].kind, MenuKind::LaunchProfile(0)));
-        let items = shell_menu_items(&[], &shells);
-        assert_eq!(items.len(), 4, "2 shells + Settings + config file");
-        assert!(matches!(items[0].kind, MenuKind::LaunchShell(0)));
-        assert!(matches!(items[1].kind, MenuKind::LaunchShell(1)));
-        assert!(matches!(items[2].kind, MenuKind::Settings));
-        assert!(matches!(items[3].kind, MenuKind::EditConfig));
+    fn menu_lists_settings_then_config() {
+        let items = menu_items();
+        assert_eq!(items.len(), 2);
+        assert!(matches!(items[0].kind, MenuKind::Settings));
+        assert!(matches!(items[1].kind, MenuKind::EditConfig));
     }
 
     #[test]

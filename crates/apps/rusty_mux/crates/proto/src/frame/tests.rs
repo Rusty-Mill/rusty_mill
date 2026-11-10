@@ -413,6 +413,7 @@ fn every_message_round_trips() {
             client: ClientId::from_uuid(Uuid::new_v4()),
         },
         Message::RequestLease { req: 22, block },
+        Message::Shutdown { req: 23 },
         Message::InputBatch {
             block,
             client: ClientId::from_uuid(Uuid::new_v4()),

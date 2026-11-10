@@ -52,8 +52,12 @@ On a clean stop the server removes the name only if it is still the socket it bo
 device and inode), so it never takes away a successor's. Login mode's front door uses the same
 helper; before, it removed a stale socket and then bound.
 
-On Linux a signal still ends the server without a clean stop, so the name stays and the next
-server replaces it at step 5. On Windows, `bind` already replaces only a socket nothing answers
+On Linux, SIGTERM and SIGINT stop the server cleanly, as Ctrl+C and Ctrl+Break do on Windows;
+so do a `Shutdown` request and `rusty-mux-ctl server stop` (C36b). State is saved, owned blocks
+are hung up, and the name is removed while it is still the server's own. Only SIGKILL or a
+crash leaves the name, and the next server replaces it at step 5. Under systemd socket
+activation the name is systemd's and stays, so the next connection starts a new server. On
+Windows, `bind` already replaces only a socket nothing answers
 on (`platform-windows` `unix_listen`), and the server leaves the name on stop for the same
 reason.
 

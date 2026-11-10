@@ -149,6 +149,9 @@ fn overlay(base: &Config, defaults: &Defaults) -> Config {
     if let Some(cwd) = &defaults.cwd {
         config.cwd = cwd.into();
     }
+    if let Some(on) = defaults.grapheme_clustering {
+        config.grapheme_clustering = on;
+    }
     config
 }
 
@@ -165,6 +168,7 @@ mod tests {
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            grapheme_clustering: false,
             config_file: file,
         }
     }
@@ -196,6 +200,15 @@ mod tests {
         ));
         let err = read(&missing, When::Reload).unwrap_err();
         assert!(err.contains("rusty-mux-settings-none.json"), "{err}");
+    }
+
+    #[test]
+    fn the_section_sets_grapheme_clustering() {
+        let path = temp("clustering", r#"{"server": {"grapheme_clustering": true}}"#);
+        let config = read(&base(Some(path.clone())), When::Reload).expect("valid");
+        assert!(config.grapheme_clustering);
+        assert_eq!(config.program, base(None).program, "nothing else moves");
+        let _ = std::fs::remove_file(path);
     }
 
     /// An absolute directory on any platform, and its JSON string.
