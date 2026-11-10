@@ -450,38 +450,46 @@ mod tests {
         assert!(hosts.is_empty());
     }
 
+    /// `path` made absolute on this platform: Windows needs a drive.
+    fn abs(path: &str) -> String {
+        match cfg!(windows) {
+            true => format!("C:{path}"),
+            false => path.to_owned(),
+        }
+    }
+
     #[test]
     fn the_file_lives_beside_the_config() {
         let var = |name: &str| match name {
-            "HOME" => Some(OsString::from("/home/me")),
-            "RUSTY_MUX_CONFIG" => Some(OsString::from("/elsewhere/c.json")),
+            "HOME" => Some(OsString::from(abs("/home/me"))),
+            "RUSTY_MUX_CONFIG" => Some(OsString::from(abs("/elsewhere/c.json"))),
             _ => None,
         };
         assert_eq!(
             hosts_path(var),
-            Some(PathBuf::from("/home/me/.config/rusty_mux/hosts.json"))
+            Some(PathBuf::from(abs("/home/me/.config/rusty_mux/hosts.json")))
         );
-        let xdg = |name: &str| (name == "XDG_CONFIG_HOME").then(|| OsString::from("/x"));
+        let xdg = |name: &str| (name == "XDG_CONFIG_HOME").then(|| OsString::from(abs("/x")));
         assert_eq!(
             hosts_path(xdg),
-            Some(PathBuf::from("/x/rusty_mux/hosts.json"))
+            Some(PathBuf::from(abs("/x/rusty_mux/hosts.json")))
         );
         assert_eq!(hosts_path(|_| None), None);
     }
 
     #[test]
     fn an_empty_or_relative_base_is_ignored() {
-        let var = |xdg: &'static str, home: &'static str| {
+        let var = |xdg: String, home: String| {
             move |name: &str| match name {
-                "XDG_CONFIG_HOME" => Some(OsString::from(xdg)),
-                "HOME" => Some(OsString::from(home)),
+                "XDG_CONFIG_HOME" => Some(OsString::from(&xdg)),
+                "HOME" => Some(OsString::from(&home)),
                 _ => None,
             }
         };
-        let home = Some(PathBuf::from("/home/me/.config/rusty_mux/hosts.json"));
-        assert_eq!(hosts_path(var("", "/home/me")), home);
-        assert_eq!(hosts_path(var("cfg", "/home/me")), home);
-        assert_eq!(hosts_path(var("", "")), None);
-        assert_eq!(hosts_path(var("", "me")), None);
+        let home = Some(PathBuf::from(abs("/home/me/.config/rusty_mux/hosts.json")));
+        assert_eq!(hosts_path(var(String::new(), abs("/home/me"))), home);
+        assert_eq!(hosts_path(var("cfg".into(), abs("/home/me"))), home);
+        assert_eq!(hosts_path(var(String::new(), String::new())), None);
+        assert_eq!(hosts_path(var(String::new(), "me".into())), None);
     }
 }
