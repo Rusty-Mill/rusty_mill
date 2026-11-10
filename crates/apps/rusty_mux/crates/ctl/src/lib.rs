@@ -1168,13 +1168,18 @@ impl<S: io::Read + Write> Session<'_, S> {
         }
         let mut last = start;
         loop {
-            let Some(message) = self.conn.poll()? else {
-                let seen = match tracker.as_mut().map(hosts::Tracker::check) {
-                    Some(hosts::Change::Changed) => Seen::HostsChanged,
-                    Some(hosts::Change::Broken(reason)) => Seen::HostsBroken(reason),
-                    Some(hosts::Change::None) | None => continue,
-                };
+            let message = self.conn.poll()?;
+            // Looked at on every turn, so a steady event stream can't
+            // starve it; it reads the file at most once a CHECK_EVERY.
+            let hosts = match tracker.as_mut().map(hosts::Tracker::check) {
+                Some(hosts::Change::Changed) => Some(Seen::HostsChanged),
+                Some(hosts::Change::Broken(reason)) => Some(Seen::HostsBroken(reason)),
+                Some(hosts::Change::None) | None => None,
+            };
+            if let Some(seen) = hosts {
                 on_event(seen, &mut *self.out)?;
+            }
+            let Some(message) = message else {
                 continue;
             };
             match message {

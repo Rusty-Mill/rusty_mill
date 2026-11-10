@@ -197,6 +197,9 @@ pub(crate) struct Tracker {
     list: Vec<Host>,
     next: Instant,
     warned: bool,
+    /// Why the file did not parse when tracking began: the first check
+    /// reports it.
+    broken: Option<String>,
 }
 
 /// What a [`Tracker::check`] found.
@@ -213,18 +216,25 @@ impl Tracker {
     /// Starts from the list in the file now; no change is reported for it.
     pub(crate) fn new(path: PathBuf) -> Self {
         let stamp = stamp(&path);
-        let list = load(&path).unwrap_or_default();
+        let (list, broken) = match load(&path) {
+            Ok(list) => (list, None),
+            Err(reason) => (Vec::new(), Some(reason)),
+        };
         Self {
             path,
             stamp,
             list,
             next: Instant::now() + CHECK_EVERY,
-            warned: false,
+            warned: broken.is_some(),
+            broken,
         }
     }
 
     /// Looks at the file if [`CHECK_EVERY`] has passed since the last look.
     pub(crate) fn check(&mut self) -> Change {
+        if let Some(reason) = self.broken.take() {
+            return Change::Broken(reason);
+        }
         let now = Instant::now();
         if now < self.next {
             return Change::None;
@@ -350,6 +360,24 @@ mod tests {
         std::fs::remove_file(&path).expect("removed");
         assert_eq!(due(&mut tracker), Change::Changed, "no file is no hosts");
         assert!(tracker.check() == Change::None, "not due yet");
+        let _gone = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_file_broken_when_tracking_starts_is_reported_first() {
+        let dir = temp_dir("broken-start");
+        let path = dir.join("hosts.json");
+        std::fs::create_dir_all(&dir).expect("made");
+        std::fs::write(&path, "{ not json").expect("written");
+        let mut tracker = Tracker::new(path.clone());
+        assert!(matches!(tracker.check(), Change::Broken(_)), "at once");
+        tracker.next = Instant::now();
+        assert_eq!(tracker.check(), Change::None, "warned once");
+        let mut list = Vec::new();
+        hosts::add(&mut list, "box", socket("/a.sock")).expect("added");
+        save(&path, &list).expect("saved");
+        tracker.next = Instant::now();
+        assert_eq!(tracker.check(), Change::Changed, "fixed");
         let _gone = std::fs::remove_dir_all(dir);
     }
 
