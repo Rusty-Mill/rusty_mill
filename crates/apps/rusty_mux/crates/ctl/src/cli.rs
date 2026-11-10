@@ -7,12 +7,15 @@ use std::time::Duration;
 
 use rusty_mux_proto::Cursor;
 use rusty_mux_proto::schema::{self, CallError, Entity, Method, Presence, Ty, Value};
+use rusty_mux_script::hosts::Address;
 use rusty_uuid::Uuid;
 
 /// A parsed command line.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Invocation {
     pub socket: Option<PathBuf>,
+    /// `--host NAME`: a saved host (C35), never with `socket`.
+    pub host: Option<String>,
     pub json: bool,
     pub command: Command,
 }
@@ -36,6 +39,8 @@ pub enum Command {
     },
     /// Works with the config file.
     Config(ConfigCommand),
+    /// Lists, adds or removes saved hosts (C35).
+    Hosts(HostsCommand),
     /// Follows events from `after` (or from now) and runs the config's
     /// rules for each, until the server goes away.
     Watch { after: Option<Cursor> },
@@ -286,12 +291,21 @@ impl Defaults {
 /// from `defaults`. The error is a one-line reason.
 pub fn parse(args: &[String], defaults: &Defaults) -> Result<Invocation, String> {
     let mut socket = None;
+    let mut host = None;
     let mut json = false;
     let mut rest = args;
     loop {
         match rest {
             [flag, path, tail @ ..] if flag == "--socket" => {
                 socket = Some(PathBuf::from(path));
+                rest = tail;
+            }
+            [flag, name, tail @ ..] if flag == "--host" => {
+                host = Some(name.clone());
+                rest = tail;
+            }
+            [flag, tail @ ..] if flag.starts_with("--host=") => {
+                host = Some(flag["--host=".len()..].to_owned());
                 rest = tail;
             }
             [flag, tail @ ..] if flag == "--json" => {
@@ -301,9 +315,13 @@ pub fn parse(args: &[String], defaults: &Defaults) -> Result<Invocation, String>
             _ => break,
         }
     }
+    if socket.is_some() && host.is_some() {
+        return Err("--host and --socket name the server twice: pass one".into());
+    }
     let command = command(rest, defaults)?;
     Ok(Invocation {
         socket,
+        host,
         json,
         command,
     })
@@ -319,6 +337,7 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "events" => events(rest),
         "do" => run_action(rest),
         "config" => config(rest),
+        "hosts" => hosts(rest).map(Command::Hosts),
         "watch" => watch(rest),
         "wait" => wait(rest).map(Command::Wait),
         "run" => run(rest, defaults).map(Command::Run),
@@ -382,6 +401,60 @@ fn config(args: &[String]) -> Result<Command, String> {
         }
         [verb] if verb == "list" => Ok(Command::Config(ConfigCommand::List)),
         _ => Err("usage: config check [PATH] | config list".into()),
+    }
+}
+
+/// `hosts`: each verb works on the hosts file alone, with no server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostsCommand {
+    List,
+    /// Appends `address` to the host called `name`, creating it.
+    Add {
+        name: String,
+        address: Address,
+    },
+    Remove(String),
+}
+
+const HOSTS_USAGE: &str = "usage: hosts list | hosts add NAME --socket PATH | \
+     hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] | hosts remove NAME";
+
+fn hosts(args: &[String]) -> Result<HostsCommand, String> {
+    match args {
+        [verb] if verb == "list" => Ok(HostsCommand::List),
+        [verb, name] if verb == "remove" => Ok(HostsCommand::Remove(name.clone())),
+        [verb, name, rest @ ..] if verb == "add" => {
+            let flags = flags("hosts add", rest, |_| false)?;
+            let mut socket = None;
+            let mut dest = None;
+            let mut udp_host = None;
+            for (flag, value) in flags {
+                let slot = match flag {
+                    "socket" => &mut socket,
+                    "ssh" => &mut dest,
+                    "udp-host" => &mut udp_host,
+                    _ => return Err(format!("hosts add: unknown flag --{flag}")),
+                };
+                if slot.replace(value.to_owned()).is_some() {
+                    return Err(format!("hosts add: --{flag} given twice"));
+                }
+            }
+            let socket = socket.ok_or("hosts add: --socket PATH is required")?;
+            let address = match (dest, udp_host) {
+                (None, None) => Address::Socket { socket },
+                (None, Some(_)) => return Err("hosts add: --udp-host needs --ssh".into()),
+                (Some(dest), udp_host) => Address::Ssh {
+                    dest,
+                    socket,
+                    udp_host,
+                },
+            };
+            Ok(HostsCommand::Add {
+                name: name.clone(),
+                address,
+            })
+        }
+        _ => Err(HOSTS_USAGE.into()),
     }
 }
 
@@ -531,6 +604,12 @@ fn wait(args: &[String]) -> Result<Wait, String> {
 /// An event kind and the field values to match, checked against
 /// [`rusty_mux_script::EVENTS`].
 fn event_filter(kind: &str, fields: &[(&str, &str)]) -> Result<Until, String> {
+    if kind == "hosts-changed" {
+        return Err(
+            "wait: hosts-changed is ctl's own event: follow it with events --follow or watch"
+                .into(),
+        );
+    }
     let (kind, names) = rusty_mux_script::EVENTS
         .iter()
         .find(|(name, _)| *name == kind)
@@ -769,6 +848,13 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "Check or list the config: config check [PATH] | config list",
     ),
     (
+        "hosts",
+        "List, add or remove saved hosts for --host: hosts list |\n\
+         \x20                  hosts add NAME --socket PATH |\n\
+         \x20                  hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] |\n\
+         \x20                  hosts remove NAME",
+    ),
+    (
         "watch",
         "Run the config's rules on events: watch [--after EPOCH:SEQ]",
     ),
@@ -834,9 +920,10 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
 pub fn usage(method: Option<&Method>) -> String {
     let Some(m) = method else {
         let mut text = String::from(
-            "usage: rusty-mux-ctl [--socket PATH] [--json] COMMAND [--FLAG VALUE]... [+ COMMAND ...]\n\
+            "usage: rusty-mux-ctl [--socket PATH | --host NAME] [--json] COMMAND [--FLAG VALUE]... [+ COMMAND ...]\n\
              The socket defaults to $RUSTY_MUX_SOCKET, else the default socket\n\
-             ($XDG_RUNTIME_DIR/rusty_mux/default.sock). An id flag also takes a name, a\n\
+             ($XDG_RUNTIME_DIR/rusty_mux/default.sock). --host tries a saved host's\n\
+             addresses in order (see hosts). An id flag also takes a name, a\n\
              position or an id suffix, optionally as a path SESSION/WINDOW/BLOCK, and\n\
              defaults to $RUSTY_MUX_SESSION, $RUSTY_MUX_WINDOW or $RUSTY_MUX_BLOCK.\n\
              Actions come from $RUSTY_MUX_CONFIG, or rusty_mux/config.json in the\n\

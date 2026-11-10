@@ -41,6 +41,15 @@ impl Stop {
         }
     }
 
+    /// This stop, with its I/O polling even when nothing bounds it, so a
+    /// follower can look at other things between reads.
+    pub(crate) fn polling(&self) -> Self {
+        match self.is_bounded() {
+            true => self.clone(),
+            false => self.clone().or_when(|| false),
+        }
+    }
+
     /// Whether I/O must poll, so a stop is noticed while the server is silent.
     pub(crate) fn is_bounded(&self) -> bool {
         self.deadline.is_some() || self.cancelled.is_some()

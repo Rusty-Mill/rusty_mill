@@ -9,7 +9,7 @@ use std::io::{self, Write};
 
 use rusty_mux_core::Event;
 use rusty_mux_proto::Features;
-use rusty_mux_script::Config;
+use rusty_mux_script::{Config, Rule};
 
 use crate::{Env, Exit, Stop, config, render, run_until};
 
@@ -51,8 +51,43 @@ impl Watcher<'_> {
             };
             fields.push((name.to_owned(), value));
         }
-        for (i, rule) in rules {
-            let ran = match rule.calls(self.config, &fields) {
+        self.fire(&rules, &fields, &format!("event {seq} {kind}"), out, err)
+    }
+
+    /// Prints ctl's own event `kind`, which has no fields, if a rule
+    /// matches it, then runs each matching rule.
+    pub(crate) fn local(
+        &self,
+        kind: &str,
+        out: &mut dyn Write,
+        err: &mut dyn Write,
+    ) -> io::Result<()> {
+        let rules: Vec<_> = self
+            .config
+            .rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| rule.event == kind)
+            .collect();
+        if rules.is_empty() {
+            return Ok(());
+        }
+        writeln!(out, "{}", crate::hosts::changed_line(self.json))?;
+        self.fire(&rules, &[], &format!("event {kind}"), out, err)
+    }
+
+    /// Runs `rules` with the event's `fields`, in order; `what` names the
+    /// event when one fails.
+    fn fire(
+        &self,
+        rules: &[(usize, &Rule)],
+        fields: &[(String, String)],
+        what: &str,
+        out: &mut dyn Write,
+        err: &mut dyn Write,
+    ) -> io::Result<()> {
+        for &(i, rule) in rules {
+            let ran = match rule.calls(self.config, fields) {
                 Ok(calls) => self.run(&config::chain(&calls), self.json, out, err) == Exit::Ok,
                 Err(reason) => {
                     writeln!(err, "rusty-mux-ctl: {reason}")?;
@@ -60,7 +95,7 @@ impl Watcher<'_> {
                 }
             };
             if !ran {
-                writeln!(err, "rusty-mux-ctl: on[{i}] failed for event {seq} {kind}")?;
+                writeln!(err, "rusty-mux-ctl: on[{i}] failed for {what}")?;
             }
         }
         Ok(())

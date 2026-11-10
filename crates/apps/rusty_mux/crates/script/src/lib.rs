@@ -36,6 +36,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub mod hosts;
 mod parse;
 
 pub use parse::{parse, parse_server};
@@ -155,6 +156,7 @@ pub struct Bind {
 /// directory or title. A program that exits has a `code` or, killed by a
 /// signal, a `signal`, never both. A `layout-changed` has no `layout`
 /// once its window is empty, and no `zoomed` unless a block is zoomed.
+/// `hosts-changed` is ctl's own: the saved hosts ([`hosts`]) changed.
 pub const EVENTS: &[(&str, &[&str])] = &[
     ("session-created", &["session"]),
     ("session-closed", &["session"]),
@@ -192,6 +194,7 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("clipboard-written", &["block", "selection"]),
     ("status-removed", &["block", "id"]),
     ("config-reloaded", &[]),
+    ("hosts-changed", &[]),
 ];
 
 /// What to run when an event of one kind happens.
