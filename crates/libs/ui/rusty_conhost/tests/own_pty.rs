@@ -930,3 +930,107 @@ fn a_write_past_the_packet_cap_arrives_whole() {
         }
     }
 }
+
+/// The Windows fidelity corpus (mux risk R1): sequences that a terminal or
+/// the mux reads from a program, which the console host must pass through
+/// byte for byte. ConPTY is run beside ours as a baseline only.
+const CORPUS: &[(&str, &[u8])] = &[
+    ("osc7501-status", b"\x1b]7501;state=working:progress=40\x07"),
+    ("osc7501-query", b"\x1b]7501;?\x1b\\"),
+    (
+        "osc8-link-bel",
+        b"\x1b]8;;https://example.com/a?b=c\x07link\x1b]8;;\x07",
+    ),
+    (
+        "osc8-link-st",
+        b"\x1b]8;id=1;https://example.com/\x1b\\link\x1b]8;;\x1b\\",
+    ),
+    ("osc0-title", b"\x1b]0;fidelity title\x07"),
+    ("osc7-cwd", b"\x1b]7;file://host/C:/dev\x1b\\"),
+    ("osc9-4-progress", b"\x1b]9;4;1;40\x07"),
+    ("osc9-notify", b"\x1b]9;build done\x07"),
+    ("osc777-notify", b"\x1b]777;notify;title;body\x07"),
+    (
+        "osc133-marks",
+        b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07",
+    ),
+    ("osc52-clipboard", b"\x1b]52;c;aGk=\x07"),
+    ("bell", b"<\x07>"),
+    ("sixel", b"\x1bPq#0;2;100;0;0#0~~@@vv@@~~\x1b\\"),
+    ("kitty-image", b"\x1b_Ga=T,f=100,s=1,v=1;iVBORw0KGgo=\x1b\\"),
+    ("iterm2-image", b"\x1b]1337;File=inline=1;size=2:aGk=\x07"),
+    ("mode-2027", b"\x1b[?2027h"),
+    ("sync-output", b"\x1b[?2026h\x1b[?2026l"),
+];
+
+/// `bytes` as `conhost_probe` text: its escapes for controls and spaces.
+fn probe_text(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&b| match b {
+            0x1b => "\\e".to_owned(),
+            b' ' => "\\s".to_owned(),
+            b'\\' => "\\\\".to_owned(),
+            0x21..=0x7e => char::from(b).to_string(),
+            _ => format!("\\x{b:02x}"),
+        })
+        .collect()
+}
+
+/// The two ways a program writes: WriteConsoleW with VT processing on
+/// (output mode 7), and a raw WriteFile.
+fn corpus_writers(bytes: &[u8]) -> [(&'static str, Vec<String>); 2] {
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    [
+        (
+            "console",
+            vec!["print".into(), "7".into(), probe_text(bytes)],
+        ),
+        ("raw", vec!["raw".into(), hex]),
+    ]
+}
+
+/// Whether `bytes` reach the terminal intact when the probe writes them
+/// on `host`. `false` if the probe does not exit 0 within the budget.
+fn passes_through(host: Host, args: &[String], bytes: &[u8]) -> bool {
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let cmd = command(&probe(), &argv);
+    let (out, child) = match host {
+        Host::ConPty => {
+            let Ok((master, child)) = WindowsPty.spawn_concrete(&cmd, SIZE) else {
+                return false;
+            };
+            (read_all(master).map(|(out, _)| out), child)
+        }
+        Host::Own => {
+            let (master, child) = own(&cmd);
+            (read_all(master).map(|(out, _)| out), child)
+        }
+    };
+    let exited = Box::new(child).wait().ok() == Some(ExitStatus::Code(0));
+    let out = out.unwrap_or_default();
+    exited && out.windows(bytes.len()).any(|w| w == bytes)
+}
+
+#[test]
+fn fidelity_corpus_passes_through_our_host() {
+    let _g = lock();
+    let mark = |ok: bool| if ok { "pass" } else { "FAIL" };
+    let mut failures = Vec::new();
+    for &(name, bytes) in CORPUS {
+        for (writer, args) in corpus_writers(bytes) {
+            let ours = passes_through(Host::Own, &args, bytes);
+            let conpty = passes_through(Host::ConPty, &args, bytes);
+            // The whole matrix, for `--nocapture` and the report.
+            eprintln!("| {name} | {writer} | {} | {} |", mark(ours), mark(conpty));
+            if !ours {
+                failures.push(format!("{name} ({writer})"));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "not passed through: {}",
+        failures.join(", ")
+    );
+}
