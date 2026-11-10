@@ -31,6 +31,7 @@ pub mod inbox;
 pub mod mcp;
 pub mod metrics;
 pub mod milestones;
+pub mod page;
 pub mod projects;
 pub mod retag;
 pub mod roadmap;

@@ -3,7 +3,7 @@
 
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{
-    BoardError, Card, Column, Dates, Edit, Event, EventKind, Plan, Shelf, Span,
+    BoardError, Card, CardSummary, Column, Dates, Edit, Event, EventKind, Plan, Shelf, Span,
 };
 use rusty_mill_board::milestones::{MilestoneEdit, MilestoneStore};
 use rusty_mill_board::projects::Projects;
@@ -1199,4 +1199,33 @@ fn a_number_edited_onto_two_cards_by_hand_is_refused_not_guessed() {
         t["tags"] = json!(["agent", "board:backlog", format!("number:{n}")])
     });
     assert!(board.get_number(n).is_err());
+}
+
+/// A summary is the full card's task fields: the cheap read loses nothing a summary shows.
+#[test]
+fn summaries_match_the_full_read_on_every_summary_field() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let first = board
+        .add(&human, "first", "body", vec!["x".into()])
+        .expect("add");
+    let second = board.add(&human, "second", "", vec![]).expect("add");
+    board
+        .plan(second.id, &human, &plan(Some(3), Some(vec![first.id])))
+        .expect("plan");
+    board.comment(second.id, &human, "note").expect("comment");
+    board
+        .edit(first.id, &human, Some("renamed"), None, None)
+        .expect("edit");
+    board.assign(second.id, "orch", &human).expect("assign");
+    board
+        .move_card(first.id, &Column::READY, &human)
+        .expect("move");
+
+    let store = TickStore::new(tick);
+    let summarise =
+        |cards: Vec<Card>| -> Vec<CardSummary> { cards.iter().map(CardSummary::from).collect() };
+    let full = summarise(store.list().expect("list"));
+    assert_eq!(full.len(), 2);
+    assert_eq!(summarise(store.summaries().expect("summaries")), full);
 }

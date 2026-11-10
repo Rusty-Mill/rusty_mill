@@ -107,6 +107,11 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 - **By date (#744).** `board_list` takes `created_from`/`created_to`, `updated_from`/`updated_to` and
   `moved_from`/`moved_to` (Unix ms, `from` inclusive, `to` exclusive). Moves come from rusty_tick's durable move
   history (`GET /moves`), so they survive restarts; entering the board counts as a move.
+- **Summaries and pages (#1429).** `board_list` with `view: "summary"` returns each card's task fields only (no
+  body, prompt, comments or links) and reads only rusty_tick's tasks, about a third of a full read. `limit` (1–500)
+  pages either view in list order, `(created_ms, id)`, and returns `next_cursor` until the listing is done; a page also
+  stops at 512 KiB. A cursor is opaque, tied to its query, and survives a restart; scope is applied to every page. Left
+  out, both keep `board_list` as it was: every matching card, full.
 - **Decision inbox (#595).** `inbox_list` and `inbox_act` (admin only, and only through a token or OAuth credential, never a caller-named actor) show and decide the open BBP escalations
   of the tasks linked from cards. Mill Board stores none of it: run with `--bbp-bin PATH --bbp-root DIR` on the
   orch host and it runs `bbp inbox` and fenced `bbp human` commands, so the host stays the only writer of the log.
