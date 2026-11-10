@@ -91,7 +91,7 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
 - **Every change goes through a PR on its own branch. Never push to `main`.**
   - Merge through the merge queue ("Merge when ready"), with a **merge commit**.
   - Never force-push or rebase shared history. To update a branch, merge `main` into it.
-- **Reviews and merges follow [AGENTS.md](../../../AGENTS.md) and [CONTRIBUTING.md](../../../CONTRIBUTING.md).** Those files win over anything restated here. Who queues and merges is open while AGENTS.md and the owner's 2026-11-06 instruction disagree (rusty_term pack OPEN_QUESTIONS Q1).
+- **Reviews and merges follow [AGENTS.md](../../../AGENTS.md) and [CONTRIBUTING.md](../../../CONTRIBUTING.md).** Those files win over anything restated here. That includes who queues and merges (rusty_term pack D157).
 - **Code:**
   - No `unwrap`/`expect` in production code.
   - Tests for non-trivial logic, including boundary cases: scroll regions, resize, wide glyphs at row edges, scrollback eviction.
