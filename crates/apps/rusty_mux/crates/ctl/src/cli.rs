@@ -227,8 +227,12 @@ pub enum SshCommand {
     Check(String),
     /// As `check`, with every value it used and a fix for each finding.
     Diagnose(String),
-    /// Prints a `Host` block for the ssh config.
+    /// Prints a `Host` block for the ssh config; with `write`, puts it in
+    /// `~/.ssh/rusty_mux/config` (pack D193).
     Setup(SshSetup),
+    /// Takes `dest`'s block out of `~/.ssh/rusty_mux/config`; without
+    /// `write`, says what it would do.
+    Remove { dest: String, write: bool },
 }
 
 /// What `ssh setup` puts in its block; only what is given.
@@ -239,6 +243,8 @@ pub struct SshSetup {
     pub user: Option<String>,
     pub port: Option<String>,
     pub identity: Option<String>,
+    /// Write the block instead of printing it.
+    pub write: bool,
 }
 
 /// What `api` prints.
@@ -530,7 +536,8 @@ fn terminfo(args: &[String]) -> Result<Terminfo, String> {
 }
 
 const SSH_USAGE: &str = "usage: ssh check DEST | ssh diagnose DEST | \
-     ssh setup DEST [--hostname H] [--user U] [--port N] [--identity FILE]";
+     ssh setup DEST [--hostname H] [--user U] [--port N] [--identity FILE] [--write] | \
+     ssh remove DEST [--write]";
 
 fn ssh(args: &[String]) -> Result<SshCommand, String> {
     let [verb, dest, rest @ ..] = args else {
@@ -543,6 +550,14 @@ fn ssh(args: &[String]) -> Result<SshCommand, String> {
         ("check", []) => Ok(SshCommand::Check(dest.clone())),
         ("diagnose", []) => Ok(SshCommand::Diagnose(dest.clone())),
         ("setup", rest) => ssh_setup(dest, rest).map(SshCommand::Setup),
+        ("remove", []) => Ok(SshCommand::Remove {
+            dest: dest.clone(),
+            write: false,
+        }),
+        ("remove", [flag]) if flag == "--write" => Ok(SshCommand::Remove {
+            dest: dest.clone(),
+            write: true,
+        }),
         _ => Err(SSH_USAGE.into()),
     }
 }
@@ -554,8 +569,13 @@ fn ssh_setup(dest: &str, rest: &[String]) -> Result<SshSetup, String> {
         user: None,
         port: None,
         identity: None,
+        write: false,
     };
-    for (flag, value) in flags("ssh setup", rest, |_| false)? {
+    for (flag, value) in flags("ssh setup", rest, |f| f == "write")? {
+        if flag == "write" {
+            setup.write = true;
+            continue;
+        }
         let slot = match flag {
             "hostname" => &mut setup.hostname,
             "user" => &mut setup.user,
@@ -978,10 +998,13 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "ssh",
-        "Check a host for rusty-mux --ssh, read-only, or print a Host block\n\
-         \x20                  for ~/.ssh/config: ssh check DEST | ssh diagnose DEST |\n\
+        "Check a host for rusty-mux --ssh (connects nowhere, though ssh -G\n\
+         \x20                  runs your config's Match exec), or set one up:\n\
+         \x20                  ssh check DEST | ssh diagnose DEST |\n\
          \x20                  ssh setup DEST [--hostname H] [--user U] [--port N]\n\
-         \x20                  [--identity FILE]; check exits 1 on a problem",
+         \x20                  [--identity FILE] [--write] | ssh remove DEST [--write];\n\
+         \x20                  --write keeps hosts in ~/.ssh/rusty_mux/config, read by one\n\
+         \x20                  Include line in ~/.ssh/config; check exits 1 on a problem",
     ),
     (
         "terminfo",

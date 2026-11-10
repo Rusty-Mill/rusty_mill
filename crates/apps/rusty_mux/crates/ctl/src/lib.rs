@@ -53,6 +53,7 @@ mod hosts;
 mod own;
 mod render;
 mod ssh;
+mod ssh_write;
 mod stop;
 pub mod target;
 mod terminfo;
