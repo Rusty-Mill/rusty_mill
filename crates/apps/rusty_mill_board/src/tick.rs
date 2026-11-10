@@ -848,6 +848,20 @@ impl<T: TickApi> Store for TickStore<T> {
         Ok(cards)
     }
 
+    /// Through the card's `number:<n>` tag: one tag read and one read per match, whatever
+    /// the size of the board.
+    fn numbered(&self, number: u64) -> Result<Vec<Card>, BoardError> {
+        let tasks: Vec<Task> = self.collection(&format!("/tags/number:{number}/tasks"), "tasks")?;
+        let mut cards = Vec::new();
+        for task in tasks.iter().filter(|t| t.on_board()) {
+            // The task may have left the board, or changed number, since the tag read.
+            if let Some(card) = self.get(task.id)?.filter(|c| c.number == Some(number)) {
+                cards.push(card);
+            }
+        }
+        Ok(cards)
+    }
+
     fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         check_claim(card)?;
         let mut body = json!({
