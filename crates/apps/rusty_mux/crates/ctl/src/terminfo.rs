@@ -19,7 +19,7 @@ use crate::cli::{Terminfo, TerminfoVerb};
 pub(crate) const SOURCE: &str = include_str!("terminfo/rusty_term.terminfo");
 
 /// Marks the check's own output lines, so rc-file noise around them on the
-/// remote is skipped.
+/// remote is skipped, even noise with no newline before a marker.
 const MARK: &str = "rusty-mux-terminfo:";
 
 /// Prints where `rusty_term` is found, then whether `tic` exists, each line
@@ -119,7 +119,9 @@ fn check(ssh: &OsString, args: &[String], out: &mut dyn Write) -> Result<Exit, (
 
 /// What `check` prints for the remote script's two lines, and its exit.
 fn report(text: &str) -> Option<(String, Exit)> {
-    let mut lines = text.lines().filter_map(|l| l.trim().strip_prefix(MARK));
+    let mut lines = text
+        .lines()
+        .filter_map(|l| Some(l.split_once(MARK)?.1.trim()));
     let (place, exit) = match lines.next()? {
         "home" => ("installed in ~/.terminfo", Exit::Ok),
         "elsewhere" => ("not in ~/.terminfo, but found elsewhere", Exit::Failed),
@@ -216,6 +218,13 @@ mod tests {
             Some(Exit::Ok),
             "rc noise skipped"
         );
+        let joined = format!("\x1b]0;title\x07{}", marked("home", "tic"));
+        assert_eq!(
+            report(&joined).map(|r| r.1),
+            Some(Exit::Ok),
+            "noise with no newline before the first marker"
+        );
+        assert!(CHECK.contains(MARK), "the script prints the marker");
         assert!(report("home\ntic").is_none(), "unmarked");
         assert!(report(&format!("{MARK}home")).is_none());
     }
