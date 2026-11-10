@@ -7,6 +7,10 @@ Ready column before that. Mux phases, exit criteria and capability rows stay in
 [../mux/ROADMAP.md](../mux/ROADMAP.md) and [../mux/CAPABILITIES.md](../mux/CAPABILITIES.md);
 this file orders the work across both and does not copy them.
 
+**Live view:** the Mill Board milestones for projects `rusty_term` and `rusty_mux` (one card per
+item, each with a prompt and its dependencies). This file is the narrative; when the two differ,
+the board is current and this file is refreshed (last refresh 2026-11-10, main 0fbc83ee).
+
 ## Where we are
 
 - **Engine and front-end.** The old term roadmap is complete (last item #1150). Scrollback
@@ -16,12 +20,14 @@ this file orders the work across both and does not copy them.
   rollback only, with no auto-fallback. The VT bulk path (#1433) made the host ~3x faster.
   GUI repaint is paced (#1423).
 - **GUI.** Chrome style guide and theme-derived search colours landed (#1460). Clipboard keys
-  follow Windows Terminal habits (#1402, #1411).
+  follow Windows Terminal habits (#1402, #1411). First-run setup (O11, #1471); chrome size fixed
+  apart from the terminal font (#1482); redesign slices 1-3 (#1523, #1528, #1536).
 - **Mux.** Phases 0, 1, 2 and 2b done. Phase 3: transport (C13) done; identity partly done
-  (principals, login mode without PAM). Phase 3b done (C37–C41, C50–C52, C71). Phases 4 and 5
-  not started.
-- **In flight.** First-run setup page (Orca gap O11), first PR: shell, theme, clipboard and
-  notification steps; the agents step comes later.
+  (principals, login mode without PAM). Phase 3b done (C37–C41, C50–C52, C71, C73 #1481, C74
+  #1490 and #1516). Arc 3 (C45, C70, C69, C36a) done; agent hosting C46 and C77 done.
+- **GUI as a mux client (arc 2).** S1-S5 merged (#1532 to #1554), Take over (#1577), and
+  `rusty_term --gui` now runs `rusty-mux-gui` (#1569). Deleting the local-mode code (R2) waits
+  for its own go.
 
 ## Next, in proposed order
 
@@ -29,32 +35,34 @@ Each item is small and needs no new crate or dependency. Order avoids file confl
 
 | # | Item | Why now | Gate |
 |---|---|---|---|
-| 1 | Finish O11 PR 1 (in flight) | Owner said yes; touches `gui/settings.rs` | none beyond review |
-| 2 | Decouple terminal `font_size` from the chrome `ui_font` | Last step of the fixed chrome scale ([STYLEGUIDE.md](STYLEGUIDE.md) §Size); after O11 to avoid settings conflicts | none |
+| 1 | ~~Finish O11 PR 1~~ **Done** (#1471) | Owner said yes; touches `gui/settings.rs` | none beyond review |
+| 2 | ~~Decouple terminal `font_size` from the chrome `ui_font`~~ **Done** (#1482) | Last step of the fixed chrome scale ([STYLEGUIDE.md](STYLEGUIDE.md) §Size); after O11 to avoid settings conflicts | none |
 | 3 | ~~Docs hygiene: HANDOFF §4 queueing rule and §3.1 floors are stale (pack Q1, Q2)~~ **Done** (card #784, 2026-11-10; pack D16; who merges is D157) | One PR, no code; stops agents reading old rules | none |
-| 4 | Conhost next ceiling: profile `Screen::client`/forward (~53%) and the mirror-grid parse (~32%) on Beast, measurements first | Host is now the Windows path; numbers decide whether a fix is worth it | none for the profile; the fix is a separate go |
-| 5 | Skill text read from the installed binary (Orca O3, Rex D1); new row C73 | XS; both peers do it; installed skill stays matched to the binary | Nano's go on the row; reconfirm the agent paths (K4) |
-| 6 | Agent hook plus OSC 7501 status precedence (Orca O2) | Richer agent status, OSC as the fallback on hosts without hooks | Nano's go; a new `Features` bit if peers see new events |
-| 7 | Snapshot encode reliably at or below libghostty (ROADMAP Phase 0's open ≤ 11.2 ms target, #939): profile, then fix | Owner wants it tried, not waved off (question 13) | none; measured on a fixed host |
+| 4 | Conhost next ceiling: profile `Screen::client`/forward (~53%) and the mirror-grid parse (~32%) on Beast, measurements first (card #785) | Host is now the Windows path; numbers decide whether a fix is worth it | none for the profile; the fix is a separate go |
+| 5 | ~~Skill text read from the installed binary (Orca O3, Rex D1); new row C73~~ **Done** (#1481) | XS; both peers do it; installed skill stays matched to the binary | Nano's go on the row; reconfirm the agent paths (K4) |
+| 6 | ~~Agent hook plus OSC 7501 status precedence (Orca O2)~~ **Done** (C74: #1490, #1516) | Richer agent status, OSC as the fallback on hosts without hooks | Nano's go; a new `Features` bit if peers see new events |
+| 7 | Snapshot encode reliably at or below libghostty (ROADMAP Phase 0's open ≤ 11.2 ms target, #939): profile, then fix (card #786) | Owner wants it tried, not waved off (question 13) | none; measured on a fixed host |
+| 8 | Config key for mode 2027 grapheme clustering, off by default (question 13 B; card #787) | Owner said yes | none |
+| 9 | Move rusty_term's ConPTY rollback backend onto platform-windows's wrapper (question 13 C; card #788) | Owner said yes | none |
 
 ## After that: the larger arcs
 
 Each arc needs the owner's go before it starts, and its own plan.
 
-1. **Mux Phase 3 remainder: sharing and identity.** C14 live sharing, C46 block ownership,
+1. **Mux Phase 3 remainder: sharing and identity.** *Not started; needs Nano's go (first card 507).* C14 live sharing,
    C35 several servers, C25/C26 rest, C27 Tailscale identity, C47–C49 remote setup.
    Gates: C33's force-disconnect must be restricted first (card 507); C27 needs the
    `rusty_tail` move (ADR-0003); PAM links libpam (native dependency); C47/C48 write to
    remote hosts and `~/.ssh/config`; TLS (card 506) touches `rusty_tls`.
-2. **One GUI for terminal and mux.** The terminal-mux design (session switcher, split-tree
+2. **One GUI for terminal and mux.** *Under way: S1-S5 and Take over merged; R1 merged (#1569), R2 waits for its go.* The terminal-mux design (session switcher, split-tree
    thumbnails, server-owned layout, per-block status) is a requirement. The GUI becomes a mux
    client only, keeping its local mode until C69 and C45 land (question 1). Both have landed: `rusty_term --gui` now runs `rusty-mux-gui` (retirement step R1, handoff D146), and deleting the local-mode code (R2) waits for its own go. This is where mux Phase 4's native client (C16) and C21,
    C42, C53–C55, C61–C64 land. Visual design goes to the design pack once it is on main.
-3. **Sessions that survive restarts.** C45 (state survives a server restart) plus C70
+3. **Sessions that survive restarts.** *Done except C36b clean stop (card 1010, owner call) and C69 (d) utmp (deferred, Q29): C45 #1488, C70 #1493, C69 (a) #1555, (b) #1558, (c) #1563, C36a #1570.* C45 (state survives a server restart) plus C70
    (scrollback spooled to disk), pulled forward from Phase 5 (question 2); it gates arc 2.
    Then C36 upgrade without losing sessions and C69 auto-start, with Orca's endpoint-ownership
    rules (O6) first.
-4. **Let Em Loose on the mux (proposal).** No link exists today between `rusty_orch`/`rusty_bbp`
+4. **Let Em Loose on the mux (proposal).** *Agent hosting rows C75-C79 designed (AGENT-HOSTING.md); C46 #1556 and C77 #1560/#1561 done; C75, C76, C78, C79 each need Nano's go.* No link exists today between `rusty_orch`/`rusty_bbp`
    and rusty_mux. Agents are launched by the `bbp mod` harness launcher, which keeps their whole
    lifecycle (process group, slot, grace, kill, reap); `bbp runner` only runs test profiles. So the
    mux does not fork agents: that would be a new executor and needs Nano's go. Proposed v0 is a
