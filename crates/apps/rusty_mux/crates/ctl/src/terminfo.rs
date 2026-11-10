@@ -136,11 +136,23 @@ fn ended(code: Option<i32>, dest: &str) -> Result<(), (Exit, String)> {
     }
 }
 
-/// `args` as a shell would take them back.
+/// `args` as a POSIX shell would take them back: each one single-quoted,
+/// so a pasted line expands nothing locally (`$HOME` stays the remote's).
 fn shown(args: &[String]) -> String {
-    let mut text = format!("{} {}", args[0], args[1]);
-    text.push_str(&format!(" \"{}\"", args[2].replace('"', "\\\"")));
-    text
+    args.iter()
+        .map(|arg| quoted(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `arg` as is when no shell would change it, else in single quotes with
+/// each `'` written as `'\''`.
+fn quoted(arg: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "@%+=:,./_-".contains(c);
+    if !arg.is_empty() && arg.chars().all(plain) {
+        return arg.to_owned();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -178,6 +190,24 @@ mod tests {
         assert_eq!(report("elsewhere\ntic").map(|r| r.1), Some(Exit::Failed));
         assert!(report("motd banner\nhome\ntic").is_none());
         assert!(report("home").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_shown_command_expands_nothing_locally() {
+        let args = ssh_args(TerminfoVerb::Remove, "me@box");
+        let line = shown(&args);
+        assert!(line.starts_with("-- me@box 'sh -c '\\''rm -f"), "{line}");
+        // Every `$` sits inside single quotes, which a shell never expands.
+        let out = std::process::Command::new("sh")
+            .args(["-c", &format!("HOME=/local; printf '%s\\n' {line}")])
+            .output()
+            .expect("run sh");
+        let words: Vec<&str> = std::str::from_utf8(&out.stdout)
+            .expect("utf-8")
+            .lines()
+            .collect();
+        assert_eq!(words, ["--", "me@box", args[2].as_str()]);
     }
 
     #[test]
