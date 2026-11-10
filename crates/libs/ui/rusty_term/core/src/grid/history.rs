@@ -72,6 +72,7 @@ impl Grid {
             return Ok(0);
         }
         let mut decoded = checkpoint::decode_batch(batch, self.clusters.len(), self.links.len())?;
+        check_batch(&decoded)?;
         self.adopt_styles(&mut decoded, theme)?;
         let (mut rows, mut marks) = self.rewrap(decoded, room)?;
         let drop = rows.len().saturating_sub(room);
@@ -118,9 +119,6 @@ impl Grid {
     /// A batch's rows at this grid's width, oldest first, and the indexes
     /// of the rows with a prompt mark. Keeps at most `room` of the newest.
     fn rewrap(&mut self, batch: Batch, room: usize) -> Result<(VecDeque<Line>, Vec<usize>)> {
-        if batch.rows.iter().any(|(line, _)| line.width() > batch.cols) {
-            return Err(Error("history batch row width"));
-        }
         let marks = batch
             .rows
             .iter()
@@ -159,6 +157,10 @@ impl Grid {
         let over = marks.len().saturating_sub(PROMPT_MARKS_MAX);
         marks.drain(..over);
         self.prompt_marks = marks;
+        if let Some(sel) = &mut self.selection {
+            sel.anchor.1 += added;
+            sel.head.1 += added;
+        }
         #[cfg(feature = "l13")]
         if let Some(s) = &mut self.command_start {
             *s += added;
@@ -177,6 +179,21 @@ impl Grid {
             }
         }
     }
+}
+
+/// Refuses a batch with a row wider than its width or a cell naming a
+/// style it does not carry, before anything is added to the grid.
+fn check_batch(batch: &Batch) -> Result<()> {
+    let styles = batch.styles.len();
+    for (line, _) in &batch.rows {
+        if line.width() > batch.cols {
+            return Err(Error("history batch row width"));
+        }
+        if line.cells().iter().any(|c| c.style().0 as usize >= styles) {
+            return Err(Error("style index"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -307,12 +324,39 @@ mod tests {
         assert_eq!(bare.scrollback_len(), 0);
         let mut back = decode(&head).unwrap().0;
         let before = back.scrollback_len();
+        let styles = back.styles.len();
         let batch = &batches[0];
-        for bad in [&b"RTHB\x02"[..], &batch[..batch.len() - 1], b"RTHB\x01\x00"] {
+        // Declared one column wide, so every row is too wide for it.
+        let mut narrow = batch.clone();
+        assert_eq!(narrow[5], 20, "the width byte");
+        narrow[5] = 1;
+        for bad in [
+            &b"RTHB\x02"[..],
+            &batch[..batch.len() - 1],
+            b"RTHB\x01\x00",
+            &narrow,
+        ] {
             assert!(back.prepend_history(bad, None).is_err(), "{bad:?}");
         }
         assert_eq!(back.scrollback_len(), before);
+        assert_eq!(back.styles.len(), styles, "no style was added");
         assert!(back.prepend_history(&batches[0], None).is_ok());
+    }
+
+    #[test]
+    fn a_selection_stays_on_its_text() {
+        let (grid, parser) = sample(20, 40);
+        let (head, batches) = encode_split(&grid, &parser, 1 << 16).unwrap();
+        let mut back = decode(&head).unwrap().0;
+        let row = back.scrollback_len();
+        back.selection = Some(crate::grid::Selection {
+            anchor: (0, row),
+            head: (5, row),
+        });
+        let before = back.selected_text();
+        let added = back.prepend_history(&batches[0], None).unwrap();
+        assert!(added > 0);
+        assert_eq!(back.selected_text(), before);
     }
 
     #[test]
