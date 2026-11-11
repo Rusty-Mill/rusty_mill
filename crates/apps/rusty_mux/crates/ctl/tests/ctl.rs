@@ -2630,6 +2630,73 @@ fn a_host_reaches_its_first_address_that_answers() {
 }
 
 #[test]
+fn a_host_declared_in_the_config_wins_and_ctl_leaves_it_alone() {
+    let socket = start_server();
+    let home = config_home("declared");
+    let dead = socket_path("declared-dead");
+    hosts_ok(
+        &home,
+        &["hosts", "add", "box", "--socket", path_text(&dead)],
+    );
+    hosts_ok(
+        &home,
+        &["hosts", "add", "lab", "--socket", path_text(&dead)],
+    );
+    // A rule for an unknown event breaks `do`, never `--host`.
+    let config = format!(
+        r#"{{"hosts": [{{"name": "box", "addresses": [{{"socket": "{}"}}]}}], "home": "box",
+            "on": [{{"event": "no-such-event", "action": "list"}}]}}"#,
+        socket.display()
+    );
+    std::fs::write(home.join("rusty_mux").join("config.json"), config).expect("write");
+    hosts_ok(
+        &home,
+        &["--host", "box", "create-session", "--name", "declared"],
+    );
+    assert!(ok(&socket, &["list"]).contains("declared"));
+
+    let listed = hosts_ok(&home, &["hosts", "list"]);
+    let want = format!(
+        "box  socket {s}  (config)  (home)\nbox  socket {d}  (saved, hidden by config)\nlab  socket {d}",
+        s = socket.display(),
+        d = dead.display()
+    );
+    assert_eq!(listed, want);
+    let json = hosts_ok(&home, &["--json", "hosts", "list"]);
+    assert!(json.contains("\"source\":\"config\""), "{json}");
+    assert!(json.contains("\"shadowed\":true"), "{json}");
+
+    let refused = hosts_ctl(&home, &["hosts", "add", "box", "--socket", "/x.sock"]);
+    assert_eq!(refused.status.code(), Some(2));
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        said.contains("declared in") && said.contains("edit it there"),
+        "{said}"
+    );
+    let removed = hosts_ok(&home, &["hosts", "remove", "box"]);
+    assert!(removed.contains("the one in the config stays"), "{removed}");
+    let again = hosts_ctl(&home, &["hosts", "remove", "box"]);
+    assert_eq!(again.status.code(), Some(2), "only the config has it now");
+    assert!(String::from_utf8_lossy(&again.stderr).contains("declared in"));
+    let _gone = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn config_check_refuses_a_home_with_no_host() {
+    let home = config_home("home-check");
+    std::fs::create_dir_all(home.join("rusty_mux")).expect("dir");
+    let config = home.join("rusty_mux").join("config.json");
+    std::fs::write(&config, r#"{"home": "lab"}"#).expect("write");
+    let refused = hosts_ctl(&home, &["config", "check"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("home `lab`"));
+    hosts_ok(&home, &["hosts", "add", "lab", "--socket", "/l.sock"]);
+    let checked = hosts_ok(&home, &["config", "check"]);
+    assert_eq!(checked, "ok: 0 actions, 0 bindings, 0 rules, home `lab`");
+    let _gone = std::fs::remove_dir_all(home);
+}
+
+#[test]
 fn following_events_reports_and_watch_runs_rules_for_changed_hosts() {
     let socket = start_server();
     let home = config_home("changed");

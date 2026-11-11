@@ -14,7 +14,8 @@ use rusty_uuid::Uuid;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Invocation {
     pub socket: Option<PathBuf>,
-    /// `--host NAME`: a saved host (C35), never with `socket`.
+    /// `--host NAME`: a host from the config or the hosts file (C35, C49),
+    /// never with `socket`.
     pub host: Option<String>,
     pub json: bool,
     pub command: Command,
@@ -457,7 +458,8 @@ fn config(args: &[String]) -> Result<Command, String> {
     }
 }
 
-/// `hosts`: each verb works on the hosts file alone, with no server.
+/// `hosts`: each verb works on the hosts file, reading the config's declared
+/// hosts but never changing them, with no server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostsCommand {
     List,

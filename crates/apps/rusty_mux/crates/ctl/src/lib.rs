@@ -484,11 +484,8 @@ pub fn run_until(
         invocation.command,
         Command::Watch { .. } | Command::Events { follow: true, .. }
     );
-    let tracker = env
-        .hosts
-        .clone()
-        .filter(|_| follows)
-        .map(hosts::Tracker::new);
+    let tracker = (follows && (env.hosts.is_some() || env.config.is_some()))
+        .then(|| hosts::Tracker::new(env.hosts.clone(), env.config.clone()));
     let stop = match tracker {
         Some(_) => stop.polling(),
         None => stop.clone(),
@@ -678,7 +675,12 @@ fn run_config(
         Err(problems) => return report(err, Exit::Failed, &problems),
     };
     match command {
-        ConfigCommand::Check(_) => write_line(out, &config::summary(&config)),
+        ConfigCommand::Check(_) => {
+            match hosts::check_home(&config.declared, env.hosts.as_deref()) {
+                Ok(()) => write_line(out, &config::summary(&config)),
+                Err(reason) => report(err, Exit::Failed, &reason),
+            }
+        }
         ConfigCommand::List => write_line(out, &config::list(&config, json)),
     }
 }

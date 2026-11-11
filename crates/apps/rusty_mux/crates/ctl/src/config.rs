@@ -44,14 +44,23 @@ pub(crate) fn chain(calls: &[Call]) -> Vec<String> {
     requests.join(&"+".to_owned())
 }
 
-/// What `config check` prints for a valid config.
+/// What `config check` prints for a valid config; declared hosts and the
+/// home are named only when there are some.
 pub(crate) fn summary(config: &Config) -> String {
-    format!(
+    let mut line = format!(
         "ok: {} actions, {} bindings, {} rules",
         config.actions.len(),
         config.binds.len(),
         config.rules.len()
-    )
+    );
+    let declared = &config.declared;
+    if !declared.hosts.is_empty() {
+        line.push_str(&format!(", {} hosts", declared.hosts.len()));
+    }
+    if let Some(home) = &declared.home {
+        line.push_str(&format!(", home `{home}`"));
+    }
+    line
 }
 
 /// One line per action, then per binding, then per rule, or a JSON object

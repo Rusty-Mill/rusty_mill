@@ -405,3 +405,55 @@ fn the_config_file_is_found_as_documented() {
     );
     assert_eq!(path(&[]), None);
 }
+
+const DECLARED: &str = r#"{
+  "hosts": [{"name": "box", "addresses": [{"ssh": "me@box", "socket": "/run/box.sock"}]}],
+  "home": "box",
+  "on": [{"event": "no-such-event", "action": "list"}]
+}"#;
+
+#[test]
+fn declared_hosts_are_read_apart_from_the_rest() {
+    let declared = parse_declared(DECLARED).expect("only hosts and home are checked");
+    assert_eq!(declared.home.as_deref(), Some("box"));
+    let host = declared.host("box").expect("declared");
+    assert_eq!(host.addresses.len(), 1);
+    assert_eq!(declared.host("other"), None);
+    let found = problems(DECLARED);
+    assert_eq!(
+        found.len(),
+        1,
+        "the full parse still sees the rule: {found:?}"
+    );
+    let config = parse(r#"{"hosts": [], "home": "lab"}"#).expect("valid");
+    assert_eq!(config.declared.home.as_deref(), Some("lab"));
+    assert_eq!(parse_declared("{}"), Ok(hosts::Declared::default()));
+}
+
+#[test]
+fn bad_declared_hosts_are_reported() {
+    let text = r#"{"hosts": [{"name": "-x", "addresses": []}, {"name": "a", "addresses": [{"socket": "rel"}]}], "home": 3}"#;
+    let found: Vec<String> = parse_declared(text)
+        .expect_err("invalid")
+        .iter()
+        .map(Problem::to_string)
+        .collect();
+    for expected in [
+        "hosts[0].name: `-x` is not a host name",
+        "hosts[0].addresses: expected an array of at least one address",
+        "hosts[1].addresses[0]:",
+        "home: expected a string",
+    ] {
+        assert!(
+            found.iter().any(|p| p.starts_with(expected)),
+            "{expected}: {found:?}"
+        );
+    }
+    assert_eq!(problems(text).len(), found.len(), "parse reports the same");
+    let twice = r#"{"hosts": [{"name": "a", "addresses": [{"socket": "/a"}]}, {"name": "a", "addresses": [{"socket": "/b"}]}]}"#;
+    assert_eq!(problems(twice), ["hosts[1]: a second host called `a`"]);
+    assert!(problems(r#"{"home": "a b"}"#)[0].starts_with("home: `a b` is not a host name"));
+    assert_eq!(problems(r#"{"hosts": {}}"#), ["hosts: expected an array"]);
+    assert!(parse_declared("[]").is_err());
+    assert!(parse_declared("not json").is_err());
+}
