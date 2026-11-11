@@ -55,6 +55,7 @@ mod render;
 mod ssh;
 mod ssh_write;
 mod stop;
+mod sync;
 pub mod target;
 mod terminfo;
 mod wait;
@@ -458,6 +459,12 @@ pub fn run_until(
                 Err((exit, reason)) => report(err, exit, &reason),
             };
         }
+        Command::Pull(sync) => {
+            return match sync::pull(&sync, env, invocation.json, out) {
+                Ok(()) => Exit::Ok,
+                Err((exit, reason)) => report(err, exit, &reason),
+            };
+        }
         Command::Ssh(command) => {
             let program = env.ssh.clone().unwrap_or_else(|| "ssh".into());
             let home = env.ssh_home.as_deref();
@@ -760,6 +767,7 @@ fn execute(
         | Command::Do { .. }
         | Command::Config(_)
         | Command::Hosts(_)
+        | Command::Pull(_)
         | Command::Ssh(_)
         | Command::Terminfo(_)
         | Command::Agent(_)

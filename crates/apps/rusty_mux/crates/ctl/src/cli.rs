@@ -42,6 +42,9 @@ pub enum Command {
     Config(ConfigCommand),
     /// Lists, adds or removes saved hosts (C35).
     Hosts(HostsCommand),
+    /// `hosts pull`: merges another machine's saved hosts into this
+    /// one's (C49b).
+    Pull(Sync),
     /// Checks a host for `rusty-mux --ssh`, or prints its config (C48).
     Ssh(SshCommand),
     /// Checks, installs or removes our terminfo entry on an SSH host (C47).
@@ -389,7 +392,10 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "events" => events(rest),
         "do" => run_action(rest),
         "config" => config(rest),
-        "hosts" => hosts(rest).map(Command::Hosts),
+        "hosts" => match rest {
+            [verb, dest, flags @ ..] if verb == "pull" => sync(dest, flags).map(Command::Pull),
+            _ => hosts(rest).map(Command::Hosts),
+        },
         "ssh" => ssh(rest).map(Command::Ssh),
         "terminfo" => terminfo(rest).map(Command::Terminfo),
         "watch" => watch(rest),
@@ -471,8 +477,20 @@ pub enum HostsCommand {
     Remove(String),
 }
 
+/// A sync with the machine at `dest` (term pack D202).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sync {
+    /// What `ssh` gets after `--`.
+    pub dest: String,
+    /// The sender's entry wins a name both sides have.
+    pub replace: bool,
+    /// Read and print the plan; write nothing.
+    pub dry_run: bool,
+}
+
 const HOSTS_USAGE: &str = "usage: hosts list | hosts add NAME --socket PATH | \
-     hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] | hosts remove NAME";
+     hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] | hosts remove NAME | \
+     hosts pull DEST [--replace] [--dry-run]";
 
 fn hosts(args: &[String]) -> Result<HostsCommand, String> {
     match args {
@@ -511,6 +529,29 @@ fn hosts(args: &[String]) -> Result<HostsCommand, String> {
         }
         _ => Err(HOSTS_USAGE.into()),
     }
+}
+
+/// `DEST [--replace] [--dry-run]`, each flag at most once.
+fn sync(dest: &str, flags: &[String]) -> Result<Sync, String> {
+    if dest.is_empty() || dest.starts_with('-') || dest.contains(char::is_whitespace) {
+        return Err(format!("hosts: `{dest}` is not an ssh destination"));
+    }
+    let mut sync = Sync {
+        dest: dest.to_owned(),
+        replace: false,
+        dry_run: false,
+    };
+    for flag in flags {
+        let slot = match flag.as_str() {
+            "--replace" => &mut sync.replace,
+            "--dry-run" => &mut sync.dry_run,
+            _ => return Err(HOSTS_USAGE.into()),
+        };
+        if std::mem::replace(slot, true) {
+            return Err(format!("hosts: {flag} given twice"));
+        }
+    }
+    Ok(sync)
 }
 
 const TERMINFO_USAGE: &str = "usage: terminfo check DEST | terminfo setup|remove DEST [--dry-run]";
@@ -996,7 +1037,8 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "List, add or remove saved hosts for --host: hosts list |\n\
          \x20                  hosts add NAME --socket PATH |\n\
          \x20                  hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] |\n\
-         \x20                  hosts remove NAME",
+         \x20                  hosts remove NAME |\n\
+         \x20                  hosts pull DEST [--replace] [--dry-run]",
     ),
     (
         "ssh",

@@ -3089,3 +3089,130 @@ fn ssh_setup_prints_a_block_once() {
     }
     let _gone = std::fs::remove_dir_all(dir);
 }
+
+/// A stand-in `ssh` that runs the remote script with `remote` as its home
+/// and none of this side's config variables, as a fresh login would.
+#[cfg(unix)]
+fn remote_ssh(dir: &Path, remote: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("remote-ssh");
+    let body = format!(
+        "#!/bin/sh\nshift 2\nexec env -u XDG_CONFIG_HOME -u RUSTY_MUX_CONFIG HOME='{}' sh -c \"$1\"\n",
+        remote.display()
+    );
+    std::fs::write(&path, body).expect("write fake ssh");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn hosts_pull_merges_the_remote_hosts_per_name() {
+    let dir = ssh_scratch("pull");
+    let local = dir.join("local");
+    let remote = dir.join("remote");
+    let remote_file = remote.join(".config").join("rusty_mux").join("hosts.json");
+    std::fs::create_dir_all(remote_file.parent().expect("dir")).expect("dir");
+    std::fs::create_dir_all(local.join("rusty_mux")).expect("dir");
+    let ssh = remote_ssh(&dir, &remote);
+    let pull = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+            .env("XDG_CONFIG_HOME", &local)
+            .env_remove("RUSTY_MUX_CONFIG")
+            .env("RUSTY_MUX_SSH", &ssh)
+            .args(["hosts", "pull", "me@box"])
+            .args(args)
+            .output()
+            .expect("run rusty-mux-ctl")
+    };
+    let local_file = local.join("rusty_mux").join("hosts.json");
+
+    // No remote file: nothing to merge, nothing written.
+    let output = pull(&[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!local_file.exists());
+
+    std::fs::write(
+        &remote_file,
+        r#"{"hosts": [
+          {"name": "lab", "addresses": [{"ssh": "me@lab", "socket": "/r/lab.sock"}]},
+          {"name": "mine", "addresses": [{"ssh": "them@mine", "socket": "/r/m.sock"}]},
+          {"name": "only-local", "addresses": [{"socket": "/r/x.sock"}]},
+          {"name": "decl", "addresses": [{"ssh": "me@decl", "socket": "/r/d.sock"}]}
+        ]}"#,
+    )
+    .expect("remote hosts");
+    hosts_ok(
+        &local,
+        &[
+            "hosts", "add", "mine", "--ssh", "me@mine", "--socket", "/m.sock",
+        ],
+    );
+    std::fs::write(
+        local.join("rusty_mux").join("config.json"),
+        r#"{"hosts": [{"name": "decl", "addresses": [{"socket": "/d.sock"}]}]}"#,
+    )
+    .expect("config");
+    let before = std::fs::read(&local_file).expect("local");
+
+    let dry = pull(&["--dry-run"]);
+    assert_eq!(dry.status.code(), Some(0));
+    let plan = stdout(&dry);
+    assert!(plan.contains("added    lab"), "{plan}");
+    assert!(plan.contains("kept     mine"), "{plan}");
+    assert!(plan.contains("skipped  only-local"), "{plan}");
+    assert!(
+        plan.contains("skipped  decl: declared in the config"),
+        "{plan}"
+    );
+    assert_eq!(
+        std::fs::read(&local_file).expect("local"),
+        before,
+        "dry run writes nothing"
+    );
+
+    assert_eq!(pull(&[]).status.code(), Some(0));
+    let listed = hosts_ok(&local, &["hosts", "list"]);
+    assert!(listed.contains("lab  ssh me@lab /r/lab.sock"), "{listed}");
+    assert!(
+        listed.contains("mine  ssh me@mine /m.sock"),
+        "kept: {listed}"
+    );
+    assert!(!listed.contains("only-local"), "{listed}");
+    let again = pull(&[]);
+    assert!(!stdout(&again).contains("added"), "already there");
+
+    let replaced = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+        .env("XDG_CONFIG_HOME", &local)
+        .env_remove("RUSTY_MUX_CONFIG")
+        .env("RUSTY_MUX_SSH", &ssh)
+        .args(["--json", "hosts", "pull", "me@box", "--replace"])
+        .output()
+        .expect("run");
+    assert_eq!(replaced.status.code(), Some(0));
+    assert!(
+        stdout(&replaced).contains(r#""outcome":"replaced""#),
+        "{}",
+        stdout(&replaced)
+    );
+    assert!(hosts_ok(&local, &["hosts", "list"]).contains("mine  ssh them@mine"));
+
+    // A bad remote file and an unreachable host write nothing.
+    std::fs::write(&remote_file, "{").expect("bad");
+    let before = std::fs::read(&local_file).expect("local");
+    assert_eq!(pull(&[]).status.code(), Some(1));
+    let gone = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+        .env("XDG_CONFIG_HOME", &local)
+        .env("RUSTY_MUX_SSH", fake_ssh(&dir, false))
+        .args(["hosts", "pull", "me@box"])
+        .output()
+        .expect("run");
+    assert_eq!(gone.status.code(), Some(4));
+    assert_eq!(std::fs::read(&local_file).expect("local"), before);
+    let _gone = std::fs::remove_dir_all(dir);
+}

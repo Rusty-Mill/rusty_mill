@@ -136,7 +136,7 @@ fn report(text: &str) -> Option<(String, Exit)> {
     Some((format!("rusty_term: {place}\n{tic}"), exit))
 }
 
-fn started(ssh: &OsString, e: io::Error) -> (Exit, String) {
+pub(crate) fn started(ssh: &OsString, e: io::Error) -> (Exit, String) {
     (
         Exit::Failed,
         format!("cannot run {}: {e}", ssh.to_string_lossy()),
@@ -144,7 +144,7 @@ fn started(ssh: &OsString, e: io::Error) -> (Exit, String) {
 }
 
 /// `Ok` for exit 0; ssh's own failure is unreachable, anything else failed.
-fn ended(code: Option<i32>, dest: &str) -> Result<(), (Exit, String)> {
+pub(crate) fn ended(code: Option<i32>, dest: &str) -> Result<(), (Exit, String)> {
     match code {
         Some(0) => Ok(()),
         Some(SSH_FAILED) => Err((Exit::Unreachable, format!("ssh could not reach {dest}"))),
