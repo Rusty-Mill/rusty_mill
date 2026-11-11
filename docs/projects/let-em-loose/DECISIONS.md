@@ -131,6 +131,7 @@ Precise contracts used by this guide:
 | D121 | #704 slice 4d: `rusty_orch consolidate` half-limit leg changes approved as built in PR #1544 | [stated] 2026-11-06 (#704) |
 | D122 | Mill Board `external_refs`: observation-only references for non-Orch execution, approved in principle | [stated] 2026-11-10 (general, #1432) |
 | D123 | #1432 S5 design defaults: ADR location, providers, capability, summary flags, card_take | [default] 2026-11-11 (#1432) |
+| D124 | #1432 S5 external refs design (ADR-0006) approved as written for implementation | [stated] 2026-11-11 (#1432) |
 
 ## D1. Lenses, not stages
 
@@ -1198,3 +1199,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_312ce716599d4b89aec9c5fec11d0b73
 **Key.** lel:1432:external-refs-design-defaults
 **Source.** let-em-loose-expert, answering the #1432 design session, 2026-11-11. D122, D94, D25, D20/D104; `crates/apps/rusty_orch/ARCHITECTURE.md` § Factory execution boundary; `crates/apps/rusty_mill_board/src/board.rs` (Build check on the execution ops). The whole design, with these defaults, still goes to Nano for approval under D25 before any code. Numbered D123 after D122.
+
+## D124. #1432 S5 external refs design (ADR-0006) approved as written for implementation
+
+**Decision.** The #1432 S5 design, ADR-0006 `crates/apps/rusty_mill_board/docs/adr/0006-external-execution-refs.md` in draft PR #1618, is approved as written for implementation, with the D123 defaults. This is the D25 design approval, and it clears the design's ask-first items: the card schema field `externalRefs` and the new MCP and HTTP op `card_execution_observe`. The work is built as two implementation cards: PR 1 keeps unknown board-document fields, then PR 2 adds external refs, each through review and CI. The approval settles what to build, not merging: review and merge gates still apply.
+**Why.** D122 approved observation-only `external_refs` in principle and required the schema and API contract to be finalized and separately approved before code. ADR-0006 covers the points D122 listed (validation, scoped authorization, idempotency, stale observations, compatibility, retention, rollback), keeps Orch the only executor (D20/D104), and its two-PR order keeps rollback lossless.
+**Rejected.** Approving with changes (revising ADR-0006 in PR #1618 before any code), and holding the design PR as a draft with nothing built; both were options on the same card.
+**Tag.** [stated] · remind-me: mem_b512d055f0f3463aaa8068bec48916c5
+**Key.** lel:1432:external-refs-design-approved
+**Source.** Nano tapped "Approve as written" on decision card `cmsg_017MoLbtrGAAcyE1PVPZXuN6LV2exssuE5oC7WWqu8rWaa` ("Approve the S5 external refs design in PR 1618 for implementation?"; option: "I create the two implementation cards and build PR 1 (keep unknown doc fields), then PR 2 (external refs), each through review and CI."), decide event `cmsg_017MoLbtrGAAcyE1PVPZXuN64ukBebuUh4oWNpEUyf7mgw`, 2026-11-11T23:48:48Z, Mill_Board project thread. Confirms D122 and D123. D25, D20, D104. Numbered D124 after D123.

@@ -1,6 +1,6 @@
 # ADR-0006: Observation-only external execution refs
 
-- **Status:** Proposed (2026-11-11), card #1432. It was approved in principle by Nano on 2026-11-10 ([D122](../../../../../docs/projects/let-em-loose/DECISIONS.md)), with defaults in D123. It needs Nano's design approval (D25) before any code. The card schema and MCP API changes below are ask-first items for that approval.
+- **Status:** Accepted (2026-11-11): Nano approved this design as written for implementation (D124), card #1432. It was approved in principle by Nano on 2026-11-10 ([D122](../../../../../docs/projects/let-em-loose/DECISIONS.md)), with defaults in D123. That approval covers the card schema and MCP API changes below, which were ask-first items (D25).
 
 ## Context
 Some work on the board runs outside Rusty Orch: Codex Cloud threads for Communications (#798) and PythRust, and the GitHub PRs and Actions runs they produce. None of it has an Orch goal, a BBP task or an assignment generation, so it cannot carry an `ExecutionLink`, and inventing one is forbidden (#798). In production, 0 of 1,425 cards have `execution` set. About 63 record Codex Cloud thread and turn ids only in comments, where nothing can query, deduplicate or reconcile them against GitHub.
