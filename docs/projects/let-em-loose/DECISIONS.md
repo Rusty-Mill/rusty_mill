@@ -129,6 +129,8 @@ Precise contracts used by this guide:
 | D119 | #704 `bbp erosion approve` and `bbp erosion limits`: both commands and their trust model approved as built in PR #1543 | [stated] 2026-11-06 (#704) |
 | D120 | #704 slice 4d: half-limit leg firing rule, measuring, `--bbp-bin` and pending base | [default] 2026-11-06 (#704) |
 | D121 | #704 slice 4d: `rusty_orch consolidate` half-limit leg changes approved as built in PR #1544 | [stated] 2026-11-06 (#704) |
+| D122 | Mill Board `external_refs`: observation-only references for non-Orch execution, approved in principle | [stated] 2026-11-10 (general, #1432) |
+| D123 | #1432 S5 design defaults: ADR location, providers, capability, summary flags, card_take | [default] 2026-11-11 (#1432) |
 
 ## D1. Lenses, not stages
 
@@ -1178,3 +1180,21 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: pending
 **Key.** lel:704:consolidate-half-limit-leg-approval
 **Source.** Nano, "Merge both", in the rusty-mill project chat, message `cmsg_01Y8j3ihrYW8jedySti37M9c5BJB8MJVcpTVXKHfp9P2zP`, 2026-11-06T15:47:26Z, replying to `cmsg_01Y8j3ihrYW8jedySti37M9cGcSaVAgBosLz316zUmS6k2` (15:14:33Z), which named these changes to `rusty_orch consolidate` and recommended merging #1544 (its other PR, rusty-remind-me #376, is not a Let Em Loose item). PR #1544 merged through the merge queue on 2026-11-06, merge commit `44cd63c7`. D114, D117, D118, D119, D120; `rusty_orch` `crates/rusty_orch/src/consolidate.rs`, `docs/adr/0024-consolidate-half-limit-leg.md`. Numbered D121 after D120.
+
+## D122. Mill Board `external_refs`: observation-only references for non-Orch execution, approved in principle
+
+**Decision.** Mill Board cards may carry observation-only `external_refs` for Codex Cloud and other execution that does not run under Orch (shape proposed: provider, ref, url, observed_at, state). Rusty Orch stays the execution authority, and `ExecutionLink` (written only by Orch) is unchanged. Mill Board must not use external observations to dispatch, retry, lease, fence or resume workers. This is approval in principle only. Before implementation, the schema and API contract must be finalized, covering validation, scoped authorization, idempotency, stale-observation handling, compatibility, retention and rollback. The S5 implementation needs its own design approval (D25) before any code, and the ask-first gates for the card schema and MCP API change still apply to that design.
+**Why.** In production 0 of 1,425 cards have `execution` set, and about 63 cards record Codex Cloud thread and turn ids only in comments, so reconciling the Board, GitHub and cloud workers is hard. A pointer-only field fixes that without building a second orchestration engine inside Mill Board, which keeps D20/D104 (orch is the only executor) and the boundary in `rusty_orch/ARCHITECTURE.md` § Factory execution boundary.
+**Rejected.** Keeping cloud execution ids in comments only. Requiring these workers to run under Orch so they get a real `ExecutionLink`.
+**Tag.** [stated] · remind-me: mem_61e819e5a00743a3b802546c4e6f171b
+**Key.** lel:general:mill-board-external-refs-observation-only
+**Source.** Nano, Mill_Board project thread, message `cmsg_017MoLbtrGAAcyE1PVPZXuN6FBsfep5KMARhZchV2QDExC`, 2026-11-10T16:06:48Z ("Approve S5 option A in principle. Use observation-only `external_refs` for Codex Cloud and other non-Orch execution references. Preserve Rusty Orch as the execution authority. ..."), answering the expert's escalation from the Mill Board retrieval and execution-state scalability assessment. D20, D104, D25; `crates/apps/rusty_orch/ARCHITECTURE.md`. Numbered D122 after D121.  Design card: #1432 (S5, under #19); its design defaults are D123.
+
+## D123. #1432 S5 design defaults: ADR location, providers, capability, summary flags, card_take
+
+**Decision.** Inside D122, the #1432 design uses these defaults. (1) The design is the board ADR `crates/apps/rusty_mill_board/docs/adr/0006-external-execution-refs.md`, committed in its first draft PR; this pack points to it from D122 and here rather than keeping a second copy. (2) `provider` is a fixed set (`codex-cloud`, `github-pr`, `github-actions`) that never includes `orch` or `bbp`. Refs may sit next to an `ExecutionLink`, because a link can bind after refs exist and nothing reads refs. (3) `card_execution_observe` reuses the Build capability plus project scope, the same as `card_execution_link`; no new capability. (4) Summaries keep `has_execution` meaning an `ExecutionLink` only, and add a separate `has_external_refs`; never one flag for both. (5) `card_take` never skips, reorders or refuses a card because of its refs; the taken card carries `external_refs` as `card_get` does, with no extra take-time warning field.
+**Why.** D122 makes Orch the only execution authority and forbids dispatch from observations, and `card_take` choosing a card is dispatch. One flag for link and refs would let a reader mistake an observation for an Orch execution. Reusing Build and the existing file layout adds nothing that needs an ask-first gate. A board ADR in the repo meets D94's purpose, which is that designs survive between sessions.
+**Rejected.** A copy of the design under `docs/projects/let-em-loose/`. `orch` or `bbp` providers. A new `observe` capability, which changes roles and the API, so it would go to Nano. A single `has_execution` covering both. Skipping a card whose ref says `running`.
+**Tag.** [default] · remind-me: mem_312ce716599d4b89aec9c5fec11d0b73
+**Key.** lel:1432:external-refs-design-defaults
+**Source.** let-em-loose-expert, answering the #1432 design session, 2026-11-11. D122, D94, D25, D20/D104; `crates/apps/rusty_orch/ARCHITECTURE.md` § Factory execution boundary; `crates/apps/rusty_mill_board/src/board.rs` (Build check on the execution ops). The whole design, with these defaults, still goes to Nano for approval under D25 before any code. Numbered D123 after D122.
