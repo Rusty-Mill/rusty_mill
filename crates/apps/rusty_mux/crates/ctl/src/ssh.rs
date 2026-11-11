@@ -195,47 +195,143 @@ pub(crate) fn block(setup: &SshSetup) -> String {
     lines.join("\n")
 }
 
-/// Whether a `Host` line in `config`, or a file it includes by a plain
-/// path, names `dest` without a wildcard.
+/// How deep `Include`s nest before ssh itself gives up (OpenSSH's
+/// `READCONF_MAX_DEPTH`).
+const INCLUDE_DEPTH: u8 = 16;
+
+/// Whether `config`, or a file it includes, names `dest` in a `Host` line
+/// or a `Match host`/`originalhost` list, without a wildcard. `Include`
+/// patterns are expanded the way ssh does for `*` and `?` in the file name.
 /// `ssh_dir` is `~/.ssh`, which every relative `Include` is read against,
-/// in nested files too.
+/// in nested files too. A missing file names nothing, as for ssh; a file
+/// that is there but can't be read is an error, since it may name `dest`.
 pub(crate) fn has_host(
     config: &Path,
     ssh_dir: &Path,
     dest: &str,
     skip: Option<&Path>,
     depth: u8,
-) -> bool {
+) -> Result<bool, String> {
     if skip == Some(config) {
-        return false;
+        return Ok(false);
     }
-    let Ok(text) = std::fs::read_to_string(config) else {
-        return false;
+    if depth > INCLUDE_DEPTH {
+        return Err(format!("{}: Includes nest too deep", config.display()));
+    }
+    let text = match std::fs::read_to_string(config) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("{}: {e}", config.display())),
     };
-    text.lines().map(str::trim).any(|line| {
+    for line in text.lines().map(str::trim) {
         // `Key value`, `Key=value` and `Key = value` all name a key.
         let (key, value) = match line.split_once(|c: char| c == '=' || c.is_whitespace()) {
             Some((key, value)) => (key, value.trim_start_matches(['=', ' ', '\t'])),
             None => (line, ""),
         };
-        let mut words = value.split_whitespace().map(|w| w.trim_matches('"'));
-        match key.to_ascii_lowercase().as_str() {
-            "host" => words.any(|w| w == dest),
-            "include" if depth < 4 => words
-                .filter(|w| !w.contains(['*', '?']))
-                .any(|w| has_host(&included(ssh_dir, w), ssh_dir, dest, skip, depth + 1)),
+        let words = || value.split_whitespace().map(|w| w.trim_matches('"'));
+        let found = match key.to_ascii_lowercase().as_str() {
+            "host" => words().any(|w| w == dest),
+            "match" => matched_hosts(words()).any(|w| w == dest),
+            "include" => {
+                for word in words() {
+                    for file in included(ssh_dir, word)? {
+                        if has_host(&file, ssh_dir, dest, skip, depth + 1)? {
+                            return Ok(true);
+                        }
+                    }
+                }
+                false
+            }
             _ => false,
+        };
+        if found {
+            return Ok(true);
         }
-    })
+    }
+    Ok(false)
 }
 
-/// Where an `Include` of `word` points: `~` is the home above `dir`
-/// (`~/.ssh`), and a relative path is in `~/.ssh`.
-fn included(dir: &Path, word: &str) -> PathBuf {
-    match word.strip_prefix("~/") {
+/// The names in a `Match` line's `host` and `originalhost` lists.
+fn matched_hosts<'a>(words: impl Iterator<Item = &'a str>) -> impl Iterator<Item = &'a str> {
+    let mut words = words.peekable();
+    std::iter::from_fn(move || {
+        while let Some(word) = words.next() {
+            let criterion = word.trim_start_matches('!').to_ascii_lowercase();
+            if matches!(criterion.as_str(), "host" | "originalhost") {
+                return words.next();
+            }
+        }
+        None
+    })
+    .flat_map(|list| list.split(','))
+}
+
+/// The files an `Include` of `word` reads: `~` is the home above `dir`
+/// (`~/.ssh`), and a relative path is in `~/.ssh`. `*` and `?` in the
+/// file name match as in glob(3), never a leading `.`; anywhere else, or
+/// `[`, they are refused rather than guessed at.
+fn included(dir: &Path, word: &str) -> Result<Vec<PathBuf>, String> {
+    let path = match word.strip_prefix("~/") {
         Some(rest) => dir.parent().unwrap_or(dir).join(rest),
         None => dir.join(word),
+    };
+    let wild = |s: &str| s.contains(['*', '?', '[']);
+    if !wild(word) {
+        return Ok(vec![path]);
     }
+    let pattern = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let parent = path.parent().unwrap_or(dir);
+    if !wild(&pattern) || pattern.contains('[') || wild(&parent.to_string_lossy()) {
+        return Err(format!("`Include {word}`: can't check that pattern"));
+    }
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{}: {e}", parent.display())),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", parent.display()))?;
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if !file.starts_with('.') && glob(&pattern, &file) {
+            files.push(entry.path());
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// Whether `name` matches `pattern`, where `*` is any run and `?` any one
+/// character.
+fn glob(pattern: &str, name: &str) -> bool {
+    let (p, n): (Vec<char>, Vec<char>) = (pattern.chars().collect(), name.chars().collect());
+    let (mut i, mut j) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while j < n.len() {
+        match p.get(i) {
+            Some('*') => {
+                star = Some((i, j));
+                i += 1;
+            }
+            Some(&c) if c == '?' || c == n[j] => {
+                i += 1;
+                j += 1;
+            }
+            _ => match star {
+                Some((si, sj)) => {
+                    i = si + 1;
+                    j = sj + 1;
+                    star = Some((si, sj + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+    p[i..].iter().all(|&c| c == '*')
 }
 
 /// Runs `ssh check|diagnose|setup` with `ssh` as the program and the
@@ -331,7 +427,16 @@ fn write_setup(
     let files = crate::ssh_write::Files::under(dir);
     crate::ssh_write::alias(&setup.dest).map_err(|e| (Exit::Usage, e))?;
     // Our Include comes first, so our block would win over theirs.
-    if has_host(&files.config, dir, &setup.dest, Some(&files.ours), 0) {
+    let has = has_host(&files.config, dir, &setup.dest, Some(&files.ours), 0).map_err(|e| {
+        (
+            Exit::Failed,
+            format!(
+                "can't tell whether your ssh config already has {}, so nothing was written: {e}",
+                setup.dest
+            ),
+        )
+    })?;
+    if has {
         return Err((
             Exit::Failed,
             format!(
@@ -395,14 +500,21 @@ fn written(
 /// `setup`: the block to add, or that the config already has the host.
 fn print_setup(setup: &SshSetup, config: Option<&Path>, out: &mut dyn Write) -> io::Result<Exit> {
     let dir = config.and_then(Path::parent).unwrap_or(Path::new("."));
-    match config.filter(|c| has_host(c, dir, &setup.dest, None, 0)) {
-        Some(config) => writeln!(
+    let found = config.map(|c| (c, has_host(c, dir, &setup.dest, None, 0)));
+    match found {
+        Some((config, Ok(true))) => writeln!(
             out,
             "{} already has a Host entry for {}; nothing to add",
             config.display(),
             setup.dest
         )?,
-        None => writeln!(out, "{}", block(setup))?,
+        Some((_, Err(e))) => writeln!(
+            out,
+            "# Check your config has no Host entry for {} first: {e}\n{}",
+            setup.dest,
+            block(setup)
+        )?,
+        _ => writeln!(out, "{}", block(setup))?,
     }
     Ok(Exit::Ok)
 }
@@ -646,9 +758,101 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         std::fs::write(dir.join("config"), "Include extra\nHost *\n  User x\n").expect("write");
         std::fs::write(dir.join("extra"), "Host other box\n  HostName b\n").expect("write");
-        assert!(has_host(&dir.join("config"), &dir, "box", None, 0));
-        assert!(!has_host(&dir.join("config"), &dir, "bo", None, 0));
-        assert!(!has_host(&dir.join("missing"), &dir, "box", None, 0));
+        assert_eq!(
+            has_host(&dir.join("config"), &dir, "box", None, 0),
+            Ok(true)
+        );
+        assert_eq!(
+            has_host(&dir.join("config"), &dir, "bo", None, 0),
+            Ok(false)
+        );
+        assert_eq!(
+            has_host(&dir.join("missing"), &dir, "box", None, 0),
+            Ok(false)
+        );
         let _gone = std::fs::remove_dir_all(dir);
+    }
+
+    fn conf_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rusty-mux-ssh-{name}-{}", std::process::id()));
+        let _fresh = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config.d")).expect("dir");
+        dir
+    }
+
+    #[test]
+    fn a_host_is_found_through_a_wildcard_include_and_a_match() {
+        let dir = conf_dir("glob");
+        let config = dir.join("config");
+        std::fs::write(&config, "Include config.d/*.conf\n").expect("write");
+        std::fs::write(dir.join("config.d/work.conf"), "Host box\n").expect("write");
+        std::fs::write(dir.join("config.d/.hidden.conf"), "Host secret\n").expect("write");
+        std::fs::write(dir.join("config.d/notes.txt"), "Host txt\n").expect("write");
+        assert_eq!(has_host(&config, &dir, "box", None, 0), Ok(true));
+        assert_eq!(
+            has_host(&config, &dir, "secret", None, 0),
+            Ok(false),
+            "no leading dot"
+        );
+        assert_eq!(
+            has_host(&config, &dir, "txt", None, 0),
+            Ok(false),
+            "*.conf only"
+        );
+        std::fs::write(&config, "Match user me originalhost a,box exec true\n").expect("write");
+        assert_eq!(has_host(&config, &dir, "box", None, 0), Ok(true));
+        std::fs::write(&config, "Match !host box\n").expect("write");
+        assert_eq!(
+            has_host(&config, &dir, "box", None, 0),
+            Ok(true),
+            "named, even negated"
+        );
+        std::fs::write(&config, "Match exec box\n").expect("write");
+        assert_eq!(has_host(&config, &dir, "box", None, 0), Ok(false));
+        let _gone = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_include_that_cannot_be_checked_is_an_error() {
+        let dir = conf_dir("unreadable");
+        let config = dir.join("config");
+        std::fs::write(dir.join("config.d/bad"), [0xff, 0xfe]).expect("write");
+        std::fs::write(&config, "Include config.d/bad\n").expect("write");
+        assert!(
+            has_host(&config, &dir, "box", None, 0).is_err(),
+            "not UTF-8"
+        );
+        std::fs::write(&config, "Include */x\n").expect("write");
+        assert!(
+            has_host(&config, &dir, "box", None, 0).is_err(),
+            "a pattern in a folder"
+        );
+        std::fs::write(&config, "Include config\n").expect("write");
+        assert!(
+            has_host(&config, &dir, "box", None, 0).is_err(),
+            "itself, forever"
+        );
+        std::fs::write(&config, "Include config.d/missing\nInclude nothing/*\n").expect("write");
+        assert_eq!(
+            has_host(&config, &dir, "box", None, 0),
+            Ok(false),
+            "missing is nothing"
+        );
+        let _gone = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn glob_matches_stars_and_question_marks() {
+        for (pattern, name, want) in [
+            ("*", "a", true),
+            ("*.conf", "x.conf", true),
+            ("*.conf", "x.confs", false),
+            ("a?c", "abc", true),
+            ("a?c", "ac", false),
+            ("a*b*c", "aXbYbZc", true),
+            ("a*b", "aXbY", false),
+        ] {
+            assert_eq!(glob(pattern, name), want, "{pattern} {name}");
+        }
     }
 }
