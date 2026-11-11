@@ -152,11 +152,27 @@ pub(crate) fn setup(files: &Files, dest: &str, block: &str, ssh: &OsStr) -> Resu
         return Err(reason);
     }
     rename(&temp, &files.ours)?;
-    let backup = match new_config {
-        Some(text) => replace_config(files, &config, &text)?,
-        None => None,
+    let Some(text) = new_config else {
+        return Ok(Done::Changed { backup: None });
     };
-    Ok(Done::Changed { backup })
+    match replace_config(files, &config, &text) {
+        Ok(backup) => Ok(Done::Changed { backup }),
+        // Our file alone does nothing until the Include reads it: put it
+        // back, so a failed setup leaves both files as they were.
+        Err(reason) => Err(match restore(&files.ours, &ours) {
+            Ok(()) => format!("{reason}; nothing was changed"),
+            Err(left) => format!("{reason}; {left}"),
+        }),
+    }
+}
+
+/// `path` back to `text`, or gone when it was empty, after a failed setup.
+fn restore(path: &Path, text: &str) -> Result<(), String> {
+    let undone = match text.is_empty() {
+        true => std::fs::remove_file(path).map_err(|e| failed(path, e)),
+        false => write_temp(path, text).and_then(|temp| rename(&temp, path)),
+    };
+    undone.map_err(|e| format!("{} still has the new block, unused: {e}", path.display()))
 }
 
 /// Takes `dest`'s block out of our file. Once it holds no block, the file
@@ -180,10 +196,15 @@ pub(crate) fn remove(files: &Files, dest: &str) -> Result<Done, String> {
             rename(&temp, &files.ours)?;
         }
     }
-    let backup = match empty && new_config != config {
-        true => replace_config(files, &config, &new_config)?,
-        false => None,
-    };
+    if !empty || new_config == config {
+        return Ok(Done::Changed { backup: None });
+    }
+    // With no backup, setup made the file: an empty one goes, as it came.
+    if new_config.is_empty() && !files.backup().exists() {
+        std::fs::remove_file(&files.config).map_err(|e| failed(&files.config, e))?;
+        return Ok(Done::Changed { backup: None });
+    }
+    let backup = replace_config(files, &config, &new_config)?;
     Ok(Done::Changed { backup })
 }
 
@@ -465,6 +486,57 @@ mod tests {
                 .expect("dir")
                 .collect();
             assert!(left.is_empty(), "no temp file left");
+            let _gone = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_config_setup_made_goes_with_the_last_block() {
+            let dir = scratch("made");
+            let files = Files::under(&dir.join(".ssh"));
+            let ssh = fake_ssh(&dir, true);
+            assert_eq!(
+                setup(&files, "a", BLOCK_A, ssh.as_os_str()),
+                Ok(Done::Changed { backup: None }),
+                "no config to back up"
+            );
+            assert!(files.config.exists());
+            remove(&files, "a").expect("removed");
+            assert!(!files.config.exists() && !files.ours.exists());
+            // An empty config the user had stays: its backup says so.
+            std::fs::write(&files.config, "").expect("written");
+            setup(&files, "a", BLOCK_A, ssh.as_os_str()).expect("set up");
+            remove(&files, "a").expect("removed");
+            assert_eq!(std::fs::read_to_string(&files.config).expect("kept"), "");
+            let _gone = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_config_that_cannot_be_written_leaves_both_files_alone() {
+            let dir = scratch("unwritable");
+            let ssh_dir = dir.join(".ssh");
+            let files = Files::under(&ssh_dir);
+            let ssh = fake_ssh(&dir, true);
+            std::fs::create_dir_all(&ssh_dir).expect("made");
+            std::fs::write(&files.config, "Host old\n").expect("written");
+            setup(&files, "b", BLOCK_B, ssh.as_os_str()).expect("set up");
+            std::fs::write(&files.config, "Host old\n").expect("the Include taken out");
+            let before = std::fs::read_to_string(&files.ours).expect("ours");
+            // A read-only folder: the temp file beside the config can't be made.
+            let mode = |m| std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(m));
+            mode(0o500).expect("read-only");
+            let refused = setup(&files, "a", BLOCK_A, ssh.as_os_str());
+            mode(0o700).expect("writable");
+            if std::fs::File::create(ssh_dir.join("probe")).is_ok() && refused.is_ok() {
+                // Root ignores the mode; nothing to test then.
+                let _gone = std::fs::remove_dir_all(dir);
+                return;
+            }
+            assert!(refused.is_err_and(|e| e.contains("nothing was changed")));
+            assert_eq!(std::fs::read_to_string(&files.ours).expect("ours"), before);
+            assert_eq!(
+                std::fs::read_to_string(&files.config).expect("config"),
+                "Host old\n"
+            );
             let _gone = std::fs::remove_dir_all(dir);
         }
 

@@ -2,7 +2,7 @@
 //! directory, forwarded by an `ssh` this process starts and reaps.
 
 use std::ffi::{OsStr, OsString};
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
@@ -66,9 +66,17 @@ fn escape(path: &Path) -> Vec<u8> {
     field
 }
 
+/// What the watchdog runs: wait for a line on stdin, and unless it says
+/// `done`, end ssh. End of input with no line is this process gone.
+const WATCHDOG: &str = r#"read -r line; [ "$line" = done ] || kill -TERM "$1" 2>/dev/null"#;
+
 /// A running `ssh` forward and the private directory of its local socket.
 pub struct Forward {
     child: Child,
+    /// A `sh` holding the read end of a pipe: if this process dies without
+    /// dropping the forward, the pipe closes and it ends `ssh`, which
+    /// would otherwise run on with nothing to forward for.
+    watchdog: Child,
     dir: PathBuf,
     socket: PathBuf,
 }
@@ -88,8 +96,22 @@ impl Forward {
                 .spawn()
                 .map_err(|e| format!("starting {}: {e}", Path::new(program).display()))
         });
-        match spawned {
-            Ok(child) => Ok(Self { child, dir, socket }),
+        let started = spawned.and_then(|mut child| match watchdog(child.id()) {
+            Ok(watchdog) => Ok((child, watchdog)),
+            Err(why) => {
+                // Not yet forwarding anything; it goes with the error.
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(why)
+            }
+        });
+        match started {
+            Ok((child, watchdog)) => Ok(Self {
+                child,
+                watchdog,
+                dir,
+                socket,
+            }),
             Err(why) => {
                 // Nothing is in it yet; a failure leaves an empty directory.
                 let _ = std::fs::remove_dir(&dir);
@@ -139,6 +161,12 @@ impl Forward {
 
 impl Drop for Forward {
     fn drop(&mut self) {
+        // Stand the watchdog down first, so it never signals a pid that
+        // has been reaped below and reused.
+        if let Some(mut stdin) = self.watchdog.stdin.take() {
+            let _ = stdin.write_all(b"done\n");
+        }
+        let _ = self.watchdog.wait();
         // It may have exited already; there is nothing to report either
         // way while the client shuts down.
         let _ = self.child.kill();
@@ -147,6 +175,18 @@ impl Drop for Forward {
             eprintln!("rusty-mux: removing {}: {e}", self.dir.display());
         }
     }
+}
+
+/// Starts the [`WATCHDOG`] for `ssh`, the pid of the forward's ssh.
+fn watchdog(ssh: u32) -> Result<Child, String> {
+    Command::new("/bin/sh")
+        .args(["-c", WATCHDOG, "sh"])
+        .arg(ssh.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("starting the ssh forward's watchdog: {e}"))
 }
 
 /// A new directory in the temp directory that only this user can enter.
@@ -349,6 +389,26 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, "cancelled");
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// The watchdog ends ssh once its pipe closes without `done`, as it
+    /// does when this process dies; a drop stands it down instead.
+    #[test]
+    fn ssh_ends_when_its_owner_goes() {
+        let mut ssh = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut dog = watchdog(ssh.id()).unwrap();
+        drop(dog.stdin.take());
+        dog.wait().unwrap();
+        let status = ssh.wait().unwrap();
+        assert!(!status.success(), "ended by a signal: {status}");
+
+        let mut kept = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut dog = watchdog(kept.id()).unwrap();
+        dog.stdin.take().unwrap().write_all(b"done\n").unwrap();
+        dog.wait().unwrap();
+        assert!(matches!(kept.try_wait(), Ok(None)), "still running");
+        kept.kill().unwrap();
+        kept.wait().unwrap();
     }
 
     #[test]
