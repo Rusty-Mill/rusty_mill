@@ -1,0 +1,182 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 960" width="1400" height="960" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-label="Ecosystem architecture: who does what, where work lives, and what is paused">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect width="1400" height="960" fill="#ffffff"/>
+
+  <text x="60" y="44" font-size="22" font-weight="700" fill="#111827">Ecosystem architecture: who does what, where work lives, and what is paused</text>
+  <text x="60" y="66" font-size="13" fill="#4b5563">Target shape after the 2026-11-10 audits. "Today → planned" lines mark changes that are decided or recommended but not yet built.</text>
+
+  <!-- You -->
+  <rect x="410" y="86" width="580" height="62" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <text x="700" y="111" font-size="16" font-weight="700" fill="#111827" text-anchor="middle">You (Nano)</text>
+  <text x="700" y="132" font-size="12.5" fill="#374151" text-anchor="middle">Set intent and priorities · answer the decision inbox · approve irreversible changes</text>
+
+  <!-- intent arrow -->
+  <path d="M700 148V188" stroke="#475569" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="712" y="173" font-size="12" fill="#4b5563">intent</text>
+
+  <!-- exceptions arrow (left margin) -->
+  <path d="M60 470H34V117H408" stroke="#475569" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="60" y="109" font-size="12" fill="#4b5563">exceptions only: irreversible, taste, deadlock, budget</text>
+
+  <!-- Agents -->
+  <text x="60" y="184" font-size="13" font-weight="700" fill="#374151">AGENTS: one lane each</text>
+  <g font-size="12.5">
+    <rect x="60" y="192" width="200" height="78" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="72" y="214" font-size="15" font-weight="700" fill="#111827">Claude chat + voice</text>
+    <text x="72" y="234" fill="#374151">Design: shapes ideas</text>
+    <text x="72" y="252" fill="#6b7280">Claude family</text>
+
+    <rect x="276" y="192" width="200" height="78" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="288" y="214" font-size="15" font-weight="700" fill="#111827">Gemini</text>
+    <text x="288" y="234" fill="#374151">Research: reads and scans</text>
+    <text x="288" y="252" fill="#6b7280">Google family</text>
+
+    <rect x="492" y="192" width="200" height="78" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="504" y="214" font-size="15" font-weight="700" fill="#111827">Duetius</text>
+    <text x="504" y="234" fill="#374151">Coordination: routes, chases</text>
+    <text x="504" y="252" fill="#6b7280">Claude family</text>
+
+    <rect x="708" y="192" width="200" height="78" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="720" y="214" font-size="15" font-weight="700" fill="#111827">Claude Code</text>
+    <text x="720" y="234" fill="#374151">Build: implements cards</text>
+    <text x="720" y="252" fill="#6b7280">Claude family</text>
+
+    <rect x="924" y="192" width="200" height="78" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="936" y="214" font-size="15" font-weight="700" fill="#111827">Codex</text>
+    <text x="936" y="234" fill="#374151">Review, backup build</text>
+    <text x="936" y="252" fill="#6b7280">OpenAI family</text>
+
+    <rect x="1140" y="192" width="200" height="78" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="1152" y="214" font-size="15" font-weight="700" fill="#111827">Dottius</text>
+    <text x="1152" y="234" fill="#374151">Merge steward, review</text>
+    <text x="1152" y="252" fill="#6b7280">OpenAI family</text>
+  </g>
+  <text x="700" y="292" font-size="12" fill="#4b5563" text-anchor="middle">Rule: work written by one model family is reviewed by another before it merges</text>
+
+  <!-- agents to systems arrow -->
+  <path d="M540 300V336" stroke="#475569" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="552" y="323" font-size="12" fill="#4b5563">claim cards · post evidence · open pull requests · save decisions</text>
+
+  <!-- Shared systems container -->
+  <rect x="60" y="340" width="980" height="400" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="80" y="364" font-size="13" font-weight="700" fill="#374151">SHARED SYSTEMS: the only places work lives</text>
+
+  <g font-size="12.5">
+    <!-- remind-me -->
+    <rect x="80" y="376" width="300" height="150" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+    <text x="94" y="400" font-size="16" font-weight="700" fill="#111827">remind-me</text>
+    <text x="94" y="421" fill="#374151">Memory: decisions, facts, captures,</text>
+    <text x="94" y="438" fill="#374151">ideas and design notes</text>
+    <text x="94" y="462" fill="#92400e">Store: in-house engine today</text>
+    <text x="94" y="479" fill="#92400e">→ SQLite is the candidate to beat</text>
+    <text x="94" y="503" fill="#92400e">Fix first: decisions going dormant</text>
+
+    <!-- Mill Board -->
+    <rect x="400" y="376" width="300" height="150" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+    <text x="414" y="400" font-size="16" font-weight="700" fill="#111827">Mill Board</text>
+    <text x="414" y="421" fill="#374151">Committed work only: cards, claims,</text>
+    <text x="414" y="438" fill="#374151">milestones, and your decision inbox</text>
+    <text x="414" y="462" fill="#92400e">Store: rusty_tick today → own SQLite</text>
+    <text x="414" y="479" fill="#92400e">Roles: builders hold admin today</text>
+    <text x="414" y="496" fill="#92400e">→ one credential per agent</text>
+
+    <!-- GitHub -->
+    <rect x="720" y="376" width="300" height="150" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+    <text x="734" y="400" font-size="16" font-weight="700" fill="#111827">GitHub</text>
+    <text x="734" y="421" fill="#374151">Code, pull requests, CI, merge queue</text>
+    <text x="734" y="438" fill="#374151">Review and merge happen here</text>
+    <text x="734" y="462" fill="#92400e">Claude work posts as you today</text>
+    <text x="734" y="479" fill="#92400e">→ one identity per agent, so review</text>
+    <text x="734" y="496" fill="#92400e">rules can be enforced</text>
+
+    <!-- Portfolio Intelligence -->
+    <rect x="80" y="566" width="300" height="154" rx="8" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+    <text x="94" y="590" font-size="16" font-weight="700" fill="#111827">Portfolio Intelligence</text>
+    <text x="94" y="611" fill="#374151">Knows what exists: repositories,</text>
+    <text x="94" y="628" fill="#374151">capabilities, overlaps</text>
+    <text x="94" y="652" fill="#374151">Reads GitHub, the board and remind-me</text>
+    <text x="94" y="676" fill="#5b21b6">Parts built, not connected:</text>
+    <text x="94" y="693" fill="#5b21b6">it cannot reach GitHub yet</text>
+
+    <!-- Let Em Loose -->
+    <rect x="400" y="566" width="620" height="154" rx="8" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+    <text x="414" y="590" font-size="16" font-weight="700" fill="#111827">Let Em Loose: the evidence gates</text>
+    <rect x="414" y="602" width="290" height="68" rx="6" fill="#ffffff" stroke="#7c3aed" stroke-width="1.25"/>
+    <text x="426" y="623" font-size="14" font-weight="700" fill="#111827">BBP: the claims board</text>
+    <text x="426" y="642" fill="#374151">Agents post evidence;</text>
+    <text x="426" y="658" fill="#374151">the board computes confidence</text>
+    <rect x="716" y="602" width="290" height="68" rx="6" fill="#ffffff" stroke="#7c3aed" stroke-width="1.25"/>
+    <text x="728" y="623" font-size="14" font-weight="700" fill="#111827">orch: the lens runner</text>
+    <text x="728" y="642" fill="#374151">Asks each model one targeted</text>
+    <text x="728" y="658" fill="#374151">question; no model logic in the core</text>
+    <text x="414" y="692" fill="#5b21b6">Built (about 95,000 lines), never run end to end. First job: the duplicate-file experiment.</text>
+    <text x="414" y="709" fill="#5b21b6">The operating model above is the stopgap until this runs.</text>
+  </g>
+
+  <!-- arrows inside systems -->
+  <path d="M230 528V564" stroke="#475569" stroke-width="1.5" fill="none" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <text x="240" y="551" font-size="12" fill="#4b5563">findings ↔ context</text>
+  <path d="M550 564V528" stroke="#475569" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="560" y="551" font-size="12" fill="#4b5563">escalations to the inbox</text>
+  <path d="M870 528V564" stroke="#475569" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="880" y="551" font-size="12" fill="#4b5563">CI and tests = evidence</text>
+
+  <!-- Rusty Mill -->
+  <path d="M550 780V744" stroke="#475569" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="562" y="767" font-size="12" fill="#4b5563">built from</text>
+  <rect x="60" y="784" width="980" height="78" rx="10" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
+  <text x="80" y="810" font-size="16" font-weight="700" fill="#111827">Rusty Mill: the monorepo of reusable crates</text>
+  <text x="80" y="831" font-size="12.5" fill="#374151">MCP server, OAuth, JSON, async runtime and the rest of the foundation. Also home to BBP, orch and the board's code.</text>
+  <text x="80" y="849" font-size="12.5" fill="#92400e">Multimodal DB engine lives here: stays a project, returns as a store only if it wins the benchmark.</text>
+
+  <!-- Shelf -->
+  <rect x="1070" y="340" width="270" height="522" rx="12" fill="#fafafa" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="1086" y="364" font-size="13" font-weight="700" fill="#374151">OFF THE MAIN PATH</text>
+  <g font-size="12.5">
+    <rect x="1086" y="376" width="238" height="56" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+    <text x="1098" y="398" font-size="14" font-weight="700" fill="#111827">Ledger</text>
+    <text x="1098" y="417" fill="#374151">Fold its store under remind-me</text>
+
+    <rect x="1086" y="442" width="238" height="56" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+    <text x="1098" y="464" font-size="14" font-weight="700" fill="#111827">Conflux</text>
+    <text x="1098" y="483" fill="#374151">Pause: BBP already covers it</text>
+
+    <rect x="1086" y="508" width="238" height="56" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+    <text x="1098" y="530" font-size="14" font-weight="700" fill="#111827">Converge Continuum</text>
+    <text x="1098" y="549" fill="#374151">Measure the pain before building</text>
+
+    <rect x="1086" y="574" width="238" height="56" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+    <text x="1098" y="596" font-size="14" font-weight="700" fill="#111827">Communications</text>
+    <text x="1098" y="615" fill="#374151">One real-model trial, then close</text>
+
+    <rect x="1086" y="640" width="238" height="56" rx="8" fill="#f9fafb" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="1098" y="662" font-size="14" font-weight="700" fill="#111827">Swarm OS</text>
+    <text x="1098" y="681" fill="#374151">Archive as a reference</text>
+
+    <rect x="1086" y="706" width="238" height="56" rx="8" fill="#f9fafb" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="1098" y="728" font-size="14" font-weight="700" fill="#111827">rusty_tick</text>
+    <text x="1098" y="747" fill="#374151">Archive after the board migrates</text>
+
+    <rect x="1086" y="772" width="238" height="56" rx="8" fill="#f9fafb" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="1098" y="794" font-size="14" font-weight="700" fill="#111827">Hermes Kanban</text>
+    <text x="1098" y="813" fill="#374151">Pilot dropped: no fourth executor</text>
+  </g>
+
+  <!-- Legend -->
+  <g font-size="12.5" fill="#374151">
+    <rect x="60" y="892" width="26" height="16" rx="4" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="94" y="905">Running; keep and invest</text>
+    <rect x="290" y="892" width="26" height="16" rx="4" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
+    <text x="324" y="905">Built, not yet working end to end</text>
+    <rect x="570" y="892" width="26" height="16" rx="4" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+    <text x="604" y="905">Decide: fold in, pause or measure first</text>
+    <rect x="880" y="892" width="26" height="16" rx="4" fill="#f9fafb" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="914" y="905">Archive</text>
+    <text x="1000" y="905" fill="#92400e">Amber text: today → planned change</text>
+  </g>
+  <text x="60" y="936" font-size="12" fill="#6b7280">Sources: the four audit docs, the Assistant Operating Model and the Let Em Loose spec, 2026-11-10.</text>
+</svg>
