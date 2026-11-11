@@ -2682,6 +2682,59 @@ fn a_host_declared_in_the_config_wins_and_ctl_leaves_it_alone() {
 }
 
 #[test]
+fn plain_calls_go_to_the_home_host() {
+    let socket = start_server();
+    let other = start_server();
+    let home = config_home("home-default");
+    std::fs::create_dir_all(home.join("rusty_mux")).expect("dir");
+    let config = home.join("rusty_mux").join("config.json");
+    let declare = |home_name: &str, path: &Path| {
+        let text = format!(
+            r#"{{"hosts": [{{"name": "box", "addresses": [{{"socket": "{}"}}]}}], "home": "{home_name}"}}"#,
+            path.display()
+        );
+        std::fs::write(&config, text).expect("write");
+    };
+    declare("box", &socket);
+    hosts_ok(&home, &["create-session", "--name", "at-home"]);
+    assert!(ok(&socket, &["list"]).contains("at-home"));
+
+    // $RUSTY_MUX_SOCKET (inside a block) still wins over the home.
+    let output = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+        .env("XDG_CONFIG_HOME", &home)
+        .env_remove("RUSTY_MUX_CONFIG")
+        .env("RUSTY_MUX_SOCKET", &other)
+        .args(["create-session", "--name", "in-block"])
+        .output()
+        .expect("run");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(ok(&other, &["list"]).contains("in-block"));
+    assert!(!ok(&socket, &["list"]).contains("in-block"));
+
+    // A home that does not answer is unreachable, never the default.
+    declare("box", &socket_path("home-gone"));
+    let gone = hosts_ctl(&home, &["list"]);
+    assert_eq!(gone.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&gone.stderr).contains("home: host `box`"));
+    declare("nope", &socket);
+    assert_eq!(hosts_ctl(&home, &["list"]).status.code(), Some(2));
+
+    // A broken config fails plain calls, but the hosts verbs carry on.
+    std::fs::write(&config, "{").expect("write");
+    assert_eq!(hosts_ctl(&home, &["list"]).status.code(), Some(1));
+    let listed = hosts_ctl(&home, &["hosts", "list"]);
+    assert_eq!(listed.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&listed.stderr).contains("ignoring the config's hosts"));
+    let added = hosts_ctl(&home, &["hosts", "add", "x", "--socket", "/x.sock"]);
+    assert_eq!(
+        added.status.code(),
+        Some(2),
+        "add can't check declared names"
+    );
+    let _gone = std::fs::remove_dir_all(home);
+}
+
+#[test]
 fn config_check_refuses_a_home_with_no_host() {
     let home = config_home("home-check");
     std::fs::create_dir_all(home.join("rusty_mux")).expect("dir");

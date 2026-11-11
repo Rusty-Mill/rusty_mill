@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use rusty_json::{Map, Value};
+use rusty_mux_script::hosts::{Address, Host};
 use rusty_mux_script::{Action, Call, Config, Rule, Run};
 
 /// The config file, as [`rusty_mux_script::default_path`] finds it.
@@ -63,8 +64,8 @@ pub(crate) fn summary(config: &Config) -> String {
     line
 }
 
-/// One line per action, then per binding, then per rule, or a JSON object
-/// of each.
+/// One line per action, then per binding, then per rule, then per
+/// declared host and the home, or a JSON object of each.
 pub(crate) fn list(config: &Config, json: bool) -> String {
     let actions = config.actions.iter().map(|a| action_line(a, json));
     let binds = config.binds.iter().map(|b| {
@@ -81,11 +82,30 @@ pub(crate) fn list(config: &Config, json: bool) -> String {
         }
     });
     let rules = config.rules.iter().map(|r| rule_line(r, json));
+    let hosts = config.declared.hosts.iter().map(|h| host_line(h, json));
+    let home = config.declared.home.iter().map(|name| match json {
+        true => object([("home", name.as_str().into())]),
+        false => format!("home   {name}"),
+    });
     actions
         .chain(binds)
         .chain(rules)
+        .chain(hosts)
+        .chain(home)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn host_line(host: &Host, json: bool) -> String {
+    if json {
+        let addresses = host.addresses.iter().map(Address::to_value).collect();
+        return object([
+            ("host", host.name.as_str().into()),
+            ("addresses", Value::Array(addresses)),
+        ]);
+    }
+    let addresses: Vec<String> = host.addresses.iter().map(Address::describe).collect();
+    format!("host   {:<16} {}", host.name, addresses.join("  "))
 }
 
 fn rule_line(rule: &Rule, json: bool) -> String {
@@ -225,5 +245,24 @@ mod tests {
             Err("no config file: set RUSTY_MUX_CONFIG".into())
         );
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn declared_hosts_and_the_home_are_listed() {
+        let config = rusty_mux_script::parse(
+            r#"{"hosts": [{"name": "box", "addresses": [{"socket": "/b.sock"}]}], "home": "box"}"#,
+        )
+        .expect("valid");
+        assert_eq!(
+            list(&config, false),
+            "host   box              socket /b.sock\nhome   box"
+        );
+        let json = list(&config, true);
+        assert!(json.contains("\"host\":\"box\""), "{json}");
+        assert!(json.ends_with("{\"home\":\"box\"}"), "{json}");
+        assert_eq!(
+            summary(&config),
+            "ok: 0 actions, 0 bindings, 0 rules, 1 hosts, home `box`"
+        );
     }
 }

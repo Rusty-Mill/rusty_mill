@@ -189,6 +189,15 @@ pub(crate) fn check_home(declared: &Declared, hosts: Option<&Path>) -> Result<()
     }
 }
 
+/// The config's home host, if it names one: where a call with no `--host`,
+/// `--socket` or `$RUSTY_MUX_SOCKET` goes. A config whose `hosts` or
+/// `home` does not parse fails the call rather than guess.
+pub(crate) fn home(env: &Env) -> Result<Option<String>, (Exit, String)> {
+    load_declared(env.config.as_deref())
+        .map(|declared| declared.home)
+        .map_err(|e| (Exit::Failed, e))
+}
+
 /// The refusal to change a host the config declares.
 fn declared_there(name: &str, env: &Env) -> (Exit, String) {
     let config = env
@@ -239,14 +248,37 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// `hosts list|add|remove`.
+/// A config whose `hosts` or `home` does not parse is ignored with a
+/// warning on `err`, so the saved hosts can still be listed and removed;
+/// `add` refuses, since it could shadow a declared name.
 pub(crate) fn run(
     command: &HostsCommand,
     env: &Env,
     json: bool,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), (Exit, String)> {
     let failed = |e: String| (Exit::Failed, e);
-    let mut known = Known::load(env.hosts.as_deref(), env.config.as_deref()).map_err(failed)?;
+    let declared = match load_declared(env.config.as_deref()) {
+        Ok(declared) => declared,
+        // Without the config, `add` cannot tell a declared name (D200).
+        Err(reason) if matches!(command, HostsCommand::Add { .. }) => {
+            return Err((
+                Exit::Usage,
+                format!("can't check the config's hosts, so nothing was added: {reason}"),
+            ));
+        }
+        Err(reason) => {
+            // Nothing better to do if stderr itself is gone.
+            let _ = writeln!(err, "rusty-mux-ctl: ignoring the config's hosts: {reason}");
+            Declared::default()
+        }
+    };
+    let saved = match env.hosts.as_deref() {
+        Some(path) => load(path).map_err(failed)?,
+        None => Vec::new(),
+    };
+    let mut known = Known { declared, saved };
     let mut note = None;
     match command {
         HostsCommand::List => {
@@ -277,9 +309,10 @@ pub(crate) fn run(
             }
         }
     }
-    let path = env.hosts.as_deref().ok_or(failed(
-        "no hosts file: set XDG_CONFIG_HOME or HOME".to_owned(),
-    ))?;
+    let path = env
+        .hosts
+        .as_deref()
+        .ok_or_else(|| failed("no hosts file: set XDG_CONFIG_HOME or HOME".to_owned()))?;
     save(path, &known.saved).map_err(failed)?;
     match note {
         Some(note) => writeln!(out, "{note}").map_err(|e| failed(e.to_string())),
