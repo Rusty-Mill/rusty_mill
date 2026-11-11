@@ -75,8 +75,9 @@ pub struct Forward {
     child: Child,
     /// A `sh` holding the read end of a pipe: if this process dies without
     /// dropping the forward, the pipe closes and it ends `ssh`, which
-    /// would otherwise run on with nothing to forward for.
-    watchdog: Child,
+    /// would otherwise run on with nothing to forward for. `None` where
+    /// there is no `/bin/sh`: the forward works, without that cleanup.
+    watchdog: Option<Child>,
     dir: PathBuf,
     socket: PathBuf,
 }
@@ -96,14 +97,11 @@ impl Forward {
                 .spawn()
                 .map_err(|e| format!("starting {}: {e}", Path::new(program).display()))
         });
-        let started = spawned.and_then(|mut child| match watchdog(child.id()) {
-            Ok(watchdog) => Ok((child, watchdog)),
-            Err(why) => {
-                // Not yet forwarding anything; it goes with the error.
-                let _ = child.kill();
-                let _ = child.wait();
-                Err(why)
-            }
+        let started = spawned.map(|child| {
+            let watchdog = watchdog(child.id())
+                .map_err(|why| eprintln!("rusty-mux: {why}; ssh may outlive a killed client"))
+                .ok();
+            (child, watchdog)
         });
         match started {
             Ok((child, watchdog)) => Ok(Self {
@@ -171,10 +169,13 @@ impl Forward {
     /// Tells the watchdog to leave `ssh` alone and waits for it to exit.
     /// A second call does nothing.
     fn stand_down(&mut self) {
-        if let Some(mut stdin) = self.watchdog.stdin.take() {
+        let Some(watchdog) = &mut self.watchdog else {
+            return;
+        };
+        if let Some(mut stdin) = watchdog.stdin.take() {
             let _ = stdin.write_all(b"done\n");
         }
-        let _ = self.watchdog.wait();
+        let _ = watchdog.wait();
     }
 }
 
@@ -388,7 +389,8 @@ mod tests {
             .wait_ready(Duration::from_secs(10), || false)
             .unwrap_err();
         assert!(err.contains("ssh exited"), "{err}");
-        assert!(forward.watchdog.stdin.is_none(), "watchdog stood down");
+        let dog = forward.watchdog.as_ref().expect("a watchdog");
+        assert!(dog.stdin.is_none(), "watchdog stood down");
         let dir = forward.dir.clone();
         drop(forward);
         assert!(!dir.exists(), "{} was left behind", dir.display());
@@ -419,9 +421,10 @@ mod tests {
             assert!(Instant::now() < deadline, "ssh never exited");
             std::thread::sleep(RETRY);
         }
-        assert!(forward.watchdog.stdin.is_none(), "pipe still open");
+        let dog = forward.watchdog.as_mut().expect("a watchdog");
+        assert!(dog.stdin.is_none(), "pipe still open");
         assert!(
-            matches!(forward.watchdog.try_wait(), Ok(Some(_))),
+            matches!(dog.try_wait(), Ok(Some(_))),
             "watchdog still running"
         );
     }
