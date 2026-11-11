@@ -1,5 +1,7 @@
 //! `--host NAME` and `hosts list|add|remove` (C35): saved hosts from the
-//! hosts file (see [`rusty_mux_script::hosts`]).
+//! hosts file (see [`rusty_mux_script::hosts`]), and hosts declared in the
+//! config (C49, term pack D198/D199). A declared host wins over a saved
+//! one of the same name, and ctl never edits a declared one.
 //!
 //! `--host` tries a host's addresses in file order and uses the first that
 //! connects. Only a failure to connect moves on, so no request is ever
@@ -11,7 +13,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use rusty_mux_script::hosts::{self, Address, Host};
+use rusty_json::Value;
+use rusty_mux_script::Problem;
+use rusty_mux_script::hosts::{self, Address, Declared, Host};
 
 use crate::cli::HostsCommand;
 use crate::{Env, Exit, Stop};
@@ -62,18 +66,148 @@ pub(crate) fn default_path() -> Option<PathBuf> {
 /// The hosts at `path`; none when the file does not exist. The error names
 /// the file and lists every problem, one per line.
 pub(crate) fn load(path: &Path) -> Result<Vec<Host>, String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
+    match read(path)? {
+        None => Ok(Vec::new()),
+        Some(text) => hosts::parse_hosts(&text).map_err(|p| named(path, &p)),
+    }
+}
+
+/// The hosts the config at `path` declares; none without a config file.
+/// Only `hosts` and `home` are checked, so an unrelated typo in the config
+/// never stops `--host`.
+pub(crate) fn load_declared(path: Option<&Path>) -> Result<Declared, String> {
+    let Some(path) = path else {
+        return Ok(Declared::default());
     };
-    hosts::parse_hosts(&text).map_err(|problems| {
-        let lines: Vec<String> = problems
+    match read(path)? {
+        None => Ok(Declared::default()),
+        Some(text) => rusty_mux_script::parse_declared(&text).map_err(|p| named(path, &p)),
+    }
+}
+
+/// The text at `path`; `None` when there is no file.
+fn read(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Every problem, one per line, each naming the file.
+fn named(path: &Path, problems: &[Problem]) -> String {
+    let lines: Vec<String> = problems
+        .iter()
+        .map(|p| format!("{}: {p}", path.display()))
+        .collect();
+    lines.join("\n")
+}
+
+/// Every host ctl knows: the config's, then the hosts file's.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Known {
+    pub(crate) declared: Declared,
+    pub(crate) saved: Vec<Host>,
+}
+
+/// One host as `hosts list` shows it.
+struct Entry<'a> {
+    host: &'a Host,
+    /// Declared in the config rather than saved.
+    config: bool,
+    /// Saved, but a declared host has its name.
+    shadowed: bool,
+    /// The one the config's `home` names.
+    home: bool,
+}
+
+impl Known {
+    /// The hosts of the files at `hosts` and `config`; a missing file has
+    /// none.
+    pub(crate) fn load(hosts: Option<&Path>, config: Option<&Path>) -> Result<Self, String> {
+        let declared = load_declared(config)?;
+        let saved = match hosts {
+            Some(path) => load(path)?,
+            None => Vec::new(),
+        };
+        Ok(Self { declared, saved })
+    }
+
+    /// The host `--host name` uses: the declared one, else the saved one.
+    pub(crate) fn find(&self, name: &str) -> Option<&Host> {
+        self.declared
+            .host(name)
+            .or_else(|| self.saved.iter().find(|h| h.name == name))
+    }
+
+    /// Declared hosts, then saved ones, each marked.
+    fn entries(&self) -> Vec<Entry<'_>> {
+        let home = self.declared.home.as_deref();
+        let declared = self.declared.hosts.iter().map(|host| (host, true, false));
+        let saved = self
+            .saved
             .iter()
-            .map(|p| format!("{}: {p}", path.display()))
+            .map(|host| (host, false, self.declared.host(&host.name).is_some()));
+        declared
+            .chain(saved)
+            .map(|(host, config, shadowed)| Entry {
+                host,
+                config,
+                shadowed,
+                home: !shadowed && home == Some(host.name.as_str()),
+            })
+            .collect()
+    }
+
+    /// What `--host` can reach, and the home: what `hosts-changed` watches.
+    fn view(&self) -> (Vec<Host>, Option<String>) {
+        let hosts = self
+            .entries()
+            .into_iter()
+            .filter(|e| !e.shadowed)
+            .map(|e| e.host.clone())
             .collect();
-        lines.join("\n")
-    })
+        (hosts, self.declared.home.clone())
+    }
+}
+
+/// Why `config check` refuses `declared`'s home, if it does: it must name
+/// a declared host or one saved in the file at `hosts`.
+pub(crate) fn check_home(declared: &Declared, hosts: Option<&Path>) -> Result<(), String> {
+    let Some(home) = declared.home.as_deref() else {
+        return Ok(());
+    };
+    let known = Known {
+        declared: declared.clone(),
+        saved: hosts.map(load).transpose()?.unwrap_or_default(),
+    };
+    match known.find(home) {
+        Some(_) => Ok(()),
+        None => Err(format!(
+            "home `{home}` names no host in the config or the hosts file"
+        )),
+    }
+}
+
+/// The config's home host, if it names one: where a call with no `--host`,
+/// `--socket` or `$RUSTY_MUX_SOCKET` goes. A config whose `hosts` or
+/// `home` does not parse fails the call rather than guess.
+pub(crate) fn home(env: &Env) -> Result<Option<String>, (Exit, String)> {
+    load_declared(env.config.as_deref())
+        .map(|declared| declared.home)
+        .map_err(|e| (Exit::Failed, e))
+}
+
+/// The refusal to change a host the config declares.
+fn declared_there(name: &str, env: &Env) -> (Exit, String) {
+    let config = env
+        .config
+        .as_deref()
+        .map_or("the config".to_owned(), |p| p.display().to_string());
+    (
+        Exit::Usage,
+        format!("host `{name}` is declared in {config}; edit it there"),
+    )
 }
 
 /// Replaces the file at `path` with `hosts`: written to a temporary file
@@ -114,52 +248,123 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// `hosts list|add|remove`.
+/// A config whose `hosts` or `home` does not parse is ignored with a
+/// warning on `err`, so the saved hosts can still be listed and removed;
+/// `add` refuses, since it could shadow a declared name.
 pub(crate) fn run(
     command: &HostsCommand,
     env: &Env,
     json: bool,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), (Exit, String)> {
-    let path = env.hosts.as_deref().ok_or((
-        Exit::Failed,
-        "no hosts file: set XDG_CONFIG_HOME or HOME".to_owned(),
-    ))?;
-    let mut list = load(path).map_err(|e| (Exit::Failed, e))?;
+    let failed = |e: String| (Exit::Failed, e);
+    let declared = match load_declared(env.config.as_deref()) {
+        Ok(declared) => declared,
+        // Without the config, `add` cannot tell a declared name (D200).
+        Err(reason) if matches!(command, HostsCommand::Add { .. }) => {
+            return Err((
+                Exit::Usage,
+                format!("can't check the config's hosts, so nothing was added: {reason}"),
+            ));
+        }
+        Err(reason) => {
+            // Nothing better to do if stderr itself is gone.
+            let _ = writeln!(err, "rusty-mux-ctl: ignoring the config's hosts: {reason}");
+            Declared::default()
+        }
+    };
+    let saved = match env.hosts.as_deref() {
+        Some(path) => load(path).map_err(failed)?,
+        None => Vec::new(),
+    };
+    let mut known = Known { declared, saved };
+    let mut note = None;
     match command {
         HostsCommand::List => {
-            let text = listing(&list, json);
+            let text = listing(&known, json);
             if !text.is_empty() {
-                writeln!(out, "{text}").map_err(|e| (Exit::Failed, e.to_string()))?;
+                writeln!(out, "{text}").map_err(|e| failed(e.to_string()))?;
             }
             return Ok(());
         }
         HostsCommand::Add { name, address } => {
-            hosts::add(&mut list, name, address.clone()).map_err(|e| (Exit::Usage, e))?;
+            if known.declared.host(name).is_some() {
+                return Err(declared_there(name, env));
+            }
+            hosts::add(&mut known.saved, name, address.clone()).map_err(|e| (Exit::Usage, e))?;
         }
         HostsCommand::Remove(name) => {
-            if !hosts::remove(&mut list, name) {
-                return Err((Exit::Usage, format!("no host `{name}`")));
+            let declared = known.declared.host(name).is_some();
+            if !hosts::remove(&mut known.saved, name) {
+                return Err(match declared {
+                    true => declared_there(name, env),
+                    false => (Exit::Usage, format!("no host `{name}`")),
+                });
+            }
+            if declared {
+                note = Some(format!(
+                    "removed the saved `{name}`; the one in the config stays"
+                ));
             }
         }
     }
-    save(path, &list).map_err(|e| (Exit::Failed, e))
+    let path = env
+        .hosts
+        .as_deref()
+        .ok_or_else(|| failed("no hosts file: set XDG_CONFIG_HOME or HOME".to_owned()))?;
+    save(path, &known.saved).map_err(failed)?;
+    match note {
+        Some(note) => writeln!(out, "{note}").map_err(|e| failed(e.to_string())),
+        None => Ok(()),
+    }
 }
 
-/// One line per host, its name then each address; or the hosts as a JSON
-/// array.
-fn listing(list: &[Host], json: bool) -> String {
+/// One line per host, its name then each address, a declared host's
+/// marked `(config)`, the home's `(home)` and a saved one a declared one
+/// hides `(saved, hidden by config)`; or the hosts as a JSON array, each
+/// with its `source` and, when true, `home` and `shadowed`.
+fn listing(known: &Known, json: bool) -> String {
+    let entries = known.entries();
     if json {
-        let all: Vec<rusty_json::Value> = list.iter().map(Host::to_value).collect();
-        return rusty_json::Value::from(all).to_json_string();
+        let all: Vec<Value> = entries.iter().map(entry_value).collect();
+        return Value::from(all).to_json_string();
     }
-    let lines: Vec<String> = list
+    let lines: Vec<String> = entries
         .iter()
-        .map(|host| {
-            let addresses: Vec<String> = host.addresses.iter().map(Address::describe).collect();
-            format!("{}  {}", host.name, addresses.join("  "))
+        .map(|entry| {
+            let addresses = entry.host.addresses.iter().map(Address::describe);
+            let marks = [
+                (entry.config, "(config)"),
+                (entry.home, "(home)"),
+                (entry.shadowed, "(saved, hidden by config)"),
+            ];
+            let marks = marks
+                .iter()
+                .filter(|(on, _)| *on)
+                .map(|(_, m)| (*m).to_owned());
+            let words: Vec<String> = std::iter::once(entry.host.name.clone())
+                .chain(addresses)
+                .chain(marks)
+                .collect();
+            words.join("  ")
         })
         .collect();
     lines.join("\n")
+}
+
+fn entry_value(entry: &Entry<'_>) -> Value {
+    let mut value = entry.host.to_value();
+    if let Value::Object(map) = &mut value {
+        let source = if entry.config { "config" } else { "saved" };
+        map.insert("source".into(), source.into());
+        for (on, key) in [(entry.home, "home"), (entry.shadowed, "shadowed")] {
+            if on {
+                map.insert(key.into(), true.into());
+            }
+        }
+    }
+    value
 }
 
 /// The socket of the first of host `name`'s addresses that connects, each
@@ -168,15 +373,23 @@ fn listing(list: &[Host], json: bool) -> String {
 /// host unreachable, with each address's reason.
 #[cfg(any(unix, windows))]
 pub(crate) fn resolve(name: &str, env: &Env, stop: &Stop) -> Result<Reached, (Exit, String)> {
-    let path = env.hosts.as_deref().ok_or((
-        Exit::Usage,
-        "--host needs a hosts file: set XDG_CONFIG_HOME or HOME".to_owned(),
-    ))?;
-    let list = load(path).map_err(|e| (Exit::Failed, e))?;
-    let host = list.iter().find(|h| h.name == name).ok_or_else(|| {
+    let files: Vec<String> = [&env.config, &env.hosts]
+        .into_iter()
+        .flatten()
+        .map(|p| p.display().to_string())
+        .collect();
+    if files.is_empty() {
+        return Err((
+            Exit::Usage,
+            "--host needs a hosts file: set XDG_CONFIG_HOME or HOME".to_owned(),
+        ));
+    }
+    let known =
+        Known::load(env.hosts.as_deref(), env.config.as_deref()).map_err(|e| (Exit::Failed, e))?;
+    let host = known.find(name).ok_or_else(|| {
         (
             Exit::Usage,
-            format!("no host `{name}` in {}", path.display()),
+            format!("no host `{name}` in {}", files.join(" or ")),
         )
     })?;
     let mut reasons = Vec::new();
@@ -246,13 +459,15 @@ fn forward(_: &str, _: &Path, _: &Env, _: &Stop) -> Result<Reached, String> {
     Err(NO_SSH.to_owned())
 }
 
-/// Watches the hosts file for `events --follow` and `watch`: the list is
-/// read at the start, then at most every [`CHECK_EVERY`], parsed again only
-/// when the file's size or modification time moved.
+/// Watches the hosts file and the config for `events --follow` and
+/// `watch`: the hosts `--host` can reach and the home are read at the
+/// start, then at most every [`CHECK_EVERY`], parsed again only when a
+/// file's size or modification time moved.
 pub(crate) struct Tracker {
-    path: PathBuf,
-    stamp: Option<(u64, SystemTime)>,
-    list: Vec<Host>,
+    hosts: Option<PathBuf>,
+    config: Option<PathBuf>,
+    stamps: Stamps,
+    view: (Vec<Host>, Option<String>),
     next: Instant,
     warned: bool,
     /// Why the file did not parse when tracking began: the first check
@@ -271,17 +486,19 @@ pub(crate) enum Change {
 }
 
 impl Tracker {
-    /// Starts from the list in the file now; no change is reported for it.
-    pub(crate) fn new(path: PathBuf) -> Self {
-        let stamp = stamp(&path);
-        let (list, broken) = match load(&path) {
-            Ok(list) => (list, None),
-            Err(reason) => (Vec::new(), Some(reason)),
+    /// Starts from the files as they are now; no change is reported for
+    /// them.
+    pub(crate) fn new(hosts: Option<PathBuf>, config: Option<PathBuf>) -> Self {
+        let stamps = stamps(&hosts, &config);
+        let (view, broken) = match Known::load(hosts.as_deref(), config.as_deref()) {
+            Ok(known) => (known.view(), None),
+            Err(reason) => ((Vec::new(), None), Some(reason)),
         };
         Self {
-            path,
-            stamp,
-            list,
+            hosts,
+            config,
+            stamps,
+            view,
             next: Instant::now() + CHECK_EVERY,
             warned: broken.is_some(),
             broken,
@@ -298,18 +515,19 @@ impl Tracker {
             return Change::None;
         }
         self.next = now + CHECK_EVERY;
-        let stamp = stamp(&self.path);
-        if stamp == self.stamp {
+        let stamps = stamps(&self.hosts, &self.config);
+        if stamps == self.stamps {
             return Change::None;
         }
-        self.stamp = stamp;
-        match load(&self.path) {
-            Ok(list) => {
+        self.stamps = stamps;
+        match Known::load(self.hosts.as_deref(), self.config.as_deref()) {
+            Ok(known) => {
                 self.warned = false;
-                match list == self.list {
+                let view = known.view();
+                match view == self.view {
                     true => Change::None,
                     false => {
-                        self.list = list;
+                        self.view = view;
                         Change::Changed
                     }
                 }
@@ -321,6 +539,13 @@ impl Tracker {
             }
         }
     }
+}
+
+/// Each file's [`stamp`].
+type Stamps = [Option<(u64, SystemTime)>; 2];
+
+fn stamps(hosts: &Option<PathBuf>, config: &Option<PathBuf>) -> Stamps {
+    [hosts, config].map(|path| path.as_deref().and_then(stamp))
 }
 
 /// The file's size and modification time; `None` when it is missing.
@@ -397,7 +622,7 @@ mod tests {
     fn the_tracker_reports_a_change_once_and_a_broken_file_once() {
         let dir = temp_dir("track");
         let path = dir.join("rusty_mux").join("hosts.json");
-        let mut tracker = Tracker::new(path.clone());
+        let mut tracker = Tracker::new(Some(path.clone()), None);
         let due = |tracker: &mut Tracker| {
             tracker.next = Instant::now();
             tracker.check()
@@ -427,7 +652,7 @@ mod tests {
         let path = dir.join("hosts.json");
         std::fs::create_dir_all(&dir).expect("made");
         std::fs::write(&path, "{ not json").expect("written");
-        let mut tracker = Tracker::new(path.clone());
+        let mut tracker = Tracker::new(Some(path.clone()), None);
         assert!(matches!(tracker.check(), Change::Broken(_)), "at once");
         tracker.next = Instant::now();
         assert_eq!(tracker.check(), Change::None, "warned once");
@@ -449,11 +674,116 @@ mod tests {
             udp_host: None,
         };
         hosts::add(&mut list, "box", ssh).expect("added");
+        let known = Known {
+            declared: Declared::default(),
+            saved: list,
+        };
         assert_eq!(
-            listing(&list, false),
+            listing(&known, false),
             "box  socket /a.sock  ssh me@box /b.sock"
         );
-        assert!(listing(&list, true).starts_with("[{\"addresses\":"));
-        assert_eq!(listing(&[], false), "");
+        let json = listing(&known, true);
+        assert!(json.starts_with("[{\"addresses\":"), "{json}");
+        assert!(json.contains("\"source\":\"saved\""), "{json}");
+        assert!(
+            !json.contains("home") && !json.contains("shadowed"),
+            "{json}"
+        );
+        assert_eq!(listing(&Known::default(), false), "");
+    }
+
+    fn known(declared: &[(&str, &str)], home: Option<&str>, saved: &[(&str, &str)]) -> Known {
+        let hosts = |pairs: &[(&str, &str)]| {
+            let mut list = Vec::new();
+            for (name, path) in pairs {
+                hosts::add(&mut list, name, socket(path)).expect("added");
+            }
+            list
+        };
+        Known {
+            declared: Declared {
+                hosts: hosts(declared),
+                home: home.map(str::to_owned),
+            },
+            saved: hosts(saved),
+        }
+    }
+
+    #[test]
+    fn a_declared_host_wins_and_is_marked() {
+        let both = known(
+            &[("box", "/c.sock")],
+            Some("box"),
+            &[("box", "/s.sock"), ("lab", "/l.sock")],
+        );
+        assert_eq!(
+            both.find("box").map(|h| &h.addresses[0]),
+            Some(&socket("/c.sock"))
+        );
+        assert_eq!(
+            both.find("lab").map(|h| &h.addresses[0]),
+            Some(&socket("/l.sock"))
+        );
+        assert_eq!(both.find("nope"), None);
+        assert_eq!(
+            listing(&both, false),
+            "box  socket /c.sock  (config)  (home)\n\
+             box  socket /s.sock  (saved, hidden by config)\n\
+             lab  socket /l.sock"
+        );
+        let json = listing(&both, true);
+        assert!(json.contains("\"source\":\"config\""), "{json}");
+        assert_eq!(json.matches("\"home\":true").count(), 1, "{json}");
+        assert_eq!(json.matches("\"shadowed\":true").count(), 1, "{json}");
+        let saved_home = known(&[], Some("lab"), &[("lab", "/l.sock")]);
+        assert_eq!(listing(&saved_home, false), "lab  socket /l.sock  (home)");
+    }
+
+    #[test]
+    fn a_home_must_name_a_host() {
+        let dir = temp_dir("home");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("hosts.json");
+        let declared = known(&[("box", "/c.sock")], Some("lab"), &[]).declared;
+        let reason = check_home(&declared, Some(&path)).expect_err("no lab");
+        assert!(reason.contains("home `lab`"), "{reason}");
+        save(&path, &known(&[], None, &[("lab", "/l.sock")]).saved).expect("saved");
+        assert_eq!(check_home(&declared, Some(&path)), Ok(()));
+        assert_eq!(check_home(&Declared::default(), None), Ok(()));
+        let _gone = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_tracker_watches_the_config_hosts_too() {
+        let dir = temp_dir("track-config");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let hosts_file = dir.join("hosts.json");
+        let config = dir.join("config.json");
+        let mut tracker = Tracker::new(Some(hosts_file.clone()), Some(config.clone()));
+        let mut due = |text: &str| {
+            std::fs::write(&config, text).expect("written");
+            tracker.next = Instant::now();
+            tracker.check()
+        };
+        let declared = r#"{"hosts": [{"name": "box", "addresses": [{"socket": "/c.sock"}]}]}"#;
+        assert_eq!(due(declared), Change::Changed, "a declared host");
+        let with_rule =
+            r#"{"on": [], "hosts": [{"name": "box", "addresses": [{"socket": "/c.sock"}]}]}"#;
+        assert_eq!(
+            due(with_rule),
+            Change::None,
+            "the rest of the config is not watched"
+        );
+        let homed =
+            r#"{"home": "box", "hosts": [{"name": "box", "addresses": [{"socket": "/c.sock"}]}]}"#;
+        assert_eq!(due(homed), Change::Changed, "a new home");
+        save(&hosts_file, &known(&[], None, &[("box", "/s.sock")]).saved).expect("saved");
+        assert_eq!(
+            due(homed),
+            Change::None,
+            "a hidden saved host changes nothing"
+        );
+        assert!(matches!(due("{"), Change::Broken(_)));
+        let _gone = std::fs::remove_dir_all(dir);
     }
 }

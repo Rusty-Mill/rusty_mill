@@ -3,6 +3,7 @@
 use rusty_json::{Map, Value};
 use rusty_mux_proto::schema::{self, Method, Param, Presence, Ty};
 
+use crate::hosts::{self, Declared};
 use crate::{
     Action, Bind, Call, Config, Defaults, EVENTS, Problem, Rule, Run, is_arg_name, placeholders,
 };
@@ -24,7 +25,9 @@ use crate::{
 ///   parameters as a request would be;
 /// - a rule is `{"event", "action", "args"?}`: one of [`EVENTS`] and what
 ///   it runs, as a binding, whose values may also hold the event's
-///   `${field}`s; a value with one is checked once the event fills it.
+///   `${field}`s; a value with one is checked once the event fills it;
+/// - `hosts` is an array of hosts as in the hosts file
+///   ([`crate::hosts`]) and `home` a host name ([`Declared`]).
 ///
 /// Unknown keys are problems, so a typo is not silently ignored.
 pub fn parse(text: &str) -> Result<Config, Vec<Problem>> {
@@ -47,18 +50,7 @@ pub fn parse(text: &str) -> Result<Config, Vec<Problem>> {
 /// the rest of the file is ctl's, and a server must not refuse it for a
 /// method or event only a newer ctl knows.
 pub fn parse_server(text: &str) -> Result<Defaults, Vec<Problem>> {
-    let root = Value::from_json_str(text).map_err(|e| {
-        vec![Problem {
-            at: "config".into(),
-            reason: format!("not JSON: {e}"),
-        }]
-    })?;
-    let Some(map) = root.as_object() else {
-        return Err(vec![Problem {
-            at: "config".into(),
-            reason: "expected an object".into(),
-        }]);
-    };
+    let map = root_object(text)?;
     let mut check = Check::default();
     let server = match map.get("server") {
         None => Defaults::default(),
@@ -67,6 +59,34 @@ pub fn parse_server(text: &str) -> Result<Defaults, Vec<Problem>> {
     match check.problems.is_empty() {
         true => Ok(server),
         false => Err(check.problems),
+    }
+}
+
+/// The `hosts` and `home` of the config in `text`, or every problem in
+/// them; none when absent. Only those keys are checked, so a bad action or
+/// rule never stops `--host`.
+pub fn parse_declared(text: &str) -> Result<Declared, Vec<Problem>> {
+    let map = root_object(text)?;
+    let mut problems = Vec::new();
+    let declared = hosts::declared(&map, &mut problems);
+    match problems.is_empty() {
+        true => Ok(declared),
+        false => Err(problems),
+    }
+}
+
+/// The JSON object in `text`.
+fn root_object(text: &str) -> Result<Map, Vec<Problem>> {
+    let problem = |reason: String| {
+        vec![Problem {
+            at: "config".into(),
+            reason,
+        }]
+    };
+    match Value::from_json_str(text) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(_) => Err(problem("expected an object".into())),
+        Err(e) => Err(problem(format!("not JSON: {e}"))),
     }
 }
 
@@ -84,7 +104,8 @@ impl Check {
     }
 
     fn config(&mut self, root: &Value) -> Config {
-        let Some(map) = self.object("config", root, &["actions", "binds", "on", "server"]) else {
+        let keys = ["actions", "binds", "on", "server", "hosts", "home"];
+        let Some(map) = self.object("config", root, &keys) else {
             return Config::default();
         };
         let mut actions: Vec<Action> = Vec::new();
@@ -119,11 +140,13 @@ impl Check {
             None => Defaults::default(),
             Some(value) => self.defaults("server", value),
         };
+        let declared = hosts::declared(map, &mut self.problems);
         Config {
             actions,
             binds,
             rules,
             server,
+            declared,
         }
     }
 

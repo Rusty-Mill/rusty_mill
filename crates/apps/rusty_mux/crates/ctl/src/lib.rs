@@ -387,8 +387,9 @@ pub fn hook_tool_name(input: &[u8]) -> Option<String> {
 }
 
 /// The socket of the host `invocation` names (see [`hosts::resolve`]),
-/// else the socket it names, else `$RUSTY_MUX_SOCKET`, else the default
-/// socket; the error carries its exit code.
+/// else the socket it names, else `$RUSTY_MUX_SOCKET`, else the config's
+/// home host (C49), else the default socket; the error carries its exit
+/// code. A home that does not answer is an error, never the default.
 fn socket(
     invocation: &Invocation,
     env: &Env,
@@ -397,13 +398,17 @@ fn socket(
     if let Some(name) = &invocation.host {
         return hosts::resolve(name, env, stop);
     }
-    invocation
-        .socket
+    if let Some(path) = invocation.socket.clone().or_else(|| env.socket.clone()) {
+        return Ok(hosts::Reached::local(path));
+    }
+    if let Some(home) = hosts::home(env)? {
+        return hosts::resolve(&home, env, stop)
+            .map_err(|(exit, reason)| (exit, format!("home: {reason}")));
+    }
+    env.default_socket
         .clone()
-        .or_else(|| env.socket.clone())
-        .or_else(|| env.default_socket.clone())
         .map(hosts::Reached::local)
-        .ok_or((Exit::Usage, "no socket: pass --socket or --host, set RUSTY_MUX_SOCKET, or set XDG_RUNTIME_DIR (LOCALAPPDATA on Windows) for the default".to_owned()))
+        .ok_or_else(|| (Exit::Usage, "no socket: pass --socket or --host, set RUSTY_MUX_SOCKET, set a home in the config, or set XDG_RUNTIME_DIR (LOCALAPPDATA on Windows) for the default".to_owned()))
 }
 
 /// The socket an agent hook reports to: only one named outright, since a
@@ -448,7 +453,7 @@ pub fn run_until(
         }
         Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
         Command::Hosts(command) => {
-            return match hosts::run(&command, env, invocation.json, out) {
+            return match hosts::run(&command, env, invocation.json, out, err) {
                 Ok(()) => Exit::Ok,
                 Err((exit, reason)) => report(err, exit, &reason),
             };
@@ -501,11 +506,8 @@ pub fn run_until(
         invocation.command,
         Command::Watch { .. } | Command::Events { follow: true, .. }
     );
-    let tracker = env
-        .hosts
-        .clone()
-        .filter(|_| follows)
-        .map(hosts::Tracker::new);
+    let tracker = (follows && (env.hosts.is_some() || env.config.is_some()))
+        .then(|| hosts::Tracker::new(env.hosts.clone(), env.config.clone()));
     let stop = match tracker {
         Some(_) => stop.polling(),
         None => stop.clone(),
@@ -695,7 +697,12 @@ fn run_config(
         Err(problems) => return report(err, Exit::Failed, &problems),
     };
     match command {
-        ConfigCommand::Check(_) => write_line(out, &config::summary(&config)),
+        ConfigCommand::Check(_) => {
+            match hosts::check_home(&config.declared, env.hosts.as_deref()) {
+                Ok(()) => write_line(out, &config::summary(&config)),
+                Err(reason) => report(err, Exit::Failed, &reason),
+            }
+        }
         ConfigCommand::List => write_line(out, &config::list(&config, json)),
     }
 }

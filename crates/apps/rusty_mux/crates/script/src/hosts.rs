@@ -194,6 +194,43 @@ pub fn parse_hosts(text: &str) -> Result<Vec<Host>, Vec<Problem>> {
     }
 }
 
+/// The hosts a config declares (C49): its `hosts` array, as in the hosts
+/// file, and its `home`, the name of a host from either file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Declared {
+    /// In config order, names unique.
+    pub hosts: Vec<Host>,
+    /// See [`is_host_name`]; whether a host has it is checked by the
+    /// caller, which can also read the hosts file.
+    pub home: Option<String>,
+}
+
+impl Declared {
+    /// The declared host called `name`.
+    pub fn host(&self, name: &str) -> Option<&Host> {
+        self.hosts.iter().find(|h| h.name == name)
+    }
+}
+
+/// The `hosts` and `home` of a config object, adding every problem in
+/// them to `problems`.
+pub(crate) fn declared(map: &Map, problems: &mut Vec<Problem>) -> Declared {
+    let mut check = Check::default();
+    let hosts = map
+        .get("hosts")
+        .map_or_else(Vec::new, |items| check.list(items));
+    let home = map.get("home").and_then(|value| {
+        let name = check.string("home", Some(value))?;
+        if !is_host_name(name) {
+            check.problem("home", bad_name(name));
+            return None;
+        }
+        Some(name.to_owned())
+    });
+    problems.append(&mut check.problems);
+    Declared { hosts, home }
+}
+
 #[derive(Default)]
 struct Check {
     problems: Vec<Problem>,
@@ -211,9 +248,14 @@ impl Check {
         let Some(map) = self.object("hosts", root, &["hosts"]) else {
             return Vec::new();
         };
-        let Some(items) = map.get("hosts") else {
-            return Vec::new();
-        };
+        match map.get("hosts") {
+            None => Vec::new(),
+            Some(items) => self.list(items),
+        }
+    }
+
+    /// A `hosts` array, at `hosts`, names unique.
+    fn list(&mut self, items: &Value) -> Vec<Host> {
         let Some(items) = items.as_array() else {
             self.problem("hosts", "expected an array");
             return Vec::new();

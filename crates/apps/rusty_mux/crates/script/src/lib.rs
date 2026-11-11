@@ -7,7 +7,9 @@
 //! maps a key chord sequence to an action or a catalog method. A rule (`on`)
 //! runs one when an event happens, its values taking the event's fields,
 //! such as `${block}` or `${pwd}`. The `server` section ([`Defaults`]) is
-//! the server's own: what a new block runs and where.
+//! the server's own: what a new block runs and where. `hosts` and `home`
+//! ([`hosts::Declared`]) are hosts declared by hand, which ctl's `--host`
+//! reads before the saved ones.
 //!
 //! [`parse`] checks every method, parameter, placeholder and binding
 //! against the catalog and reports every problem at once, so a config that
@@ -39,7 +41,7 @@ use std::path::{Path, PathBuf};
 pub mod hosts;
 mod parse;
 
-pub use parse::{parse, parse_server};
+pub use parse::{parse, parse_declared, parse_server};
 
 /// A checked config.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -52,6 +54,8 @@ pub struct Config {
     pub rules: Vec<Rule>,
     /// The `server` section, which the server reads; empty when absent.
     pub server: Defaults,
+    /// The `hosts` and `home` that ctl reads (C49); empty when absent.
+    pub declared: hosts::Declared,
 }
 
 /// What the server starts a new block with when the request names
