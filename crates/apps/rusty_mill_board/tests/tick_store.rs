@@ -1418,6 +1418,79 @@ fn kinds(events: &[Event]) -> Vec<(EventKind, String)> {
     events.iter().map(|e| (e.kind, e.actor.clone())).collect()
 }
 
+/// A newer board writes `field` into `card`'s document, fenced like any board write.
+fn newer_board_writes(tick: &FakeTick, card: uuid::Uuid, field: &str, value: serde_json::Value) {
+    let get = |path: String| TickRequest {
+        method: "GET",
+        path,
+        ..TickRequest::default()
+    };
+    let (_, task) = tick.send(&get(format!("/tasks/{card}"))).expect("task");
+    let (_, doc) = tick.send(&get(format!("/docs/board/{card}"))).expect("doc");
+    let mut body = doc["body"].clone();
+    body[field] = value;
+    let put = TickRequest {
+        method: "PUT",
+        path: format!("/docs/board/{card}"),
+        body: Some(body),
+        if_task_match: task["etag"].as_str().map(str::to_owned),
+        ..TickRequest::default()
+    };
+    assert_eq!(tick.send(&put).expect("put").0, 200);
+}
+
+#[test]
+fn a_field_this_board_does_not_know_survives_its_writes() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    board
+        .edit_at(card.id, &human, None, &prompt("first"))
+        .expect("prompt");
+    let refs = json!([{"provider": "codex-cloud", "ref": "t1", "state": "running"}]);
+    newer_board_writes(&tick, card.id, "externalRefs", refs.clone());
+
+    board
+        .edit_at(card.id, &human, None, &prompt("second"))
+        .expect("rewrite the document");
+    let doc = &tick.docs("board")[0];
+    assert_eq!(doc["prompt"], "second", "the edit landed");
+    assert_eq!(
+        doc["externalRefs"], refs,
+        "the unknown field was written back unchanged"
+    );
+    assert_eq!(doc["v"], 1);
+
+    board
+        .edit_at(card.id, &human, None, &prompt(""))
+        .expect("clear the prompt");
+    assert_eq!(
+        tick.docs("board")[0]["externalRefs"],
+        refs,
+        "kept when every known field is empty"
+    );
+}
+
+#[test]
+fn a_document_with_no_unknown_fields_is_written_as_before() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    board
+        .edit_at(card.id, &human, None, &prompt("first"))
+        .expect("prompt");
+    let before = tick.docs("board")[0].clone();
+    board
+        .edit_at(card.id, &human, None, &prompt("second"))
+        .expect("rewrite");
+    let mut after = tick.docs("board")[0].clone();
+    after["prompt"] = before["prompt"].clone();
+    assert_eq!(
+        after, before,
+        "nothing but the edit changes in the document"
+    );
+}
+
 #[test]
 fn a_comment_added_in_rusty_tick_shows_as_an_event_once() {
     let (board, tick) = board();

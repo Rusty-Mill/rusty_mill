@@ -276,6 +276,10 @@ struct BoardDoc {
     prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_ms: Option<i64>,
+    /// Fields this binary does not know, written back unchanged, so a newer board's fields
+    /// survive this one's writes (a rollback loses nothing; ADR-0006).
+    #[serde(flatten)]
+    unknown: serde_json::Map<String, Value>,
 }
 
 impl BoardDoc {
@@ -291,6 +295,17 @@ impl BoardDoc {
             execution: card.execution.clone(),
             prompt: card.prompt.clone(),
             target_ms: card.target_ms,
+            unknown: serde_json::Map::new(),
+        }
+    }
+
+    /// `card`'s document, keeping the fields of `stored` this binary does not know.
+    fn kept(card: &Card, stored: Option<&Self>) -> Self {
+        let mut unknown = stored.map(|d| d.unknown.clone()).unwrap_or_default();
+        unknown.remove("v"); // the format version, which `body` writes
+        Self {
+            unknown,
+            ..Self::of(card)
         }
     }
 
@@ -302,10 +317,10 @@ impl BoardDoc {
         body
     }
 
-    /// The body to write for `card`, refused before any request when rusty_tick would
-    /// refuse it, so an edit never half-lands on a document that cannot be stored.
-    fn checked(card: &Card) -> Result<Value, BoardError> {
-        let body = Self::of(card).body();
+    /// This document's body, refused before any request when rusty_tick would refuse it, so
+    /// an edit never half-lands on a document that cannot be stored.
+    fn checked(&self) -> Result<Value, BoardError> {
+        let body = self.body();
         let bytes = serde_json::to_vec(&body)
             .map_err(|e| BoardError::Storage(format!("board document: {e}")))?;
         if bytes.len() > MAX_DOC_BYTES {
@@ -1065,7 +1080,7 @@ impl<T: TickApi> Store for TickStore<T> {
         }
         let doc = match BoardDoc::of(card) == BoardDoc::default() {
             true => None,
-            false => Some(BoardDoc::checked(card)?),
+            false => Some(BoardDoc::of(card).checked()?),
         };
         self.start_write(card.id)?;
         let result = (|| {
@@ -1096,18 +1111,16 @@ impl<T: TickApi> Store for TickStore<T> {
         // The task version the board read the card at (`rev = version - 1`, and the
         // next revision is one more).
         let read = card.rev;
-        let current = self
-            .parts(card.id)?
-            .map(card_of)
-            .transpose()?
-            .ok_or(BoardError::NotFound(card.id))?;
+        let parts = self.parts(card.id)?.ok_or(BoardError::NotFound(card.id))?;
+        let stored = parts.doc.clone();
+        let current = card_of(parts)?;
         // Every write moves the version, so an unchanged version means the task and its
         // board document are as the board read them; each request below is fenced on it.
         if current.rev + 1 != read {
             return Err(BoardError::Conflict);
         }
         let doc = match BoardDoc::of(card) != BoardDoc::of(&current) {
-            true => Some(BoardDoc::checked(card)?),
+            true => Some(BoardDoc::kept(card, stored.as_ref()).checked()?),
             false => None,
         };
         self.start_write(card.id)?;
