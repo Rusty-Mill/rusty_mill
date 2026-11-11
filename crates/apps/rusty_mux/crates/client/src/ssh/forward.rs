@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use super::{BATCH, Login, OWNED};
@@ -127,7 +127,7 @@ impl Forward {
 
     /// Whether `ssh` is still running: once it exits, the forward is gone.
     pub fn running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        matches!(self.exited(), Ok(None))
     }
 
     /// Waits until `ssh` has bound the local socket, which it does only
@@ -148,7 +148,7 @@ impl Forward {
             if cancelled() {
                 return Err("cancelled".into());
             }
-            if let Some(status) = self.child.try_wait().map_err(|e| e.to_string())? {
+            if let Some(status) = self.exited().map_err(|e| e.to_string())? {
                 return Err(format!("ssh exited ({status}) before the forward was up"));
             }
             if Instant::now() >= deadline {
@@ -157,16 +157,32 @@ impl Forward {
             std::thread::sleep(RETRY);
         }
     }
+
+    /// Reaps `ssh` if it has exited, then stands the watchdog down, so
+    /// it never signals the pid once another process reuses it.
+    fn exited(&mut self) -> io::Result<Option<ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            self.stand_down();
+        }
+        Ok(status)
+    }
+
+    /// Tells the watchdog to leave `ssh` alone and waits for it to exit.
+    /// A second call does nothing.
+    fn stand_down(&mut self) {
+        if let Some(mut stdin) = self.watchdog.stdin.take() {
+            let _ = stdin.write_all(b"done\n");
+        }
+        let _ = self.watchdog.wait();
+    }
 }
 
 impl Drop for Forward {
     fn drop(&mut self) {
         // Stand the watchdog down first, so it never signals a pid that
         // has been reaped below and reused.
-        if let Some(mut stdin) = self.watchdog.stdin.take() {
-            let _ = stdin.write_all(b"done\n");
-        }
-        let _ = self.watchdog.wait();
+        self.stand_down();
         // It may have exited already; there is nothing to report either
         // way while the client shuts down.
         let _ = self.child.kill();
@@ -372,6 +388,7 @@ mod tests {
             .wait_ready(Duration::from_secs(10), || false)
             .unwrap_err();
         assert!(err.contains("ssh exited"), "{err}");
+        assert!(forward.watchdog.stdin.is_none(), "watchdog stood down");
         let dir = forward.dir.clone();
         drop(forward);
         assert!(!dir.exists(), "{} was left behind", dir.display());
@@ -389,6 +406,24 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, "cancelled");
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// Seeing ssh gone through `running` stands the watchdog down at
+    /// once, before the pid can be reused, not only at the drop.
+    #[test]
+    fn an_ssh_seen_gone_stands_its_watchdog_down() {
+        let mut forward =
+            Forward::start(OsStr::new("false"), "box", Path::new("/r"), Login::Batch).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while forward.running() {
+            assert!(Instant::now() < deadline, "ssh never exited");
+            std::thread::sleep(RETRY);
+        }
+        assert!(forward.watchdog.stdin.is_none(), "pipe still open");
+        assert!(
+            matches!(forward.watchdog.try_wait(), Ok(Some(_))),
+            "watchdog still running"
+        );
     }
 
     /// The watchdog ends ssh once its pipe closes without `done`, as it
