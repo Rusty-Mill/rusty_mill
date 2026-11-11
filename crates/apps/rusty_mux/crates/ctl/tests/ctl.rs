@@ -2487,6 +2487,11 @@ fn hosts_ok(home: &Path, args: &[&str]) -> String {
     stdout(&output).trim().to_owned()
 }
 
+/// `path` as the inside of a JSON string: Windows paths hold `\\`.
+fn json_path(path: &Path) -> String {
+    path_text(path).replace('\\', "\\\\")
+}
+
 fn path_text(path: &Path) -> &str {
     path.to_str().expect("a UTF-8 path")
 }
@@ -2646,7 +2651,7 @@ fn a_host_declared_in_the_config_wins_and_ctl_leaves_it_alone() {
     let config = format!(
         r#"{{"hosts": [{{"name": "box", "addresses": [{{"socket": "{}"}}]}}], "home": "box",
             "on": [{{"event": "no-such-event", "action": "list"}}]}}"#,
-        socket.display()
+        json_path(&socket)
     );
     std::fs::write(home.join("rusty_mux").join("config.json"), config).expect("write");
     hosts_ok(
@@ -2691,7 +2696,7 @@ fn plain_calls_go_to_the_home_host() {
     let declare = |home_name: &str, path: &Path| {
         let text = format!(
             r#"{{"hosts": [{{"name": "box", "addresses": [{{"socket": "{}"}}]}}], "home": "{home_name}"}}"#,
-            path.display()
+            json_path(path)
         );
         std::fs::write(&config, text).expect("write");
     };
