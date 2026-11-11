@@ -142,6 +142,22 @@ pub struct Env {
     /// `$RUSTY_MUX_SSH`: the `ssh` that `terminfo`, `ssh` and `--host`'s
     /// ssh addresses run; `ssh` when unset.
     pub ssh: Option<OsString>,
+    /// The folder OpenSSH's `~` means, whose `.ssh` the `ssh` commands
+    /// read and write: see [`ssh_home`].
+    pub ssh_home: Option<PathBuf>,
+}
+
+/// The home OpenSSH uses, by `var`: `%USERPROFILE%` on Windows, where
+/// Win32-OpenSSH ignores `$HOME` (which Git Bash or MSYS may set to another
+/// folder), else `$HOME`; the other one when that is unset. An empty
+/// variable counts as unset.
+pub fn ssh_home(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let set = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let (first, second) = match cfg!(windows) {
+        true => ("USERPROFILE", "HOME"),
+        false => ("HOME", "USERPROFILE"),
+    };
+    set(first).or_else(|| set(second))
 }
 
 impl Env {
@@ -164,6 +180,7 @@ impl Env {
             agent_homes: AgentHomes::from_process(),
             ctl: std::env::current_exe().ok(),
             ssh: std::env::var_os("RUSTY_MUX_SSH"),
+            ssh_home: ssh_home(|name| std::env::var_os(name)),
         }
     }
 }
@@ -438,7 +455,7 @@ pub fn run_until(
         }
         Command::Ssh(command) => {
             let program = env.ssh.clone().unwrap_or_else(|| "ssh".into());
-            let home = env.agent_homes.home.as_deref();
+            let home = env.ssh_home.as_deref();
             let config = home.map(|h| h.join(".ssh").join("config"));
             return ssh::run(&command, &program, config.as_deref(), home, out)
                 .unwrap_or_else(|(exit, reason)| report(err, exit, &reason));
@@ -1282,6 +1299,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ssh_home_is_the_profile_on_windows_and_home_elsewhere() {
+        let both = |name: &str| match name {
+            "HOME" => Some(OsString::from("/msys/home/me")),
+            "USERPROFILE" => Some(OsString::from("C:/Users/me")),
+            _ => None,
+        };
+        let want = match cfg!(windows) {
+            true => "C:/Users/me",
+            false => "/msys/home/me",
+        };
+        assert_eq!(ssh_home(both), Some(PathBuf::from(want)));
+        let profile_only = |name: &str| (name == "USERPROFILE").then(|| OsString::from("C:/u"));
+        assert_eq!(ssh_home(profile_only), Some(PathBuf::from("C:/u")));
+        let empty = |name: &str| (name == "HOME").then(OsString::new);
+        assert_eq!(ssh_home(empty), None, "empty counts as unset");
+    }
+
+    #[test]
     fn only_a_missing_socket_reads_as_no_server() {
         let socket = Path::new("/run/x/default.sock");
         let refused = io::Error::from(io::ErrorKind::ConnectionRefused);
@@ -1396,6 +1431,7 @@ mod tests {
             agent_homes: AgentHomes::default(),
             ctl: None,
             ssh: None,
+            ssh_home: None,
         };
         let stop = Stop::after(std::time::Duration::ZERO);
         let (mut out, mut err) = (Vec::new(), Vec::new());
