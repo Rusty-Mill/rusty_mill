@@ -511,7 +511,7 @@ pub struct Card {
     pub done_ms: Option<i64>,
     /// Set when the card was closed without shipping ([`Card::close`]): it is Done, has no
     /// `done_ms`, and counts as dropped, never shipped. `None` for open and shipped cards.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed: Option<Closure>,
     /// When the card was archived, Unix ms: a Done card set aside from the board's default
     /// views. It is still Done, so roadmap, metrics and dependencies count it as before.
@@ -1098,7 +1098,10 @@ impl Card {
     /// Where a Done card's window starts: its ship time (or, closed without shipping, its last
     /// change), or its last restore if later.
     pub fn shelf_since_ms(&self) -> i64 {
-        let closed_ms = self.done_ms.unwrap_or(self.updated_ms);
+        let closed_ms = self
+            .done_ms
+            .or(self.closed.map(|c| c.at_ms))
+            .unwrap_or(self.updated_ms);
         self.restored_ms.map_or(closed_ms, |r| r.max(closed_ms))
     }
 
@@ -1409,6 +1412,19 @@ mod tests {
             closed.close(&flow(), CloseReason::Duplicate, &human, 4),
             Err(BoardError::Terminal)
         );
+    }
+
+    #[test]
+    fn a_dropped_card_shelves_from_its_close_and_a_comment_does_not_bring_it_back() {
+        let human = actor("nano", &[Capability::Triage]);
+        let day = 24 * 60 * 60 * 1000;
+        let c = card()
+            .close(&flow(), CloseReason::WontDo, &human, 5)
+            .expect("close")
+            .comment(&human, "later", 20 * day)
+            .expect("comment");
+        assert_eq!(c.shelf_since_ms(), 5);
+        assert!(c.shelved(20 * day, Some(14 * day)));
     }
 
     #[test]

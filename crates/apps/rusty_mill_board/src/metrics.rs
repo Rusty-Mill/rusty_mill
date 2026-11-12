@@ -407,6 +407,18 @@ mod tests {
     }
 
     #[test]
+    fn dropped_counts_reach_back_exactly_the_recent_window() {
+        let edge = NOW - RECENT_DAYS * DAY_MS;
+        let cards = [
+            dropped("at the edge", CloseReason::Superseded, edge),
+            dropped("just before", CloseReason::Superseded, edge - 1),
+        ];
+        let m = metrics(&Workflow::default(), &cards, NOW);
+        assert_eq!(m.dropped[2].count, 1);
+        assert_eq!(m.by_project[0].dropped, 1);
+    }
+
+    #[test]
     fn claims_count_only_work_in_progress() {
         let claimed = |col: Column, who: &str| Card {
             claim: Some(who.into()),

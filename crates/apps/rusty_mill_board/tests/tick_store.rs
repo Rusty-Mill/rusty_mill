@@ -275,6 +275,25 @@ fn a_close_with_a_reason_is_a_won_t_do_task_and_reads_back_from_tags_alone() {
 }
 
 #[test]
+fn an_unreadable_closed_tag_reads_as_won_t_do_at_tick_s_close_time() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    tick.owner_edit(card.id, |t| {
+        t["status"] = json!("wontdo");
+        t["tags"] = json!(["agent", "closed:duplicat:5"]);
+    });
+    let at = tick.task(card.id)["completedMs"].as_i64().expect("stamped");
+    assert_eq!(
+        board.get(card.id).expect("get").closed,
+        Some(Closure {
+            reason: CloseReason::WontDo,
+            at_ms: at
+        })
+    );
+}
+
+#[test]
 fn a_task_marked_won_t_do_in_rusty_tick_reads_as_dropped_and_a_done_task_as_shipped() {
     let (board, tick) = board();
     let human = board.roles().actor("nano", "human").expect("role");

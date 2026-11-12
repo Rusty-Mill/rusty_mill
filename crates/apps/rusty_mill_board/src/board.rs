@@ -1421,10 +1421,12 @@ impl<S: Store> Board<S> {
     }
 
     /// Close an unstarted card without shipping it, for `reason` (see [`Card::close`]). Needs
-    /// `Triage`. A non-blank `note` is added as `by`'s comment once the card is closed.
+    /// `Triage`. A non-blank `note` is added as `by`'s comment first, once the close is known to
+    /// be allowed, so a failure never leaves the card closed without its note: retrying after a
+    /// failed close at worst repeats the note.
     ///
     /// # Errors
-    /// See [`Card::close`]; a storage failure adding the note leaves the card closed.
+    /// See [`Card::close`], or a storage failure (nothing is closed then).
     pub fn close(
         &self,
         id: Uuid,
@@ -1432,15 +1434,18 @@ impl<S: Store> Board<S> {
         note: Option<&str>,
         by: &Actor,
     ) -> Result<Card, BoardError> {
-        let flow = self.flow();
-        let card = self.apply_in(&flow, id, by, EventKind::Closed, |c, now| {
-            c.close(&flow, reason, by, now)
-        })?;
-        drop(flow);
-        match note.map(str::trim).filter(|n| !n.is_empty()) {
-            Some(text) => self.comment(id, by, text),
-            None => Ok(card),
+        if let Some(text) = note.map(str::trim).filter(|n| !n.is_empty()) {
+            let current = self.get(id)?;
+            if !by.may_work_in(&current.project) {
+                return Err(BoardError::OutOfScope(current.project));
+            }
+            current.close(&self.flow(), reason, by, (self.clock)())?;
+            self.comment(id, by, text)?;
         }
+        let flow = self.flow();
+        self.apply_in(&flow, id, by, EventKind::Closed, |c, now| {
+            c.close(&flow, reason, by, now)
+        })
     }
 
     /// Archive a Done card. Needs `Close`, as closing work does.

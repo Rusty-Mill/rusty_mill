@@ -453,22 +453,32 @@ fn closed_status(card: &Card) -> &'static str {
 }
 
 /// How a closed task's card was dropped: its `closed:<reason>:<ms>` tag, or, for a task
-/// marked won't-do in rusty_tick itself, `wont_do` at the time tick closed it. `None` for
-/// open and done tasks.
+/// marked won't-do in rusty_tick itself (or whose tag is unreadable), `wont_do` at the time
+/// tick closed it. `None` for open and done tasks. A task reopened in rusty_tick loses its tag
+/// on the board's next write, since an open card has no `closed`.
 fn closure_of(task: &Task) -> Option<Closure> {
     if task.status != "wontdo" {
         return None;
     }
+    // A task closed before rusty_tick stamped close times falls back to its creation, which
+    // never moves, so it never drifts into recent counts.
+    let tick_ms = task.completed_ms.unwrap_or(task.created_ms);
     let tagged = task.tags.iter().find_map(|t| {
-        let (reason, ms) = t.strip_prefix("closed:")?.split_once(':')?;
-        Some(Closure {
-            reason: CloseReason::parse(reason)?,
-            at_ms: ms.parse().ok()?,
-        })
+        let raw = t.strip_prefix("closed:")?;
+        let parsed = raw.split_once(':').and_then(|(reason, ms)| {
+            Some(Closure {
+                reason: CloseReason::parse(reason)?,
+                at_ms: ms.parse().ok()?,
+            })
+        });
+        if parsed.is_none() {
+            rusty_log::warn!(task = %task.id, tag = %t, "unreadable closed tag; reading the card as won't-do");
+        }
+        parsed
     });
     tagged.or(Some(Closure {
         reason: CloseReason::WontDo,
-        at_ms: task.completed_ms.unwrap_or(task.updated_ms),
+        at_ms: tick_ms,
     }))
 }
 

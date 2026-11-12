@@ -1528,6 +1528,45 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_close_adds_no_note() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let human = |extra: Value| {
+            let mut a = json!({"actor": "nano", "role": "human"});
+            a.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            a
+        };
+        call_as(&board, None, "card_add", human(json!({"title": "t"}))).expect("add");
+        call_as(
+            &board,
+            None,
+            "card_move",
+            human(json!({"id": "#1", "to": "ready"})),
+        )
+        .expect("ready");
+        call_as(
+            &board,
+            None,
+            "card_move",
+            human(json!({"id": "#1", "to": "building"})),
+        )
+        .expect("start");
+        let refused = call_as(
+            &board,
+            None,
+            "card_close",
+            human(json!({"id": "#1", "reason": "wont_do", "note": "nope"})),
+        );
+        assert!(matches!(
+            refused,
+            Err(CallError::Board(BoardError::Refused(_)))
+        ));
+        let got = call_as(&board, None, "card_get", json!({"id": "#1"})).expect("get");
+        assert_eq!(got["card"]["comments"], json!([]));
+    }
+
+    #[test]
     fn a_card_is_named_by_id_or_by_number() {
         let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
         let add = json!({"actor": "nano", "role": "human", "title": "t"});
@@ -2249,12 +2288,12 @@ mod tests {
         };
         assert_eq!(
             progress(0),
-            json!({"total": 2, "done": 1, "blocked": 0, "ready_to_close": false})
+            json!({"total": 2, "done": 1, "dropped": 0, "blocked": 0, "ready_to_close": false})
         );
         call("card_move", json!({"id": "#2", "to": "blocked"})).expect("blocked");
         assert_eq!(
             progress(0),
-            json!({"total": 2, "done": 1, "blocked": 1, "ready_to_close": false})
+            json!({"total": 2, "done": 1, "dropped": 0, "blocked": 1, "ready_to_close": false})
         );
         call("card_plan", json!({"id": "#2", "milestone": null})).expect("unlink");
         assert_eq!(progress(0)["ready_to_close"], true);

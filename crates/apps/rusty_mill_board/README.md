@@ -105,6 +105,8 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   per week (`weeks[].dropped`), per project (`by_project[].dropped`) and per reason (`dropped`, last 30 days).
   In rusty_tick the task is closed as `wontdo` with a `closed:<reason>:<ms>` tag, in one write, so summaries see the
   reason without reading documents; a task marked won't-do in rusty_tick itself reads as `wont_do`.
+  Rollups (`card_trace`, `board_milestones`) count dropped children apart from done ones, and a parent or
+  milestone is `ready_to_close` only once every child is Done and at least one shipped.
 - **Prompt (#745).** A card's `prompt` holds instructions for whoever takes it, apart from the body: `card_update`
   sets it (`""` clears it, at most 32 KiB), `card_get`/`board_list` return it, and the card dialog shows it in its own
   box with a Copy prompt button. It lives in the card's rusty_tick `board` document, not on the task, so rusty_tick's
