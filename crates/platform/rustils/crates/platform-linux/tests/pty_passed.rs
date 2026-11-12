@@ -1,6 +1,7 @@
 //! Passed descriptors (C75): a pty child gets the descriptors it is
 //! passed, in order, at 3, 4, … and nothing else above 2, whatever
-//! numbers the parent holds them at. One test, so nothing else in this
+//! numbers the parent holds them at, even descriptors the test process
+//! itself inherited. One test, so nothing else in this
 //! binary opens or moves descriptors while it puts sources on the target
 //! numbers themselves.
 
@@ -91,11 +92,35 @@ fn place(fd: OwnedFd, to: i32) -> OwnedFd {
     unsafe { OwnedFd::from_raw_fd(to) }
 }
 
+/// 0–2 and every descriptor above 2 this process holds without
+/// close-on-exec: what any plain spawn inherits. A test runner or CI job
+/// may hand the test some.
+fn inheritable() -> Vec<i32> {
+    let open: Vec<i32> = std::fs::read_dir("/proc/self/fd")
+        .expect("list fds")
+        .map(|entry| entry.expect("fd entry").file_name())
+        .map(|name| name.to_string_lossy().parse().expect("fd number"))
+        .collect();
+    let mut fds: Vec<i32> = open
+        .into_iter()
+        .filter(|&fd| {
+            // SAFETY: fcntl(F_GETFD) only reads a descriptor's flags; one
+            // closed since the listing (the listing's own) answers -1.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            fd <= 2 || (flags >= 0 && flags & libc::FD_CLOEXEC == 0)
+        })
+        .collect();
+    fds.sort_unstable();
+    fds
+}
+
 #[test]
 fn passed_descriptors_land_in_order_and_nothing_else_leaks() {
-    // None passed: a plain spawn, unchanged.
+    // None passed: a plain spawn, unchanged, so it inherits exactly what
+    // any spawn from this process would.
+    let inherited = inheritable();
     let (fds, _) = run(&[]);
-    assert_eq!(fds, [0, 1, 2], "no descriptor above 2");
+    assert_eq!(fds, inherited, "a plain spawn is unchanged");
 
     // Overlap: the sources sit on each other's targets, swapped. Sparse:
     // unrelated inheritable descriptors at 5 and 9 must not reach the child.
