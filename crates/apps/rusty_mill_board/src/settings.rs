@@ -21,10 +21,10 @@ use serde_json::{Value, json};
 
 use crate::api::{CallError, Identity, Shared, Who, acting};
 use crate::board::{ProjectsSink, Roles};
-use crate::domain::{Actor, BoardError, Capability, MoveRules};
+use crate::domain::{Actor, BoardError, Capability, MoveRules, ProjectStatus};
 use crate::github::GithubConfig;
 use crate::identities::{Credentials, read_private};
-use crate::projects::Projects;
+use crate::projects::{Projects, Statuses};
 use crate::syncer::{MIN_SECS, Syncer};
 use crate::workflow::Workflow;
 
@@ -48,6 +48,8 @@ pub struct Files {
     pub rules: Option<PathBuf>,
     /// The columns and the moves between them.
     pub workflow: Option<PathBuf>,
+    /// Each project's status (active unless listed).
+    pub project_status: Option<PathBuf>,
 }
 
 impl Files {
@@ -60,6 +62,7 @@ impl Files {
             github: Some(dir.join("github.json")),
             rules: Some(dir.join("rules.json")),
             workflow: Some(dir.join("workflow.json")),
+            project_status: Some(dir.join("project-status.json")),
         }
     }
 }
@@ -143,6 +146,18 @@ pub fn load_rules(path: &Path) -> Result<MoveRules, String> {
     let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let file: RulesFile = serde_json::from_str(&json).map_err(|e| format!("rules: {e}"))?;
     Ok(file.movement)
+}
+
+/// The project statuses from `path`, or every project active if there is no such file yet.
+///
+/// # Errors
+/// If it exists but cannot be read or parsed.
+pub fn load_statuses(path: &Path) -> Result<Statuses, String> {
+    if !path.exists() {
+        return Ok(Statuses::default());
+    }
+    let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Statuses::parse(&json)
 }
 
 /// The workflow from `path`, or the default (the original seven columns) if there is no such
@@ -299,6 +314,12 @@ struct RulesSet {
 }
 
 #[derive(Deserialize)]
+struct ProjectStatusSet {
+    project: String,
+    status: ProjectStatus,
+}
+
+#[derive(Deserialize)]
 struct WorkflowSet {
     workflow: Workflow,
 }
@@ -394,6 +415,7 @@ impl Settings {
             "settings_github_set" => |s, _, a| s.github_set(&parse(a)?),
             "settings_github_clear" => |s, _, _| s.github_clear(),
             "settings_rules_set" => |s, by, a| s.rules_set(by, &parse(a)?),
+            "settings_project_status_set" => |s, by, a| s.project_status_set(by, &parse(a)?),
             "settings_workflow_set" => {
                 |s, by, a| s.workflow_set(by, parse::<WorkflowSet>(a)?.workflow)
             }
@@ -439,6 +461,7 @@ impl Settings {
                 "github": self.files.github.is_some(),
                 "rules": self.files.rules.is_some(),
                 "workflow": self.files.workflow.is_some(),
+                "project_status": self.files.project_status.is_some(),
             },
             "agents": agents,
             "repos": self.board.projects(),
@@ -448,6 +471,7 @@ impl Settings {
             "github": github,
             "rules": RulesFile { movement: self.board.move_rules() },
             "workflow": self.board.workflow(),
+            "project_status": self.board.statuses(),
             "apps": self.oauth.get().map(|p| p.store().list_clients()),
             "server": self.server,
             "paths": {
@@ -457,6 +481,7 @@ impl Settings {
                 "github": self.files.github,
                 "rules": self.files.rules,
                 "workflow": self.files.workflow,
+                "project_status": self.files.project_status,
             },
         }))
     }
@@ -723,6 +748,20 @@ impl Settings {
         self.board.set_move_rules(a.movement);
         rusty_log::warn!(actor = %by.name, movement = ?a.movement, "card movement rules changed");
         Ok(json!(file))
+    }
+
+    /// Set one project's status: written under the board's lock before it applies, and logged.
+    fn project_status_set(&self, by: &Actor, a: &ProjectStatusSet) -> Res {
+        let path = self.file(&self.files.project_status)?;
+        let statuses = self
+            .board
+            .set_project_status(&a.project, a.status, |next| {
+                let json = serde_json::to_string_pretty(next).map_err(|e| e.to_string())?;
+                rusty_atomic_file::write(&path, json.as_bytes())
+                    .map_err(|e| format!("{}: {e}", path.display()))
+            })?;
+        rusty_log::warn!(actor = %by.name, project = %a.project, status = a.status.as_str(), "project status changed");
+        Ok(json!({ "project_status": statuses }))
     }
 
     /// Replace the columns and moves. Refused if a removed column still holds cards; the file

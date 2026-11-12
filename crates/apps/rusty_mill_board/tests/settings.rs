@@ -9,12 +9,12 @@ use std::sync::Arc;
 use rusty_mcp_server::{HttpConfig, HttpHandler};
 use rusty_mill_board::api::Shared;
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::domain::MoveRules;
+use rusty_mill_board::domain::{MoveRules, ProjectStatus};
 use rusty_mill_board::identities::Credentials;
 use rusty_mill_board::mcp;
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::settings::{
-    Files, ServerInfo, Settings, load_github, load_roles, load_rules, load_workflow,
+    Files, ServerInfo, Settings, load_github, load_roles, load_rules, load_statuses, load_workflow,
     open_credentials,
 };
 use rusty_mill_board::store::{MemStore, Store};
@@ -355,6 +355,39 @@ fn nothing_may_leave_the_board_without_an_admin() {
         &json!({"name": "deputy"}),
     );
     assert_eq!(status, 422, "the last one again: {text}");
+}
+
+#[test]
+fn a_project_status_is_set_live_written_to_its_file_and_gates_new_cards() {
+    let f = start("project_status");
+    let (status, out, text) = f.admin(
+        "settings_project_status_set",
+        &json!({"project": "default", "status": "paused"}),
+    );
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(out["project_status"], json!({"default": "paused"}));
+    let saved = load_statuses(&f.file("project-status.json")).expect("file");
+    assert_eq!(saved.of("default"), ProjectStatus::Paused);
+    let (_, listed, _) = f.admin("board_projects", &json!({}));
+    assert_eq!(listed["status"], json!({"default": "paused"}));
+    let (status, _, text) = f.admin("card_add", &json!({"title": "x"}));
+    assert_eq!(status, 422, "a paused project takes no new cards: {text}");
+
+    let (_, out, _) = f.admin(
+        "settings_project_status_set",
+        &json!({"project": "default", "status": "active"}),
+    );
+    assert_eq!(
+        out["project_status"],
+        json!({}),
+        "active is the default and not listed"
+    );
+    assert_eq!(f.admin("card_add", &json!({"title": "x"})).0, 200);
+    let (status, _, _) = f.admin(
+        "settings_project_status_set",
+        &json!({"project": "nowhere", "status": "paused"}),
+    );
+    assert_eq!(status, 422, "an unknown project is refused");
 }
 
 #[test]
@@ -787,7 +820,7 @@ fn without_files_settings_can_be_read_but_not_changed() {
         .expect("ok");
     assert_eq!(
         get["files"],
-        json!({"agents": false, "projects": false, "roles": false, "github": false, "rules": false, "workflow": false})
+        json!({"agents": false, "projects": false, "roles": false, "github": false, "rules": false, "workflow": false, "project_status": false})
     );
     for (op, body) in [
         (
@@ -795,6 +828,10 @@ fn without_files_settings_can_be_read_but_not_changed() {
             json!({"agent": {"name": "x", "role": "builder"}}),
         ),
         ("settings_projects_set", json!({"repos": {}})),
+        (
+            "settings_project_status_set",
+            json!({"project": "default", "status": "paused"}),
+        ),
         ("settings_roles_set", json!({"roles": {"human": ["admin"]}})),
         ("settings_github_set", json!({"repo": "o/n", "token": "t"})),
         ("settings_rules_set", json!({"movement": "open"})),
@@ -1049,4 +1086,16 @@ fn an_admin_lists_and_revokes_signed_in_apps() {
     assert_eq!(out["apps"], json!([]));
     let (status, _, _) = f.admin("settings_app_revoke", &json!({"client_id": id}));
     assert_eq!(status, 422, "an unknown app is refused");
+}
+
+#[test]
+fn a_malformed_project_status_file_is_refused_at_load() {
+    let dir = std::env::temp_dir().join(format!("mb-status-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("project-status.json");
+    for bad in ["not json", r#"{"default": "sleeping"}"#] {
+        std::fs::write(&path, bad).expect("write");
+        assert!(load_statuses(&path).is_err(), "{bad}");
+    }
+    std::fs::remove_dir_all(&dir).expect("clean up");
 }

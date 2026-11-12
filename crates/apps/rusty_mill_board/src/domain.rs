@@ -385,6 +385,60 @@ pub struct Comment {
     pub text: String,
 }
 
+/// Where a project stands. Absent means [`ProjectStatus::Active`].
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectStatus {
+    /// Committed work: on the default views, takes new cards, hands out work.
+    #[default]
+    Active,
+    /// On hold: off the default views, refuses new cards, hands out no work.
+    Paused,
+    /// A labelled experiment: takes new cards and hands out work, but is off the default views.
+    Experiment,
+    /// Finished with: off the default views, refuses new cards, hands out no work.
+    Archived,
+}
+
+impl ProjectStatus {
+    /// Every status, in display order.
+    pub const ALL: [ProjectStatus; 4] = [
+        ProjectStatus::Active,
+        ProjectStatus::Paused,
+        ProjectStatus::Experiment,
+        ProjectStatus::Archived,
+    ];
+
+    /// The stored name (`active`, `paused`, `experiment`, `archived`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectStatus::Active => "active",
+            ProjectStatus::Paused => "paused",
+            ProjectStatus::Experiment => "experiment",
+            ProjectStatus::Archived => "archived",
+        }
+    }
+
+    /// Whether `card_add` (and moving a card in) may put cards in such a project, and
+    /// `card_take` may hand its cards out.
+    pub fn accepts_cards(self) -> bool {
+        matches!(self, ProjectStatus::Active | ProjectStatus::Experiment)
+    }
+}
+
 /// Why unstarted work was closed without shipping it.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
@@ -1343,6 +1397,15 @@ mod tests {
             .move_freely(&flow(), &Column::DONE, &human, 7)
             .expect("done");
         assert_eq!(c.done_ms, Some(7));
+    }
+
+    #[test]
+    fn only_active_and_experiment_projects_take_cards() {
+        let takes: Vec<bool> = ProjectStatus::ALL
+            .map(ProjectStatus::accepts_cards)
+            .to_vec();
+        assert_eq!(takes, [true, false, true, false]);
+        assert_eq!(ProjectStatus::default(), ProjectStatus::Active);
     }
 
     #[test]
