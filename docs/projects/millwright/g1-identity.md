@@ -23,7 +23,7 @@ GitHub settings himself (card #24; ask-first list). Written 2026-11-12.
 
 1. **Can a Claude session open PRs under its own identity?** Locally run Claude Code: yes,
    with a GitHub App installation token in `GH_TOKEN` and the git author set to the App's
-   bot (Nano chose a GitHub App on 2026-11-02). Cloud sessions: not through the built-in
+   bot (Nano chose a GitHub App on 2026-11-02, `mem_fb86e90e49d845fea7ed3e911cc3430a`). Cloud sessions: not through the built-in
    connection, which is Nano's account. A cloud environment could hold the App's private
    key as an environment secret and push with a minted token, but the GitHub MCP tools
    would still act as `baileyrd`. So the App fixes authorship of pushes and PRs opened from
