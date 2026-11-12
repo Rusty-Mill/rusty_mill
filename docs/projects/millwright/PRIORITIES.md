@@ -10,7 +10,7 @@ Tiers:
 - **High:** the Millwright critical path.
 - **Normal:** active; one change in flight at a time.
 - **Low:** no new work unless it unblocks a High project.
-- **Paused:** takes no new cards, and its open cards go through B0 triage.
+- **Paused:** takes no new cards; its open cards stay open under Mill Board's paused project status (DECISIONS.md paused-project-status).
 - **Closed:** experiments with a conclusion in remind-me.
 
 | Board project | Tier | Next milestone | Source |
@@ -33,10 +33,10 @@ Tiers:
 | tokio_migration | Low | none | project-priorities |
 | agent_cloud | Low | none | project-priorities |
 | rusty_tick | Low | archive after B3 | project-priorities, board-store |
-| rocket_league | Paused | B0 triage | project-priorities |
-| apprentice_ai | Paused | B0 triage | project-priorities |
-| mediboard | Paused | B0 triage | project-priorities |
-| rusty_meshed | Paused | B0 triage | project-priorities |
+| rocket_league | Paused | B0 (paused status) | project-priorities, paused-project-status |
+| apprentice_ai | Paused | B0 (paused status) | project-priorities, paused-project-status |
+| mediboard | Paused | B0 (paused status) | project-priorities, paused-project-status |
+| rusty_meshed | Paused | B0 (paused status) | project-priorities, paused-project-status |
 | ledger | Closed | S0, S1 | close-ledger, b0-triage-approved |
 | conflux | Closed (paused) | S0, S1 | pause-conflux, b0-triage-approved |
 | swarm_os | Closed (archived prototype) | none | archive-swarm-os, b0-triage-approved |
