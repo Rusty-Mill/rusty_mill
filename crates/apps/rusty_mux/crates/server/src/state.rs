@@ -97,7 +97,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::INPUT_GATE)
     .union(Features::LEASE_REQUESTS)
     .union(Features::SHUTDOWN)
-    .union(Features::BACKGROUND_HISTORY);
+    .union(Features::BACKGROUND_HISTORY)
+    .union(Features::HOLD);
 
 /// An owner whose outbox holds more than this can't be told of more
 /// input, so an owner-only block refuses it (C77): half the budget, so a
@@ -169,6 +170,9 @@ struct BlockRt {
     spool: Option<Spool>,
     /// The last [`Message::InputBatch`] number sent to the owner (C77).
     input_seq: u64,
+    /// Launched with `hold` (C78): the block stays, read-only, once its
+    /// program exits.
+    hold: bool,
 }
 
 /// A block's running program: its PTY and the task reading it.
@@ -245,6 +249,7 @@ impl BlockRt {
             unsaved: true,
             spool: None,
             input_seq: 0,
+            hold: false,
         }
     }
 
@@ -258,6 +263,9 @@ impl BlockRt {
     /// The program, or a refusal saying the block is read-only.
     fn live(&self) -> Result<&Live, Refusal> {
         self.live.as_ref().ok_or_else(|| {
+            if self.hold {
+                return "the block is read-only: its program has exited".into();
+            }
             "the block is read-only: it was restored after a server restart and its command was not run again"
                 .into()
         })
@@ -1270,6 +1278,9 @@ impl State {
         if launch.own {
             self.require(client, Features::OWNERSHIP, "an owned launch")?;
         }
+        if launch.hold {
+            self.require(client, Features::HOLD, "a held launch")?;
+        }
         if launch.input == InputMode::OwnerOnly {
             self.require(client, Features::INPUT_GATE, "an owner-only launch")?;
             if !launch.own {
@@ -1387,9 +1398,16 @@ impl State {
             "terminal.modes" => terminal::modes(&rt.grid),
             "terminal.report-status" => return self.report_status(block, &named),
             "terminal.shell" => {
-                let live = rt.live()?;
-                let pid = live.process.pid().ok_or("the program has exited")?;
-                let activity = process::activity(pid, live.pty.foreground());
+                // A held or restored block's program is gone (C78), and so
+                // is one whose child was just reaped, whichever is seen.
+                let running = rt
+                    .live
+                    .as_ref()
+                    .and_then(|live| Some((live.process.pid()?, live)));
+                let activity = match running {
+                    None => "exited",
+                    Some((pid, live)) => process::activity(pid, live.pty.foreground()),
+                };
                 terminal::shell(&rt.grid, &rt.started.program, activity)
             }
             "terminal.set-theme" | "terminal.clear" => {
@@ -1517,6 +1535,10 @@ impl State {
                             None => Ownership::Orphaned,
                         }),
                         input: block.input(),
+                        exited: self
+                            .blocks
+                            .get(&block.id())
+                            .is_some_and(|rt| rt.live.is_none()),
                     });
                 }
             }
@@ -1624,7 +1646,8 @@ impl State {
             crate::checkpoint::grid(size),
             self.config.grapheme_clustering,
         );
-        let rt = rt.screened(shared, grid, parser);
+        let mut rt = rt.screened(shared, grid, parser);
+        rt.hold = launch.hold;
         self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
     }
@@ -2089,18 +2112,34 @@ impl State {
 
     /// The block's output ended: stop serving its PTY, without aborting the
     /// reader that is calling this. Its program, to reap; `None` if a
-    /// client closed the block first.
+    /// client closed the block first. A held block stays, read-only, with
+    /// its screen and scrollback (C78).
     fn hang_up(&mut self, block: BlockId) -> Option<Process> {
+        if let Some(rt) = self.blocks.get_mut(&block)
+            && rt.hold
+        {
+            let live = rt.live.take()?;
+            // Saved and restored read-only from now on (D72).
+            rt.started.read_only = true;
+            rt.unsaved = true;
+            live.pty.release();
+            return Some(live.process);
+        }
         self.blocks.remove(&block).and_then(|rt| rt.release(false))
     }
 
     /// The block's program ended: announce how, if known, and close the
-    /// block, unless a client closed it while the program was reaped.
+    /// block, unless a client closed it while the program was reaped or it
+    /// is held (C78).
     fn exited(&mut self, block: BlockId, status: Option<ExitStatus>) {
         if let Some(status) = status
             && self.mux.note_exit(block, status).is_err()
         {
             return;
+        }
+        let held = self.blocks.get(&block).is_some_and(|rt| rt.hold);
+        if held {
+            return self.flush();
         }
         if self.mux.close_block(block).is_ok() {
             self.flush();

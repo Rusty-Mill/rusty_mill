@@ -389,6 +389,7 @@ mod tests {
             name: String::new(),
             owner: None,
             input: rusty_mux_core::InputMode::Open,
+            exited: false,
         };
         assert!(h.take(&entry), "a List entry says nobody holds it");
     }
