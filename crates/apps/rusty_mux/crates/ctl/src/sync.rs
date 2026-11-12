@@ -8,8 +8,8 @@
 //! shell. Only this machine's `hosts.json` is written; neither config.json.
 
 use std::ffi::OsString;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::io::{Read, Write};
+use std::process::{Child, Command, Stdio};
 
 use rusty_json::{Map, Value};
 use rusty_mux_script::hosts::{self, Merged, Outcome};
@@ -25,10 +25,15 @@ const MARK: &str = "rusty-mux-hosts:";
 /// then `file` and its text, or `none`.
 const READ: &str = concat!(
     "m=rusty-mux-hosts:; case \"$XDG_CONFIG_HOME\" in /*) b=\"$XDG_CONFIG_HOME\";; ",
-    "*) [ -n \"$HOME\" ] || { echo \"HOME is not set\" >&2; exit 1; }; b=\"$HOME/.config\";; esac; ",
+    "*) case \"$HOME\" in /*) b=\"$HOME/.config\";; ",
+    "*) echo \"HOME is not an absolute path\" >&2; exit 1;; esac;; esac; ",
     "p=\"$b/rusty_mux/hosts.json\"; echo \"${m}path $p\"; ",
     "if [ -f \"$p\" ]; then echo \"${m}file\"; cat \"$p\"; else echo \"${m}none\"; fi"
 );
+
+/// The most the remote may print. A real hosts.json is a few KiB; more
+/// means something other than the script is talking.
+const MAX_ANSWER: u64 = 1 << 20;
 
 /// The remote `hosts.json`: its path, and its text unless it is missing.
 #[derive(Debug, PartialEq, Eq)]
@@ -72,14 +77,14 @@ pub(crate) fn pull(
     };
     let saved = crate::hosts::load(path).map_err(failed)?;
     let merged = hosts::merge(&saved, &sender, &declared, sync.replace);
+    if !sync.dry_run && merged.hosts != saved {
+        crate::hosts::save(path, &merged.hosts).map_err(failed)?;
+    }
     let text = report(&merged, json);
     if !text.is_empty() {
         writeln!(out, "{text}").map_err(|e| failed(e.to_string()))?;
     }
-    if sync.dry_run || merged.hosts == saved {
-        return Ok(());
-    }
-    crate::hosts::save(path, &merged.hosts).map_err(failed)
+    Ok(())
 }
 
 /// The command line `ssh` gets to read `dest`'s hosts.
@@ -88,19 +93,45 @@ fn ssh_args(dest: &str) -> [String; 3] {
 }
 
 fn read_remote(ssh: &OsString, dest: &str) -> Result<Remote, (Exit, String)> {
-    let output = Command::new(ssh)
+    let mut child = Command::new(ssh)
         .args(ssh_args(dest))
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .output()
+        .spawn()
         .map_err(|e| started(ssh, e))?;
-    ended(output.status.code(), dest)?;
-    parse_remote(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+    let answer = read_capped(&mut child, dest);
+    let status = child.wait().map_err(|e| (Exit::Failed, e.to_string()))?;
+    let answer = answer?;
+    ended(status.code(), dest)?;
+    parse_remote(&String::from_utf8_lossy(&answer)).ok_or_else(|| {
         (
             Exit::Failed,
             format!("{dest} did not run the sync script; it needs a POSIX sh"),
         )
     })
+}
+
+/// The child's stdout, up to [`MAX_ANSWER`] bytes. Past that the child is
+/// killed, so a runaway remote can't fill memory.
+fn read_capped(child: &mut Child, dest: &str) -> Result<Vec<u8>, (Exit, String)> {
+    let mut answer = Vec::new();
+    let Some(stdout) = child.stdout.take() else {
+        return Ok(answer);
+    };
+    stdout
+        .take(MAX_ANSWER + 1)
+        .read_to_end(&mut answer)
+        .map_err(|e| (Exit::Failed, format!("reading from {dest}: {e}")))?;
+    if answer.len() as u64 <= MAX_ANSWER {
+        return Ok(answer);
+    }
+    // Already exited is fine: either way it is stopped.
+    let _ = child.kill();
+    Err((
+        Exit::Failed,
+        format!("{dest} printed more than {MAX_ANSWER} bytes; nothing was pulled"),
+    ))
 }
 
 /// The script's answer in `text`, past any rc-file noise before it.
@@ -185,5 +216,32 @@ mod tests {
             parse_remote("rusty-mux-hosts:path /p\nrusty-mux-hosts:what\n"),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_script_refuses_a_relative_home() {
+        let run = |home: &str| {
+            Command::new("sh")
+                .args(["-c", READ])
+                .env_remove("XDG_CONFIG_HOME")
+                .env("HOME", home)
+                .output()
+                .map(|o| o.status.success())
+        };
+        assert_eq!(run("relative/home").ok(), Some(false));
+        assert_eq!(run("/nonexistent-home").ok(), Some(true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runaway_remote_is_cut_off() {
+        let mut child = Command::new("yes")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("yes runs");
+        let read = read_capped(&mut child, "box");
+        child.wait().expect("yes stops");
+        assert!(read.is_err_and(|(_, e)| e.contains("more than")));
     }
 }
