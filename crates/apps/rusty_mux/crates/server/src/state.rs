@@ -98,12 +98,25 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::LEASE_REQUESTS)
     .union(Features::SHUTDOWN)
     .union(Features::BACKGROUND_HISTORY)
-    .union(Features::HOLD);
+    .union(Features::HOLD)
+    .union(UNIX_ONLY);
+
+/// Offered on Linux only: signal and release (C76) act on a Unix process
+/// group, and orch, their one client, runs there.
+#[cfg(target_os = "linux")]
+const UNIX_ONLY: Features = Features::SIGNAL_RELEASE;
+#[cfg(not(target_os = "linux"))]
+const UNIX_ONLY: Features = Features::NONE;
 
 /// An owner whose outbox holds more than this can't be told of more
 /// input, so an owner-only block refuses it (C77): half the budget, so a
 /// refusal comes well before the owner is dropped.
 const INPUT_REPORT_LIMIT: usize = crate::outbox::BUDGET / 2;
+
+/// Why a request that needs a block's program is refused once there is
+/// none (C76).
+#[cfg(target_os = "linux")]
+const EXITED: &str = "exited: the block's program is no longer running";
 
 /// The server's clock in unix ms, which grants are given in (C77).
 fn now_ms() -> u64 {
@@ -173,6 +186,9 @@ struct BlockRt {
     /// Launched with `hold` (C78): the block stays, read-only, once its
     /// program exits.
     hold: bool,
+    /// Its PTY was released (C76): read-only, with its program, if still
+    /// running, left to its owner.
+    released: bool,
 }
 
 /// A block's running program: its PTY and the task reading it.
@@ -250,6 +266,7 @@ impl BlockRt {
             spool: None,
             input_seq: 0,
             hold: false,
+            released: false,
         }
     }
 
@@ -263,6 +280,9 @@ impl BlockRt {
     /// The program, or a refusal saying the block is read-only.
     fn live(&self) -> Result<&Live, Refusal> {
         self.live.as_ref().ok_or_else(|| {
+            if self.released {
+                return "the block is read-only: its pty was released".into();
+            }
             if self.hold {
                 return "the block is read-only: its program has exited".into();
             }
@@ -1204,6 +1224,23 @@ impl State {
                 self.require(client, Features::SHUTDOWN, "shutdown")
                     .and_then(|()| self.shutdown(client)),
             ),
+            #[cfg(target_os = "linux")]
+            M::SignalBlock { req, block, signal } => (
+                req,
+                self.require(client, Features::SIGNAL_RELEASE, "signal-block")
+                    .and_then(|()| self.signal_block(client, block, signal)),
+            ),
+            #[cfg(target_os = "linux")]
+            M::ReleaseBlock { req, block } => (
+                req,
+                self.require(client, Features::SIGNAL_RELEASE, "release-block")
+                    .and_then(|()| self.release_block(shared, client, block)),
+            ),
+            #[cfg(not(target_os = "linux"))]
+            M::SignalBlock { req, .. } | M::ReleaseBlock { req, .. } => (
+                req,
+                Err("signal and release are supported on Linux only".into()),
+            ),
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
@@ -1250,6 +1287,65 @@ impl State {
                     .map(|()| Outcome::Done(None))
                     .map_err(Refusal::from)
             })
+    }
+
+    /// Sends `signal` to `block`'s program group, for its owner (C76).
+    #[cfg(target_os = "linux")]
+    fn signal_block(
+        &self,
+        client: ClientId,
+        block: BlockId,
+        signal: rusty_mux_proto::BlockSignal,
+    ) -> Result<Outcome, Refusal> {
+        self.owns(client, [block])?;
+        let live = self.running(block)?;
+        live.process
+            .signal(signal)
+            .map_err(|e| format!("signalling the block's program: {e}"))?;
+        Ok(Outcome::Done(None))
+    }
+
+    /// Closes `block`'s PTY and waits for its program, never killing it,
+    /// for its owner (C76). The block is read-only from now on; once the
+    /// program exits, [`Self::exited`] keeps a held block and closes any
+    /// other, as for a program that exits by itself.
+    #[cfg(target_os = "linux")]
+    fn release_block(
+        &mut self,
+        shared: &Shared,
+        client: ClientId,
+        block: BlockId,
+    ) -> Result<Outcome, Refusal> {
+        self.owns(client, [block])?;
+        self.running(block)?;
+        let rt = self
+            .blocks
+            .get_mut(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        let live = rt.live.take().ok_or(EXITED)?;
+        // Saved and restored read-only from now on (D72).
+        rt.started.read_only = true;
+        rt.unsaved = true;
+        rt.released = true;
+        live.reader.abort();
+        live.pty.release();
+        drop(live.pty);
+        let shared = shared.clone();
+        rusty_tokio::task::spawn_local(async move {
+            let status = live.process.wait().await;
+            shared.borrow_mut().exited(block, status);
+        });
+        Ok(Outcome::Done(None))
+    }
+
+    /// `block`'s running program, or why there is none.
+    #[cfg(target_os = "linux")]
+    fn running(&self, block: BlockId) -> Result<&Live, Refusal> {
+        let rt = self
+            .blocks
+            .get(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        rt.live.as_ref().ok_or_else(|| EXITED.into())
     }
 
     /// Refuses unless `client` may change each of `blocks`: nobody else

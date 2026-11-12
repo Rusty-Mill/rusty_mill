@@ -262,7 +262,7 @@ read-only like any command block (D72). C70's spool, once merged, keeps its scro
 
 **As built (C78).** `Features::HOLD` is bit 43 and `Launch.hold` field 60. A block entry gains
 `exited` (field 61), true for any block without a program (held or restored), which `list`
-shows as `state=exited`. Release (C76) will reuse the same path once it lands.
+shows as `state=exited`. Release (C76) reuses the same path.
 
 ## C76. Signal and release
 
@@ -292,6 +292,15 @@ block, and both are refused on Windows (`unsupported`); orch runs on Linux.
 - After `ReleaseBlock`, a program that ignores SIGHUP is still alive 2 s later. That shows there
   was no implicit kill.
 - A non-owner is refused on an owned block.
+
+**As built (C76).** `Features::SIGNAL_RELEASE` is bit 44, and the server offers it on Linux only, so
+a Windows server never grants it. `SignalBlock` is client type 0x28, with the signal in field 25
+(`SIGNAL`, shared with `program-exited`) as its Linux number; any number outside the set fails to
+decode. `ReleaseBlock` is 0x29. Once released, the block is read-only at once, even while its
+program still runs: `list` shows it `exited`, and input says its pty was released. The wait
+polls `try_wait` like `reap()` but never signals, and it takes the child out of `Process` first,
+so a cancelled wait (a stopping server) leaves the program running rather than killing it.
+`rusty-mux-ctl own` takes `{"op":"signal","block":B,"signal":"term"}` and `{"op":"release","block":B}`.
 
 ## C77. Input gate
 

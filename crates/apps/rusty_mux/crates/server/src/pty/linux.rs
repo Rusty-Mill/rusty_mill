@@ -10,7 +10,7 @@ use platform::process::{Child, Signal};
 use platform::pty::PtyMaster;
 use platform_linux::{LinuxChild, LinuxPty, LinuxPtyMaster};
 use rusty_mux_core::{ExitStatus, Size};
-use rusty_mux_proto::Echo;
+use rusty_mux_proto::{BlockSignal, Echo};
 use rusty_tokio::io::AsyncFd;
 
 use super::{GRACE, POLL, command, exit_status, to_io, win_size};
@@ -91,6 +91,32 @@ impl Process {
 }
 
 impl Process {
+    /// Sends `sig` to the program's process group (C76).
+    pub(crate) fn signal(&self, sig: BlockSignal) -> io::Result<()> {
+        let Some(child) = self.child.as_ref() else {
+            return Ok(());
+        };
+        child.kill_tree(platform_signal(sig)).map_err(to_io)
+    }
+
+    /// Waits for the program to exit without ever signalling it, and
+    /// without the kill [`Drop`] would send if this is cancelled (C76): a
+    /// released block's owner ends its program, not the mux.
+    /// How it ended, or `None` if that can't be known.
+    pub(crate) async fn wait(mut self) -> Option<ExitStatus> {
+        let mut child = self.child.take()?;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return exit_status(status),
+                Ok(None) => rusty_tokio::time::sleep(POLL).await,
+                Err(err) => {
+                    eprintln!("rusty-mux-server: polling pid {}: {err:?}", child.id());
+                    return None;
+                }
+            }
+        }
+    }
+
     /// Hangs up the program's group and leaves it running, unreaped: a
     /// stopping server does this to an owned block, never killing it
     /// (D87). Whoever owns the block cleans up.
@@ -101,6 +127,17 @@ impl Process {
         if matches!(child.try_wait(), Ok(None)) {
             signal(&child, Signal::Hup);
         }
+    }
+}
+
+fn platform_signal(sig: BlockSignal) -> Signal {
+    match sig {
+        BlockSignal::Hup => Signal::Hup,
+        BlockSignal::Int => Signal::Int,
+        BlockSignal::Kill => Signal::Kill,
+        BlockSignal::Term => Signal::Term,
+        BlockSignal::Cont => Signal::Cont,
+        BlockSignal::Stop => Signal::Stop,
     }
 }
 

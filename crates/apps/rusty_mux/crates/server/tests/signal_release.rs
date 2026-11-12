@@ -1,0 +1,211 @@
+//! Signal and release (C76): the owner of a block signals its program's
+//! group, or closes its PTY and waits without the mux ever killing the
+//! program. Linux only, as the feature is.
+
+#![cfg(target_os = "linux")]
+
+mod common;
+
+use std::time::{Duration, Instant};
+
+use common::{Client, PATIENCE, start_server, window_for};
+use rusty_mux_core::{BlockId, Size};
+use rusty_mux_proto::{BlockSignal, Entry, Features, Launch, Message, Program};
+
+const OWNER: Features = Features::CHECKPOINT_V6
+    .union(Features::LAUNCH)
+    .union(Features::INSPECT)
+    .union(Features::OWNERSHIP)
+    .union(Features::HOLD)
+    .union(Features::SIGNAL_RELEASE);
+
+fn owned(script: &str, hold: bool) -> Launch {
+    Launch {
+        program: Some(Program {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+        }),
+        own: true,
+        hold,
+        ..Launch::default()
+    }
+}
+
+/// An owned block running `script`, attached, once it has printed `ready`.
+fn launch(client: &mut Client, script: &str, hold: bool) -> BlockId {
+    let window = window_for(client);
+    let size = Size::new(80, 24).expect("size");
+    let id = client.request(|req| Message::CreateBlock {
+        req,
+        window,
+        size,
+        launch: owned(script, hold),
+    });
+    let block = BlockId::from_uuid(id.expect("a block id"));
+    client.request(|req| Message::Attach { req, block });
+    client.wait_ready(block);
+    screen_until(client, block, "ready");
+    block
+}
+
+/// The block's screen once it shows `needle`, which may have come before
+/// the attach's checkpoint or after it.
+fn screen_until(client: &mut Client, block: BlockId, needle: &str) -> String {
+    loop {
+        let text = client.text(block);
+        if text.contains(needle) {
+            return text;
+        }
+        client.recv();
+    }
+}
+
+/// The number the screen shows after `PID=`.
+fn pid(client: &mut Client, block: BlockId) -> u32 {
+    let text = screen_until(client, block, "PID=");
+    let digits: String = text
+        .split("PID=")
+        .nth(1)
+        .unwrap_or_default()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().expect("a pid on screen")
+}
+
+fn refused(client: &mut Client, make: impl FnOnce(u64) -> Message) -> String {
+    match client.answer(make).as_slice() {
+        [Message::Failed { reason, .. }] => reason.clone(),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// The block's listing entry's exited mark; `None` once it is gone.
+fn exited(client: &mut Client, block: BlockId) -> Option<bool> {
+    client
+        .answer(|req| Message::List { req })
+        .into_iter()
+        .find_map(|m| match m {
+            Message::Entry {
+                entry: Entry::Block {
+                    block: b, exited, ..
+                },
+                ..
+            } if b == block => Some(exited),
+            _ => None,
+        })
+}
+
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + PATIENCE;
+    while !done() {
+        assert!(Instant::now() < deadline, "never {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Whether `pid` is a live process, not a zombie or gone.
+fn alive(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The state follows the command's closing parenthesis.
+    let state = stat
+        .rsplit(')')
+        .next()
+        .and_then(|rest| rest.trim().chars().next());
+    !matches!(state, Some('Z' | 'X') | None)
+}
+
+fn kill(pid: u32) {
+    let status = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .expect("run kill");
+    assert!(status.success(), "kill -9 {pid}");
+}
+
+#[test]
+fn term_reaches_a_trap_in_the_programs_group() {
+    let socket = start_server();
+    let mut owner = Client::connect_with(&socket, OWNER, None);
+    let script = "trap 'echo TRAPPED-TERM; exit 0' TERM; echo ready; while :; do sleep 0.1; done";
+    let block = launch(&mut owner, script, false);
+
+    owner.request(|req| Message::SignalBlock {
+        req,
+        block,
+        signal: BlockSignal::Term,
+    });
+    screen_until(&mut owner, block, "TRAPPED-TERM");
+}
+
+#[test]
+fn a_released_program_that_ignores_hangups_is_never_killed() {
+    let socket = start_server();
+    let mut owner = Client::connect_with(&socket, OWNER, None);
+    let script = "trap '' HUP; echo PID=$$; echo ready; while :; do sleep 0.1; done";
+    let block = launch(&mut owner, script, false);
+    let pid = pid(&mut owner, block);
+
+    owner.request(|req| Message::ReleaseBlock { req, block });
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(alive(pid), "pid {pid} was killed after the release");
+    assert_eq!(exited(&mut owner, block), Some(true), "read-only meanwhile");
+    let again = refused(&mut owner, |req| Message::SignalBlock {
+        req,
+        block,
+        signal: BlockSignal::Term,
+    });
+    assert!(again.starts_with("exited"), "{again}");
+
+    // Its owner ends it; an unheld block then closes.
+    kill(pid);
+    wait_until("closed", || exited(&mut owner, block).is_none());
+}
+
+#[test]
+fn a_held_block_stays_after_its_released_program_exits() {
+    let socket = start_server();
+    let mut owner = Client::connect_with(&socket, OWNER, None);
+    let script = "trap '' HUP; echo PID=$$; echo ready HELD-SCREEN; while :; do sleep 0.1; done";
+    let block = launch(&mut owner, script, true);
+    let pid = pid(&mut owner, block);
+
+    owner.request(|req| Message::ReleaseBlock { req, block });
+    kill(pid);
+    wait_until("reaped", || !alive(pid));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(exited(&mut owner, block), Some(true), "still listed");
+    owner.request(|req| Message::CloseBlock { req, block });
+    assert_eq!(exited(&mut owner, block), None, "closed");
+}
+
+#[test]
+fn only_the_owner_may_signal_or_release() {
+    let socket = start_server();
+    let mut owner = Client::connect_with(&socket, OWNER, None);
+    let mut peer = Client::connect_with(&socket, OWNER, None);
+    let block = launch(&mut owner, "echo ready; sleep 30", false);
+
+    let signal = refused(&mut peer, |req| Message::SignalBlock {
+        req,
+        block,
+        signal: BlockSignal::Kill,
+    });
+    let release = refused(&mut peer, |req| Message::ReleaseBlock { req, block });
+    assert!(signal.contains("own"), "{signal}");
+    assert!(release.contains("own"), "{release}");
+    assert_eq!(exited(&mut owner, block), Some(false), "untouched");
+}
+
+#[test]
+fn signal_and_release_need_the_feature() {
+    let socket = start_server();
+    let mut owner = Client::connect_with(&socket, OWNER, None);
+    let block = launch(&mut owner, "echo ready; sleep 30", false);
+    let plain = OWNER.without(Features::SIGNAL_RELEASE);
+    let mut older = Client::connect_with(&socket, plain, None);
+    let reason = refused(&mut older, |req| Message::ReleaseBlock { req, block });
+    assert!(reason.contains("requires feature bits"), "{reason}");
+}
