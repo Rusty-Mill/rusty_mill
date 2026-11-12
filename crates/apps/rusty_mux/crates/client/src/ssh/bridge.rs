@@ -94,7 +94,7 @@ pub struct Bridge {
 impl Bridge {
     /// Binds a new local socket whose connections run `program` (OpenSSH's
     /// `ssh`, or a stand-in) with [`args`], and starts a first bridge with
-    /// stdin closed, logging in as `login` allows, to check that the login,
+    /// its input ended at once, logging in as `login` allows, to check that the login,
     /// `ctl` and the server all answer before the client connects. Later
     /// connections never ask. Every `ssh`'s stderr stays this process's,
     /// for a password prompt or a refusal.
@@ -116,13 +116,19 @@ impl Bridge {
                 return Err(why);
             }
         };
+        // A pipe closed at once, not `Stdio::null()`: Win32-OpenSSH reading
+        // NUL never sends the end of input, so the remote bridge would run
+        // on and the login never end (seen on Beast, 2026-11-12).
         let login = Command::new(program)
             .args(first)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .spawn();
         let login = match login {
-            Ok(child) => child,
+            Ok(mut child) => {
+                drop(child.stdin.take());
+                child
+            }
             Err(e) => {
                 drop(listener);
                 remove(&dir);
@@ -474,6 +480,21 @@ mod tests {
         let private = bridge.dir.clone();
         drop(bridge);
         assert!(!private.exists(), "{} was left behind", private.display());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The first login's input is a pipe that ends at once, which every
+    /// `ssh` passes on as the end of input; Win32-OpenSSH never ends one
+    /// read from NUL. The stand-in succeeds only on a pipe at its end.
+    #[test]
+    fn the_first_login_reads_a_closed_pipe() {
+        let (dir, ssh) = stand_in("[ -p /dev/stdin ] && [ -z \"$(cat)\" ]");
+        let mut bridge =
+            Bridge::start(ssh.as_os_str(), "box", CTL, Path::new("/r"), Login::Batch).unwrap();
+        bridge
+            .wait_ready(Duration::from_secs(10), || false)
+            .unwrap();
+        drop(bridge);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
