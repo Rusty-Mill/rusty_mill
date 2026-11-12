@@ -11,6 +11,7 @@ use crate::domain::{
     Actor, BoardError, Card, CardSummary, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit,
     ExecutionLink, Plan, Shelf, Span, View,
 };
+use crate::external::{Observation, Provider, RefState};
 use crate::milestones::MilestoneEdit;
 use crate::page::{Cursor, Key, checked_limit, page, query_hash};
 use crate::store::Store;
@@ -220,9 +221,10 @@ struct ListArgs {
     moved_from: Option<i64>,
     /// Only cards that changed column before this time (Unix ms).
     moved_to: Option<i64>,
-    /// `full` (default): whole cards. `summary`: id, number, rev, title, project, column,
-    /// priority, claim, tags and times only, without body, prompt, links or comments; much
-    /// smaller, and read without loading any card's prompt or comments.
+    /// `summary` (default): id, number, rev, title, project, column, priority, claim, tags
+    /// and times only, without body, prompt, links or comments; much smaller, and read
+    /// without loading any card's prompt or comments. `full`: whole cards, as `card_get`
+    /// returns them.
     #[serde(default)]
     view: View,
     /// Page size, 1 to 500. With it (or `cursor`) the result also has `next_cursor` (null
@@ -497,6 +499,40 @@ impl BindExecutionArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct ObserveArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Card id, or its number (`#42` or `42`).
+    id: String,
+    /// Where it ran: `codex-cloud`, `github-pr` or `github-actions`. Orch execution is
+    /// `card_execution_link`, not this.
+    provider: Provider,
+    /// The provider's own id: a Codex Cloud thread id, `owner/repo#123`, an Actions run id.
+    /// 1-128 characters of `A-Z a-z 0-9 . _ : / # -`.
+    #[serde(rename = "ref")]
+    reference: String,
+    /// The state you saw.
+    state: RefState,
+    /// An `https://` link to it (at most 512 bytes). Omit to keep the one already recorded.
+    url: Option<String>,
+    /// When you saw that state, Unix ms. At most 5 minutes ahead of the board's clock.
+    observed_at_ms: i64,
+}
+
+impl ObserveArgs {
+    fn observation(self) -> (Who, String, Observation) {
+        let obs = Observation {
+            provider: self.provider,
+            reference: self.reference,
+            state: self.state,
+            url: self.url,
+            observed_at_ms: self.observed_at_ms,
+        };
+        (self.who, self.id, obs)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct EventsArgs {
     /// Return events after this event id (omit for the beginning).
     after: Option<String>,
@@ -622,7 +658,7 @@ pub fn ops() -> Vec<Op> {
     vec![
         op(
             "board_list",
-            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those. Done cards that are archived, or done more than `done_days` (default 14) ago, are left out unless `archived` is `include` or `only`. `created_*`, `updated_*` and `moved_*` (Unix ms, `from` inclusive, `to` exclusive) keep cards created, last changed or moved column in a range. `view: summary` returns small cards without body, prompt, links or comments. `limit` pages the result in creation order: pass the page's `next_cursor` as `cursor` with the same arguments until it is null.",
+            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those. Done cards that are archived, or done more than `done_days` (default 14) ago, are left out unless `archived` is `include` or `only`. `created_*`, `updated_*` and `moved_*` (Unix ms, `from` inclusive, `to` exclusive) keep cards created, last changed or moved column in a range. By default it returns small summaries without body, prompt, links or comments; pass `view: full` for whole cards, or `card_get` one card. `limit` pages the result in creation order: pass the page's `next_cursor` as `cursor` with the same arguments until it is null.",
             |b, i, a: ListArgs| {
                 checked_project(b, scope(i), a.project.as_deref())?;
                 let days = a.done_days.unwrap_or(DONE_WINDOW_DAYS);
@@ -753,7 +789,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_events",
-            "Poll the change log, oldest first. Send the `cursor` of your last reply as `after` to get only newer events (the reply's `cursor` is the last event returned, or your `after` if none). `tail: true` returns just the current end of the log, to start a watcher. `resync: true` means your `after` is not in the log (the board restarted since you read it): changes may have been missed, so re-read the board (`board_list`, `view: summary` is cheapest) and go on from the reply's `cursor`.",
+            "Poll the change log, oldest first. Send the `cursor` of your last reply as `after` to get only newer events (the reply's `cursor` is the last event returned, or your `after` if none). `tail: true` returns just the current end of the log, to start a watcher. `resync: true` means your `after` is not in the log (the board restarted since you read it): changes may have been missed, so re-read the board (`board_list`; its default summaries are cheapest) and go on from the reply's `cursor`.",
             |b, _, a: EventsArgs| {
                 if a.tail == Some(true) {
                     return to_json(
@@ -856,6 +892,15 @@ pub fn ops() -> Vec<Op> {
                 let (who, card_id, link) = a.link.link();
                 let who = acting(b, i, &who)?;
                 card(b.recover_execution(card_ref(b, &card_id)?, expected, link, &who)?)
+            },
+        ),
+        op(
+            "card_execution_observe",
+            "Record what you saw of execution outside Orch that works on this card: a Codex Cloud thread, a GitHub PR or an Actions run, and its state. Observation only: nothing on the board acts on it. Upserts by provider and ref; a replay or an older observation changes nothing, and the same time with a different state is refused. At most 8 refs per card: a new one replaces the finished ref seen longest ago, and is refused if none has finished. Needs `build`.",
+            |b, i, a: ObserveArgs| {
+                let (who, card_id, obs) = a.observation();
+                let who = acting(b, i, &who)?;
+                card(b.observe_execution(card_ref(b, &card_id)?, obs, &who)?)
             },
         ),
         op(
@@ -1138,12 +1183,14 @@ mod tests {
     }
 
     #[test]
-    fn board_list_without_new_arguments_keeps_its_shape() {
+    fn board_list_defaults_to_summaries_and_gives_whole_cards_when_asked() {
         let board = paged_board();
         add_cards(&board, 2);
         let out = call_as(&board, None, "board_list", json!({})).expect("list");
         let keys: Vec<&String> = out.as_object().expect("object").keys().collect();
         assert_eq!(keys, ["cards"]);
+        assert!(out["cards"][0].get("body").is_none(), "summary by default");
+        let out = call_as(&board, None, "board_list", json!({"view": "full"})).expect("full");
         assert_eq!(out["cards"][0]["body"], "body text");
         assert_eq!(out["cards"][0]["comments"][0]["text"], "a comment");
     }
@@ -1245,7 +1292,7 @@ mod tests {
         assert!(refused(json!({"limit": 1, "cursor": format!("{cursor}x")})));
         // The same cursor with other arguments is another query.
         assert!(refused(
-            json!({"limit": 1, "cursor": cursor, "view": "summary"})
+            json!({"limit": 1, "cursor": cursor, "view": "full"})
         ));
         assert!(refused(
             json!({"limit": 1, "cursor": cursor, "archived": "include"})
@@ -1272,9 +1319,10 @@ mod tests {
             a["body"] = json!(body);
             call_as(&board, None, "card_add", a).expect("add");
         }
-        let first = call_as(&board, None, "board_list", json!({"limit": 500})).expect("page");
+        let full = json!({"limit": 500, "view": "full"});
+        let first = call_as(&board, None, "board_list", full).expect("page");
         assert_eq!(first["cards"].as_array().expect("cards").len(), 1);
-        let cards = scan(&board, None, json!({}), 500);
+        let cards = scan(&board, None, json!({"view": "full"}), 500);
         assert_eq!(cards.len(), 3);
         assert!(cards.iter().all(|c| c["body"] == body.as_str()));
     }

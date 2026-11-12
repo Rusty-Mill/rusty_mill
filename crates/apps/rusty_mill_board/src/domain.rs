@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::external::ExternalRef;
 use crate::workflow::{Kind, Transition, Workflow};
 
 /// A board column's id: 1-32 of `a-z 0-9 _`, starting with a letter. It is what cards
@@ -449,6 +450,10 @@ pub struct Card {
     /// It is data rather than a provider handle: providers, sessions and processes can change.
     #[serde(default)]
     pub execution: Option<ExecutionLink>,
+    /// Execution outside Orch that worked on this card, and its last observed state
+    /// (ADR-0006). Observation only: nothing on the board decides anything from it.
+    #[serde(default)]
+    pub external_refs: Vec<ExternalRef>,
     /// Creation time, Unix ms.
     pub created_ms: i64,
     /// Last change, Unix ms.
@@ -476,10 +481,11 @@ pub struct Card {
 #[serde(rename_all = "snake_case")]
 pub enum View {
     /// The whole card: body, prompt, links and comments.
-    #[default]
     Full,
     /// [`CardSummary`]: what a board or queue view needs, without body, prompt, links or
-    /// comments.
+    /// comments. The default (S7): a full listing is asked for, never the accident of
+    /// leaving `view` out.
+    #[default]
     Summary,
 }
 
@@ -674,6 +680,8 @@ pub enum EventKind {
     ExecutionLinked,
     /// A factory execution moved to a replacement assignment generation.
     ExecutionRecovered,
+    /// Execution outside Orch was observed (ADR-0006).
+    ExecutionObserved,
     /// Moved to another project.
     Assigned,
     /// Given its board-wide number.
@@ -791,6 +799,7 @@ impl Card {
             issue: None,
             synced_text: None,
             execution: None,
+            external_refs: Vec::new(),
             created_ms: now_ms,
             updated_ms: now_ms,
             done_ms: None,
@@ -814,7 +823,7 @@ impl Card {
         }
     }
 
-    fn next(&self, now_ms: i64) -> Self {
+    pub(crate) fn next(&self, now_ms: i64) -> Self {
         Self {
             rev: self.rev + 1,
             updated_ms: now_ms,

@@ -37,7 +37,6 @@ L1, L7 and L8 are answered (2026-11-12); see DECISIONS.md lel-m1-commit, lel-los
 | --- | --- | --- |
 | M1 | Approve the minimal role fix: one credential per agent, the builder role loses admin, merge and triage, and "close" is gated or replaced by a narrow "record merged work" capability? | Yes. It is configuration, not code. |
 | M2 | Which role should Claude chat and voice sessions hold? Today they sign in as the human admin. | A design role: add and comment on cards, no gates, no merge. |
-| M3 | Start the design for the board's own SQLite store? | Yes. Design first; Nano approves before any migration. |
 | M5 | Does the ask-first list (data migrations, deletions, dependency and toolchain bumps, public API changes) still reach Nano once agents may merge and deploy? | Yes, keep it. |
 | M6 | Where do the evidence gates live? | In Let Em Loose. Do not build richer gate machinery into Mill Board's columns. |
 | M7 | Drop the Hermes Kanban pilot agreed in the 2026-11-10 Mill Board audit? | Yes. One executor fewer to keep honest. ("No fourth executor" is Let Em Loose D20, which Nano reopened for mux-hosted agents on 2026-11-04, so it is not by itself a reason.) |

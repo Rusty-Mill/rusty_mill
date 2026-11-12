@@ -934,7 +934,7 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),up:el("input","","up"),ms:el("select")};
+  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),up:el("input","","up"),ms:el("select")};
   for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(label(p),p)));f.p.append(g)}
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
@@ -967,7 +967,7 @@ function show(id){
   const form=el("form");form.method="dialog";const head=el("div",null,"dhead");if(k.number)head.append(el("span","#"+k.number,"num"));head.append(f.meta);
   const plan=el("div",null,"plan");plan.append(f.pr,el("span","Target","meta"),f.due);
   const links=el("div",null,"plan");links.append(el("span","Parent","meta"),f.up,el("span","Milestone","meta"),f.ms);
-  form.append(head,f.tr,f.banner,f.t,f.b,promptRow,f.g,plan,links,...(projects().length>1?[f.p]:[]),row,f.cm,f.ci);
+  form.append(head,f.tr,f.banner,f.t,f.b,promptRow,f.g,plan,links,...(projects().length>1?[f.p]:[]),row,f.ex,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
@@ -991,6 +991,15 @@ function traceLine(k){
   }
   return out;
 }
+// Execution outside Orch that worked on the card, as last observed (ADR-0006): shown, never acted on.
+function refLines(k){
+  return (k.external_refs??[]).map(r=>{
+    const d=el("div"),name=r.provider+" "+r.ref;
+    if(r.url){const a=el("a",name);a.href=r.url;a.target="_blank";a.rel="noopener noreferrer";d.append(a)}else d.append(el("span",name));
+    d.append(el("span"," · "+r.state+" · seen "+new Date(r.observed_at_ms).toLocaleString()+" by "+r.by,"meta"));
+    return d;
+  });
+}
 async function save(){
   const d=dlg,t=typed();
   d.partial=null;d.note=false;
@@ -1008,6 +1017,7 @@ function syncDialog(){
   f.ar.hidden=!isDone(k);f.ar.textContent=shelved(k)?"Restore":"Archive";
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
+  f.ex.replaceChildren(...refLines(k));
   const theirs=snap(k);
   if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
   if(document.activeElement!==f.due)f.due.value=k.target_ms?isoDay(k.target_ms):"";
@@ -1050,7 +1060,7 @@ $("dlg").onclose=()=>{dlg=null};
 const byPriority=list=>list.sort((a,b)=>b.priority-a.priority||a.created_ms-b.created_ms||(a.id<b.id?-1:a.id>b.id?1:0));
 async function snapshot(){
   const at=(await api("board_events",{tail:true})).cursor;
-  const list=(await api("board_list",{archived:"include"})).cards;
+  const list=(await api("board_list",{archived:"include",view:"full"})).cards;
   cursor=at;cards=byPriority(list);loaded=true;
 }
 /* Bring `cards` up to the newest event: read again only the cards the new events name, one
@@ -1065,7 +1075,7 @@ async function catchUp(){
   const r=await api("board_events",{after:cursor,limit:1000});
   const ids=[...new Set(r.events.map(e=>e.card))];
   if(r.resync||ids.length>FEW){
-    const list=(await api("board_list",{archived:"include"})).cards;   // if this throws, the cursor stays put and the events are retried
+    const list=(await api("board_list",{archived:"include",view:"full"})).cards;   // if this throws, the cursor stays put and the events are retried
     cursor=r.cursor;cards=byPriority(list);return true;
   }
   if(!ids.length){cursor=r.cursor;return false}

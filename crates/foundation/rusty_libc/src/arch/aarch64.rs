@@ -113,6 +113,8 @@ pub mod nr {
     pub const SENDTO: usize = 206;
     pub const RECVFROM: usize = 207;
     pub const SHUTDOWN: usize = 210;
+    pub const SENDMSG: usize = 211;
+    pub const RECVMSG: usize = 212;
     pub const ACCEPT4: usize = 242;
     pub const GETSOCKNAME: usize = 204;
     pub const GETPEERNAME: usize = 205;

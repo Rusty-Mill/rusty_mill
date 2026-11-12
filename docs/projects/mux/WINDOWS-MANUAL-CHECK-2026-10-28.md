@@ -81,7 +81,7 @@ in their own words. Nothing here is inferred: a check that was not run says so.
 ## Not checked
 
 - CUJ 3 / R10: whether a second account is stopped at `connect` by the socket
-  DACL, or only by the SID check. Still open (design Q4). The second server at
+  DACL, or only by the SID check. Answered 2026-11-12 (card #281, RISKS R10): the DACL refuses it at `connect`. The second server at
   `C:\Users\Public` was prepared so that bob could reach the socket's parent
   directory; `C:\Users\baileyrd` itself is not traversable by other accounts, so
   a refusal there would not have answered Q4.

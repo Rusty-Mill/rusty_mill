@@ -57,7 +57,7 @@ has slack and can slip a phase without delaying the end state.
 | --- | --- | --- | --- | --- | --- | --- |
 | B0 | Backlog triage | Paused projects hold no open cards; each remaining project's proposal is approved and applied | X answers | Coordination, Design | M | E2, X1 to X3, approve each list (X4 to X6 feed S2, S3, B3) |
 | B1 | Lean cards and per-agent logins | Agents list summaries by default; each agent signs in as itself; adding a card can set priority and links in one call | G1 | Build | M | M1, M2 |
-| B2 | Own-store design | A design note for the SQLite store, migration and rollback is approved | B0 | Build, Review | S | M3, approve the design |
+| B2 | Own-store design | A design note for the SQLite store, migration and rollback is approved | B0 | Build, Review | S | Approve the design (M3 answered 2026-11-12) |
 | B3 | Migration to the board's own store | Dry run shows no difference; production migration done; the rusty_tick and engine adapters are removed; rusty_tick archived | B2 | Build, Merge steward | L | Authorise the migration and the deletions |
 | B4 | Claims view | The board shows Let Em Loose claims and the inbox as its main agent-facing surface; columns stay for work that does not run through it | L3, B3 | Build | M | Inbox only |
 
