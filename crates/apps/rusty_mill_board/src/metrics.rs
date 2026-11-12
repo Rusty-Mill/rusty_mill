@@ -35,8 +35,10 @@ pub struct ProjectTally {
     pub project: String,
     /// Cards not Done.
     pub open: usize,
-    /// Cards shipped within [`RECENT_DAYS`].
+    /// Cards shipped, with evidence, within [`RECENT_DAYS`].
     pub shipped: usize,
+    /// Cards Done without evidence within [`RECENT_DAYS`].
+    pub prototype: usize,
     /// Cards closed without shipping within [`RECENT_DAYS`].
     pub dropped: usize,
 }
@@ -48,8 +50,10 @@ pub struct Week {
     pub start_ms: i64,
     /// Cards created in it.
     pub added: usize,
-    /// Cards shipped in it.
+    /// Cards shipped in it, with evidence.
     pub done: usize,
+    /// Cards Done in it without evidence.
+    pub prototype: usize,
     /// Cards closed without shipping in it.
     pub dropped: usize,
 }
@@ -113,7 +117,11 @@ pub fn metrics(flow: &Workflow, cards: &[Card], now_ms: i64) -> Metrics {
     let since = now_ms.saturating_sub(RECENT_DAYS * DAY_MS);
     let recent: Vec<&Card> = cards
         .iter()
-        .filter(|c| c.done_ms.is_some_and(|d| d >= since))
+        .filter(|c| c.shipped() && c.done_ms.is_some_and(|d| d >= since))
+        .collect();
+    let prototypes: Vec<&Card> = cards
+        .iter()
+        .filter(|c| c.prototype() && c.done_ms.is_some_and(|d| d >= since))
         .collect();
     let dropped: Vec<&Card> = cards
         .iter()
@@ -122,7 +130,7 @@ pub fn metrics(flow: &Workflow, cards: &[Card], now_ms: i64) -> Metrics {
     Metrics {
         open: open.len(),
         by_column: by_column(flow, &open),
-        by_project: by_project(&open, &recent, &dropped),
+        by_project: by_project(&open, &recent, &prototypes, &dropped),
         by_priority: PRIORITIES
             .into_iter()
             .rev()
@@ -159,8 +167,13 @@ fn by_column(flow: &Workflow, open: &[&Card]) -> Vec<Tally<Column>> {
         .collect()
 }
 
-fn by_project(open: &[&Card], recent: &[&Card], dropped: &[&Card]) -> Vec<ProjectTally> {
-    let mut per: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::new();
+fn by_project(
+    open: &[&Card],
+    recent: &[&Card],
+    prototypes: &[&Card],
+    dropped: &[&Card],
+) -> Vec<ProjectTally> {
+    let mut per: BTreeMap<&str, (usize, usize, usize, usize)> = BTreeMap::new();
     open.iter()
         .for_each(|c| per.entry(&c.project).or_default().0 += 1);
     recent
@@ -169,14 +182,20 @@ fn by_project(open: &[&Card], recent: &[&Card], dropped: &[&Card]) -> Vec<Projec
     dropped
         .iter()
         .for_each(|c| per.entry(&c.project).or_default().2 += 1);
+    prototypes
+        .iter()
+        .for_each(|c| per.entry(&c.project).or_default().3 += 1);
     let mut out: Vec<ProjectTally> = per
         .into_iter()
-        .map(|(project, (open, shipped, dropped))| ProjectTally {
-            project: project.to_owned(),
-            open,
-            shipped,
-            dropped,
-        })
+        .map(
+            |(project, (open, shipped, dropped, prototype))| ProjectTally {
+                project: project.to_owned(),
+                open,
+                shipped,
+                prototype,
+                dropped,
+            },
+        )
         .collect();
     out.sort_by(|a, b| b.open.cmp(&a.open).then_with(|| a.project.cmp(&b.project)));
     out
@@ -211,6 +230,7 @@ fn weeks(cards: &[Card], now_ms: i64) -> Vec<Week> {
             start_ms: now_ms - (WEEKS - i) as i64 * WEEK_MS,
             added: 0,
             done: 0,
+            prototype: 0,
             dropped: 0,
         })
         .collect();
@@ -219,7 +239,10 @@ fn weeks(cards: &[Card], now_ms: i64) -> Vec<Week> {
             out[w].added += 1;
         }
         if let Some(w) = c.done_ms.and_then(|d| week_of(d, now_ms)) {
-            out[w].done += 1;
+            match c.shipped() {
+                true => out[w].done += 1,
+                false => out[w].prototype += 1,
+            }
         }
         if let Some(w) = c.closed.and_then(|x| week_of(x.at_ms, now_ms)) {
             out[w].dropped += 1;
@@ -288,6 +311,7 @@ mod tests {
         Card {
             created_ms,
             done_ms: Some(done_ms),
+            evidence: vec!["https://github.com/o/r/pull/1".into()],
             ..card(title, Column::DONE)
         }
     }
@@ -352,12 +376,14 @@ mod tests {
                     project: "q".into(),
                     open: 2,
                     shipped: 0,
+                    prototype: 0,
                     dropped: 0
                 },
                 ProjectTally {
                     project: "p".into(),
                     open: 0,
                     shipped: 1,
+                    prototype: 0,
                     dropped: 0
                 },
             ]
@@ -388,6 +414,7 @@ mod tests {
                 project: "p".into(),
                 open: 0,
                 shipped: 1,
+                prototype: 0,
                 dropped: 2
             }]
         );
@@ -404,6 +431,25 @@ mod tests {
         let weekly: Vec<(usize, usize)> = m.weeks.iter().map(|w| (w.done, w.dropped)).collect();
         assert_eq!(weekly[WEEKS - 1], (1, 1));
         assert_eq!(weekly[WEEKS - 2], (0, 1));
+    }
+
+    #[test]
+    fn done_without_evidence_is_a_prototype_not_shipped() {
+        let proto = Card {
+            evidence: Vec::new(),
+            ..shipped("proto", NOW - DAY_MS, NOW)
+        };
+        let cards = [proto, shipped("real", NOW - 2 * DAY_MS, NOW)];
+        let m = metrics(&Workflow::default(), &cards, NOW);
+        assert_eq!(m.lead_time.shipped, 1);
+        assert_eq!(
+            m.lead_time.median_ms,
+            Some(2 * DAY_MS),
+            "prototypes take no part"
+        );
+        assert_eq!((m.by_project[0].shipped, m.by_project[0].prototype), (1, 1));
+        let last = &m.weeks[WEEKS - 1];
+        assert_eq!((last.done, last.prototype), (1, 1));
     }
 
     #[test]

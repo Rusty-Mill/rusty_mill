@@ -385,6 +385,11 @@ pub struct Comment {
     pub text: String,
 }
 
+/// Most evidence links a card keeps.
+pub const MAX_EVIDENCE: usize = 8;
+/// Longest evidence link, in bytes.
+pub const MAX_EVIDENCE_BYTES: usize = 512;
+
 /// Where a project stands. Absent means [`ProjectStatus::Active`].
 #[derive(
     Debug,
@@ -567,6 +572,10 @@ pub struct Card {
     /// `done_ms`, and counts as dropped, never shipped. `None` for open and shipped cards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed: Option<Closure>,
+    /// Links showing the work shipped: a merged PR, or any page that shows it ([`Card::add_evidence`]).
+    /// A Done card counts as shipped only with one; without, it reports as a prototype.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
     /// When the card was archived, Unix ms: a Done card set aside from the board's default
     /// views. It is still Done, so roadmap, metrics and dependencies count it as before.
     #[serde(default)]
@@ -915,6 +924,7 @@ impl Card {
             updated_ms: now_ms,
             done_ms: None,
             closed: None,
+            evidence: Vec::new(),
             archived_ms: None,
             restored_ms: None,
             target_ms: None,
@@ -1112,6 +1122,52 @@ impl Card {
                 reason,
                 at_ms: now_ms,
             }),
+            ..self.next(now_ms)
+        })
+    }
+
+    /// Whether the card shipped: Done as shipped work ([`Card::done_ms`]) with evidence.
+    pub fn shipped(&self) -> bool {
+        self.done_ms.is_some() && !self.evidence.is_empty()
+    }
+
+    /// Whether the card is Done as shipped work but has no evidence: a prototype.
+    pub fn prototype(&self) -> bool {
+        self.done_ms.is_some() && self.evidence.is_empty()
+    }
+
+    /// Add evidence links (`http(s)://`, at most [`MAX_EVIDENCE_BYTES`] each, no whitespace),
+    /// keeping those already there. Unchanged if every link is already recorded.
+    ///
+    /// # Errors
+    /// [`BoardError::Invalid`] for no links, a malformed link, or more than [`MAX_EVIDENCE`] in all.
+    pub fn add_evidence(&self, links: &[String], now_ms: i64) -> Result<Self, BoardError> {
+        if links.is_empty() {
+            return Err(BoardError::Invalid("give at least one evidence link"));
+        }
+        let mut all = self.evidence.clone();
+        for raw in links {
+            let link = raw.trim();
+            let ok = (link.starts_with("https://") || link.starts_with("http://"))
+                && link.len() <= MAX_EVIDENCE_BYTES
+                && !link.chars().any(char::is_whitespace);
+            if !ok {
+                return Err(BoardError::Invalid(
+                    "an evidence link is an http(s) URL of at most 512 bytes, without spaces",
+                ));
+            }
+            if !all.iter().any(|l| l == link) {
+                all.push(link.to_owned());
+            }
+        }
+        if all.len() > MAX_EVIDENCE {
+            return Err(BoardError::Invalid("a card keeps at most 8 evidence links"));
+        }
+        if all == self.evidence {
+            return Ok(self.clone());
+        }
+        Ok(Self {
+            evidence: all,
             ..self.next(now_ms)
         })
     }
@@ -1488,6 +1544,59 @@ mod tests {
             .expect("comment");
         assert_eq!(c.shelf_since_ms(), 5);
         assert!(c.shelved(20 * day, Some(14 * day)));
+    }
+
+    #[test]
+    fn evidence_makes_a_done_card_shipped_and_without_it_a_prototype() {
+        let human = actor("nano", &[Capability::Triage, Capability::Merge]);
+        let done = card()
+            .move_freely(&flow(), &Column::DONE, &human, 7)
+            .expect("done");
+        assert!(done.prototype() && !done.shipped());
+        let pr = "https://github.com/o/r/pull/1".to_owned();
+        let shipped = done
+            .add_evidence(&[pr.clone(), format!(" {pr} ")], 8)
+            .expect("add");
+        assert_eq!(shipped.evidence, std::slice::from_ref(&pr));
+        assert!(shipped.shipped() && !shipped.prototype());
+        assert_eq!(
+            shipped.add_evidence(&[pr], 9).expect("same"),
+            shipped,
+            "idempotent"
+        );
+        let open = card()
+            .add_evidence(&["https://x.test/a".into()], 1)
+            .expect("open");
+        assert!(
+            !open.shipped() && !open.prototype(),
+            "evidence alone ships nothing"
+        );
+        let dropped = card()
+            .close(&flow(), CloseReason::WontDo, &human, 2)
+            .expect("close");
+        assert!(!dropped.prototype(), "dropped is neither");
+    }
+
+    #[test]
+    fn bad_or_too_many_evidence_links_are_refused() {
+        for bad in [
+            "",
+            "ftp://x",
+            "https://a b",
+            &format!("https://{}", "x".repeat(510)),
+        ] {
+            assert!(
+                matches!(
+                    card().add_evidence(&[bad.to_owned()], 1),
+                    Err(BoardError::Invalid(_))
+                ),
+                "{bad:?}"
+            );
+        }
+        assert!(card().add_evidence(&[], 1).is_err());
+        let nine: Vec<String> = (0..9).map(|i| format!("https://x.test/{i}")).collect();
+        assert!(card().add_evidence(&nine, 1).is_err());
+        assert!(card().add_evidence(&nine[..8], 1).is_ok());
     }
 
     #[test]

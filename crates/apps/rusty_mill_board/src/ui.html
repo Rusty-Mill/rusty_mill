@@ -836,7 +836,7 @@ async function renderMetrics(){
   parts.push(idle);
   if(!sel.project){
     const proj=panel("Open by project","w12 split");
-    proj.append(...rows(m.by_project.map(p=>({label:label(p.project),n:p.open,title:p.shipped+" shipped in 30 days"}))));
+    proj.append(...rows(m.by_project.map(p=>({label:label(p.project),n:p.open,title:p.shipped+" shipped, "+(p.prototype||0)+" prototype, "+(p.dropped||0)+" dropped in 30 days"}))));
     parts.push(proj);
   }
   b.replaceChildren(el("h3","Metrics · "+scope),kpis,...parts);

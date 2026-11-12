@@ -428,6 +428,19 @@ struct AddArgs {
     /// Id or number of the card this one is split from. Set it whenever you split work into
     /// pieces, so the decomposition is recorded rather than implied by titles.
     parent: Option<String>,
+    /// Evidence that the work shipped (a merged PR or other http(s) link), at most 8. A Done
+    /// card counts as shipped only with evidence; without, metrics report it as a prototype.
+    evidence: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct EvidenceArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Card id, or its number (`#42` or `42`).
+    id: String,
+    /// Links to add: a merged PR, or any http(s) page that shows the work shipped.
+    links: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -905,12 +918,13 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_add",
-            "Create a card in Backlog, or with `done: true` straight in Done to record work that already merged (needs `close`; put the merged PR in the body). When splitting work into pieces, pass `parent` (the card it is split from) on each piece.",
+            "Create a card in Backlog, or with `done: true` straight in Done to record work that already merged (needs `close`; pass the merged PR as `evidence`, or it counts as a prototype). When splitting work into pieces, pass `parent` (the card it is split from) on each piece.",
             |b, i, a: AddArgs| {
                 let who = acting(b, i, &a.who)?;
                 let new = NewCard {
                     done: a.done == Some(true),
                     parent: a.parent.as_deref().map(|r| card_ref(b, r)).transpose()?,
+                    evidence: a.evidence.unwrap_or_default(),
                     ..NewCard::new(
                         &a.title,
                         a.body.as_deref().unwrap_or(""),
@@ -987,6 +1001,14 @@ pub fn ops() -> Vec<Op> {
             |b, i, a: IdArgs| {
                 let who = acting(b, i, &a.who)?;
                 card(b.release(card_ref(b, &a.id)?, &who)?)
+            },
+        ),
+        op(
+            "card_evidence",
+            "Add evidence that a card's work shipped: a merged PR, or any http(s) page that shows it (at most 8 per card; links already there are kept). A Done card counts as shipped in `board_metrics` only with evidence; without, it is reported as a prototype. Needs `close`, `merge` or `triage`.",
+            |b, i, a: EvidenceArgs| {
+                let who = acting(b, i, &a.who)?;
+                card(b.add_evidence(card_ref(b, &a.id)?, &a.links, &who)?)
             },
         ),
         op(
@@ -1838,6 +1860,68 @@ mod tests {
         ));
         let got = call_as(&board, None, "card_get", json!({"id": "#1"})).expect("get");
         assert_eq!(got["card"]["comments"], json!([]));
+    }
+
+    #[test]
+    fn evidence_is_added_by_whoever_records_shipped_work() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let as_ = |role: &str, extra: Value| {
+            let mut a = json!({"actor": "nano", "role": role});
+            a.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            a
+        };
+        let pr = "https://github.com/o/r/pull/9";
+        let added = call_as(
+            &board,
+            None,
+            "card_add",
+            as_(
+                "builder",
+                json!({"title": "merged", "done": true, "evidence": [pr]}),
+            ),
+        )
+        .expect("add")["card"]
+            .clone();
+        assert_eq!(added["evidence"], json!([pr]));
+        call_as(
+            &board,
+            None,
+            "card_add",
+            as_("human", json!({"title": "t"})),
+        )
+        .expect("add");
+        let refused = call_as(
+            &board,
+            None,
+            "card_evidence",
+            as_("reviewer", json!({"id": "#2", "links": [pr]})),
+        );
+        assert!(matches!(
+            refused,
+            Err(CallError::Board(BoardError::Forbidden(_)))
+        ));
+        let bad = call_as(
+            &board,
+            None,
+            "card_evidence",
+            as_("human", json!({"id": "#2", "links": ["not a link"]})),
+        );
+        assert!(matches!(bad, Err(CallError::Board(BoardError::Invalid(_)))));
+        let ok = call_as(
+            &board,
+            None,
+            "card_evidence",
+            as_("human", json!({"id": "#2", "links": [pr]})),
+        )
+        .expect("evidence");
+        assert_eq!(ok["card"]["evidence"], json!([pr]));
+        let m = call_as(&board, None, "board_metrics", json!({})).expect("metrics");
+        assert_eq!(
+            m["lead_time"]["shipped"], 1,
+            "the merged card counts as shipped"
+        );
     }
 
     #[test]
