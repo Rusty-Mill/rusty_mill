@@ -22,8 +22,9 @@ drift. Built small and safe, because it writes into other tools' config folders.
 - Out: forking Skills Manager or Skills Desktop (D3); built-in editor; LLM translation;
   OAuth, vendor marketplaces as built-ins, telemetry, auto-updater; whole-folder
   linking; any write outside our own folders without a previewed plan (D8).
-- Undecided: desktop shell (Q3); fate of `library/` (Q1); how Markdown sections are
-  applied (Q6).
+- `library/` is absorbed over time: its entry kinds and `sources.json` are the domain
+  model; `build.py` runs until the Rust core renders the catalog, then retires (D14).
+- Undecided: desktop shell (Q3); how Markdown sections are applied (Q6).
 
 ## Constraints
 - Lives in rusty_mill, named "Ai Env Manager" (D1). [stated]

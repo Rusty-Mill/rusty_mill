@@ -39,7 +39,7 @@ sources disagree, answer by that rule and add the conflict, with both sources, t
 - Never delete or replace a path that lacks our managed marker (D6).
 - No telemetry; no write outside our own folders without a previewed plan and `--yes` (D8).
 - No code copied from Skills Desktop (D9). New third-party dependencies are ask-first (D12).
-- `library/` is not changed until OPEN_QUESTIONS Q1 is answered.
+- `library/` keeps working (`build.py`) until the Rust core renders the catalog (D14); no change to it before then without a plan.
 
 ## Decide the tier
 1. **Answer** when the pack, remind-me or standing principles settle it. Cite the
