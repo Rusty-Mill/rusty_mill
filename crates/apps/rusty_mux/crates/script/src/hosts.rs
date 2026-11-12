@@ -212,6 +212,84 @@ impl Declared {
     }
 }
 
+/// What a sync did with one of the sender's hosts (C49b, term pack D204).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// The receiver lacked it; it was appended.
+    Added,
+    /// The receiver has its own, different entry, which stays.
+    Kept,
+    /// `--replace`: the sender's entry took the receiver's place.
+    Replaced,
+    /// Not taken, and why.
+    Skipped(&'static str),
+}
+
+/// The receiver's hosts after a sync, and what happened to each sender
+/// host that changed something or was turned away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    pub hosts: Vec<Host>,
+    pub report: Vec<(String, Outcome)>,
+}
+
+/// `receiver`'s saved hosts with `sender`'s merged in, per name: a name
+/// the receiver lacks is appended; one it has keeps its entry unless
+/// `replace`; none is ever removed. A name `declared` in the receiver's
+/// config is skipped, so no hidden duplicate is written (D199). Socket
+/// addresses name a server on the sender, so they are dropped, and a host
+/// left with none is skipped (Q47). An entry equal to the receiver's is
+/// not reported.
+pub fn merge(receiver: &[Host], sender: &[Host], declared: &Declared, replace: bool) -> Merged {
+    let mut hosts = receiver.to_vec();
+    let mut report = Vec::new();
+    for host in sender {
+        let outcome = match portable(host) {
+            _ if declared.host(&host.name).is_some() => {
+                Some(Outcome::Skipped("declared in the config"))
+            }
+            None => Some(Outcome::Skipped(
+                "only socket addresses, which are the sender's own",
+            )),
+            Some(host) => take(&mut hosts, host, replace),
+        };
+        if let Some(outcome) = outcome {
+            report.push((host.name.clone(), outcome));
+        }
+    }
+    Merged { hosts, report }
+}
+
+/// `host` with only its ssh addresses; `None` when it has none.
+fn portable(host: &Host) -> Option<Host> {
+    let addresses: Vec<Address> = host
+        .addresses
+        .iter()
+        .filter(|a| matches!(a, Address::Ssh { .. }))
+        .cloned()
+        .collect();
+    (!addresses.is_empty()).then(|| Host {
+        name: host.name.clone(),
+        addresses,
+    })
+}
+
+/// Puts `host` into `hosts` as [`merge`] says; `None` when nothing changed.
+fn take(hosts: &mut Vec<Host>, host: Host, replace: bool) -> Option<Outcome> {
+    let Some(have) = hosts.iter_mut().find(|h| h.name == host.name) else {
+        hosts.push(host);
+        return Some(Outcome::Added);
+    };
+    if *have == host {
+        return None;
+    }
+    if !replace {
+        return Some(Outcome::Kept);
+    }
+    *have = host;
+    Some(Outcome::Replaced)
+}
+
 /// The `hosts` and `home` of a config object, adding every problem in
 /// them to `problems`.
 pub(crate) fn declared(map: &Map, problems: &mut Vec<Problem>) -> Declared {
@@ -533,5 +611,64 @@ mod tests {
         assert_eq!(hosts_path(var("cfg".into(), abs("/home/me"))), home);
         assert_eq!(hosts_path(var(String::new(), String::new())), None);
         assert_eq!(hosts_path(var(String::new(), "me".into())), None);
+    }
+
+    fn ssh(dest: &str) -> Address {
+        Address::Ssh {
+            dest: dest.into(),
+            socket: "/r.sock".into(),
+            udp_host: None,
+        }
+    }
+
+    fn host(name: &str, addresses: Vec<Address>) -> Host {
+        Host {
+            name: name.into(),
+            addresses,
+        }
+    }
+
+    #[test]
+    fn a_merge_adds_keeps_replaces_and_skips_per_name() {
+        let receiver = vec![host("same", vec![ssh("a")]), host("mine", vec![ssh("a")])];
+        let sender = vec![
+            host("same", vec![ssh("a")]),
+            host("mine", vec![ssh("b")]),
+            host("new", vec![socket("/s.sock"), ssh("n")]),
+            host("local", vec![socket("/s.sock")]),
+            host("decl", vec![ssh("d")]),
+        ];
+        let declared = Declared {
+            hosts: vec![host("decl", vec![socket("/c.sock")])],
+            home: None,
+        };
+        let kept = merge(&receiver, &sender, &declared, false);
+        assert_eq!(
+            kept.report,
+            [
+                ("mine".to_owned(), Outcome::Kept),
+                ("new".to_owned(), Outcome::Added),
+                (
+                    "local".to_owned(),
+                    Outcome::Skipped("only socket addresses, which are the sender's own")
+                ),
+                (
+                    "decl".to_owned(),
+                    Outcome::Skipped("declared in the config")
+                ),
+            ]
+        );
+        assert_eq!(kept.hosts[1], receiver[1], "kept as it was");
+        assert_eq!(kept.hosts[2], host("new", vec![ssh("n")]), "socket dropped");
+        assert_eq!(kept.hosts.len(), 3);
+        let replaced = merge(&receiver, &sender, &declared, true);
+        assert_eq!(replaced.report[0], ("mine".to_owned(), Outcome::Replaced));
+        assert_eq!(replaced.hosts[1], host("mine", vec![ssh("b")]));
+        let none = merge(&receiver, &[], &Declared::default(), true);
+        assert_eq!(
+            (none.hosts, none.report),
+            (receiver, vec![]),
+            "never removes"
+        );
     }
 }

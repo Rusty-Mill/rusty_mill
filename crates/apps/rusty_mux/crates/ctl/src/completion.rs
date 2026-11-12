@@ -28,7 +28,17 @@ const COMMAND_WORDS: &[(&str, &[&str])] = &[
     ("config", &["check", "list"]),
     (
         "hosts",
-        &["list", "add", "remove", "--socket", "--ssh", "--udp-host"],
+        &[
+            "list",
+            "add",
+            "remove",
+            "pull",
+            "--socket",
+            "--ssh",
+            "--udp-host",
+            "--replace",
+            "--dry-run",
+        ],
     ),
     (
         "ssh",
