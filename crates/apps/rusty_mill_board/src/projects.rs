@@ -18,9 +18,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::domain::DEFAULT_PROJECT;
+use crate::domain::{DEFAULT_PROJECT, ProjectStatus};
 
 /// Longest repository or project name.
 const MAX_NAME: usize = 40;
@@ -29,6 +29,44 @@ const REPOS_KEY: &str = "repos";
 
 /// project name -> the repository paths its cards may change (empty for the repository's default).
 type Paths = BTreeMap<String, Vec<String>>;
+
+/// Each project's status, kept apart from the registry (its own settings file), so the
+/// projects file keeps its format. Only projects that are not active are listed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Statuses(BTreeMap<String, ProjectStatus>);
+
+impl Statuses {
+    /// Parse a status file's JSON: `{"project": "paused" | "experiment" | "archived", ...}`.
+    ///
+    /// # Errors
+    /// On malformed JSON or an unknown status.
+    pub fn parse(json: &str) -> Result<Self, String> {
+        let raw: BTreeMap<String, ProjectStatus> =
+            serde_json::from_str(json).map_err(|e| format!("project status: {e}"))?;
+        Ok(Self(
+            raw.into_iter()
+                .filter(|(_, s)| *s != ProjectStatus::Active)
+                .collect(),
+        ))
+    }
+
+    /// `project`'s status: [`ProjectStatus::Active`] unless listed.
+    pub fn of(&self, project: &str) -> ProjectStatus {
+        self.0.get(project).copied().unwrap_or_default()
+    }
+
+    /// These statuses with `project` set to `status`.
+    #[must_use]
+    pub fn with(&self, project: &str, status: ProjectStatus) -> Self {
+        let mut next = self.0.clone();
+        match status {
+            ProjectStatus::Active => next.remove(project),
+            other => next.insert(project.to_owned(), other),
+        };
+        Self(next)
+    }
+}
 
 /// Repository name -> its projects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -290,6 +328,22 @@ impl Projects {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statuses_default_to_active_and_list_only_the_rest() {
+        let s = Statuses::parse(r#"{"a": "paused", "b": "active"}"#).expect("parse");
+        assert_eq!(s.of("a"), ProjectStatus::Paused);
+        assert_eq!(s.of("b"), ProjectStatus::Active);
+        assert_eq!(s.of("unlisted"), ProjectStatus::Active);
+        let s = s
+            .with("a", ProjectStatus::Active)
+            .with("c", ProjectStatus::Experiment);
+        assert_eq!(
+            serde_json::to_string(&s).expect("json"),
+            r#"{"c":"experiment"}"#
+        );
+        assert!(Statuses::parse(r#"{"a": "gone"}"#).is_err());
+    }
 
     fn names(p: &Projects) -> Vec<&str> {
         let mut n: Vec<_> = p.names().collect();
