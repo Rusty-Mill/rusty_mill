@@ -246,6 +246,9 @@ connection afterwards.
 - Descriptors belong to the frame that holds the last byte of the read that brought them. That
   frame must start inside the read, or they are refused. Descriptors sent with any other request
   are closed.
+- A client must send a launch's descriptors with the frame's first byte: either the whole frame
+  and its descriptors in one `sendmsg`, or the descriptors on the first chunk if the frame is
+  split. A client that attaches them to a later chunk gets "descriptors inside a frame".
 - `env` names and values are text, like `argv`.
 - `own` passes only descriptors it inherited, which it notes at startup before opening its
   socket.

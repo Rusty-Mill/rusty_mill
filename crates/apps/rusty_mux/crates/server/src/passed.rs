@@ -179,6 +179,29 @@ mod tests {
         assert!(matches!(claim(&mut pending, 0, 10), Passed::Bad(_)));
     }
 
+    /// A second arrival before the first is claimed closes the first, and
+    /// the frame that began before the second read is then refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unclaimed_arrival_replaced_is_closed() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+
+        let (sent, mut peer) = UnixStream::pair().expect("socket pair");
+        let mut pending = Some(Arrival {
+            fds: vec![Fd::from(sent)],
+            truncated: false,
+            start: 0,
+            end: 10,
+        });
+        assert!(matches!(claim(&mut pending, 0, 5), Passed::None), "not yet");
+        pending = arrival(10, 30, false);
+        let mut byte = [0u8; 1];
+        assert_eq!(peer.read(&mut byte).expect("read"), 0, "first is closed");
+        assert!(matches!(claim(&mut pending, 0, 30), Passed::Bad(_)));
+        assert!(pending.is_none());
+    }
+
     #[test]
     fn nothing_pending_is_none() {
         assert!(matches!(claim(&mut None, 0, 10), Passed::None));
