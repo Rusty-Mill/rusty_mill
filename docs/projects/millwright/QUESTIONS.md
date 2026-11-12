@@ -12,8 +12,8 @@ acted on.
 3. **O2:** give Claude its own GitHub identity. Cross-family review cannot be enforced without it.
 4. **P1:** decide Portfolio Intelligence's shorter MVP path. Nothing there is dispatchable until then.
 5. **R1:** approve the remind-me order of work. The dormancy fix protects a store in daily use.
-6. **X1 to X3:** close the three experiments against their written conclusions.
-7. **E2:** start the backlog triage pass, beginning with the 113 cards of the paused projects.
+6. ~~**X1 to X3:** close the three experiments against their written conclusions.~~ Answered 2026-11-12; see DECISIONS.md close-ledger, pause-conflux, archive-swarm-os.
+7. ~~**E2:** start the backlog triage pass, beginning with the 113 cards of the paused projects.~~ Answered 2026-11-12; see DECISIONS.md backlog-triage. Still open from it: which projects count as paused (below).
 
 ## Let Em Loose
 
@@ -29,7 +29,6 @@ These are also tracked by `let-em-loose-expert`; its pack is the authority for t
 | L6 | Accept a first experiment run that launches builders from the existing Codex container, adding jailed terminals afterwards? | Yes. It takes most of the second milestone off the critical path. |
 | L7 | Two approved designs (builder session, gaps) are lost. Are there copies, or are versions rebuilt from the decision log acceptable for re-approval? | Accept rebuilt versions. |
 | L8 | Approve the first milestone's designs as a batch, instead of one approval per card? | Yes. Most of it is deployment, prompts and configuration. |
-| L9 | Freeze new Let Em Loose design until the first run has happened? | Yes. It is the project's own rule: build the slice before designing more. |
 | L10 | Sign the golden set once it is drafted? Agreed 2026-11-04; no draft exists yet. | Nothing to do until the draft arrives. |
 | L11 | Update the project's docs, which list "agents merging PRs" as a non-goal, when the new merge rule takes effect? | Yes, in the same change that lifts the rule. |
 
@@ -40,10 +39,9 @@ These are also tracked by `let-em-loose-expert`; its pack is the authority for t
 | M1 | Approve the minimal role fix: one credential per agent, the builder role loses admin, merge and triage, and "close" is gated or replaced by a narrow "record merged work" capability? | Yes. It is configuration, not code. |
 | M2 | Which role should Claude chat and voice sessions hold? Today they sign in as the human admin. | A design role: add and comment on cards, no gates, no merge. |
 | M3 | Start the design for the board's own SQLite store? | Yes. Design first; Nano approves before any migration. |
-| M4 | With Nano out of the gates, who commits work from the backlog? | Nano, by setting priorities per project or milestone; agents pull from that. |
 | M5 | Does the ask-first list (data migrations, deletions, dependency and toolchain bumps, public API changes) still reach Nano once agents may merge and deploy? | Yes, keep it. |
 | M6 | Where do the evidence gates live? | In Let Em Loose. Do not build richer gate machinery into Mill Board's columns. |
-| M7 | Drop the Hermes Kanban pilot? | Yes. "No fourth executor" is a settled decision. |
+| M7 | Drop the Hermes Kanban pilot agreed in the 2026-11-10 Mill Board audit? | Yes. One executor fewer to keep honest. ("No fourth executor" is Let Em Loose D20, which Nano reopened for mux-hosted agents on 2026-11-04, so it is not by itself a reason.) |
 | O1 | Update the Assistant Operating Model with the audit findings (lanes bound to credentials, design produces notes not cards, research enters as claims, the board's own store, deploys)? | Yes. |
 | O2 | Create a GitHub identity for Claude's work, so its pull requests and reviews stop posting as Nano? | Yes. Dottius already has one; GitHub's own review rules can then enforce cross-family review. |
 | O3 | Confirm Duetius as coordinator, including choosing between two agents' positions on reversible changes? He is Claude-family, like the primary builder. | Yes for routing and chasing. For disputes over Claude-authored work, Dottius or Codex decides. |
@@ -81,9 +79,6 @@ These are also tracked by `let-em-loose-expert`; its pack is the authority for t
 
 | # | Question | Recommendation |
 | --- | --- | --- |
-| X1 | Ledger: fold its evidence store into the remind-me benchmark, stop its recall, MCP and inference roadmap, and close its 37 open cards against a written conclusion? | Yes. |
-| X2 | Conflux: pause it and close its 30 cards? Anything to port into BBP? | Pause and close. BBP already has epochs, action marks, budgets and replay. |
-| X3 | Swarm OS: archive it and relabel it on the board as a prototype instead of 47 shipped? | Yes. |
 | X4 | Converge Continuum: has the rebase and CI cost been measured? Finish the baseline, then trial Jujutsu with the merge queue for two weeks before building the kernel? | Measure first, then the trial. |
 | X5 | Communications: run one bounded real-model trial, write a one-page conclusion and close? | Yes. No optimisation or Protobuf arms. |
 | X6 | Archive rusty_tick once the board has migrated to its own store? | Yes, as already decided; confirm the timing. |
@@ -92,7 +87,12 @@ These are also tracked by `let-em-loose-expert`; its pack is the authority for t
 
 | # | Question | Recommendation |
 | --- | --- | --- |
-| E1 | Adopt an entry rule: a new idea starts as a design note in remind-me, and a repository and cards are created only after an overlap check? | Yes. Deliberate experiments are allowed if labelled, with a harvest at the end. |
-| E2 | Run the backlog triage pass (an agent proposes commit, fold or shelve per project; nothing moves until Nano approves), starting with Conflux, Ledger and Converge? | Yes. |
-| E3 | Is any of the five audited repos carrying work committed for this month? | Anything that is not can leave the board. |
 | E4 | Settle one Rust toolchain pin across the repos, and move Ledger and Conflux to the newer SQLite binding? Both are ask-first changes. | Yes to both. |
+
+E2 (run the triage) is answered; see DECISIONS.md backlog-triage. Still open from it:
+which projects count as paused. X1 to X3 settle that Ledger, Conflux and Swarm OS
+leave the board; whether Converge is also paused, as E2's wording suggested, is not
+settled (handoff/OPEN_QUESTIONS.md Q2).
+
+E1 (entry rule) and E3 (committed work this month) are answered; see DECISIONS.md
+entry-rule and audited-repos-this-month; X1 to X3 still stand (e3-x-reconcile).
