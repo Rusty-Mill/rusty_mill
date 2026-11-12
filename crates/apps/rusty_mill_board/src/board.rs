@@ -14,6 +14,7 @@ use crate::domain::{
     Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit,
     Event, EventKind, ExecutionLink, MoveRules, Plan, Shelf, View, import_id, text_hash,
 };
+use crate::external::Observation;
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
 use crate::metrics::{Metrics, metrics};
 use crate::milestones::{MemMilestones, Milestone, MilestoneEdit, MilestoneStore};
@@ -1139,6 +1140,26 @@ impl<S: Store> Board<S> {
         }
         self.apply(id, by, EventKind::ExecutionRecovered, |c, now| {
             c.recover_execution(expected_generation, link.clone(), now)
+        })
+    }
+
+    /// Record an observation of execution outside Orch on this card (ADR-0006; see
+    /// [`Card::observe`]). Needs Build and the card's project, like binding an Orch
+    /// execution; the acting identity is recorded as the ref's `by`.
+    ///
+    /// # Errors
+    /// A missing capability or scope, input refused by [`Card::observe`], or storage failure.
+    pub fn observe_execution(
+        &self,
+        id: Uuid,
+        obs: Observation,
+        by: &Actor,
+    ) -> Result<Card, BoardError> {
+        if !by.caps.contains(&Capability::Build) {
+            return Err(BoardError::Forbidden(Capability::Build));
+        }
+        self.apply(id, by, EventKind::ExecutionObserved, |c, now| {
+            c.observe(obs.clone(), &by.name, now)
         })
     }
 

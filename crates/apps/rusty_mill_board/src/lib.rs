@@ -5,6 +5,7 @@
 //! - [`board`]: the service: roles, clock, commit with retry.
 //! - [`projects`]: the applications one board serves, and the paths each may change.
 //! - [`domain`]: pure cards, column ids and capabilities.
+//! - [`external`]: observation-only refs to execution outside Orch (ADR-0006).
 //! - [`workflow`]: the admin-edited columns and the moves between them.
 //! - [`roadmap`]: a project's roadmap lanes, derived from its cards.
 //! - [`trace`]: parent/child decomposition and milestone links, rolled up from cards.
@@ -24,6 +25,7 @@ pub mod bbp_cli;
 pub mod board;
 pub mod domain;
 pub mod drain;
+pub mod external;
 pub mod github;
 pub mod http;
 pub mod identities;
