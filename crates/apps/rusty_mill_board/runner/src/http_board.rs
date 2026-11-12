@@ -75,7 +75,7 @@ impl HttpBoard {
 
 impl BoardApi for HttpBoard {
     fn list(&self, column: &Column) -> Result<Vec<Card>, ApiError> {
-        let out = self.call("board_list", json!({ "column": column }))?;
+        let out = self.call("board_list", json!({ "column": column, "view": "full" }))?;
         serde_json::from_value(out["cards"].clone()).map_err(transport)
     }
 

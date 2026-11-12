@@ -481,10 +481,11 @@ pub struct Card {
 #[serde(rename_all = "snake_case")]
 pub enum View {
     /// The whole card: body, prompt, links and comments.
-    #[default]
     Full,
     /// [`CardSummary`]: what a board or queue view needs, without body, prompt, links or
-    /// comments.
+    /// comments. The default (S7): a full listing is asked for, never the accident of
+    /// leaving `view` out.
+    #[default]
     Summary,
 }
 
