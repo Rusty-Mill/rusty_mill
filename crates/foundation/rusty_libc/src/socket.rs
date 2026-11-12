@@ -669,6 +669,9 @@ impl Received {
 /// `EINVAL` when `fds` holds more than [`MAX_FDS`], or when `buf` is
 /// empty while `fds` is not: a stream needs at least one byte to carry
 /// descriptors.
+///
+/// On a stream this may send less than `buf`. The descriptors went with
+/// what was sent, so send the rest without them.
 pub fn send_with_fds(fd: i32, buf: &[u8], fds: &[i32], flags: i32) -> Result<usize, Errno> {
     if fds.len() > MAX_FDS || (buf.is_empty() && !fds.is_empty()) {
         return Err(Errno::EINVAL);
@@ -727,8 +730,11 @@ pub fn send_with_fds(fd: i32, buf: &[u8], fds: &[i32], flags: i32) -> Result<usi
 /// sent alongside. [`MSG_CMSG_CLOEXEC`] is always added to `flags`, so a
 /// received descriptor never leaks into a program this process starts.
 ///
-/// The kernel never merges data sent with descriptors into an earlier
-/// read, so the descriptors belong to the first byte of `buf`.
+/// On a stream, Linux ends a read after the segment that carried
+/// descriptors but may start it with bytes of earlier sends, so the
+/// descriptors came with some byte of `buf`, the last of which is theirs.
+/// Send them only where the reader can find the boundary, such as with
+/// the first byte of a frame.
 pub fn recv_with_fds(fd: i32, buf: &mut [u8], flags: i32) -> Result<Received, Errno> {
     let mut control = Control([0; CONTROL]);
     let iov = IoVec {
@@ -1101,7 +1107,7 @@ mod tests {
         let mut buf = [0u8; 1];
         let got = recv_with_fds(b.as_raw_fd(), &mut buf, 0).expect("recv");
         assert!(got.truncated);
-        assert!(got.count <= MAX_FDS);
+        assert_eq!(got.count, MAX_FDS);
         for fd in got.fds() {
             fd::close(*fd).expect("close");
         }
