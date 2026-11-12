@@ -8,7 +8,9 @@ use rusty_wire::Writer;
 use super::*;
 use crate::field::Out;
 use crate::schema::Value;
-use crate::{Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Program, Takeover};
+use crate::{
+    BlockSignal, Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Program, Takeover,
+};
 use rusty_mux_core::InputMode;
 
 const REQ_ID: u32 = 1;
@@ -447,6 +449,12 @@ fn every_message_round_trips() {
         },
         Message::RequestLease { req: 22, block },
         Message::Shutdown { req: 23 },
+        Message::SignalBlock {
+            req: 24,
+            block,
+            signal: BlockSignal::Term,
+        },
+        Message::ReleaseBlock { req: 25, block },
         Message::InputBatch {
             block,
             client: ClientId::from_uuid(Uuid::new_v4()),
@@ -1437,4 +1445,46 @@ fn a_version_that_is_not_short_printable_ascii_is_dropped() {
         .expect("bad UTF-8 decodes")
         .expect("whole frame");
     assert!(matches!(decoded, Message::Hello { version: None, .. }));
+}
+
+#[test]
+fn a_signal_outside_the_closed_set_is_refused() {
+    let block = BlockId::from_uuid(Uuid::new_v4());
+    let frame = raw_frame(0x28, |o| {
+        o.varint(REQ_ID, 1).uuid(4, block.uuid()).varint(25, 10);
+    });
+    assert_eq!(
+        decode(&frame),
+        Err(Error::InvalidField {
+            message: 0x28,
+            field: 25
+        })
+    );
+}
+
+#[test]
+fn block_signals_keep_their_linux_numbers_and_names() {
+    let pairs: Vec<(u8, &str)> = BlockSignal::ALL
+        .iter()
+        .map(|s| (s.number(), s.name()))
+        .collect();
+    assert_eq!(
+        pairs,
+        [
+            (1, "hup"),
+            (2, "int"),
+            (9, "kill"),
+            (15, "term"),
+            (18, "cont"),
+            (19, "stop")
+        ]
+    );
+    for signal in BlockSignal::ALL {
+        assert_eq!(BlockSignal::from_name(signal.name()), Some(signal));
+        assert_eq!(
+            BlockSignal::from_number(signal.number().into()),
+            Some(signal)
+        );
+    }
+    assert_eq!(BlockSignal::from_name("usr1"), None);
 }

@@ -24,6 +24,7 @@ Tiers:
 | rusty_term | Normal | none | project-priorities |
 | pythrust | Normal | none | project-priorities |
 | rusty_mill | Normal | G0 (this rule) | project-priorities |
+| ai_env_manager | Normal | M0 core and linker (Ai Env Manager's own milestone, not a Millwright one) | ai-env-manager-priority |
 | converge_continuum | Low (not paused) | S3 after X4 | project-priorities |
 | communications | Low | S2 (one trial, then close) | project-priorities |
 | rusty_fclone | Low | L3 verdict compares against it | project-priorities |

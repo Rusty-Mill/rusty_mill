@@ -40,6 +40,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use error::Error;
 pub use frame::{MAX_FRAME, decode, encode};
 pub use message::{
-    Code, Cursor, DatagramKey, ECHO_GRACE, Echo, Entry, Features, Launch, Message, Ownership,
-    Program, Takeover,
+    BlockSignal, Code, Cursor, DatagramKey, ECHO_GRACE, Echo, Entry, Features, Launch, Message,
+    Ownership, Program, Takeover,
 };

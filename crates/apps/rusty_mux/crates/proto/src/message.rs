@@ -219,6 +219,11 @@ impl Features {
     /// older decoders skip the field.
     pub const HOLD: Self = Self(1 << 43);
 
+    /// Signal and release (C76): [`Message::SignalBlock`] signals an owned
+    /// block's program group, and [`Message::ReleaseBlock`] closes its PTY
+    /// and waits for the program without ever killing it. Linux only: only a Linux server offers it.
+    pub const SIGNAL_RELEASE: Self = Self(1 << 44);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -308,6 +313,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::BACKGROUND_HISTORY, "background history"),
     (Features::AGENT_LAUNCH, "agent launch"),
     (Features::HOLD, "hold on exit"),
+    (Features::SIGNAL_RELEASE, "signal and release"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -388,6 +394,63 @@ pub struct Launch {
     /// Keep the block, read-only, once its program exits (C78).
     /// Negotiated with [`Features::HOLD`].
     pub hold: bool,
+}
+
+/// What [`Message::SignalBlock`] may send (C76): a closed set, so no
+/// arbitrary numbers. On the wire as its Linux number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockSignal {
+    Hup,
+    Int,
+    Kill,
+    Term,
+    Cont,
+    Stop,
+}
+
+impl BlockSignal {
+    pub const ALL: [Self; 6] = [
+        Self::Hup,
+        Self::Int,
+        Self::Kill,
+        Self::Term,
+        Self::Cont,
+        Self::Stop,
+    ];
+
+    /// Its Linux signal number.
+    pub const fn number(self) -> u8 {
+        match self {
+            Self::Hup => 1,
+            Self::Int => 2,
+            Self::Kill => 9,
+            Self::Term => 15,
+            Self::Cont => 18,
+            Self::Stop => 19,
+        }
+    }
+
+    /// Its name without `SIG`, lower case, such as `term`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Hup => "hup",
+            Self::Int => "int",
+            Self::Kill => "kill",
+            Self::Term => "term",
+            Self::Cont => "cont",
+            Self::Stop => "stop",
+        }
+    }
+
+    pub fn from_number(number: u64) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|s| u64::from(s.number()) == number)
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.name() == name)
+    }
 }
 
 /// Who controls an owned block, in its [`Entry::Block`] (C46).
@@ -710,6 +773,23 @@ pub enum Message {
     Shutdown {
         req: u64,
     },
+    /// Sends `signal` to the program group of owned `block` (C76). Refused
+    /// with `exited` once the program is gone, for anyone but the owner,
+    /// and on Windows. Negotiated with [`Features::SIGNAL_RELEASE`].
+    SignalBlock {
+        req: u64,
+        block: BlockId,
+        signal: BlockSignal,
+    },
+    /// Closes owned `block`'s PTY and waits for its program without ever
+    /// killing it (C76); the kernel's hang-up is all it gets. A held block
+    /// then stays read-only, any other closes once the program exits.
+    /// Refused as [`Message::SignalBlock`] is. Negotiated with
+    /// [`Features::SIGNAL_RELEASE`].
+    ReleaseBlock {
+        req: u64,
+        block: BlockId,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -973,6 +1053,8 @@ mod ty {
     pub const REVOKE_LEASE: u8 = 0x22;
     pub const REQUEST_LEASE: u8 = 0x23;
     pub const SHUTDOWN: u8 = 0x24;
+    pub const SIGNAL_BLOCK: u8 = 0x28;
+    pub const RELEASE_BLOCK: u8 = 0x29;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -1122,6 +1204,11 @@ impl Message {
                 out.varint(REQ, *req);
                 ty::SHUTDOWN
             }
+            M::SignalBlock { req, block, signal } => {
+                out.varint(SIGNAL, signal.number().into());
+                req_block(out, *req, *block, ty::SIGNAL_BLOCK)
+            }
+            M::ReleaseBlock { req, block } => req_block(out, *req, *block, ty::RELEASE_BLOCK),
             M::ResizeSplit {
                 req,
                 block,
@@ -1426,6 +1513,16 @@ impl Message {
             },
             ty::SHUTDOWN => M::Shutdown {
                 req: f.varint(REQ)?,
+            },
+            ty::SIGNAL_BLOCK => M::SignalBlock {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                signal: BlockSignal::from_number(f.varint(SIGNAL)?)
+                    .ok_or_else(|| f.invalid(SIGNAL))?,
+            },
+            ty::RELEASE_BLOCK => M::ReleaseBlock {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
             },
             ty::RESIZE_SPLIT => M::ResizeSplit {
                 req: f.varint(REQ)?,

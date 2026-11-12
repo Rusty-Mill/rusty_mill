@@ -14,7 +14,7 @@ use rusty_tokio::sync::Notify;
 
 use crate::outbox::{Inbox, outbox};
 use crate::passed::{self, Arrival, Descriptors, Passed};
-use crate::state::{Kept, Pending, Shared, State};
+use crate::state::{Kept, Pending, PtyWrite, Shared, State};
 
 const READ_CHUNK: usize = 64 << 10;
 
@@ -135,14 +135,37 @@ async fn serve(
                 continue;
             }
         };
-        write.pty.write_all(&write.data).await?;
-        if let Some(key) = write.key {
+        let PtyWrite {
+            pty,
+            revoke,
+            data,
+            key,
+            report,
+        } = write;
+        // A release abandons the write and drops its hold on the master,
+        // so no byte reaches the program afterwards (C76). Biased, so a
+        // release that came first wins before a byte is written.
+        let taken = std::cell::Cell::new(0);
+        rusty_tokio::select! {
+            biased;
+            _ = revoke.fired() => {}
+            result = pty.write_counted(&data, &taken) => result?,
+        }
+        drop(pty);
+        // What the program got, all of it unless a release cut it short.
+        let mut data = data;
+        data.truncate(taken.get());
+        if data.is_empty() {
+            continue;
+        }
+        if let Some(key) = key {
             let now = std::time::Instant::now();
             state.borrow_mut().written(client, cancel, key, now);
         }
-        // Reported after the program has the bytes (C77).
-        if let Some((block, from)) = write.report {
-            state.borrow_mut().report_input(block, from, write.data);
+        // Reported after the program has the bytes (C77), the prefix it
+        // got when a release cut the write short.
+        if let Some((block, from)) = report {
+            state.borrow_mut().report_input(block, from, data);
         }
     }
     Ok(())
