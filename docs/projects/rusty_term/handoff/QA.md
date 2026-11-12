@@ -43,3 +43,11 @@ Source: `docs/projects/term/ROADMAP.md:104` (Nano, project thread, 2026-11-04 12
 ## Is UDP its own address kind in a C35 saved host?
 Asked 2026-11-10 (card #280). **No**: every UDP association starts over the SSH control connection (`OpenDatagram` through the forward; the key travels only inside SSH), so UDP is an upgrade of an `ssh` address. The address carries an optional `udp_host` (the `--udp-host` override), and long-lived clients use UDP as `--ssh` does. ctl calls never use UDP. Tag: answered from sources (recorded as D176).
 Source: `docs/projects/mux/UDP-TRANSPORT.md` "Bootstrap" 1-5, decision 3; `crates/apps/rusty_mux/crates/tui/src/main.rs:31-47`.
+
+## Can the TUI's ssh and UDP reconnect tests be ported to Windows? (card #1423)
+Asked 2026-11-12. **No, not yet**: `rusty-mux --ssh` on Windows returns "--ssh is supported on Unix only for now", and the shared SSH forward (`Forward`, `args`, `private_dir`) is cfg(unix), so those tests stay in the Linux-only `lifecycle.rs` until `--ssh` exists on Windows. Port only the scripted-server tests; the layout and host are D209 and D210, as amended by D211.
+Source: `crates/apps/rusty_mux/crates/tui/src/main.rs:794-797`; D196.
+
+## Does the TUI byte oracle hold under our Windows host? (card #1423, D209/D211)
+Asked 2026-11-12 (PR #1629, green in manual ci.yml run 43149413399 on 4d945c578). **Yes, with one known difference**: the host first sends its `PREAMBLE` (`?9001h?1004h`), and sends each of those again right after the client turns it off (`?9001l`, `?1004l`). The harness (`host::as_sent`) strips exactly those bytes, and nothing else.
+Source: `crates/libs/ui/rusty_conhost/src/console.rs:47-50`; PR #1629, as reported by the card #1423 thread.
