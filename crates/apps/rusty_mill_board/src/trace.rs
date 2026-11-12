@@ -21,11 +21,14 @@ pub const MAX_DEPTH: usize = 32;
 pub struct Rollup {
     /// How many there are.
     pub total: usize,
-    /// How many are Done.
+    /// How many shipped: Done and not dropped.
     pub done: usize,
+    /// How many were closed without shipping ([`Card::close`](crate::domain::Card::close)).
+    pub dropped: usize,
     /// How many are Blocked.
     pub blocked: usize,
-    /// Every one is Done and the parent (or milestone) is still open: close it.
+    /// Every one is Done, at least one shipped, and the parent (or milestone) is still open:
+    /// close it. Children that were all dropped leave nothing to close it on.
     pub ready_to_close: bool,
 }
 
@@ -34,10 +37,12 @@ impl Rollup {
         let mut r = Self::default();
         for c in cards {
             r.total += 1;
-            r.done += usize::from(c.column == Column::DONE);
+            let finished = c.column == Column::DONE;
+            r.done += usize::from(finished && c.closed.is_none());
+            r.dropped += usize::from(finished && c.closed.is_some());
             r.blocked += usize::from(c.column == Column::BLOCKED);
         }
-        r.ready_to_close = r.total > 0 && r.done == r.total && !closed;
+        r.ready_to_close = r.done > 0 && r.done + r.dropped == r.total && !closed;
         r
     }
 }
@@ -225,6 +230,28 @@ mod tests {
     }
 
     #[test]
+    fn dropped_children_are_counted_apart_and_alone_never_make_a_parent_ready() {
+        use crate::domain::{CloseReason, Closure};
+        let parent = card(1, None, Column::BACKLOG);
+        let dropped = |n| Card {
+            closed: Some(Closure {
+                reason: CloseReason::WontDo,
+                at_ms: 1,
+            }),
+            ..card(n, Some(&parent), Column::DONE)
+        };
+        let mut cards = vec![parent.clone(), dropped(2), dropped(3)];
+        let r = rollup(&cards, &parent);
+        assert_eq!((r.total, r.done, r.dropped), (2, 0, 2));
+        assert!(!r.ready_to_close, "nothing shipped: nothing to close it on");
+        cards.push(card(4, Some(&parent), Column::DONE));
+        assert!(
+            rollup(&cards, &parent).ready_to_close,
+            "one shipped, the rest dropped"
+        );
+    }
+
+    #[test]
     fn a_parent_rolls_up_its_direct_children_and_flags_ready_to_close() {
         let arc = card(1, None, Column::BACKLOG);
         let s2 = card(2, Some(&arc), Column::BACKLOG);
@@ -236,6 +263,7 @@ mod tests {
             Rollup {
                 total: 2,
                 done: 1,
+                dropped: 0,
                 blocked: 1,
                 ready_to_close: false
             }

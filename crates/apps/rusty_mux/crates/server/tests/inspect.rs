@@ -92,6 +92,7 @@ fn list_gives_each_parent_before_its_children() {
             name: bname,
             owner: None,
             input: InputMode::Open,
+            exited: false,
         },
         Entry::Block {
             block: b2,

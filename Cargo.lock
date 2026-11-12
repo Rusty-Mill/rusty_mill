@@ -11039,6 +11039,7 @@ dependencies = [
  "platform",
  "platform-linux",
  "platform-windows",
+ "rusty_conhost",
  "rusty_mux_client",
  "rusty_mux_core",
  "rusty_mux_proto",

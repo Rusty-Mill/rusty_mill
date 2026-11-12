@@ -260,6 +260,10 @@ read-only like any command block (D72). C70's spool, once merged, keeps its scro
 - `CloseBlock` removes the block.
 - A held block survives a server restart read-only.
 
+**As built (C78).** `Features::HOLD` is bit 43 and `Launch.hold` field 60. A block entry gains
+`exited` (field 61), true for any block without a program (held or restored), which `list`
+shows as `state=exited`. The entry is not re-sent when `exited` flips: a watcher learns of the exit from `program-exited`, as for any block. Release (C76) will reuse the same path once it lands.
+
 ## C76. Signal and release
 
 **Today.** Closing a block runs `rt.release` and then `reap()`, which sends SIGHUP to the
@@ -344,7 +348,23 @@ a rule with no use.
 
 ## C79. Windows `--ssh` attach
 
-**Today.**
+**As built (2026-11-12).** The spike ([C79-SPIKE-2026-11-12.md](C79-SPIKE-2026-11-12.md))
+found that Win32-OpenSSH 9.5p2 cannot listen on a local AF_UNIX socket, so Windows takes the
+bridge route below, with one change from step 1: `attach` opens a connection per block, so the
+client keeps a local socket rather than running `Conn` over one child's pipes.
+- `rusty_mux_client::ssh::Bridge` binds a socket in a fresh owner-only directory (DACL), sets the
+  socket owner-only, and checks each connection's process token against this user (R10's two
+  layers). Each connection runs its own `ssh -T HOST CTL --socket 'PATH' bridge`, joined byte
+  for byte; its `ssh` ends when its input does, as when the client dies.
+- Start-up runs one bridge with empty input under an interactive login, so a host-key prompt or
+  password works and a missing `ctl` or server fails before the screen is taken. Every later
+  login is `BatchMode`, so a key or an agent is needed.
+- `RUSTY_MUX_REMOTE_CTL` names the remote ctl as shell text (default `rusty-mux-ctl`), since a
+  non-login shell's `PATH` often lacks `~/.local/bin`.
+- The rejoin path is `BridgePath`: a fresh bridge per rejoin, no UDP (`udp_wanted` is false on
+  Windows). `rusty-mux-ctl ssh check` on Windows skips the forward and UDP findings.
+
+**Before the build.**
 - The `rusty-mux` client builds on Windows, but `--ssh` returns "supported on Unix only for now"
   (`tui/src/main.rs` ~851).
 - `Conn<S: Read + Write>` is already generic (`tui/src/lib.rs:264`). What blocks Windows is

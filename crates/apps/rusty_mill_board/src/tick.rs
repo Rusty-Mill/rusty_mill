@@ -39,9 +39,10 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::domain::{
-    BoardError, Card, Column, Comment, DEFAULT_PROJECT, Event, EventKind, ExecutionLink, Span,
-    next_event_id, reserved_tag,
+    BoardError, Card, CloseReason, Closure, Column, Comment, DEFAULT_PROJECT, Event, EventKind,
+    ExecutionLink, Span, next_event_id, reserved_tag,
 };
+use crate::external::{ExternalRef, Provider, RefState};
 use crate::http::Http;
 use crate::milestones::{Milestone, MilestoneStore};
 use crate::store::Store;
@@ -276,6 +277,8 @@ struct BoardDoc {
     prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    external_refs: Vec<StoredRef>,
     /// Fields this binary does not know, written back unchanged, so a newer board's fields
     /// survive this one's writes (a rollback loses nothing; ADR-0006).
     #[serde(flatten)]
@@ -295,6 +298,12 @@ impl BoardDoc {
             execution: card.execution.clone(),
             prompt: card.prompt.clone(),
             target_ms: card.target_ms,
+            external_refs: card
+                .external_refs
+                .iter()
+                .cloned()
+                .map(StoredRef::from)
+                .collect(),
             unknown: serde_json::Map::new(),
         }
     }
@@ -329,6 +338,62 @@ impl BoardDoc {
             ));
         }
         Ok(body)
+    }
+}
+
+/// An [`ExternalRef`] as stored: camelCase, like the rest of the document (ADR-0006).
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredRef {
+    provider: Provider,
+    #[serde(rename = "ref")]
+    reference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    state: RefState,
+    observed_at_ms: i64,
+    by: String,
+}
+
+impl From<ExternalRef> for StoredRef {
+    fn from(r: ExternalRef) -> Self {
+        let ExternalRef {
+            provider,
+            reference,
+            url,
+            state,
+            observed_at_ms,
+            by,
+        } = r;
+        Self {
+            provider,
+            reference,
+            url,
+            state,
+            observed_at_ms,
+            by,
+        }
+    }
+}
+
+impl From<StoredRef> for ExternalRef {
+    fn from(r: StoredRef) -> Self {
+        let StoredRef {
+            provider,
+            reference,
+            url,
+            state,
+            observed_at_ms,
+            by,
+        } = r;
+        Self {
+            provider,
+            reference,
+            url,
+            state,
+            observed_at_ms,
+            by,
+        }
     }
 }
 
@@ -370,8 +435,51 @@ fn task_tags(card: &Card) -> Vec<String> {
     tags.extend(card.number.iter().map(|n| format!("number:{n}")));
     tags.extend(card.archived_ms.iter().map(|ms| format!("archived:{ms}")));
     tags.extend(card.restored_ms.iter().map(|ms| format!("restored:{ms}")));
+    tags.extend(
+        card.closed
+            .iter()
+            .map(|c| format!("closed:{}:{}", c.reason.as_str(), c.at_ms)),
+    );
     tags.extend(card.tags.iter().cloned());
     tags
+}
+
+/// rusty_tick's status for a Done card: `wontdo` when it closed without shipping.
+fn closed_status(card: &Card) -> &'static str {
+    match card.closed {
+        Some(_) => "wontdo",
+        None => "done",
+    }
+}
+
+/// How a closed task's card was dropped: its `closed:<reason>:<ms>` tag, or, for a task
+/// marked won't-do in rusty_tick itself (or whose tag is unreadable), `wont_do` at the time
+/// tick closed it. `None` for open and done tasks. A task reopened in rusty_tick loses its tag
+/// on the board's next write, since an open card has no `closed`.
+fn closure_of(task: &Task) -> Option<Closure> {
+    if task.status != "wontdo" {
+        return None;
+    }
+    // A task closed before rusty_tick stamped close times falls back to its creation, which
+    // never moves, so it never drifts into recent counts.
+    let tick_ms = task.completed_ms.unwrap_or(task.created_ms);
+    let tagged = task.tags.iter().find_map(|t| {
+        let raw = t.strip_prefix("closed:")?;
+        let parsed = raw.split_once(':').and_then(|(reason, ms)| {
+            Some(Closure {
+                reason: CloseReason::parse(reason)?,
+                at_ms: ms.parse().ok()?,
+            })
+        });
+        if parsed.is_none() {
+            rusty_log::warn!(task = %task.id, tag = %t, "unreadable closed tag; reading the card as won't-do");
+        }
+        parsed
+    });
+    tagged.or(Some(Closure {
+        reason: CloseReason::WontDo,
+        at_ms: tick_ms,
+    }))
 }
 
 /// The column a task's card is in: its `board:` tag while open, else Done.
@@ -423,6 +531,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         .cloned()
         .collect();
     let doc = doc.unwrap_or_default();
+    let closed = closure_of(&task);
     Ok(Card {
         id: task.id,
         number,
@@ -445,10 +554,16 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         issue: doc.issue,
         synced_text: doc.synced_text,
         execution: doc.execution,
+        external_refs: doc
+            .external_refs
+            .into_iter()
+            .map(ExternalRef::from)
+            .collect(),
         created_ms: task.created_ms,
         updated_ms: task.updated_ms,
         // Only shipped work has a ship date; won't-do is closed but never shipped.
         done_ms: task.completed_ms.filter(|_| task.status == "done"),
+        closed,
         archived_ms,
         restored_ms,
         target_ms: doc.target_ms,
@@ -803,7 +918,7 @@ impl<T: TickApi> TickStore<T> {
         }
         // Done is terminal on the board, so a card only ever closes its task.
         if next.column == Column::DONE && current.column != Column::DONE {
-            patch.insert("status".into(), json!("done"));
+            patch.insert("status".into(), json!(closed_status(next)));
         }
         if next.project != current.project {
             patch.insert("listId".into(), json!(self.list_for(&next.project)?));
@@ -1076,7 +1191,7 @@ impl<T: TickApi> Store for TickStore<T> {
         // A card recorded straight in Done is created closed, in the same request: never an
         // open task left behind if a second write failed.
         if card.column == Column::DONE {
-            body["status"] = json!("done");
+            body["status"] = json!(closed_status(card));
         }
         let doc = match BoardDoc::of(card) == BoardDoc::default() {
             true => None,

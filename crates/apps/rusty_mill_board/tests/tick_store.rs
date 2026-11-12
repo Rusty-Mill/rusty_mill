@@ -3,7 +3,8 @@
 
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{
-    BoardError, Card, CardSummary, Column, Dates, Edit, Event, EventKind, Plan, Shelf, Span,
+    BoardError, Card, CardSummary, CloseReason, Closure, Column, Dates, Edit, Event, EventKind,
+    Plan, Shelf, Span,
 };
 use rusty_mill_board::milestones::{MilestoneEdit, MilestoneStore};
 use rusty_mill_board::projects::Projects;
@@ -235,6 +236,82 @@ fn done_closes_the_task_and_a_task_closed_in_rusty_tick_is_done() {
     let closed = board.get(other.id).expect("get");
     assert_eq!(closed.column, Column::DONE);
     assert_eq!(closed.done_ms, None, "won't-do is closed, not shipped");
+}
+
+#[test]
+fn a_close_with_a_reason_is_a_won_t_do_task_and_reads_back_from_tags_alone() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let closed = board
+        .close(card.id, CloseReason::Superseded, None, &human)
+        .expect("close");
+    let task = tick.task(card.id);
+    assert_eq!(task["status"], "wontdo");
+    assert!(
+        task["tags"]
+            .as_array()
+            .expect("tags")
+            .contains(&json!("closed:superseded:42"))
+    );
+    let want = Some(Closure {
+        reason: CloseReason::Superseded,
+        at_ms: 42,
+    });
+    assert_eq!(closed.closed, want);
+    assert_eq!(board.get(card.id).expect("get").closed, want);
+    let summary = board
+        .list_view(
+            None,
+            Shelf::Include,
+            0,
+            rusty_mill_board::domain::View::Summary,
+        )
+        .expect("summaries");
+    assert_eq!(
+        CardSummary::from(&summary[0]).closed,
+        Some(CloseReason::Superseded)
+    );
+}
+
+#[test]
+fn an_unreadable_closed_tag_reads_as_won_t_do_at_tick_s_close_time() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    tick.owner_edit(card.id, |t| {
+        t["status"] = json!("wontdo");
+        t["tags"] = json!(["agent", "closed:duplicat:5"]);
+    });
+    let at = tick.task(card.id)["completedMs"].as_i64().expect("stamped");
+    assert_eq!(
+        board.get(card.id).expect("get").closed,
+        Some(Closure {
+            reason: CloseReason::WontDo,
+            at_ms: at
+        })
+    );
+}
+
+#[test]
+fn a_task_marked_won_t_do_in_rusty_tick_reads_as_dropped_and_a_done_task_as_shipped() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let dropped = board.add(&human, "a", "", vec![]).expect("add");
+    let shipped = board.add(&human, "b", "", vec![]).expect("add");
+    tick.owner_edit(dropped.id, |t| t["status"] = json!("wontdo"));
+    tick.owner_edit(shipped.id, |t| t["status"] = json!("done"));
+    let at = tick.task(dropped.id)["completedMs"]
+        .as_i64()
+        .expect("stamped");
+    assert_eq!(
+        board.get(dropped.id).expect("get").closed,
+        Some(Closure {
+            reason: CloseReason::WontDo,
+            at_ms: at
+        })
+    );
+    assert_eq!(board.get(shipped.id).expect("get").closed, None);
 }
 
 #[test]
@@ -1290,8 +1367,8 @@ fn a_paged_scan_over_rusty_tick_never_truncates_large_records() {
     op(&board, "card_comment", json!({"id": big, "text": comment}));
     op(&board, "card_add", json!({"title": "after"}));
 
-    let all = op(&board, "board_list", json!({}))["cards"].clone();
-    let seen = scan_all(&board, &json!({}), 1);
+    let all = op(&board, "board_list", json!({"view": "full"}))["cards"].clone();
+    let seen = scan_all(&board, &json!({"view": "full"}), 1);
     assert_eq!(json!(seen), all);
     let card = seen.iter().find(|c| c["id"] == big).expect("big card");
     assert_eq!(card["body"].as_str().map(str::len), Some(body.len()));
@@ -1447,8 +1524,8 @@ fn a_field_this_board_does_not_know_survives_its_writes() {
     board
         .edit_at(card.id, &human, None, &prompt("first"))
         .expect("prompt");
-    let refs = json!([{"provider": "codex-cloud", "ref": "t1", "state": "running"}]);
-    newer_board_writes(&tick, card.id, "externalRefs", refs.clone());
+    let later = json!([{"kind": "from a newer board"}]);
+    newer_board_writes(&tick, card.id, "laterField", later.clone());
 
     board
         .edit_at(card.id, &human, None, &prompt("second"))
@@ -1456,7 +1533,7 @@ fn a_field_this_board_does_not_know_survives_its_writes() {
     let doc = &tick.docs("board")[0];
     assert_eq!(doc["prompt"], "second", "the edit landed");
     assert_eq!(
-        doc["externalRefs"], refs,
+        doc["laterField"], later,
         "the unknown field was written back unchanged"
     );
     assert_eq!(doc["v"], 1);
@@ -1465,8 +1542,8 @@ fn a_field_this_board_does_not_know_survives_its_writes() {
         .edit_at(card.id, &human, None, &prompt(""))
         .expect("clear the prompt");
     assert_eq!(
-        tick.docs("board")[0]["externalRefs"],
-        refs,
+        tick.docs("board")[0]["laterField"],
+        later,
         "kept when every known field is empty"
     );
 }
@@ -1714,4 +1791,42 @@ fn a_cursor_from_before_a_restart_gets_a_resync() {
     assert!(events.iter().any(|e| e["card"] == a), "{events:?}");
     let next = op(&after, "board_events", json!({ "after": polled["cursor"] }));
     assert_eq!(next["resync"], false);
+}
+
+#[test]
+fn external_refs_are_stored_camel_case_and_read_back() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let obs = rusty_mill_board::external::Observation {
+        provider: rusty_mill_board::external::Provider::GithubPr,
+        reference: "Rusty-Mill/rusty_mill#1".into(),
+        state: rusty_mill_board::external::RefState::Succeeded,
+        url: Some("https://github.com/Rusty-Mill/rusty_mill/pull/1".into()),
+        observed_at_ms: 1_000,
+    };
+    let seen = board
+        .observe_execution(card.id, obs, &human)
+        .expect("observe");
+    assert_eq!(
+        tick.docs("board")[0]["externalRefs"],
+        json!([{
+            "provider": "github-pr",
+            "ref": "Rusty-Mill/rusty_mill#1",
+            "url": "https://github.com/Rusty-Mill/rusty_mill/pull/1",
+            "state": "succeeded",
+            "observedAtMs": 1_000,
+            "by": "nano",
+        }])
+    );
+    let reread = board.get(card.id).expect("get");
+    assert_eq!(reread.external_refs, seen.external_refs);
+    // A later edit keeps them.
+    board
+        .edit_at(card.id, &human, None, &prompt("p"))
+        .expect("edit");
+    assert_eq!(
+        board.get(card.id).expect("get").external_refs,
+        seen.external_refs
+    );
 }

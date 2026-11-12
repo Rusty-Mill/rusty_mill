@@ -58,7 +58,7 @@ has slack and can slip a phase without delaying the end state.
 | --- | --- | --- | --- | --- | --- | --- |
 | B0 | Backlog triage | Ledger and Conflux hold no open cards; the paused projects (rocket_league, apprentice_ai, mediboard, rusty_meshed) carry Mill Board's paused project status, with their cards left open under it; each remaining project's proposal is approved and applied | X answers; the paused project status on Mill Board | Coordination, Design | M | E2, X1 to X3, approve each list, approve the paused-status design (X4 to X6 feed S2, S3, B3) |
 | B1 | Lean cards and per-agent logins | Agents list summaries by default; each agent signs in as itself; adding a card can set priority and links in one call | G1 | Build | M | M1, M2 |
-| B2 | Own-store design | A design note for the SQLite store, migration and rollback is approved | B0 | Build, Review | S | M3, approve the design |
+| B2 | Own-store design | A design note for the SQLite store, migration and rollback is approved | B0 | Build, Review | S | Approve the design (M3 answered 2026-11-12) |
 | B3 | Migration to the board's own store | Dry run shows no difference; production migration done; the rusty_tick and engine adapters are removed; rusty_tick archived | B2 | Build, Merge steward | L | Authorise the migration and the deletions |
 | B4 | Claims view | The board shows Let Em Loose claims and the inbox as its main agent-facing surface; columns stay for work that does not run through it | L3, B3 | Build | M | Inbox only |
 
@@ -76,7 +76,7 @@ has slack and can slip a phase without delaying the end state.
 
 | Code | Deliverable | Done when | Depends on | Lane | Size | Needs Nano |
 | --- | --- | --- | --- | --- | --- | --- |
-| L0 | First milestone committed | Its six cards are in Ready with batch-approved designs; the lost designs are rebuilt; the design freeze is recorded | None | Nano, Design | S | L1, L7, L8 (L9 decided: lel-freeze) |
+| L0 | First milestone committed | #758 (items 1-3), #1123, #1124 and #1166 are in Ready, with #1092 following once L2 confirms the host; their designs are batch-approved; the design freeze is recorded | None | Nano, Design | S | None left (decided: lel-m1-commit, lel-lost-designs, lel-m1-design-batch, lel-freeze); #1092 waits on L2 |
 | L1 | Deployment and prompts | The protocol host, orch and the inbox run on BaileyAi; the four lens prompts and the cost breaker wiring are merged | L0, G1 | Build | M | L2, L4 |
 | L2 | Smoke run | One toy claim settles on the local model with a log that replays to the same outcome | L1 | Build, Review | S | L3 |
 | L3 | Duplicate-file experiment, stage one | Built from intent alone using the Codex container; golden set signed; shadow run done; a verdict against rusty_fclone on the five success criteria | L2 | Build, Research, Nano | L | L5, L6, L10, sign the golden set, judge the result |

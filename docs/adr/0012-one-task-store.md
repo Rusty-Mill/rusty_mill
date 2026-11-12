@@ -1,6 +1,6 @@
 # ADR-0012: One task store: rusty_tick holds tasks, Mill Board is the agent view
 
-Status: Accepted
+Status: Accepted; superseded by [Mill Board ADR-0007](../../crates/apps/rusty_mill_board/docs/adr/0007-own-sqlite-store.md) once that is approved (Nano, 2026-11-10: the board owns its own SQLite store)
 Date: 2026-10-26
 
 ## Context

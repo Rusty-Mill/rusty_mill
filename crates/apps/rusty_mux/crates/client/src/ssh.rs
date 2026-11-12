@@ -8,11 +8,16 @@
 //! which is removed, with the forward stopped, when the `Forward` drops.
 //! The forward is Unix only; the options and `ssh -G` lookup are not, so
 //! `rusty-mux-ctl ssh check` uses them everywhere (term pack D194).
+//! Windows, whose OpenSSH cannot forward a local Unix socket, reaches the
+//! server through [`Bridge`] instead: one `ssh` running
+//! `rusty-mux-ctl bridge` per connection.
 
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+#[cfg(any(windows, test))]
+pub use bridge::Bridge;
 #[cfg(unix)]
 pub use forward::{Forward, args, private_dir};
 
@@ -70,6 +75,8 @@ fn parse_hostname(config: &str) -> Option<String> {
     })
 }
 
+#[cfg(any(windows, test))]
+pub mod bridge;
 #[cfg(unix)]
 mod forward;
 

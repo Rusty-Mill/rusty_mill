@@ -955,7 +955,33 @@ fn raw_local_addr_unix(sock: w::SOCKET) -> Result<Option<PathBuf>> {
 
 fn new_unix_socket() -> Result<OwnedSocket> {
     ensure_wsa_started();
-    Ok(OwnedSocket(raw_unix_socket()?))
+    let sock = OwnedSocket(raw_unix_socket()?);
+    no_inherit(sock.raw())?;
+    Ok(sock)
+}
+
+/// Clears `sock`'s inherit flag, as std does for its own sockets: plain
+/// `socket()` and `accept()` return inheritable handles, so every child
+/// process started later would hold the listener or connection open.
+#[cfg(feature = "track-w")]
+fn no_inherit(sock: w::SOCKET) -> Result<()> {
+    // SAFETY: `sock` is a valid socket the caller owns; a socket is a
+    // kernel handle, and clearing its inherit flag has no other effect.
+    unsafe { rusty_win32::handle::set_inheritable(sock as rusty_win32::handle::RawHandle, false) }
+        .map_err(|e| errmap::trackw_err("SetHandleInformation", e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn no_inherit(sock: w::SOCKET) -> Result<()> {
+    // SAFETY: as above.
+    let ok = unsafe { w::SetHandleInformation(sock as w::HANDLE, w::HANDLE_FLAG_INHERIT, 0) };
+    if ok == 0 {
+        return Err(crate::sys::errmap::last_win32_err(
+            "SetHandleInformation",
+            std::ffi::OsStr::new(""),
+        ));
+    }
+    Ok(())
 }
 
 /// `socket` + `connect`, blocking until the connection completes or
@@ -1114,7 +1140,9 @@ pub fn unix_listen(path: &Path) -> Result<OwnedSocket> {
 /// it bound to one.
 pub fn unix_accept(listen_sock: &OwnedSocket) -> Result<(OwnedSocket, Option<PathBuf>)> {
     let (sock, peer) = raw_accept_unix(listen_sock.raw())?;
-    Ok((OwnedSocket(sock), peer))
+    let sock = OwnedSocket(sock);
+    no_inherit(sock.raw())?;
+    Ok((sock, peer))
 }
 
 /// `getpeername`. `Ok(None)` when the peer connected from an unnamed
