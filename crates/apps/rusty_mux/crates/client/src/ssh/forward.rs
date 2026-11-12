@@ -97,11 +97,14 @@ impl Forward {
                 .spawn()
                 .map_err(|e| format!("starting {}: {e}", Path::new(program).display()))
         });
-        let started = spawned.map(|child| {
-            let watchdog = watchdog(child.id())
-                .map_err(|why| eprintln!("rusty-mux: {why}; ssh may outlive a killed client"))
-                .ok();
-            (child, watchdog)
+        let started = spawned.and_then(|mut child| match guard(Path::new(SHELL), child.id()) {
+            Ok(watchdog) => Ok((child, watchdog)),
+            Err(why) => {
+                // Not yet forwarding anything; it goes with the error.
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(why)
+            }
         });
         match started {
             Ok((child, watchdog)) => Ok(Self {
@@ -194,16 +197,40 @@ impl Drop for Forward {
     }
 }
 
-/// Starts the [`WATCHDOG`] for `ssh`, the pid of the forward's ssh.
-fn watchdog(ssh: u32) -> Result<Child, String> {
-    Command::new("/bin/sh")
+/// The shell that runs the [`WATCHDOG`].
+const SHELL: &str = "/bin/sh";
+
+/// The watchdog for `ssh`, or none on a host without `shell`, where ssh
+/// may outlive a killed client; any other failure to start it is an
+/// error, so a resource limit never quietly drops it (term pack D202).
+fn guard(shell: &Path, ssh: u32) -> Result<Option<Child>, String> {
+    match spawn_watchdog(shell, ssh) {
+        Ok(dog) => Ok(Some(dog)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            eprintln!(
+                "rusty-mux: no {} for the ssh forward's watchdog; ssh may outlive a killed client",
+                shell.display()
+            );
+            Ok(None)
+        }
+        Err(e) => Err(format!("starting the ssh forward's watchdog: {e}")),
+    }
+}
+
+/// Starts the [`WATCHDOG`] in `shell` for `ssh`, the pid of the forward's ssh.
+fn spawn_watchdog(shell: &Path, ssh: u32) -> io::Result<Child> {
+    Command::new(shell)
         .args(["-c", WATCHDOG, "sh"])
         .arg(ssh.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("starting the ssh forward's watchdog: {e}"))
+}
+
+#[cfg(test)]
+fn watchdog(ssh: u32) -> io::Result<Child> {
+    spawn_watchdog(Path::new(SHELL), ssh)
 }
 
 /// A new directory in the temp directory that only this user can enter.
@@ -427,6 +454,16 @@ mod tests {
             matches!(dog.try_wait(), Ok(Some(_))),
             "watchdog still running"
         );
+    }
+
+    /// Only a missing shell leaves the forward without a watchdog; any
+    /// other failure to start one is an error (D202).
+    #[test]
+    fn only_a_missing_shell_goes_without_a_watchdog() {
+        let gone = guard(Path::new("/nonexistent/rusty-mux/sh"), std::process::id());
+        assert!(matches!(gone, Ok(None)), "{gone:?}");
+        let refused = guard(Path::new("/"), std::process::id());
+        assert!(refused.is_err(), "{refused:?}");
     }
 
     /// The watchdog ends ssh once its pipe closes without `done`, as it
