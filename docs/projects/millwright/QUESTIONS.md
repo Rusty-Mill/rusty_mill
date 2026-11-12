@@ -7,7 +7,7 @@ acted on.
 
 ## Answer these seven first
 
-1. **L1 and L2:** commit Let Em Loose's first milestone and authorise its deployment. This gets a smoke run, the first time the system runs end to end.
+1. **L2:** authorise Let Em Loose's deployment and confirm the host. This gets a smoke run, the first time the system runs end to end. (L1, committing the first milestone, answered 2026-11-12; see DECISIONS.md lel-m1-commit.)
 2. **M1:** approve the minimal role fix on Mill Board. Today any builder agent can pass every gate.
 3. **O2:** give Claude its own GitHub identity. Cross-family review cannot be enforced without it.
 4. **P1:** decide Portfolio Intelligence's shorter MVP path. Nothing there is dispatchable until then.
@@ -19,16 +19,15 @@ acted on.
 
 These are also tracked by `let-em-loose-expert`; its pack is the authority for that project.
 
+L1, L7 and L8 are answered (2026-11-12); see DECISIONS.md lel-m1-commit, lel-lost-designs, lel-m1-design-batch.
+
 | # | Question | Recommendation |
 | --- | --- | --- |
-| L1 | Commit the first milestone ("ready for a live run": host, breaker wiring, deployment, lens prompts, spend readiness, smoke run)? All six cards are in the backlog. | Yes. Move them to Ready. |
 | L2 | Authorise deploying the protocol host, orch and the inbox, and confirm the host? The record says BaileyAi; one card proposes probing MS-01 first. | Yes, on BaileyAi. Skip the probe unless BaileyAi lacks headroom. |
 | L3 | Is the smoke run (one toy claim, local model, no builders, no spend) the first target, ahead of the full experiment? | Yes. |
 | L4 | Approve the first live run and its spend ceiling? Today's rule is flat-rate subscriptions and local models only. | Flat-rate and local only for the first run; revisit paid calls after it. |
 | L5 | Which credential lets the Claude CLI work inside the builder jail, which is meant to hold no secrets? This blocks the builder work. | Nano's call. Simplest: a subscription login on a dedicated account used only by this jail. |
 | L6 | Accept a first experiment run that launches builders from the existing Codex container, adding jailed terminals afterwards? | Yes. It takes most of the second milestone off the critical path. |
-| L7 | Two approved designs (builder session, gaps) are lost. Are there copies, or are versions rebuilt from the decision log acceptable for re-approval? | Accept rebuilt versions. |
-| L8 | Approve the first milestone's designs as a batch, instead of one approval per card? | Yes. Most of it is deployment, prompts and configuration. |
 | L10 | Sign the golden set once it is drafted? Agreed 2026-11-04; no draft exists yet. | Nothing to do until the draft arrives. |
 | L11 | Update the project's docs, which list "agents merging PRs" as a non-goal, when the new merge rule takes effect? | Yes, in the same change that lifts the rule. |
 

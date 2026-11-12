@@ -135,6 +135,9 @@ Precise contracts used by this guide:
 | D125 | #1432 S5 clarifications: `unknown` refs not evictable, S5a document readback, refs on the domain `Card` | [default] 2026-11-12 (#1432) |
 | D126 | #1432 S5: card summaries drop `has_execution` and `has_external_refs` (supersedes D123 item 4) | [stated] 2026-11-12 (#1432) |
 | D127 | Design freeze: no new Let Em Loose design until its first run | [stated] 2026-11-12 (general) |
+| D128 | M1 committed: #758 items 1-3, #1123, #1124, #1166 to Ready; #1092 waits for the BaileyAi host; #754 out | [stated] 2026-11-12 (general, M1) |
+| D129 | Lost designs not needed for M1; #1402 builder-session rebuild waits until after the first run | [stated] 2026-11-12 (general, M1) |
+| D130 | M1 design steps approved as one batch of runbooks and config (changes D25 for M1) | [stated] 2026-11-12 (general, M1) |
 
 ## D1. Lenses, not stages
 
@@ -292,6 +295,7 @@ Precise contracts used by this guide:
 **Decision.** Each card posts a design or report for Nano's approval before any implementation. Schema and API changes are flagged.
 **Why.** This matches Nano's working agreement, and these contracts are expensive to change.
 **Rejected.** Implementing straight from the card text.
+**Changed for M1 2026-11-12 (D130).** Nano approved M1's design steps (#1092, #1123, #1124, #1166) as one batch of runbooks and config, so those cards need no per-card design approval. D25 stands for every other card.
 
 ## D26. The name is Let Em Loose
 
@@ -1238,3 +1242,30 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_1bae9f1358544fc3a517998b983b896a
 **Key.** lel:general:design-freeze-until-first-run
 **Source.** Nano, Millwright project thread message `cmsg_01632CBKCXsWe6RyFWvE9dovLW5oB3NEACWHuvMnsptmYP`, 2026-11-12T00:34:16Z: "Let Em Loose is under a design freeze until its first run. Add no design there." Answers `docs/projects/millwright/QUESTIONS.md` L9. Numbered D127 after D126.
+
+## D128. M1 committed: #758 items 1-3, #1123, #1124, #1166 to Ready; #1092 waits for the BaileyAi host; #754 out
+
+**Decision.** Let Em Loose's first milestone (M1) is committed. #758 (items 1-3 only), #1123, #1124 and #1166 go to Ready. #1092 (deploy layout) follows only once Nano confirms the BaileyAi host (Millwright L2). #754 (the MS-01 probe) leaves M1. #758 item 4 (the new Survey and Intent lenses) moves to its own card for after the first run. "Go" in the same message means go on Millwright L0. It is not read as Millwright L2: it does not authorise deploying on BaileyAi. Deploying stays ask-first, so #1092 stays in Backlog until Nano answers L2. That reading is the caller's, recorded here at its request; Nano's words do not mention L2.
+**Why.** It is the smallest card set that reaches the first run, which the design freeze (D127) puts ahead of any new design. New lenses are new design, so they wait. Deploying on BaileyAi is ask-first and the escalation kept it as a separate question (L2), so a "Go" on L0 doesn't answer it.
+**Rejected.** The other L1 options put to Nano. Reading "Go" as L2 approval to deploy.
+**Tag.** [stated] · remind-me: mem_0ccb1eaa4d394c5c98ac572bbb8a8adc
+**Key.** lel:general:m1-commit-cards
+**Source.** Nano, Mill thread message `cmsg_01632CBKCXsWe6RyFWvE9dov81m5TvtNmj43NpXMCV23tc`, 2026-11-12T19:22:57Z, project thread `cmsg_01632CBKCXsWe6RyFWvE9dov5LxGS7LhnBwjYdXbAXf7nm`, verbatim: "Go, a, a, a". "Go" answers Millwright L0 and the first "a" answers L1, option a, as the caller put it to Nano from the expert's escalation earlier on 2026-11-12. D127. The board moves are the caller's; this entry moves no card. Numbered D128 after D127.
+
+## D129. Lost designs not needed for M1; #1402 builder-session rebuild waits until after the first run
+
+**Decision.** M1 needs neither lost design, 598-gaps-design.md or 600-builder-session-design.md. For #598 the gaps design is covered by `598-build/PLAN.md` and D86, which stand as the build basis. #1402 (rebuilding the builder-session design) waits until after the first run. "Lost designs rebuilt" drops from Millwright L0's done-when. This closes OPEN_QUESTIONS Q16 and defers Q44's rebuild to #1402.
+**Why.** No copy of either file exists. M1 can run on the approved decisions (D59, D62, D63–D66, D86, D104), and rebuilding a design before the first run cuts against the design freeze (D127).
+**Rejected.** Rebuilding either design before M1. Holding M1 until a copy turns up.
+**Tag.** [stated] · remind-me: mem_46ee7dd7b8b942a3a62d5edc4a1b7fdd
+**Key.** lel:general:lost-designs-not-needed-for-m1
+**Source.** Nano, Mill thread message `cmsg_01632CBKCXsWe6RyFWvE9dov81m5TvtNmj43NpXMCV23tc`, 2026-11-12T19:22:57Z, project thread `cmsg_01632CBKCXsWe6RyFWvE9dov5LxGS7LhnBwjYdXbAXf7nm`, verbatim: "Go, a, a, a". The second "a" answers Millwright L7, option a. D86, D127; OPEN_QUESTIONS Q16, Q44. Numbered D129 after D128.
+
+## D130. M1 design steps approved as one batch of runbooks and config (changes D25 for M1)
+
+**Decision.** M1's design steps are approved as one batch of runbooks and config: #1092 deploy layout, #1123 prompts and model bindings, #1124 spend report and #1166 smoke-run plan. They count as runbooks and config, not new design under D127. This changes D25 (design first on every card) for M1 only: these four cards need no separate per-card design approval before work starts. It approves no ask-first item. Deploying on BaileyAi still waits for Millwright L2 (D128). Paid model calls, schema or API changes and the other ask-first items still go to Nano. Review and merge gates are unchanged.
+**Why.** These steps run what is already approved. Treating each one as a new design would stall M1 under the freeze (D127), and one batch approval keeps Nano's sign-off without a design per card.
+**Rejected.** Per-card D25 design approval for each M1 step. Treating them as new design under D127.
+**Tag.** [stated] · remind-me: mem_970ab68163f14d498f99ddf976739c5f
+**Key.** lel:general:m1-design-steps-batch-approved
+**Source.** Nano, Mill thread message `cmsg_01632CBKCXsWe6RyFWvE9dov81m5TvtNmj43NpXMCV23tc`, 2026-11-12T19:22:57Z, project thread `cmsg_01632CBKCXsWe6RyFWvE9dov5LxGS7LhnBwjYdXbAXf7nm`, verbatim: "Go, a, a, a". The third "a" answers Millwright L8, option a. Changes D25 for M1; D127, D128. Numbered D130 after D129.
