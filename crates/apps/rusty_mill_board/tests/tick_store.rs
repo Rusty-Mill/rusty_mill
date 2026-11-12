@@ -275,6 +275,24 @@ fn a_close_with_a_reason_is_a_won_t_do_task_and_reads_back_from_tags_alone() {
 }
 
 #[test]
+fn evidence_lives_in_the_board_document_and_is_left_out_while_empty() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    assert!(
+        tick.doc("board", card.id)
+            .is_none_or(|d| d.get("evidence").is_none())
+    );
+    let pr = "https://github.com/o/r/pull/7".to_owned();
+    board
+        .add_evidence(card.id, std::slice::from_ref(&pr), &human)
+        .expect("evidence");
+    let doc = tick.doc("board", card.id).expect("doc");
+    assert_eq!(doc["evidence"], json!([pr]));
+    assert_eq!(board.get(card.id).expect("get").evidence, [pr]);
+}
+
+#[test]
 fn an_unreadable_closed_tag_reads_as_won_t_do_at_tick_s_close_time() {
     let (board, tick) = board();
     let human = board.roles().actor("nano", "human").expect("role");

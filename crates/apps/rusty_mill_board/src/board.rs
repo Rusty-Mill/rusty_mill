@@ -141,6 +141,8 @@ pub struct NewCard<'a> {
     pub done: bool,
     /// The card it is split from.
     pub parent: Option<Uuid>,
+    /// Evidence links (see [`Card::add_evidence`]); none by default.
+    pub evidence: Vec<String>,
 }
 
 impl<'a> NewCard<'a> {
@@ -1118,10 +1120,16 @@ impl<S: Store> Board<S> {
         if new.done && !by.caps.contains(&Capability::Close) {
             return Err(BoardError::Forbidden(Capability::Close));
         }
+        if !new.evidence.is_empty() {
+            check_records_shipped(by)?;
+        }
         let mut card = Card::new(new.title, new.body, new.tags, (self.clock)())?;
         if new.done {
             card.column = Column::DONE;
             card.done_ms = Some(card.created_ms);
+        }
+        if !new.evidence.is_empty() {
+            card.evidence = card.add_evidence(&new.evidence, card.created_ms)?.evidence;
         }
         if let Some(p) = new.parent {
             // A new card has no children, so no parent can close a loop through it.
@@ -1321,6 +1329,7 @@ impl<S: Store> Board<S> {
                     | BoardError::Claimed(_)
                     | BoardError::NoSuchMove { .. }
                     | BoardError::Forbidden(_)
+                    | BoardError::ForbiddenAny(_)
                     | BoardError::NotClaimant
                     | BoardError::Terminal
                     | BoardError::OutOfScope(_)
@@ -1537,6 +1546,18 @@ impl<S: Store> Board<S> {
         let flow = self.flow();
         self.apply_in(&flow, id, by, EventKind::Closed, |c, now| {
             c.close(&flow, reason, by, now)
+        })
+    }
+
+    /// Add evidence links to a card (see [`Card::add_evidence`]). Needs `Close`, `Merge` or
+    /// `Triage`: whoever may record work as shipped.
+    ///
+    /// # Errors
+    /// A missing capability, or see [`Card::add_evidence`].
+    pub fn add_evidence(&self, id: Uuid, links: &[String], by: &Actor) -> Result<Card, BoardError> {
+        check_records_shipped(by)?;
+        self.apply(id, by, EventKind::Edited, |c, now| {
+            c.add_evidence(links, now)
         })
     }
 
@@ -1907,4 +1928,13 @@ fn answerer(actor: &str) -> String {
     } else {
         label
     }
+}
+
+/// Who may record work as shipped (add evidence): a holder of `Close`, `Merge` or `Triage`.
+fn check_records_shipped(by: &Actor) -> Result<(), BoardError> {
+    const MAY: &[Capability] = &[Capability::Close, Capability::Merge, Capability::Triage];
+    if MAY.iter().any(|c| by.caps.contains(c)) {
+        return Ok(());
+    }
+    Err(BoardError::ForbiddenAny(MAY))
 }

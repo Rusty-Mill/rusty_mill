@@ -279,6 +279,8 @@ struct BoardDoc {
     target_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     external_refs: Vec<StoredRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    evidence: Vec<String>,
     /// Fields this binary does not know, written back unchanged, so a newer board's fields
     /// survive this one's writes (a rollback loses nothing; ADR-0006).
     #[serde(flatten)]
@@ -304,6 +306,7 @@ impl BoardDoc {
                 .cloned()
                 .map(StoredRef::from)
                 .collect(),
+            evidence: card.evidence.clone(),
             unknown: serde_json::Map::new(),
         }
     }
@@ -564,6 +567,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         // Only shipped work has a ship date; won't-do is closed but never shipped.
         done_ms: task.completed_ms.filter(|_| task.status == "done"),
         closed,
+        evidence: doc.evidence,
         archived_ms,
         restored_ms,
         target_ms: doc.target_ms,

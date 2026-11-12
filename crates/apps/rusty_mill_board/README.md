@@ -109,6 +109,18 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `board_projects` reports `status` for non-active projects. The board's status picker (Active, Experiment, Paused,
   Archived, All projects) starts on Active. A paused or archived project must be made active before it is removed
   or renamed, so no status outlives its project.
+- **Shipped needs evidence.** A Done card counts as shipped only with evidence: a merged PR or any http(s) link
+  with a host that shows the work (printable ASCII, at most 512 bytes; `card_evidence`, or `evidence` on
+  `card_add`, both needing `close`, `merge` or `triage`), at most 8 per card, kept in the card's rusty_tick board
+  document. A dropped card takes none. Without evidence it is a prototype: `board_metrics` counts it as
+  `prototype` (per week and per project) and leaves it out of shipped and lead time; the Metrics view shows
+  prototypes beside shipped work. Cards Done before evidence existed are backfilled once, with the board stopped:
+  `rusty_mill_board --tick-url ... --settings-dir ... --backfill-evidence rusty_mill=Rusty-Mill/rusty_mill`
+  prints which Done cards (not dropped, no evidence yet) would get the pull requests their body and comments
+  name (`https://github.com/O/N/pull/N` anywhere; `PR #N` or `pull request #N` in a mapped repository's
+  projects; never a bare `#N`), at most 8 each; add `--backfill-record FILE` to write, and
+  `--undo-backfill FILE` clears what it wrote. Observed external refs (ADR-0006) never count. Cards that were Done before evidence existed read as
+  prototypes until someone adds a link.
 - **Close reasons (dropped work).** `card_close` closes an unstarted card (Backlog or a queue) without shipping
   it, for a required `reason`: `wont_do`, `duplicate` or `superseded`; an optional `note` becomes the closer's
   comment. It needs `triage`, and is refused for started, blocked or Done cards. The card goes to Done with no

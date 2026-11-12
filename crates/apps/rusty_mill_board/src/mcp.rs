@@ -38,9 +38,9 @@ pub fn server_with(board: Arc<Shared>, flight: Arc<InFlight>) -> Result<Arc<Serv
          card_move it to the next column (leaving a work column needs your claim). board_columns lists \
          the columns, their kinds and the moves between them with the capability each needs; a move \
          marked `gate` is a human approval. A card whose PR already merged on the forge may be moved \
-         straight to done by a role holding `close`, where the workflow allows it: comment with the \
-         merged PR first. \
-         Merged work with no card: card_add with done: true. A missing project: project_add. If a move is refused, the reason says which capability is \
+         straight to done by a role holding `close`, where the workflow allows it: record the merged \
+         PR with card_evidence first (a Done card counts as shipped only with evidence). \
+         Merged work with no card: card_add with done: true and evidence: [the PR link]. A missing project: project_add. If a move is refused, the reason says which capability is \
          missing, so do not try to work around it: comment and leave the card. Poll board_events \
          (after = the last event id you saw) to follow changes.",
     );

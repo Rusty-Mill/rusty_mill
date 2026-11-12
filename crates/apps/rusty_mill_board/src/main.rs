@@ -24,6 +24,7 @@ use std::time::Duration;
 use clap::Parser;
 use rusty_mcp_server::{HttpConfig, HttpHandler, serve_stdio};
 use rusty_mill_board::api::Shared;
+use rusty_mill_board::backfill;
 use rusty_mill_board::bbp_cli::BbpCli;
 use rusty_mill_board::board::{Board, Roles, system_ms};
 use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
@@ -95,6 +96,20 @@ struct Cli {
     /// changed since the retag is left alone and reported.
     #[arg(long, value_name = "FILE", conflicts_with = "export_projects")]
     undo_retag: Option<PathBuf>,
+    /// Give Done cards without evidence the GitHub pull requests their body and comments
+    /// name, and exit. `REPO=OWNER/NAME,...` maps a board repository (from the projects file)
+    /// to GitHub, so a bare `PR #N` in its projects counts; URLs count everywhere. Prints the
+    /// plan as JSON; nothing is written without --backfill-record.
+    #[arg(long, value_name = "REPO=OWNER/NAME,...", conflicts_with_all = ["export_projects", "retag_columns", "undo_retag", "undo_backfill"])]
+    backfill_evidence: Option<String>,
+    /// With --backfill-evidence: a new file the plan is saved to before any card is written
+    /// (stop the board first); it is what --undo-backfill reads.
+    #[arg(long, value_name = "FILE", requires = "backfill_evidence")]
+    backfill_record: Option<PathBuf>,
+    /// Clear the evidence a backfill wrote, from its --backfill-record FILE, and exit. A card
+    /// whose evidence has changed since is left alone and reported.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["export_projects", "retag_columns", "undo_retag"])]
+    undo_backfill: Option<PathBuf>,
     /// Keep the cards in this rusty_tick (e.g. `http://127.0.0.1:8788`): its tasks tagged
     /// `agent` are the board. Omit for an in-memory board. The token is read from the
     /// `RUSTY_TICK_TOKEN` environment variable only, never an argument (which process
@@ -311,7 +326,55 @@ fn run_retag(cli: &Cli, store: &dyn Store) -> Result<(), String> {
     Ok(())
 }
 
-/// Pretty JSON for the retag output.
+fn run_backfill(cli: &Cli, store: &dyn Store) -> Result<(), String> {
+    if let Some(path) = &cli.undo_backfill {
+        let fail = |e: String| format!("--undo-backfill {}: {e}", path.display());
+        let text = std::fs::read_to_string(path).map_err(|e| fail(e.to_string()))?;
+        let plan: Vec<backfill::Fill> =
+            serde_json::from_str(&text).map_err(|e| fail(e.to_string()))?;
+        let out = backfill::undo(store, &plan, system_ms()).map_err(|e| fail(e.to_string()))?;
+        println!("{}", json(&out)?);
+        return Ok(());
+    }
+    let Some(spec) = &cli.backfill_evidence else {
+        return Ok(());
+    };
+    let github = backfill::parse_repos(spec)?;
+    let projects = match &files(cli).projects {
+        Some(path) if path.exists() => Projects::load(path)?,
+        _ => Projects::default(),
+    };
+    let github_of = |c: &rusty_mill_board::domain::Card| {
+        projects
+            .repo_of(&c.project)
+            .and_then(|r| github.get(r).cloned())
+    };
+    let cards = store.list().map_err(|e| e.to_string())?;
+    let plan = backfill::plan(&cards, &github_of);
+    let Some(record) = &cli.backfill_record else {
+        println!("{}", json(&plan)?);
+        eprintln!(
+            "dry run: {} card(s) would get evidence; add --backfill-record FILE to write",
+            plan.len()
+        );
+        return Ok(());
+    };
+    let fail = |e: String| format!("--backfill-record {}: {e}", record.display());
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(record)
+        .map_err(|e| fail(format!("not saved, nothing written: {e}")))?;
+    std::io::Write::write_all(&mut file, json(&plan)?.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|e| fail(format!("not saved, nothing written: {e}")))?;
+    let out = backfill::apply(store, &plan, system_ms())
+        .map_err(|e| fail(format!("{e}; undo what was written with --undo-backfill")))?;
+    println!("{}", json(&out)?);
+    Ok(())
+}
+
+/// Pretty JSON for the retag and backfill output.
 fn json<T: serde::Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string_pretty(value).map_err(|e| e.to_string())
 }
@@ -343,6 +406,9 @@ fn run(cli: Cli) -> Result<(), String> {
     };
     if cli.retag_columns.is_some() || cli.undo_retag.is_some() {
         return run_retag(&cli, store.as_ref());
+    }
+    if cli.backfill_evidence.is_some() || cli.undo_backfill.is_some() {
+        return run_backfill(&cli, store.as_ref());
     }
     let files = files(&cli);
     required(&cli.projects, "--projects")?;
