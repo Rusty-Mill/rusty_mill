@@ -1,6 +1,6 @@
 //! The server's state: the model, each block's PTY and grid, each client's queue.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
@@ -133,9 +133,36 @@ fn name_seed() -> u64 {
     u64::from_le_bytes(seed)
 }
 
+/// Fires when a block's PTY is released (C76), so a write already under
+/// way gives the master up at once instead of holding it open and
+/// delivering its bytes later.
+#[derive(Default)]
+pub(crate) struct Revoke {
+    fired: Cell<bool>,
+    notify: Notify,
+}
+
+impl Revoke {
+    #[cfg(target_os = "linux")]
+    fn fire(&self) {
+        self.fired.set(true);
+        self.notify.notify_waiters();
+    }
+
+    /// Resolves once the PTY is released; at once if it already was.
+    pub(crate) async fn fired(&self) {
+        if self.fired.get() {
+            return;
+        }
+        self.notify.notified().await;
+    }
+}
+
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
     pub(crate) pty: Rc<Pty>,
+    /// The block's release, which abandons this write (C76).
+    pub(crate) revoke: Rc<Revoke>,
     pub(crate) data: Vec<u8>,
     /// With [`Features::ECHO_ACK`]: the block and `Input` request to
     /// [`State::written`] once the write returns.
@@ -194,6 +221,8 @@ struct BlockRt {
 /// A block's running program: its PTY and the task reading it.
 struct Live {
     pty: Rc<Pty>,
+    /// Fired on release, so pending writes drop their `pty` (C76).
+    revoke: Rc<Revoke>,
     process: Process,
     /// Tells the reader a key was written, so it drains when its grace ends.
     wake: Rc<Notify>,
@@ -235,6 +264,7 @@ impl Unscreened {
         ));
         let live = Live {
             pty: self.pty,
+            revoke: Rc::default(),
             process: self.process,
             wake,
             reader,
@@ -1328,6 +1358,9 @@ impl State {
         rt.unsaved = true;
         rt.released = true;
         live.reader.abort();
+        // A write already under way on another connection holds the master
+        // too: it gives it up now, so the master closes with this drop.
+        live.revoke.fire();
         live.pty.release();
         drop(live.pty);
         // Disarmed here, before any future holds it: a task dropped unpolled
@@ -1457,10 +1490,12 @@ impl State {
                 };
                 let data = keys::encode(keys, rt.grid.app_cursor_keys)
                     .map_err(|e| format!("{method}: {e}"))?;
-                let pty = rt.live()?.pty.clone();
+                let live = rt.live()?;
+                let (pty, revoke) = (live.pty.clone(), live.revoke.clone());
                 let report = self.reporting(client, block)?;
                 return Ok(Outcome::Write(PtyWrite {
                     pty,
+                    revoke,
                     data,
                     key: None,
                     report,
@@ -1827,18 +1862,18 @@ impl State {
         self.mux
             .authorize_input(client, block)
             .map_err(Refusal::from)?;
-        let pty = self
+        let live = self
             .blocks
             .get(&block)
             .ok_or_else(|| format!("block {block} has no PTY"))?
-            .live()?
-            .pty
-            .clone();
+            .live()?;
+        let (pty, revoke) = (live.pty.clone(), live.revoke.clone());
         let report = self.reporting(client, block)?;
         self.check_echo(block);
         let key = self.echoes(client).then_some((block, req));
         Ok(Outcome::Write(PtyWrite {
             pty,
+            revoke,
             data,
             key,
             report,

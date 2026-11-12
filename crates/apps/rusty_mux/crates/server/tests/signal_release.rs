@@ -181,6 +181,54 @@ fn a_held_block_stays_after_its_released_program_exits() {
     assert_eq!(exited(&mut owner, block), None, "closed");
 }
 
+/// A write already under way when the owner releases gives the master up:
+/// the program's terminal hangs up, and no byte reaches it afterwards.
+#[test]
+fn a_release_abandons_a_write_already_under_way() {
+    const SENT: usize = 1 << 20;
+    let socket = start_server();
+    let mut owner = Client::connect_with(&socket, OWNER, None);
+    let mut writer = Client::connect_with(&socket, OWNER, None);
+    let dir = std::env::temp_dir().join(format!("signal-release-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let out = dir.join("read");
+    let _ = std::fs::remove_file(&out);
+    // Raw, so the terminal neither echoes nor waits for a line; the
+    // program reads nothing until well after the release.
+    let script = format!(
+        "stty raw -echo; trap '' HUP; echo PID=$$; echo ready; sleep 1; \
+         head -c {SENT} | wc -c > {out}.part; mv {out}.part {out}; sleep 30",
+        out = out.display()
+    );
+    let block = launch(&mut owner, &script, false);
+    let pid = pid(&mut owner, block);
+    writer.request(|req| Message::Attach { req, block });
+    writer.request(|req| Message::AcquireLease { req, block });
+    // Far more than the terminal buffers, so the write stays pending.
+    writer.input(block, &vec![b'x'; SENT]);
+    std::thread::sleep(Duration::from_millis(200));
+
+    owner.request(|req| Message::ReleaseBlock { req, block });
+    wait_until("read to its end", || out.exists());
+    let read: usize = std::fs::read_to_string(&out)
+        .expect("count")
+        .trim()
+        .parse()
+        .expect("a byte count");
+    assert!(
+        read < SENT,
+        "{read} of {SENT} bytes arrived after the release"
+    );
+    assert_eq!(
+        exited(&mut writer, block),
+        Some(true),
+        "the writer still served"
+    );
+    assert!(alive(pid), "pid {pid} was killed after the release");
+    kill(pid);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn only_the_owner_may_signal_or_release() {
     let socket = start_server();

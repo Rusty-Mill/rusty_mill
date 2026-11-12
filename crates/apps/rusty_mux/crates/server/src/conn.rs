@@ -13,7 +13,7 @@ use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use rusty_tokio::sync::Notify;
 
 use crate::outbox::{Inbox, outbox};
-use crate::state::{Kept, Pending, Shared, State};
+use crate::state::{Kept, Pending, PtyWrite, Shared, State};
 
 const READ_CHUNK: usize = 64 << 10;
 
@@ -128,14 +128,32 @@ async fn serve(
                 continue;
             }
         };
-        write.pty.write_all(&write.data).await?;
-        if let Some(key) = write.key {
+        let PtyWrite {
+            pty,
+            revoke,
+            data,
+            key,
+            report,
+        } = write;
+        // A release abandons the write and drops its hold on the master,
+        // so no byte reaches the program afterwards (C76). Biased, so a
+        // release that came first wins before a byte is written.
+        let written = rusty_tokio::select! {
+            biased;
+            _ = revoke.fired() => false,
+            result = pty.write_all(&data) => { result?; true },
+        };
+        drop(pty);
+        if !written {
+            continue;
+        }
+        if let Some(key) = key {
             let now = std::time::Instant::now();
             state.borrow_mut().written(client, cancel, key, now);
         }
         // Reported after the program has the bytes (C77).
-        if let Some((block, from)) = write.report {
-            state.borrow_mut().report_input(block, from, write.data);
+        if let Some((block, from)) = report {
+            state.borrow_mut().report_input(block, from, data);
         }
     }
     Ok(())

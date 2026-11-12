@@ -301,6 +301,9 @@ program still runs: `list` shows it `exited`, and input says its pty was release
 moves the child out of `Process`, synchronously, into a `Released` waiter with no kill-on-drop,
 before any task is spawned. The waiter polls `try_wait` like `reap()` but never signals, so a
 waiter dropped unpolled, aborted, or cut short by a stopping server leaves the program running.
+A release also abandons any input write already under way on another connection: each write
+carries the block's `Revoke`, which the release fires, so the writer drops its hold on the master
+and no byte reaches the program afterwards.
 `rusty-mux-ctl own` takes `{"op":"signal","block":B,"signal":"term"}` and `{"op":"release","block":B}`.
 
 ## C77. Input gate
