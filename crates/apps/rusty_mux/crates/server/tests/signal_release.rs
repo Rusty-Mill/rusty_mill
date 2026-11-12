@@ -125,6 +125,15 @@ fn kill(pid: u32) {
     assert!(status.success(), "kill -9 {pid}");
 }
 
+/// Kills the group `pid` leads, the block program's, children included.
+fn kill_group(pid: u32) {
+    let status = std::process::Command::new("kill")
+        .args(["-9", "--", &format!("-{pid}")])
+        .status()
+        .expect("run kill");
+    assert!(status.success(), "kill -9 -- -{pid}");
+}
+
 #[test]
 fn term_reaches_a_trap_in_the_programs_group() {
     let socket = start_server();
@@ -147,11 +156,19 @@ fn a_released_program_that_ignores_hangups_is_never_killed() {
     let script = "trap '' HUP; echo PID=$$; echo ready; while :; do sleep 0.1; done";
     let block = launch(&mut owner, script, false);
     let pid = pid(&mut owner, block);
+    // Held from before, so only the release refuses the input below.
+    owner.request(|req| Message::AcquireLease { req, block });
 
     owner.request(|req| Message::ReleaseBlock { req, block });
     std::thread::sleep(Duration::from_secs(2));
     assert!(alive(pid), "pid {pid} was killed after the release");
     assert_eq!(exited(&mut owner, block), Some(true), "read-only meanwhile");
+    let typed = refused(&mut owner, |req| Message::Input {
+        req,
+        block,
+        data: b"x".to_vec(),
+    });
+    assert!(typed.contains("its pty was released"), "{typed}");
     let again = refused(&mut owner, |req| Message::SignalBlock {
         req,
         block,
@@ -225,7 +242,8 @@ fn a_release_abandons_a_write_already_under_way() {
         "the writer still served"
     );
     assert!(alive(pid), "pid {pid} was killed after the release");
-    kill(pid);
+    // Its `sleep 30` too, not only the shell.
+    kill_group(pid);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -247,6 +265,42 @@ fn only_the_owner_may_signal_or_release() {
     assert_eq!(exited(&mut owner, block), Some(false), "untouched");
 }
 
+/// A block made without `own` has no owner, so no client may signal or
+/// release it, its creator included (D230): it behaves as before C76.
+#[test]
+fn an_unowned_block_is_never_signalled_or_released() {
+    let socket = start_server();
+    let mut maker = Client::connect_with(&socket, OWNER, None);
+    let window = window_for(&mut maker);
+    let size = Size::new(80, 24).expect("size");
+    let launch = Launch {
+        own: false,
+        ..owned("echo PID=$$; echo ready; sleep 30", false)
+    };
+    let id = maker.request(|req| Message::CreateBlock {
+        req,
+        window,
+        size,
+        launch,
+    });
+    let block = BlockId::from_uuid(id.expect("a block id"));
+    maker.request(|req| Message::Attach { req, block });
+    maker.wait_ready(block);
+    let pid = pid(&mut maker, block);
+
+    let signal = refused(&mut maker, |req| Message::SignalBlock {
+        req,
+        block,
+        signal: BlockSignal::Kill,
+    });
+    let release = refused(&mut maker, |req| Message::ReleaseBlock { req, block });
+    assert!(signal.contains("no owner"), "{signal}");
+    assert!(release.contains("no owner"), "{release}");
+    assert!(alive(pid), "pid {pid} was signalled");
+    assert_eq!(exited(&mut maker, block), Some(false), "untouched");
+    kill_group(pid);
+}
+
 #[test]
 fn signal_and_release_need_the_feature() {
     let socket = start_server();
@@ -254,6 +308,13 @@ fn signal_and_release_need_the_feature() {
     let block = launch(&mut owner, "echo ready; sleep 30", false);
     let plain = OWNER.without(Features::SIGNAL_RELEASE);
     let mut older = Client::connect_with(&socket, plain, None);
-    let reason = refused(&mut older, |req| Message::ReleaseBlock { req, block });
-    assert!(reason.contains("requires feature bits"), "{reason}");
+    let release = refused(&mut older, |req| Message::ReleaseBlock { req, block });
+    assert!(release.contains("requires feature bits"), "{release}");
+    let signal = refused(&mut older, |req| Message::SignalBlock {
+        req,
+        block,
+        signal: BlockSignal::Kill,
+    });
+    assert!(signal.contains("requires feature bits"), "{signal}");
+    assert_eq!(exited(&mut owner, block), Some(false), "untouched");
 }

@@ -70,6 +70,13 @@ impl Child for LinuxChild {
                 OsCode::None,
                 "kill_tree",
             )),
+            // `kill(-1)` signals every process this user may; no child
+            // leads group 0 or 1, so either is a bug, refused.
+            Some(pgid) if pgid <= 1 => Err(PlatformError::new(
+                ErrorKind::InvalidInput,
+                OsCode::None,
+                "kill_tree: process group <= 1",
+            )),
             Some(pgid) => spawn::kill_group(pgid, sig),
         }
     }

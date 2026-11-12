@@ -216,7 +216,7 @@ impl Features {
 
     /// Signal and release (C76): [`Message::SignalBlock`] signals an owned
     /// block's program group, and [`Message::ReleaseBlock`] closes its PTY
-    /// and waits for the program without ever killing it. Unix only.
+    /// and waits for the program without ever killing it. Linux only: only a Linux server offers it.
     pub const SIGNAL_RELEASE: Self = Self(1 << 44);
 
     pub const fn from_bits(bits: u64) -> Self {

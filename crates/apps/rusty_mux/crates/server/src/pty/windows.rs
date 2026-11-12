@@ -479,6 +479,18 @@ impl Pty {
         result.await.map_err(|_| broken())?
     }
 
+    /// [`Self::write_all`], counting the whole write once it is done: a
+    /// queued write finishes whole, and no release abandons one on Windows.
+    pub(crate) async fn write_counted(
+        &self,
+        data: &[u8],
+        written: &std::cell::Cell<usize>,
+    ) -> io::Result<()> {
+        self.write_all(data).await?;
+        written.set(data.len());
+        Ok(())
+    }
+
     /// Fails once the console is closed, or while it is closing.
     pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
         self.master.resize(win_size(size)).map_err(to_io)

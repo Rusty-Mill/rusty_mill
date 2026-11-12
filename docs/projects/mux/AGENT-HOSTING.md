@@ -274,7 +274,7 @@ orch owns the end grace and kills through the cgroup.
 **Shape.** Behind `SIGNAL_RELEASE`, there are two new requests. Both are owner-only on an owned
 block, and both are refused on Windows (`unsupported`); orch runs on Linux.
 - **`SignalBlock{block, signal}`.**
-  - It signals the program's own process group through the existing pidfd-safe `kill_tree`.
+  - It signals the program's own process group through the existing `kill_tree`, a plain `kill(-pgid)`: safe because the group leader is not yet reaped, so its pid (the group id) cannot be reused.
   - `signal` is a closed set (`hup`, `int`, `term`, `kill`, `stop`, `cont`), so no arbitrary
     numbers.
   - If the program is gone, it answers `exited`.
@@ -303,7 +303,9 @@ before any task is spawned. The waiter polls `try_wait` like `reap()` but never 
 waiter dropped unpolled, aborted, or cut short by a stopping server leaves the program running.
 A release also abandons any input write already under way on another connection: each write
 carries the block's `Revoke`, which the release fires, so the writer drops its hold on the master
-and no byte reaches the program afterwards.
+and no byte reaches the program afterwards. The bytes it had already taken are still acked and
+reported (C77). Both requests are refused on a block with no owner, for every client, so a block
+made without `own` behaves as before (D230); an orphaned block stays refused too.
 `rusty-mux-ctl own` takes `{"op":"signal","block":B,"signal":"term"}` and `{"op":"release","block":B}`.
 
 ## C77. Input gate

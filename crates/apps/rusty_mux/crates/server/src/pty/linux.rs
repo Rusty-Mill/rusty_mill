@@ -93,9 +93,11 @@ impl Process {
 impl Process {
     /// Sends `sig` to the program's process group (C76).
     pub(crate) fn signal(&self, sig: BlockSignal) -> io::Result<()> {
-        let Some(child) = self.child.as_ref() else {
-            return Ok(());
-        };
+        // Gone already: say so rather than report a signal that went nowhere.
+        let child = self
+            .child
+            .as_ref()
+            .ok_or_else(|| io::Error::other("exited"))?;
         child.kill_tree(platform_signal(sig)).map_err(to_io)
     }
 
@@ -215,12 +217,26 @@ impl Pty {
         }
     }
 
-    pub(crate) async fn write_all(&self, mut data: &[u8]) -> io::Result<()> {
+    pub(crate) async fn write_all(&self, data: &[u8]) -> io::Result<()> {
+        self.write_counted(data, &std::cell::Cell::new(0)).await
+    }
+
+    /// [`Self::write_all`], adding to `written` as the program takes each
+    /// part, so a caller that abandons the write knows how much it got.
+    pub(crate) async fn write_counted(
+        &self,
+        mut data: &[u8],
+        written: &std::cell::Cell<usize>,
+    ) -> io::Result<()> {
         while !data.is_empty() {
             let mut ready = self.master.writable().await?;
             match ready.try_io(|fd| fd.get_ref().write(data).map_err(to_io)) {
                 Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Ok(result) => data = &data[result?..],
+                Ok(result) => {
+                    let n = result?;
+                    written.set(written.get() + n);
+                    data = &data[n..];
+                }
                 Err(_would_block) => continue,
             }
         }

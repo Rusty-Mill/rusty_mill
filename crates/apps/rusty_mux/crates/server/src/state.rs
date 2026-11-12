@@ -1327,7 +1327,7 @@ impl State {
         block: BlockId,
         signal: rusty_mux_proto::BlockSignal,
     ) -> Result<Outcome, Refusal> {
-        self.owns(client, [block])?;
+        self.owner_only(client, block)?;
         let live = self.running(block)?;
         live.process
             .signal(signal)
@@ -1346,7 +1346,7 @@ impl State {
         client: ClientId,
         block: BlockId,
     ) -> Result<Outcome, Refusal> {
-        self.owns(client, [block])?;
+        self.owner_only(client, block)?;
         self.running(block)?;
         let rt = self
             .blocks
@@ -1389,6 +1389,27 @@ impl State {
     /// Refuses unless `client` may change each of `blocks`: nobody else
     /// owns it and it is not orphaned (C46). An unknown block is left for
     /// the request itself to report.
+    /// Refuses `client` unless `block` has an owner and it is `client`:
+    /// signal and release reach only an owned block, for its owner, so a
+    /// block made without `own` behaves as before (C76, D230). Unlike
+    /// [`Self::owns`], an unowned block is refused too.
+    #[cfg(target_os = "linux")]
+    fn owner_only(&self, client: ClientId, block: BlockId) -> Result<(), Refusal> {
+        let target = self
+            .mux
+            .block(block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        if target.owner().is_none() {
+            return Err(format!(
+                "block {block} has no owner: only an owned block's owner may signal or release it"
+            )
+            .into());
+        }
+        self.mux
+            .authorize_owner(client, block)
+            .map_err(Refusal::from)
+    }
+
     fn owns(
         &self,
         client: ClientId,
