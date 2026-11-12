@@ -32,19 +32,24 @@ pub struct Fill {
     pub number: Option<u64>,
     /// The card's revision when planned.
     pub rev: u64,
-    /// The pull request links, in the order the card names them.
-    pub links: Vec<String>,
-    /// Where the card names each link (the text around it), to review the plan by: one per
-    /// link. Nothing checks that a pull request merged, so a person reads these.
-    #[serde(default)]
-    pub context: Vec<String>,
+    /// The pull requests, in the order the card first names them.
+    pub links: Vec<Link>,
 }
 
-/// A pull request a card names, and the text it was named in.
-struct Mention {
-    link: String,
-    context: String,
+/// A pull request a card names, and every place it names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Link {
+    /// `https://github.com/OWNER/NAME/pull/N`.
+    pub url: String,
+    /// The text around each mention, oldest first (at most [`MAX_MENTIONS`]), to review the
+    /// plan by. Nothing checks that a pull request merged, so a person reads these: a later
+    /// "closed unmerged" shows here.
+    pub named_in: Vec<String>,
 }
+
+/// Most mentions kept per link.
+const MAX_MENTIONS: usize = 6;
 
 /// What happened to one planned card.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -91,6 +96,7 @@ pub fn parse_repos(spec: &str) -> Result<BTreeMap<String, String>, String> {
 /// A repository, owner or name: letters, digits, `-`, `_` and `.`.
 fn plain(s: &str) -> bool {
     !s.is_empty()
+        && !s.bytes().all(|b| b == b'.')
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
@@ -108,34 +114,38 @@ pub fn plan(cards: &[Card], github_of: &dyn Fn(&Card) -> Option<String>) -> Vec<
                 id: c.id,
                 number: c.number,
                 rev: c.rev,
-                links: named.iter().map(|m| m.link.clone()).collect(),
-                context: named.into_iter().map(|m| m.context).collect(),
+                links: named,
             })
         })
         .collect()
 }
 
 /// Every pull request `card` names, in order, without repeats.
-fn links_in(card: &Card, github: Option<&str>) -> Vec<Mention> {
+fn links_in(card: &Card, github: Option<&str>) -> Vec<Link> {
     let texts =
         std::iter::once(card.body.as_str()).chain(card.comments.iter().map(|c| c.text.as_str()));
-    let mut out: Vec<Mention> = Vec::new();
+    let mut out: Vec<Link> = Vec::new();
     for text in texts {
         for (at, link) in pull_urls(text).into_iter().chain(pr_mentions(text, github)) {
-            if !out.iter().any(|m| m.link == link) {
-                out.push(Mention {
-                    link,
-                    context: snippet(text, at),
-                });
+            let seen = snippet(text, at);
+            match out.iter_mut().find(|l| l.url == link) {
+                Some(l) if l.named_in.len() < MAX_MENTIONS && !l.named_in.contains(&seen) => {
+                    l.named_in.push(seen);
+                }
+                Some(_) => {}
+                None => out.push(Link {
+                    url: link,
+                    named_in: vec![seen],
+                }),
             }
         }
     }
     out
 }
 
-/// About 140 characters of `text` around byte `at` (a char boundary), on one line.
+/// About 180 characters of `text` around byte `at` (a char boundary), on one line.
 fn snippet(text: &str, at: usize) -> String {
-    let before: Vec<char> = text[..at].chars().rev().take(60).collect();
+    let before: Vec<char> = text[..at].chars().rev().take(100).collect();
     let around: String = before
         .into_iter()
         .rev()
@@ -145,11 +155,11 @@ fn snippet(text: &str, at: usize) -> String {
 }
 
 /// The last [`MAX_EVIDENCE`] links the card itself accepts as evidence.
-fn valid(card: &Card, links: Vec<Mention>) -> Vec<Mention> {
-    let ok: Vec<Mention> = links
+fn valid(card: &Card, links: Vec<Link>) -> Vec<Link> {
+    let ok: Vec<Link> = links
         .into_iter()
-        .filter(|m| {
-            card.add_evidence(std::slice::from_ref(&m.link), card.updated_ms)
+        .filter(|l| {
+            card.add_evidence(std::slice::from_ref(&l.url), card.updated_ms)
                 .is_ok()
         })
         .collect();
@@ -232,7 +242,8 @@ pub fn apply(store: &dyn Store, plan: &[Fill], now_ms: i64) -> Result<Vec<Outcom
             out.push(skipped(f.id, "changed since the plan"));
             continue;
         }
-        let next = card.add_evidence(&f.links, now_ms)?;
+        let urls: Vec<String> = f.links.iter().map(|l| l.url.clone()).collect();
+        let next = card.add_evidence(&urls, now_ms)?;
         match store.replace(&next, Event::of(&next, EventKind::Edited, ACTOR)) {
             Ok(_) => out.push(Outcome::Done { id: f.id }),
             Err(BoardError::Conflict) => out.push(skipped(f.id, "changed while writing")),
@@ -245,7 +256,7 @@ pub fn apply(store: &dyn Store, plan: &[Fill], now_ms: i64) -> Result<Vec<Outcom
 /// Clear the evidence of each planned card that still has exactly the planned links.
 ///
 /// # Errors
-/// The first storage error. Cards before it are cleared; running it again finishes the rest.
+/// The first storage error other than a conflict. Cards before it are cleared.
 pub fn undo(store: &dyn Store, plan: &[Fill], now_ms: i64) -> Result<Vec<Outcome>, BoardError> {
     let mut out = Vec::new();
     for f in plan {
@@ -253,7 +264,7 @@ pub fn undo(store: &dyn Store, plan: &[Fill], now_ms: i64) -> Result<Vec<Outcome
             out.push(skipped(f.id, "no longer on the board"));
             continue;
         };
-        if card.evidence != f.links {
+        if !card.evidence.iter().eq(f.links.iter().map(|l| &l.url)) {
             out.push(skipped(f.id, "its evidence is not what the backfill wrote"));
             continue;
         }
@@ -261,8 +272,11 @@ pub fn undo(store: &dyn Store, plan: &[Fill], now_ms: i64) -> Result<Vec<Outcome
             evidence: Vec::new(),
             ..card.next(now_ms)
         };
-        store.replace(&next, Event::of(&next, EventKind::Edited, ACTOR))?;
-        out.push(Outcome::Done { id: f.id });
+        match store.replace(&next, Event::of(&next, EventKind::Edited, ACTOR)) {
+            Ok(_) => out.push(Outcome::Done { id: f.id }),
+            Err(BoardError::Conflict) => out.push(skipped(f.id, "changed while writing")),
+            Err(e) => return Err(e),
+        }
     }
     Ok(out)
 }
@@ -311,7 +325,7 @@ mod tests {
             ],
         );
         let only =
-            |github| -> Vec<String> { links_in(&c, github).into_iter().map(|m| m.link).collect() };
+            |github| -> Vec<String> { links_in(&c, github).into_iter().map(|l| l.url).collect() };
         let links = only(Some(RM));
         assert_eq!(
             links,
@@ -351,7 +365,7 @@ mod tests {
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].id, full.id);
         assert_eq!(p[0].links.len(), MAX_EVIDENCE);
-        assert!(p[0].links[0].ends_with("/pull/3"), "{:?}", p[0].links);
+        assert!(p[0].links[0].url.ends_with("/pull/3"), "{:?}", p[0].links);
     }
 
     #[test]
@@ -416,20 +430,85 @@ mod tests {
     }
 
     #[test]
-    fn the_plan_shows_where_each_pull_request_is_named() {
+    fn the_plan_shows_every_place_a_pull_request_is_named() {
         let c = done(
             "Superseded by PR #5, which was closed unmerged.",
-            &["see PR #6 for the fix"],
+            &[
+                "see PR #6 for the fix",
+                "PR #5 was closed unmerged; PR #6 landed",
+                "PR #6",
+            ],
         );
         let p = plan(&[c], &mapped);
         assert_eq!(p[0].links.len(), 2);
-        assert_eq!(p[0].context.len(), 2);
+        let five = &p[0].links[0];
+        assert!(five.url.ends_with("/pull/5"));
+        assert_eq!(five.named_in.len(), 2, "{five:?}");
+        assert!(five.named_in[0].contains("Superseded by PR #5"));
         assert!(
-            p[0].context[0].contains("Superseded by PR #5"),
-            "{:?}",
-            p[0].context
+            five.named_in[1].contains("PR #5 was closed unmerged"),
+            "a later mention shows"
         );
-        assert!(p[0].context[1].contains("see PR #6 for the fix"));
+        assert_eq!(p[0].links[1].named_in.len(), 3, "{:?}", p[0].links[1]);
+    }
+
+    /// A store whose writes lose a race.
+    struct Racy(MemStore);
+
+    impl Store for Racy {
+        fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+            self.0.get(id)
+        }
+        fn list(&self) -> Result<Vec<Card>, BoardError> {
+            self.0.list()
+        }
+        fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
+            self.0.insert(card, event)
+        }
+        fn replace(&self, _: &Card, _: Event) -> Result<u64, BoardError> {
+            Err(BoardError::Conflict)
+        }
+        fn events_since(
+            &self,
+            after: Option<Uuid>,
+            limit: usize,
+        ) -> Result<Vec<Event>, BoardError> {
+            self.0.events_since(after, limit)
+        }
+        fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+            self.0.last_event_id()
+        }
+        fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+            self.0.reserve_number(card, floor)
+        }
+    }
+
+    #[test]
+    fn a_lost_race_is_skipped_by_apply_and_undo_not_fatal() {
+        let store = Racy(MemStore::default());
+        let c = done("PR #1", &[]);
+        store
+            .insert(&c, Event::of(&c, EventKind::Created, "t"))
+            .expect("insert");
+        let p = plan(std::slice::from_ref(&c), &mapped);
+        let out = apply(&store, &p, 10).expect("apply goes on");
+        assert!(
+            matches!(&out[..], [Outcome::Skipped { why, .. }] if why == "changed while writing"),
+            "{out:?}"
+        );
+        // A card that already carries the planned links, whose clearing loses the race.
+        let filled = c
+            .add_evidence(&[p[0].links[0].url.clone()], 11)
+            .expect("fill");
+        store
+            .0
+            .replace(&filled, Event::of(&filled, EventKind::Edited, "t"))
+            .expect("write");
+        let out = undo(&store, &p, 12).expect("undo goes on");
+        assert!(
+            matches!(&out[..], [Outcome::Skipped { why, .. }] if why == "changed while writing"),
+            "{out:?}"
+        );
     }
 
     #[test]
@@ -489,7 +568,15 @@ mod tests {
     fn repo_maps_parse_or_say_why_not() {
         let m = parse_repos("rusty_mill=Rusty-Mill/rusty_mill, pythrust=o/p").expect("parse");
         assert_eq!(m["rusty_mill"], RM);
-        for bad in ["x", "x=y", "x=a/b,x=c/d", "x=a/b c", "=a/b"] {
+        for bad in [
+            "x",
+            "x=y",
+            "x=a/b,x=c/d",
+            "x=a/b c",
+            "=a/b",
+            "x=../b",
+            "x=a/..",
+        ] {
             assert!(parse_repos(bad).is_err(), "{bad}");
         }
     }
