@@ -34,8 +34,9 @@ sources disagree, answer by that rule and add the conflict, with both sources, t
 `AEM/OPEN_QUESTIONS.md`.
 
 ## Hard lines (each escalates if crossed)
-- No Mill Board project, cards, crate scaffold or PRIORITIES.md row until Nano sets a
-  tier (D13). Programme questions (tier, phase, sequencing) go to `millwright-expert`.
+- Tier is Normal, one change in flight (D16, supersedes D13): no Mill Board cards or
+  crate scaffold before the overlap check (Q7), and never more than one change in flight.
+  Programme questions (tier, phase, sequencing) go to `millwright-expert`.
 - Never delete or replace a path that lacks our managed marker (D6).
 - No telemetry; no write outside our own folders without a previewed plan and `--yes` (D8).
 - No code copied from Skills Desktop (D9). New third-party dependencies are ask-first (D12).

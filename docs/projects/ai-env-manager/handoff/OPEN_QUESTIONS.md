@@ -4,7 +4,7 @@ Format: `- [ ] Q<n> (<date>, blocking? y/n): <question> — interim choice: <wha
 Resolved items are checked and point to the D#/QA entry that answers them.
 
 - [x] Q1 → D14 (2026-11-12, y for M1): How does Ai Env Manager relate to `library/`, which already catalogs prompts, skills, mods, claude-md and agents-md entries from git sources in place? a) absorb it over time (reuse its kinds and `sources.json`; `build.py` keeps running until the Rust core renders the catalog), b) keep separate, c) replace now. — interim choice: a) for the model only (D10); `library/` untouched. Asked on a decision card, 2026-11-12.
-- [ ] Q2 (2026-11-12, y for cards/code): Priority tier in `docs/projects/millwright/PRIORITIES.md`? millwright-expert recommends Low (like `skill_pack`, `expert_agents`), or fold into `skill_pack`/`library/`. — interim choice: design pack only (D13).
+- [x] Q2 → D16 (2026-11-12, y for cards/code): Priority tier in `docs/projects/millwright/PRIORITIES.md`? millwright-expert recommends Low (like `skill_pack`, `expert_agents`), or fold into `skill_pack`/`library/`. — interim choice: design pack only (D13).
 - [ ] Q3 (2026-11-12, n): Desktop at all? Keep M4's Tauri shell, or stop at CLI plus MCP? — interim choice: CLI and MCP only; no desktop work planned.
 - [ ] Q4 (2026-11-12, n): Which tools ship first: all 32 catalog entries, or Claude Code, Codex, Cursor, Gemini CLI, verified, then more? — interim choice: the four.
 - [ ] Q5 (2026-11-12, n until M0 code): Is Windows first-class from M0 (junction fallback tested in CI), or macOS and Linux first? — interim choice: Windows in M0 CI, since Nano's main machine is Windows (rusty_term/condrv work) and the fallback is the hard part.

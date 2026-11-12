@@ -4,8 +4,9 @@ Owner: Nano (`baileyrd`) — the person whose words count as `[stated]`
 Tags: [stated] [default] [open]. Pack root: `docs/projects/ai-env-manager/handoff/`.
 
 ## Status
-Design only. No Mill Board project, cards, crate or PRIORITIES.md row until Nano gives
-the project a tier (DECISIONS.md D13). Work from this pack; do not scaffold code yet.
+Priority tier Normal: active, one change in flight (DECISIONS.md D16, supersedes D13).
+M0 cards (core and linker) and the crate scaffold (D11) may start after the overlap check
+(OPEN_QUESTIONS.md Q7). New third-party dependencies stay ask-first (D12).
 
 ## Intent
 One tool that manages the AI working environment Nano already keeps in git: skills,
