@@ -95,5 +95,4 @@ leave the board; whether Converge is also paused, as E2's wording suggested, is 
 settled (handoff/OPEN_QUESTIONS.md Q2).
 
 E1 (entry rule) and E3 (committed work this month) are answered; see DECISIONS.md
-entry-rule and audited-repos-this-month. Still open from E3: how "they all might" sits
-with X1 to X3 (handoff/OPEN_QUESTIONS.md Q3).
+entry-rule and audited-repos-this-month; X1 to X3 still stand (e3-x-reconcile).
