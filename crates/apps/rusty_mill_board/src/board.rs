@@ -1120,6 +1120,9 @@ impl<S: Store> Board<S> {
         if new.done && !by.caps.contains(&Capability::Close) {
             return Err(BoardError::Forbidden(Capability::Close));
         }
+        if !new.evidence.is_empty() {
+            check_records_shipped(by)?;
+        }
         let mut card = Card::new(new.title, new.body, new.tags, (self.clock)())?;
         if new.done {
             card.column = Column::DONE;
@@ -1326,6 +1329,7 @@ impl<S: Store> Board<S> {
                     | BoardError::Claimed(_)
                     | BoardError::NoSuchMove { .. }
                     | BoardError::Forbidden(_)
+                    | BoardError::ForbiddenAny(_)
                     | BoardError::NotClaimant
                     | BoardError::Terminal
                     | BoardError::OutOfScope(_)
@@ -1551,12 +1555,7 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// A missing capability, or see [`Card::add_evidence`].
     pub fn add_evidence(&self, id: Uuid, links: &[String], by: &Actor) -> Result<Card, BoardError> {
-        let may = [Capability::Close, Capability::Merge, Capability::Triage]
-            .iter()
-            .any(|c| by.caps.contains(c));
-        if !may {
-            return Err(BoardError::Forbidden(Capability::Close));
-        }
+        check_records_shipped(by)?;
         self.apply(id, by, EventKind::Edited, |c, now| {
             c.add_evidence(links, now)
         })
@@ -1929,4 +1928,13 @@ fn answerer(actor: &str) -> String {
     } else {
         label
     }
+}
+
+/// Who may record work as shipped (add evidence): a holder of `Close`, `Merge` or `Triage`.
+fn check_records_shipped(by: &Actor) -> Result<(), BoardError> {
+    const MAY: &[Capability] = &[Capability::Close, Capability::Merge, Capability::Triage];
+    if MAY.iter().any(|c| by.caps.contains(c)) {
+        return Ok(());
+    }
+    Err(BoardError::ForbiddenAny(MAY))
 }

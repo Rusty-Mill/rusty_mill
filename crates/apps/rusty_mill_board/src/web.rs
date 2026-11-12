@@ -325,9 +325,10 @@ fn status_of(e: &BoardError) -> StatusCode {
         BoardError::Conflict | BoardError::Claimed(_) | BoardError::PartlySaved { .. } => {
             StatusCode::CONFLICT
         }
-        BoardError::Forbidden(_) | BoardError::NotClaimant | BoardError::OutOfScope(_) => {
-            StatusCode::FORBIDDEN
-        }
+        BoardError::Forbidden(_)
+        | BoardError::ForbiddenAny(_)
+        | BoardError::NotClaimant
+        | BoardError::OutOfScope(_) => StatusCode::FORBIDDEN,
         BoardError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         BoardError::Terminal
         | BoardError::NoSuchMove { .. }

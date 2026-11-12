@@ -110,10 +110,11 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   Archived, All projects) starts on Active. A paused or archived project must be made active before it is removed
   or renamed, so no status outlives its project.
 - **Shipped needs evidence.** A Done card counts as shipped only with evidence: a merged PR or any http(s) link
-  that shows the work (`card_evidence`, needing `close`, `merge` or `triage`; or `evidence` on `card_add` with
-  `done: true`), at most 8 per card, kept in the card's rusty_tick board document. Without evidence it is a
-  prototype: `board_metrics` counts it as `prototype` (per week and per project) and leaves it out of shipped and
-  lead time. Observed external refs (ADR-0006) never count. Cards that were Done before evidence existed read as
+  with a host that shows the work (printable ASCII, at most 512 bytes; `card_evidence`, or `evidence` on
+  `card_add`, both needing `close`, `merge` or `triage`), at most 8 per card, kept in the card's rusty_tick board
+  document. A dropped card takes none. Without evidence it is a prototype: `board_metrics` counts it as
+  `prototype` (per week and per project) and leaves it out of shipped and lead time; the Metrics view shows
+  prototypes beside shipped work. Observed external refs (ADR-0006) never count. Cards that were Done before evidence existed read as
   prototypes until someone adds a link.
 - **Close reasons (dropped work).** `card_close` closes an unstarted card (Backlog or a queue) without shipping
   it, for a required `reason`: `wont_do`, `duplicate` or `superseded`; an optional `note` becomes the closer's

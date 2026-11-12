@@ -167,36 +167,32 @@ fn by_column(flow: &Workflow, open: &[&Card]) -> Vec<Tally<Column>> {
         .collect()
 }
 
+/// The tally of `c`'s project, started at zero.
+fn tally<'a>(per: &'a mut BTreeMap<String, ProjectTally>, c: &Card) -> &'a mut ProjectTally {
+    per.entry(c.project.clone())
+        .or_insert_with(|| ProjectTally {
+            project: c.project.clone(),
+            open: 0,
+            shipped: 0,
+            prototype: 0,
+            dropped: 0,
+        })
+}
+
 fn by_project(
     open: &[&Card],
     recent: &[&Card],
     prototypes: &[&Card],
     dropped: &[&Card],
 ) -> Vec<ProjectTally> {
-    let mut per: BTreeMap<&str, (usize, usize, usize, usize)> = BTreeMap::new();
-    open.iter()
-        .for_each(|c| per.entry(&c.project).or_default().0 += 1);
-    recent
-        .iter()
-        .for_each(|c| per.entry(&c.project).or_default().1 += 1);
-    dropped
-        .iter()
-        .for_each(|c| per.entry(&c.project).or_default().2 += 1);
+    let mut per: BTreeMap<String, ProjectTally> = BTreeMap::new();
+    open.iter().for_each(|c| tally(&mut per, c).open += 1);
+    recent.iter().for_each(|c| tally(&mut per, c).shipped += 1);
     prototypes
         .iter()
-        .for_each(|c| per.entry(&c.project).or_default().3 += 1);
-    let mut out: Vec<ProjectTally> = per
-        .into_iter()
-        .map(
-            |(project, (open, shipped, dropped, prototype))| ProjectTally {
-                project: project.to_owned(),
-                open,
-                shipped,
-                prototype,
-                dropped,
-            },
-        )
-        .collect();
+        .for_each(|c| tally(&mut per, c).prototype += 1);
+    dropped.iter().for_each(|c| tally(&mut per, c).dropped += 1);
+    let mut out: Vec<ProjectTally> = per.into_values().collect();
     out.sort_by(|a, b| b.open.cmp(&a.open).then_with(|| a.project.cmp(&b.project)));
     out
 }
@@ -239,9 +235,10 @@ fn weeks(cards: &[Card], now_ms: i64) -> Vec<Week> {
             out[w].added += 1;
         }
         if let Some(w) = c.done_ms.and_then(|d| week_of(d, now_ms)) {
-            match c.shipped() {
-                true => out[w].done += 1,
-                false => out[w].prototype += 1,
+            if c.shipped() {
+                out[w].done += 1;
+            } else {
+                out[w].prototype += 1;
             }
         }
         if let Some(w) = c.closed.and_then(|x| week_of(x.at_ms, now_ms)) {

@@ -1898,10 +1898,23 @@ mod tests {
             "card_evidence",
             as_("reviewer", json!({"id": "#2", "links": [pr]})),
         );
-        assert!(matches!(
-            refused,
-            Err(CallError::Board(BoardError::Forbidden(_)))
-        ));
+        assert!(
+            matches!(&refused, Err(CallError::Board(BoardError::ForbiddenAny(cs))) if cs.len() == 3),
+            "{refused:?}"
+        );
+        // Nor can evidence come in with a new card, done or not, without those capabilities.
+        for done in [false, true] {
+            let sneaked = call_as(
+                &board,
+                None,
+                "card_add",
+                as_(
+                    "reviewer",
+                    json!({"title": "sneak", "done": done, "evidence": [pr]}),
+                ),
+            );
+            assert!(sneaked.is_err(), "done {done}: {sneaked:?}");
+        }
         let bad = call_as(
             &board,
             None,

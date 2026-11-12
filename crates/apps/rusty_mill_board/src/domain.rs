@@ -390,6 +390,28 @@ pub const MAX_EVIDENCE: usize = 8;
 /// Longest evidence link, in bytes.
 pub const MAX_EVIDENCE_BYTES: usize = 512;
 
+/// Whether `link` is a plausible evidence link: `http://` or `https://` (any case) and a host,
+/// printable ASCII only (no spaces, control or invisible format characters; a non-ASCII
+/// address is given percent-encoded), at most [`MAX_EVIDENCE_BYTES`].
+fn evidence_link_ok(link: &str) -> bool {
+    if link.len() > MAX_EVIDENCE_BYTES || !link.bytes().all(|b| b.is_ascii_graphic()) {
+        return false;
+    }
+    let Some((scheme, rest)) = link.split_once("://") else {
+        return false;
+    };
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        && !host.is_empty()
+        && !host.starts_with(':')
+}
+
 /// Where a project stands. Absent means [`ProjectStatus::Active`].
 #[derive(
     Debug,
@@ -719,6 +741,8 @@ pub enum BoardError {
     },
     /// The actor lacks the capability for this move.
     Forbidden(Capability),
+    /// The actor holds none of these capabilities, any one of which would do.
+    ForbiddenAny(&'static [Capability]),
     /// Someone else holds the claim.
     Claimed(String),
     /// Claim needed to move out of a working column.
@@ -752,6 +776,7 @@ impl fmt::Display for BoardError {
             Self::Terminal => write!(f, "done cards cannot move"),
             Self::NoSuchMove { from, to } => write!(f, "no move {from} -> {to}"),
             Self::Forbidden(c) => write!(f, "requires capability {c:?}"),
+            Self::ForbiddenAny(cs) => write!(f, "requires one of the capabilities {cs:?}"),
             Self::Claimed(by) => write!(f, "claimed by {by}"),
             Self::NotClaimant => write!(f, "only the claim holder may move this card"),
             Self::Conflict => write!(f, "card changed concurrently; retry"),
@@ -782,7 +807,7 @@ pub enum EventKind {
     Claimed,
     /// Claim dropped.
     Released,
-    /// Title/body/tags edited.
+    /// Title, body, tags, prompt or evidence edited.
     Edited,
     /// Comment added.
     Commented,
@@ -1145,15 +1170,18 @@ impl Card {
         if links.is_empty() {
             return Err(BoardError::Invalid("give at least one evidence link"));
         }
+        if self.closed.is_some() {
+            return Err(BoardError::Invalid(
+                "a dropped card shipped nothing, so it takes no evidence",
+            ));
+        }
         let mut all = self.evidence.clone();
         for raw in links {
             let link = raw.trim();
-            let ok = (link.starts_with("https://") || link.starts_with("http://"))
-                && link.len() <= MAX_EVIDENCE_BYTES
-                && !link.chars().any(char::is_whitespace);
-            if !ok {
+            if !evidence_link_ok(link) {
                 return Err(BoardError::Invalid(
-                    "an evidence link is an http(s) URL of at most 512 bytes, without spaces",
+                    "an evidence link is an http(s) URL with a host, of at most 512 printable \
+                     ASCII bytes",
                 ));
             }
             if !all.iter().any(|l| l == link) {
@@ -1583,7 +1611,14 @@ mod tests {
             "",
             "ftp://x",
             "https://a b",
-            &format!("https://{}", "x".repeat(510)),
+            "https://",
+            "https:///path",
+            "https://user@/x",
+            "https://:443/x",
+            "https://x.test/\u{0}",
+            "https://x.test/a\u{200B}b",
+            "javascript://x.test/%0Aalert(1)x",
+            &format!("https://{}", "x".repeat(MAX_EVIDENCE_BYTES - 7)),
         ] {
             assert!(
                 matches!(
@@ -1593,6 +1628,29 @@ mod tests {
                 "{bad:?}"
             );
         }
+        for good in [
+            "HTTPS://X.test/pull/1",
+            "http://x.test",
+            "https://x.test?q=1",
+            "https://user@x.test:8443/p#f",
+            &format!("https://{}", "x".repeat(MAX_EVIDENCE_BYTES - 8)),
+        ] {
+            assert!(
+                card().add_evidence(&[good.to_owned()], 1).is_ok(),
+                "{good:?}"
+            );
+        }
+        let dropped = Card {
+            closed: Some(Closure {
+                reason: CloseReason::WontDo,
+                at_ms: 1,
+            }),
+            ..card()
+        };
+        assert!(
+            dropped.add_evidence(&["https://x.test".into()], 2).is_err(),
+            "a dropped card takes no evidence"
+        );
         assert!(card().add_evidence(&[], 1).is_err());
         let nine: Vec<String> = (0..9).map(|i| format!("https://x.test/{i}")).collect();
         assert!(card().add_evidence(&nine, 1).is_err());

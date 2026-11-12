@@ -185,11 +185,11 @@ main.metrics{grid-template-columns:repeat(12,minmax(0,1fr));max-width:1400px;ali
 .pair{display:flex;gap:3px;align-items:flex-end;height:100%}
 .colm{flex:1;height:var(--h);min-height:2px;position:relative;border-radius:2px 2px 0 0}
 .colm span{position:absolute;bottom:100%;left:0;right:0;text-align:center;font:700 14px/1.3 var(--num);color:var(--ink)}
-.colm.add{background:var(--line2)}.colm.ship{background:var(--cyan-fill)}
+.colm.add{background:var(--line2)}.colm.ship{background:var(--cyan-fill)}.colm.proto{background:var(--mute)}
 .wl{position:relative;top:22px;height:0;text-align:center;font-size:12px;color:var(--mute);white-space:nowrap}
 .key{display:flex;gap:16px;margin-top:40px;font-size:12.5px;color:var(--mute)}
 .key .k::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
-.key .add::before{background:var(--line2)}.key .ship::before{background:var(--cyan-fill)}
+.key .add::before{background:var(--line2)}.key .ship::before{background:var(--cyan-fill)}.key .proto::before{background:var(--mute)}
 .metrics .idlelist .card{border:0;border-top:1px solid var(--line);border-radius:0;box-shadow:none;margin:0;padding:9px 0}
 .metrics .idlelist .card .num{font-size:17px}.metrics .idlelist .card b{font-size:13.5px}
 @media (max-width:1000px){.metrics>.col,.metrics>.w8,.metrics>.w4{grid-column:1/-1}}
@@ -795,25 +795,25 @@ async function renderMetrics(){
   try{m=await api("board_metrics",args)}
   catch(e){if(!stale()){b.classList.remove("board","roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
-  const n=c=>m.by_column.find(t=>t.key===c)?.count??0,lt=m.lead_time;
+  const n=c=>m.by_column.find(t=>t.key===c)?.count??0,lt=m.lead_time,protos=m.by_project.reduce((a,p)=>a+p.prototype,0);
   const kpis=el("div",null,"kpis");
   for(const [v,l,t] of [[m.open,"open"],[working().reduce((a,c)=>a+n(c),0),"in progress",working().map(colLabel).join(", ")],[n("blocked"),"blocked"],
-    [lt.shipped,"shipped, 30 days"],[dur(lt.median_ms),"median lead time","created to shipped, last 30 days"],[dur(lt.p85_ms),"85% within","created to shipped, last 30 days"]]){
+    [lt.shipped,"shipped, 30 days","Done with evidence (a merged PR or other link), last 30 days"],[protos,"prototypes, 30 days","Done without evidence, last 30 days"],[dur(lt.median_ms),"median lead time","created to shipped, last 30 days"],[dur(lt.p85_ms),"85% within","created to shipped, last 30 days"]]){
     const k=el("div",null,"kpi");k.append(el("b",String(v)),l);if(t)k.title=t;kpis.append(k);
   }
   b.classList.remove("board","roadmap","decisions","archive");b.classList.add("metrics");
   const scope=sel.project?label(sel.project):sel.repo||"all projects";
   // Flow: cards added and shipped each week, side by side, the current week last.
-  const wmax=Math.max(1,...m.weeks.flatMap(w=>[w.added,w.done]));
-  const flow=panel("Flow","w8","cards created and shipped per week, the current week last");
+  const wmax=Math.max(1,...m.weeks.flatMap(w=>[w.added,w.done,w.prototype]));
+  const flow=panel("Flow","w8","cards created, shipped and done as prototypes per week, the current week last");
   const chart=el("div",null,"weeks");
   m.weeks.forEach((w,i)=>{
-    const g=el("div",null,"wk");g.title=day(w.start_ms)+": "+w.added+" added, "+w.done+" shipped";
+    const g=el("div",null,"wk");g.title=day(w.start_ms)+": "+w.added+" added, "+w.done+" shipped, "+w.prototype+" prototypes";
     const pair=el("div",null,"pair");
-    for(const [n,cls] of [[w.added,"add"],[w.done,"ship"]]){const c=el("div",null,"colm "+cls);c.style.setProperty("--h",(n/wmax*100)+"%");c.append(el("span",String(n)));pair.append(c)}
+    for(const [n,cls] of [[w.added,"add"],[w.done,"ship"],[w.prototype,"proto"]]){const c=el("div",null,"colm "+cls);c.style.setProperty("--h",(n/wmax*100)+"%");c.append(el("span",String(n)));pair.append(c)}
     g.append(pair,el("div",i===m.weeks.length-1?"This week":day(w.start_ms),"wl"));chart.append(g);
   });
-  const key=el("div",null,"key");key.append(el("span","Added","k add"),el("span","Shipped","k ship"));
+  const key=el("div",null,"key");key.append(el("span","Added","k add"),el("span","Shipped","k ship"),el("span","Prototype","k proto"));
   flow.append(chart,key);
   // Where open work sits: one stacked bar in stage inks, then the rows.
   const cols=panel("Open by column","w4");
