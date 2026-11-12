@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::domain::{Card, Column, PRIORITIES};
+use crate::domain::{Card, CloseReason, Column, PRIORITIES};
 use crate::workflow::{Kind, Workflow};
 
 /// Weeks of flow history, the current week last.
@@ -28,7 +28,7 @@ pub struct Tally<K> {
     pub count: usize,
 }
 
-/// One project's open cards and those it shipped within [`RECENT_DAYS`].
+/// One project's open cards, and those it shipped or dropped within [`RECENT_DAYS`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectTally {
     /// The project.
@@ -37,6 +37,8 @@ pub struct ProjectTally {
     pub open: usize,
     /// Cards shipped within [`RECENT_DAYS`].
     pub shipped: usize,
+    /// Cards closed without shipping within [`RECENT_DAYS`].
+    pub dropped: usize,
 }
 
 /// Seven days of flow, ending at `start_ms + 7 days` (the last one ends now).
@@ -48,6 +50,8 @@ pub struct Week {
     pub added: usize,
     /// Cards shipped in it.
     pub done: usize,
+    /// Cards closed without shipping in it.
+    pub dropped: usize,
 }
 
 /// Created-to-shipped time of the cards shipped within [`RECENT_DAYS`].
@@ -95,6 +99,8 @@ pub struct Metrics {
     pub by_claim: Vec<Tally<String>>,
     /// The last [`WEEKS`] weeks, oldest first.
     pub weeks: Vec<Week>,
+    /// Cards closed without shipping within [`RECENT_DAYS`], per reason, every reason.
+    pub dropped: Vec<Tally<CloseReason>>,
     /// Lead time of recent work.
     pub lead_time: LeadTime,
     /// Up to [`IDLE_LIMIT`] open cards past Backlog, idle longest first.
@@ -109,10 +115,14 @@ pub fn metrics(flow: &Workflow, cards: &[Card], now_ms: i64) -> Metrics {
         .iter()
         .filter(|c| c.done_ms.is_some_and(|d| d >= since))
         .collect();
+    let dropped: Vec<&Card> = cards
+        .iter()
+        .filter(|c| c.closed.is_some_and(|x| x.at_ms >= since))
+        .collect();
     Metrics {
         open: open.len(),
         by_column: by_column(flow, &open),
-        by_project: by_project(&open, &recent),
+        by_project: by_project(&open, &recent, &dropped),
         by_priority: PRIORITIES
             .into_iter()
             .rev()
@@ -123,6 +133,16 @@ pub fn metrics(flow: &Workflow, cards: &[Card], now_ms: i64) -> Metrics {
             .collect(),
         by_claim: by_claim(flow, &open),
         weeks: weeks(cards, now_ms),
+        dropped: CloseReason::ALL
+            .into_iter()
+            .map(|r| Tally {
+                key: r,
+                count: dropped
+                    .iter()
+                    .filter(|c| c.closed.is_some_and(|x| x.reason == r))
+                    .count(),
+            })
+            .collect(),
         lead_time: lead_time(&recent),
         idle: idle(&open, now_ms),
     }
@@ -139,19 +159,23 @@ fn by_column(flow: &Workflow, open: &[&Card]) -> Vec<Tally<Column>> {
         .collect()
 }
 
-fn by_project(open: &[&Card], recent: &[&Card]) -> Vec<ProjectTally> {
-    let mut per: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+fn by_project(open: &[&Card], recent: &[&Card], dropped: &[&Card]) -> Vec<ProjectTally> {
+    let mut per: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::new();
     open.iter()
         .for_each(|c| per.entry(&c.project).or_default().0 += 1);
     recent
         .iter()
         .for_each(|c| per.entry(&c.project).or_default().1 += 1);
+    dropped
+        .iter()
+        .for_each(|c| per.entry(&c.project).or_default().2 += 1);
     let mut out: Vec<ProjectTally> = per
         .into_iter()
-        .map(|(project, (open, shipped))| ProjectTally {
+        .map(|(project, (open, shipped, dropped))| ProjectTally {
             project: project.to_owned(),
             open,
             shipped,
+            dropped,
         })
         .collect();
     out.sort_by(|a, b| b.open.cmp(&a.open).then_with(|| a.project.cmp(&b.project)));
@@ -187,6 +211,7 @@ fn weeks(cards: &[Card], now_ms: i64) -> Vec<Week> {
             start_ms: now_ms - (WEEKS - i) as i64 * WEEK_MS,
             added: 0,
             done: 0,
+            dropped: 0,
         })
         .collect();
     for c in cards {
@@ -195,6 +220,9 @@ fn weeks(cards: &[Card], now_ms: i64) -> Vec<Week> {
         }
         if let Some(w) = c.done_ms.and_then(|d| week_of(d, now_ms)) {
             out[w].done += 1;
+        }
+        if let Some(w) = c.closed.and_then(|x| week_of(x.at_ms, now_ms)) {
+            out[w].dropped += 1;
         }
     }
     out
@@ -323,15 +351,59 @@ mod tests {
                 ProjectTally {
                     project: "q".into(),
                     open: 2,
-                    shipped: 0
+                    shipped: 0,
+                    dropped: 0
                 },
                 ProjectTally {
                     project: "p".into(),
                     open: 0,
-                    shipped: 1
+                    shipped: 1,
+                    dropped: 0
                 },
             ]
         );
+    }
+
+    fn dropped(title: &str, reason: CloseReason, at_ms: i64) -> Card {
+        Card {
+            closed: Some(crate::domain::Closure { reason, at_ms }),
+            ..card(title, Column::DONE)
+        }
+    }
+
+    #[test]
+    fn dropped_work_is_counted_apart_from_shipped() {
+        let cards = [
+            shipped("s", NOW - DAY_MS, NOW),
+            dropped("dup", CloseReason::Duplicate, NOW),
+            dropped("no", CloseReason::WontDo, NOW - WEEK_MS),
+            dropped("old", CloseReason::WontDo, NOW - RECENT_DAYS * DAY_MS - 1),
+        ];
+        let m = metrics(&Workflow::default(), &cards, NOW);
+        assert_eq!(m.open, 0, "a dropped card is closed");
+        assert_eq!(m.lead_time.shipped, 1, "dropped never ships");
+        assert_eq!(
+            m.by_project,
+            [ProjectTally {
+                project: "p".into(),
+                open: 0,
+                shipped: 1,
+                dropped: 2
+            }]
+        );
+        let reasons: Vec<(CloseReason, usize)> =
+            m.dropped.iter().map(|t| (t.key, t.count)).collect();
+        assert_eq!(
+            reasons,
+            [
+                (CloseReason::WontDo, 1),
+                (CloseReason::Duplicate, 1),
+                (CloseReason::Superseded, 0)
+            ]
+        );
+        let weekly: Vec<(usize, usize)> = m.weeks.iter().map(|w| (w.done, w.dropped)).collect();
+        assert_eq!(weekly[WEEKS - 1], (1, 1));
+        assert_eq!(weekly[WEEKS - 2], (0, 1));
     }
 
     #[test]

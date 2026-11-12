@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::{
-    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit,
-    Event, EventKind, ExecutionLink, MoveRules, Plan, Shelf, View, import_id, text_hash,
+    Actor, BoardError, Capability, Card, CloseReason, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS,
+    Dates, Edit, Event, EventKind, ExecutionLink, MoveRules, Plan, Shelf, View, import_id,
+    text_hash,
 };
 use crate::external::Observation;
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
@@ -1417,6 +1418,29 @@ impl<S: Store> Board<S> {
         });
         drop(registry);
         card
+    }
+
+    /// Close an unstarted card without shipping it, for `reason` (see [`Card::close`]). Needs
+    /// `Triage`. A non-blank `note` is added as `by`'s comment once the card is closed.
+    ///
+    /// # Errors
+    /// See [`Card::close`]; a storage failure adding the note leaves the card closed.
+    pub fn close(
+        &self,
+        id: Uuid,
+        reason: CloseReason,
+        note: Option<&str>,
+        by: &Actor,
+    ) -> Result<Card, BoardError> {
+        let flow = self.flow();
+        let card = self.apply_in(&flow, id, by, EventKind::Closed, |c, now| {
+            c.close(&flow, reason, by, now)
+        })?;
+        drop(flow);
+        match note.map(str::trim).filter(|n| !n.is_empty()) {
+            Some(text) => self.comment(id, by, text),
+            None => Ok(card),
+        }
     }
 
     /// Archive a Done card. Needs `Close`, as closing work does.
