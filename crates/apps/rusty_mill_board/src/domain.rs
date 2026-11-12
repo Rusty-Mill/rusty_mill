@@ -437,11 +437,6 @@ impl ProjectStatus {
     pub fn accepts_cards(self) -> bool {
         matches!(self, ProjectStatus::Active | ProjectStatus::Experiment)
     }
-
-    /// Whether its cards are on the board's default views.
-    pub fn shown_by_default(self) -> bool {
-        self == ProjectStatus::Active
-    }
 }
 
 /// Why unstarted work was closed without shipping it.
@@ -1405,15 +1400,11 @@ mod tests {
     }
 
     #[test]
-    fn only_active_and_experiment_projects_take_cards_and_only_active_ones_show() {
+    fn only_active_and_experiment_projects_take_cards() {
         let takes: Vec<bool> = ProjectStatus::ALL
             .map(ProjectStatus::accepts_cards)
             .to_vec();
-        let shows: Vec<bool> = ProjectStatus::ALL
-            .map(ProjectStatus::shown_by_default)
-            .to_vec();
         assert_eq!(takes, [true, false, true, false]);
-        assert_eq!(shows, [true, false, false, false]);
         assert_eq!(ProjectStatus::default(), ProjectStatus::Active);
     }
 

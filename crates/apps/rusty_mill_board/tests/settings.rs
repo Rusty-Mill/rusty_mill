@@ -1087,3 +1087,15 @@ fn an_admin_lists_and_revokes_signed_in_apps() {
     let (status, _, _) = f.admin("settings_app_revoke", &json!({"client_id": id}));
     assert_eq!(status, 422, "an unknown app is refused");
 }
+
+#[test]
+fn a_malformed_project_status_file_is_refused_at_load() {
+    let dir = std::env::temp_dir().join(format!("mb-status-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("project-status.json");
+    for bad in ["not json", r#"{"default": "sleeping"}"#] {
+        std::fs::write(&path, bad).expect("write");
+        assert!(load_statuses(&path).is_err(), "{bad}");
+    }
+    std::fs::remove_dir_all(&dir).expect("clean up");
+}

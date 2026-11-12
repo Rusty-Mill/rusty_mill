@@ -259,7 +259,13 @@ impl ListArgs {
         ) + &self
             .project_status
             .as_ref()
-            .map(|s| format!(";project_status={s:?}"))
+            .map(|s| {
+                // A set, not a sequence: the same filter in any order keeps its cursor.
+                let mut names: Vec<&str> = s.iter().map(|x| x.as_str()).collect();
+                names.sort_unstable();
+                names.dedup();
+                format!(";project_status={names:?}")
+            })
             .unwrap_or_default()
     }
 
@@ -268,7 +274,7 @@ impl ListArgs {
         match (&self.project_status, &self.project) {
             (Some(wanted), _) => wanted.contains(&status),
             (None, Some(_)) => true,
-            (None, None) => status.shown_by_default(),
+            (None, None) => status.accepts_cards(),
         }
     }
 
@@ -1523,7 +1529,7 @@ mod tests {
     }
 
     #[test]
-    fn board_list_shows_active_projects_unless_asked_or_one_is_named() {
+    fn board_list_shows_projects_that_take_work_unless_asked_or_one_is_named() {
         let board = statused_board();
         let titles = |args: Value| -> Vec<String> {
             let mut t: Vec<String> =
@@ -1536,7 +1542,7 @@ mod tests {
             t.sort();
             t
         };
-        assert_eq!(titles(json!({})), ["on"]);
+        assert_eq!(titles(json!({})), ["on", "test"], "projects that take work");
         assert_eq!(titles(json!({"project": "held"})), ["held"]);
         assert_eq!(
             titles(json!({"project_status": ["experiment", "paused"]})),
@@ -1623,6 +1629,114 @@ mod tests {
             on(json!({"id": "#1", "project": "gone"})),
         )
         .expect("re-file");
+    }
+
+    #[test]
+    fn project_status_edges_hold() {
+        let board = statused_board();
+        // Taking a paused project's card by id says why, rather than that it is missing.
+        let took = call_as(
+            &board,
+            None,
+            "card_take",
+            json!({"actor": "dev", "role": "builder", "id": "#3"}),
+        );
+        assert!(
+            matches!(took, Err(CallError::Board(BoardError::Refused(_)))),
+            "{took:?}"
+        );
+        // Nothing starts in a paused project: no claim, no move into a work column.
+        let nano = |extra: Value| {
+            let mut a = json!({"actor": "nano", "role": "human"});
+            a.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            a
+        };
+        for (op, args) in [
+            ("card_claim", json!({"id": "#3"})),
+            ("card_move", json!({"id": "#3", "to": "building"})),
+        ] {
+            let out = call_as(&board, None, op, nano(args));
+            assert!(
+                matches!(out, Err(CallError::Board(BoardError::Refused(_)))),
+                "{op}: {out:?}"
+            );
+        }
+        // Work under way when the project was paused may move on.
+        call_as(
+            &board,
+            None,
+            "card_move",
+            nano(json!({"id": "#1", "to": "building"})),
+        )
+        .expect("start on");
+        board
+            .set_project_status("on", ProjectStatus::Paused, |_| Ok(()))
+            .expect("pause on");
+        call_as(
+            &board,
+            None,
+            "card_move",
+            nano(json!({"id": "#1", "to": "qa"})),
+        )
+        .expect("finishes");
+        board
+            .set_project_status("on", ProjectStatus::Active, |_| Ok(()))
+            .expect("resume on");
+        // A failed write leaves the status as it was.
+        let failed =
+            board.set_project_status("on", ProjectStatus::Paused, |_| Err("disk full".to_owned()));
+        assert!(matches!(failed, Err(BoardError::Refused(_))));
+        assert_eq!(board.statuses().of("on"), ProjectStatus::Active);
+        // Forge issues are not imported into a paused project.
+        board
+            .set_project_status(DEFAULT_PROJECT, ProjectStatus::Paused, |_| Ok(()))
+            .expect("pause default");
+        let bot = board.roles().actor("sync", "human").expect("actor");
+        assert!(matches!(
+            board.import(&bot, "issue", "", Vec::new(), 7),
+            Err(BoardError::Refused(_))
+        ));
+        // The cursor is bound to the set of statuses, not their order.
+        let page = |order: Value, cursor: Value| {
+            call_as(
+                &board,
+                None,
+                "board_list",
+                json!({"project_status": order, "limit": 1, "cursor": cursor}),
+            )
+        };
+        let first = page(json!(["paused", "experiment"]), Value::Null).expect("first");
+        let next = first["next_cursor"].clone();
+        assert!(next.is_string(), "{first}");
+        assert!(page(json!(["experiment", "paused"]), next).is_ok());
+    }
+
+    #[test]
+    fn a_status_does_not_outlive_its_project() {
+        let projects =
+            crate::projects::Projects::parse(r#"{"keep": ["a"], "spare": ["b"]}"#).expect("parse");
+        let without = crate::projects::Projects::parse(r#"{"keep": ["a"]}"#).expect("parse");
+        let board: Shared = Board::new(
+            Box::new(MemStore::default()) as Box<dyn Store>,
+            Roles::default(),
+        )
+        .with_projects(projects);
+        board
+            .set_project_status("spare", ProjectStatus::Paused, |_| Ok(()))
+            .expect("pause");
+        let removed = board.set_projects(without.clone(), |_| Ok(()));
+        assert!(
+            matches!(&removed, Err(BoardError::Refused(why)) if why.contains("make it active")),
+            "{removed:?}"
+        );
+        board
+            .set_project_status("spare", ProjectStatus::Active, |_| Ok(()))
+            .expect("activate");
+        board
+            .set_projects(without, |_| Ok(()))
+            .expect("removed once active");
     }
 
     #[test]

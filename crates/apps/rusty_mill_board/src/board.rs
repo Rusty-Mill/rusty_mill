@@ -23,7 +23,7 @@ use crate::projects::{Projects, Statuses};
 use crate::roadmap::{Roadmap, roadmap};
 use crate::store::Store;
 use crate::trace::{self, MilestoneView, Trace};
-use crate::workflow::Workflow;
+use crate::workflow::{Kind, Workflow};
 
 /// Attempts per operation when another writer wins the revision race.
 const RETRIES: usize = 3;
@@ -222,7 +222,10 @@ impl<S: Store> Board<S> {
         status: ProjectStatus,
         persist: impl FnOnce(&Statuses) -> Result<(), String>,
     ) -> Result<Statuses, BoardError> {
-        if !self.registry().contains(project) {
+        // Held across the write so the project cannot be removed meanwhile (lock order:
+        // projects, then statuses, as in `update_projects`).
+        let registry = self.registry();
+        if !registry.contains(project) {
             return Err(BoardError::Invalid("unknown project"));
         }
         let mut guard = self
@@ -232,6 +235,8 @@ impl<S: Store> Board<S> {
         let next = guard.with(project, status);
         persist(&next).map_err(BoardError::Refused)?;
         *guard = next.clone();
+        drop(guard);
+        drop(registry);
         Ok(next)
     }
 
@@ -245,6 +250,17 @@ impl<S: Store> Board<S> {
             "project {project:?} is {}: it takes no new cards until it is active again",
             status.as_str()
         )))
+    }
+
+    /// Refuse to start work (move a card into a work column from outside one) in a project
+    /// that takes none. Work already under way may move on and finish.
+    fn check_starts(&self, flow: &Workflow, card: &Card, to: &Column) -> Result<(), BoardError> {
+        let starts =
+            flow.kind(to) == Some(Kind::Work) && flow.kind(&card.column) != Some(Kind::Work);
+        if starts {
+            self.check_accepts(&card.project)?;
+        }
+        Ok(())
     }
 
     /// Start with these movement rules instead of [`MoveRules::Enforced`].
@@ -365,6 +381,17 @@ impl<S: Store> Board<S> {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let projects = derive(&guard)?;
+        // A status outliving its project would come back on a new project of the same name.
+        let statuses = self.statuses();
+        if let Some(gone) = guard
+            .names()
+            .find(|p| !projects.contains(p) && statuses.of(p) != ProjectStatus::Active)
+        {
+            return Err(BoardError::Refused(format!(
+                "project {gone:?} is {}; make it active before removing or renaming it",
+                statuses.of(gone).as_str()
+            )));
+        }
         if let Some(card) = self
             .store
             .list()?
@@ -1135,6 +1162,7 @@ impl<S: Store> Board<S> {
         card.id = import_id(issue);
         card.issue = Some(issue);
         card.synced_text = Some(text_hash(&card.title, &card.body));
+        self.check_accepts(&card.project)?;
         self.insert_numbered(by, card)
     }
 
@@ -1260,6 +1288,7 @@ impl<S: Store> Board<S> {
         let listed = match id {
             Some(i) => {
                 let named = self.get_in(&flow, i)?;
+                self.check_accepts(&named.project)?;
                 self.check_deps_done(&named)?;
                 check_not_superseded(&named)?;
                 vec![named]
@@ -1433,10 +1462,12 @@ impl<S: Store> Board<S> {
         let flow = self.flow();
         match self.move_rules() {
             MoveRules::Enforced => self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
+                self.check_starts(&flow, c, to)?;
                 c.move_to(&flow, to, by, now)
             }),
             MoveRules::Open => {
                 let card = self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
+                    self.check_starts(&flow, c, to)?;
                     c.move_freely(&flow, to, by, now)
                 })?;
                 rusty_log::info!(card = %id, actor = %by.name, to = %to, "card moved with movement rules off");
@@ -1591,7 +1622,10 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::claim`].
     pub fn claim(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
-        self.apply(id, by, EventKind::Claimed, |c, now| c.claim(by, now))
+        self.apply(id, by, EventKind::Claimed, |c, now| {
+            self.check_accepts(&c.project)?;
+            c.claim(by, now)
+        })
     }
 
     /// Release a claim.

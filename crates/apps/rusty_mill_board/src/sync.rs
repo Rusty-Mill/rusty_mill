@@ -311,6 +311,10 @@ pub fn reconcile(board: &Shared, forge: &dyn Forge) -> Result<Report, SyncError>
         match board.import(&actor, &issue.title, &body, tags, issue.number) {
             Ok(_) => report.cards_imported += 1,
             Err(BoardError::Conflict) => {}
+            // Its project takes no cards while paused or archived: import it once it is active.
+            Err(BoardError::Refused(why)) => {
+                rusty_log::info!(issue = issue.number, %why, "issue not imported");
+            }
             Err(e) => return Err(e.into()),
         }
     }

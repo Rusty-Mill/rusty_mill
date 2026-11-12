@@ -101,11 +101,14 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 - **Project status.** A project is `active` (the default), `paused`, `experiment` or `archived`, kept in
   `project-status.json` in the settings directory (only non-active projects are listed; the projects file keeps its
   format). Settings > Repositories sets it per project (`settings_project_status_set`, admin), written before it
-  applies. Paused and archived projects refuse `card_add`, refuse open cards moved in with `card_assign` (a Done
-  card may still be re-filed there), and `card_take` hands out none of their work; an experiment takes cards and
-  hands out work. Only active projects are on `board_list` by default: `project_status: [...]` lists others, and
-  naming a `project` lists it whatever its status. `board_projects` reports `status` for non-active projects, and
-  the board's status picker (Active, Experiment, Paused, Archived, All projects) filters the board the same way.
+  applies. Paused and archived projects refuse `card_add`, forge imports (retried once active), open cards moved in
+  with `card_assign` (a Done card may still be re-filed there), `card_claim`, and moves into a work column from
+  outside one; `card_take` hands out none of their work. Work already under way may move on and finish. An
+  experiment takes cards and hands out work. `board_list` lists projects that take work (active and experiment) by
+  default: `project_status: [...]` lists others, and naming a `project` lists it whatever its status.
+  `board_projects` reports `status` for non-active projects. The board's status picker (Active, Experiment, Paused,
+  Archived, All projects) starts on Active. A paused or archived project must be made active before it is removed
+  or renamed, so no status outlives its project.
 - **Close reasons (dropped work).** `card_close` closes an unstarted card (Backlog or a queue) without shipping
   it, for a required `reason`: `wont_do`, `duplicate` or `superseded`; an optional `note` becomes the closer's
   comment. It needs `triage`, and is refused for started, blocked or Done cards. The card goes to Done with no

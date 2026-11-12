@@ -375,7 +375,7 @@ let cards=[],cursor=null,loaded=false,dlg=null,repos={},sel={repo:"",project:"",
    "" for every status. A chosen project is shown whatever its status. */
 const STATUSES=["active","experiment","paused","archived"];
 let pstatus={},statusSel="active";
-const statusOf=p=>pstatus[p]||"active";
+const statusOf=p=>Object.hasOwn(pstatus,p)?pstatus[p]:"active";
 const projects=()=>Object.values(repos).flat();
 /* `default` is the Inbox: where a card that names no project lands (rusty_tick's Inbox list). Shown by that name only. */
 const INBOX="default",label=p=>p===INBOX?"Inbox":p;
@@ -1302,9 +1302,9 @@ function reposTab(){
       const rm=el("button","Remove");rm.type="button";rm.onclick=restructure(()=>{draft[r]=draft[r].filter(x=>x!==p)});
       row.append(nm,rm);
       // A saved project's status applies at once, apart from the paths below.
-      if(cfg.repos[r]&&p.name in cfg.repos[r]){
+      if(cfg.repos[r]&&Object.hasOwn(cfg.repos[r],p.name)){
         const st=field("select",{});st.setAttribute("aria-label",p.name+" status");st.disabled=!cfg.files.project_status;
-        st.append(...STATUSES.map(x=>new Option(x,x)));st.value=(cfg.project_status||{})[p.name]||"active";
+        st.append(...STATUSES.map(x=>new Option(x,x)));const ps=cfg.project_status||{};st.value=Object.hasOwn(ps,p.name)?ps[p.name]:"active";
         st.onchange=guard(err,()=>setting("settings_project_status_set",{project:p.name,status:st.value}));
         row.append(st);
       }
