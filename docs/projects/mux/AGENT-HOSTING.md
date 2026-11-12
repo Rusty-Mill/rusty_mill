@@ -297,9 +297,10 @@ block, and both are refused on Windows (`unsupported`); orch runs on Linux.
 a Windows server never grants it. `SignalBlock` is client type 0x28, with the signal in field 25
 (`SIGNAL`, shared with `program-exited`) as its Linux number; any number outside the set fails to
 decode. `ReleaseBlock` is 0x29. Once released, the block is read-only at once, even while its
-program still runs: `list` shows it `exited`, and input says its pty was released. The wait
-polls `try_wait` like `reap()` but never signals, and it takes the child out of `Process` first,
-so a cancelled wait (a stopping server) leaves the program running rather than killing it.
+program still runs: `list` shows it `exited`, and input says its pty was released. `Process::release`
+moves the child out of `Process`, synchronously, into a `Released` waiter with no kill-on-drop,
+before any task is spawned. The waiter polls `try_wait` like `reap()` but never signals, so a
+waiter dropped unpolled, aborted, or cut short by a stopping server leaves the program running.
 `rusty-mux-ctl own` takes `{"op":"signal","block":B,"signal":"term"}` and `{"op":"release","block":B}`.
 
 ## C77. Input gate

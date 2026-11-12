@@ -1330,9 +1330,14 @@ impl State {
         live.reader.abort();
         live.pty.release();
         drop(live.pty);
+        // Disarmed here, before any future holds it: a task dropped unpolled
+        // must not kill the program either.
+        let Some(released) = live.process.release() else {
+            return Ok(Outcome::Done(None));
+        };
         let shared = shared.clone();
         rusty_tokio::task::spawn_local(async move {
-            let status = live.process.wait().await;
+            let status = released.wait().await;
             shared.borrow_mut().exited(block, status);
         });
         Ok(Outcome::Done(None))
