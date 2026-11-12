@@ -798,16 +798,19 @@ mod client {
     /// `socket` on `host`, Windows' way to the server, since its OpenSSH
     /// cannot forward a local Unix socket (C79). The remote
     /// `rusty-mux-ctl` is `RUSTY_MUX_REMOTE_CTL`, as shell text, when set.
-    /// UDP is Unix only, so `udp_host` is not used.
+    /// UDP is Unix only, so `udp_host` is refused.
     #[cfg(windows)]
     fn remote(
         host: &OsStr,
-        _udp_host: Option<&OsStr>,
+        udp_host: Option<&OsStr>,
         socket: &Path,
         block: Option<&OsString>,
     ) -> Result<(), String> {
         use rusty_mux_client::ssh::{Bridge, Login, bridge::CTL};
 
+        if udp_host.is_some() {
+            return Err("--udp-host: UDP is supported on Unix only".into());
+        }
         let host = host
             .to_str()
             .ok_or("--ssh: the host is not UTF-8")?

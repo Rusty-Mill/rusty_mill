@@ -45,13 +45,13 @@ const CHUNK: usize = 64 * 1024;
 /// and nothing else. `ctl` is shell text for the remote shell, so it may be
 /// `~/.local/bin/rusty-mux-ctl`, which a non-login shell's `PATH` may not
 /// reach; `remote` is quoted as one word. `--` keeps a host that starts
-/// with `-` from reading as an option. `remote` must be absolute, since the
-/// remote shell would resolve a relative path against a directory the user
-/// does not choose.
+/// with `-` from reading as an option, and [`check_host`] keeps one out.
+/// `remote` must be absolute, since the remote shell would resolve a
+/// relative path against a directory the user does not choose. Each
+/// connection is its own login, so the config's own forwards are cleared:
+/// a `LocalForward` would fail to bind on the second connection.
 pub fn args(host: &str, ctl: &str, remote: &Path, login: Login) -> Result<Vec<OsString>, String> {
-    if host.is_empty() {
-        return Err("--ssh needs a host".into());
-    }
+    check_host(host)?;
     if ctl.trim().is_empty() {
         return Err("RUSTY_MUX_REMOTE_CTL is empty".into());
     }
@@ -63,7 +63,7 @@ pub fn args(host: &str, ctl: &str, remote: &Path, login: Login) -> Result<Vec<Os
         return Err(format!("{path}: --ssh needs an absolute socket path"));
     }
     let mut args = vec![OsString::from("-T")];
-    for option in OWNED {
+    for option in OWNED.into_iter().chain([CLEAR]) {
         args.extend(["-o", option].map(OsString::from));
     }
     if login == Login::Batch {
@@ -72,6 +72,25 @@ pub fn args(host: &str, ctl: &str, remote: &Path, login: Login) -> Result<Vec<Os
     args.extend(["--", host].map(OsString::from));
     args.push(format!("{ctl} --socket {} bridge", quote(path)).into());
     Ok(args)
+}
+
+/// The option that drops the config's forwards for every bridge's `ssh`.
+const CLEAR: &str = "ClearAllForwardings=yes";
+
+/// A host name, `user@host` or address, refusing anything else: an option,
+/// whitespace or shell characters. Win32-OpenSSH 9.5 predates OpenSSH
+/// 9.6's own check, and a `ProxyCommand` with `%h` would hand them to a
+/// shell (CVE-2023-51385).
+fn check_host(host: &str) -> Result<(), String> {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || "._-@:[]".contains(c);
+    match host {
+        "" => Err("--ssh needs a host".into()),
+        _ if host.starts_with('-') => Err(format!("{host}: --ssh host may not start with -")),
+        _ if !host.chars().all(allowed) => Err(format!(
+            "{host}: --ssh host may hold only letters, digits and . _ - @ : [ ]"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// `word` as one POSIX shell word: single quotes, with each `'` closed,
@@ -209,11 +228,12 @@ impl Drop for Bridge {
         }
         self.stop.store(true, Ordering::Release);
         if let Some(accepter) = self.accepter.take() {
-            // Wakes the accept; if the listener is gone, it has ended.
-            if !accepter.is_finished() {
-                let _ = Stream::connect(&self.socket);
+            // Wakes the accept. If nothing can connect, the thread is left
+            // blocked rather than waited on for ever; the process ends it.
+            let woken = accepter.is_finished() || Stream::connect(&self.socket).is_ok();
+            if woken {
+                let _ = accepter.join();
             }
-            let _ = accepter.join();
         }
         if let Err(e) = std::fs::remove_dir_all(&self.dir) {
             eprintln!("rusty-mux: removing {}: {e}", self.dir.display());
@@ -279,8 +299,13 @@ impl Run {
         std::thread::spawn(move || outbound(reader, stdin));
         std::thread::spawn(move || {
             inbound(stdout, stream);
-            // Its output has ended; it exits once its input does too.
-            let _ = child.wait();
+            // Its output has ended; it exits once its input does too. A
+            // failure shows here, such as a BatchMode login refused.
+            match child.wait() {
+                Ok(status) if status.success() => {}
+                Ok(status) => eprintln!("rusty-mux: a bridge's ssh exited ({status})"),
+                Err(e) => eprintln!("rusty-mux: waiting for a bridge's ssh: {e}"),
+            }
         });
         Ok(())
     }
@@ -289,16 +314,27 @@ impl Run {
 /// The client's bytes to `ssh`; its end closes `ssh`'s input, which ends
 /// the remote bridge's writes to the server.
 fn outbound(mut from: Stream, mut to: ChildStdin) {
-    // A failed write means ssh is gone, which `inbound` sees too.
-    let _ = pump(&mut from, &mut to);
+    say(pump(&mut from, &mut to), "to ssh");
 }
 
 /// The server's bytes, from `ssh`, to the client; their end is passed on
 /// as the end of the connection's reads.
 fn inbound(mut from: ChildStdout, mut to: Stream) {
-    // A failed write means the client is gone; ssh ends with its input.
-    let _ = pump(&mut from, &mut to);
+    say(pump(&mut from, &mut to), "from ssh");
+    // The client may have closed already; there is nothing else to tell.
     let _ = to.shutdown(Shutdown::Write);
+}
+
+/// Reports a relay's failure, other than the far side having gone, which
+/// is how every connection ends from one side or the other.
+fn say(relayed: io::Result<()>, way: &str) {
+    use io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset};
+    match relayed {
+        Err(e) if !matches!(e.kind(), BrokenPipe | ConnectionAborted | ConnectionReset) => {
+            eprintln!("rusty-mux: relaying {way}: {e}");
+        }
+        _ => {}
+    }
 }
 
 /// Copies `from` to `to` until `from` ends, flushing after every read.
@@ -408,6 +444,8 @@ mod tests {
                 "ExitOnForwardFailure=yes",
                 "-o",
                 "StreamLocalBindUnlink=yes",
+                "-o",
+                "ClearAllForwardings=yes",
                 "--",
                 "box",
                 "rusty-mux-ctl --socket '/run/mux.sock' bridge",
@@ -439,11 +477,21 @@ mod tests {
         assert!(args("", CTL, remote, Login::Batch).is_err());
         assert!(args("box", " ", remote, Login::Batch).is_err());
         assert!(args("box", CTL, Path::new("mux.sock"), Login::Batch).is_err());
-        let end = args("-oProxyCommand=x", CTL, remote, Login::Batch).unwrap();
-        assert_eq!(
-            &end[end.len() - 3..end.len() - 1],
-            ["--", "-oProxyCommand=x"]
-        );
+        for host in [
+            "-oProxyCommand=x",
+            "a b",
+            "a;b",
+            "$(x)",
+            "a`b`",
+            "a|b",
+            "a%h",
+        ] {
+            assert!(args(host, CTL, remote, Login::Batch).is_err(), "{host}");
+        }
+        for host in ["box", "me@box.example", "10.0.0.2", "me@[::1]", "a_b-c"] {
+            let end = args(host, CTL, remote, Login::Batch).unwrap();
+            assert_eq!(&end[end.len() - 3..end.len() - 1], ["--", host]);
+        }
     }
 
     /// A stand-in `ssh` that runs `body` in `sh`, ignoring its arguments.
@@ -551,5 +599,63 @@ mod tests {
         std::fs::remove_dir(&dir).unwrap();
         assert!(dir.is_absolute(), "{}", dir.display());
         assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+    }
+}
+
+/// The same relay on Windows, with a batch file for `ssh`: Rust runs a
+/// `.cmd` through `cmd.exe`, which ignores the arguments it is passed.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    /// A stand-in `ssh` that runs `body`, and the directory it is in.
+    fn stand_in(body: &str) -> (PathBuf, PathBuf) {
+        let dir = private_dir().unwrap();
+        let program = dir.join("ssh.cmd");
+        std::fs::write(&program, format!("@{body}\r\n")).unwrap();
+        (dir, program)
+    }
+
+    /// The local socket takes this user's connections, through the owner-only
+    /// DACLs and the peer check, and each reaches its own `ssh`: here
+    /// `findstr`, which sends back every line it is sent.
+    #[test]
+    fn each_connection_is_joined_to_its_own_ssh() {
+        let (dir, ssh) = stand_in(r#"findstr "^" & exit /b 0"#);
+        let mut bridge =
+            Bridge::start(ssh.as_os_str(), "box", CTL, Path::new("/r"), Login::Batch).unwrap();
+        bridge
+            .wait_ready(Duration::from_secs(20), || false)
+            .unwrap();
+        assert!(bridge.running());
+        for line in [&b"one\r\n"[..], b"two\r\n"] {
+            let mut conn = Stream::connect(bridge.socket()).unwrap();
+            conn.set_read_timeout(Some(Duration::from_secs(20)))
+                .unwrap();
+            conn.write_all(line).unwrap();
+            conn.shutdown(Shutdown::Write).unwrap();
+            let mut back = Vec::new();
+            conn.read_to_end(&mut back).unwrap();
+            assert_eq!(back, line);
+        }
+        let private = bridge.dir.clone();
+        drop(bridge);
+        assert!(!private.exists(), "{} was left behind", private.display());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_first_login_fails_and_cleans_up() {
+        let (dir, ssh) = stand_in("exit /b 1");
+        let mut bridge =
+            Bridge::start(ssh.as_os_str(), "box", CTL, Path::new("/r"), Login::Batch).unwrap();
+        let err = bridge
+            .wait_ready(Duration::from_secs(20), || false)
+            .unwrap_err();
+        assert!(err.contains("ssh exited"), "{err}");
+        let private = bridge.dir.clone();
+        drop(bridge);
+        assert!(!private.exists(), "{} was left behind", private.display());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
