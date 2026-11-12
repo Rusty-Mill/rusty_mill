@@ -33,6 +33,7 @@ const COMMAND_WORDS: &[(&str, &[&str])] = &[
             "add",
             "remove",
             "pull",
+            "push",
             "--socket",
             "--ssh",
             "--udp-host",

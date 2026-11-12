@@ -42,9 +42,9 @@ pub enum Command {
     Config(ConfigCommand),
     /// Lists, adds or removes saved hosts (C35).
     Hosts(HostsCommand),
-    /// `hosts pull`: merges another machine's saved hosts into this
-    /// one's (C49b).
-    Pull(Sync),
+    /// `hosts pull` or `hosts push`: merges saved hosts between this
+    /// machine and another, per name (C49b).
+    Sync(Sync),
     /// Checks a host for `rusty-mux --ssh`, or prints its config (C48).
     Ssh(SshCommand),
     /// Checks, installs or removes our terminfo entry on an SSH host (C47).
@@ -393,7 +393,12 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "do" => run_action(rest),
         "config" => config(rest),
         "hosts" => match rest {
-            [verb, dest, flags @ ..] if verb == "pull" => sync(dest, flags).map(Command::Pull),
+            [verb, dest, flags @ ..] if verb == "pull" => {
+                sync(Way::Pull, dest, flags).map(Command::Sync)
+            }
+            [verb, dest, flags @ ..] if verb == "push" => {
+                sync(Way::Push, dest, flags).map(Command::Sync)
+            }
             _ => hosts(rest).map(Command::Hosts),
         },
         "ssh" => ssh(rest).map(Command::Ssh),
@@ -477,9 +482,20 @@ pub enum HostsCommand {
     Remove(String),
 }
 
+/// Which machine's `hosts.json` a sync writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Way {
+    /// The remote's saved hosts merge into this machine's.
+    Pull,
+    /// This machine's saved hosts merge into the remote's.
+    Push,
+}
+
 /// A sync with the machine at `dest` (term pack D202).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sync {
+    /// Pull or push.
+    pub way: Way,
     /// What `ssh` gets after `--`.
     pub dest: String,
     /// The sender's entry wins a name both sides have.
@@ -490,7 +506,7 @@ pub struct Sync {
 
 const HOSTS_USAGE: &str = "usage: hosts list | hosts add NAME --socket PATH | \
      hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] | hosts remove NAME | \
-     hosts pull DEST [--replace] [--dry-run]";
+     hosts pull|push DEST [--replace] [--dry-run]";
 
 fn hosts(args: &[String]) -> Result<HostsCommand, String> {
     match args {
@@ -532,11 +548,12 @@ fn hosts(args: &[String]) -> Result<HostsCommand, String> {
 }
 
 /// `DEST [--replace] [--dry-run]`, each flag at most once.
-fn sync(dest: &str, flags: &[String]) -> Result<Sync, String> {
+fn sync(way: Way, dest: &str, flags: &[String]) -> Result<Sync, String> {
     if dest.is_empty() || dest.starts_with('-') || dest.contains(char::is_whitespace) {
         return Err(format!("hosts: `{dest}` is not an ssh destination"));
     }
     let mut sync = Sync {
+        way,
         dest: dest.to_owned(),
         replace: false,
         dry_run: false,
@@ -1038,7 +1055,7 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
          \x20                  hosts add NAME --socket PATH |\n\
          \x20                  hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] |\n\
          \x20                  hosts remove NAME |\n\
-         \x20                  hosts pull DEST [--replace] [--dry-run]",
+         \x20                  hosts pull|push DEST [--replace] [--dry-run]",
     ),
     (
         "ssh",
