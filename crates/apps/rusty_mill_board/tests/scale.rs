@@ -169,11 +169,11 @@ fn run(server: &Running, board: &Shared, name: &str, args: Value) -> Cost {
 /// The measured reads: (label, MCP operation, arguments).
 fn reads() -> Vec<(&'static str, &'static str, Value)> {
     vec![
-        ("board_list", "board_list", json!({})),
+        ("board_list", "board_list", json!({ "view": "full" })),
         (
             "board_list project",
             "board_list",
-            json!({ "project": MID_PROJECT }),
+            json!({ "view": "full", "project": MID_PROJECT }),
         ),
         (
             "card_get id",
@@ -193,7 +193,7 @@ fn reads() -> Vec<(&'static str, &'static str, Value)> {
         (
             "board_list first page",
             "board_list",
-            json!({ "limit": 100 }),
+            json!({ "view": "full", "limit": 100 }),
         ),
         ("card_get number", "card_get", json!({ "id": "#700" })),
         ("board_events", "board_events", json!({})),
@@ -336,7 +336,7 @@ fn bench() {
         let start = Instant::now();
         std::thread::scope(|s| {
             let readers: Vec<_> = (0..4)
-                .map(|_| s.spawn(|| run(&server, &board, "board_list", json!({}))))
+                .map(|_| s.spawn(|| run(&server, &board, "board_list", json!({ "view": "full" }))))
                 .collect();
             for r in readers {
                 r.join().expect("reader");
