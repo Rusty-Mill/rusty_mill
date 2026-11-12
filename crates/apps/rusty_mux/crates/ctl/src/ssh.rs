@@ -88,12 +88,15 @@ pub(crate) struct Machine<'a> {
     /// Whether `file` is in `known` for `host`; `None` when it cannot be
     /// told (no `ssh-keygen`).
     pub(crate) known: &'a dyn Fn(&Path, &str) -> Option<bool>,
+    /// Whether `rusty-mux --ssh` goes through `rusty-mux-ctl bridge`, one
+    /// login per connection, with no forward and no UDP: Windows (C79).
+    pub(crate) bridged: bool,
 }
 
 /// The findings for a destination whose `ssh -G` resolved to `resolved`.
 pub(crate) fn findings(resolved: &Resolved, machine: &Machine<'_>) -> Vec<Finding> {
     let mut found = Vec::new();
-    if resolved.get("clearallforwardings") == Some("yes") {
+    if !machine.bridged && resolved.get("clearallforwardings") == Some("yes") {
         found.push(Finding::problem(
             "ClearAllForwardings is on, which drops the forward rusty-mux needs",
             "remove ClearAllForwardings for this host from your ssh config",
@@ -107,20 +110,19 @@ pub(crate) fn findings(resolved: &Resolved, machine: &Machine<'_>) -> Vec<Findin
         .any(|f| expand(f, machine.home).is_file());
     if !keys && !machine.agent {
         found.push(Finding::warning(
-            "no identity file exists and no agent is running, so only the first login can use a password; reconnects fail",
+            match machine.bridged {
+                false => "no identity file exists and no agent is running, so only the first login can use a password; reconnects fail",
+                true => "no identity file exists and no agent is running, so only the first login can use a password; every connection after it fails",
+            },
             "create a key (ssh-keygen) and install it (ssh-copy-id), or start ssh-agent",
         ));
     }
-    if resolved.get("proxyjump").is_some() || resolved.get("proxycommand").is_some() {
+    if !machine.bridged
+        && (resolved.get("proxyjump").is_some() || resolved.get("proxycommand").is_some())
+    {
         found.push(Finding::warning(
             "the host is reached through a proxy, but UDP goes straight to its hostname",
             "pass rusty-mux --udp-host with a name the client can reach, or RUSTY_MUX_UDP=off",
-        ));
-    }
-    if cfg!(windows) {
-        found.push(Finding::warning(
-            "rusty-mux --ssh runs on Unix only for now",
-            "run rusty-mux from a Unix machine, or reach the server through rusty-mux-ctl bridge",
         ));
     }
     found
@@ -374,6 +376,7 @@ pub(crate) fn run(
         home,
         agent: std::env::var_os("SSH_AUTH_SOCK").is_some_and(|s| !s.is_empty()),
         known: &known,
+        bridged: cfg!(windows),
     };
     let found = findings(&resolved, &machine);
     if verbose {
@@ -642,11 +645,22 @@ mod tests {
         userknownhostsfile ~/.ssh/known_hosts ~/.ssh/known_hosts2\n";
 
     fn check(text: &str, home: Option<&Path>, agent: bool, known: Option<bool>) -> Vec<Finding> {
+        check_on(text, home, agent, known, false)
+    }
+
+    fn check_on(
+        text: &str,
+        home: Option<&Path>,
+        agent: bool,
+        known: Option<bool>,
+        bridged: bool,
+    ) -> Vec<Finding> {
         let answer = move |_: &Path, _: &str| known;
         let machine = Machine {
             home,
             agent,
             known: &answer,
+            bridged,
         };
         findings(&Resolved::parse(text), &machine)
     }
@@ -690,6 +704,20 @@ mod tests {
     fn cleared_forwardings_are_a_problem() {
         let text = GOOD.replace("clearallforwardings no", "clearallforwardings yes");
         assert_eq!(problems(&check(&text, None, true, Some(true))).len(), 1);
+    }
+
+    /// Through the bridge, no forward is cleared and no UDP goes past a
+    /// proxy, but every connection logs in.
+    #[test]
+    fn a_bridged_check_skips_the_forward_and_udp() {
+        let text = format!("{GOOD}proxyjump bastion\n")
+            .replace("clearallforwardings no", "clearallforwardings yes");
+        let home = Some(Path::new("/nonexistent-home"));
+        let found = check_on(&text, home, false, Some(true), true);
+        assert!(problems(&found).is_empty(), "{found:?}");
+        let texts: Vec<&str> = found.iter().map(|f| f.text.as_str()).collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(texts[0].contains("every connection after it"), "{texts:?}");
     }
 
     #[test]
