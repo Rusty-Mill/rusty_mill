@@ -6,11 +6,11 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use common::{Client, PATIENCE, start_server, window_for};
-use rusty_mux_core::{BlockId, Size};
-use rusty_mux_proto::{BlockSignal, Entry, Features, Launch, Message, Program};
+use rusty_mux_core::{BlockId, ClientId, InputMode, Size};
+use rusty_mux_proto::{BlockSignal, Echo, Entry, Features, Launch, Message, Program};
 
 const OWNER: Features = Features::CHECKPOINT_V6
     .union(Features::LAUNCH)
@@ -33,13 +33,18 @@ fn owned(script: &str, hold: bool) -> Launch {
 
 /// An owned block running `script`, attached, once it has printed `ready`.
 fn launch(client: &mut Client, script: &str, hold: bool) -> BlockId {
+    launch_with(client, owned(script, hold))
+}
+
+/// `launch`, attached, once its program has printed `ready`.
+fn launch_with(client: &mut Client, launch: Launch) -> BlockId {
     let window = window_for(client);
     let size = Size::new(80, 24).expect("size");
     let id = client.request(|req| Message::CreateBlock {
         req,
         window,
         size,
-        launch: owned(script, hold),
+        launch,
     });
     let block = BlockId::from_uuid(id.expect("a block id"));
     client.request(|req| Message::Attach { req, block });
@@ -198,14 +203,26 @@ fn a_held_block_stays_after_its_released_program_exits() {
     assert_eq!(exited(&mut owner, block), None, "closed");
 }
 
+/// Owner-only, reporting input, and acking echoes: the release must
+/// resolve both for a write it cuts short.
+const GATED: Features = OWNER
+    .union(Features::INPUT_GATE)
+    .union(Features::SYNC)
+    .union(Features::ECHO_ACK);
+
 /// A write already under way when the owner releases gives the master up:
-/// the program's terminal hangs up, and no byte reaches it afterwards.
+/// the program's terminal hangs up, and no byte reaches it afterwards. The
+/// owner hears of the prefix the terminal took, not the whole write (C77), and the
+/// writer's pending keys end with an `Unknown` echo, never an ack (C76).
 #[test]
 fn a_release_abandons_a_write_already_under_way() {
     const SENT: usize = 1 << 20;
+    /// More than a Linux PTY queues for its reader (64 KiB plus the line
+    /// discipline's 4 KiB).
+    const BUFFERED: usize = 72 << 10;
     let socket = start_server();
-    let mut owner = Client::connect_with(&socket, OWNER, None);
-    let mut writer = Client::connect_with(&socket, OWNER, None);
+    let mut owner = Client::connect_with(&socket, GATED, None);
+    let mut writer = Client::connect_with(&socket, GATED, None);
     let dir = std::env::temp_dir().join(format!("signal-release-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let out = dir.join("read");
@@ -217,15 +234,23 @@ fn a_release_abandons_a_write_already_under_way() {
          head -c {SENT} | wc -c > {out}.part; mv {out}.part {out}; sleep 30",
         out = out.display()
     );
-    let block = launch(&mut owner, &script, false);
+    let block = launch_with(
+        &mut owner,
+        Launch {
+            input: InputMode::OwnerOnly,
+            ..owned(&script, false)
+        },
+    );
     let pid = pid(&mut owner, block);
     writer.request(|req| Message::Attach { req, block });
+    grant(&mut owner, block, writer.id());
     writer.request(|req| Message::AcquireLease { req, block });
     // Far more than the terminal buffers, so the write stays pending.
-    writer.input(block, &vec![b'x'; SENT]);
+    let input = writer.input(block, &vec![b'x'; SENT]);
     std::thread::sleep(Duration::from_millis(200));
 
     owner.request(|req| Message::ReleaseBlock { req, block });
+    let batch = next_batch(&mut owner);
     wait_until("read to its end", || out.exists());
     let read: usize = std::fs::read_to_string(&out)
         .expect("count")
@@ -236,6 +261,28 @@ fn a_release_abandons_a_write_already_under_way() {
         read < SENT,
         "{read} of {SENT} bytes arrived after the release"
     );
+    // The hangup discards what the terminal queued, so the program reads
+    // less than it took; the report is that prefix, never the whole write.
+    assert!(
+        (read..=read + BUFFERED).contains(&batch.len()) && !batch.is_empty(),
+        "the owner heard of {} bytes, the program read {read}",
+        batch.len()
+    );
+    assert!(
+        batch.iter().all(|&b| b == b'x'),
+        "not a prefix of the write"
+    );
+
+    wait_unknown_after_known(&mut writer);
+    let sync = writer.input_sync();
+    while !matches!(writer.recv(), Message::Done { req, .. } if req == sync) {}
+    assert!(
+        !writer
+            .echoes
+            .iter()
+            .any(|(_, m)| matches!(m, Message::EchoAck { req, .. } if *req >= input)),
+        "an abandoned key was acked"
+    );
     assert_eq!(
         exited(&mut writer, block),
         Some(true),
@@ -245,6 +292,47 @@ fn a_release_abandons_a_write_already_under_way() {
     // Its `sleep 30` too, not only the shell.
     kill_group(pid);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn grant(owner: &mut Client, block: BlockId, client: ClientId) {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock");
+    let until = u64::try_from(since.as_millis()).expect("ms") + 60_000;
+    owner.request(|req| Message::GrantLease {
+        req,
+        block,
+        client,
+        until,
+    });
+}
+
+/// The next input `owner` is told of.
+fn next_batch(owner: &mut Client) -> Vec<u8> {
+    loop {
+        if let Message::InputBatch { data, .. } = owner.recv() {
+            return data;
+        }
+    }
+}
+
+/// Reads until `client` is told the echo became unknown after it was
+/// known: the release's resolution, not the state before any `stty`.
+fn wait_unknown_after_known(client: &mut Client) {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let modes = client.echoes.iter().filter_map(|(_, m)| match m {
+            Message::EchoMode { mode, .. } => Some(*mode),
+            _ => None,
+        });
+        let mut known = false;
+        for mode in modes {
+            known |= mode != Echo::Unknown;
+            if known && mode == Echo::Unknown {
+                return;
+            }
+        }
+        assert!(Instant::now() < deadline, "the echo never became unknown");
+        client.recv();
+    }
 }
 
 #[test]

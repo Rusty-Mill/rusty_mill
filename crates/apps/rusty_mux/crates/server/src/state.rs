@@ -1363,6 +1363,7 @@ impl State {
         live.revoke.fire();
         live.pty.release();
         drop(live.pty);
+        self.end_echo(block);
         // Disarmed here, before any future holds it: a task dropped unpolled
         // must not kill the program either.
         let Some(released) = live.process.release() else {
@@ -1386,9 +1387,6 @@ impl State {
         rt.live.as_ref().ok_or_else(|| EXITED.into())
     }
 
-    /// Refuses unless `client` may change each of `blocks`: nobody else
-    /// owns it and it is not orphaned (C46). An unknown block is left for
-    /// the request itself to report.
     /// Refuses `client` unless `block` has an owner and it is `client`:
     /// signal and release reach only an owned block, for its owner, so a
     /// block made without `own` behaves as before (C76, D230). Unlike
@@ -1410,6 +1408,9 @@ impl State {
             .map_err(Refusal::from)
     }
 
+    /// Refuses unless `client` may change each of `blocks`: nobody else
+    /// owns it and it is not orphaned (C46). An unknown block is left for
+    /// the request itself to report.
     fn owns(
         &self,
         client: ClientId,
@@ -2036,9 +2037,32 @@ impl State {
         let Some(rt) = self.blocks.get_mut(&block) else {
             return;
         };
+        // No reader drains a released block: its keys were resolved by
+        // the release's `EchoMode` instead (`end_echo`).
+        let Some(live) = &rt.live else {
+            return;
+        };
+        live.wake.notify_one();
         rt.waiting.written(client, req, at);
-        if let Some(live) = &rt.live {
-            live.wake.notify_one();
+    }
+
+    /// `block`'s output has ended for good (C76 release): nothing will be
+    /// read again, so no key can be acked under [`Message::EchoAck`]'s
+    /// contract. Drops its keys and says the echo is now
+    /// [`Echo::Unknown`], which tells
+    /// every client to stop predicting and drop its guesses: the terminal
+    /// resolution of every pending key, the one written after this too.
+    #[cfg(target_os = "linux")]
+    fn end_echo(&mut self, block: BlockId) {
+        let Some(rt) = self.blocks.get_mut(&block) else {
+            return;
+        };
+        rt.waiting = Waiting::default();
+        if std::mem::replace(&mut rt.echo, Echo::Unknown) == Echo::Unknown {
+            return;
+        }
+        for client in self.attached(block) {
+            self.send_echo(client, block);
         }
     }
 

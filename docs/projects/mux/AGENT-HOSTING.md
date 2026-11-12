@@ -303,8 +303,12 @@ before any task is spawned. The waiter polls `try_wait` like `reap()` but never 
 waiter dropped unpolled, aborted, or cut short by a stopping server leaves the program running.
 A release also abandons any input write already under way on another connection: each write
 carries the block's `Revoke`, which the release fires, so the writer drops its hold on the master
-and no byte reaches the program afterwards. The bytes it had already taken are still acked and
-reported (C77). Both requests are refused on a block with no owner, for every client, so a block
+and no byte reaches the program afterwards. The bytes it had already taken are still reported
+(C77). Nothing reads the block again, so no key can be acked under `EchoAck`'s contract: the
+release drops every pending key and sends `EchoMode` `unknown` to each attached `ECHO_ACK` client,
+which resets its prediction; a write that records its keys after the release is dropped the same
+way. The hangup discards what the terminal had queued, so the program may read fewer bytes than
+the owner was told the terminal took. Both requests are refused on a block with no owner, for every client, so a block
 made without `own` behaves as before (D230); an orphaned block stays refused too.
 `rusty-mux-ctl own` takes `{"op":"signal","block":B,"signal":"term"}` and `{"op":"release","block":B}`.
 
