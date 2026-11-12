@@ -35,3 +35,8 @@ platform-windows = { workspace = true }
 # tests do. The client itself never links the server.
 rusty_mux_server = { workspace = true }
 rusty_tokio = { workspace = true }
+
+# The scripted lifecycle tests run the client on our own console host on
+# Windows, whose output keeps the client's VT bytes (pack D209).
+[target.'cfg(windows)'.dev-dependencies]
+rusty_conhost = { workspace = true }
