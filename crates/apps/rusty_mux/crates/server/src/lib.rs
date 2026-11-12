@@ -36,6 +36,8 @@ mod login;
 #[cfg(any(target_os = "linux", windows))]
 mod outbox;
 #[cfg(any(target_os = "linux", windows))]
+mod passed;
+#[cfg(any(target_os = "linux", windows))]
 mod process;
 #[cfg(any(target_os = "linux", windows))]
 mod pty;
@@ -408,6 +410,9 @@ async fn accept(
         match allowed(&stream) {
             Ok(Peer::Allowed) => {
                 let (rd, wr) = stream.into_split();
+                // Only a peer's own connection passes descriptors (C75).
+                #[cfg(target_os = "linux")]
+                let rd = passed::Reader::new(rd);
                 rusty_tokio::task::spawn_local(conn::run(
                     state.clone(),
                     rd,

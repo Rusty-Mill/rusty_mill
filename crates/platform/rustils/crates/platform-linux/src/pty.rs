@@ -38,6 +38,19 @@ impl LinuxPty {
         cmd: &Command,
         size: WinSize,
     ) -> Result<(LinuxPtyMaster, LinuxChild)> {
+        self.spawn_passing(cmd, size, &[])
+    }
+
+    /// [`Self::spawn_concrete`], also giving the child `passed`, in order,
+    /// at descriptors 3, 4, …; everything else above 2 is closed in the
+    /// child. Linux only, so it stays off the portable [`Command`]: a
+    /// Windows pty has no numbered descriptors to map (C75).
+    pub fn spawn_passing(
+        &self,
+        cmd: &Command,
+        size: WinSize,
+        passed: &[BorrowedFd<'_>],
+    ) -> Result<(LinuxPtyMaster, LinuxChild)> {
         // A pty-hosted child is unconditionally a new session leader
         // (that's the mechanism that gives it the slave as its
         // controlling terminal) — which makes it a fresh process-group
@@ -70,6 +83,7 @@ impl LinuxPty {
             &cmd.cwd,
             &cmd.env,
             &slave_path,
+            passed,
         )?;
 
         // The child is its own session leader, so its pgid == its own

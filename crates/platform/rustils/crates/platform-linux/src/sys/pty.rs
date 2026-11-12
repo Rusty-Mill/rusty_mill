@@ -29,7 +29,7 @@
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString, OsStr, OsString};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::process::EnvSpec;
@@ -109,9 +109,20 @@ pub fn open_pty_pair() -> Result<(OwnedFd, CString)> {
     Ok((master, slave_path))
 }
 
+/// The first descriptor number a passed descriptor lands on: 0–2 are the
+/// pty.
+const FIRST_PASSED: i32 = 3;
+
 /// Spawn `path` (already-resolved) attached to `slave_path` as its
 /// controlling terminal and sole stdio — see this module's doc comment
 /// for the `posix_spawn`-native mechanism. Returns the child pid.
+///
+/// `passed` reach the child in order at 3, 4, … (C75). Each is first
+/// staged in this process by `F_DUPFD_CLOEXEC` at or above 3+n, so no
+/// staged number is a target and no source is overwritten mid-mapping,
+/// whatever numbers the originals hold; the file actions then `dup2` each
+/// staged copy onto its target and close everything from 3+n up. The
+/// staged copies close here when this returns, spawned or not.
 pub fn spawn_attached(
     path: &OsStr,
     argv0: &OsStr,
@@ -119,6 +130,7 @@ pub fn spawn_attached(
     cwd: &OsStr,
     env: &EnvSpec,
     slave_path: &CStr,
+    passed: &[BorrowedFd<'_>],
 ) -> Result<c::pid_t> {
     // Every allocation happens here, before the spawn call — the same
     // B-1/B-2 fix standard `sys::spawn::spawn`'s own doc comment states.
@@ -168,6 +180,9 @@ pub fn spawn_attached(
         return Err(spawn::errno_err("posix_spawn adddup2", r, OsStr::new("")));
     }
 
+    let staged = stage(passed)?;
+    map_passed(&mut actions, &staged)?;
+
     let mut attr = spawn::SpawnAttr::new()?;
     // SAFETY: `attr.0` is initialized; setflags has no pointer arguments
     // beyond it. Runs before file actions/exec (glibc's `__spawni`
@@ -202,6 +217,67 @@ pub fn spawn_attached(
         return Err(spawn::errno_err("posix_spawn", r, path));
     }
     Ok(pid)
+}
+
+/// Copies of `passed`, close-on-exec, each numbered at or above the first
+/// number past the targets.
+fn stage(passed: &[BorrowedFd<'_>]) -> Result<Vec<OwnedFd>> {
+    let floor = target(passed.len())?;
+    passed
+        .iter()
+        .map(|fd| {
+            // SAFETY: `fd` is a valid open descriptor for the call;
+            // F_DUPFD_CLOEXEC takes an int and has no pointer argument.
+            let copy = unsafe { c::fcntl(fd.as_raw_fd(), c::F_DUPFD_CLOEXEC, floor) };
+            if copy < 0 {
+                return Err(pty_err("fcntl F_DUPFD_CLOEXEC"));
+            }
+            // SAFETY: `copy` is a freshly returned, otherwise-unowned fd.
+            Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+        })
+        .collect()
+}
+
+/// The file actions that put `staged[i]` at 3+i and close everything from
+/// 3+n up; none without passed descriptors, so a plain spawn is unchanged.
+fn map_passed(actions: &mut spawn::FileActions, staged: &[OwnedFd]) -> Result<()> {
+    if staged.is_empty() {
+        return Ok(());
+    }
+    for (i, fd) in staged.iter().enumerate() {
+        let to = target(i)?;
+        // SAFETY: `actions.0` is initialized; `fd` stays open until the
+        // spawn returns. dup2 clears close-on-exec on the target only.
+        let r = unsafe { c::posix_spawn_file_actions_adddup2(&mut actions.0, fd.as_raw_fd(), to) };
+        if r != 0 {
+            return Err(spawn::errno_err("posix_spawn adddup2", r, OsStr::new("")));
+        }
+    }
+    let from = target(staged.len())?;
+    // SAFETY: `actions.0` is initialized; no pointer argument besides it.
+    let r = unsafe { c::posix_spawn_file_actions_addclosefrom_np(&mut actions.0, from) };
+    if r != 0 {
+        return Err(spawn::errno_err(
+            "posix_spawn addclosefrom",
+            r,
+            OsStr::new(""),
+        ));
+    }
+    Ok(())
+}
+
+/// The descriptor number the `i`th passed descriptor lands on.
+fn target(i: usize) -> Result<i32> {
+    i32::try_from(i)
+        .ok()
+        .and_then(|i| FIRST_PASSED.checked_add(i))
+        .ok_or_else(|| {
+            PlatformError::new(
+                ErrorKind::InvalidInput,
+                OsCode::None,
+                "too many passed descriptors",
+            )
+        })
 }
 
 /// `ioctl(master_fd, TIOCSWINSZ)` — `TIOCGWINSZ`'s write-side sibling

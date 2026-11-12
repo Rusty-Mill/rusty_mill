@@ -90,6 +90,44 @@ fn bad_requests_are_refused_with_their_id() {
 }
 
 #[test]
+fn an_agent_launch_carries_its_environment_and_descriptor_count() {
+    let line = format!(
+        r#"{{"id":1,"op":"launch","window":"{WINDOW}","env":{{"PATH":"/bin","EMPTY":""}},"fds":2}}"#
+    );
+    let request = parsed(&line);
+    let Request::Launch { launch, .. } = &request else {
+        panic!("not a launch");
+    };
+    let mut env = launch.env.clone().expect("an exact environment");
+    env.sort();
+    assert_eq!(
+        env,
+        [
+            ("EMPTY".into(), String::new()),
+            ("PATH".into(), "/bin".into())
+        ]
+    );
+    assert_eq!(launch.fds, 2);
+    assert!(request.agent());
+    let plain = format!(r#"{{"id":1,"op":"launch","window":"{WINDOW}"}}"#);
+    assert!(!parsed(&plain).agent());
+}
+
+#[test]
+fn bad_agent_launches_are_refused() {
+    let launch = |extra: &str| format!(r#"{{"id":3,"op":"launch","window":"{WINDOW}"{extra}}}"#);
+    for (extra, why) in [
+        (r#","env":["A"]"#, "map names to text"),
+        (r#","env":{"A":1}"#, "must be text"),
+        (r#","fds":9"#, "from 0 to 8"),
+        (r#","fds":-1"#, "from 0 to 8"),
+    ] {
+        let (_, reason) = refusal(&launch(extra));
+        assert!(reason.contains(why), "{extra}: {reason}");
+    }
+}
+
+#[test]
 fn an_owner_only_launch_needs_the_input_gate() {
     let line = format!(r#"{{"id":1,"op":"launch","window":"{WINDOW}","input":"owner-only"}}"#);
     let request = parsed(&line);

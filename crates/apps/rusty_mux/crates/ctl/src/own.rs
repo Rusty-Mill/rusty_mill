@@ -6,6 +6,9 @@
 //! - `{"id":ID,"op":"launch","window":UUID,"cols":N,"rows":N,"program":P,"args":[..],"cwd":DIR}`,
 //!   where only `window` is required; the answer carries the new `block`.
 //! - `{"id":ID,"op":"close","block":UUID}`.
+//! - With C75: `"env":{NAME:VALUE,…}` on a launch gives its program exactly
+//!   that environment, and `"fds":N` passes it this process's descriptors
+//!   3 to 3+N−1 (at most 8, Linux only), which it gets at the same numbers.
 //! - With C77: `"input":"owner-only"` on a launch gates its input, and
 //!   `{"id":ID,"op":"grant","block":UUID,"client":UUID,"until":MS}` and
 //!   `{"id":ID,"op":"revoke","block":UUID,"client":UUID}` let another client
@@ -60,6 +63,16 @@ const NEEDED: Features = Features::LAUNCH
 /// an older server refuses those here rather than launching an open block.
 const GATE: Features = Features::INPUT_GATE;
 
+/// Asked for too, but only launches with an exact environment or passed
+/// descriptors need it (C75).
+const AGENT: Features = Features::AGENT_LAUNCH;
+
+/// The first descriptor `own` passes: what it inherited above stdio.
+const FIRST_FD: i32 = 3;
+
+/// The most descriptors one launch passes (C75).
+const MAX_FDS: u64 = 8;
+
 /// How long a dropped connection is retried: inside the server's 30 s
 /// grace (D44), leaving room for the last try.
 const RECONNECT: Duration = Duration::from_secs(25);
@@ -112,6 +125,11 @@ impl Request {
             Self::Close { .. } => false,
         }
     }
+
+    /// Whether it needs [`Features::AGENT_LAUNCH`].
+    fn agent(&self) -> bool {
+        matches!(self, Self::Launch { launch, .. } if launch.env.is_some() || launch.fds > 0)
+    }
 }
 
 /// A request sent and not yet answered, with the caller's id.
@@ -128,6 +146,8 @@ struct Link {
     generation: u64,
     /// The server offered [`Features::INPUT_GATE`].
     gate: bool,
+    /// The server offered [`Features::AGENT_LAUNCH`].
+    agent: bool,
 }
 
 /// Runs `own` against the server at `socket`, reading requests from
@@ -138,6 +158,8 @@ pub(crate) fn run(
     input: impl BufRead + Send + 'static,
     out: &mut dyn Write,
 ) -> Result<Exit, Failure> {
+    // Before this process opens anything that could take their numbers.
+    let inherited = Inherited::now();
     let (tx, rx) = mpsc::channel();
     let (link, cursor) = open(socket, None, None, 0, &tx)?;
     read_lines(input, tx.clone());
@@ -150,6 +172,7 @@ pub(crate) fn run(
         pending: HashMap::new(),
         owned: HashSet::new(),
         next_req: 1,
+        inherited,
     };
     // The loop holds a sender, so the channel never disconnects.
     while let Ok(inbound) = rx.recv() {
@@ -185,6 +208,7 @@ struct Owner<'a> {
     pending: HashMap<u64, Pending>,
     owned: HashSet<BlockId>,
     next_req: u64,
+    inherited: Inherited,
 }
 
 impl Owner<'_> {
@@ -206,6 +230,16 @@ impl Owner<'_> {
         };
         if request.gated() && !self.link.gate {
             return self.print(&failed(id, "the server cannot gate input"));
+        }
+        if request.agent() && !self.link.agent {
+            return self.print(&failed(id, "the server cannot launch agents"));
+        }
+        let fds = match &request {
+            Request::Launch { launch, .. } => launch.fds,
+            _ => 0,
+        };
+        if let Err(why) = self.inherited.check(fds) {
+            return self.print(&failed(id, &why));
         }
         let req = self.next_req;
         self.next_req += 1;
@@ -244,7 +278,7 @@ impl Owner<'_> {
         self.pending.insert(req, Pending { id, launch });
         // A failed write shows as the connection dropping, which the
         // reader reports; the request is then pending like any other.
-        let _ = send(&mut self.link.stream, &message);
+        let _ = send_passing(&mut self.link.stream, &message, fds);
         Ok(())
     }
 
@@ -381,7 +415,10 @@ fn open(
 ) -> Result<(Link, Option<Cursor>), Failure> {
     let stream = connect(socket, &Stop::default())?;
     let mut conn = Conn::new(stream.try_clone()?, Stop::default());
-    let asked = NEEDED.union(GATE).union(Features::LEASE_REQUESTS);
+    let asked = NEEDED
+        .union(GATE)
+        .union(AGENT)
+        .union(Features::LEASE_REQUESTS);
     conn.send(&Message::Hello {
         version: Some(rusty_mux_proto::VERSION.into()),
         features: asked,
@@ -431,6 +468,7 @@ fn open(
         token,
         generation,
         gate: features.contains(GATE),
+        agent: features.contains(AGENT),
     };
     Ok((link, cursor))
 }
@@ -450,9 +488,64 @@ fn read_lines(input: impl BufRead + Send + 'static, tx: Sender<Inbound>) {
     });
 }
 
-fn send(stream: &mut UnixStream, message: &Message) -> io::Result<()> {
+/// Sends `message`, passing descriptors 3 to 3+`fds`−1 in the same
+/// `sendmsg` as its first byte, which is where the server looks (C75).
+fn send_passing(stream: &mut UnixStream, message: &Message, fds: u8) -> io::Result<()> {
     let frame = encode(message).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    stream.write_all(&frame)
+    let sent = pass(stream, &frame, fds)?;
+    stream.write_all(&frame[sent..])
+}
+
+/// Sends what of `frame` one `sendmsg` takes, with descriptors 3 and on.
+#[cfg(target_os = "linux")]
+fn pass(stream: &UnixStream, frame: &[u8], fds: u8) -> io::Result<usize> {
+    use std::os::fd::AsRawFd;
+    if fds == 0 {
+        return Ok(0);
+    }
+    let passed: Vec<i32> = (FIRST_FD..FIRST_FD + i32::from(fds)).collect();
+    rusty_libc::socket::send_with_fds(stream.as_raw_fd(), frame, &passed, 0)
+        .map_err(|e| io::Error::from_raw_os_error(e.0))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pass(_: &UnixStream, _: &[u8], _: u8) -> io::Result<usize> {
+    Ok(0)
+}
+
+/// Which of descriptors 3 to 3+[`MAX_FDS`]−1 this process inherited: only
+/// those may be passed, never one it opened itself, such as its socket.
+#[derive(Clone, Copy)]
+struct Inherited(u8);
+
+impl Inherited {
+    #[cfg(target_os = "linux")]
+    fn now() -> Self {
+        use rusty_libc::fd::{F_GETFD, fcntl};
+        let open = (0..MAX_FDS as u8)
+            .filter(|i| fcntl(FIRST_FD + i32::from(*i), F_GETFD, 0).is_ok())
+            .fold(0, |mask, i| mask | 1 << i);
+        Self(open)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn now() -> Self {
+        Self(0)
+    }
+
+    /// Refuses passing descriptors 3 to 3+`fds`−1 unless each was inherited.
+    fn check(self, fds: u8) -> Result<(), String> {
+        if fds > 0 && cfg!(not(target_os = "linux")) {
+            return Err("passing descriptors needs Linux".into());
+        }
+        match (0..fds).find(|i| self.0 & 1 << i == 0) {
+            None => Ok(()),
+            Some(i) => Err(format!(
+                "descriptor {} was not inherited",
+                FIRST_FD + i32::from(i)
+            )),
+        }
+    }
 }
 
 /// The request on `line` and its id, or why it is refused with the id
@@ -546,7 +639,32 @@ fn launch(value: &Value) -> Result<Launch, String> {
         cwd: text("cwd")?,
         own: true,
         input,
+        env: env(value)?,
+        fds: match value.get("fds") {
+            None => 0,
+            Some(n) => n
+                .as_u64()
+                .filter(|n| *n <= MAX_FDS)
+                .and_then(|n| u8::try_from(n).ok())
+                .ok_or_else(|| format!("`fds` must be a count from 0 to {MAX_FDS}"))?,
+        },
     })
+}
+
+/// The exact environment a launch names, if it names one.
+fn env(value: &Value) -> Result<Option<Vec<(String, String)>>, String> {
+    let Some(env) = value.get("env") else {
+        return Ok(None);
+    };
+    let env = env.as_object().ok_or("`env` must map names to text")?;
+    env.iter()
+        .map(|(name, v)| {
+            v.as_str()
+                .map(|v| (name.clone(), v.to_owned()))
+                .ok_or_else(|| format!("`env` value of `{name}` must be text"))
+        })
+        .collect::<Result<_, _>>()
+        .map(Some)
 }
 
 /// `data` as lowercase hex, two digits a byte.

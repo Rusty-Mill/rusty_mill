@@ -15,7 +15,6 @@
 //! never on the server's thread; our host's hang-up returns at once.
 
 use std::cell::{Cell, RefCell};
-use std::ffi::OsString;
 use std::io;
 use std::sync::Arc;
 use std::thread;
@@ -123,8 +122,10 @@ pub(crate) struct Process {
 pub(crate) fn spawn(
     config: &Config,
     size: Size,
-    env: &[(&str, OsString)],
+    env: super::Env<'_>,
     owned: bool,
+    // Never any: Windows has no descriptor passing (C75).
+    _passed: Vec<crate::passed::Fd>,
 ) -> io::Result<(Pty, Process)> {
     let group = if owned {
         GroupSpec::Inherit

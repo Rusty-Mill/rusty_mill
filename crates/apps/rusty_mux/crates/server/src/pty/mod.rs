@@ -34,10 +34,26 @@ pub(crate) const SHUTDOWN: Duration = Duration::from_secs(6);
 /// How often `Process::reap` polls for the exit.
 const POLL: Duration = Duration::from_millis(10);
 
-/// `config`'s program with this process's environment plus `env`.
-fn command(config: &Config, env: &[(&str, OsString)]) -> Command {
-    let mut vars: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
-    vars.extend(env.iter().map(|(k, v)| (OsString::from(k), v.clone())));
+/// A block program's environment.
+#[derive(Clone, Copy)]
+pub(crate) enum Env<'a> {
+    /// This process's environment plus these.
+    Server(&'a [(&'static str, OsString)]),
+    /// Exactly these, nothing inherited (C75).
+    Exact(&'a [(String, String)]),
+}
+
+/// `config`'s program with the environment `env` gives.
+fn command(config: &Config, env: Env<'_>) -> Command {
+    let vars: BTreeMap<OsString, OsString> = match env {
+        Env::Server(extra) => std::env::vars_os()
+            .chain(extra.iter().map(|(k, v)| (OsString::from(k), v.clone())))
+            .collect(),
+        Env::Exact(vars) => vars
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+            .collect(),
+    };
     let mut cmd =
         Command::new(config.program.clone(), config.cwd.clone()).env(EnvSpec::Explicit(vars));
     for arg in &config.args {

@@ -13,6 +13,7 @@ use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use rusty_tokio::sync::Notify;
 
 use crate::outbox::{Inbox, outbox};
+use crate::passed::{self, Arrival, Descriptors, Passed};
 use crate::state::{Kept, Pending, Shared, State};
 
 const READ_CHUNK: usize = 64 << 10;
@@ -28,21 +29,27 @@ pub(crate) async fn run<R, W>(
     transport: Transport,
     on_client: impl FnOnce(ClientId, &Rc<Notify>),
 ) where
-    R: AsyncRead + Unpin,
+    R: AsyncRead + Descriptors + Unpin,
     W: AsyncWrite + Unpin,
 {
     let mut frames = Frames::default();
 
+    // Descriptors sent with the Hello are closed with it.
     let (features, resume, takeover) = match frames.next(&mut rd).await {
-        Ok(Some(Message::Hello {
-            features,
-            resume,
-            takeover,
-            // No client is refused for its version: the floor is none until
-            // a breaking change needs one (C36, handoff D144).
-            version: _,
-        })) => (features, resume, takeover),
-        Ok(Some(other)) => return eprintln!("rusty-mux-server: expected Hello, got {other:?}"),
+        Ok(Some((
+            Message::Hello {
+                features,
+                resume,
+                takeover,
+                // No client is refused for its version: the floor is none until
+                // a breaking change needs one (C36, handoff D144).
+                version: _,
+            },
+            _,
+        ))) => (features, resume, takeover),
+        Ok(Some((other, _))) => {
+            return eprintln!("rusty-mux-server: expected Hello, got {other:?}");
+        }
         Ok(None) => return,
         Err(err) => return eprintln!("rusty-mux-server: handshake: {err}"),
     };
@@ -112,14 +119,14 @@ async fn serve(
     state: &Shared,
     client: ClientId,
     cancel: &Rc<Notify>,
-    rd: &mut (impl AsyncRead + Unpin),
+    rd: &mut (impl AsyncRead + Descriptors + Unpin),
     frames: &mut Frames,
 ) -> io::Result<()> {
-    while let Some(message) = frames.next(rd).await? {
+    while let Some((message, passed)) = frames.next(rd).await? {
         if !state.borrow().served_by(client, cancel) {
             return Ok(());
         }
-        let write = match State::request(state, client, message) {
+        let write = match State::request_with(state, client, message, passed) {
             None => continue,
             Some(Pending::Write(write)) => write,
             Some(Pending::Reload(done)) => {
@@ -178,12 +185,17 @@ async fn write_all(wr: &mut (impl AsyncWrite + Unpin), mut bytes: &[u8]) -> io::
     Ok(())
 }
 
-/// Reassembles frames from a byte stream. The buffer never holds more than
-/// one frame (at most `MAX_FRAME`) plus one read.
+/// Reassembles frames from a byte stream, with the descriptors each one
+/// brought (C75). The buffer never holds more than one frame (at most
+/// `MAX_FRAME`) plus one read.
 struct Frames {
     buf: Vec<u8>,
     /// Bytes of `buf` already decoded; compacted before the next read.
     start: usize,
+    /// The stream offset of `buf[0]`.
+    base: u64,
+    /// Descriptors a read brought that no frame has claimed yet.
+    pending: Option<Arrival>,
     chunk: Box<[u8]>,
 }
 
@@ -192,24 +204,43 @@ impl Default for Frames {
         Self {
             buf: Vec::new(),
             start: 0,
+            base: 0,
+            pending: None,
             chunk: vec![0; READ_CHUNK].into_boxed_slice(),
         }
     }
 }
 
 impl Frames {
-    /// The next message, or `None` at a clean end of stream.
-    async fn next(&mut self, rd: &mut (impl AsyncRead + Unpin)) -> io::Result<Option<Message>> {
+    /// The next message and what it passed, or `None` at a clean end of
+    /// stream.
+    async fn next(
+        &mut self,
+        rd: &mut (impl AsyncRead + Descriptors + Unpin),
+    ) -> io::Result<Option<(Message, Passed)>> {
         loop {
             let decoded = decode(&self.buf[self.start..])
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             if let Some((message, used)) = decoded {
+                let at = self.base + self.start as u64;
                 self.start += used;
-                return Ok(Some(message));
+                let passed = passed::claim(&mut self.pending, at, at + used as u64);
+                return Ok(Some((message, passed)));
             }
             self.buf.drain(..self.start);
+            self.base += self.start as u64;
             self.start = 0;
             let n = read(rd, &mut self.chunk).await?;
+            if let Some((fds, truncated)) = rd.take() {
+                let start = self.base + self.buf.len() as u64;
+                // Replacing descriptors no frame claimed closes them.
+                self.pending = Some(Arrival {
+                    fds,
+                    truncated,
+                    start,
+                    end: start + n as u64,
+                });
+            }
             if n == 0 {
                 return match self.buf.is_empty() {
                     true => Ok(None),

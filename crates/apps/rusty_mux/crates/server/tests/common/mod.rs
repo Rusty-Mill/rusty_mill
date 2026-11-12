@@ -214,6 +214,30 @@ impl Client {
             .expect("write");
     }
 
+    /// Sends `message` in one `sendmsg` that passes `fds` with its first
+    /// byte, as ctl does (C75).
+    #[cfg(target_os = "linux")]
+    pub fn send_passing(&mut self, message: &Message, fds: &[i32]) {
+        use std::os::fd::AsRawFd;
+        let frame = encode(message).expect("encode");
+        let sent = rusty_libc::socket::send_with_fds(self.stream.as_raw_fd(), &frame, fds, 0)
+            .expect("sendmsg");
+        self.stream.write_all(&frame[sent..]).expect("write");
+    }
+
+    /// [`Self::answer`], passing `fds` with the request.
+    #[cfg(target_os = "linux")]
+    pub fn answer_passing(
+        &mut self,
+        make: impl FnOnce(u64) -> Message,
+        fds: &[i32],
+    ) -> Vec<Message> {
+        let req = self.next_req;
+        self.next_req += 1;
+        self.send_passing(&make(req), fds);
+        self.answer_to(req)
+    }
+
     /// Reads one message, applying snapshots and output to its terminals.
     pub fn recv(&mut self) -> Message {
         loop {
@@ -335,6 +359,11 @@ impl Client {
         let req = self.next_req;
         self.next_req += 1;
         self.send(&make(req));
+        self.answer_to(req)
+    }
+
+    /// Every message answering `req`, as [`Self::answer`].
+    fn answer_to(&mut self, req: u64) -> Vec<Message> {
         let mut answer = Vec::new();
         loop {
             let message = self.recv();
