@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::board::{Board, NewCard};
 use crate::domain::{
-    Actor, BoardError, Card, CardSummary, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit,
-    ExecutionLink, Plan, Shelf, Span, View,
+    Actor, BoardError, Card, CardSummary, CloseReason, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS,
+    Dates, Edit, ExecutionLink, Plan, Shelf, Span, View,
 };
 use crate::external::{Observation, Provider, RefState};
 use crate::milestones::MilestoneEdit;
@@ -416,6 +416,18 @@ struct MoveArgs {
     id: String,
     /// Destination column.
     to: Column,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct CloseArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Card id, or its number (`#42` or `42`).
+    id: String,
+    /// Why it is closed without shipping: `wont_do`, `duplicate` or `superseded`.
+    reason: CloseReason,
+    /// Optional context, added as your comment: the surviving card, the decision, and so on.
+    note: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -945,6 +957,14 @@ pub fn ops() -> Vec<Op> {
             },
         ),
         op(
+            "card_close",
+            "Close an unstarted card (in backlog or a queue) without shipping it. `reason` is required: `wont_do`, `duplicate` or `superseded`; an optional `note` is added as your comment. The card goes to done with no ship time, counts as dropped in `board_metrics`, never as shipped. Needs `triage`. Refused for started, blocked or done cards.",
+            |b, i, a: CloseArgs| {
+                let who = acting(b, i, &a.who)?;
+                card(b.close(card_ref(b, &a.id)?, a.reason, a.note.as_deref(), &who)?)
+            },
+        ),
+        op(
             "card_archive",
             "Archive a Done card: it leaves the board's default views but stays Done, counts in roadmap and metrics, and `card_get` still finds it. Needs `close`. Refused for an open card.",
             |b, i, a: IdArgs| {
@@ -1443,6 +1463,107 @@ mod tests {
         )
         .expect("bulk");
         assert_eq!(bulk["archived"], 0, "the window counts from the restore");
+    }
+
+    #[test]
+    fn card_close_drops_a_backlog_card_with_its_reason_and_note() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let as_ = |role: &str, extra: Value| {
+            let mut args = json!({"actor": "nano", "role": role});
+            args.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            args
+        };
+        for title in ["keep", "drop"] {
+            call_as(
+                &board,
+                None,
+                "card_add",
+                as_("human", json!({"title": title})),
+            )
+            .expect("add");
+        }
+        let missing = call_as(
+            &board,
+            None,
+            "card_close",
+            as_("human", json!({"id": "#2"})),
+        );
+        assert!(
+            matches!(missing, Err(CallError::BadArgs(_))),
+            "reason is required"
+        );
+        let builder = call_as(
+            &board,
+            None,
+            "card_close",
+            as_("builder", json!({"id": "#2", "reason": "wont_do"})),
+        );
+        assert!(matches!(
+            builder,
+            Err(CallError::Board(BoardError::Forbidden(Capability::Triage)))
+        ));
+
+        let closed = call_as(
+            &board,
+            None,
+            "card_close",
+            as_(
+                "human",
+                json!({"id": "#2", "reason": "duplicate", "note": "same as #1"}),
+            ),
+        )
+        .expect("close")["card"]
+            .clone();
+        assert_eq!(closed["column"], "done");
+        assert_eq!(closed["done_ms"], Value::Null);
+        assert_eq!(closed["closed"]["reason"], "duplicate");
+        assert_eq!(closed["comments"][0]["text"], "same as #1");
+
+        let m = call_as(&board, None, "board_metrics", json!({})).expect("metrics");
+        assert_eq!(m["open"], 1);
+        assert_eq!(m["lead_time"]["shipped"], 0);
+        assert_eq!(m["dropped"][1], json!({"key": "duplicate", "count": 1}));
+    }
+
+    #[test]
+    fn a_refused_close_adds_no_note() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let human = |extra: Value| {
+            let mut a = json!({"actor": "nano", "role": "human"});
+            a.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            a
+        };
+        call_as(&board, None, "card_add", human(json!({"title": "t"}))).expect("add");
+        call_as(
+            &board,
+            None,
+            "card_move",
+            human(json!({"id": "#1", "to": "ready"})),
+        )
+        .expect("ready");
+        call_as(
+            &board,
+            None,
+            "card_move",
+            human(json!({"id": "#1", "to": "building"})),
+        )
+        .expect("start");
+        let refused = call_as(
+            &board,
+            None,
+            "card_close",
+            human(json!({"id": "#1", "reason": "wont_do", "note": "nope"})),
+        );
+        assert!(matches!(
+            refused,
+            Err(CallError::Board(BoardError::Refused(_)))
+        ));
+        let got = call_as(&board, None, "card_get", json!({"id": "#1"})).expect("get");
+        assert_eq!(got["card"]["comments"], json!([]));
     }
 
     #[test]
@@ -2167,12 +2288,12 @@ mod tests {
         };
         assert_eq!(
             progress(0),
-            json!({"total": 2, "done": 1, "blocked": 0, "ready_to_close": false})
+            json!({"total": 2, "done": 1, "dropped": 0, "blocked": 0, "ready_to_close": false})
         );
         call("card_move", json!({"id": "#2", "to": "blocked"})).expect("blocked");
         assert_eq!(
             progress(0),
-            json!({"total": 2, "done": 1, "blocked": 1, "ready_to_close": false})
+            json!({"total": 2, "done": 1, "dropped": 0, "blocked": 1, "ready_to_close": false})
         );
         call("card_plan", json!({"id": "#2", "milestone": null})).expect("unlink");
         assert_eq!(progress(0)["ready_to_close"], true);

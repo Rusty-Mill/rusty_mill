@@ -344,12 +344,13 @@ pub fn reserved_tag(tag: &str) -> bool {
         || tag.starts_with("number:")
         || tag.starts_with("archived:")
         || tag.starts_with("restored:")
+        || tag.starts_with("closed:")
 }
 
 fn check_tags(tags: &[String]) -> Result<(), BoardError> {
     if tags.iter().any(|t| reserved_tag(t)) {
         return Err(BoardError::Invalid(
-            "tags `agent`, `board:…`, `claim:…`, `number:…`, `archived:…` and `restored:…` are the board's own",
+            "tags `agent`, `board:…`, `claim:…`, `number:…`, `archived:…`, `restored:…` and `closed:…` are the board's own",
         ));
     }
     Ok(())
@@ -382,6 +383,52 @@ pub struct Comment {
     pub at_ms: i64,
     /// Text.
     pub text: String,
+}
+
+/// Why unstarted work was closed without shipping it.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseReason {
+    /// Decided against.
+    WontDo,
+    /// Another card covers the same work.
+    Duplicate,
+    /// A newer card or a decision replaces it.
+    Superseded,
+}
+
+impl CloseReason {
+    /// Every reason, in display order.
+    pub const ALL: [CloseReason; 3] = [
+        CloseReason::WontDo,
+        CloseReason::Duplicate,
+        CloseReason::Superseded,
+    ];
+
+    /// The stored name (`wont_do`, `duplicate`, `superseded`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CloseReason::WontDo => "wont_do",
+            CloseReason::Duplicate => "duplicate",
+            CloseReason::Superseded => "superseded",
+        }
+    }
+
+    /// The reason stored as `name`, if it is one.
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.as_str() == name)
+    }
+}
+
+/// How a Done card was closed without shipping: dropped work. A shipped card has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Closure {
+    /// Why.
+    pub reason: CloseReason,
+    /// When, Unix ms.
+    pub at_ms: i64,
 }
 
 /// One card. `rev` increases on every change and is the store's CAS token.
@@ -462,6 +509,10 @@ pub struct Card {
     /// and for work closed without shipping (rusty_tick's won't-do).
     #[serde(default)]
     pub done_ms: Option<i64>,
+    /// Set when the card was closed without shipping ([`Card::close`]): it is Done, has no
+    /// `done_ms`, and counts as dropped, never shipped. `None` for open and shipped cards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<Closure>,
     /// When the card was archived, Unix ms: a Done card set aside from the board's default
     /// views. It is still Done, so roadmap, metrics and dependencies count it as before.
     #[serde(default)]
@@ -518,6 +569,9 @@ pub struct CardSummary {
     pub updated_ms: i64,
     /// When it shipped, Unix ms.
     pub done_ms: Option<i64>,
+    /// Why it was closed without shipping; left out unless it was, so summaries stay small.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed: Option<CloseReason>,
     /// When it was archived, Unix ms.
     pub archived_ms: Option<i64>,
 }
@@ -537,6 +591,7 @@ impl From<&Card> for CardSummary {
             created_ms: c.created_ms,
             updated_ms: c.updated_ms,
             done_ms: c.done_ms,
+            closed: c.closed.map(|x| x.reason),
             archived_ms: c.archived_ms,
         }
     }
@@ -686,6 +741,8 @@ pub enum EventKind {
     Assigned,
     /// Given its board-wide number.
     Numbered,
+    /// Closed without shipping ([`Card::close`]).
+    Closed,
 }
 
 /// One entry in the append-only log. `id` is a UUIDv7 assigned by the store
@@ -803,6 +860,7 @@ impl Card {
             created_ms: now_ms,
             updated_ms: now_ms,
             done_ms: None,
+            closed: None,
             archived_ms: None,
             restored_ms: None,
             target_ms: None,
@@ -965,6 +1023,45 @@ impl Card {
         }
     }
 
+    /// Close unstarted work without shipping it: the card goes to Done with `reason`, no
+    /// `done_ms` and no claim, so it counts as dropped. Needs `Triage`. Only a card in Backlog
+    /// or a queue may be closed: started work ships, or is blocked for a human.
+    ///
+    /// # Errors
+    /// [`BoardError::Forbidden`] without `Triage`, [`BoardError::Terminal`] for a Done card,
+    /// and [`BoardError::Refused`] for a card in a work column or Blocked.
+    pub fn close(
+        &self,
+        flow: &Workflow,
+        reason: CloseReason,
+        by: &Actor,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
+        if !by.caps.contains(&Capability::Triage) {
+            return Err(BoardError::Forbidden(Capability::Triage));
+        }
+        if self.column == Column::DONE {
+            return Err(BoardError::Terminal);
+        }
+        if !matches!(flow.kind(&self.column), Some(Kind::Backlog | Kind::Queue)) {
+            return Err(BoardError::Refused(
+                "only an unstarted card (in backlog or a queue) can be closed with a reason; \
+                 started work ships or is blocked"
+                    .into(),
+            ));
+        }
+        Ok(Self {
+            column: Column::DONE,
+            claim: None,
+            done_ms: None,
+            closed: Some(Closure {
+                reason,
+                at_ms: now_ms,
+            }),
+            ..self.next(now_ms)
+        })
+    }
+
     /// Archive the card: set it aside from the default views. Unchanged if already archived.
     ///
     /// # Errors
@@ -1001,7 +1098,10 @@ impl Card {
     /// Where a Done card's window starts: its ship time (or, closed without shipping, its last
     /// change), or its last restore if later.
     pub fn shelf_since_ms(&self) -> i64 {
-        let closed_ms = self.done_ms.unwrap_or(self.updated_ms);
+        let closed_ms = self
+            .done_ms
+            .or(self.closed.map(|c| c.at_ms))
+            .unwrap_or(self.updated_ms);
         self.restored_ms.map_or(closed_ms, |r| r.max(closed_ms))
     }
 
@@ -1243,6 +1343,97 @@ mod tests {
             .move_freely(&flow(), &Column::DONE, &human, 7)
             .expect("done");
         assert_eq!(c.done_ms, Some(7));
+    }
+
+    #[test]
+    fn triage_closes_a_backlog_card_as_dropped_not_shipped() {
+        let human = actor("nano", &[Capability::Triage]);
+        let c = card()
+            .close(&flow(), CloseReason::Duplicate, &human, 9)
+            .expect("close");
+        assert_eq!(c.column, Column::DONE);
+        assert_eq!(c.done_ms, None);
+        assert_eq!(c.claim, None);
+        assert_eq!(
+            c.closed,
+            Some(Closure {
+                reason: CloseReason::Duplicate,
+                at_ms: 9
+            })
+        );
+        assert_eq!(CardSummary::from(&c).closed, Some(CloseReason::Duplicate));
+    }
+
+    #[test]
+    fn a_queued_card_may_be_closed_and_its_claim_is_dropped() {
+        let human = actor("nano", &[Capability::Triage]);
+        let c = card()
+            .move_to(&flow(), &Column::READY, &human, 1)
+            .expect("ready")
+            .claim(&actor("dev", &[Capability::Build]), 2)
+            .expect("claim");
+        let c = c
+            .close(&flow(), CloseReason::WontDo, &human, 3)
+            .expect("close");
+        assert_eq!((c.column, c.claim), (Column::DONE, None));
+    }
+
+    #[test]
+    fn closing_needs_triage() {
+        let dev = actor("dev", &[Capability::Build, Capability::Close]);
+        assert_eq!(
+            card().close(&flow(), CloseReason::WontDo, &dev, 1),
+            Err(BoardError::Forbidden(Capability::Triage))
+        );
+    }
+
+    #[test]
+    fn started_blocked_and_done_cards_are_not_closed() {
+        let human = actor("nano", &[Capability::Triage, Capability::Build]);
+        let ready = card()
+            .move_to(&flow(), &Column::READY, &human, 1)
+            .expect("ready");
+        let building = ready
+            .move_to(&flow(), &Column::BUILDING, &human, 2)
+            .expect("start");
+        let blocked = card()
+            .move_to(&flow(), &Column::BLOCKED, &human, 2)
+            .expect("block");
+        for c in [building, blocked] {
+            assert!(matches!(
+                c.close(&flow(), CloseReason::WontDo, &human, 3),
+                Err(BoardError::Refused(_))
+            ));
+        }
+        let closed = card()
+            .close(&flow(), CloseReason::WontDo, &human, 3)
+            .expect("close");
+        assert_eq!(
+            closed.close(&flow(), CloseReason::Duplicate, &human, 4),
+            Err(BoardError::Terminal)
+        );
+    }
+
+    #[test]
+    fn a_dropped_card_shelves_from_its_close_and_a_comment_does_not_bring_it_back() {
+        let human = actor("nano", &[Capability::Triage]);
+        let day = 24 * 60 * 60 * 1000;
+        let c = card()
+            .close(&flow(), CloseReason::WontDo, &human, 5)
+            .expect("close")
+            .comment(&human, "later", 20 * day)
+            .expect("comment");
+        assert_eq!(c.shelf_since_ms(), 5);
+        assert!(c.shelved(20 * day, Some(14 * day)));
+    }
+
+    #[test]
+    fn close_reasons_round_trip_their_names_and_closed_tags_are_reserved() {
+        for r in CloseReason::ALL {
+            assert_eq!(CloseReason::parse(r.as_str()), Some(r));
+        }
+        assert_eq!(CloseReason::parse("shipped"), None);
+        assert!(reserved_tag("Closed:wont_do:1"));
     }
 
     #[test]

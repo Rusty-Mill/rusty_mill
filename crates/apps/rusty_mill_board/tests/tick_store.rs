@@ -3,7 +3,8 @@
 
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{
-    BoardError, Card, CardSummary, Column, Dates, Edit, Event, EventKind, Plan, Shelf, Span,
+    BoardError, Card, CardSummary, CloseReason, Closure, Column, Dates, Edit, Event, EventKind,
+    Plan, Shelf, Span,
 };
 use rusty_mill_board::milestones::{MilestoneEdit, MilestoneStore};
 use rusty_mill_board::projects::Projects;
@@ -235,6 +236,82 @@ fn done_closes_the_task_and_a_task_closed_in_rusty_tick_is_done() {
     let closed = board.get(other.id).expect("get");
     assert_eq!(closed.column, Column::DONE);
     assert_eq!(closed.done_ms, None, "won't-do is closed, not shipped");
+}
+
+#[test]
+fn a_close_with_a_reason_is_a_won_t_do_task_and_reads_back_from_tags_alone() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let closed = board
+        .close(card.id, CloseReason::Superseded, None, &human)
+        .expect("close");
+    let task = tick.task(card.id);
+    assert_eq!(task["status"], "wontdo");
+    assert!(
+        task["tags"]
+            .as_array()
+            .expect("tags")
+            .contains(&json!("closed:superseded:42"))
+    );
+    let want = Some(Closure {
+        reason: CloseReason::Superseded,
+        at_ms: 42,
+    });
+    assert_eq!(closed.closed, want);
+    assert_eq!(board.get(card.id).expect("get").closed, want);
+    let summary = board
+        .list_view(
+            None,
+            Shelf::Include,
+            0,
+            rusty_mill_board::domain::View::Summary,
+        )
+        .expect("summaries");
+    assert_eq!(
+        CardSummary::from(&summary[0]).closed,
+        Some(CloseReason::Superseded)
+    );
+}
+
+#[test]
+fn an_unreadable_closed_tag_reads_as_won_t_do_at_tick_s_close_time() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    tick.owner_edit(card.id, |t| {
+        t["status"] = json!("wontdo");
+        t["tags"] = json!(["agent", "closed:duplicat:5"]);
+    });
+    let at = tick.task(card.id)["completedMs"].as_i64().expect("stamped");
+    assert_eq!(
+        board.get(card.id).expect("get").closed,
+        Some(Closure {
+            reason: CloseReason::WontDo,
+            at_ms: at
+        })
+    );
+}
+
+#[test]
+fn a_task_marked_won_t_do_in_rusty_tick_reads_as_dropped_and_a_done_task_as_shipped() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let dropped = board.add(&human, "a", "", vec![]).expect("add");
+    let shipped = board.add(&human, "b", "", vec![]).expect("add");
+    tick.owner_edit(dropped.id, |t| t["status"] = json!("wontdo"));
+    tick.owner_edit(shipped.id, |t| t["status"] = json!("done"));
+    let at = tick.task(dropped.id)["completedMs"]
+        .as_i64()
+        .expect("stamped");
+    assert_eq!(
+        board.get(dropped.id).expect("get").closed,
+        Some(Closure {
+            reason: CloseReason::WontDo,
+            at_ms: at
+        })
+    );
+    assert_eq!(board.get(shipped.id).expect("get").closed, None);
 }
 
 #[test]
