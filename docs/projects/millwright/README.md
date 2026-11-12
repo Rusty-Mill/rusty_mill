@@ -21,7 +21,7 @@ its exit test passes, not when its cards close.
 
 | Phase | Improves | Uses | Exit test |
 | --- | --- | --- | --- |
-| 0. Clear the ground | The board and its backlog | The audits and the questions | Paused projects hold no open cards; every remaining project has a priority from Nano |
+| 0. Clear the ground | The board and its backlog | The audits and the questions | Paused projects hold no open cards; every remaining project has a priority from Nano; the entry rule is in AGENTS.md |
 | 1. Make the controls real | Identities, roles, review rules; remind-me dormancy | A lean board with priorities | An agent is refused at a gate and at a self-merge; a routine PR merges on green CI plus a cross-family review with no action from Nano |
 | 2. First real runs | Let Em Loose and Portfolio Intelligence | Enforced review and automatic merge | A smoke run settles one toy claim; a live sync lists the real repositories |
 | 3. Turn the tools on the ecosystem | Storage under remind-me and Mill Board | The two engines that now run | The overlap report names what the audits found by hand; the duplicate-file experiment is judged; the benchmark has a winner |
