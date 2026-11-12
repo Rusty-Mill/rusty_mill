@@ -414,7 +414,7 @@ mod tests {
         let status = match e {
             NotFound(_) => 404,
             Conflict | Claimed(_) | PartlySaved { .. } => 409,
-            Forbidden(_) | NotClaimant | OutOfScope(_) => 403,
+            Forbidden(_) | ForbiddenAny(_) | NotClaimant | OutOfScope(_) => 403,
             Terminal | NoSuchMove { .. } | Invalid(_) | Refused(_) => 422,
             Storage(_) => 500,
         };
