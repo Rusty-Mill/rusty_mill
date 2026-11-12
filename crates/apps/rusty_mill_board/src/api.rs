@@ -147,13 +147,14 @@ pub(crate) fn acting(
     }
 }
 
-/// The actor for an inbox op. These ops carry BBP's human authority (they lift
-/// its gates and budgets), so a caller-named actor and role are not enough: only
-/// an identity bound to the transport (a token or OAuth grant) may use them.
+/// The actor for an op that only an authenticated admin may run: the inbox ops, which carry
+/// BBP's human authority (they lift its gates and budgets), and `board_number_cards`, which
+/// writes every project's cards. A caller-named actor and role are not enough: only an
+/// identity bound to the transport (a token or OAuth grant) may use them.
 fn bound_acting(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Actor, BoardError> {
     if identity.is_none() {
         return Err(BoardError::Invalid(
-            "the inbox needs an authenticated admin credential; a named actor and role are not enough",
+            "this needs an authenticated admin credential; a named actor and role are not enough",
         ));
     }
     acting(b, identity, who)
@@ -1110,9 +1111,9 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_number_cards",
-            "Number the cards that have no number yet: tasks tagged `agent` directly in rusty_tick since the board started (the board also does this when it starts). Needs admin, unlimited to projects. {numbered: count}.",
+            "Number the cards that have no number yet: tasks tagged `agent` directly in rusty_tick since the board started (the board also does this when it starts). Needs an authenticated admin credential, unlimited to projects. {numbered: count}.",
             |b, i, a: WhoArgs| {
-                let who = acting(b, i, &a.who)?;
+                let who = bound_acting(b, i, &a.who)?;
                 to_json(json!({ "numbered": b.number_cards_as(&who)? }))
             },
         ),
@@ -1990,7 +1991,7 @@ mod tests {
     }
 
     #[test]
-    fn board_number_cards_numbers_strays_for_an_unlimited_admin_only() {
+    fn board_number_cards_numbers_strays_for_an_authenticated_unlimited_admin_only() {
         let store = MemStore::default();
         let stray = Card::new("stray", "", vec![], 1).expect("card");
         store
@@ -2010,6 +2011,18 @@ mod tests {
         let mut limited = ident("nano", "human");
         limited.projects = Some(vec!["default".into()]);
         assert!(refused(&limited), "it writes every project's cards");
+        let stated = json!({"actor": "nano", "role": "human"});
+        assert!(
+            matches!(
+                call_as(&board, None, "board_number_cards", stated),
+                Err(CallError::Board(BoardError::Invalid(m))) if m.contains("authenticated admin credential")
+            ),
+            "a stated admin role without a credential is refused"
+        );
+        assert!(
+            call_as(&board, None, "board_number_cards", json!({})).is_err(),
+            "no credential and no actor is refused"
+        );
         let human = ident("nano", "human");
         let out = call_as(&board, Some(&human), "board_number_cards", json!({})).expect("number");
         assert_eq!(out["numbered"], 1);
