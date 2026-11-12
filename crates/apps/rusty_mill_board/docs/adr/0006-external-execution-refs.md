@@ -38,7 +38,7 @@ One new MCP and HTTP op, `card_execution_observe {id, provider, ref, state, url?
   - An older `observed_at_ms` than the stored one is a no-op: the newer state stands, so observations may arrive out of order.
   - The same `observed_at_ms` with a different state is refused as a conflict, so the caller re-observes with a fresh time instead of one write silently winning.
   - A time more than 5 minutes ahead of the board's clock is refused as invalid, so a fast observer clock cannot pin a state that later observations can never replace.
-- **The ninth ref:** it replaces the terminal ref with the oldest `observed_at_ms`. If all 8 are live, it is refused. A live observation is never evicted.
+- **The ninth ref:** it replaces the terminal ref (`succeeded`, `failed` or `cancelled`) with the oldest `observed_at_ms`. If none of the 8 is terminal, it is refused. A live or `unknown` observation is never evicted, because the observer could not rule out that it is still running (D125).
 - **Event:** a change logs a new `ExecutionObserved` event, so `board_events` pollers and the web UI's incremental refresh pick it up as they do any card change.
 - **Reads:**
   - `card_get` and the full `board_list` view carry `external_refs`.
@@ -61,8 +61,8 @@ Refs stay on Done and archived cards, and restore keeps them: they are the recor
 - **A new binary reading an old document:** `externalRefs` defaults to empty.
 - **An old binary reading a new document:** `BoardDoc` has no `deny_unknown_fields`, so it reads the card and ignores the refs. But it rewrites the whole document on that card's next write, which drops them.
 - To make rollback lossless, the implementation lands in two PRs:
-  1. `BoardDoc` keeps fields it does not know (`#[serde(flatten)]` into a JSON map) and writes them back unchanged. This is generic and adds no new field. It is deployed first.
-  2. `external_refs` itself.
+  1. `BoardDoc` keeps fields it does not know (`#[serde(flatten)]` into a JSON map). `TickStore::replace` already reads the stored document before each write, and it writes those fields back unchanged. This is generic, adds no new field and keeps the domain `Card` free of storage detail. It is deployed first.
+  2. `external_refs` itself, as a field of the domain `Card` like `execution`, which `BoardDoc::of` writes (D125).
 
   Rolling back from 2 to 1 then loses nothing. Rolling back below 1 drops refs from a card's document on that card's next write. That is accepted and stated in the release notes.
 - **MCP schema:** a new tool, a new optional field on the card, and two summary booleans. Existing calls are unchanged. Connectors pick up the new tool after a reconnect.

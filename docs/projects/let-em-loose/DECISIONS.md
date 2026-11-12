@@ -132,6 +132,7 @@ Precise contracts used by this guide:
 | D122 | Mill Board `external_refs`: observation-only references for non-Orch execution, approved in principle | [stated] 2026-11-10 (general, #1432) |
 | D123 | #1432 S5 design defaults: ADR location, providers, capability, summary flags, card_take | [default] 2026-11-11 (#1432) |
 | D124 | #1432 S5 external refs design (ADR-0006) approved as written for implementation | [stated] 2026-11-11 (#1432) |
+| D125 | #1432 S5 clarifications: `unknown` refs not evictable, S5a document readback, refs on the domain `Card` | [default] 2026-11-12 (#1432) |
 
 ## D1. Lenses, not stages
 
@@ -1208,3 +1209,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_b512d055f0f3463aaa8068bec48916c5
 **Key.** lel:1432:external-refs-design-approved
 **Source.** Nano tapped "Approve as written" on decision card `cmsg_017MoLbtrGAAcyE1PVPZXuN6LV2exssuE5oC7WWqu8rWaa` ("Approve the S5 external refs design in PR 1618 for implementation?"; option: "I create the two implementation cards and build PR 1 (keep unknown doc fields), then PR 2 (external refs), each through review and CI."), decide event `cmsg_017MoLbtrGAAcyE1PVPZXuN64ukBebuUh4oWNpEUyf7mgw`, 2026-11-11T23:48:48Z, Mill_Board project thread. Confirms D122 and D123. D25, D20, D104. Numbered D124 after D123.
+
+## D125. #1432 S5 clarifications: `unknown` refs not evictable, S5a document readback, refs on the domain `Card`
+
+**Decision.** Inside D124 (ADR-0006), three clarifications. (1) A ref in state `unknown` counts as not evictable, the same as a live ref, because the observer could not tell. The ninth ref replaces the terminal ref (`succeeded`, `failed`, `cancelled`) with the oldest `observed_at_ms`, and is refused if no ref is terminal. (2) S5a keeps unknown board-document fields by reading the stored document back before each rewrite. (3) In S5b, `external_refs` sits on the domain `Card` the same way `execution` does. This entry does not settle the summary flags in D123 item (4); that question went to Nano after the PR #1618 review.
+**Why.** ADR-0006 defines `unknown` as neither live nor terminal and only says a live observation is never evicted. Refusing is the conservative reading: an observation that may still be running is never dropped, and the rule can be relaxed later. Readback and the domain `Card` placement follow the existing `execution` pattern and are implementation detail inside the approved design.
+**Rejected.** Evicting `unknown` refs like terminal ones, which could drop a ref for work that is still running.
+**Tag.** [default] · remind-me: mem_fbced0cfdbde43ee89a9f08dc4da4ef2
+**Key.** lel:1432:external-refs-unknown-eviction-and-doc-preservation
+**Source.** let-em-loose-expert, answering the PR #1618 review follow-up (branch `claude/project-thread-ofbftl`, head 85e0c449), 2026-11-12. ADR-0006 `crates/apps/rusty_mill_board/docs/adr/0006-external-execution-refs.md` (state table, ninth-ref rule); D124, D123. Numbered D125 after D124.
