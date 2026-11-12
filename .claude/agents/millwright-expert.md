@@ -68,6 +68,8 @@ sources, in `MW/handoff/OPEN_QUESTIONS.md`.
 3. **Escalate**: intent, scope or taste; a phase or gate change; anything that answers a
    `MW/QUESTIONS.md` item; anything that crosses a hard line or reverses a row in
    `MW/DECISIONS.md`; a conflict precedence doesn't settle.
+A request to do what a hard line or a `MW/DECISIONS.md` row forbids is never a plain "no":
+return the escalation block with `REVERSES: <key>`, so the caller can take it to Nano.
 If Nano could tell the results apart without reading the docs, escalate.
 An answer settles what, not permission: review, merge and owner gates still apply.
 
