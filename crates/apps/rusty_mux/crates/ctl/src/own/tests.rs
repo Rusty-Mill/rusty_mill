@@ -128,6 +128,20 @@ fn bad_agent_launches_are_refused() {
 }
 
 #[test]
+fn a_launch_can_hold_its_block() {
+    let line = format!(r#"{{"id":1,"op":"launch","window":"{WINDOW}","hold":true}}"#);
+    let Request::Launch { launch, .. } = parsed(&line) else {
+        panic!("not a launch");
+    };
+    assert!(launch.hold);
+    let held = parsed(&line);
+    assert_eq!(held.unsupported(NEEDED.union(GATE)), Some(NO_HOLD));
+    assert_eq!(held.unsupported(NEEDED.union(Features::HOLD)), None);
+    let bad = format!(r#"{{"id":1,"op":"launch","window":"{WINDOW}","hold":"yes"}}"#);
+    assert!(refusal(&bad).1.contains("true or false"));
+}
+
+#[test]
 fn an_owner_only_launch_needs_the_input_gate() {
     let line = format!(r#"{{"id":1,"op":"launch","window":"{WINDOW}","input":"owner-only"}}"#);
     let request = parsed(&line);
@@ -135,9 +149,10 @@ fn an_owner_only_launch_needs_the_input_gate() {
         panic!("not a launch");
     };
     assert_eq!(launch.input, InputMode::OwnerOnly);
-    assert!(request.gated());
+    assert_eq!(request.unsupported(NEEDED), Some(NO_GATE));
+    assert_eq!(request.unsupported(NEEDED.union(GATE)), None);
     let open = format!(r#"{{"id":1,"op":"launch","window":"{WINDOW}","input":"open"}}"#);
-    assert!(!parsed(&open).gated());
+    assert_eq!(parsed(&open).unsupported(NEEDED), None);
 }
 
 #[test]
@@ -153,7 +168,7 @@ fn grants_and_revokes_name_a_block_a_client_and_a_time() {
             ..
         }
     ));
-    assert!(request.gated());
+    assert_eq!(request.unsupported(NEEDED), Some(NO_GATE));
     let line = format!(r#"{{"id":5,"op":"revoke","block":"{WINDOW}","client":"{WINDOW}"}}"#);
     assert!(matches!(parsed(&line), Request::Revoke { .. }));
     let line = format!(r#"{{"id":6,"op":"grant","block":"{WINDOW}","client":"{WINDOW}"}}"#);

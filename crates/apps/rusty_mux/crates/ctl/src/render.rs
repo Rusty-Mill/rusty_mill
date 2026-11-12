@@ -221,6 +221,7 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             name,
             owner,
             input,
+            exited,
         } => {
             let mut fields = vec![("window", Id(window.uuid()))];
             fields.extend(size_fields(*size));
@@ -238,6 +239,9 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
                 InputMode::OwnerOnly => "owner-only",
             };
             fields.push(("input", Field::Word(input)));
+            // C78: a held or restored block's program is gone.
+            let state = if *exited { "exited" } else { "running" };
+            fields.push(("state", Field::Word(state)));
             ("block", block.uuid(), fields)
         }
         Entry::Client {
@@ -722,11 +726,12 @@ mod tests {
             name: "edit".into(),
             owner: None,
             input: InputMode::Open,
+            exited: false,
         };
         assert_eq!(
             entry_line(&block, false),
             format!(
-                "block {} window={} cols=80 rows=24 holder=- title=\"vim\" name=\"edit\" owner=- input=open",
+                "block {} window={} cols=80 rows=24 holder=- title=\"vim\" name=\"edit\" owner=- input=open state=running",
                 id(1),
                 id(2)
             )

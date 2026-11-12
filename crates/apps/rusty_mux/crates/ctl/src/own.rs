@@ -12,6 +12,8 @@
 //!   Each passes once: `own` closes its own copies as soon as the launch
 //!   is answered, whether it succeeded or failed, so it never holds a slot
 //!   lock or keeps a pipe open past the launch.
+//! - With C78: `"hold":true` on a launch keeps the block, read-only, once
+//!   its program exits, until it is closed.
 //! - With C77: `"input":"owner-only"` on a launch gates its input, and
 //!   `{"id":ID,"op":"grant","block":UUID,"client":UUID,"until":MS}` and
 //!   `{"id":ID,"op":"revoke","block":UUID,"client":UUID}` let another client
@@ -120,12 +122,23 @@ enum Request {
 }
 
 impl Request {
-    /// Whether it needs [`Features::INPUT_GATE`].
-    fn gated(&self) -> bool {
+    /// Why a server offering `offered` can't take this request, if it
+    /// can't. An older server skips fields it doesn't know, so it would
+    /// launch an open or unheld block in silence: `own` refuses instead.
+    fn unsupported(&self, offered: Features) -> Option<&'static str> {
+        let lacks = |feature: Features, why| (!offered.contains(feature)).then_some(why);
         match self {
-            Self::Launch { launch, .. } => launch.input == InputMode::OwnerOnly,
-            Self::Grant { .. } | Self::Revoke { .. } => true,
-            Self::Close { .. } => false,
+            Self::Launch { launch, .. } => {
+                let gate = launch.input == InputMode::OwnerOnly;
+                gate.then(|| lacks(GATE, NO_GATE)).flatten().or_else(|| {
+                    launch
+                        .hold
+                        .then(|| lacks(Features::HOLD, NO_HOLD))
+                        .flatten()
+                })
+            }
+            Self::Grant { .. } | Self::Revoke { .. } => lacks(GATE, NO_GATE),
+            Self::Close { .. } => None,
         }
     }
 
@@ -134,6 +147,9 @@ impl Request {
         matches!(self, Self::Launch { launch, .. } if launch.env.is_some() || launch.fds > 0)
     }
 }
+
+const NO_GATE: &str = "the server cannot gate input";
+const NO_HOLD: &str = "the server cannot hold a block after its program exits";
 
 /// A request sent and not yet answered, with the caller's id.
 struct Pending {
@@ -157,10 +173,9 @@ struct Link {
     client: ClientId,
     token: Uuid,
     generation: u64,
-    /// The server offered [`Features::INPUT_GATE`].
-    gate: bool,
-    /// The server offered [`Features::AGENT_LAUNCH`].
-    agent: bool,
+    /// What the server granted this connection; a reconnect may reach an
+    /// upgraded or older one.
+    features: Features,
 }
 
 /// Runs `own` against the server at `socket`, reading requests from
@@ -250,10 +265,10 @@ impl Owner<'_> {
             Ok(passed) => passed,
             Err(why) => return self.print(&failed(id, &why)),
         };
-        if request.gated() && !self.link.gate {
-            return self.print(&failed(id, "the server cannot gate input"));
+        if let Some(why) = request.unsupported(self.link.features) {
+            return self.print(&failed(id, why));
         }
-        if request.agent() && !self.link.agent {
+        if request.agent() && !self.link.features.contains(AGENT) {
             return self.print(&failed(id, "the server cannot launch agents"));
         }
         let req = self.next_req;
@@ -437,9 +452,11 @@ fn open(
 ) -> Result<(Link, Option<Cursor>), Failure> {
     let stream = connect(socket, &Stop::default())?;
     let mut conn = Conn::new(stream.try_clone()?, Stop::default());
+    // HOLD is asked for too; without it, `own` refuses a held launch.
     let asked = NEEDED
         .union(GATE)
         .union(AGENT)
+        .union(Features::HOLD)
         .union(Features::LEASE_REQUESTS);
     conn.send(&Message::Hello {
         version: Some(rusty_mux_proto::VERSION.into()),
@@ -489,8 +506,7 @@ fn open(
         client,
         token,
         generation,
-        gate: features.contains(GATE),
-        agent: features.contains(AGENT),
+        features,
     };
     Ok((link, cursor))
 }
@@ -689,6 +705,10 @@ fn launch(value: &Value) -> Result<Launch, String> {
         Some("owner-only") => InputMode::OwnerOnly,
         Some(_) => return Err("`input` must be `open` or `owner-only`".into()),
     };
+    let hold = match value.get("hold") {
+        None => false,
+        Some(v) => v.as_bool().ok_or("`hold` must be true or false")?,
+    };
     Ok(Launch {
         program,
         cwd: text("cwd")?,
@@ -703,6 +723,7 @@ fn launch(value: &Value) -> Result<Launch, String> {
                 .and_then(|n| u8::try_from(n).ok())
                 .ok_or_else(|| format!("`fds` must be a count from 0 to {MAX_FDS}"))?,
         },
+        hold,
     })
 }
 

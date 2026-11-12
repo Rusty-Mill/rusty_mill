@@ -545,6 +545,7 @@ mod tests {
             name: String::new(),
             owner: None,
             input: rusty_mux_core::InputMode::Open,
+            exited: false,
         };
         vec![
             Entry::Session {

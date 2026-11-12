@@ -1290,8 +1290,8 @@ fn a_paged_scan_over_rusty_tick_never_truncates_large_records() {
     op(&board, "card_comment", json!({"id": big, "text": comment}));
     op(&board, "card_add", json!({"title": "after"}));
 
-    let all = op(&board, "board_list", json!({}))["cards"].clone();
-    let seen = scan_all(&board, &json!({}), 1);
+    let all = op(&board, "board_list", json!({"view": "full"}))["cards"].clone();
+    let seen = scan_all(&board, &json!({"view": "full"}), 1);
     assert_eq!(json!(seen), all);
     let card = seen.iter().find(|c| c["id"] == big).expect("big card");
     assert_eq!(card["body"].as_str().map(str::len), Some(body.len()));

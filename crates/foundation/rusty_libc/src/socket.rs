@@ -642,7 +642,9 @@ struct Control([u8; CONTROL]);
 /// What [`recv_with_fds`] received.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Received {
-    /// Bytes read into the buffer; `0` means the peer closed.
+    /// Bytes read into the buffer. On a stream socket, `0` into a nonempty
+    /// buffer means the peer closed; a datagram socket can also receive an
+    /// empty datagram, which is not an end.
     pub bytes: usize,
     /// The received descriptors, in the order sent; only the first
     /// `count` are valid. The caller owns them and must close them.
@@ -1036,6 +1038,22 @@ mod tests {
         for fd in got.fds().iter().chain(&[r, w]) {
             fd::close(*fd).expect("close");
         }
+    }
+
+    #[test]
+    fn descriptors_travel_on_a_datagram_socket_too() {
+        use std::os::fd::AsRawFd;
+        let (a, b) = std::os::unix::net::UnixDatagram::pair().expect("pair");
+        let file = std::fs::File::open("/proc/self/exe").expect("open");
+        assert_eq!(
+            send_with_fds(a.as_raw_fd(), b"D", &[file.as_raw_fd()], 0),
+            Ok(1)
+        );
+        let mut buf = [0u8; 4];
+        let got = recv_with_fds(b.as_raw_fd(), &mut buf, 0).expect("recv");
+        assert_eq!((got.bytes, got.count, got.truncated), (1, 1, false));
+        assert_eq!(inode(got.fds()[0]), inode(file.as_raw_fd()));
+        fd::close(got.fds()[0]).expect("close");
     }
 
     #[test]

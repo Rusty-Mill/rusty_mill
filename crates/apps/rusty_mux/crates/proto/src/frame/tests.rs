@@ -228,6 +228,7 @@ fn every_message_round_trips() {
                 name: "editor".into(),
                 owner: None,
                 input: InputMode::Open,
+                exited: false,
             },
         },
         Message::Entry {
@@ -241,6 +242,7 @@ fn every_message_round_trips() {
                 name: String::new(),
                 owner: None,
                 input: InputMode::Open,
+                exited: false,
             },
         },
         Message::Entry {

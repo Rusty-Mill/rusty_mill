@@ -443,6 +443,7 @@ impl Args<'_> {
             input: InputMode::Open,
             env: None,
             fds: 0,
+            hold: false,
         })
     }
 
