@@ -250,8 +250,10 @@ connection afterwards.
   and its descriptors in one `sendmsg`, or the descriptors on the first chunk if the frame is
   split. A client that attaches them to a later chunk gets "descriptors inside a frame".
 - `env` names and values are text, like `argv`.
-- `own` passes only descriptors it inherited, which it notes at startup before opening its
-  socket.
+- `own` passes only descriptors it inherited, which it takes ownership of at startup before
+  opening its socket. Each passes with at most one launch, and `own` closes its copies when that
+  launch is answered, refused or lost, as the lifetime above requires. A later launch naming one
+  is refused as already passed.
 - The one-shot `run --env-exact … --fds N` is not built yet.
 
 ## C78. Hold on exit

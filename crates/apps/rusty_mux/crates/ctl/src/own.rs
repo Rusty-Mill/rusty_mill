@@ -9,6 +9,9 @@
 //! - With C75: `"env":{NAME:VALUE,…}` on a launch gives its program exactly
 //!   that environment, and `"fds":N` passes it this process's descriptors
 //!   3 to 3+N−1 (at most 8, Linux only), which it gets at the same numbers.
+//!   Each passes once: `own` closes its own copies as soon as the launch
+//!   is answered, whether it succeeded or failed, so it never holds a slot
+//!   lock or keeps a pipe open past the launch.
 //! - With C77: `"input":"owner-only"` on a launch gates its input, and
 //!   `{"id":ID,"op":"grant","block":UUID,"client":UUID,"until":MS}` and
 //!   `{"id":ID,"op":"revoke","block":UUID,"client":UUID}` let another client
@@ -136,7 +139,17 @@ impl Request {
 struct Pending {
     id: Value,
     launch: bool,
+    /// The descriptors the launch passed, held only to be closed when it
+    /// is answered or lost, by drop.
+    _passed: Vec<Fd>,
 }
+
+/// One inherited descriptor `own` owns until a launch passes it. None
+/// exist off Linux.
+#[cfg(target_os = "linux")]
+type Fd = std::os::fd::OwnedFd;
+#[cfg(not(target_os = "linux"))]
+enum Fd {}
 
 /// The current connection: the write half, and what taking it over needs.
 struct Link {
@@ -228,18 +241,20 @@ impl Owner<'_> {
             Ok(parsed) => parsed,
             Err((id, why)) => return self.print(&failed(id, &why)),
         };
+        let fds = match &request {
+            Request::Launch { launch, .. } => launch.fds,
+            _ => 0,
+        };
+        // Taken first, so a launch refused here closes them too.
+        let passed = match self.inherited.take(fds) {
+            Ok(passed) => passed,
+            Err(why) => return self.print(&failed(id, &why)),
+        };
         if request.gated() && !self.link.gate {
             return self.print(&failed(id, "the server cannot gate input"));
         }
         if request.agent() && !self.link.agent {
             return self.print(&failed(id, "the server cannot launch agents"));
-        }
-        let fds = match &request {
-            Request::Launch { launch, .. } => launch.fds,
-            _ => 0,
-        };
-        if let Err(why) = self.inherited.check(fds) {
-            return self.print(&failed(id, &why));
         }
         let req = self.next_req;
         self.next_req += 1;
@@ -275,10 +290,17 @@ impl Owner<'_> {
                 (Message::RevokeLease { req, block, client }, false)
             }
         };
-        self.pending.insert(req, Pending { id, launch });
         // A failed write shows as the connection dropping, which the
         // reader reports; the request is then pending like any other.
-        let _ = send_passing(&mut self.link.stream, &message, fds);
+        let _ = send_passing(&mut self.link.stream, &message, &passed);
+        self.pending.insert(
+            req,
+            Pending {
+                id,
+                launch,
+                _passed: passed,
+            },
+        );
         Ok(())
     }
 
@@ -488,63 +510,96 @@ fn read_lines(input: impl BufRead + Send + 'static, tx: Sender<Inbound>) {
     });
 }
 
-/// Sends `message`, passing descriptors 3 to 3+`fds`−1 in the same
-/// `sendmsg` as its first byte, which is where the server looks (C75).
-fn send_passing(stream: &mut UnixStream, message: &Message, fds: u8) -> io::Result<()> {
+/// Sends `message`, passing `passed` in the same `sendmsg` as its first
+/// byte, which is where the server looks (C75).
+fn send_passing(stream: &mut UnixStream, message: &Message, passed: &[Fd]) -> io::Result<()> {
     let frame = encode(message).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let sent = pass(stream, &frame, fds)?;
+    let sent = pass(stream, &frame, passed)?;
     stream.write_all(&frame[sent..])
 }
 
-/// Sends what of `frame` one `sendmsg` takes, with descriptors 3 and on.
+/// Sends what of `frame` one `sendmsg` takes, with `passed`.
 #[cfg(target_os = "linux")]
-fn pass(stream: &UnixStream, frame: &[u8], fds: u8) -> io::Result<usize> {
+fn pass(stream: &UnixStream, frame: &[u8], passed: &[Fd]) -> io::Result<usize> {
     use std::os::fd::AsRawFd;
-    if fds == 0 {
+    if passed.is_empty() {
         return Ok(0);
     }
-    let passed: Vec<i32> = (FIRST_FD..FIRST_FD + i32::from(fds)).collect();
-    rusty_libc::socket::send_with_fds(stream.as_raw_fd(), frame, &passed, 0)
+    let raw: Vec<i32> = passed.iter().map(AsRawFd::as_raw_fd).collect();
+    rusty_libc::socket::send_with_fds(stream.as_raw_fd(), frame, &raw, 0)
         .map_err(|e| io::Error::from_raw_os_error(e.0))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn pass(_: &UnixStream, _: &[u8], _: u8) -> io::Result<usize> {
+fn pass(_: &UnixStream, _: &[u8], _: &[Fd]) -> io::Result<usize> {
     Ok(0)
 }
 
-/// Which of descriptors 3 to 3+[`MAX_FDS`]−1 this process inherited: only
-/// those may be passed, never one it opened itself, such as its socket.
-#[derive(Clone, Copy)]
-struct Inherited(u8);
+/// What `own` holds at descriptor 3+i.
+enum Slot {
+    /// Nothing was open there at startup, or `own` opened it itself, such
+    /// as its socket: never passed.
+    Absent,
+    /// Inherited, and owned until a launch passes it.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(dead_code, reason = "nothing is inherited off Linux")
+    )]
+    Held(Fd),
+    /// A launch already passed it, and `own` closed its copy.
+    Passed,
+}
+
+/// Descriptors 3 to 3+[`MAX_FDS`]−1 as this process inherited them. Each
+/// passes at most once, with one launch (C46 lifetime).
+struct Inherited([Slot; MAX_FDS as usize]);
 
 impl Inherited {
+    /// Must run before this process opens anything that could take one of
+    /// their numbers.
     #[cfg(target_os = "linux")]
     fn now() -> Self {
         use rusty_libc::fd::{F_GETFD, fcntl};
-        let open = (0..MAX_FDS as u8)
-            .filter(|i| fcntl(FIRST_FD + i32::from(*i), F_GETFD, 0).is_ok())
-            .fold(0, |mask, i| mask | 1 << i);
-        Self(open)
+        use std::os::fd::FromRawFd;
+        Self(std::array::from_fn(|i| {
+            let fd = FIRST_FD + i32::try_from(i).unwrap_or(i32::MAX);
+            if fcntl(fd, F_GETFD, 0).is_err() {
+                return Slot::Absent;
+            }
+            // SAFETY: `fd` is open, was inherited, and nothing in this
+            // process owns it yet; it is wrapped exactly once.
+            Slot::Held(unsafe { Fd::from_raw_fd(fd) })
+        }))
     }
 
     #[cfg(not(target_os = "linux"))]
     fn now() -> Self {
-        Self(0)
+        Self(std::array::from_fn(|_| Slot::Absent))
     }
 
-    /// Refuses passing descriptors 3 to 3+`fds`−1 unless each was inherited.
-    fn check(self, fds: u8) -> Result<(), String> {
+    /// Takes descriptors 3 to 3+`fds`−1 for one launch, or why not, in
+    /// which case it takes none.
+    fn take(&mut self, fds: u8) -> Result<Vec<Fd>, String> {
         if fds > 0 && cfg!(not(target_os = "linux")) {
             return Err("passing descriptors needs Linux".into());
         }
-        match (0..fds).find(|i| self.0 & 1 << i == 0) {
-            None => Ok(()),
-            Some(i) => Err(format!(
-                "descriptor {} was not inherited",
-                FIRST_FD + i32::from(i)
-            )),
+        let wanted = &mut self.0[..usize::from(fds)];
+        for (i, slot) in wanted.iter().enumerate() {
+            let fd = FIRST_FD + i32::try_from(i).unwrap_or(i32::MAX);
+            match slot {
+                Slot::Held(_) => {}
+                Slot::Absent => return Err(format!("descriptor {fd} was not inherited")),
+                Slot::Passed => return Err(format!("descriptor {fd} was already passed")),
+            }
         }
+        let taken = wanted
+            .iter_mut()
+            .filter_map(|slot| match std::mem::replace(slot, Slot::Passed) {
+                Slot::Held(fd) => Some(fd),
+                Slot::Absent | Slot::Passed => None,
+            })
+            .collect();
+        Ok(taken)
     }
 }
 

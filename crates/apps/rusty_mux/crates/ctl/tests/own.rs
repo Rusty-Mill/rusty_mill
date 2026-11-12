@@ -381,6 +381,26 @@ fn own_hears_a_viewer_ask_for_the_lease() {
     assert!(asked["principal"].as_str().is_some(), "{asked:?}");
 }
 
+/// Everything `reader` yields until its last writer closes, or `None` if
+/// a writer is still open after [`PATIENCE`].
+fn to_eof(reader: std::io::PipeReader) -> Option<String> {
+    use std::io::Read;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let mut reader = reader;
+        let _ = tx.send(reader.read_to_string(&mut text).map(|_| text));
+    });
+    rx.recv_timeout(PATIENCE)
+        .ok()
+        .map(|read| read.expect("read a pipe"))
+}
+
+fn refusal(answer: &Value) -> &str {
+    assert_eq!(answer.get("ok"), Some(&Value::Bool(false)), "{answer:?}");
+    answer["error"].as_str().expect("an error")
+}
+
 #[test]
 fn own_launches_an_agent_with_its_environment_and_descriptors() {
     let socket = start_server();
@@ -388,31 +408,52 @@ fn own_launches_an_agent_with_its_environment_and_descriptors() {
     let (first, first_w) = std::io::pipe().expect("pipe");
     let (second, second_w) = std::io::pipe().expect("pipe");
     let mut own = Own::inheriting(&socket, vec![first_w.into(), second_w.into()]);
-    let script = r#"echo \"one:$RUSTY_MUX_SOCKET:$AGENT\" >&3; echo two >&4; sleep 30"#;
+    // The agent closes its copies and lives on; `own` is still running.
+    let script =
+        r#"echo \"one:$RUSTY_MUX_SOCKET:$AGENT\" >&3; echo two >&4; exec 3>&- 4>&-; sleep 30"#;
     own.send(&format!(
         r#"{{"id":1,"op":"launch","window":"{window}","program":"/bin/sh","args":["-c","{script}"],"env":{{"AGENT":"yes"}},"fds":2}}"#
     ));
     let answer = own.answer(1);
     assert_eq!(answer.get("ok"), Some(&Value::Bool(true)), "{answer:?}");
-    let line = |reader| {
-        let mut line = String::new();
-        BufReader::new(reader)
-            .read_line(&mut line)
-            .expect("read a pipe");
-        line
-    };
-    assert_eq!(line(first), "one::yes\n", "exact environment, no socket");
-    assert_eq!(line(second), "two\n");
+    // EOF, so neither `own` nor the server kept a copy after the launch.
+    let first = to_eof(first).expect("own kept fd 3 open");
+    let second = to_eof(second).expect("own kept fd 4 open");
+    assert_eq!(first, "one::yes\n", "exact environment, no socket");
+    assert_eq!(second, "two\n");
 
     own.send(&format!(
-        r#"{{"id":2,"op":"launch","window":"{window}","fds":3}}"#
+        r#"{{"id":2,"op":"launch","window":"{window}","fds":1}}"#
     ));
-    let refused = own.answer(2);
-    assert_eq!(refused.get("ok"), Some(&Value::Bool(false)));
+    let again = own.answer(2);
     assert!(
-        refused["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("descriptor 5 was not inherited")),
-        "{refused:?}"
+        refusal(&again).contains("descriptor 3 was already passed"),
+        "{again:?}"
     );
+}
+
+#[test]
+fn own_closes_its_descriptors_when_a_launch_fails() {
+    let socket = start_server();
+    let window = window(&socket);
+    let (lock, lock_w) = std::io::pipe().expect("pipe");
+    let mut own = Own::inheriting(&socket, vec![lock_w.into()]);
+
+    // Refused here, taking nothing: fd 4 was never inherited.
+    own.send(&format!(
+        r#"{{"id":1,"op":"launch","window":"{window}","fds":2}}"#
+    ));
+    let missing = own.answer(1);
+    assert!(
+        refusal(&missing).contains("descriptor 4 was not inherited"),
+        "{missing:?}"
+    );
+
+    // Refused by the server, which closes its copy; `own` closes its own.
+    own.send(&format!(
+        r#"{{"id":2,"op":"launch","window":"{window}","env":{{"RUSTY_MUX_SOCKET":"x"}},"fds":1}}"#
+    ));
+    let failed = own.answer(2);
+    assert!(refusal(&failed).contains("env"), "{failed:?}");
+    assert_eq!(to_eof(lock).as_deref(), Some(""), "own kept fd 3 open");
 }
