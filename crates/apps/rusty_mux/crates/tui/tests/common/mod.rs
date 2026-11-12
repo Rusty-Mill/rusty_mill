@@ -31,6 +31,11 @@ mod host {
     pub fn cwd() -> std::path::PathBuf {
         "/".into()
     }
+
+    /// What the client wrote: the pty adds nothing.
+    pub fn as_sent(screen: Vec<u8>) -> Vec<u8> {
+        screen
+    }
 }
 
 #[cfg(windows)]
@@ -43,6 +48,36 @@ mod host {
     /// Where the client runs.
     pub fn cwd() -> std::path::PathBuf {
         std::env::temp_dir()
+    }
+
+    /// The modes our host keeps on with its own terminal: it sends them
+    /// first, and again right after the client turns either off.
+    const PREAMBLE: &[u8] = b"\x1b[?9001h\x1b[?1004h";
+    const KEPT: [(&[u8], &[u8]); 2] = [
+        (b"\x1b[?9001l\x1b[?9001h", b"\x1b[?9001l"),
+        (b"\x1b[?1004l\x1b[?1004h", b"\x1b[?1004l"),
+    ];
+
+    /// What the client wrote, without what our host adds to keep its own
+    /// modes. Anything else the client sent, a `?9001h` included, stays.
+    pub fn as_sent(screen: Vec<u8>) -> Vec<u8> {
+        let mut out = screen.strip_prefix(PREAMBLE).unwrap_or(&screen).to_vec();
+        for (kept, sent) in KEPT {
+            out = replace(&out, kept, sent);
+        }
+        out
+    }
+
+    fn replace(haystack: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(haystack.len());
+        let mut rest = haystack;
+        while let Some(at) = rest.windows(from.len()).position(|w| w == from) {
+            out.extend_from_slice(&rest[..at]);
+            out.extend_from_slice(to);
+            rest = &rest[at + from.len()..];
+        }
+        out.extend_from_slice(rest);
+        out
     }
 }
 
@@ -282,7 +317,7 @@ impl Tui {
         }
         // Let the reader drain what the client wrote before it exited.
         std::thread::sleep(Duration::from_millis(200));
-        self.screen.lock().expect("lock").clone()
+        host::as_sent(self.screen.lock().expect("lock").clone())
     }
 }
 
@@ -388,7 +423,15 @@ pub fn layout_server(script: Script) -> (PathBuf, Arc<Shared>) {
         let control = welcome(&listener, features);
         let mut sender = Conn::new(control.try_clone().expect("clone"));
         let control_shared = server.clone();
-        std::thread::spawn(move || serve_control(control, &control_shared));
+        // The event sender's clone keeps the socket open, so close the
+        // connection once the client leaves, as a real server does. On
+        // Windows the client's own shutdown doesn't end its read; only
+        // the server's close does.
+        let closer = control.try_clone().expect("clone");
+        std::thread::spawn(move || {
+            serve_control(control, &control_shared);
+            let _ = closer.shutdown(std::net::Shutdown::Both);
+        });
         std::thread::spawn(move || {
             while let Ok(event) = queued.recv() {
                 send_event(&mut sender, event);
