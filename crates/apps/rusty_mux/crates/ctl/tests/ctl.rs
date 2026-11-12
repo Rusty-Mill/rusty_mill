@@ -3216,3 +3216,133 @@ fn hosts_pull_merges_the_remote_hosts_per_name() {
     assert_eq!(std::fs::read(&local_file).expect("local"), before);
     let _gone = std::fs::remove_dir_all(dir);
 }
+
+/// Like [`remote_ssh`], but it changes `file` just before running the
+/// write script, as another writer between push's two calls would.
+#[cfg(unix)]
+fn racing_ssh(dir: &Path, remote: &Path, file: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("racing-ssh");
+    let body = format!(
+        "#!/bin/sh\nshift 2\ncase \"$1\" in *mktemp*) echo >> '{}';; esac\n\
+         exec env -u XDG_CONFIG_HOME -u RUSTY_MUX_CONFIG HOME='{}' sh -c \"$1\"\n",
+        file.display(),
+        remote.display()
+    );
+    std::fs::write(&path, body).expect("write fake ssh");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn hosts_push_merges_into_the_remote_hosts_per_name() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = ssh_scratch("push");
+    let local = dir.join("local");
+    let remote = dir.join("remote");
+    let remote_dir = remote.join(".config").join("rusty_mux");
+    let remote_file = remote_dir.join("hosts.json");
+    std::fs::create_dir_all(local.join("rusty_mux")).expect("dir");
+    let push = |ssh: &Path, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+            .env("XDG_CONFIG_HOME", &local)
+            .env_remove("RUSTY_MUX_CONFIG")
+            .env("RUSTY_MUX_SSH", ssh)
+            .args(["hosts", "push", "me@box"])
+            .args(args)
+            .output()
+            .expect("run rusty-mux-ctl")
+    };
+    let ssh = remote_ssh(&dir, &remote);
+    for args in [
+        [
+            "hosts",
+            "add",
+            "lab",
+            "--ssh",
+            "me@lab",
+            "--socket",
+            "/lab.sock",
+        ]
+        .as_slice(),
+        &[
+            "hosts", "add", "decl", "--ssh", "me@decl", "--socket", "/d.sock",
+        ],
+        &["hosts", "add", "here", "--socket", "/here.sock"],
+    ] {
+        hosts_ok(&local, args);
+    }
+
+    // No remote file or folder: push makes both, private.
+    let output = push(&ssh, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan = stdout(&output);
+    assert!(plan.contains("added    lab"), "{plan}");
+    assert!(plan.contains("skipped  here"), "socket only: {plan}");
+    let mode = std::fs::metadata(&remote_file)
+        .expect("written")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let written = std::fs::read_to_string(&remote_file).expect("remote");
+    assert!(
+        written.contains("me@lab") && !written.contains("/here.sock"),
+        "{written}"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&remote_dir)
+        .expect("dir")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".hosts.json."))
+        .collect();
+    assert!(leftovers.is_empty(), "temp files left");
+
+    // The remote config declares `decl`, so it is skipped; dry run writes nothing.
+    std::fs::write(
+        &remote_file,
+        r#"{"hosts": [{"name": "theirs", "addresses": [{"socket": "/t.sock"}]}]}"#,
+    )
+    .expect("remote hosts");
+    std::fs::write(
+        remote_dir.join("config.json"),
+        r#"{"hosts": [{"name": "decl", "addresses": [{"socket": "/d.sock"}]}]}"#,
+    )
+    .expect("remote config");
+    let before = std::fs::read(&remote_file).expect("remote");
+    let dry = push(&ssh, &["--dry-run"]);
+    assert_eq!(dry.status.code(), Some(0));
+    let plan = stdout(&dry);
+    assert!(
+        plan.contains("skipped  decl: declared in the config"),
+        "{plan}"
+    );
+    assert_eq!(std::fs::read(&remote_file).expect("remote"), before);
+    assert_eq!(push(&ssh, &[]).status.code(), Some(0));
+    let written = std::fs::read_to_string(&remote_file).expect("remote");
+    assert!(
+        written.contains("theirs") && written.contains("me@lab"),
+        "{written}"
+    );
+    assert!(!written.contains("me@decl"), "{written}");
+
+    // A change between the read and the write refuses and keeps that change.
+    std::fs::write(&remote_file, r#"{"hosts": []}"#).expect("remote hosts");
+    let racing = racing_ssh(&dir, &remote, &remote_file);
+    let refused = push(&racing, &[]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("changed after it was read"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&remote_file).expect("remote"),
+        "{\"hosts\": []}\n"
+    );
+    let _gone = std::fs::remove_dir_all(dir);
+}

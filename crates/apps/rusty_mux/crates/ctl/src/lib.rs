@@ -459,8 +459,8 @@ pub fn run_until(
                 Err((exit, reason)) => report(err, exit, &reason),
             };
         }
-        Command::Pull(sync) => {
-            return match sync::pull(&sync, env, invocation.json, out) {
+        Command::Sync(sync) => {
+            return match sync::run(&sync, env, invocation.json, out) {
                 Ok(()) => Exit::Ok,
                 Err((exit, reason)) => report(err, exit, &reason),
             };
@@ -767,7 +767,7 @@ fn execute(
         | Command::Do { .. }
         | Command::Config(_)
         | Command::Hosts(_)
-        | Command::Pull(_)
+        | Command::Sync(_)
         | Command::Ssh(_)
         | Command::Terminfo(_)
         | Command::Agent(_)
