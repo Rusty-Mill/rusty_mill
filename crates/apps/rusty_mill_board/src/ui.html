@@ -1060,7 +1060,7 @@ $("dlg").onclose=()=>{dlg=null};
 const byPriority=list=>list.sort((a,b)=>b.priority-a.priority||a.created_ms-b.created_ms||(a.id<b.id?-1:a.id>b.id?1:0));
 async function snapshot(){
   const at=(await api("board_events",{tail:true})).cursor;
-  const list=(await api("board_list",{archived:"include"})).cards;
+  const list=(await api("board_list",{archived:"include",view:"full"})).cards;
   cursor=at;cards=byPriority(list);loaded=true;
 }
 /* Bring `cards` up to the newest event: read again only the cards the new events name, one
@@ -1075,7 +1075,7 @@ async function catchUp(){
   const r=await api("board_events",{after:cursor,limit:1000});
   const ids=[...new Set(r.events.map(e=>e.card))];
   if(r.resync||ids.length>FEW){
-    const list=(await api("board_list",{archived:"include"})).cards;   // if this throws, the cursor stays put and the events are retried
+    const list=(await api("board_list",{archived:"include",view:"full"})).cards;   // if this throws, the cursor stays put and the events are retried
     cursor=r.cursor;cards=byPriority(list);return true;
   }
   if(!ids.length){cursor=r.cursor;return false}
