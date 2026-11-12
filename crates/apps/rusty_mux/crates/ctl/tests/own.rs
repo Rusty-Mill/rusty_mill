@@ -349,3 +349,69 @@ fn own_hears_a_viewer_ask_for_the_lease() {
     assert_eq!(asked["block"].as_str(), Some(block.as_str()));
     assert!(asked["principal"].as_str().is_some(), "{asked:?}");
 }
+
+/// A server from before C78: it grants the C46 set and C77's gate, but
+/// not HOLD, answers each `CreateBlock` and passes it to `seen`.
+fn older_server(seen: std::sync::mpsc::Sender<Message>) -> PathBuf {
+    let path = socket_path("older");
+    let listener = StdListener::bind(&path).expect("bind");
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut buf = Vec::new();
+        assert!(matches!(next(&mut stream, &mut buf), Message::Hello { .. }));
+        let features = Features::LAUNCH
+            .union(Features::OWNERSHIP)
+            .union(Features::TAKEOVER)
+            .union(Features::EVENT_SEQ)
+            .union(Features::PROGRAM_EVENTS)
+            .union(Features::INPUT_GATE);
+        let welcome = Message::Welcome {
+            features,
+            client: rusty_mux_core::ClientId::from_uuid(rusty_uuid::Uuid::new_v4()),
+            cursor: None,
+            token: Some(rusty_uuid::Uuid::new_v4()),
+            version: None,
+        };
+        send(&mut stream, &welcome);
+        loop {
+            let message = next(&mut stream, &mut buf);
+            if let Message::CreateBlock { req, .. } = &message {
+                let created = Some(rusty_uuid::Uuid::new_v4());
+                send(&mut stream, &Message::Done { req: *req, created });
+            }
+            if seen.send(message).is_err() {
+                return;
+            }
+        }
+    });
+    path
+}
+
+#[test]
+fn own_refuses_a_held_launch_a_server_cannot_hold() {
+    let (tx, seen) = std::sync::mpsc::channel();
+    let socket = older_server(tx);
+    let mut own = Own::start(&socket);
+    let window = "00000000-0000-0000-0000-00000000000a";
+
+    own.send(&format!(
+        r#"{{"id":1,"op":"launch","window":"{window}","hold":true}}"#
+    ));
+    let refused = own.answer(1);
+    assert_eq!(refused.get("ok"), Some(&Value::Bool(false)), "{refused:?}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("cannot hold")),
+        "{refused:?}"
+    );
+
+    own.launch(2, window);
+    let first = seen.recv_timeout(PATIENCE).expect("a request");
+    assert!(
+        matches!(first, Message::CreateBlock { ref launch, .. } if !launch.hold),
+        "the held launch reached the server: {first:?}"
+    );
+}

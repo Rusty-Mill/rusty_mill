@@ -208,6 +208,12 @@ impl Features {
     /// [`Message::History`] batches, newest first, between live output.
     pub const BACKGROUND_HISTORY: Self = Self(1 << 41);
 
+    /// Hold on exit (C78): [`Launch::hold`] keeps a block once its program
+    /// exits, read-only with its screen and scrollback, until it is closed.
+    /// A block entry says when its program has exited regardless, since
+    /// older decoders skip the field.
+    pub const HOLD: Self = Self(1 << 43);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -295,6 +301,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::LEASE_REQUESTS, "lease requests"),
     (Features::SHUTDOWN, "clean stop on request"),
     (Features::BACKGROUND_HISTORY, "background history"),
+    (Features::HOLD, "hold on exit"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -363,6 +370,9 @@ pub struct Launch {
     /// Who may type into an owned block (C77); [`InputMode::OwnerOnly`]
     /// needs `own`. Negotiated with [`Features::INPUT_GATE`].
     pub input: InputMode,
+    /// Keep the block, read-only, once its program exits (C78).
+    /// Negotiated with [`Features::HOLD`].
+    pub hold: bool,
 }
 
 /// Who controls an owned block, in its [`Entry::Block`] (C46).
@@ -426,6 +436,10 @@ pub enum Entry {
         /// Who may take its lease; [`InputMode::Open`] from a server
         /// without [`Features::INPUT_GATE`].
         input: InputMode,
+        /// Its program has exited, or was not run again after a restart:
+        /// the block only shows its last screen (C78). `false` from an
+        /// older server.
+        exited: bool,
     },
     /// Sent only with [`Features::LABELS`].
     Client {
@@ -894,8 +908,13 @@ const UNTIL: u32 = 56;
 /// A peer's package version, in Hello and Welcome (C36): text, or absent
 /// from a peer older than the field.
 const VERSION: u32 = 57;
-// IDs 1..=VERSION are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = VERSION as usize;
+/// A launch's mark that the block stays once its program exits: 1, or
+/// absent (C78). 58 and 59 are C75's.
+const HOLD: u32 = 60;
+/// A block entry's mark that its program has exited: 1, or absent (C78).
+const EXITED: u32 = 61;
+// IDs 1..=EXITED are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = EXITED as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -1551,6 +1570,9 @@ fn put_launch(out: &mut Out, launch: &Launch) {
     if launch.own {
         out.varint(OWN, 1);
     }
+    if launch.hold {
+        out.varint(HOLD, 1);
+    }
     put_input(out, launch.input);
 }
 
@@ -1585,6 +1607,7 @@ fn get_launch(f: &In<'_>) -> Result<Launch, Error> {
         cwd: f.opt(CWD, In::string)?,
         own: f.opt(OWN, In::varint)? == Some(1),
         input: get_input(f)?,
+        hold: f.opt(HOLD, In::varint)? == Some(1),
     })
 }
 
@@ -2222,6 +2245,7 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             name,
             owner,
             input,
+            exited,
         } => {
             let o = out
                 .varint(KIND, entry::BLOCK)
@@ -2242,6 +2266,9 @@ fn put_entry(out: &mut Out, entry: &Entry) {
                 }
             }
             put_input(o, *input);
+            if *exited {
+                o.varint(EXITED, 1);
+            }
             put_size(o, *size);
         }
         Entry::Client {
@@ -2295,6 +2322,7 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             name: f.opt(NAME, In::string)?.unwrap_or_default(),
             owner: get_ownership(f)?,
             input: get_input(f)?,
+            exited: f.opt(EXITED, In::varint)? == Some(1),
         },
         entry::CLIENT => Entry::Client {
             client: client(f, CLIENT)?,

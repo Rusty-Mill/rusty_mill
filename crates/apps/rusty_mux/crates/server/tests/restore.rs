@@ -452,3 +452,63 @@ fn a_failed_spool_still_goes_with_its_block() {
     server.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// C78: a held block whose program exited is saved, and comes back
+/// read-only and exited, keeping its screen.
+#[cfg(unix)]
+#[test]
+fn a_held_exited_block_survives_a_restart() {
+    use rusty_mux_proto::{Launch, Program};
+    let dir = state_dir("held");
+    let server = Server::start(&dir);
+    let features = Features::CHECKPOINT_V6
+        .union(Features::LAUNCH)
+        .union(Features::INSPECT)
+        .union(Features::HOLD);
+    let mut client = Client::connect_with(&server.socket, features, None);
+    let window = common::window_for(&mut client);
+    let launch = Launch {
+        program: Some(Program {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "echo HELD-KEPT".into()],
+        }),
+        hold: true,
+        ..Launch::default()
+    };
+    let block = rusty_mux_core::BlockId::from_uuid(
+        client
+            .request(|req| Message::CreateBlock {
+                req,
+                window,
+                size: rusty_mux_core::Size::new(80, 24).unwrap(),
+                launch,
+            })
+            .expect("id"),
+    );
+    let exited = |client: &mut Client| {
+        listing(client).into_iter().find_map(|e| match e {
+            Entry::Block {
+                block: b, exited, ..
+            } if b == block => Some(exited),
+            _ => None,
+        })
+    };
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while exited(&mut client) != Some(true) {
+        assert!(std::time::Instant::now() < deadline, "never exited");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(client);
+    server.stop();
+
+    let server = Server::start(&dir);
+    let mut client = inspecting(&server.socket);
+    assert_eq!(exited(&mut client), Some(true), "back, still exited");
+    client.request(|req| Message::Attach { req, block });
+    client.wait_ready(block);
+    let text = client.text(block);
+    assert_eq!(text.matches("HELD-KEPT").count(), 1, "{text}");
+    drop(client);
+    server.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
