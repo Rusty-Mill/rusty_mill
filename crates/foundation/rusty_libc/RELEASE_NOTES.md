@@ -11,13 +11,6 @@ Stay up to date with the latest changes to rusty_libc.
 
 ---
 
-## Descriptor passing over Unix sockets
-
-**Added**
-- `socket::send_with_fds`/`recv_with_fds` + `Received`, `MAX_FDS`, `MSG_CTRUNC`, `MSG_CMSG_CLOEXEC`: `sendmsg`/`recvmsg` with one `SCM_RIGHTS` control message of up to 8 descriptors. Received descriptors are always close-on-exec, and a cut-short control message is reported, with the kernel having closed what didn't fit. First consumer: rusty_mux's agent launch (C75), which passes a slot lock and an ACP socket to an agent's block. Unix-only by design (owner decision B, 2026-11-05).
-
----
-
 ## `statfs`, for a free-space check
 
 **Added**
