@@ -103,7 +103,8 @@ struct Cli {
     #[arg(long, value_name = "REPO=OWNER/NAME,...", conflicts_with_all = ["export_projects", "retag_columns", "undo_retag", "undo_backfill"])]
     backfill_evidence: Option<String>,
     /// With --backfill-evidence: a new file the plan is saved to before any card is written
-    /// (stop the board first); it is what --undo-backfill reads.
+    /// (best with the board stopped; a card changed meanwhile is skipped and reported, and
+    /// running again needs a new file); it is what --undo-backfill reads.
     #[arg(long, value_name = "FILE", requires = "backfill_evidence")]
     backfill_record: Option<PathBuf>,
     /// Clear the evidence a backfill wrote, from its --backfill-record FILE, and exit. A card
@@ -360,13 +361,7 @@ fn run_backfill(cli: &Cli, store: &dyn Store) -> Result<(), String> {
         return Ok(());
     };
     let fail = |e: String| format!("--backfill-record {}: {e}", record.display());
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(record)
-        .map_err(|e| fail(format!("not saved, nothing written: {e}")))?;
-    std::io::Write::write_all(&mut file, json(&plan)?.as_bytes())
-        .and_then(|()| file.sync_all())
+    backfill::save_record(record, &plan)
         .map_err(|e| fail(format!("not saved, nothing written: {e}")))?;
     let out = backfill::apply(store, &plan, system_ms())
         .map_err(|e| fail(format!("{e}; undo what was written with --undo-backfill")))?;

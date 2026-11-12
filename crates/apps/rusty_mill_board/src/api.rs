@@ -1913,7 +1913,16 @@ mod tests {
                     json!({"title": "sneak", "done": done, "evidence": [pr]}),
                 ),
             );
-            assert!(sneaked.is_err(), "done {done}: {sneaked:?}");
+            // The Done gate (`Close`) answers first for a done card.
+            let gated = if done {
+                matches!(
+                    sneaked,
+                    Err(CallError::Board(BoardError::Forbidden(Capability::Close)))
+                )
+            } else {
+                matches!(sneaked, Err(CallError::Board(BoardError::ForbiddenAny(_))))
+            };
+            assert!(gated, "done {done}: {sneaked:?}");
         }
         let bad = call_as(
             &board,

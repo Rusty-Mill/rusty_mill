@@ -119,8 +119,10 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   prints which Done cards (not dropped, no evidence yet) would get the pull requests their body and comments
   name (`https://github.com/O/N/pull/N` anywhere; `PR #N` or `pull request #N` in a mapped repository's
   projects; never a bare `#N`), at most 8 each; add `--backfill-record FILE` to write, and
-  `--undo-backfill FILE` clears what it wrote. Observed external refs (ADR-0006) never count. Cards that were Done before evidence existed read as
-  prototypes until someone adds a link.
+  `--undo-backfill FILE` clears what it wrote. Observed external refs (ADR-0006) never count. Done cards that name no pull request read as prototypes
+  until someone adds a link. The plan lists, per link, the text it was named in: read it, because nothing checks
+  that a pull request merged (a card may say "superseded by PR #5"). A card changed while the backfill runs is
+  skipped and reported.
 - **Close reasons (dropped work).** `card_close` closes an unstarted card (Backlog or a queue) without shipping
   it, for a required `reason`: `wont_do`, `duplicate` or `superseded`; an optional `note` becomes the closer's
   comment. It needs `triage`, and is refused for started, blocked or Done cards. The card goes to Done with no

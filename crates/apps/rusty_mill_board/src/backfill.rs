@@ -34,6 +34,16 @@ pub struct Fill {
     pub rev: u64,
     /// The pull request links, in the order the card names them.
     pub links: Vec<String>,
+    /// Where the card names each link (the text around it), to review the plan by: one per
+    /// link. Nothing checks that a pull request merged, so a person reads these.
+    #[serde(default)]
+    pub context: Vec<String>,
+}
+
+/// A pull request a card names, and the text it was named in.
+struct Mention {
+    link: String,
+    context: String,
 }
 
 /// What happened to one planned card.
@@ -68,11 +78,6 @@ pub fn parse_repos(spec: &str) -> Result<BTreeMap<String, String>, String> {
         let (owner, name) = github
             .split_once('/')
             .ok_or_else(|| format!("{pair:?}: expected REPO=OWNER/NAME"))?;
-        let plain = |s: &str| {
-            !s.is_empty()
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-        };
         if !plain(repo) || !plain(owner) || !plain(name) {
             return Err(format!("{pair:?}: expected REPO=OWNER/NAME"));
         }
@@ -83,6 +88,13 @@ pub fn parse_repos(spec: &str) -> Result<BTreeMap<String, String>, String> {
     Ok(out)
 }
 
+/// A repository, owner or name: letters, digits, `-`, `_` and `.`.
+fn plain(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+}
+
 /// The cards to fill: Done, not dropped, without evidence, naming at least one pull request.
 /// `github_of` gives the `OWNER/NAME` a card's bare `PR #N` mentions refer to, if any. At
 /// most [`MAX_EVIDENCE`] links per card, the last named (the ones that merged, as a rule).
@@ -91,39 +103,53 @@ pub fn plan(cards: &[Card], github_of: &dyn Fn(&Card) -> Option<String>) -> Vec<
         .iter()
         .filter(|c| c.done_ms.is_some() && c.closed.is_none() && c.evidence.is_empty())
         .filter_map(|c| {
-            let links = links_in(c, github_of(c).as_deref());
-            let links = valid(c, links);
-            (!links.is_empty()).then_some(Fill {
+            let named = valid(c, links_in(c, github_of(c).as_deref()));
+            (!named.is_empty()).then(|| Fill {
                 id: c.id,
                 number: c.number,
                 rev: c.rev,
-                links,
+                links: named.iter().map(|m| m.link.clone()).collect(),
+                context: named.into_iter().map(|m| m.context).collect(),
             })
         })
         .collect()
 }
 
 /// Every pull request `card` names, in order, without repeats.
-fn links_in(card: &Card, github: Option<&str>) -> Vec<String> {
+fn links_in(card: &Card, github: Option<&str>) -> Vec<Mention> {
     let texts =
         std::iter::once(card.body.as_str()).chain(card.comments.iter().map(|c| c.text.as_str()));
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<Mention> = Vec::new();
     for text in texts {
-        for link in pull_urls(text).into_iter().chain(pr_mentions(text, github)) {
-            if !out.contains(&link) {
-                out.push(link);
+        for (at, link) in pull_urls(text).into_iter().chain(pr_mentions(text, github)) {
+            if !out.iter().any(|m| m.link == link) {
+                out.push(Mention {
+                    link,
+                    context: snippet(text, at),
+                });
             }
         }
     }
     out
 }
 
-/// The last [`MAX_EVIDENCE`] links the card itself accepts as evidence.
-fn valid(card: &Card, links: Vec<String>) -> Vec<String> {
-    let ok: Vec<String> = links
+/// About 140 characters of `text` around byte `at` (a char boundary), on one line.
+fn snippet(text: &str, at: usize) -> String {
+    let before: Vec<char> = text[..at].chars().rev().take(60).collect();
+    let around: String = before
         .into_iter()
-        .filter(|l| {
-            card.add_evidence(std::slice::from_ref(l), card.updated_ms)
+        .rev()
+        .chain(text[at..].chars().take(80))
+        .collect();
+    around.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The last [`MAX_EVIDENCE`] links the card itself accepts as evidence.
+fn valid(card: &Card, links: Vec<Mention>) -> Vec<Mention> {
+    let ok: Vec<Mention> = links
+        .into_iter()
+        .filter(|m| {
+            card.add_evidence(std::slice::from_ref(&m.link), card.updated_ms)
                 .is_ok()
         })
         .collect();
@@ -132,21 +158,21 @@ fn valid(card: &Card, links: Vec<String>) -> Vec<String> {
 }
 
 /// `https://github.com/OWNER/NAME/pull/N` links in `text`, cut to that form (no `/files`,
-/// `#issuecomment-...` and so on).
-fn pull_urls(text: &str) -> Vec<String> {
+/// `#issuecomment-...` and so on), with where each starts.
+fn pull_urls(text: &str) -> Vec<(usize, String)> {
     text.match_indices(GITHUB)
         .filter_map(|(at, _)| {
             let mut parts = text[at + GITHUB.len()..].splitn(4, '/');
             let (owner, name, pull) = (parts.next()?, parts.next()?, parts.next()?);
             let number = digits(parts.next()?)?;
-            (pull == "pull" && !owner.is_empty() && !name.is_empty())
-                .then(|| format!("{GITHUB}{owner}/{name}/pull/{number}"))
+            (pull == "pull" && plain(owner) && plain(name))
+                .then(|| (at, format!("{GITHUB}{owner}/{name}/pull/{number}")))
         })
         .collect()
 }
 
 /// `PR #N`, `PR#N` and `pull request #N` in `text`, as links into `github` (`OWNER/NAME`).
-fn pr_mentions(text: &str, github: Option<&str>) -> Vec<String> {
+fn pr_mentions(text: &str, github: Option<&str>) -> Vec<(usize, String)> {
     let Some(github) = github else {
         return Vec::new();
     };
@@ -161,20 +187,40 @@ fn pr_mentions(text: &str, github: Option<&str>) -> Vec<String> {
             })
         })
         .collect::<BTreeMap<usize, String>>()
-        .into_values()
+        .into_iter()
         .collect()
 }
 
-/// The number `s` starts with, if any.
+/// The pull request number `s` starts with, if any (not 0).
 fn digits(s: &str) -> Option<u64> {
     let end = s.bytes().take_while(u8::is_ascii_digit).count();
-    s[..end].parse().ok()
+    s[..end].parse().ok().filter(|n| *n > 0)
+}
+
+/// Save `plan` as the record file at `path`, which must not exist yet, and sync it: what
+/// [`undo`] reads, written before [`apply`] changes any card.
+///
+/// # Errors
+/// If the file exists or cannot be written.
+pub fn save_record(path: &std::path::Path, plan: &[Fill]) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(plan).map_err(|e| e.to_string())?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    std::io::Write::write_all(&mut file, json.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|e| e.to_string())
 }
 
 /// Give each planned card its links, if it is still at the planned revision with no evidence.
 ///
+/// A card someone changed between the check and the write is skipped and reported, as is one
+/// that already has evidence, so running a plan again is safe.
+///
 /// # Errors
-/// The first storage error. Cards before it are written; running the plan again skips them.
+/// The first storage error other than a conflict. Cards before it are written.
 pub fn apply(store: &dyn Store, plan: &[Fill], now_ms: i64) -> Result<Vec<Outcome>, BoardError> {
     let mut out = Vec::new();
     for f in plan {
@@ -187,8 +233,11 @@ pub fn apply(store: &dyn Store, plan: &[Fill], now_ms: i64) -> Result<Vec<Outcom
             continue;
         }
         let next = card.add_evidence(&f.links, now_ms)?;
-        store.replace(&next, Event::of(&next, EventKind::Edited, ACTOR))?;
-        out.push(Outcome::Done { id: f.id });
+        match store.replace(&next, Event::of(&next, EventKind::Edited, ACTOR)) {
+            Ok(_) => out.push(Outcome::Done { id: f.id }),
+            Err(BoardError::Conflict) => out.push(skipped(f.id, "changed while writing")),
+            Err(e) => return Err(e),
+        }
     }
     Ok(out)
 }
@@ -261,7 +310,9 @@ mod tests {
                 "card #99 and APR #5",
             ],
         );
-        let links = links_in(&c, Some(RM));
+        let only =
+            |github| -> Vec<String> { links_in(&c, github).into_iter().map(|m| m.link).collect() };
+        let links = only(Some(RM));
         assert_eq!(
             links,
             [
@@ -272,7 +323,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            links_in(&c, None),
+            only(None),
             ["https://github.com/o/r/pull/7"],
             "unmapped: URLs only"
         );
@@ -350,6 +401,88 @@ mod tests {
             store.get(b.id).expect("get").expect("card").evidence.len(),
             2
         );
+    }
+
+    #[test]
+    fn malformed_pull_urls_and_pr_zero_are_not_evidence() {
+        let c = done(
+            "https://github.com/o/r/pull/ https://github.com/o/r/pull/x https://github.com/o /r/pull/1 \
+             https://github.com/o/r/pull/0 https://github.com/o%20x/r/pull/2 PR #0 \
+             https://github.com/o/r/issues/3 https://github.com/o/r/pull/4#issuecomment-9",
+            &[],
+        );
+        let links: Vec<String> = links_in(&c, Some(RM)).into_iter().map(|m| m.link).collect();
+        assert_eq!(links, ["https://github.com/o/r/pull/4"]);
+    }
+
+    #[test]
+    fn the_plan_shows_where_each_pull_request_is_named() {
+        let c = done(
+            "Superseded by PR #5, which was closed unmerged.",
+            &["see PR #6 for the fix"],
+        );
+        let p = plan(&[c], &mapped);
+        assert_eq!(p[0].links.len(), 2);
+        assert_eq!(p[0].context.len(), 2);
+        assert!(
+            p[0].context[0].contains("Superseded by PR #5"),
+            "{:?}",
+            p[0].context
+        );
+        assert!(p[0].context[1].contains("see PR #6 for the fix"));
+    }
+
+    #[test]
+    fn apply_and_undo_skip_missing_and_changed_cards() {
+        let store = MemStore::default();
+        let c = done("PR #1", &[]);
+        store
+            .insert(&c, Event::of(&c, EventKind::Created, "t"))
+            .expect("insert");
+        let p = plan(std::slice::from_ref(&c), &mapped);
+        let gone = Fill {
+            id: Uuid::new_v4(),
+            ..p[0].clone()
+        };
+        let stale = Fill {
+            rev: 99,
+            ..p[0].clone()
+        };
+        let out = apply(&store, &[gone.clone(), stale], 10).expect("apply");
+        assert!(
+            out.iter().all(|o| matches!(o, Outcome::Skipped { .. })),
+            "{out:?}"
+        );
+        assert!(
+            store
+                .get(c.id)
+                .expect("get")
+                .expect("card")
+                .evidence
+                .is_empty()
+        );
+        let out = undo(&store, &[gone, p[0].clone()], 11).expect("undo");
+        assert!(
+            out.iter().all(|o| matches!(o, Outcome::Skipped { .. })),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_record_is_never_overwritten() {
+        let dir = std::env::temp_dir().join(format!("mb-backfill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("record.json");
+        let p = plan(&[done("PR #1", &[])], &mapped);
+        save_record(&path, &p).expect("first");
+        let saved: Vec<Fill> =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(saved, p);
+        assert!(
+            save_record(&path, &p).is_err(),
+            "an existing record is refused"
+        );
+        std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
     #[test]
