@@ -6,6 +6,8 @@
 //! - `{"id":ID,"op":"launch","window":UUID,"cols":N,"rows":N,"program":P,"args":[..],"cwd":DIR}`,
 //!   where only `window` is required; the answer carries the new `block`.
 //! - `{"id":ID,"op":"close","block":UUID}`.
+//! - With C78: `"hold":true` on a launch keeps the block, read-only, once
+//!   its program exits, until it is closed.
 //! - With C77: `"input":"owner-only"` on a launch gates its input, and
 //!   `{"id":ID,"op":"grant","block":UUID,"client":UUID,"until":MS}` and
 //!   `{"id":ID,"op":"revoke","block":UUID,"client":UUID}` let another client
@@ -381,7 +383,11 @@ fn open(
 ) -> Result<(Link, Option<Cursor>), Failure> {
     let stream = connect(socket, &Stop::default())?;
     let mut conn = Conn::new(stream.try_clone()?, Stop::default());
-    let asked = NEEDED.union(GATE).union(Features::LEASE_REQUESTS);
+    // HOLD is asked for too; a server without it refuses a held launch.
+    let asked = NEEDED
+        .union(GATE)
+        .union(Features::HOLD)
+        .union(Features::LEASE_REQUESTS);
     conn.send(&Message::Hello {
         version: Some(rusty_mux_proto::VERSION.into()),
         features: asked,
@@ -541,11 +547,16 @@ fn launch(value: &Value) -> Result<Launch, String> {
         Some("owner-only") => InputMode::OwnerOnly,
         Some(_) => return Err("`input` must be `open` or `owner-only`".into()),
     };
+    let hold = match value.get("hold") {
+        None => false,
+        Some(v) => v.as_bool().ok_or("`hold` must be true or false")?,
+    };
     Ok(Launch {
         program,
         cwd: text("cwd")?,
         own: true,
         input,
+        hold,
     })
 }
 

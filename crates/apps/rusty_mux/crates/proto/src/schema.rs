@@ -441,6 +441,7 @@ impl Args<'_> {
             // A one-shot call keeps no connection to own the block with.
             own: false,
             input: InputMode::Open,
+            hold: false,
         })
     }
 

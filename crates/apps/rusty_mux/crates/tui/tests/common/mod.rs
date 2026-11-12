@@ -490,6 +490,7 @@ pub fn serve_control(stream: Stream, shared: &Shared) {
                         name: String::new(),
                         owner: None,
                         input: rusty_mux_core::InputMode::Open,
+                        exited: false,
                     });
                 }
                 for entry in entries {

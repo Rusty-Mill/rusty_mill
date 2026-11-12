@@ -43,6 +43,7 @@ fn listing() -> Vec<Entry> {
         name: name.into(),
         owner: None,
         input: rusty_mux_core::InputMode::Open,
+        exited: false,
     };
     let client = |c: &str, name: &str| Entry::Client {
         client: ClientId::from_uuid(id(c)),

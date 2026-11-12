@@ -260,6 +260,10 @@ read-only like any command block (D72). C70's spool, once merged, keeps its scro
 - `CloseBlock` removes the block.
 - A held block survives a server restart read-only.
 
+**As built (C78).** `Features::HOLD` is bit 43 and `Launch.hold` field 60. A block entry gains
+`exited` (field 61), true for any block without a program (held or restored), which `list`
+shows as `state=exited`. Release (C76) will reuse the same path once it lands.
+
 ## C76. Signal and release
 
 **Today.** Closing a block runs `rt.release` and then `reap()`, which sends SIGHUP to the
