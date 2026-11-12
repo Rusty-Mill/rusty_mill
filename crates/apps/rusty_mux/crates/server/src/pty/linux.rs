@@ -1,9 +1,8 @@
 //! Linux: a block's PTY, driven by the reactor through a non-blocking
 //! master fd, and the program running on it.
 
-use std::ffi::OsString;
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::time::Instant;
 
 use platform::process::{Child, Signal};
@@ -13,8 +12,9 @@ use rusty_mux_core::{ExitStatus, Size};
 use rusty_mux_proto::{BlockSignal, Echo};
 use rusty_tokio::io::AsyncFd;
 
-use super::{GRACE, POLL, command, exit_status, to_io, win_size};
+use super::{Env, GRACE, POLL, command, exit_status, to_io, win_size};
 use crate::Config;
+use crate::passed::Fd;
 
 /// The master side of a block's PTY. Shared by the reader and by writers;
 /// the fd closes when the last handle drops.
@@ -28,19 +28,24 @@ pub(crate) struct Process {
     child: Option<LinuxChild>,
 }
 
-/// Starts `config`'s program on a new PTY of `size`, with this process's
-/// environment plus `env`. `owned` matters only on Windows: the program
-/// leads its own session and process group here either way.
+/// Starts `config`'s program on a new PTY of `size`, with the environment
+/// `env` gives and `passed` at descriptors 3, 4, and on (C75), which close
+/// here once it has started or failed to. `owned` matters only on Windows:
+/// the program leads its own session and process group here either way.
 pub(crate) fn spawn(
     config: &Config,
     size: Size,
-    env: &[(&str, OsString)],
+    env: Env<'_>,
     _owned: bool,
+    passed: Vec<Fd>,
 ) -> io::Result<(Pty, Process)> {
     let cmd = command(config, env);
+    let borrowed: Vec<BorrowedFd<'_>> = passed.iter().map(AsFd::as_fd).collect();
     let (master, child) = LinuxPty
-        .spawn_concrete(&cmd, win_size(size))
+        .spawn_passing(&cmd, win_size(size), &borrowed)
         .map_err(to_io)?;
+    drop(borrowed);
+    drop(passed);
     // Owned before anything else can fail, so an error below still reaps it.
     let process = Process { child: Some(child) };
     master.set_nonblocking(true).map_err(to_io)?;

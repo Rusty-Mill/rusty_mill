@@ -6,6 +6,12 @@
 //! - `{"id":ID,"op":"launch","window":UUID,"cols":N,"rows":N,"program":P,"args":[..],"cwd":DIR}`,
 //!   where only `window` is required; the answer carries the new `block`.
 //! - `{"id":ID,"op":"close","block":UUID}`.
+//! - With C75: `"env":{NAME:VALUE,…}` on a launch gives its program exactly
+//!   that environment, and `"fds":N` passes it this process's descriptors
+//!   3 to 3+N−1 (at most 8, Linux only), which it gets at the same numbers.
+//!   Each passes once: `own` closes its own copies as soon as the launch
+//!   is answered, whether it succeeded or failed, so it never holds a slot
+//!   lock or keeps a pipe open past the launch.
 //! - With C78: `"hold":true` on a launch keeps the block, read-only, once
 //!   its program exits, until it is closed.
 //! - With C76 (Linux): `{"id":ID,"op":"signal","block":UUID,"signal":S}`
@@ -65,6 +71,16 @@ const NEEDED: Features = Features::LAUNCH
 /// Asked for too, but only owner-only launches, grants and revokes need it:
 /// an older server refuses those here rather than launching an open block.
 const GATE: Features = Features::INPUT_GATE;
+
+/// Asked for too, but only launches with an exact environment or passed
+/// descriptors need it (C75).
+const AGENT: Features = Features::AGENT_LAUNCH;
+
+/// The first descriptor `own` passes: what it inherited above stdio.
+const FIRST_FD: i32 = 3;
+
+/// The most descriptors one launch passes (C75).
+const MAX_FDS: u64 = 8;
 
 /// How long a dropped connection is retried: inside the server's 30 s
 /// grace (D44), leaving room for the last try.
@@ -140,6 +156,11 @@ impl Request {
             }
         }
     }
+
+    /// Whether it needs [`Features::AGENT_LAUNCH`].
+    fn agent(&self) -> bool {
+        matches!(self, Self::Launch { launch, .. } if launch.env.is_some() || launch.fds > 0)
+    }
 }
 
 const NO_GATE: &str = "the server cannot gate input";
@@ -150,7 +171,17 @@ const NO_SIGNAL: &str = "the server cannot signal or release a block";
 struct Pending {
     id: Value,
     launch: bool,
+    /// The descriptors the launch passed, held only to be closed when it
+    /// is answered or lost, by drop.
+    _passed: Vec<Fd>,
 }
+
+/// One inherited descriptor `own` owns until a launch passes it. None
+/// exist off Linux.
+#[cfg(target_os = "linux")]
+type Fd = std::os::fd::OwnedFd;
+#[cfg(not(target_os = "linux"))]
+enum Fd {}
 
 /// The current connection: the write half, and what taking it over needs.
 struct Link {
@@ -171,6 +202,8 @@ pub(crate) fn run(
     input: impl BufRead + Send + 'static,
     out: &mut dyn Write,
 ) -> Result<Exit, Failure> {
+    // Before this process opens anything that could take their numbers.
+    let inherited = Inherited::now();
     let (tx, rx) = mpsc::channel();
     let (link, cursor) = open(socket, None, None, 0, &tx)?;
     read_lines(input, tx.clone());
@@ -183,6 +216,7 @@ pub(crate) fn run(
         pending: HashMap::new(),
         owned: HashSet::new(),
         next_req: 1,
+        inherited,
     };
     // The loop holds a sender, so the channel never disconnects.
     while let Ok(inbound) = rx.recv() {
@@ -218,6 +252,7 @@ struct Owner<'a> {
     pending: HashMap<u64, Pending>,
     owned: HashSet<BlockId>,
     next_req: u64,
+    inherited: Inherited,
 }
 
 impl Owner<'_> {
@@ -237,8 +272,20 @@ impl Owner<'_> {
             Ok(parsed) => parsed,
             Err((id, why)) => return self.print(&failed(id, &why)),
         };
+        let fds = match &request {
+            Request::Launch { launch, .. } => launch.fds,
+            _ => 0,
+        };
+        // Taken first, so a launch refused here closes them too.
+        let passed = match self.inherited.take(fds) {
+            Ok(passed) => passed,
+            Err(why) => return self.print(&failed(id, &why)),
+        };
         if let Some(why) = request.unsupported(self.link.features) {
             return self.print(&failed(id, why));
+        }
+        if request.agent() && !self.link.features.contains(AGENT) {
+            return self.print(&failed(id, "the server cannot launch agents"));
         }
         let req = self.next_req;
         self.next_req += 1;
@@ -278,10 +325,17 @@ impl Owner<'_> {
             }
             Request::Release { block } => (Message::ReleaseBlock { req, block }, false),
         };
-        self.pending.insert(req, Pending { id, launch });
         // A failed write shows as the connection dropping, which the
         // reader reports; the request is then pending like any other.
-        let _ = send(&mut self.link.stream, &message);
+        let _ = send_passing(&mut self.link.stream, &message, &passed);
+        self.pending.insert(
+            req,
+            Pending {
+                id,
+                launch,
+                _passed: passed,
+            },
+        );
         Ok(())
     }
 
@@ -422,6 +476,7 @@ fn open(
     // refuses a held launch, a signal and a release itself.
     let asked = NEEDED
         .union(GATE)
+        .union(AGENT)
         .union(Features::HOLD)
         .union(Features::SIGNAL_RELEASE)
         .union(Features::LEASE_REQUESTS);
@@ -493,9 +548,97 @@ fn read_lines(input: impl BufRead + Send + 'static, tx: Sender<Inbound>) {
     });
 }
 
-fn send(stream: &mut UnixStream, message: &Message) -> io::Result<()> {
+/// Sends `message`, passing `passed` in the same `sendmsg` as its first
+/// byte, which is where the server looks (C75).
+fn send_passing(stream: &mut UnixStream, message: &Message, passed: &[Fd]) -> io::Result<()> {
     let frame = encode(message).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    stream.write_all(&frame)
+    let sent = pass(stream, &frame, passed)?;
+    stream.write_all(&frame[sent..])
+}
+
+/// Sends what of `frame` one `sendmsg` takes, with `passed`.
+#[cfg(target_os = "linux")]
+fn pass(stream: &UnixStream, frame: &[u8], passed: &[Fd]) -> io::Result<usize> {
+    use std::os::fd::AsRawFd;
+    if passed.is_empty() {
+        return Ok(0);
+    }
+    let raw: Vec<i32> = passed.iter().map(AsRawFd::as_raw_fd).collect();
+    rusty_libc::socket::send_with_fds(stream.as_raw_fd(), frame, &raw, 0)
+        .map_err(|e| io::Error::from_raw_os_error(e.0))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pass(_: &UnixStream, _: &[u8], _: &[Fd]) -> io::Result<usize> {
+    Ok(0)
+}
+
+/// What `own` holds at descriptor 3+i.
+enum Slot {
+    /// Nothing was open there at startup, or `own` opened it itself, such
+    /// as its socket: never passed.
+    Absent,
+    /// Inherited, and owned until a launch passes it.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(dead_code, reason = "nothing is inherited off Linux")
+    )]
+    Held(Fd),
+    /// A launch already passed it, and `own` closed its copy.
+    Passed,
+}
+
+/// Descriptors 3 to 3+[`MAX_FDS`]−1 as this process inherited them. Each
+/// passes at most once, with one launch (C46 lifetime).
+struct Inherited([Slot; MAX_FDS as usize]);
+
+impl Inherited {
+    /// Must run before this process opens anything that could take one of
+    /// their numbers.
+    #[cfg(target_os = "linux")]
+    fn now() -> Self {
+        use rusty_libc::fd::{F_GETFD, fcntl};
+        use std::os::fd::FromRawFd;
+        Self(std::array::from_fn(|i| {
+            let fd = FIRST_FD + i32::try_from(i).unwrap_or(i32::MAX);
+            if fcntl(fd, F_GETFD, 0).is_err() {
+                return Slot::Absent;
+            }
+            // SAFETY: `fd` is open, was inherited, and nothing in this
+            // process owns it yet; it is wrapped exactly once.
+            Slot::Held(unsafe { Fd::from_raw_fd(fd) })
+        }))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn now() -> Self {
+        Self(std::array::from_fn(|_| Slot::Absent))
+    }
+
+    /// Takes descriptors 3 to 3+`fds`−1 for one launch, or why not, in
+    /// which case it takes none.
+    fn take(&mut self, fds: u8) -> Result<Vec<Fd>, String> {
+        if fds > 0 && cfg!(not(target_os = "linux")) {
+            return Err("passing descriptors needs Linux".into());
+        }
+        let wanted = &mut self.0[..usize::from(fds)];
+        for (i, slot) in wanted.iter().enumerate() {
+            let fd = FIRST_FD + i32::try_from(i).unwrap_or(i32::MAX);
+            match slot {
+                Slot::Held(_) => {}
+                Slot::Absent => return Err(format!("descriptor {fd} was not inherited")),
+                Slot::Passed => return Err(format!("descriptor {fd} was already passed")),
+            }
+        }
+        let taken = wanted
+            .iter_mut()
+            .filter_map(|slot| match std::mem::replace(slot, Slot::Passed) {
+                Slot::Held(fd) => Some(fd),
+                Slot::Absent | Slot::Passed => None,
+            })
+            .collect();
+        Ok(taken)
+    }
 }
 
 /// The request on `line` and its id, or why it is refused with the id
@@ -604,8 +747,33 @@ fn launch(value: &Value) -> Result<Launch, String> {
         cwd: text("cwd")?,
         own: true,
         input,
+        env: env(value)?,
+        fds: match value.get("fds") {
+            None => 0,
+            Some(n) => n
+                .as_u64()
+                .filter(|n| *n <= MAX_FDS)
+                .and_then(|n| u8::try_from(n).ok())
+                .ok_or_else(|| format!("`fds` must be a count from 0 to {MAX_FDS}"))?,
+        },
         hold,
     })
+}
+
+/// The exact environment a launch names, if it names one.
+fn env(value: &Value) -> Result<Option<Vec<(String, String)>>, String> {
+    let Some(env) = value.get("env") else {
+        return Ok(None);
+    };
+    let env = env.as_object().ok_or("`env` must map names to text")?;
+    env.iter()
+        .map(|(name, v)| {
+            v.as_str()
+                .map(|v| (name.clone(), v.to_owned()))
+                .ok_or_else(|| format!("`env` value of `{name}` must be text"))
+        })
+        .collect::<Result<_, _>>()
+        .map(Some)
 }
 
 /// `data` as lowercase hex, two digits a byte.

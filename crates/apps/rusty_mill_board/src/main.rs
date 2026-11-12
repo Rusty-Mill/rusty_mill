@@ -32,8 +32,8 @@ use rusty_mill_board::milestones::{MemMilestones, MilestoneStore};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::retag;
 use rusty_mill_board::settings::{
-    Files, GithubFile, ServerInfo, Settings, load_github, load_roles, load_rules, load_workflow,
-    open_credentials, projects_sink,
+    Files, GithubFile, ServerInfo, Settings, load_github, load_roles, load_rules, load_statuses,
+    load_workflow, open_credentials, projects_sink,
 };
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
@@ -367,8 +367,15 @@ fn run(cli: Cli) -> Result<(), String> {
         .map(load_workflow)
         .transpose()?
         .unwrap_or_default();
+    let statuses = files
+        .project_status
+        .as_deref()
+        .map(load_statuses)
+        .transpose()?
+        .unwrap_or_default();
     let mut board = Board::new(store, roles.clone())
         .with_projects(projects.clone())
+        .with_statuses(statuses)
         .with_move_rules(rules)
         .with_workflow(workflow)
         .with_milestones(milestones);

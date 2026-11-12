@@ -237,6 +237,25 @@ connection afterwards.
   datagram connection are each refused. Afterwards the server's open-descriptor count is back
   where it started, and a failed spawn leaves no staged copy.
 
+**As built (C75, rusty_term D213 on).** These points differ from the plan above:
+- The descriptor map is a Linux-only `platform_linux::LinuxPty::spawn_passing`, not a field on the
+  portable `Command`. It adds the close-from action only when descriptors are passed, so a plain
+  spawn is unchanged.
+- The server reads a direct connection through its own `recv_with_fds` reader, so `rusty_tokio`
+  gains no public API.
+- Descriptors belong to the frame that holds the last byte of the read that brought them. That
+  frame must start inside the read, or they are refused. Descriptors sent with any other request
+  are closed.
+- A client must send a launch's descriptors with the frame's first byte: either the whole frame
+  and its descriptors in one `sendmsg`, or the descriptors on the first chunk if the frame is
+  split. A client that attaches them to a later chunk gets "descriptors inside a frame".
+- `env` names and values are text, like `argv`.
+- `own` passes only descriptors it inherited, which it takes ownership of at startup before
+  opening its socket. Each passes with at most one launch, and `own` closes its copies when that
+  launch is answered, refused or lost, as the lifetime above requires. A later launch naming one
+  is refused as already passed.
+- The one-shot `run --env-exact … --fds N` is not built yet.
+
 ## C78. Hold on exit
 
 **Today.** When the program exits, `exited()` (`server/src/state.rs:1679`) closes the block, and
@@ -367,7 +386,23 @@ a rule with no use.
 
 ## C79. Windows `--ssh` attach
 
-**Today.**
+**As built (2026-11-12).** The spike ([C79-SPIKE-2026-11-12.md](C79-SPIKE-2026-11-12.md))
+found that Win32-OpenSSH 9.5p2 cannot listen on a local AF_UNIX socket, so Windows takes the
+bridge route below, with one change from step 1: `attach` opens a connection per block, so the
+client keeps a local socket rather than running `Conn` over one child's pipes.
+- `rusty_mux_client::ssh::Bridge` binds a socket in a fresh owner-only directory (DACL), sets the
+  socket owner-only, and checks each connection's process token against this user (R10's two
+  layers). Each connection runs its own `ssh -T HOST CTL --socket 'PATH' bridge`, joined byte
+  for byte; its `ssh` ends when its input does, as when the client dies.
+- Start-up runs one bridge with empty input under an interactive login, so a host-key prompt or
+  password works and a missing `ctl` or server fails before the screen is taken. Every later
+  login is `BatchMode`, so a key or an agent is needed.
+- `RUSTY_MUX_REMOTE_CTL` names the remote ctl as shell text (default `rusty-mux-ctl`), since a
+  non-login shell's `PATH` often lacks `~/.local/bin`.
+- The rejoin path is `BridgePath`: a fresh bridge per rejoin, no UDP (`udp_wanted` is false on
+  Windows). `rusty-mux-ctl ssh check` on Windows skips the forward and UDP findings.
+
+**Before the build.**
 - The `rusty-mux` client builds on Windows, but `--ssh` returns "supported on Unix only for now"
   (`tui/src/main.rs` ~851).
 - `Conn<S: Read + Write>` is already generic (`tui/src/lib.rs:264`). What blocks Windows is

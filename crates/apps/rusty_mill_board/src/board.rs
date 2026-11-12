@@ -11,18 +11,19 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::{
-    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit,
-    Event, EventKind, ExecutionLink, MoveRules, Plan, Shelf, View, import_id, text_hash,
+    Actor, BoardError, Capability, Card, CloseReason, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS,
+    Dates, Edit, Event, EventKind, ExecutionLink, MoveRules, Plan, ProjectStatus, Shelf, View,
+    import_id, text_hash,
 };
 use crate::external::Observation;
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
 use crate::metrics::{Metrics, metrics};
 use crate::milestones::{MemMilestones, Milestone, MilestoneEdit, MilestoneStore};
-use crate::projects::Projects;
+use crate::projects::{Projects, Statuses};
 use crate::roadmap::{Roadmap, roadmap};
 use crate::store::Store;
 use crate::trace::{self, MilestoneView, Trace};
-use crate::workflow::Workflow;
+use crate::workflow::{Kind, Workflow};
 
 /// Attempts per operation when another writer wins the revision race.
 const RETRIES: usize = 3;
@@ -109,6 +110,8 @@ pub struct Board<S> {
     workflow: RwLock<Workflow>,
     projects: RwLock<Projects>,
     projects_sink: Option<ProjectsSink>,
+    /// Each project's status; unlisted projects are active.
+    statuses: RwLock<Statuses>,
     /// Held while numbers are handed out, so this process does not race itself for them.
     /// Uniqueness does not rest on it: the store reserves each number (`Store::reserve_number`).
     numbering: Mutex<Numbering>,
@@ -175,6 +178,7 @@ impl<S: Store> Board<S> {
             workflow: RwLock::new(Workflow::default()),
             projects: RwLock::new(Projects::default()),
             projects_sink: None,
+            statuses: RwLock::new(Statuses::default()),
             numbering: Mutex::new(Numbering::default()),
             clock,
             escalations: None,
@@ -190,6 +194,73 @@ impl<S: Store> Board<S> {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = projects;
         self
+    }
+
+    /// Start with these project statuses instead of every project active.
+    #[must_use]
+    pub fn with_statuses(self, statuses: Statuses) -> Self {
+        *self
+            .statuses
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = statuses;
+        self
+    }
+
+    /// A snapshot of the project statuses.
+    pub fn statuses(&self) -> Statuses {
+        read(&self.statuses)
+    }
+
+    /// Set `project`'s status. `persist` makes the new statuses durable and runs under the write
+    /// lock before they apply; if it fails nothing has changed. The caller checks the actor may.
+    ///
+    /// # Errors
+    /// An unknown project, or [`BoardError::Refused`] with what `persist` reported.
+    pub fn set_project_status(
+        &self,
+        project: &str,
+        status: ProjectStatus,
+        persist: impl FnOnce(&Statuses) -> Result<(), String>,
+    ) -> Result<Statuses, BoardError> {
+        // Held across the write so the project cannot be removed meanwhile (lock order:
+        // projects, then statuses, as in `update_projects`).
+        let registry = self.registry();
+        if !registry.contains(project) {
+            return Err(BoardError::Invalid("unknown project"));
+        }
+        let mut guard = self
+            .statuses
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = guard.with(project, status);
+        persist(&next).map_err(BoardError::Refused)?;
+        *guard = next.clone();
+        drop(guard);
+        drop(registry);
+        Ok(next)
+    }
+
+    /// Refuse new cards for `project` unless its status takes them.
+    fn check_accepts(&self, project: &str) -> Result<(), BoardError> {
+        let status = self.statuses().of(project);
+        if status.accepts_cards() {
+            return Ok(());
+        }
+        Err(BoardError::Refused(format!(
+            "project {project:?} is {}: it takes no new cards until it is active again",
+            status.as_str()
+        )))
+    }
+
+    /// Refuse to start work (move a card into a work column from outside one) in a project
+    /// that takes none. Work already under way may move on and finish.
+    fn check_starts(&self, flow: &Workflow, card: &Card, to: &Column) -> Result<(), BoardError> {
+        let starts =
+            flow.kind(to) == Some(Kind::Work) && flow.kind(&card.column) != Some(Kind::Work);
+        if starts {
+            self.check_accepts(&card.project)?;
+        }
+        Ok(())
     }
 
     /// Start with these movement rules instead of [`MoveRules::Enforced`].
@@ -310,6 +381,17 @@ impl<S: Store> Board<S> {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let projects = derive(&guard)?;
+        // A status outliving its project would come back on a new project of the same name.
+        let statuses = self.statuses();
+        if let Some(gone) = guard
+            .names()
+            .find(|p| !projects.contains(p) && statuses.of(p) != ProjectStatus::Active)
+        {
+            return Err(BoardError::Refused(format!(
+                "project {gone:?} is {}; make it active before removing or renaming it",
+                statuses.of(gone).as_str()
+            )));
+        }
         if let Some(card) = self
             .store
             .list()?
@@ -1057,6 +1139,7 @@ impl<S: Store> Board<S> {
         if !by.may_work_in(project) {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
+        self.check_accepts(project)?;
         project.clone_into(&mut card.project);
         let card = self.insert_numbered(by, card)?;
         drop(registry);
@@ -1079,6 +1162,7 @@ impl<S: Store> Board<S> {
         card.id = import_id(issue);
         card.issue = Some(issue);
         card.synced_text = Some(text_hash(&card.title, &card.body));
+        self.check_accepts(&card.project)?;
         self.insert_numbered(by, card)
     }
 
@@ -1204,6 +1288,7 @@ impl<S: Store> Board<S> {
         let listed = match id {
             Some(i) => {
                 let named = self.get_in(&flow, i)?;
+                self.check_accepts(&named.project)?;
                 self.check_deps_done(&named)?;
                 check_not_superseded(&named)?;
                 vec![named]
@@ -1215,9 +1300,11 @@ impl<S: Store> Board<S> {
                 .map(|c| placed(&flow, c))
                 .collect(),
         };
+        let statuses = self.statuses();
         let mut candidates: Vec<Card> = listed
             .into_iter()
             .filter(|c| project.is_none_or(|p| c.project == p))
+            .filter(|c| statuses.of(&c.project).accepts_cards())
             .filter(|c| rank(c).is_some() && flow.actionable(&c.column, &by.caps))
             .filter(|c| id.is_some() || c.claim.as_deref().is_none_or(|h| h == by.name))
             .collect();
@@ -1375,10 +1462,12 @@ impl<S: Store> Board<S> {
         let flow = self.flow();
         match self.move_rules() {
             MoveRules::Enforced => self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
+                self.check_starts(&flow, c, to)?;
                 c.move_to(&flow, to, by, now)
             }),
             MoveRules::Open => {
                 let card = self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
+                    self.check_starts(&flow, c, to)?;
                     c.move_freely(&flow, to, by, now)
                 })?;
                 rusty_log::info!(card = %id, actor = %by.name, to = %to, "card moved with movement rules off");
@@ -1404,6 +1493,10 @@ impl<S: Store> Board<S> {
         }
         let triage = by.caps.contains(&Capability::Triage);
         let card = self.apply(id, by, EventKind::Assigned, |c, now| {
+            // A Done card may be re-filed anywhere; open work only into a project that takes it.
+            if c.column != Column::DONE {
+                self.check_accepts(project)?;
+            }
             let needed = assign_capability(&c.column);
             if !triage && !by.caps.contains(&needed) {
                 return Err(BoardError::Forbidden(needed));
@@ -1417,6 +1510,34 @@ impl<S: Store> Board<S> {
         });
         drop(registry);
         card
+    }
+
+    /// Close an unstarted card without shipping it, for `reason` (see [`Card::close`]). Needs
+    /// `Triage`. A non-blank `note` is added as `by`'s comment first, once the close is known to
+    /// be allowed, so a failure never leaves the card closed without its note: retrying after a
+    /// failed close at worst repeats the note.
+    ///
+    /// # Errors
+    /// See [`Card::close`], or a storage failure (nothing is closed then).
+    pub fn close(
+        &self,
+        id: Uuid,
+        reason: CloseReason,
+        note: Option<&str>,
+        by: &Actor,
+    ) -> Result<Card, BoardError> {
+        if let Some(text) = note.map(str::trim).filter(|n| !n.is_empty()) {
+            let current = self.get(id)?;
+            if !by.may_work_in(&current.project) {
+                return Err(BoardError::OutOfScope(current.project));
+            }
+            current.close(&self.flow(), reason, by, (self.clock)())?;
+            self.comment(id, by, text)?;
+        }
+        let flow = self.flow();
+        self.apply_in(&flow, id, by, EventKind::Closed, |c, now| {
+            c.close(&flow, reason, by, now)
+        })
     }
 
     /// Archive a Done card. Needs `Close`, as closing work does.
@@ -1501,7 +1622,10 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::claim`].
     pub fn claim(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
-        self.apply(id, by, EventKind::Claimed, |c, now| c.claim(by, now))
+        self.apply(id, by, EventKind::Claimed, |c, now| {
+            self.check_accepts(&c.project)?;
+            c.claim(by, now)
+        })
     }
 
     /// Release a claim.

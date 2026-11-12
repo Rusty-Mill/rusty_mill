@@ -371,11 +371,17 @@ let tok=null;
 const $=id=>document.getElementById(id);
 // `loaded`: the board has been read once. The cursor cannot say so: it is null on a board with no events yet.
 let cards=[],cursor=null,loaded=false,dlg=null,repos={},sel={repo:"",project:"",agent:""};
+/* Project statuses (board_projects' `status`, unlisted = active) and which the board shows: active by default,
+   "" for every status. A chosen project is shown whatever its status. */
+const STATUSES=["active","experiment","paused","archived"];
+let pstatus={},statusSel="active";
+const statusOf=p=>Object.hasOwn(pstatus,p)?pstatus[p]:"active";
 const projects=()=>Object.values(repos).flat();
 /* `default` is the Inbox: where a card that names no project lands (rusty_tick's Inbox list). Shown by that name only. */
 const INBOX="default",label=p=>p===INBOX?"Inbox":p;
 const repoOf=p=>Object.keys(repos).find(r=>repos[r].includes(p))||"";
-const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project)&&(!sel.agent||k.claim===sel.agent);
+const statusShown=p=>p===sel.project||!statusSel||statusOf(p)===statusSel;
+const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project)&&statusShown(k.project)&&(!sel.agent||k.claim===sel.agent);
 const count=f=>cards.filter(f).length;
 /* A Done card is shelved, off the board and in the Archive view, once archived or 14 days after it
    was done (closed without shipping: after its last change) or last restored. The server's
@@ -855,6 +861,11 @@ function renderSide(){
     for(const x of names)r.append(new Option(x+" · "+listed(k=>repoOf(k.project)===x),x));
     r.value=sel.repo;r.onchange=()=>pick(r.value,"");
     n1.append(r);
+    // Which project statuses are on the board: committed (active) work unless asked.
+    const st=el("select");st.id="pstatus";st.setAttribute("aria-label","project status");
+    st.append(...STATUSES.map(x=>new Option(x[0].toUpperCase()+x.slice(1)+" projects",x)),new Option("All projects",""));
+    st.value=statusSel;st.onchange=()=>{statusSel=st.value;pref("pstatus",statusSel);render()};
+    n1.append(st);
     // The Inbox is a project, not a repository: it shows and counts only cards with no other project.
     // Listed only when this credential may see it, like every other entry here.
     const chips=[];
@@ -863,7 +874,7 @@ function renderSide(){
     // away. A repository whose only project is its own is left out: it is the repository, chosen above.
     // (A credential limited to some projects may see a repository with one other project: that one stays.)
     const named=Object.entries(repos).filter(([x])=>!sel.repo||x===sel.repo)
-      .flatMap(([x,ps])=>ps.length===1&&ps[0]===x?[]:ps).filter(p=>p!==INBOX).sort();
+      .flatMap(([x,ps])=>ps.length===1&&ps[0]===x?[]:ps).filter(p=>p!==INBOX&&statusShown(p)).sort();
     for(const p of named)chips.push(item(p,listed(k=>k.project===p),sel.project===p,()=>sel.project===p?pick(sel.repo,""):pick(repoOf(p),p)));
     if(chips.length)n1.append(el("i",null,"sep"),el("span","Projects","lbl"),...chips);
   }
@@ -1060,7 +1071,7 @@ $("dlg").onclose=()=>{dlg=null};
 const byPriority=list=>list.sort((a,b)=>b.priority-a.priority||a.created_ms-b.created_ms||(a.id<b.id?-1:a.id>b.id?1:0));
 async function snapshot(){
   const at=(await api("board_events",{tail:true})).cursor;
-  const list=(await api("board_list",{archived:"include",view:"full"})).cards;
+  const list=(await api("board_list",{archived:"include",view:"full",project_status:STATUSES})).cards;
   cursor=at;cards=byPriority(list);loaded=true;
 }
 /* Bring `cards` up to the newest event: read again only the cards the new events name, one
@@ -1075,7 +1086,7 @@ async function catchUp(){
   const r=await api("board_events",{after:cursor,limit:1000});
   const ids=[...new Set(r.events.map(e=>e.card))];
   if(r.resync||ids.length>FEW){
-    const list=(await api("board_list",{archived:"include",view:"full"})).cards;   // if this throws, the cursor stays put and the events are retried
+    const list=(await api("board_list",{archived:"include",view:"full",project_status:STATUSES})).cards;   // if this throws, the cursor stays put and the events are retried
     cursor=r.cursor;cards=byPriority(list);return true;
   }
   if(!ids.length){cursor=r.cursor;return false}
@@ -1289,7 +1300,15 @@ function reposTab(){
             paths=field("textarea",{value:p.paths,placeholder:"one repository path per line, e.g. crates/apps/rocket_league"});
       inputs.push(()=>{p.name=nm.value.trim();p.paths=paths.value});
       const rm=el("button","Remove");rm.type="button";rm.onclick=restructure(()=>{draft[r]=draft[r].filter(x=>x!==p)});
-      row.append(nm,rm);fs.append(row,paths);
+      row.append(nm,rm);
+      // A saved project's status applies at once, apart from the paths below.
+      if(cfg.repos[r]&&Object.hasOwn(cfg.repos[r],p.name)){
+        const st=field("select",{});st.setAttribute("aria-label",p.name+" status");st.disabled=!cfg.files.project_status;
+        st.append(...STATUSES.map(x=>new Option(x,x)));const ps=cfg.project_status||{};st.value=Object.hasOwn(ps,p.name)?ps[p.name]:"active";
+        st.onchange=guard(err,()=>setting("settings_project_status_set",{project:p.name,status:st.value}));
+        row.append(st);
+      }
+      fs.append(row,paths);
     }
     const addp=el("button","+ project"),rmr=el("button","Remove repository");addp.type=rmr.type="button";
     addp.onclick=restructure(()=>draft[r].push({name:"",paths:""}));
@@ -1463,7 +1482,7 @@ async function loadMeta(){
     $("actor").hidden=$("role").hidden=true;const c=$("me");c.hidden=false;
     c.replaceChildren(el("span",(me.actor[0]||"?").toUpperCase(),"av"),el("b",me.actor),"· "+me.role);c.title="Signed in as "+me.actor+" ("+me.role+")"}
   // repo -> its projects. A credential limited to some projects hears only of those.
-  const listed=(await meta("board_projects",{repos:{}})).repos;
+  const pj=await meta("board_projects",{repos:{}}),listed=pj.repos;pstatus=pj.status||{};
   repos=Object.fromEntries(Object.entries(listed).map(([r,p])=>[r,Object.keys(p)]));
   if(sel.repo&&!(sel.repo in repos))sel={repo:"",project:"",agent:sel.agent};
   if(sel.project&&!projects().includes(sel.project))sel={...sel,project:""};
@@ -1471,7 +1490,8 @@ async function loadMeta(){
 (async()=>{
   $("actor").value=pref("actor")||"";
   await loadMeta();
-  const r=pref("repo"),p=pref("project");
+  const r=pref("repo"),p=pref("project"),ps=pref("pstatus");
+  if(ps!==null&&(ps===""||STATUSES.includes(ps)))statusSel=ps;
   if(r in repos&&(!p||repos[r].includes(p)))sel={repo:r,project:p||"",agent:""};
   $("actor").onchange=()=>pref("actor",$("actor").value);$("role").onchange=()=>pref("role",$("role").value);
   $("gear").onclick=openSettings;

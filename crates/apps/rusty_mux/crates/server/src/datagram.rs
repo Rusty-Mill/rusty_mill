@@ -455,6 +455,8 @@ pub(crate) struct StreamReader {
     id: StreamId,
 }
 
+impl crate::passed::Descriptors for StreamReader {}
+
 impl AsyncRead for StreamReader {
     fn poll_read(
         self: Pin<&mut Self>,

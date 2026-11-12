@@ -60,6 +60,12 @@ pub use libc::{WCONTINUED, WIFCONTINUED, WIFSTOPPED, WSTOPSIG, WUNTRACED};
 // already admitted above for the D6 signal source.
 pub use libc::{tcsetpgrp, SIGTTOU, SIG_DFL, SIG_IGN};
 
+// C75 passed descriptors (`sys::pty::spawn_attached`): `fcntl`'s
+// `F_DUPFD_CLOEXEC`, admitted below, stages each descriptor above its
+// target in the parent, and `addclosefrom_np` (glibc 2.34) closes the
+// staged copies and anything else above the targets in the child.
+pub use libc::posix_spawn_file_actions_addclosefrom_np;
+
 // `test`'s file-mode predicates (faccessat slice's sibling, D11):
 // S_ISUID/S_ISGID/S_ISVTX decode `st_mode` for `-u/-g/-k`; `st_uid`/
 // `st_gid` (already reachable off `stat`, no separate admission needed)

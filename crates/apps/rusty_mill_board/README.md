@@ -72,8 +72,8 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
-  `card_get`, `card_trace`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_archive`,
-  `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `board_milestones`, `milestone_add`,
+  `card_get`, `card_trace`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_close`,
+  `card_archive`, `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `board_milestones`, `milestone_add`,
   `milestone_update`, `inbox_list`, `inbox_act`, `board_number_cards`. The web API
   exposes the same table, so the two cannot drift.
 - **Milestones.** A project's dated goals (`src/milestones.rs`): a title and a target date, closed when reached, never
@@ -98,6 +98,26 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `older_than_days` ago), checks each card again as it commits, and needs `triage`. `board_list` with
   `archived: "only"` lists the archive. The state is an `archived:<ms>` or `restored:<ms>` tag on the rusty_tick
   task, beside `number:<n>`, so there is no migration.
+- **Project status.** A project is `active` (the default), `paused`, `experiment` or `archived`, kept in
+  `project-status.json` in the settings directory (only non-active projects are listed; the projects file keeps its
+  format). Settings > Repositories sets it per project (`settings_project_status_set`, admin), written before it
+  applies. Paused and archived projects refuse `card_add`, forge imports (retried once active), open cards moved in
+  with `card_assign` (a Done card may still be re-filed there), `card_claim`, and moves into a work column from
+  outside one; `card_take` hands out none of their work. Work already under way may move on and finish. An
+  experiment takes cards and hands out work. `board_list` lists projects that take work (active and experiment) by
+  default: `project_status: [...]` lists others, and naming a `project` lists it whatever its status.
+  `board_projects` reports `status` for non-active projects. The board's status picker (Active, Experiment, Paused,
+  Archived, All projects) starts on Active. A paused or archived project must be made active before it is removed
+  or renamed, so no status outlives its project.
+- **Close reasons (dropped work).** `card_close` closes an unstarted card (Backlog or a queue) without shipping
+  it, for a required `reason`: `wont_do`, `duplicate` or `superseded`; an optional `note` becomes the closer's
+  comment. It needs `triage`, and is refused for started, blocked or Done cards. The card goes to Done with no
+  `done_ms` and a `closed: {reason, at_ms}`, so it never counts as shipped; `board_metrics` reports it as dropped,
+  per week (`weeks[].dropped`), per project (`by_project[].dropped`) and per reason (`dropped`, last 30 days).
+  In rusty_tick the task is closed as `wontdo` with a `closed:<reason>:<ms>` tag, in one write, so summaries see the
+  reason without reading documents; a task marked won't-do in rusty_tick itself reads as `wont_do`.
+  Rollups (`card_trace`, `board_milestones`) count dropped children apart from done ones, and a parent or
+  milestone is `ready_to_close` only once every child is Done and at least one shipped.
 - **Prompt (#745).** A card's `prompt` holds instructions for whoever takes it, apart from the body: `card_update`
   sets it (`""` clears it, at most 32 KiB), `card_get`/`board_list` return it, and the card dialog shows it in its own
   box with a Copy prompt button. It lives in the card's rusty_tick `board` document, not on the task, so rusty_tick's
