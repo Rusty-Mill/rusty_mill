@@ -29,6 +29,7 @@ B0, then G1, then L2 and P2 together, then L3 and P3 together, then L4. Everythi
 has slack and can slip a phase without delaying the end state.
 
 - Phase 0 and G1 are small, and every later milestone lands through the merge flow G1 creates.
+- B0 ends with Mill Board's paused project status, its next change after G1's change in flight and ahead of the rest of B1 and the ADR-0007 store PR #1438 (DECISIONS.md project-status-order, which overrides board-improvements-order for this item). The 0-to-1 gate passes after G1 has started; G1 does not wait for it.
 - L3 is the longest single item and the only one that needs sustained time from Nano
   (golden set, shadow run, judging). Protect it from new design work.
 
@@ -36,7 +37,7 @@ has slack and can slip a phase without delaying the end state.
 
 | Gate | Passes when | Who checks |
 | --- | --- | --- |
-| 0 to 1 | The paused projects have no open cards; every remaining project has a priority from Nano; the entry rule is written into AGENTS.md | Duetius reports; Nano confirms |
+| 0 to 1 | Ledger and Conflux have no open cards and the paused projects carry Mill Board's paused project status; every remaining project has a priority from Nano; the entry rule is written into AGENTS.md | Duetius reports; Nano confirms |
 | 1 to 2 | A builder agent is refused at a gate and at a self-merge; one routine PR merges on green CI plus a cross-family review with no action from Nano; an untouched decision appears in default search | Dottius demonstrates on a test PR |
 | 2 to 3 | The smoke run completes with a replayable log; Portfolio Intelligence lists the real repositories from a live sync | A reviewer from the other model family re-runs both |
 | 3 to 4 | The overlap report names the overlaps the 2026-11-10 audits found; the experiment has a written verdict against rusty_fclone; the storage benchmark has a winner; the board runs on its own store | Nano on the experiment verdict; agents on the rest |
@@ -55,7 +56,7 @@ has slack and can slip a phase without delaying the end state.
 
 | Code | Deliverable | Done when | Depends on | Lane | Size | Needs Nano |
 | --- | --- | --- | --- | --- | --- | --- |
-| B0 | Backlog triage | Paused projects hold no open cards; each remaining project's proposal is approved and applied | X answers | Coordination, Design | M | E2, X1 to X3, approve each list (X4 to X6 feed S2, S3, B3) |
+| B0 | Backlog triage | Ledger and Conflux hold no open cards; the paused projects (rocket_league, apprentice_ai, mediboard, rusty_meshed) carry Mill Board's paused project status, with their cards left open under it; each remaining project's proposal is approved and applied | X answers; the paused project status on Mill Board (after G1's change, ahead of #1438; project-status-order) | Coordination, Design | M | E2, X1 to X3, approve each list, approve the paused-status design (X4 to X6 feed S2, S3, B3) |
 | B1 | Lean cards and per-agent logins | Agents list summaries by default; each agent signs in as itself; adding a card can set priority and links in one call | G1 | Build | M | M1, M2 |
 | B2 | Own-store design | A design note for the SQLite store, migration and rollback is approved | B0 | Build, Review | S | Approve the design (M3 answered 2026-11-12) |
 | B3 | Migration to the board's own store | Dry run shows no difference; production migration done; the rusty_tick and engine adapters are removed; rusty_tick archived | B2 | Build, Merge steward | L | Authorise the migration and the deletions |

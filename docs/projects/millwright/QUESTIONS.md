@@ -13,7 +13,7 @@ acted on.
 4. **P1:** decide Portfolio Intelligence's shorter MVP path. Nothing there is dispatchable until then.
 5. **R1:** approve the remind-me order of work. The dormancy fix protects a store in daily use.
 6. ~~**X1 to X3:** close the three experiments against their written conclusions.~~ Answered 2026-11-12; see DECISIONS.md close-ledger, pause-conflux, archive-swarm-os.
-7. ~~**E2:** start the backlog triage pass, beginning with the 113 cards of the paused projects.~~ Answered 2026-11-12; see DECISIONS.md backlog-triage. Still open from it: which projects count as paused (below).
+7. ~~**E2:** start the backlog triage pass, beginning with the 113 cards of the paused projects.~~ Answered 2026-11-12; see DECISIONS.md backlog-triage. Which projects count as paused: see DECISIONS.md project-priorities.
 
 ## Let Em Loose
 
@@ -87,10 +87,8 @@ L1, L7 and L8 are answered (2026-11-12); see DECISIONS.md lel-m1-commit, lel-los
 | --- | --- | --- |
 | E4 | Settle one Rust toolchain pin across the repos, and move Ledger and Conflux to the newer SQLite binding? Both are ask-first changes. | Yes to both. |
 
-E2 (run the triage) is answered; see DECISIONS.md backlog-triage. Still open from it:
-which projects count as paused. X1 to X3 settle that Ledger, Conflux and Swarm OS
-leave the board; whether Converge is also paused, as E2's wording suggested, is not
-settled (handoff/OPEN_QUESTIONS.md Q2).
+E2 (run the triage) is answered; see DECISIONS.md backlog-triage. Which projects count as
+paused is answered too: see DECISIONS.md project-priorities (Converge is not paused).
 
 E1 (entry rule) and E3 (committed work this month) are answered; see DECISIONS.md
 entry-rule and audited-repos-this-month; X1 to X3 still stand (e3-x-reconcile).
