@@ -262,7 +262,7 @@ read-only like any command block (D72). C70's spool, once merged, keeps its scro
 
 **As built (C78).** `Features::HOLD` is bit 43 and `Launch.hold` field 60. A block entry gains
 `exited` (field 61), true for any block without a program (held or restored), which `list`
-shows as `state=exited`. Release (C76) reuses the same path.
+shows as `state=exited`. The entry is not re-sent when `exited` flips: a watcher learns of the exit from `program-exited`, as for any block. Release (C76) reuses the same path.
 
 ## C76. Signal and release
 
