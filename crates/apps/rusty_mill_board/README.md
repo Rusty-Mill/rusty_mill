@@ -75,7 +75,8 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `card_get`, `card_trace`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_close`,
   `card_archive`, `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `board_milestones`, `milestone_add`,
   `milestone_update`, `inbox_list`, `inbox_act`, `board_number_cards`. The web API
-  exposes the same table, so the two cannot drift.
+  exposes the same table, so the two cannot drift. `inbox_list`, `inbox_act` and `board_number_cards` need an
+  authenticated admin credential (a token or OAuth grant); a caller-named actor and role are refused.
 - **Milestones.** A project's dated goals (`src/milestones.rs`): a title and a target date, closed when reached, never
   deleted. `milestone_add` and `milestone_update` need Triage and the project in scope; `board_milestones` lists what the
   caller may see. In rusty_tick a milestone is a task tagged `milestone` (never `agent`, so never a card) in the
