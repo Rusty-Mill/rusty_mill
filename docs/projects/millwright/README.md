@@ -57,6 +57,7 @@ Mill Board, Let Em Loose (BBP, orch) and the shared crates are in `rusty_mill`. 
 - [ROADMAP.md](ROADMAP.md): 30 milestones, phase gates, critical path.
 - [QUESTIONS.md](QUESTIONS.md): open questions for Nano, with recommendations.
 - [DECISIONS.md](DECISIONS.md): what Nano has decided, with date and source.
+- [PRIORITIES.md](PRIORITIES.md): each board project's priority tier; agents pull work from it.
 - [architecture.svg](architecture.svg): agents, shared systems, and what is off the main path.
 - [handoff/](handoff/SPEC.md): the pack behind `millwright-expert`, which answers programme
   questions (phase, gate, sequencing, which milestone, what waits) before Nano is asked.

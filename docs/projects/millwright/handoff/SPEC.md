@@ -12,6 +12,7 @@ This pack only points; the expert opens the files below at call time.
 | What it is, rules of engagement, what waits | `../README.md` | this one |
 | Phases, milestone codes (G, B, R, L, P, S), gates, critical path, board plan | `../ROADMAP.md` | this one |
 | Nano's decisions | `../DECISIONS.md` (keys, remind-me ids) | this one |
+| Project priority tiers (current view of project-priorities) | `../PRIORITIES.md` | this one |
 | Questions waiting on Nano, with recommendations | `../QUESTIONS.md` | this one |
 | Agents, systems, what is off the main path | `../architecture.svg` | this one |
 | Let Em Loose design (L-codes' content) | `docs/projects/let-em-loose/` | `let-em-loose-expert` |

@@ -40,4 +40,20 @@ except that its merge decision is superseded by the rule above (owner, 2026-10-2
   [proposed-settings.md](docs/super-board/proposed-settings.md) to `.claude/settings.local.json`.
 - Stop it with `/super-board stop`. A bad merge is reverted by PR.
 
+## New work: notes first, cards on commitment
+
+Owner decisions of 2026-11-12, Millwright E1 and M4 (`entry-rule` and `backlog-commit`
+in [docs/projects/millwright/DECISIONS.md](docs/projects/millwright/DECISIONS.md)):
+
+- A new idea starts as a design note in remind-me. It does not start as Mill Board cards
+  or a new repository.
+- Create a repository or cards only after an overlap check against the existing
+  repositories and board projects, and only for committed work.
+- Work is committed when its project has a priority in
+  [PRIORITIES.md](docs/projects/millwright/PRIORITIES.md). Agents pull from those
+  priorities, never from card priorities they set themselves. A paused project takes
+  no new cards.
+- A deliberate experiment is allowed when it is labelled `experiment`. It ends with a
+  harvest: a one-page conclusion in remind-me.
+
 Tickets: [issue template](docs/agents/issue-tracker.md). The tooling lives in `.claude/`.
