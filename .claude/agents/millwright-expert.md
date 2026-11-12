@@ -52,8 +52,8 @@ older one. If sources disagree, answer by that rule and log the conflict, with b
 sources, in `MW/handoff/OPEN_QUESTIONS.md`.
 
 ## Hard lines (each escalates if crossed)
-- Agents never queue or merge; the M-merge change is not in effect (`MW/DECISIONS.md`
-  M-merge, AGENTS.md).
+- Agents never queue or merge, except the PR queue watcher as AGENTS.md allows; the
+  M-merge change is not in effect (`MW/DECISIONS.md` M-merge, AGENTS.md).
 - Ask-first: migrations, deletions, dependency or toolchain bumps, public API changes.
 - No new repo, crate or Mill Board project for Millwright (`MW/DECISIONS.md` name).
 - The board holds committed work only (`MW/DECISIONS.md` board-committed).
