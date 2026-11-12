@@ -19,6 +19,9 @@
 //! need). Unix-domain sockets cover one more need: a non-blocking `connect`
 //! to a path, which `std` cannot do, so a client can give up on a server
 //! whose accept backlog is full; only pathname addresses are supported.
+//! And one more: passing descriptors over a Unix socket (`SCM_RIGHTS`,
+//! [`send_with_fds`]/[`recv_with_fds`]), which `std` cannot do either,
+//! for rusty_mux's agent launch (C75).
 
 use crate::arch::nr;
 use crate::arch::{from_ret, from_ret_i32, syscall2, syscall3, syscall4, syscall6, Errno};
@@ -582,6 +585,214 @@ pub fn shutdown(fd: i32, how: i32) -> Result<(), Errno> {
     from_ret(ret).map(|_| ())
 }
 
+/// The most descriptors [`send_with_fds`] sends, or [`recv_with_fds`]
+/// receives, in one call.
+pub const MAX_FDS: usize = 8;
+
+/// `recvmsg` flag: the control message was cut short, and the descriptors
+/// that did not fit were closed by the kernel.
+pub const MSG_CTRUNC: i32 = 0x8;
+/// `recvmsg` flag: received descriptors are close-on-exec from the start.
+pub const MSG_CMSG_CLOEXEC: i32 = 0x4000_0000;
+
+const SOL_SOCKET: i32 = 1;
+const SCM_RIGHTS: i32 = 1;
+
+/// Kernel `struct msghdr` (64-bit).
+#[repr(C)]
+struct MsgHdr {
+    name: usize,
+    namelen: u32,
+    iov: usize,
+    iovlen: usize,
+    control: usize,
+    controllen: usize,
+    flags: i32,
+}
+
+const _: () = assert!(core::mem::size_of::<MsgHdr>() == 56);
+const _: () = assert!(core::mem::offset_of!(MsgHdr, iov) == 16);
+const _: () = assert!(core::mem::offset_of!(MsgHdr, control) == 32);
+const _: () = assert!(core::mem::offset_of!(MsgHdr, flags) == 48);
+
+/// Kernel `struct iovec`.
+#[repr(C)]
+struct IoVec {
+    base: usize,
+    len: usize,
+}
+
+/// Kernel `struct cmsghdr` (64-bit): the header before `SCM_RIGHTS` data.
+#[repr(C)]
+struct CmsgHdr {
+    len: usize,
+    level: i32,
+    ty: i32,
+}
+
+const CMSG_HDR: usize = core::mem::size_of::<CmsgHdr>();
+const _: () = assert!(CMSG_HDR == 16);
+/// `CMSG_SPACE(MAX_FDS * 4)`: the header, then the descriptors padded to 8.
+const CONTROL: usize = CMSG_HDR + (MAX_FDS * 4).next_multiple_of(8);
+
+/// A control buffer aligned as `struct cmsghdr` needs.
+#[repr(C, align(8))]
+struct Control([u8; CONTROL]);
+
+/// What [`recv_with_fds`] received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Received {
+    /// Bytes read into the buffer; `0` means the peer closed.
+    pub bytes: usize,
+    /// The received descriptors, in the order sent; only the first
+    /// `count` are valid. The caller owns them and must close them.
+    pub fds: [i32; MAX_FDS],
+    /// How many of `fds` are valid.
+    pub count: usize,
+    /// The sender passed more than [`MAX_FDS`] (or the control message was
+    /// cut short otherwise); the kernel closed those that did not fit.
+    pub truncated: bool,
+}
+
+impl Received {
+    /// The valid descriptors.
+    pub fn fds(&self) -> &[i32] {
+        &self.fds[..self.count]
+    }
+}
+
+/// Send `buf` on a connected Unix stream or datagram socket, passing
+/// `fds` along as one `SCM_RIGHTS` control message (the receiver gets
+/// its own copies; the caller keeps its descriptors open). Returns the
+/// bytes sent, as [`send`] does.
+///
+/// `EINVAL` when `fds` holds more than [`MAX_FDS`], or when `buf` is
+/// empty while `fds` is not: a stream needs at least one byte to carry
+/// descriptors.
+pub fn send_with_fds(fd: i32, buf: &[u8], fds: &[i32], flags: i32) -> Result<usize, Errno> {
+    if fds.len() > MAX_FDS || (buf.is_empty() && !fds.is_empty()) {
+        return Err(Errno::EINVAL);
+    }
+    let mut control = Control([0; CONTROL]);
+    let used = match fds.len() {
+        0 => 0,
+        n => {
+            let len = CMSG_HDR + n * 4;
+            let header = CmsgHdr {
+                len,
+                level: SOL_SOCKET,
+                ty: SCM_RIGHTS,
+            };
+            // SAFETY: `control` is 8-aligned and at least `CMSG_HDR` bytes,
+            // so a `CmsgHdr` fits at its start.
+            unsafe { core::ptr::write(control.0.as_mut_ptr().cast::<CmsgHdr>(), header) };
+            for (i, fd) in fds.iter().enumerate() {
+                let at = CMSG_HDR + i * 4;
+                control.0[at..at + 4].copy_from_slice(&fd.to_ne_bytes());
+            }
+            len.next_multiple_of(8)
+        }
+    };
+    let iov = IoVec {
+        base: buf.as_ptr() as usize,
+        len: buf.len(),
+    };
+    let msg = MsgHdr {
+        name: 0,
+        namelen: 0,
+        iov: &iov as *const IoVec as usize,
+        iovlen: 1,
+        control: if used == 0 {
+            0
+        } else {
+            control.0.as_ptr() as usize
+        },
+        controllen: used,
+        flags: 0,
+    };
+    // SAFETY: `msg`, `iov`, `buf` and `control` outlive the call, and the
+    // kernel only reads them.
+    let ret = unsafe {
+        syscall3(
+            nr::SENDMSG,
+            fd as usize,
+            &msg as *const MsgHdr as usize,
+            flags as usize,
+        )
+    };
+    from_ret(ret)
+}
+
+/// Receive into `buf` from a connected Unix socket, with any descriptors
+/// sent alongside. [`MSG_CMSG_CLOEXEC`] is always added to `flags`, so a
+/// received descriptor never leaks into a program this process starts.
+///
+/// The kernel never merges data sent with descriptors into an earlier
+/// read, so the descriptors belong to the first byte of `buf`.
+pub fn recv_with_fds(fd: i32, buf: &mut [u8], flags: i32) -> Result<Received, Errno> {
+    let mut control = Control([0; CONTROL]);
+    let iov = IoVec {
+        base: buf.as_mut_ptr() as usize,
+        len: buf.len(),
+    };
+    let mut msg = MsgHdr {
+        name: 0,
+        namelen: 0,
+        iov: &iov as *const IoVec as usize,
+        iovlen: 1,
+        control: control.0.as_mut_ptr() as usize,
+        controllen: CONTROL,
+        flags: 0,
+    };
+    // SAFETY: `msg` points at `iov`, which points at `buf`, and at
+    // `control`; all are exclusively borrowed for the call and the kernel
+    // writes at most their stated lengths.
+    let ret = unsafe {
+        syscall3(
+            nr::RECVMSG,
+            fd as usize,
+            &mut msg as *mut MsgHdr as usize,
+            (flags | MSG_CMSG_CLOEXEC) as usize,
+        )
+    };
+    let bytes = from_ret(ret)?;
+    let mut got = Received {
+        bytes,
+        fds: [-1; MAX_FDS],
+        count: 0,
+        truncated: msg.flags & MSG_CTRUNC != 0,
+    };
+    let end = msg.controllen.min(CONTROL);
+    let mut at = 0;
+    while at + CMSG_HDR <= end {
+        // SAFETY: `at` is a multiple of 8 within `control`, which the kernel
+        // filled with well-formed headers up to `controllen`.
+        let header = unsafe { core::ptr::read(control.0.as_ptr().add(at).cast::<CmsgHdr>()) };
+        if header.len < CMSG_HDR || at + header.len > end {
+            break;
+        }
+        if header.level == SOL_SOCKET && header.ty == SCM_RIGHTS {
+            let data = &control.0[at + CMSG_HDR..at + header.len];
+            for raw in data.as_chunks::<4>().0 {
+                let fd = i32::from_ne_bytes(*raw);
+                match got.count < MAX_FDS {
+                    true => {
+                        got.fds[got.count] = fd;
+                        got.count += 1;
+                    }
+                    // Can't happen with a buffer of MAX_FDS, but never leak one.
+                    false => {
+                        let _ = crate::fd::close(fd);
+                        got.truncated = true;
+                    }
+                }
+            }
+        }
+        at += header.len.next_multiple_of(8);
+    }
+    Ok(got)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,5 +987,123 @@ mod tests {
         let s = socket(AF_INET, SOCK_STREAM, 0).expect("socket");
         assert_eq!(getpeername_in(s), Err(Errno(107))); // ENOTCONN
         fd::close(s).ok();
+    }
+
+    fn inode(fd: i32) -> (u64, u64) {
+        use std::os::fd::BorrowedFd;
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: `fd` is open for the duration of the borrow.
+        let file = unsafe { BorrowedFd::borrow_raw(fd) }
+            .try_clone_to_owned()
+            .expect("dup");
+        let meta = std::fs::File::from(file).metadata().expect("stat");
+        (meta.dev(), meta.ino())
+    }
+
+    fn pair() -> (
+        std::os::unix::net::UnixStream,
+        std::os::unix::net::UnixStream,
+    ) {
+        std::os::unix::net::UnixStream::pair().expect("pair")
+    }
+
+    #[test]
+    fn descriptors_arrive_in_order_close_on_exec() {
+        use std::os::fd::AsRawFd;
+        let (a, b) = pair();
+        let (r, w) = fd::pipe2(0).expect("pipe");
+        let file = std::fs::File::open("/proc/self/exe").expect("open");
+        let sent = [w, file.as_raw_fd(), r];
+        assert_eq!(send_with_fds(a.as_raw_fd(), b"L", &sent, 0), Ok(1));
+        let mut buf = [0u8; 4];
+        let got = recv_with_fds(b.as_raw_fd(), &mut buf, 0).expect("recv");
+        assert_eq!(
+            (got.bytes, &buf[..1], got.count, got.truncated),
+            (1, &b"L"[..], 3, false)
+        );
+        for (theirs, ours) in got.fds().iter().zip(sent) {
+            assert_ne!(*theirs, ours);
+            assert_eq!(inode(*theirs), inode(ours));
+            let flags = fd::fcntl(*theirs, fd::F_GETFD, 0).expect("F_GETFD");
+            assert_eq!(flags & fd::FD_CLOEXEC, fd::FD_CLOEXEC);
+        }
+        for fd in got.fds().iter().chain(&[r, w]) {
+            fd::close(*fd).expect("close");
+        }
+    }
+
+    #[test]
+    fn data_without_descriptors_reads_as_none() {
+        use std::os::fd::AsRawFd;
+        let (a, b) = pair();
+        assert_eq!(send_with_fds(a.as_raw_fd(), b"plain", &[], 0), Ok(5));
+        let mut buf = [0u8; 8];
+        let got = recv_with_fds(b.as_raw_fd(), &mut buf, 0).expect("recv");
+        assert_eq!((got.bytes, got.count, got.truncated), (5, 0, false));
+        drop(a);
+        let got = recv_with_fds(b.as_raw_fd(), &mut buf, 0).expect("recv");
+        assert_eq!((got.bytes, got.count), (0, 0));
+    }
+
+    #[test]
+    fn too_many_or_no_byte_is_refused() {
+        use std::os::fd::AsRawFd;
+        let (a, _b) = pair();
+        let fds = [a.as_raw_fd(); MAX_FDS + 1];
+        assert_eq!(
+            send_with_fds(a.as_raw_fd(), b"x", &fds, 0),
+            Err(Errno::EINVAL)
+        );
+        assert_eq!(
+            send_with_fds(a.as_raw_fd(), b"", &fds[..1], 0),
+            Err(Errno::EINVAL)
+        );
+    }
+
+    #[test]
+    fn more_than_fit_is_truncated_and_the_rest_closed() {
+        use std::os::fd::AsRawFd;
+        // Send MAX_FDS + 1 with a raw sendmsg the API itself refuses to make.
+        let (a, b) = pair();
+        let one = a.as_raw_fd();
+        let n = MAX_FDS + 1;
+        let len = CMSG_HDR + n * 4;
+        #[repr(C, align(8))]
+        struct Big([u8; 64]);
+        let mut control = Big([0; 64]);
+        let header = CmsgHdr {
+            len,
+            level: SOL_SOCKET,
+            ty: SCM_RIGHTS,
+        };
+        // SAFETY: 8-aligned buffer, larger than the header.
+        unsafe { core::ptr::write(control.0.as_mut_ptr().cast::<CmsgHdr>(), header) };
+        for i in 0..n {
+            control.0[CMSG_HDR + i * 4..CMSG_HDR + i * 4 + 4].copy_from_slice(&one.to_ne_bytes());
+        }
+        let byte = *b"x";
+        let iov = IoVec {
+            base: byte.as_ptr() as usize,
+            len: 1,
+        };
+        let msg = MsgHdr {
+            name: 0,
+            namelen: 0,
+            iov: &iov as *const IoVec as usize,
+            iovlen: 1,
+            control: control.0.as_ptr() as usize,
+            controllen: len.next_multiple_of(8),
+            flags: 0,
+        };
+        // SAFETY: as in `send_with_fds`.
+        let ret = unsafe { syscall3(nr::SENDMSG, one as usize, &msg as *const MsgHdr as usize, 0) };
+        assert_eq!(from_ret(ret), Ok(1));
+        let mut buf = [0u8; 1];
+        let got = recv_with_fds(b.as_raw_fd(), &mut buf, 0).expect("recv");
+        assert!(got.truncated);
+        assert!(got.count <= MAX_FDS);
+        for fd in got.fds() {
+            fd::close(*fd).expect("close");
+        }
     }
 }
