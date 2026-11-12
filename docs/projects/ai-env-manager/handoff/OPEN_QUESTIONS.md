@@ -1,0 +1,14 @@
+# Open questions — ai-env-manager
+Claude Code: append here instead of stopping when a question isn't blocking.
+Format: `- [ ] Q<n> (<date>, blocking? y/n): <question> — interim choice: <what you did>`
+Resolved items are checked and point to the D#/QA entry that answers them.
+
+- [x] Q1 → D14 (2026-11-12, y for M1): How does Ai Env Manager relate to `library/`, which already catalogs prompts, skills, mods, claude-md and agents-md entries from git sources in place? a) absorb it over time (reuse its kinds and `sources.json`; `build.py` keeps running until the Rust core renders the catalog), b) keep separate, c) replace now. — interim choice: a) for the model only (D10); `library/` untouched. Asked on a decision card, 2026-11-12.
+- [x] Q2 → D16 (2026-11-12, y for cards/code): Priority tier in `docs/projects/millwright/PRIORITIES.md`? millwright-expert recommends Low (like `skill_pack`, `expert_agents`), or fold into `skill_pack`/`library/`. — interim choice: design pack only (D13).
+- [ ] Q3 (2026-11-12, n): Desktop at all? Keep M4's Tauri shell, or stop at CLI plus MCP? — interim choice: CLI and MCP only; no desktop work planned.
+- [ ] Q4 (2026-11-12, n): Which tools ship first: all 32 catalog entries, or Claude Code, Codex, Cursor, Gemini CLI, verified, then more? — interim choice: the four.
+- [ ] Q5 (2026-11-12, n until M0 code): Is Windows first-class from M0 (junction fallback tested in CI), or macOS and Linux first? — interim choice: Windows in M0 CI, since Nano's main machine is Windows (rusty_term/condrv work) and the fallback is the hard part.
+- [ ] Q6 (2026-11-12, y for M3): How are key md files managed: link whole files (like skills), or compose named sections into a tool's CLAUDE.md/AGENTS.md? Composition edits files we don't own (D6, D8). — interim choice: catalog-only for md entries; no writes.
+- [ ] Q7 (2026-11-12, n): Overlaps to settle before cards: `skill_pack` (a source, and its Eval-Kit hook in M3), `expert_agents` (agent prompts), rusty_mux C39 agent setup (`--agent claude|codex|opencode|pi`, remind-me `mem_32c27c18d10346ca8ff6de6df5044bd1`). — interim choice: treat all three as sources or neighbours, not replaced.
+- [ ] Q8 (2026-11-12, n): Is the source doc's recommendation (D3–D9) accepted? remind-me records it as "pending Nano's review". — interim choice: rows stay `[default]`.
+- [ ] Q9 (2026-11-12, n): Sources not read: the doc's embedded architecture diagram (dropped on export; the ASCII sketch in SPEC.md replaces it); the teardown spec on `baileyrd/reverse` branch `claude/project-thread-rni80a` (`targets/skills-manager-2.2.0/spec.md`, outside this session's GitHub scope); the Skills Manager and Skills Desktop breakdown artifacts (`KktUuhC1eFPVrefKYJGPzc`, `2sPPUqZevip7az3NBjWhjP`). — interim choice: the pack relies on the recommendation doc only. Commit the teardown spec here before M0 if implementers need its path table.
