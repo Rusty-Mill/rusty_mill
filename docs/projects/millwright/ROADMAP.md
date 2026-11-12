@@ -29,7 +29,7 @@ B0, then G1, then L2 and P2 together, then L3 and P3 together, then L4. Everythi
 has slack and can slip a phase without delaying the end state.
 
 - Phase 0 and G1 are small, and every later milestone lands through the merge flow G1 creates.
-- B0 ends with Mill Board's paused project status, which is built after G1/B1 close and after #1635 and the ADR-0007 store PR #1438 land (DECISIONS.md board-improvements-order). The 0-to-1 gate cannot pass before then. G1, B1 and B2 do not wait for it. Whether Phase 0 should wait that long is open with Nano (handoff/OPEN_QUESTIONS.md Q8).
+- B0 ends with Mill Board's paused project status, its next change after G1's change in flight and ahead of the rest of B1 and the ADR-0007 store PR #1438 (DECISIONS.md project-status-order, which overrides board-improvements-order for this item). The 0-to-1 gate passes after G1 has started; G1 does not wait for it.
 - L3 is the longest single item and the only one that needs sustained time from Nano
   (golden set, shadow run, judging). Protect it from new design work.
 
@@ -56,7 +56,7 @@ has slack and can slip a phase without delaying the end state.
 
 | Code | Deliverable | Done when | Depends on | Lane | Size | Needs Nano |
 | --- | --- | --- | --- | --- | --- | --- |
-| B0 | Backlog triage | Ledger and Conflux hold no open cards; the paused projects (rocket_league, apprentice_ai, mediboard, rusty_meshed) carry Mill Board's paused project status, with their cards left open under it; each remaining project's proposal is approved and applied | X answers; the paused project status on Mill Board (after G1/B1 and #1438, board-improvements-order) | Coordination, Design | M | E2, X1 to X3, approve each list, approve the paused-status design (X4 to X6 feed S2, S3, B3) |
+| B0 | Backlog triage | Ledger and Conflux hold no open cards; the paused projects (rocket_league, apprentice_ai, mediboard, rusty_meshed) carry Mill Board's paused project status, with their cards left open under it; each remaining project's proposal is approved and applied | X answers; the paused project status on Mill Board (after G1's change, ahead of #1438; project-status-order) | Coordination, Design | M | E2, X1 to X3, approve each list, approve the paused-status design (X4 to X6 feed S2, S3, B3) |
 | B1 | Lean cards and per-agent logins | Agents list summaries by default; each agent signs in as itself; adding a card can set priority and links in one call | G1 | Build | M | M1, M2 |
 | B2 | Own-store design | A design note for the SQLite store, migration and rollback is approved | B0 | Build, Review | S | Approve the design (M3 answered 2026-11-12) |
 | B3 | Migration to the board's own store | Dry run shows no difference; production migration done; the rusty_tick and engine adapters are removed; rusty_tick archived | B2 | Build, Merge steward | L | Authorise the migration and the deletions |
