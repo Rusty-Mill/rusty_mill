@@ -178,6 +178,29 @@ fn grants_and_revokes_name_a_block_a_client_and_a_time() {
 }
 
 #[test]
+fn signals_name_one_of_the_closed_set_and_releases_a_block() {
+    let line = format!(r#"{{"id":8,"op":"signal","block":"{WINDOW}","signal":"term"}}"#);
+    let request = parsed(&line);
+    assert!(matches!(
+        request,
+        Request::Signal {
+            signal: BlockSignal::Term,
+            ..
+        }
+    ));
+    assert_eq!(request.unsupported(NEEDED), Some(NO_SIGNAL));
+    assert_eq!(
+        request.unsupported(NEEDED.union(Features::SIGNAL_RELEASE)),
+        None
+    );
+    let line = format!(r#"{{"id":9,"op":"signal","block":"{WINDOW}","signal":"usr1"}}"#);
+    assert!(refusal(&line).1.contains("`signal` must be"));
+    let line = format!(r#"{{"id":10,"op":"release","block":"{WINDOW}"}}"#);
+    assert!(matches!(parsed(&line), Request::Release { .. }));
+    assert!(refusal(r#"{"id":11,"op":"release"}"#).1.contains("`block`"));
+}
+
+#[test]
 fn input_is_printed_as_hex() {
     assert_eq!(hex(b"ls\r\x00\xff"), "6c730d00ff");
     assert_eq!(hex(&[]), "");

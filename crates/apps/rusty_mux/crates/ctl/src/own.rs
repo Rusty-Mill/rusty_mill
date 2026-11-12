@@ -14,6 +14,10 @@
 //!   lock or keeps a pipe open past the launch.
 //! - With C78: `"hold":true` on a launch keeps the block, read-only, once
 //!   its program exits, until it is closed.
+//! - With C76 (Linux): `{"id":ID,"op":"signal","block":UUID,"signal":S}`
+//!   sends `hup`, `int`, `term`, `kill`, `stop` or `cont` to the block's
+//!   program group, and `{"id":ID,"op":"release","block":UUID}` closes its
+//!   PTY and waits for the program, never killing it.
 //! - With C77: `"input":"owner-only"` on a launch gates its input, and
 //!   `{"id":ID,"op":"grant","block":UUID,"client":UUID,"until":MS}` and
 //!   `{"id":ID,"op":"revoke","block":UUID,"client":UUID}` let another client
@@ -50,7 +54,7 @@ use platform_windows::WindowsUnixStream as UnixStream;
 use rusty_json::{Map, Value};
 use rusty_mux_core::{BlockId, ClientId, Event, InputMode, Size, WindowId};
 use rusty_mux_proto::older::Older;
-use rusty_mux_proto::{Cursor, Features, Launch, Message, Program, Takeover, encode};
+use rusty_mux_proto::{BlockSignal, Cursor, Features, Launch, Message, Program, Takeover, encode};
 use rusty_uuid::Uuid;
 
 use crate::conn::{Conn, connect};
@@ -119,12 +123,20 @@ enum Request {
         block: BlockId,
         client: ClientId,
     },
+    Signal {
+        block: BlockId,
+        signal: BlockSignal,
+    },
+    Release {
+        block: BlockId,
+    },
 }
 
 impl Request {
     /// Why a server offering `offered` can't take this request, if it
     /// can't. An older server skips fields it doesn't know, so it would
-    /// launch an open or unheld block in silence: `own` refuses instead.
+    /// launch an open or unheld block in silence, and fails a message type
+    /// it doesn't know: `own` refuses instead.
     fn unsupported(&self, offered: Features) -> Option<&'static str> {
         let lacks = |feature: Features, why| (!offered.contains(feature)).then_some(why);
         match self {
@@ -139,6 +151,9 @@ impl Request {
             }
             Self::Grant { .. } | Self::Revoke { .. } => lacks(GATE, NO_GATE),
             Self::Close { .. } => None,
+            Self::Signal { .. } | Self::Release { .. } => {
+                lacks(Features::SIGNAL_RELEASE, NO_SIGNAL)
+            }
         }
     }
 
@@ -150,6 +165,7 @@ impl Request {
 
 const NO_GATE: &str = "the server cannot gate input";
 const NO_HOLD: &str = "the server cannot hold a block after its program exits";
+const NO_SIGNAL: &str = "the server cannot signal or release a block";
 
 /// A request sent and not yet answered, with the caller's id.
 struct Pending {
@@ -304,6 +320,10 @@ impl Owner<'_> {
             Request::Revoke { block, client } => {
                 (Message::RevokeLease { req, block, client }, false)
             }
+            Request::Signal { block, signal } => {
+                (Message::SignalBlock { req, block, signal }, false)
+            }
+            Request::Release { block } => (Message::ReleaseBlock { req, block }, false),
         };
         // A failed write shows as the connection dropping, which the
         // reader reports; the request is then pending like any other.
@@ -452,11 +472,13 @@ fn open(
 ) -> Result<(Link, Option<Cursor>), Failure> {
     let stream = connect(socket, &Stop::default())?;
     let mut conn = Conn::new(stream.try_clone()?, Stop::default());
-    // HOLD is asked for too; without it, `own` refuses a held launch.
+    // HOLD and SIGNAL_RELEASE are asked for too; without them, `own`
+    // refuses a held launch, a signal and a release itself.
     let asked = NEEDED
         .union(GATE)
         .union(AGENT)
         .union(Features::HOLD)
+        .union(Features::SIGNAL_RELEASE)
         .union(Features::LEASE_REQUESTS);
     conn.send(&Message::Hello {
         version: Some(rusty_mux_proto::VERSION.into()),
@@ -649,6 +671,17 @@ fn request(value: &Value) -> Result<Request, String> {
         Some("revoke") => Ok(Request::Revoke {
             block: BlockId::from_uuid(uuid(value, "block")?),
             client: ClientId::from_uuid(uuid(value, "client")?),
+        }),
+        Some("signal") => Ok(Request::Signal {
+            block: BlockId::from_uuid(uuid(value, "block")?),
+            signal: value
+                .get("signal")
+                .and_then(Value::as_str)
+                .and_then(BlockSignal::from_name)
+                .ok_or("`signal` must be hup, int, term, kill, stop or cont")?,
+        }),
+        Some("release") => Ok(Request::Release {
+            block: BlockId::from_uuid(uuid(value, "block")?),
         }),
         Some(op) => Err(format!("unknown op `{op}`")),
         None => Err("no `op`".into()),

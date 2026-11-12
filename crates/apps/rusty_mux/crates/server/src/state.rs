@@ -1,6 +1,6 @@
 //! The server's state: the model, each block's PTY and grid, each client's queue.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
@@ -100,12 +100,25 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::SHUTDOWN)
     .union(Features::BACKGROUND_HISTORY)
     .union(Features::AGENT_LAUNCH)
-    .union(Features::HOLD);
+    .union(Features::HOLD)
+    .union(UNIX_ONLY);
+
+/// Offered on Linux only: signal and release (C76) act on a Unix process
+/// group, and orch, their one client, runs there.
+#[cfg(target_os = "linux")]
+const UNIX_ONLY: Features = Features::SIGNAL_RELEASE;
+#[cfg(not(target_os = "linux"))]
+const UNIX_ONLY: Features = Features::NONE;
 
 /// An owner whose outbox holds more than this can't be told of more
 /// input, so an owner-only block refuses it (C77): half the budget, so a
 /// refusal comes well before the owner is dropped.
 const INPUT_REPORT_LIMIT: usize = crate::outbox::BUDGET / 2;
+
+/// Why a request that needs a block's program is refused once there is
+/// none (C76).
+#[cfg(target_os = "linux")]
+const EXITED: &str = "exited: the block's program is no longer running";
 
 /// The server's clock in unix ms, which grants are given in (C77).
 fn now_ms() -> u64 {
@@ -122,9 +135,36 @@ fn name_seed() -> u64 {
     u64::from_le_bytes(seed)
 }
 
+/// Fires when a block's PTY is released (C76), so a write already under
+/// way gives the master up at once instead of holding it open and
+/// delivering its bytes later.
+#[derive(Default)]
+pub(crate) struct Revoke {
+    fired: Cell<bool>,
+    notify: Notify,
+}
+
+impl Revoke {
+    #[cfg(target_os = "linux")]
+    fn fire(&self) {
+        self.fired.set(true);
+        self.notify.notify_waiters();
+    }
+
+    /// Resolves once the PTY is released; at once if it already was.
+    pub(crate) async fn fired(&self) {
+        if self.fired.get() {
+            return;
+        }
+        self.notify.notified().await;
+    }
+}
+
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
     pub(crate) pty: Rc<Pty>,
+    /// The block's release, which abandons this write (C76).
+    pub(crate) revoke: Rc<Revoke>,
     pub(crate) data: Vec<u8>,
     /// With [`Features::ECHO_ACK`]: the block and `Input` request to
     /// [`State::written`] once the write returns.
@@ -175,11 +215,16 @@ struct BlockRt {
     /// Launched with `hold` (C78): the block stays, read-only, once its
     /// program exits.
     hold: bool,
+    /// Its PTY was released (C76): read-only, with its program, if still
+    /// running, left to its owner.
+    released: bool,
 }
 
 /// A block's running program: its PTY and the task reading it.
 struct Live {
     pty: Rc<Pty>,
+    /// Fired on release, so pending writes drop their `pty` (C76).
+    revoke: Rc<Revoke>,
     process: Process,
     /// Tells the reader a key was written, so it drains when its grace ends.
     wake: Rc<Notify>,
@@ -226,6 +271,7 @@ impl Unscreened {
         ));
         let live = Live {
             pty: self.pty,
+            revoke: Rc::default(),
             process: self.process,
             wake,
             reader,
@@ -257,6 +303,7 @@ impl BlockRt {
             spool: None,
             input_seq: 0,
             hold: false,
+            released: false,
         }
     }
 
@@ -270,6 +317,9 @@ impl BlockRt {
     /// The program, or a refusal saying the block is read-only.
     fn live(&self) -> Result<&Live, Refusal> {
         self.live.as_ref().ok_or_else(|| {
+            if self.released {
+                return "the block is read-only: its pty was released".into();
+            }
             if self.hold {
                 return "the block is read-only: its program has exited".into();
             }
@@ -1229,6 +1279,23 @@ impl State {
                 self.require(client, Features::SHUTDOWN, "shutdown")
                     .and_then(|()| self.shutdown(client)),
             ),
+            #[cfg(target_os = "linux")]
+            M::SignalBlock { req, block, signal } => (
+                req,
+                self.require(client, Features::SIGNAL_RELEASE, "signal-block")
+                    .and_then(|()| self.signal_block(client, block, signal)),
+            ),
+            #[cfg(target_os = "linux")]
+            M::ReleaseBlock { req, block } => (
+                req,
+                self.require(client, Features::SIGNAL_RELEASE, "release-block")
+                    .and_then(|()| self.release_block(shared, client, block)),
+            ),
+            #[cfg(not(target_os = "linux"))]
+            M::SignalBlock { req, .. } | M::ReleaseBlock { req, .. } => (
+                req,
+                Err("signal and release are supported on Linux only".into()),
+            ),
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
@@ -1275,6 +1342,95 @@ impl State {
                     .map(|()| Outcome::Done(None))
                     .map_err(Refusal::from)
             })
+    }
+
+    /// Sends `signal` to `block`'s program group, for its owner (C76).
+    #[cfg(target_os = "linux")]
+    fn signal_block(
+        &self,
+        client: ClientId,
+        block: BlockId,
+        signal: rusty_mux_proto::BlockSignal,
+    ) -> Result<Outcome, Refusal> {
+        self.owner_only(client, block)?;
+        let live = self.running(block)?;
+        live.process
+            .signal(signal)
+            .map_err(|e| format!("signalling the block's program: {e}"))?;
+        Ok(Outcome::Done(None))
+    }
+
+    /// Closes `block`'s PTY and waits for its program, never killing it,
+    /// for its owner (C76). The block is read-only from now on; once the
+    /// program exits, [`Self::exited`] keeps a held block and closes any
+    /// other, as for a program that exits by itself.
+    #[cfg(target_os = "linux")]
+    fn release_block(
+        &mut self,
+        shared: &Shared,
+        client: ClientId,
+        block: BlockId,
+    ) -> Result<Outcome, Refusal> {
+        self.owner_only(client, block)?;
+        self.running(block)?;
+        let rt = self
+            .blocks
+            .get_mut(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        let live = rt.live.take().ok_or(EXITED)?;
+        // Saved and restored read-only from now on (D72).
+        rt.started.read_only = true;
+        rt.unsaved = true;
+        rt.released = true;
+        live.reader.abort();
+        // A write already under way on another connection holds the master
+        // too: it gives it up now, so the master closes with this drop.
+        live.revoke.fire();
+        live.pty.release();
+        drop(live.pty);
+        self.end_echo(block);
+        // Disarmed here, before any future holds it: a task dropped unpolled
+        // must not kill the program either.
+        let Some(released) = live.process.release() else {
+            return Ok(Outcome::Done(None));
+        };
+        let shared = shared.clone();
+        rusty_tokio::task::spawn_local(async move {
+            let status = released.wait().await;
+            shared.borrow_mut().exited(block, status);
+        });
+        Ok(Outcome::Done(None))
+    }
+
+    /// `block`'s running program, or why there is none.
+    #[cfg(target_os = "linux")]
+    fn running(&self, block: BlockId) -> Result<&Live, Refusal> {
+        let rt = self
+            .blocks
+            .get(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        rt.live.as_ref().ok_or_else(|| EXITED.into())
+    }
+
+    /// Refuses `client` unless `block` has an owner and it is `client`:
+    /// signal and release reach only an owned block, for its owner, so a
+    /// block made without `own` behaves as before (C76, D230). Unlike
+    /// [`Self::owns`], an unowned block is refused too.
+    #[cfg(target_os = "linux")]
+    fn owner_only(&self, client: ClientId, block: BlockId) -> Result<(), Refusal> {
+        let target = self
+            .mux
+            .block(block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        if target.owner().is_none() {
+            return Err(format!(
+                "block {block} has no owner: only an owned block's owner may signal or release it"
+            )
+            .into());
+        }
+        self.mux
+            .authorize_owner(client, block)
+            .map_err(Refusal::from)
     }
 
     /// Refuses unless `client` may change each of `blocks`: nobody else
@@ -1395,10 +1551,12 @@ impl State {
                 };
                 let data = keys::encode(keys, rt.grid.app_cursor_keys)
                     .map_err(|e| format!("{method}: {e}"))?;
-                let pty = rt.live()?.pty.clone();
+                let live = rt.live()?;
+                let (pty, revoke) = (live.pty.clone(), live.revoke.clone());
                 let report = self.reporting(client, block)?;
                 return Ok(Outcome::Write(PtyWrite {
                     pty,
+                    revoke,
                     data,
                     key: None,
                     report,
@@ -1785,18 +1943,18 @@ impl State {
         self.mux
             .authorize_input(client, block)
             .map_err(Refusal::from)?;
-        let pty = self
+        let live = self
             .blocks
             .get(&block)
             .ok_or_else(|| format!("block {block} has no PTY"))?
-            .live()?
-            .pty
-            .clone();
+            .live()?;
+        let (pty, revoke) = (live.pty.clone(), live.revoke.clone());
         let report = self.reporting(client, block)?;
         self.check_echo(block);
         let key = self.echoes(client).then_some((block, req));
         Ok(Outcome::Write(PtyWrite {
             pty,
+            revoke,
             data,
             key,
             report,
@@ -1938,9 +2096,32 @@ impl State {
         let Some(rt) = self.blocks.get_mut(&block) else {
             return;
         };
+        // No reader drains a released block: its keys were resolved by
+        // the release's `EchoMode` instead (`end_echo`).
+        let Some(live) = &rt.live else {
+            return;
+        };
+        live.wake.notify_one();
         rt.waiting.written(client, req, at);
-        if let Some(live) = &rt.live {
-            live.wake.notify_one();
+    }
+
+    /// `block`'s output has ended for good (C76 release): nothing will be
+    /// read again, so no key can be acked under [`Message::EchoAck`]'s
+    /// contract. Drops its keys and says the echo is now
+    /// [`Echo::Unknown`], which tells
+    /// every client to stop predicting and drop its guesses: the terminal
+    /// resolution of every pending key, the one written after this too.
+    #[cfg(target_os = "linux")]
+    fn end_echo(&mut self, block: BlockId) {
+        let Some(rt) = self.blocks.get_mut(&block) else {
+            return;
+        };
+        rt.waiting = Waiting::default();
+        if std::mem::replace(&mut rt.echo, Echo::Unknown) == Echo::Unknown {
+            return;
+        }
+        for client in self.attached(block) {
+            self.send_echo(client, block);
         }
     }
 
