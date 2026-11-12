@@ -200,7 +200,8 @@ pub(crate) fn block(setup: &SshSetup) -> String {
 const INCLUDE_DEPTH: u8 = 16;
 
 /// Whether `config`, or a file it includes, names `dest` in a `Host` line
-/// or a `Match host`/`originalhost` list, without a wildcard. `Include`
+/// or a `Match host`/`originalhost` list, without a wildcard, ignoring
+/// ASCII case as ssh does. `Include`
 /// patterns are expanded the way ssh does for `*` and `?` in the file name.
 /// `ssh_dir` is `~/.ssh`, which every relative `Include` is read against,
 /// in nested files too. A missing file names nothing, as for ssh; a file
@@ -231,8 +232,8 @@ pub(crate) fn has_host(
         };
         let words = || value.split_whitespace().map(|w| w.trim_matches('"'));
         let found = match key.to_ascii_lowercase().as_str() {
-            "host" => words().any(|w| w == dest),
-            "match" => matched_hosts(words()).any(|w| w == dest),
+            "host" => words().any(|w| w.eq_ignore_ascii_case(dest)),
+            "match" => matched_hosts(words()).any(|w| w.eq_ignore_ascii_case(dest)),
             "include" => {
                 for word in words() {
                     for file in included(ssh_dir, word)? {
@@ -267,13 +268,18 @@ fn matched_hosts<'a>(words: impl Iterator<Item = &'a str>) -> impl Iterator<Item
     .flat_map(|list| list.split(','))
 }
 
-/// The files an `Include` of `word` reads: `~` is the home above `dir`
-/// (`~/.ssh`), and a relative path is in `~/.ssh`. `*` and `?` in the
-/// file name match as in glob(3), never a leading `.`; anywhere else, or
-/// `[`, they are refused rather than guessed at.
+/// The files an `Include` of `word` reads: `~/` (or `~\`) is the home
+/// above `dir` (`~/.ssh`), and a relative path is in `~/.ssh`. `*` and `?`
+/// in the file name match as in glob(3), a leading `.` only when the
+/// pattern starts with one; anywhere else, or `[`, or another user's
+/// `~user/`, they are refused rather than guessed at.
 fn included(dir: &Path, word: &str) -> Result<Vec<PathBuf>, String> {
-    let path = match word.strip_prefix("~/") {
+    let home = word.strip_prefix("~/").or_else(|| word.strip_prefix("~\\"));
+    let path = match home {
         Some(rest) => dir.parent().unwrap_or(dir).join(rest),
+        None if word.starts_with('~') => {
+            return Err(format!("`Include {word}`: can't check another user's home"));
+        }
         None => dir.join(word),
     };
     let wild = |s: &str| s.contains(['*', '?', '[']);
@@ -297,7 +303,8 @@ fn included(dir: &Path, word: &str) -> Result<Vec<PathBuf>, String> {
     for entry in entries {
         let entry = entry.map_err(|e| format!("{}: {e}", parent.display()))?;
         let file = entry.file_name().to_string_lossy().into_owned();
-        if !file.starts_with('.') && glob(&pattern, &file) {
+        let hidden = file.starts_with('.') && !pattern.starts_with('.');
+        if !hidden && glob(&pattern, &file) {
             files.push(entry.path());
         }
     }
@@ -809,6 +816,23 @@ mod tests {
         );
         std::fs::write(&config, "Match exec box\n").expect("write");
         assert_eq!(has_host(&config, &dir, "box", None, 0), Ok(false));
+        std::fs::write(&config, "Host BOX\nMatch host Lab\n").expect("write");
+        assert_eq!(
+            has_host(&config, &dir, "box", None, 0),
+            Ok(true),
+            "any case"
+        );
+        assert_eq!(
+            has_host(&config, &dir, "lab", None, 0),
+            Ok(true),
+            "any case"
+        );
+        std::fs::write(&config, "Include config.d/.h*\n").expect("write");
+        assert_eq!(
+            has_host(&config, &dir, "secret", None, 0),
+            Ok(true),
+            "a dot pattern matches dot files"
+        );
         let _gone = std::fs::remove_dir_all(dir);
     }
 
@@ -831,6 +855,11 @@ mod tests {
         assert!(
             has_host(&config, &dir, "box", None, 0).is_err(),
             "itself, forever"
+        );
+        std::fs::write(&config, "Include ~other/.ssh/x\n").expect("write");
+        assert!(
+            has_host(&config, &dir, "box", None, 0).is_err(),
+            "another user's home"
         );
         std::fs::write(&config, "Include config.d/missing\nInclude nothing/*\n").expect("write");
         assert_eq!(
