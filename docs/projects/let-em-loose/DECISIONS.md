@@ -134,6 +134,7 @@ Precise contracts used by this guide:
 | D124 | #1432 S5 external refs design (ADR-0006) approved as written for implementation | [stated] 2026-11-11 (#1432) |
 | D125 | #1432 S5 clarifications: `unknown` refs not evictable, S5a document readback, refs on the domain `Card` | [default] 2026-11-12 (#1432) |
 | D126 | #1432 S5: card summaries drop `has_execution` and `has_external_refs` (supersedes D123 item 4) | [stated] 2026-11-12 (#1432) |
+| D127 | Design freeze: no new Let Em Loose design until its first run | [stated] 2026-11-12 (general) |
 
 ## D1. Lenses, not stages
 
@@ -1228,3 +1229,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_a077a68ee1884f3ab39ac805e39850dc
 **Key.** lel:1432:external-refs-summary-flags-dropped
 **Source.** Nano chose option A, "Drop both flags", on decision card `cmsg_017MoLbtrGAAcyE1PVPZXuN62KVkvMfLiGbUKg62y2EiuZ` ("Drop the two summary flags from the external refs design?"), 2026-11-12T00:13:55Z, Mill_Board project thread `cmsg_017MoLbtrGAAcyE1PVPZXuN6Ek2MsYp9T23hpHFtsj2DWp`, answering the expert's escalation from the PR #1618 review (D125). Supersedes D123 item (4); narrows D124. ADR-0006 `crates/apps/rusty_mill_board/docs/adr/0006-external-execution-refs.md` still lists the flags and needs the matching edit in PR #1618. Numbered D126 after D125.
+
+## D127. Design freeze: no new Let Em Loose design until its first run
+
+**Decision.** Let Em Loose is under a design freeze until its first run. No new design is added to the project until then; work goes into building and running what is already approved. This is a scope rule and changes no existing design or decision.
+**Why.** It is the project's own rule: build the slice before designing more.
+**Rejected.** Continuing to add designs before the first run.
+**Tag.** [stated] · remind-me: mem_1bae9f1358544fc3a517998b983b896a
+**Key.** lel:general:design-freeze-until-first-run
+**Source.** Nano, Millwright project thread message `cmsg_01632CBKCXsWe6RyFWvE9dovLW5oB3NEACWHuvMnsptmYP`, 2026-11-12T00:34:16Z: "Let Em Loose is under a design freeze until its first run. Add no design there." Answers `docs/projects/millwright/QUESTIONS.md` L9. Numbered D127 after D126.

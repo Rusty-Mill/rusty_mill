@@ -29,7 +29,6 @@ These are also tracked by `let-em-loose-expert`; its pack is the authority for t
 | L6 | Accept a first experiment run that launches builders from the existing Codex container, adding jailed terminals afterwards? | Yes. It takes most of the second milestone off the critical path. |
 | L7 | Two approved designs (builder session, gaps) are lost. Are there copies, or are versions rebuilt from the decision log acceptable for re-approval? | Accept rebuilt versions. |
 | L8 | Approve the first milestone's designs as a batch, instead of one approval per card? | Yes. Most of it is deployment, prompts and configuration. |
-| L9 | Freeze new Let Em Loose design until the first run has happened? | Yes. It is the project's own rule: build the slice before designing more. |
 | L10 | Sign the golden set once it is drafted? Agreed 2026-11-04; no draft exists yet. | Nothing to do until the draft arrives. |
 | L11 | Update the project's docs, which list "agents merging PRs" as a non-goal, when the new merge rule takes effect? | Yes, in the same change that lifts the rule. |
 
@@ -43,7 +42,7 @@ These are also tracked by `let-em-loose-expert`; its pack is the authority for t
 | M4 | With Nano out of the gates, who commits work from the backlog? | Nano, by setting priorities per project or milestone; agents pull from that. |
 | M5 | Does the ask-first list (data migrations, deletions, dependency and toolchain bumps, public API changes) still reach Nano once agents may merge and deploy? | Yes, keep it. |
 | M6 | Where do the evidence gates live? | In Let Em Loose. Do not build richer gate machinery into Mill Board's columns. |
-| M7 | Drop the Hermes Kanban pilot? | Yes. "No fourth executor" is a settled decision. |
+| M7 | Drop the Hermes Kanban pilot agreed in the 2026-11-10 Mill Board audit? | Yes. One executor fewer to keep honest. ("No fourth executor" is Let Em Loose D20, which Nano reopened for mux-hosted agents on 2026-11-04, so it is not by itself a reason.) |
 | O1 | Update the Assistant Operating Model with the audit findings (lanes bound to credentials, design produces notes not cards, research enters as claims, the board's own store, deploys)? | Yes. |
 | O2 | Create a GitHub identity for Claude's work, so its pull requests and reviews stop posting as Nano? | Yes. Dottius already has one; GitHub's own review rules can then enforce cross-family review. |
 | O3 | Confirm Duetius as coordinator, including choosing between two agents' positions on reversible changes? He is Claude-family, like the primary builder. | Yes for routing and chasing. For disputes over Claude-authored work, Dottius or Codex decides. |

@@ -14,6 +14,7 @@ Only what Nano has stated. Each row gives the date, the reason, and where he sai
 | experiments | Ledger, Conflux and Swarm OS were deliberate experiments: a different model designing memory or coordination without being told about the existing systems. | To see whether another model would produce a different design. | 2026-11-10 | `mem_07c124e9f8f74ec4a742f6496b9ca070`, `mem_c3d5bbd1aa7d445688e01f1a05dbec75` |
 | M-merge | Gates should not be human approvals. The 2026-10-27 rule that agents never queue or merge was wrong: agents may queue, merge and deploy once machine-verified evidence checks pass. **Not in effect** until those checks and per-agent credentials exist; until then AGENTS.md stands as written. | Nano mostly rubber-stamps approvals and does not want to be the bottleneck. | 2026-11-10 | `mem_3dc7f50871404442837cc6368f522fb3` |
 | duetius | Duet, called Duetius, is the Claude-based agent, alongside Dottius (ChatGPT-based). | — | 2026-11-10 | `mem_1c5dc78d5a114ddd99f4d2e197c33604` |
+| lel-freeze | Let Em Loose is under a design freeze until its first run. Answers L9. Recorded as Let Em Loose D127. | Run before designing more. | 2026-11-12 | `mem_1bae9f1358544fc3a517998b983b896a` |
 
 ## Not decided
 

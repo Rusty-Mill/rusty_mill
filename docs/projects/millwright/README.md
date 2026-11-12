@@ -38,13 +38,19 @@ its exit test passes, not when its cards close.
   intent to merge.
 - **Ask-first still applies:** migrations, deletions, dependency and toolchain bumps,
   public API changes.
-- **AGENTS.md is in force as written.** The merge rule changes only in Phase 1, after
-  per-agent identities and review rules exist (see DECISIONS.md, M-merge).
+- **AGENTS.md is in force as written.** The merge rule changes only once machine-verified
+  evidence checks and per-agent credentials exist (DECISIONS.md, M-merge). G1 builds them.
 
 ## What waits until Phase 3 passes
 
 New repositories, new Let Em Loose design, the knowledge pipeline, the Converge kernel,
 the remind-me UI overhaul and graph view, the Mill Board live flow view.
+
+## Where the work lives
+
+Mill Board, Let Em Loose (BBP, orch) and the shared crates are in `rusty_mill`. remind-me
+(`rusty-remind-me`) and Portfolio Intelligence (`portfolio-intelligence`, with its own
+`portfolio-intelligence-expert`) live in their own repositories.
 
 ## Files
 
@@ -52,9 +58,11 @@ the remind-me UI overhaul and graph view, the Mill Board live flow view.
 - [QUESTIONS.md](QUESTIONS.md): open questions for Nano, with recommendations.
 - [DECISIONS.md](DECISIONS.md): what Nano has decided, with date and source.
 - [architecture.svg](architecture.svg): agents, shared systems, and what is off the main path.
+- [handoff/](handoff/SPEC.md): the pack behind `millwright-expert`, which answers programme
+  questions (phase, gate, sequencing, which milestone, what waits) before Nano is asked.
 
 ## Sources
 
 The audits and working drafts live outside the repo: remind-me audit, Mill Board audit,
 Portfolio Intelligence audit, the five-repo ecosystem audit and the Assistant Operating
-Model. Their links are in remind-me under the tag `millwright`.
+Model. Their links are in remind-me under the tags `audit` (2026-11-10) and `millwright`.

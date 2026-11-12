@@ -20,7 +20,8 @@ answer to M1, O2, L6 or R2 changes the shape of G1, L3 or R3.
 | Portfolio Intelligence | P0 MVP path | P1 Slim down | **P2 Live path** | **P3 Overlaps** | P4 Agent access |
 | Side projects | S0 Close out | S1 Hygiene | S2 Trials | S3 Jujutsu | S4 Converge |
 
-Bold marks the critical path.
+Bold marks the critical path. remind-me and Portfolio Intelligence work happens in their
+own repositories; everything else is in `rusty_mill`.
 
 ## Critical path
 
@@ -45,7 +46,7 @@ has slack and can slip a phase without delaying the end state.
 | Code | Deliverable | Done when | Depends on | Lane | Size | Needs Nano |
 | --- | --- | --- | --- | --- | --- | --- |
 | G0 | Project priorities and the entry rule | Every active project has a priority; "notes first, cards on commitment" is in AGENTS.md | B0 | Nano, Design | S | M4, E1, E3 |
-| G1 | Agent identities, least-privilege roles, cross-family review; the new merge rule takes effect | The Phase 1 gate demonstration passes on rusty_mill and remind-me | G0 | Build, Merge steward | M | M1, M2, M5, O1 to O4 |
+| G1 | Agent identities, least-privilege roles, cross-family review, and the machine-verified evidence checks M-merge requires; only then does the new merge rule take effect | The Phase 1 gate demonstration passes on rusty_mill and remind-me | G0 | Build, Merge steward | M | M1, M2, M5, O1 to O4 |
 | G2 | Coordinator lane and a metrics baseline | Duetius posts a daily digest; the four numbers are recorded for the first time | G1 | Coordination | S | O3 |
 | G3 | Review of the stopgap | A written comparison of review-gated merges against what the first runs showed, with changes proposed | L2, P2 | Coordination, Research | S | Read and react |
 | G4 | Evidence gates take over | Work routed through Let Em Loose merges on its evidence; review-based gating stays for everything else | L3, G3 | Build, Merge steward | M | Inbox only |
@@ -74,7 +75,7 @@ has slack and can slip a phase without delaying the end state.
 
 | Code | Deliverable | Done when | Depends on | Lane | Size | Needs Nano |
 | --- | --- | --- | --- | --- | --- | --- |
-| L0 | First milestone committed | Its six cards are in Ready with batch-approved designs; the lost designs are rebuilt; the design freeze is recorded | None | Nano, Design | S | L1, L7 to L9 |
+| L0 | First milestone committed | Its six cards are in Ready with batch-approved designs; the lost designs are rebuilt; the design freeze is recorded | None | Nano, Design | S | L1, L7, L8 (L9 decided: lel-freeze) |
 | L1 | Deployment and prompts | The protocol host, orch and the inbox run on BaileyAi; the four lens prompts and the cost breaker wiring are merged | L0, G1 | Build | M | L2, L4 |
 | L2 | Smoke run | One toy claim settles on the local model with a log that replays to the same outcome | L1 | Build, Review | S | L3 |
 | L3 | Duplicate-file experiment, stage one | Built from intent alone using the Codex container; golden set signed; shadow run done; a verdict against rusty_fclone on the five success criteria | L2 | Build, Research, Nano | L | L5, L6, L10, sign the golden set, judge the result |
