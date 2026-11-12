@@ -202,7 +202,7 @@ const SHELL: &str = "/bin/sh";
 
 /// The watchdog for `ssh`, or none on a host without `shell`, where ssh
 /// may outlive a killed client; any other failure to start it is an
-/// error, so a resource limit never quietly drops it (term pack D202).
+/// error, so a resource limit never quietly drops it (term pack D206).
 fn guard(shell: &Path, ssh: u32) -> Result<Option<Child>, String> {
     match spawn_watchdog(shell, ssh) {
         Ok(dog) => Ok(Some(dog)),
@@ -457,7 +457,7 @@ mod tests {
     }
 
     /// Only a missing shell leaves the forward without a watchdog; any
-    /// other failure to start one is an error (D202).
+    /// other failure to start one is an error (D206).
     #[test]
     fn only_a_missing_shell_goes_without_a_watchdog() {
         let gone = guard(Path::new("/nonexistent/rusty-mux/sh"), std::process::id());
