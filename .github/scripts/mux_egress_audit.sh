@@ -11,8 +11,10 @@ for b in rusty-mux-server rusty-mux-ctl rusty-mux-mcp rusty-mux; do
   [[ -x "$bin/$b" ]] || { echo "missing $bin/$b; build it first" >&2; exit 2; }
 done
 command -v strace >/dev/null || { echo "strace is required" >&2; exit 2; }
+command -v script >/dev/null || { echo "script (util-linux) is required for the TUI step" >&2; exit 2; }
 work="$(mktemp -d)"
-trap 'kill "$server" 2>/dev/null || true; rm -rf "$work"' EXIT
+server=
+trap 'if [[ -n "$server" ]]; then kill "$server" 2>/dev/null || true; fi; rm -rf "$work"' EXIT
 sock="$work/mux.sock"
 export HOME="$work/home" XDG_CONFIG_HOME="$work/config" XDG_RUNTIME_DIR="$work/run"
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
@@ -32,12 +34,12 @@ ctl 5 whoami
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"audit","version":"0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' |
-  RUSTY_MUX_SOCKET="$sock" timeout 20 "${trace[@]}" "$work/mcp.trace" "$bin/rusty-mux-mcp" >/dev/null || true
+  RUSTY_MUX_SOCKET="$sock" timeout 20 "${trace[@]}" "$work/mcp.trace" "$bin/rusty-mux-mcp" >"$work/mcp.out" || true
+# tools/list needs no server, so the trace may be empty: check the answer.
+grep -q '"id":2' "$work/mcp.out" || { echo "mcp did not answer tools/list" >&2; exit 1; }
 # The TUI attaches through a pty for a few seconds, then is stopped.
-if command -v script >/dev/null; then
-  script -qec "timeout -s TERM 3 strace -f -qq -e trace=socket,connect,sendto,sendmsg,bind -o '$work/tui.trace' '$bin/rusty-mux' '$sock'" /dev/null >/dev/null 2>&1 </dev/null || true
-  [[ -s "$work/tui.trace" ]] || { echo "the TUI did not run" >&2; exit 1; }
-fi
+script -qec "timeout -s TERM 3 strace -f -qq -e trace=socket,connect,sendto,sendmsg,bind -o '$work/tui.trace' '$bin/rusty-mux' '$sock'" /dev/null >/dev/null 2>&1 </dev/null || true
+[[ -s "$work/tui.trace" ]] || { echo "the TUI did not run" >&2; exit 1; }
 # Stop the traced server itself (strace's child), then let strace finish.
 pkill -INT -P "$server" || true
 timeout 20 tail --pid="$server" -f /dev/null || kill "$server" || true

@@ -13,7 +13,7 @@ The script runs the release `rusty-mux-server`, `rusty-mux-ctl`, `rusty-mux-mcp`
 - runs an MCP `initialize` and `tools/list`;
 - attaches the TUI through a pty for 3 s.
 
-The script fails if any traced process opens an `AF_INET`, `AF_INET6`, `AF_PACKET` or `AF_NETLINK` socket, or connects, sends or binds to an IP address.
+The script fails if any traced process opens an `AF_INET`, `AF_INET6`, `AF_PACKET` or `AF_NETLINK` socket, or connects, sends or binds to an IP address. It also fails if a step did not run: mcp must answer `tools/list`, and the TUI must leave a trace.
 
 On Linux, all 27 traced calls were `AF_UNIX`, and the script printed `egress audit: PASS`.
 
