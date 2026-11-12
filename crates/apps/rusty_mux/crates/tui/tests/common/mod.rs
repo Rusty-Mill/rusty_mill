@@ -270,7 +270,14 @@ impl Tui {
     pub fn exit_within(mut self, patience: Duration) -> Vec<u8> {
         let deadline = Instant::now() + patience;
         while self.child.try_wait().expect("try_wait").is_none() {
-            assert!(Instant::now() < deadline, "the client did not exit");
+            if Instant::now() >= deadline {
+                let screen = self.screen.lock().expect("lock");
+                let tail = &screen[screen.len().saturating_sub(2048)..];
+                panic!(
+                    "the client did not exit; it last wrote {:?}",
+                    String::from_utf8_lossy(tail)
+                );
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
         // Let the reader drain what the client wrote before it exited.
