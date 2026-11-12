@@ -110,7 +110,7 @@ pub fn plan(cards: &[Card], github_of: &dyn Fn(&Card) -> Option<String>) -> Vec<
         .filter(|c| c.done_ms.is_some() && c.closed.is_none() && c.evidence.is_empty())
         .filter_map(|c| {
             let named = valid(c, links_in(c, github_of(c).as_deref()));
-            (!named.is_empty()).then(|| Fill {
+            (!named.is_empty()).then_some(Fill {
                 id: c.id,
                 number: c.number,
                 rev: c.rev,
@@ -425,7 +425,7 @@ mod tests {
              https://github.com/o/r/issues/3 https://github.com/o/r/pull/4#issuecomment-9",
             &[],
         );
-        let links: Vec<String> = links_in(&c, Some(RM)).into_iter().map(|m| m.link).collect();
+        let links: Vec<String> = links_in(&c, Some(RM)).into_iter().map(|l| l.url).collect();
         assert_eq!(links, ["https://github.com/o/r/pull/4"]);
     }
 
