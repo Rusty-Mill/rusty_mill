@@ -42,9 +42,11 @@ impl LinuxPty {
     }
 
     /// [`Self::spawn_concrete`], also giving the child `passed`, in order,
-    /// at descriptors 3, 4, …; everything else above 2 is closed in the
-    /// child. Linux only, so it stays off the portable [`Command`]: a
-    /// Windows pty has no numbered descriptors to map (C75).
+    /// at descriptors 3, 4, …. When `passed` is nonempty, everything else
+    /// above 2 is closed in the child. When it is empty, this is a plain
+    /// spawn: the child inherits whatever the caller holds without
+    /// close-on-exec. Linux only, so it stays off the portable
+    /// [`Command`]: a Windows pty has no numbered descriptors to map (C75).
     pub fn spawn_passing(
         &self,
         cmd: &Command,
