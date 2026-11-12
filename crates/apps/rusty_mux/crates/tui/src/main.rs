@@ -4,9 +4,14 @@
 //! `rusty_mux_proto::endpoint`), starting a server there if none answers
 //! (`rusty_mux_client::autostart`); `--ssh` needs one. With `--ssh`
 //! the socket is the server's absolute path on HOST, reached through one
-//! OpenSSH (8.7 or later) forward (Unix only; `RUSTY_MUX_SSH` names another
-//! `ssh` program); the client asks for nothing until the forward is up, so
-//! a password prompt works. If the path to HOST is lost (a silent
+//! OpenSSH (8.7 or later) forward (`RUSTY_MUX_SSH` names another `ssh`
+//! program); the client asks for nothing until the forward is up, so a
+//! password prompt works. Windows, whose OpenSSH cannot forward a local
+//! Unix socket, runs `rusty-mux-ctl bridge` on HOST over one `ssh` per
+//! connection instead (C79), so only its first login may ask: later ones
+//! need a key or an agent. `RUSTY_MUX_REMOTE_CTL` names the remote
+//! `rusty-mux-ctl`, as shell text, when a non-login shell's `PATH` does
+//! not reach it. If the path to HOST is lost (a silent
 //! heartbeat or a dropped forward), the client logs in again without
 //! prompting, with backoff, and takes its clients over, keeping the
 //! screen and the input lease; it stops if the server let them go.
@@ -598,9 +603,7 @@ mod client {
 
     /// How long the client waits for an SSH forward to come up, the login
     /// included: a first login may wait on a password, a later one may not.
-    #[cfg(unix)]
     const LOGIN: Duration = Duration::from_secs(120);
-    #[cfg(unix)]
     const RELOGIN: Duration = Duration::from_secs(10);
 
     /// Attaches to the server at `args[0]`, through a forward to `ssh`'s
@@ -791,9 +794,109 @@ mod client {
         Arc::new(move || heard.last())
     }
 
+    /// Attaches through a [`Bridge`](rusty_mux_client::ssh::Bridge) to
+    /// `socket` on `host`, Windows' way to the server, since its OpenSSH
+    /// cannot forward a local Unix socket (C79). The remote
+    /// `rusty-mux-ctl` is `RUSTY_MUX_REMOTE_CTL`, as shell text, when set.
+    /// UDP is Unix only, so `udp_host` is refused.
     #[cfg(windows)]
-    fn remote(_: &OsStr, _: Option<&OsStr>, _: &Path, _: Option<&OsString>) -> Result<(), String> {
-        Err("--ssh is supported on Unix only for now".into())
+    fn remote(
+        host: &OsStr,
+        udp_host: Option<&OsStr>,
+        socket: &Path,
+        block: Option<&OsString>,
+    ) -> Result<(), String> {
+        use rusty_mux_client::ssh::{Bridge, Login, bridge::CTL};
+
+        if udp_host.is_some() {
+            return Err("--udp-host: UDP is supported on Unix only".into());
+        }
+        let host = host
+            .to_str()
+            .ok_or("--ssh: the host is not UTF-8")?
+            .to_owned();
+        let ctl = match std::env::var_os("RUSTY_MUX_REMOTE_CTL") {
+            Some(ctl) => ctl
+                .into_string()
+                .map_err(|_| "RUSTY_MUX_REMOTE_CTL is not UTF-8")?,
+            None => CTL.to_owned(),
+        };
+        let remote = socket.to_owned();
+        let program = std::env::var_os("RUSTY_MUX_SSH").unwrap_or_else(|| "ssh".into());
+        let mut first = Bridge::start(&program, &host, &ctl, &remote, Login::Interactive)?;
+        first.wait_ready(LOGIN, || false)?;
+        let local = first.socket().to_owned();
+        let path = BridgePath {
+            program,
+            host,
+            ctl,
+            remote,
+            current: first,
+            fresh: None,
+        };
+        attach(local, block, Some(Box::new(path)))
+    }
+
+    /// The bridges to the server: the one in use, and a fresh one until the
+    /// clients are taken over on it.
+    #[cfg(windows)]
+    struct BridgePath {
+        program: OsString,
+        host: String,
+        ctl: String,
+        remote: PathBuf,
+        current: rusty_mux_client::ssh::Bridge,
+        fresh: Option<rusty_mux_client::ssh::Bridge>,
+    }
+
+    #[cfg(windows)]
+    impl Rejoin for BridgePath {
+        /// With `keep`, the bridge in use, if still taking connections;
+        /// otherwise a new one, whose first login must not ask.
+        fn fresh(&mut self, keep: bool, cancel: &AtomicBool) -> Result<PathBuf, String> {
+            use rusty_mux_client::ssh::{Bridge, Login};
+
+            self.discard();
+            if keep && self.current.running() {
+                return Ok(self.current.socket().to_owned());
+            }
+            let mut next = Bridge::start(
+                &self.program,
+                &self.host,
+                &self.ctl,
+                &self.remote,
+                Login::Batch,
+            )?;
+            next.wait_ready(RELOGIN, || cancel.load(Ordering::Acquire))?;
+            let local = next.socket().to_owned();
+            self.fresh = Some(next);
+            Ok(local)
+        }
+
+        /// No bridge can tell when it last heard the server.
+        fn listen(&mut self) {}
+
+        fn settle(&mut self) {
+            if let Some(fresh) = self.fresh.take() {
+                self.current = fresh;
+            }
+        }
+
+        fn discard(&mut self) {
+            self.fresh = None;
+        }
+
+        fn datagram(&mut self, _: u16, _: [u8; 8], _: [u8; 32]) -> Result<PathBuf, String> {
+            Err("UDP is supported on Unix only".into())
+        }
+
+        fn standby(&mut self) -> Result<PathBuf, String> {
+            Err("no UDP path in standby".into())
+        }
+
+        fn pulses(&self) -> Pulses {
+            Pulses::default()
+        }
     }
 
     /// Shows `block` (or a new one) from the server at `socket` until the
@@ -1003,8 +1106,9 @@ mod client {
     }
 
     /// Whether to try UDP: unless `RUSTY_MUX_UDP=off`.
+    /// Windows never: its path to a remote server is a bridge, with no UDP.
     fn udp_wanted() -> bool {
-        std::env::var_os("RUSTY_MUX_UDP").is_none_or(|v| v != "off")
+        cfg!(unix) && std::env::var_os("RUSTY_MUX_UDP").is_none_or(|v| v != "off")
     }
 
     /// Where [`upgrade`] left the control connection.
