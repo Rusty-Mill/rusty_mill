@@ -11,6 +11,7 @@ use crate::domain::{
     Actor, BoardError, Card, CardSummary, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit,
     ExecutionLink, Plan, Shelf, Span, View,
 };
+use crate::external::{Observation, Provider, RefState};
 use crate::milestones::MilestoneEdit;
 use crate::page::{Cursor, Key, checked_limit, page, query_hash};
 use crate::store::Store;
@@ -497,6 +498,40 @@ impl BindExecutionArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct ObserveArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Card id, or its number (`#42` or `42`).
+    id: String,
+    /// Where it ran: `codex-cloud`, `github-pr` or `github-actions`. Orch execution is
+    /// `card_execution_link`, not this.
+    provider: Provider,
+    /// The provider's own id: a Codex Cloud thread id, `owner/repo#123`, an Actions run id.
+    /// 1-128 characters of `A-Z a-z 0-9 . _ : / # -`.
+    #[serde(rename = "ref")]
+    reference: String,
+    /// The state you saw.
+    state: RefState,
+    /// An `https://` link to it (at most 512 bytes). Omit to keep the one already recorded.
+    url: Option<String>,
+    /// When you saw that state, Unix ms. At most 5 minutes ahead of the board's clock.
+    observed_at_ms: i64,
+}
+
+impl ObserveArgs {
+    fn observation(self) -> (Who, String, Observation) {
+        let obs = Observation {
+            provider: self.provider,
+            reference: self.reference,
+            state: self.state,
+            url: self.url,
+            observed_at_ms: self.observed_at_ms,
+        };
+        (self.who, self.id, obs)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct EventsArgs {
     /// Return events after this event id (omit for the beginning).
     after: Option<String>,
@@ -856,6 +891,15 @@ pub fn ops() -> Vec<Op> {
                 let (who, card_id, link) = a.link.link();
                 let who = acting(b, i, &who)?;
                 card(b.recover_execution(card_ref(b, &card_id)?, expected, link, &who)?)
+            },
+        ),
+        op(
+            "card_execution_observe",
+            "Record what you saw of execution outside Orch that works on this card: a Codex Cloud thread, a GitHub PR or an Actions run, and its state. Observation only: nothing on the board acts on it. Upserts by provider and ref; a replay or an older observation changes nothing, and the same time with a different state is refused. At most 8 refs per card: a new one replaces the finished ref seen longest ago, and is refused if none has finished. Needs `build`.",
+            |b, i, a: ObserveArgs| {
+                let (who, card_id, obs) = a.observation();
+                let who = acting(b, i, &who)?;
+                card(b.observe_execution(card_ref(b, &card_id)?, obs, &who)?)
             },
         ),
         op(

@@ -1447,8 +1447,8 @@ fn a_field_this_board_does_not_know_survives_its_writes() {
     board
         .edit_at(card.id, &human, None, &prompt("first"))
         .expect("prompt");
-    let refs = json!([{"provider": "codex-cloud", "ref": "t1", "state": "running"}]);
-    newer_board_writes(&tick, card.id, "externalRefs", refs.clone());
+    let later = json!([{"kind": "from a newer board"}]);
+    newer_board_writes(&tick, card.id, "laterField", later.clone());
 
     board
         .edit_at(card.id, &human, None, &prompt("second"))
@@ -1456,7 +1456,7 @@ fn a_field_this_board_does_not_know_survives_its_writes() {
     let doc = &tick.docs("board")[0];
     assert_eq!(doc["prompt"], "second", "the edit landed");
     assert_eq!(
-        doc["externalRefs"], refs,
+        doc["laterField"], later,
         "the unknown field was written back unchanged"
     );
     assert_eq!(doc["v"], 1);
@@ -1465,8 +1465,8 @@ fn a_field_this_board_does_not_know_survives_its_writes() {
         .edit_at(card.id, &human, None, &prompt(""))
         .expect("clear the prompt");
     assert_eq!(
-        tick.docs("board")[0]["externalRefs"],
-        refs,
+        tick.docs("board")[0]["laterField"],
+        later,
         "kept when every known field is empty"
     );
 }
@@ -1714,4 +1714,42 @@ fn a_cursor_from_before_a_restart_gets_a_resync() {
     assert!(events.iter().any(|e| e["card"] == a), "{events:?}");
     let next = op(&after, "board_events", json!({ "after": polled["cursor"] }));
     assert_eq!(next["resync"], false);
+}
+
+#[test]
+fn external_refs_are_stored_camel_case_and_read_back() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let obs = rusty_mill_board::external::Observation {
+        provider: rusty_mill_board::external::Provider::GithubPr,
+        reference: "Rusty-Mill/rusty_mill#1".into(),
+        state: rusty_mill_board::external::RefState::Succeeded,
+        url: Some("https://github.com/Rusty-Mill/rusty_mill/pull/1".into()),
+        observed_at_ms: 1_000,
+    };
+    let seen = board
+        .observe_execution(card.id, obs, &human)
+        .expect("observe");
+    assert_eq!(
+        tick.docs("board")[0]["externalRefs"],
+        json!([{
+            "provider": "github-pr",
+            "ref": "Rusty-Mill/rusty_mill#1",
+            "url": "https://github.com/Rusty-Mill/rusty_mill/pull/1",
+            "state": "succeeded",
+            "observedAtMs": 1_000,
+            "by": "nano",
+        }])
+    );
+    let reread = board.get(card.id).expect("get");
+    assert_eq!(reread.external_refs, seen.external_refs);
+    // A later edit keeps them.
+    board
+        .edit_at(card.id, &human, None, &prompt("p"))
+        .expect("edit");
+    assert_eq!(
+        board.get(card.id).expect("get").external_refs,
+        seen.external_refs
+    );
 }

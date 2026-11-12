@@ -42,6 +42,7 @@ use crate::domain::{
     BoardError, Card, Column, Comment, DEFAULT_PROJECT, Event, EventKind, ExecutionLink, Span,
     next_event_id, reserved_tag,
 };
+use crate::external::{ExternalRef, Provider, RefState};
 use crate::http::Http;
 use crate::milestones::{Milestone, MilestoneStore};
 use crate::store::Store;
@@ -276,6 +277,8 @@ struct BoardDoc {
     prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    external_refs: Vec<StoredRef>,
     /// Fields this binary does not know, written back unchanged, so a newer board's fields
     /// survive this one's writes (a rollback loses nothing; ADR-0006).
     #[serde(flatten)]
@@ -295,6 +298,12 @@ impl BoardDoc {
             execution: card.execution.clone(),
             prompt: card.prompt.clone(),
             target_ms: card.target_ms,
+            external_refs: card
+                .external_refs
+                .iter()
+                .cloned()
+                .map(StoredRef::from)
+                .collect(),
             unknown: serde_json::Map::new(),
         }
     }
@@ -329,6 +338,62 @@ impl BoardDoc {
             ));
         }
         Ok(body)
+    }
+}
+
+/// An [`ExternalRef`] as stored: camelCase, like the rest of the document (ADR-0006).
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredRef {
+    provider: Provider,
+    #[serde(rename = "ref")]
+    reference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    state: RefState,
+    observed_at_ms: i64,
+    by: String,
+}
+
+impl From<ExternalRef> for StoredRef {
+    fn from(r: ExternalRef) -> Self {
+        let ExternalRef {
+            provider,
+            reference,
+            url,
+            state,
+            observed_at_ms,
+            by,
+        } = r;
+        Self {
+            provider,
+            reference,
+            url,
+            state,
+            observed_at_ms,
+            by,
+        }
+    }
+}
+
+impl From<StoredRef> for ExternalRef {
+    fn from(r: StoredRef) -> Self {
+        let StoredRef {
+            provider,
+            reference,
+            url,
+            state,
+            observed_at_ms,
+            by,
+        } = r;
+        Self {
+            provider,
+            reference,
+            url,
+            state,
+            observed_at_ms,
+            by,
+        }
     }
 }
 
@@ -445,6 +510,11 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         issue: doc.issue,
         synced_text: doc.synced_text,
         execution: doc.execution,
+        external_refs: doc
+            .external_refs
+            .into_iter()
+            .map(ExternalRef::from)
+            .collect(),
         created_ms: task.created_ms,
         updated_ms: task.updated_ms,
         // Only shipped work has a ship date; won't-do is closed but never shipped.
