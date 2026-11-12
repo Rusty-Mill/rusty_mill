@@ -12,14 +12,14 @@ use uuid::Uuid;
 
 use crate::domain::{
     Actor, BoardError, Capability, Card, CloseReason, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS,
-    Dates, Edit, Event, EventKind, ExecutionLink, MoveRules, Plan, Shelf, View, import_id,
-    text_hash,
+    Dates, Edit, Event, EventKind, ExecutionLink, MoveRules, Plan, ProjectStatus, Shelf, View,
+    import_id, text_hash,
 };
 use crate::external::Observation;
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
 use crate::metrics::{Metrics, metrics};
 use crate::milestones::{MemMilestones, Milestone, MilestoneEdit, MilestoneStore};
-use crate::projects::Projects;
+use crate::projects::{Projects, Statuses};
 use crate::roadmap::{Roadmap, roadmap};
 use crate::store::Store;
 use crate::trace::{self, MilestoneView, Trace};
@@ -110,6 +110,8 @@ pub struct Board<S> {
     workflow: RwLock<Workflow>,
     projects: RwLock<Projects>,
     projects_sink: Option<ProjectsSink>,
+    /// Each project's status; unlisted projects are active.
+    statuses: RwLock<Statuses>,
     /// Held while numbers are handed out, so this process does not race itself for them.
     /// Uniqueness does not rest on it: the store reserves each number (`Store::reserve_number`).
     numbering: Mutex<Numbering>,
@@ -176,6 +178,7 @@ impl<S: Store> Board<S> {
             workflow: RwLock::new(Workflow::default()),
             projects: RwLock::new(Projects::default()),
             projects_sink: None,
+            statuses: RwLock::new(Statuses::default()),
             numbering: Mutex::new(Numbering::default()),
             clock,
             escalations: None,
@@ -191,6 +194,57 @@ impl<S: Store> Board<S> {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = projects;
         self
+    }
+
+    /// Start with these project statuses instead of every project active.
+    #[must_use]
+    pub fn with_statuses(self, statuses: Statuses) -> Self {
+        *self
+            .statuses
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = statuses;
+        self
+    }
+
+    /// A snapshot of the project statuses.
+    pub fn statuses(&self) -> Statuses {
+        read(&self.statuses)
+    }
+
+    /// Set `project`'s status. `persist` makes the new statuses durable and runs under the write
+    /// lock before they apply; if it fails nothing has changed. The caller checks the actor may.
+    ///
+    /// # Errors
+    /// An unknown project, or [`BoardError::Refused`] with what `persist` reported.
+    pub fn set_project_status(
+        &self,
+        project: &str,
+        status: ProjectStatus,
+        persist: impl FnOnce(&Statuses) -> Result<(), String>,
+    ) -> Result<Statuses, BoardError> {
+        if !self.registry().contains(project) {
+            return Err(BoardError::Invalid("unknown project"));
+        }
+        let mut guard = self
+            .statuses
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = guard.with(project, status);
+        persist(&next).map_err(BoardError::Refused)?;
+        *guard = next.clone();
+        Ok(next)
+    }
+
+    /// Refuse new cards for `project` unless its status takes them.
+    fn check_accepts(&self, project: &str) -> Result<(), BoardError> {
+        let status = self.statuses().of(project);
+        if status.accepts_cards() {
+            return Ok(());
+        }
+        Err(BoardError::Refused(format!(
+            "project {project:?} is {}: it takes no new cards until it is active again",
+            status.as_str()
+        )))
     }
 
     /// Start with these movement rules instead of [`MoveRules::Enforced`].
@@ -1058,6 +1112,7 @@ impl<S: Store> Board<S> {
         if !by.may_work_in(project) {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
+        self.check_accepts(project)?;
         project.clone_into(&mut card.project);
         let card = self.insert_numbered(by, card)?;
         drop(registry);
@@ -1216,9 +1271,11 @@ impl<S: Store> Board<S> {
                 .map(|c| placed(&flow, c))
                 .collect(),
         };
+        let statuses = self.statuses();
         let mut candidates: Vec<Card> = listed
             .into_iter()
             .filter(|c| project.is_none_or(|p| c.project == p))
+            .filter(|c| statuses.of(&c.project).accepts_cards())
             .filter(|c| rank(c).is_some() && flow.actionable(&c.column, &by.caps))
             .filter(|c| id.is_some() || c.claim.as_deref().is_none_or(|h| h == by.name))
             .collect();
@@ -1405,6 +1462,10 @@ impl<S: Store> Board<S> {
         }
         let triage = by.caps.contains(&Capability::Triage);
         let card = self.apply(id, by, EventKind::Assigned, |c, now| {
+            // A Done card may be re-filed anywhere; open work only into a project that takes it.
+            if c.column != Column::DONE {
+                self.check_accepts(project)?;
+            }
             let needed = assign_capability(&c.column);
             if !triage && !by.caps.contains(&needed) {
                 return Err(BoardError::Forbidden(needed));
