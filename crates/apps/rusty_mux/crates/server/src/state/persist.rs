@@ -160,8 +160,11 @@ impl State {
             size: revive.size,
             config: &config,
             started,
-            // A restored block has no owner (D117 (7)).
+            // A restored block has no owner (D117 (7)), and was never told
+            // a caller's environment (D74).
             owned: false,
+            env: None,
+            fds: Vec::new(),
         })?;
         let rt = unscreened.screened(shared, grid, parser);
         self.adopt(revive.block, rt);

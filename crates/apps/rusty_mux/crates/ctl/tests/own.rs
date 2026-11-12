@@ -6,6 +6,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::Shutdown;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener as StdListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
@@ -144,15 +145,37 @@ struct Own {
 
 impl Own {
     fn start(socket: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+        Self::inheriting(socket, Vec::new())
+    }
+
+    /// `own`, with `fds` at its descriptors 3, 4, and on.
+    fn inheriting(socket: &Path, fds: Vec<OwnedFd>) -> Self {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"));
+        command
             .env_remove("RUSTY_MUX_SOCKET")
             .arg("--socket")
             .arg(socket)
             .arg("own")
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("start own");
+            .stdout(Stdio::piped());
+        // Lifted clear of 3 and up first, so no move overwrites a source.
+        let lifted: Vec<OwnedFd> = fds.iter().map(lift).collect();
+        let raw: Vec<i32> = lifted.iter().map(AsRawFd::as_raw_fd).collect();
+        // SAFETY: dup2 is a raw syscall, async-signal-safe, and the closure
+        // allocates nothing; dup2 clears close-on-exec on its target.
+        unsafe {
+            command.pre_exec(move || {
+                for (i, fd) in raw.iter().enumerate() {
+                    let to = 3 + i32::try_from(i).unwrap_or(i32::MAX);
+                    rusty_libc::fd::dup2(*fd, to)
+                        .map_err(|e| std::io::Error::from_raw_os_error(e.0))?;
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("start own");
+        drop((fds, lifted));
         let stdin = child.stdin.take();
         let stdout = BufReader::new(child.stdout.take().expect("stdout"));
         Self {
@@ -201,6 +224,14 @@ impl Own {
         assert_eq!(answer.get("ok"), Some(&Value::Bool(true)), "{answer:?}");
         answer["block"].as_str().expect("a block id").to_owned()
     }
+}
+
+/// A close-on-exec copy of `fd` at 100 or above.
+fn lift(fd: &OwnedFd) -> OwnedFd {
+    let copy = rusty_libc::fd::fcntl(fd.as_raw_fd(), rusty_libc::fd::F_DUPFD_CLOEXEC, 100)
+        .expect("F_DUPFD_CLOEXEC");
+    // SAFETY: `copy` was just returned and nothing else owns it.
+    unsafe { OwnedFd::from_raw_fd(copy) }
 }
 
 impl Drop for Own {
@@ -348,6 +379,83 @@ fn own_hears_a_viewer_ask_for_the_lease() {
     let asked = own.until("event", "lease-requested");
     assert_eq!(asked["block"].as_str(), Some(block.as_str()));
     assert!(asked["principal"].as_str().is_some(), "{asked:?}");
+}
+
+/// Everything `reader` yields until its last writer closes, or `None` if
+/// a writer is still open after [`PATIENCE`].
+fn to_eof(reader: std::io::PipeReader) -> Option<String> {
+    use std::io::Read;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let mut reader = reader;
+        let _ = tx.send(reader.read_to_string(&mut text).map(|_| text));
+    });
+    rx.recv_timeout(PATIENCE)
+        .ok()
+        .map(|read| read.expect("read a pipe"))
+}
+
+fn refusal(answer: &Value) -> &str {
+    assert_eq!(answer.get("ok"), Some(&Value::Bool(false)), "{answer:?}");
+    answer["error"].as_str().expect("an error")
+}
+
+#[test]
+fn own_launches_an_agent_with_its_environment_and_descriptors() {
+    let socket = start_server();
+    let window = window(&socket);
+    let (first, first_w) = std::io::pipe().expect("pipe");
+    let (second, second_w) = std::io::pipe().expect("pipe");
+    let mut own = Own::inheriting(&socket, vec![first_w.into(), second_w.into()]);
+    // The agent closes its copies and lives on; `own` is still running.
+    let script =
+        r#"echo \"one:$RUSTY_MUX_SOCKET:$AGENT\" >&3; echo two >&4; exec 3>&- 4>&-; sleep 30"#;
+    own.send(&format!(
+        r#"{{"id":1,"op":"launch","window":"{window}","program":"/bin/sh","args":["-c","{script}"],"env":{{"AGENT":"yes"}},"fds":2}}"#
+    ));
+    let answer = own.answer(1);
+    assert_eq!(answer.get("ok"), Some(&Value::Bool(true)), "{answer:?}");
+    // EOF, so neither `own` nor the server kept a copy after the launch.
+    let first = to_eof(first).expect("own kept fd 3 open");
+    let second = to_eof(second).expect("own kept fd 4 open");
+    assert_eq!(first, "one::yes\n", "exact environment, no socket");
+    assert_eq!(second, "two\n");
+
+    own.send(&format!(
+        r#"{{"id":2,"op":"launch","window":"{window}","fds":1}}"#
+    ));
+    let again = own.answer(2);
+    assert!(
+        refusal(&again).contains("descriptor 3 was already passed"),
+        "{again:?}"
+    );
+}
+
+#[test]
+fn own_closes_its_descriptors_when_a_launch_fails() {
+    let socket = start_server();
+    let window = window(&socket);
+    let (lock, lock_w) = std::io::pipe().expect("pipe");
+    let mut own = Own::inheriting(&socket, vec![lock_w.into()]);
+
+    // Refused here, taking nothing: fd 4 was never inherited.
+    own.send(&format!(
+        r#"{{"id":1,"op":"launch","window":"{window}","fds":2}}"#
+    ));
+    let missing = own.answer(1);
+    assert!(
+        refusal(&missing).contains("descriptor 4 was not inherited"),
+        "{missing:?}"
+    );
+
+    // Refused by the server, which closes its copy; `own` closes its own.
+    own.send(&format!(
+        r#"{{"id":2,"op":"launch","window":"{window}","env":{{"RUSTY_MUX_SOCKET":"x"}},"fds":1}}"#
+    ));
+    let failed = own.answer(2);
+    assert!(refusal(&failed).contains("env"), "{failed:?}");
+    assert_eq!(to_eof(lock).as_deref(), Some(""), "own kept fd 3 open");
 }
 
 /// A server from before C78: it grants the C46 set and C77's gate, but

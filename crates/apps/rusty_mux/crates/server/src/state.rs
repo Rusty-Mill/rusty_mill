@@ -30,6 +30,7 @@ use crate::echo::Waiting;
 use crate::history::History;
 use crate::keys;
 use crate::outbox::Outbox;
+use crate::passed::{Fd, Passed};
 use crate::process;
 use crate::pty::{self, Process, Pty};
 use crate::spool::Spool;
@@ -98,6 +99,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::LEASE_REQUESTS)
     .union(Features::SHUTDOWN)
     .union(Features::BACKGROUND_HISTORY)
+    .union(Features::AGENT_LAUNCH)
     .union(Features::HOLD);
 
 /// An owner whose outbox holds more than this can't be told of more
@@ -195,6 +197,11 @@ struct Start<'a> {
     /// Launched with an owner (`Launch.own`): on Windows its program gets
     /// no Job Object, so the mux never ends what it started (pack D182).
     owned: bool,
+    /// The program's whole environment, instead of the server's and the
+    /// block's `RUSTY_MUX_*` (C75). Never saved (D74).
+    env: Option<&'a [(String, String)]>,
+    /// Descriptors the program gets at 3, 4, and on (C75).
+    fds: Vec<Fd>,
 }
 
 /// A started program whose block has no screen or reader yet.
@@ -918,7 +925,19 @@ impl State {
 
     /// Applies one request. Returns input for the caller to write to a PTY
     /// after releasing the borrow.
+    #[cfg(all(test, unix))]
     pub(crate) fn request(shared: &Shared, client: ClientId, message: Message) -> Option<Pending> {
+        Self::request_with(shared, client, message, Passed::None)
+    }
+
+    /// [`Self::request`] for a frame that came with `passed` (C75): only a
+    /// launch takes descriptors, and any it does not take are closed.
+    pub(crate) fn request_with(
+        shared: &Shared,
+        client: ClientId,
+        message: Message,
+        passed: Passed,
+    ) -> Option<Pending> {
         let mut this = shared.borrow_mut();
         // A request proves the client got this connection's Welcome, and
         // with it the current token.
@@ -927,7 +946,7 @@ impl State {
         }
         // Grants end on time before anything relies on them (C77).
         this.mux.expire_grants(now_ms());
-        let (req, outcome) = this.apply(shared, client, message);
+        let (req, outcome) = this.apply(shared, client, message, passed);
         let write = match outcome {
             Ok(Outcome::Done(created)) => {
                 this.send(client, &Message::Done { req, created });
@@ -961,8 +980,13 @@ impl State {
         shared: &Shared,
         client: ClientId,
         message: Message,
+        passed: Passed,
     ) -> (u64, Result<Outcome, Refusal>) {
         use Message as M;
+        let launches = matches!(message, M::CreateBlock { .. } | M::Split { .. });
+        if !launches && !matches!(passed, Passed::None) {
+            eprintln!("rusty-mux-server: client {client}: closing descriptors a request passed");
+        }
         let done = |r: Result<(), rusty_mux_core::Error>| {
             r.map(|()| Outcome::Done(None)).map_err(Refusal::from)
         };
@@ -997,12 +1021,13 @@ impl State {
             } => {
                 // As the catalog's contract: a launch only on a connection
                 // that negotiated it.
-                if let Err(refusal) = self.check_launch(client, &launch) {
-                    return (req, Err(refusal));
-                }
+                let fds = match self.check_launch(client, &launch, passed) {
+                    Ok(fds) => fds,
+                    Err(refusal) => return (req, Err(refusal)),
+                };
                 (
                     req,
-                    self.create_block(shared, client, window, size, &launch, None),
+                    self.create_block(shared, client, window, size, &launch, fds, None),
                 )
             }
             M::Split {
@@ -1013,9 +1038,9 @@ impl State {
             } => (
                 req,
                 self.require(client, Features::LAYOUT, "split")
-                    .and_then(|()| self.check_launch(client, &launch))
-                    .and_then(|()| self.owns(client, [block]))
-                    .and_then(|()| self.split(shared, client, block, side, &launch)),
+                    .and_then(|()| self.check_launch(client, &launch, passed))
+                    .and_then(|fds| self.owns(client, [block]).map(|()| fds))
+                    .and_then(|fds| self.split(shared, client, block, side, &launch, fds)),
             ),
             M::Zoom { req, block } => (
                 req,
@@ -1270,8 +1295,22 @@ impl State {
     }
 
     /// Refuses a launch `client` did not negotiate: any at all without
-    /// `LAUNCH`, an owned one without `OWNERSHIP`.
-    fn check_launch(&self, client: ClientId, launch: &Launch) -> Result<(), Refusal> {
+    /// `LAUNCH`, an owned one without `OWNERSHIP`, an exact environment or
+    /// passed descriptors without `AGENT_LAUNCH`. Returns the descriptors
+    /// the launch takes, which must be exactly those its frame passed.
+    fn check_launch(
+        &self,
+        client: ClientId,
+        launch: &Launch,
+        passed: Passed,
+    ) -> Result<Vec<Fd>, Refusal> {
+        if launch.env.is_some() || launch.fds > 0 {
+            self.require(client, Features::AGENT_LAUNCH, "an agent launch")?;
+        }
+        if let Some(env) = &launch.env {
+            check_env(env)?;
+        }
+        let fds = passed_fds(launch.fds, passed)?;
         if *launch != Launch::default() {
             self.require(client, Features::LAUNCH, "a launch")?;
         }
@@ -1287,7 +1326,7 @@ impl State {
                 return Err("bad_launch(input): an owner-only block must be owned".into());
             }
         }
-        Ok(())
+        Ok(fds)
     }
 
     /// Whether `client` negotiated `feature`.
@@ -1582,6 +1621,7 @@ impl State {
         target: BlockId,
         side: Side,
         launch: &Launch,
+        fds: Vec<Fd>,
     ) -> Result<Outcome, Refusal> {
         let size = self.mux.split_size(target, side)?;
         let window = self
@@ -1589,11 +1629,21 @@ impl State {
             .block(target)
             .ok_or(rusty_mux_core::Error::UnknownBlock(target))?
             .window();
-        self.create_block(shared, client, window, size, launch, Some((target, side)))
+        self.create_block(
+            shared,
+            client,
+            window,
+            size,
+            launch,
+            fds,
+            Some((target, side)),
+        )
     }
 
     /// Starts a block in `window`, placed by the model, or beside the
-    /// block `beside` names; owned by `client` if `launch` says so.
+    /// block `beside` names; owned by `client` if `launch` says so, its
+    /// program given `fds` (C75).
+    #[allow(clippy::too_many_arguments)]
     fn create_block(
         &mut self,
         shared: &Shared,
@@ -1601,6 +1651,7 @@ impl State {
         window: WindowId,
         size: Size,
         launch: &Launch,
+        fds: Vec<Fd>,
         beside: Option<(BlockId, Side)>,
     ) -> Result<Outcome, Refusal> {
         if self.stopping {
@@ -1634,6 +1685,8 @@ impl State {
             config: &config,
             started,
             owned: launch.own,
+            env: launch.env.as_deref(),
+            fds,
         })?;
         match beside {
             None => self.mux.add_block(block, window, size)?,
@@ -1673,9 +1726,15 @@ impl State {
             config,
             started,
             owned,
+            env,
+            fds,
         } = start;
-        let env = self.block_env(session, window, block);
-        let (pty, process) = pty::spawn(config, size, &env, owned)
+        let block_env = self.block_env(session, window, block);
+        let env = match env {
+            Some(exact) => pty::Env::Exact(exact),
+            None => pty::Env::Server(&block_env),
+        };
+        let (pty, process) = pty::spawn(config, size, env, owned, fds)
             .map_err(|e| format!("spawning the block's program: {e}"))?;
         self.hosts.track(&process);
         let pty = Rc::new(pty);
@@ -2255,6 +2314,48 @@ fn close(mut rt: BlockRt) {
     }
 }
 
+/// The most descriptors one launch takes (C75), as many as one frame can
+/// bring.
+const MAX_FDS: u8 = 8;
+
+/// Refuses an exact environment a program could not be given, or that
+/// names a `RUSTY_MUX_*` variable: those are the server's to set, and an
+/// agent launch must not reach the socket (C75).
+fn check_env(env: &[(String, String)]) -> Result<(), Refusal> {
+    for (name, value) in env {
+        if name.is_empty() || name.contains(['=', '\0']) || value.contains('\0') {
+            return Err(format!("bad_launch(env): `{name}` can't be set").into());
+        }
+        if name.starts_with("RUSTY_MUX_") {
+            return Err(format!("bad_launch(env): `{name}` is the server's to set").into());
+        }
+    }
+    Ok(())
+}
+
+/// The `want` descriptors a launch's frame passed, or why not.
+fn passed_fds(want: u8, passed: Passed) -> Result<Vec<Fd>, Refusal> {
+    if want > MAX_FDS {
+        return Err(format!("bad_launch(fds): at most {MAX_FDS} descriptors").into());
+    }
+    if want > 0 && cfg!(not(target_os = "linux")) {
+        return Err("unsupported: passing descriptors needs Linux".into());
+    }
+    let fds = match passed {
+        Passed::None => Vec::new(),
+        Passed::Fds(fds) => fds,
+        Passed::Bad(why) => return Err(format!("bad_launch(fds): {why}").into()),
+    };
+    if fds.len() != usize::from(want) {
+        let got = fds.len();
+        return Err(format!(
+            "bad_launch(fds): the launch asks for {want} and its frame passed {got}"
+        )
+        .into());
+    }
+    Ok(fds)
+}
+
 /// The server's `config` with what `launch` asks for instead. A relative
 /// working directory would depend on where the server started, so it is
 /// refused, as is one that is not a directory.
@@ -2704,6 +2805,7 @@ mod regression {
                 window,
                 Size::new(80, 24).unwrap(),
                 &Launch::default(),
+                Vec::new(),
                 None,
             )
             .unwrap()
@@ -3432,7 +3534,15 @@ mod regression {
                 let mut state = shared.borrow_mut();
                 assert!(
                     state
-                        .create_block(&shared, client, window, size, &Launch::default(), None)
+                        .create_block(
+                            &shared,
+                            client,
+                            window,
+                            size,
+                            &Launch::default(),
+                            Vec::new(),
+                            None
+                        )
                         .is_err()
                 );
                 assert!(state.resize(client, block, size).is_err());

@@ -208,6 +208,11 @@ impl Features {
     /// [`Message::History`] batches, newest first, between live output.
     pub const BACKGROUND_HISTORY: Self = Self(1 << 41);
 
+    /// Agent launch (C75): [`Launch::env`] gives the program exactly that
+    /// environment, and [`Launch::fds`] has it inherit the descriptors the
+    /// launching frame passed, at 3, 4, and on. Descriptors travel only
+    /// over a Unix socket the client opened itself, on Linux.
+    pub const AGENT_LAUNCH: Self = Self(1 << 42);
     /// Hold on exit (C78): [`Launch::hold`] keeps a block once its program
     /// exits, read-only with its screen and scrollback, until it is closed.
     /// A block entry says when its program has exited regardless, since
@@ -301,6 +306,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::LEASE_REQUESTS, "lease requests"),
     (Features::SHUTDOWN, "clean stop on request"),
     (Features::BACKGROUND_HISTORY, "background history"),
+    (Features::AGENT_LAUNCH, "agent launch"),
     (Features::HOLD, "hold on exit"),
 ];
 
@@ -370,6 +376,15 @@ pub struct Launch {
     /// Who may type into an owned block (C77); [`InputMode::OwnerOnly`]
     /// needs `own`. Negotiated with [`Features::INPUT_GATE`].
     pub input: InputMode,
+    /// The program's whole environment (C75): nothing is inherited and
+    /// the server adds no `RUSTY_MUX_*`, which it refuses here too. `None`
+    /// is the server's environment and the block's `RUSTY_MUX_*`.
+    /// Negotiated with [`Features::AGENT_LAUNCH`].
+    pub env: Option<Vec<(String, String)>>,
+    /// How many descriptors the frame carrying this launch passes, which
+    /// the program gets at 3, 4, and on (C75). Negotiated with
+    /// [`Features::AGENT_LAUNCH`].
+    pub fds: u8,
     /// Keep the block, read-only, once its program exits (C78).
     /// Negotiated with [`Features::HOLD`].
     pub hold: bool,
@@ -908,6 +923,11 @@ const UNTIL: u32 = 56;
 /// A peer's package version, in Hello and Welcome (C36): text, or absent
 /// from a peer older than the field.
 const VERSION: u32 = 57;
+/// A launch's exact environment (C75): each name, then its value, as the
+/// length-prefixed strings of [`ARGV`]. Present, even empty, is exact.
+const ENV: u32 = 58;
+/// How many descriptors a launch's frame passes (C75); absent is none.
+const FDS: u32 = 59;
 /// A launch's mark that the block stays once its program exits: 1, or
 /// absent (C78). 58 and 59 are C75's.
 const HOLD: u32 = 60;
@@ -1556,13 +1576,8 @@ fn get_size(f: &In<'_>) -> Result<Size, Error> {
 
 fn put_launch(out: &mut Out, launch: &Launch) {
     if let Some(Program { command, args }) = &launch.program {
-        let mut argv = Writer::new();
-        for arg in args {
-            varint::write(&mut argv, arg.len() as u64);
-            argv.write_bytes(arg.as_bytes());
-        }
         out.bytes(COMMAND, command.as_bytes())
-            .bytes(ARGV, &argv.into_vec());
+            .bytes(ARGV, &strings(args));
     }
     if let Some(cwd) = &launch.cwd {
         out.bytes(CWD, cwd.as_bytes());
@@ -1574,6 +1589,22 @@ fn put_launch(out: &mut Out, launch: &Launch) {
         out.varint(HOLD, 1);
     }
     put_input(out, launch.input);
+    if let Some(env) = &launch.env {
+        out.bytes(ENV, &strings(env.iter().flat_map(|(k, v)| [k, v])));
+    }
+    if launch.fds > 0 {
+        out.varint(FDS, launch.fds.into());
+    }
+}
+
+/// `items` as length-prefixed strings, the encoding of [`ARGV`] and [`ENV`].
+fn strings<'a>(items: impl IntoIterator<Item = &'a String>) -> Vec<u8> {
+    let mut w = Writer::new();
+    for item in items {
+        varint::write(&mut w, item.len() as u64);
+        w.write_bytes(item.as_bytes());
+    }
+    w.into_vec()
 }
 
 /// Only owner-only travels: absent is open.
@@ -1607,8 +1638,30 @@ fn get_launch(f: &In<'_>) -> Result<Launch, Error> {
         cwd: f.opt(CWD, In::string)?,
         own: f.opt(OWN, In::varint)? == Some(1),
         input: get_input(f)?,
+        env: f
+            .opt(ENV, In::bytes)?
+            .map(|bytes| get_env(bytes).ok_or_else(|| f.invalid(ENV)))
+            .transpose()?,
+        fds: match f.opt(FDS, In::varint)? {
+            None => 0,
+            Some(n) => u8::try_from(n).map_err(|_| f.invalid(FDS))?,
+        },
         hold: f.opt(HOLD, In::varint)? == Some(1),
     })
+}
+
+/// Name and value pairs; an odd count is malformed.
+fn get_env(bytes: &[u8]) -> Option<Vec<(String, String)>> {
+    let flat = get_argv(bytes)?;
+    if flat.len() % 2 != 0 {
+        return None;
+    }
+    let mut it = flat.into_iter();
+    let mut env = Vec::with_capacity(it.len() / 2);
+    while let (Some(name), Some(value)) = (it.next(), it.next()) {
+        env.push((name, value));
+    }
+    Some(env)
 }
 
 fn get_argv(bytes: &[u8]) -> Option<Vec<String>> {

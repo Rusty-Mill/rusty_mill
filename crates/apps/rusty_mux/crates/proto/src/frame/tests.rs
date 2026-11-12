@@ -106,6 +106,31 @@ fn every_message_round_trips() {
                 ..Launch::default()
             },
         },
+        // C75: an empty exact environment is still exact.
+        Message::CreateBlock {
+            req: 3,
+            window,
+            size: size(80, 24),
+            launch: Launch {
+                env: Some(Vec::new()),
+                ..Launch::default()
+            },
+        },
+        Message::CreateBlock {
+            req: 3,
+            window,
+            size: size(80, 24),
+            launch: Launch {
+                own: true,
+                env: Some(vec![
+                    ("PATH".into(), "/usr/bin:/bin".into()),
+                    ("EMPTY".into(), String::new()),
+                    ("EQ".into(), "a=b".into()),
+                ]),
+                fds: 8,
+                ..Launch::default()
+            },
+        },
         Message::Attach { req: 4, block },
         Message::Detach { req: 5 },
         Message::AcquireLease { req: 6, block },

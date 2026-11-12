@@ -237,6 +237,25 @@ connection afterwards.
   datagram connection are each refused. Afterwards the server's open-descriptor count is back
   where it started, and a failed spawn leaves no staged copy.
 
+**As built (C75, rusty_term D213 on).** These points differ from the plan above:
+- The descriptor map is a Linux-only `platform_linux::LinuxPty::spawn_passing`, not a field on the
+  portable `Command`. It adds the close-from action only when descriptors are passed, so a plain
+  spawn is unchanged.
+- The server reads a direct connection through its own `recv_with_fds` reader, so `rusty_tokio`
+  gains no public API.
+- Descriptors belong to the frame that holds the last byte of the read that brought them. That
+  frame must start inside the read, or they are refused. Descriptors sent with any other request
+  are closed.
+- A client must send a launch's descriptors with the frame's first byte: either the whole frame
+  and its descriptors in one `sendmsg`, or the descriptors on the first chunk if the frame is
+  split. A client that attaches them to a later chunk gets "descriptors inside a frame".
+- `env` names and values are text, like `argv`.
+- `own` passes only descriptors it inherited, which it takes ownership of at startup before
+  opening its socket. Each passes with at most one launch, and `own` closes its copies when that
+  launch is answered, refused or lost, as the lifetime above requires. A later launch naming one
+  is refused as already passed.
+- The one-shot `run --env-exact … --fds N` is not built yet.
+
 ## C78. Hold on exit
 
 **Today.** When the program exits, `exited()` (`server/src/state.rs:1679`) closes the block, and
