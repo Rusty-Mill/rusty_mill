@@ -1398,13 +1398,15 @@ impl State {
             "terminal.modes" => terminal::modes(&rt.grid),
             "terminal.report-status" => return self.report_status(block, &named),
             "terminal.shell" => {
-                // A held or restored block's program is gone (C78).
-                let activity = match &rt.live {
+                // A held or restored block's program is gone (C78), and so
+                // is one whose child was just reaped, whichever is seen.
+                let running = rt
+                    .live
+                    .as_ref()
+                    .and_then(|live| Some((live.process.pid()?, live)));
+                let activity = match running {
                     None => "exited",
-                    Some(live) => {
-                        let pid = live.process.pid().ok_or("the program has exited")?;
-                        process::activity(pid, live.pty.foreground())
-                    }
+                    Some((pid, live)) => process::activity(pid, live.pty.foreground()),
                 };
                 terminal::shell(&rt.grid, &rt.started.program, activity)
             }
