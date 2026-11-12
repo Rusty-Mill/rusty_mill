@@ -133,6 +133,7 @@ Precise contracts used by this guide:
 | D123 | #1432 S5 design defaults: ADR location, providers, capability, summary flags, card_take | [default] 2026-11-11 (#1432) |
 | D124 | #1432 S5 external refs design (ADR-0006) approved as written for implementation | [stated] 2026-11-11 (#1432) |
 | D125 | #1432 S5 clarifications: `unknown` refs not evictable, S5a document readback, refs on the domain `Card` | [default] 2026-11-12 (#1432) |
+| D126 | #1432 S5: card summaries drop `has_execution` and `has_external_refs` (supersedes D123 item 4) | [stated] 2026-11-12 (#1432) |
 
 ## D1. Lenses, not stages
 
@@ -1194,7 +1195,7 @@ The first three were approved first. The last three were added to Q35 after that
 
 ## D123. #1432 S5 design defaults: ADR location, providers, capability, summary flags, card_take
 
-**Decision.** Inside D122, the #1432 design uses these defaults. (1) The design is the board ADR `crates/apps/rusty_mill_board/docs/adr/0006-external-execution-refs.md`, committed in its first draft PR; this pack points to it from D122 and here rather than keeping a second copy. (2) `provider` is a fixed set (`codex-cloud`, `github-pr`, `github-actions`) that never includes `orch` or `bbp`. Refs may sit next to an `ExecutionLink`, because a link can bind after refs exist and nothing reads refs. (3) `card_execution_observe` reuses the Build capability plus project scope, the same as `card_execution_link`; no new capability. (4) Summaries keep `has_execution` meaning an `ExecutionLink` only, and add a separate `has_external_refs`; never one flag for both. (5) `card_take` never skips, reorders or refuses a card because of its refs; the taken card carries `external_refs` as `card_get` does, with no extra take-time warning field.
+**Decision.** Inside D122, the #1432 design uses these defaults. (1) The design is the board ADR `crates/apps/rusty_mill_board/docs/adr/0006-external-execution-refs.md`, committed in its first draft PR; this pack points to it from D122 and here rather than keeping a second copy. (2) `provider` is a fixed set (`codex-cloud`, `github-pr`, `github-actions`) that never includes `orch` or `bbp`. Refs may sit next to an `ExecutionLink`, because a link can bind after refs exist and nothing reads refs. (3) `card_execution_observe` reuses the Build capability plus project scope, the same as `card_execution_link`; no new capability. (4) ~~Summaries keep `has_execution` meaning an `ExecutionLink` only, and add a separate `has_external_refs`; never one flag for both.~~ Superseded by D126 (Nano, 2026-11-12): summaries carry neither flag; readers who need an `ExecutionLink` or refs call `card_get`. One flag for both stays rejected. (5) `card_take` never skips, reorders or refuses a card because of its refs; the taken card carries `external_refs` as `card_get` does, with no extra take-time warning field.
 **Why.** D122 makes Orch the only execution authority and forbids dispatch from observations, and `card_take` choosing a card is dispatch. One flag for link and refs would let a reader mistake an observation for an Orch execution. Reusing Build and the existing file layout adds nothing that needs an ask-first gate. A board ADR in the repo meets D94's purpose, which is that designs survive between sessions.
 **Rejected.** A copy of the design under `docs/projects/let-em-loose/`. `orch` or `bbp` providers. A new `observe` capability, which changes roles and the API, so it would go to Nano. A single `has_execution` covering both. Skipping a card whose ref says `running`.
 **Tag.** [default] · remind-me: mem_312ce716599d4b89aec9c5fec11d0b73
@@ -1208,7 +1209,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Rejected.** Approving with changes (revising ADR-0006 in PR #1618 before any code), and holding the design PR as a draft with nothing built; both were options on the same card.
 **Tag.** [stated] · remind-me: mem_b512d055f0f3463aaa8068bec48916c5
 **Key.** lel:1432:external-refs-design-approved
-**Source.** Nano tapped "Approve as written" on decision card `cmsg_017MoLbtrGAAcyE1PVPZXuN6LV2exssuE5oC7WWqu8rWaa` ("Approve the S5 external refs design in PR 1618 for implementation?"; option: "I create the two implementation cards and build PR 1 (keep unknown doc fields), then PR 2 (external refs), each through review and CI."), decide event `cmsg_017MoLbtrGAAcyE1PVPZXuN64ukBebuUh4oWNpEUyf7mgw`, 2026-11-11T23:48:48Z, Mill_Board project thread. Confirms D122 and D123. D25, D20, D104. Numbered D124 after D123.
+**Source.** Nano tapped "Approve as written" on decision card `cmsg_017MoLbtrGAAcyE1PVPZXuN6LV2exssuE5oC7WWqu8rWaa` ("Approve the S5 external refs design in PR 1618 for implementation?"; option: "I create the two implementation cards and build PR 1 (keep unknown doc fields), then PR 2 (external refs), each through review and CI."), decide event `cmsg_017MoLbtrGAAcyE1PVPZXuN64ukBebuUh4oWNpEUyf7mgw`, 2026-11-11T23:48:48Z, Mill_Board project thread. Confirms D122 and D123. D25, D20, D104. Numbered D124 after D123. D123 item (4), the summary flags, was later dropped by Nano: see D126.
 
 ## D125. #1432 S5 clarifications: `unknown` refs not evictable, S5a document readback, refs on the domain `Card`
 
@@ -1218,3 +1219,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_fbced0cfdbde43ee89a9f08dc4da4ef2
 **Key.** lel:1432:external-refs-unknown-eviction-and-doc-preservation
 **Source.** let-em-loose-expert, answering the PR #1618 review follow-up (branch `claude/project-thread-ofbftl`, head 85e0c449), 2026-11-12. ADR-0006 `crates/apps/rusty_mill_board/docs/adr/0006-external-execution-refs.md` (state table, ninth-ref rule); D124, D123. Numbered D125 after D124.
+
+## D126. #1432 S5: card summaries drop `has_execution` and `has_external_refs` (supersedes D123 item 4)
+
+**Decision.** Card summaries gain neither `has_execution` nor `has_external_refs`. A reader that needs a card's `ExecutionLink` or its external refs calls `card_get` (or uses the full `board_list` view), which already carry them. This replaces D123 item (4) only; the rest of D123 and D124's approval of ADR-0006 stand, narrowed by this change.
+**Why.** Under S1, card summaries are built from task metadata and never read the board documents, so neither flag can be computed. The PR #1618 review found this after D124's approval. Nothing uses the flags today, so dropping them is the smallest change and only narrows what Nano approved.
+**Rejected.** Keeping the flags as two reserved task tags kept in step with each card's document, which needs a second write per observation that can be partly saved, plus a new reserved-tag rule. Keeping them by reading every board document for summaries, which undoes the S1 speedup. A single flag for link and refs stays rejected (D123).
+**Tag.** [stated] · remind-me: mem_a077a68ee1884f3ab39ac805e39850dc
+**Key.** lel:1432:external-refs-summary-flags-dropped
+**Source.** Nano chose option A, "Drop both flags", on decision card `cmsg_017MoLbtrGAAcyE1PVPZXuN62KVkvMfLiGbUKg62y2EiuZ` ("Drop the two summary flags from the external refs design?"), 2026-11-12T00:13:55Z, Mill_Board project thread `cmsg_017MoLbtrGAAcyE1PVPZXuN6Ek2MsYp9T23hpHFtsj2DWp`, answering the expert's escalation from the PR #1618 review (D125). Supersedes D123 item (4); narrows D124. ADR-0006 `crates/apps/rusty_mill_board/docs/adr/0006-external-execution-refs.md` still lists the flags and needs the matching edit in PR #1618. Numbered D126 after D125.

@@ -1,6 +1,6 @@
 # ADR-0006: Observation-only external execution refs
 
-- **Status:** Accepted (2026-11-11): Nano approved this design as written for implementation (D124), card #1432. It was approved in principle by Nano on 2026-11-10 ([D122](../../../../../docs/projects/let-em-loose/DECISIONS.md)), with defaults in D123. That approval covers the card schema and MCP API changes below, which were ask-first items (D25).
+- **Status:** Accepted (2026-11-11): Nano approved this design as written for implementation (D124), card #1432. The summary flags in D123 were later dropped (D126, 2026-11-12). It was approved in principle by Nano on 2026-11-10 ([D122](../../../../../docs/projects/let-em-loose/DECISIONS.md)), with defaults in D123. That approval covers the card schema and MCP API changes below, which were ask-first items (D25).
 
 ## Context
 Some work on the board runs outside Rusty Orch: Codex Cloud threads for Communications (#798) and PythRust, and the GitHub PRs and Actions runs they produce. None of it has an Orch goal, a BBP task or an assignment generation, so it cannot carry an `ExecutionLink`, and inventing one is forbidden (#798). In production, 0 of 1,425 cards have `execution` set. About 63 record Codex Cloud thread and turn ids only in comments, where nothing can query, deduplicate or reconcile them against GitHub.
@@ -42,7 +42,7 @@ One new MCP and HTTP op, `card_execution_observe {id, provider, ref, state, url?
 - **Event:** a change logs a new `ExecutionObserved` event, so `board_events` pollers and the web UI's incremental refresh pick it up as they do any card change.
 - **Reads:**
   - `card_get` and the full `board_list` view carry `external_refs`.
-  - Summaries gain two flags (D123): `has_execution` (an `ExecutionLink` is set) and `has_external_refs` (any ref is set). A single flag for both is rejected, because a reader could take an observation for an Orch execution.
+  - Summaries are unchanged (D126). They are built from task metadata and never read the card document, so they cannot tell whether a card has an `ExecutionLink` or refs. A reader that needs either calls `card_get`.
   - The card dialog lists the refs, linking each `url`.
 
 There is no op to delete a ref. Eviction bounds the list, and an observation is history.
@@ -65,7 +65,7 @@ Refs stay on Done and archived cards, and restore keeps them: they are the recor
   2. `external_refs` itself, as a field of the domain `Card` like `execution`, which `BoardDoc::of` writes (D125).
 
   Rolling back from 2 to 1 then loses nothing. Rolling back below 1 drops refs from a card's document on that card's next write. That is accepted and stated in the release notes.
-- **MCP schema:** a new tool, a new optional field on the card, and two summary booleans. Existing calls are unchanged. Connectors pick up the new tool after a reconnect.
+- **MCP schema:** a new tool, and a new optional field on the card. Existing calls are unchanged. Connectors pick up the new tool after a reconnect.
 
 ### Consumers and backfill
 - #798 Communications and the PythRust cloud cards call `card_execution_observe` when they launch, resume or finish a Codex Cloud thread, and when a PR they opened changes state. #798's reconciliation then compares refs against GitHub, not comment text.
@@ -76,7 +76,7 @@ Refs stay on Done and archived cards, and restore keeps them: they are the recor
 
 ## Consequences
 - Non-Orch execution becomes queryable and reconcilable without a second orchestration engine inside the board.
-- One more op and one more event kind. The document stays well under its size limit, and S1 summaries stay small (two booleans).
+- One more op and one more event kind. The document stays well under its size limit, and S1 summaries are unchanged.
 - The eviction rule and the provider set are code, so a new provider or a larger cap is a reviewed change.
 - Rejected:
   - Keeping ids in comments only (status quo, unqueryable).
