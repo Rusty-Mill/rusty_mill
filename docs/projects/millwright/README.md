@@ -58,6 +58,7 @@ Mill Board, Let Em Loose (BBP, orch) and the shared crates are in `rusty_mill`. 
 - [QUESTIONS.md](QUESTIONS.md): open questions for Nano, with recommendations.
 - [DECISIONS.md](DECISIONS.md): what Nano has decided, with date and source.
 - [PRIORITIES.md](PRIORITIES.md): each board project's priority tier; agents pull work from it.
+- [g1-identity.md](g1-identity.md): G1 report on Claude's GitHub identity and cross-family review (card #24).
 - [architecture.svg](architecture.svg): agents, shared systems, and what is off the main path.
 - [handoff/](handoff/SPEC.md): the pack behind `millwright-expert`, which answers programme
   questions (phase, gate, sequencing, which milestone, what waits) before Nano is asked.
