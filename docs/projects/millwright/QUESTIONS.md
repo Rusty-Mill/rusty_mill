@@ -87,11 +87,13 @@ These are also tracked by `let-em-loose-expert`; its pack is the authority for t
 
 | # | Question | Recommendation |
 | --- | --- | --- |
-| E1 | Adopt an entry rule: a new idea starts as a design note in remind-me, and a repository and cards are created only after an overlap check? | Yes. Deliberate experiments are allowed if labelled, with a harvest at the end. |
-| E3 | Is any of the five audited repos carrying work committed for this month? | Anything that is not can leave the board. |
 | E4 | Settle one Rust toolchain pin across the repos, and move Ledger and Conflux to the newer SQLite binding? Both are ask-first changes. | Yes to both. |
 
 E2 (run the triage) is answered; see DECISIONS.md backlog-triage. Still open from it:
 which projects count as paused. X1 to X3 settle that Ledger, Conflux and Swarm OS
 leave the board; whether Converge is also paused, as E2's wording suggested, is not
 settled (handoff/OPEN_QUESTIONS.md Q2).
+
+E1 (entry rule) and E3 (committed work this month) are answered; see DECISIONS.md
+entry-rule and audited-repos-this-month. Still open from E3: how "they all might" sits
+with X1 to X3 (handoff/OPEN_QUESTIONS.md Q3).
