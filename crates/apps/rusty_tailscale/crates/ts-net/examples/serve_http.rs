@@ -12,17 +12,12 @@
 //! Hello from tailscale-rs (ts-net), served with no TUN and no root!
 //! ```
 
-#[cfg(target_os = "linux")]
 use std::path::PathBuf;
-#[cfg(target_os = "linux")]
 use std::process::ExitCode;
 
-#[cfg(target_os = "linux")]
 use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
-#[cfg(target_os = "linux")]
 use ts_net::{Node, NodeConfig, TcpStream};
 
-#[cfg(target_os = "linux")]
 const USAGE: &str = "\
 usage: serve_http --login-server <url> --authkey <key> [options]
 
@@ -34,7 +29,6 @@ options:
   --direct              enable direct-path discovery
   --stun <host:port>    STUN server for reflexive discovery (implies --direct)";
 
-#[cfg(target_os = "linux")]
 struct Args {
     login_server: String,
     derp_server: Option<String>,
@@ -46,7 +40,6 @@ struct Args {
     stun: Option<String>,
 }
 
-#[cfg(target_os = "linux")]
 fn parse_args() -> Result<Args, String> {
     let mut login_server = None;
     let mut derp_server = None;
@@ -88,7 +81,6 @@ fn parse_args() -> Result<Args, String> {
 #[cfg(not(target_os = "linux"))]
 fn main() {}
 
-#[cfg(target_os = "linux")]
 #[rusty_tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     tracing_subscriber_init();
@@ -144,7 +136,6 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-#[cfg(target_os = "linux")]
 async fn handle(mut stream: TcpStream) {
     let peer = stream.peer_addr();
     // Read the request headers (until the blank line) — enough to be a polite
@@ -181,7 +172,6 @@ async fn handle(mut stream: TcpStream) {
     let _ = stream.shutdown().await;
 }
 
-#[cfg(target_os = "linux")]
 fn tracing_subscriber_init() {
     // Best-effort: honor RUST_LOG if the subscriber crate is present. ts-net's
     // example keeps deps minimal, so just print engine logs via eprintln
