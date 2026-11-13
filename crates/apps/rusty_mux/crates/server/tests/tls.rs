@@ -138,7 +138,61 @@ fn try_in(addr: SocketAddr, first: &[u8]) -> Option<Message> {
     })
 }
 
+/// Connects with a valid token, calls `revoke` (at the door when `early`,
+/// else once the server has answered), and tells whether the server then
+/// closed the connection. Whatever it still said before closing is ignored.
+fn closed_after_revoke(addr: SocketAddr, early: bool, revoke: impl FnOnce()) -> bool {
+    let runtime = Builder::new_current_thread()
+        .build_local(&LocalOptions::default())
+        .expect("runtime");
+    runtime.block_on(async {
+        rusty_tokio::time::timeout(PATIENCE, async {
+            let tcp = TcpStream::connect(addr).await.ok()?;
+            let mut tls =
+                AsyncTlsStream::new(tcp, "localhost", &TrustPolicy::DangerNoVerification).ok()?;
+            tls.write_all(&TOKEN).await.ok()?;
+            let hello = Message::Hello {
+                version: None,
+                features: Features::CHECKPOINT_V6,
+                resume: None,
+                takeover: None,
+            };
+            let mut revoke = Some(revoke);
+            if early {
+                // Let the server read the token and wait for Hello.
+                rusty_tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                (revoke.take()?)();
+            }
+            tls.write_all(&encode(&hello).expect("encode")).await.ok()?;
+            loop {
+                let mut chunk = [0u8; 4096];
+                match tls.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return Some(()),
+                    Ok(_) => {
+                        if let Some(revoke) = revoke.take() {
+                            revoke();
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .is_ok()
+    })
+}
+
 impl Server {
+    /// Empties the token file and reloads, as `token revoke` and SIGHUP do.
+    fn revoke_all(&self, dir: &Path) {
+        write(dir, "tokens", "");
+        let (answer, answered) = oneshot::channel();
+        self.reload.send(answer).expect("running");
+        // The answer is on a channel only an async task can await; give the
+        // reload a moment instead.
+        drop(answered);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
     fn finish(self, dir: &Path) {
         let _ = self.stop.send(());
         let _ = std::fs::remove_dir_all(dir);
@@ -191,5 +245,23 @@ fn a_reload_that_revokes_a_token_stops_it_being_served() {
         try_in(server.addr, &TOKEN).is_none(),
         "a revoked token was served"
     );
+    server.finish(&dir);
+}
+
+#[test]
+fn a_token_revoked_while_the_peer_waits_at_hello_is_not_served() {
+    let dir = scratch();
+    let server = start(&dir, "token:laptop\n");
+    let closed = closed_after_revoke(server.addr, true, || server.revoke_all(&dir));
+    assert!(closed, "a token revoked at Hello kept its seat");
+    server.finish(&dir);
+}
+
+#[test]
+fn a_reload_closes_a_served_connection_of_a_revoked_token() {
+    let dir = scratch();
+    let server = start(&dir, "token:laptop\n");
+    let closed = closed_after_revoke(server.addr, false, || server.revoke_all(&dir));
+    assert!(closed, "a revoked connection stayed open");
     server.finish(&dir);
 }

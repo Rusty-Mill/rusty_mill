@@ -84,14 +84,19 @@ pub(crate) fn read_tokens(path: &Path) -> io::Result<Tokens> {
     })
 }
 
-/// Reads the token the peer sends first and returns its name, if it is one.
-async fn authenticate<S>(stream: &mut S, tokens: &RefCell<Tokens>) -> Option<String>
+/// Reads the token the peer sends first; returns its name and the bytes, if
+/// they are a token's.
+async fn authenticate<S>(
+    stream: &mut S,
+    tokens: &RefCell<Tokens>,
+) -> Option<(String, [u8; token::LEN])>
 where
     S: rusty_tokio::io::AsyncRead + Unpin + Send,
 {
     let mut presented = [0u8; token::LEN];
     stream.read_exact(&mut presented).await.ok()?;
-    tokens.borrow().verify(&presented).map(str::to_string)
+    let name = tokens.borrow().verify(&presented)?.to_string();
+    Some((name, presented))
 }
 
 /// One peer: the handshake, the token, then the protocol as a guest.
@@ -104,22 +109,33 @@ async fn serve_peer(
     guests: Guests,
     pending: Rc<Cell<usize>>,
 ) {
-    let admitted = rusty_tokio::time::timeout(PATIENCE, async {
+    // The stream comes back with its verdict, so a refusal can hold it.
+    let seen = rusty_tokio::time::timeout(PATIENCE, async {
         let mut tls = acceptor.accept_async(stream).ok()?;
         tls.complete_handshake().await.ok()?;
-        let name = authenticate(&mut tls, &tokens).await?;
-        let principal = Principal::new(format!("token:{name}"), "").ok()?;
-        let listed = allow.borrow().names(&principal);
-        listed.then_some((tls, principal))
+        let admitted = async {
+            let (name, presented) = authenticate(&mut tls, &tokens).await?;
+            let principal = Principal::new(format!("token:{name}"), "").ok()?;
+            let listed = allow.borrow().names(&principal);
+            listed.then_some((principal, presented))
+        }
+        .await;
+        Some((tls, admitted))
     })
     .await
     .ok()
     .flatten();
-    pending.set(pending.get() - 1);
-    let Some((tls, principal)) = admitted else {
-        // Held, not answered: a refusal costs the guesser a second.
-        return rusty_tokio::time::sleep(FAIL_DELAY).await;
+    let (tls, principal, presented) = match seen {
+        Some((tls, Some((principal, presented)))) => (tls, principal, presented),
+        refused => {
+            // Held, not answered: a refusal costs the guesser a second.
+            if refused.is_some() {
+                rusty_tokio::time::sleep(FAIL_DELAY).await;
+            }
+            return pending.set(pending.get() - 1);
+        }
     };
+    pending.set(pending.get() - 1);
     let (rd, wr) = rusty_tokio::io::split(tls);
     let who = principal.clone();
     conn::run(
@@ -128,7 +144,15 @@ async fn serve_peer(
         wr,
         principal,
         Transport::Socket,
-        move |_, cancel| guests.add(who, cancel),
+        move |_, cancel| {
+            // The peer may have waited at `Hello` through a reload: it is
+            // served only if its token is still the one it presented.
+            let name = who.id().trim_start_matches("token:");
+            if tokens.borrow().verify(&presented) != Some(name) {
+                return cancel.notify_one();
+            }
+            guests.add(who.clone(), cancel)
+        },
     )
     .await;
 }

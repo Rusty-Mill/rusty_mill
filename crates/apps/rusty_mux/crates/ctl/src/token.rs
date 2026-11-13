@@ -61,7 +61,13 @@ fn save(file: &Path, text: &str) -> std::io::Result<()> {
     temp.push(".new");
     let temp = std::path::PathBuf::from(temp);
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    // A stale sibling (or a link planted there) is removed, and the new one
+    // must be created by us, so it has our mode and is no one's link.
+    match std::fs::remove_file(&temp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
     let mut f = options.open(&temp)?;

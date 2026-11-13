@@ -52,11 +52,11 @@ mod state;
 #[cfg(any(target_os = "linux", windows))]
 mod store;
 pub use rusty_mux_proto::style;
-#[cfg(any(target_os = "linux", windows))]
 #[cfg(target_os = "linux")]
 mod pem;
 #[cfg(target_os = "linux")]
 pub mod tailnet;
+#[cfg(any(target_os = "linux", windows))]
 mod terminal;
 #[cfg(target_os = "linux")]
 mod tls;
