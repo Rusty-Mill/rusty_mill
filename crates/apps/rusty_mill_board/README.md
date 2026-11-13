@@ -120,8 +120,10 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   name (`https://github.com/O/N/pull/N` anywhere; `PR #N` or `pull request #N` in a mapped repository's
   projects; never a bare `#N`), at most 8 each; add `--backfill-record FILE` to write, and
   `--undo-backfill FILE` clears what it wrote. Observed external refs (ADR-0006) never count. Done cards that name no pull request read as prototypes
-  until someone adds a link. The plan lists, per link, every place it is named (the text around it): read it, because nothing checks
-  that a pull request merged (a card may say "superseded by PR #5"). A card changed while the backfill runs is
+  until someone adds a link. The plan lists, per link, every place it is named (the text around it): read it, since a card
+  may say "superseded by PR #5". Add `--check-merged` (with `GITHUB_TOKEN`, read access to pull requests) to ask GitHub
+  whether each one merged and keep only those; dropped links go to stderr, and a failed lookup (auth, rate limit)
+  stops the run before anything is written. A card changed while the backfill runs is
   skipped and reported.
   Each run writes its own `--backfill-record` file (an existing one is refused); undo a run with that run's file.
 - **Close reasons (dropped work).** `card_close` closes an unstarted card (Backlog or a queue) without shipping

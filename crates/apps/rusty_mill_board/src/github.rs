@@ -8,6 +8,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::backfill::{Lookup, Merged};
 use crate::http::Http;
 use crate::sync::{Draft, Forge, Issue, SyncError};
 
@@ -40,29 +41,118 @@ impl GithubConfig {
     /// If the repo is not `owner/name` of plain name characters (it goes into
     /// a URL path), the API base is not http(s), or the token is empty.
     pub fn new(api: &str, repo: &str, token: &str) -> Result<Self, String> {
-        // Both segments go into a URL path: plain name characters, and never `.`/`..`.
-        let plain = |s: &str| {
-            s != "."
-                && s != ".."
-                && !s.is_empty()
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        };
         match repo.split_once('/') {
             Some((owner, name)) if plain(owner) && plain(name) => {}
             _ => return Err("repo must look like owner/name".into()),
         }
-        if !(api.starts_with("https://") || api.starts_with("http://")) {
-            return Err("API base must start with https:// or http://".into());
-        }
-        if token.trim().is_empty() {
-            return Err("GitHub token is empty".into());
-        }
+        let (api, token) = base(api, token)?;
         Ok(Self {
-            api: api.trim_end_matches('/').to_owned(),
+            api,
             repo: repo.to_owned(),
-            token: token.trim().to_owned(),
+            token,
         })
+    }
+}
+
+/// A URL path segment: plain name characters, and never `.`/`..`.
+fn plain(s: &str) -> bool {
+    s != "."
+        && s != ".."
+        && !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// A checked API base (no trailing `/`) and token.
+fn base(api: &str, token: &str) -> Result<(String, String), String> {
+    if !(api.starts_with("https://") || api.starts_with("http://")) {
+        return Err("API base must start with https:// or http://".into());
+    }
+    if token.trim().is_empty() {
+        return Err("GitHub token is empty".into());
+    }
+    Ok((
+        api.trim_end_matches('/').to_owned(),
+        token.trim().to_owned(),
+    ))
+}
+
+/// `(status, body)` of one GitHub REST request.
+fn send(
+    http: &Http,
+    token: &str,
+    method: &str,
+    url: &str,
+    body: Option<String>,
+) -> Result<(u16, String), String> {
+    let auth = format!("Bearer {token}");
+    let headers = [
+        ("Authorization", auth.as_str()),
+        ("Accept", "application/vnd.github+json"),
+        ("X-GitHub-Api-Version", "2022-11-28"),
+        ("User-Agent", "rusty_mill_board"),
+    ];
+    http.send(method, url, &headers, body)
+}
+
+/// The backfill's merge check over `GET /repos/OWNER/NAME/pulls/N` (read-only; the token
+/// needs pull requests read on each repository).
+pub struct GithubMerged {
+    api: String,
+    token: String,
+    http: Http,
+}
+
+impl fmt::Debug for GithubMerged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GithubMerged")
+            .field("api", &self.api)
+            .field("token", &"***redacted***")
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
+struct RawPull {
+    merged: bool,
+}
+
+impl GithubMerged {
+    /// `api` is the REST base, e.g. `https://api.github.com`.
+    ///
+    /// # Errors
+    /// If the API base is not http(s), the token is empty, or the runtime cannot start.
+    pub fn new(api: &str, token: &str) -> Result<Self, String> {
+        let (api, token) = base(api, token)?;
+        Ok(Self {
+            api,
+            token,
+            http: Http::new(Duration::from_secs(30))?,
+        })
+    }
+}
+
+impl Merged for GithubMerged {
+    fn merged(&self, owner: &str, name: &str, number: u64) -> Result<bool, Lookup> {
+        if !plain(owner) || !plain(name) {
+            return Err(Lookup::Failed(format!("{owner}/{name}: not a repository")));
+        }
+        let url = format!("{}/repos/{owner}/{name}/pulls/{number}", self.api);
+        let (status, text) =
+            send(&self.http, &self.token, "GET", &url, None).map_err(Lookup::Failed)?;
+        match status {
+            200 => serde_json::from_str::<RawPull>(&text)
+                .map(|p| p.merged)
+                .map_err(|e| Lookup::Failed(e.to_string())),
+            404 => Err(Lookup::Missing),
+            _ => {
+                let snippet: String = text.chars().take(BODY_SNIPPET).collect();
+                Err(Lookup::Failed(format!(
+                    "GET {} -> {status}: {snippet}",
+                    url_path(&url)
+                )))
+            }
+        }
     }
 }
 
@@ -124,14 +214,8 @@ impl GithubForge {
 
     /// One request; returns the body of a 2xx, else an error naming the status.
     fn call(&self, method: &str, url: &str, body: Option<String>) -> Result<String, SyncError> {
-        let auth = format!("Bearer {}", self.config.token);
-        let headers = [
-            ("Authorization", auth.as_str()),
-            ("Accept", "application/vnd.github+json"),
-            ("X-GitHub-Api-Version", "2022-11-28"),
-            ("User-Agent", "rusty_mill_board"),
-        ];
-        let (status, text) = self.http.send(method, url, &headers, body).map_err(forge)?;
+        let (status, text) =
+            send(&self.http, &self.config.token, method, url, body).map_err(forge)?;
         if (200..300).contains(&status) {
             return Ok(text);
         }
@@ -230,5 +314,64 @@ mod tests {
             url_path("https://api.github.com/repos/a/b/issues?x=1"),
             "/repos/a/b/issues?x=1"
         );
+    }
+
+    /// Serve one canned response per connection, in order, on a loopback port; returns the
+    /// API base and the request lines seen.
+    fn serve(replies: &[(u16, &str)]) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let replies: Vec<(u16, String)> = replies.iter().map(|(c, b)| (*c, (*b).into())).collect();
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for (code, body) in replies {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("request line");
+                seen.push(line.trim().to_owned());
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).expect("header");
+                    if header.trim().is_empty() {
+                        break;
+                    }
+                    if header.to_ascii_lowercase().starts_with("authorization:") {
+                        assert_eq!(header.trim(), "Authorization: Bearer hunter2");
+                    }
+                }
+                let reply = format!(
+                    "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(reply.as_bytes()).expect("reply");
+            }
+            seen
+        });
+        (base, handle)
+    }
+
+    #[test]
+    fn merged_reads_the_pull_request_and_tells_missing_from_failed() {
+        let (base, server) = serve(&[
+            (200, r#"{"number":1,"merged":true}"#),
+            (200, r#"{"number":2,"merged":false}"#),
+            (404, r#"{"message":"Not Found"}"#),
+            (403, r#"{"message":"API rate limit exceeded"}"#),
+        ]);
+        let forge = GithubMerged::new(&base, "hunter2").expect("client");
+        assert!(!format!("{forge:?}").contains("hunter2"), "token redacted");
+        assert_eq!(forge.merged("o", "r", 1), Ok(true));
+        assert_eq!(forge.merged("o", "r", 2), Ok(false));
+        assert_eq!(forge.merged("o", "r", 3), Err(Lookup::Missing));
+        match forge.merged("o", "r", 4) {
+            Err(Lookup::Failed(e)) => assert!(e.contains("403") && e.contains("rate limit"), "{e}"),
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        assert!(matches!(forge.merged("..", "r", 5), Err(Lookup::Failed(_))));
+        let seen = server.join().expect("server");
+        assert_eq!(seen[0], "GET /repos/o/r/pulls/1 HTTP/1.1");
+        assert_eq!(seen.len(), 4, "the bad repository never left the process");
     }
 }

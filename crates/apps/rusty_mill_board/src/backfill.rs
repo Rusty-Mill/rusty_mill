@@ -43,8 +43,8 @@ pub struct Link {
     /// `https://github.com/OWNER/NAME/pull/N`.
     pub url: String,
     /// The text around each mention, oldest first (at most [`MAX_MENTIONS`]), to review the
-    /// plan by. Nothing checks that a pull request merged, so a person reads these: a later
-    /// "closed unmerged" shows here.
+    /// plan by. Unless [`keep_merged`] ran, nothing checks that a pull request merged, so a
+    /// person reads these: a later "closed unmerged" shows here.
     pub named_in: Vec<String>,
 }
 
@@ -205,6 +205,97 @@ fn pr_mentions(text: &str, github: Option<&str>) -> Vec<(usize, String)> {
 fn digits(s: &str) -> Option<u64> {
     let end = s.bytes().take_while(u8::is_ascii_digit).count();
     s[..end].parse().ok().filter(|n| *n > 0)
+}
+
+/// Why a merge lookup gave no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lookup {
+    /// The forge has no such pull request, or the token cannot see it: the link is dropped
+    /// and reported.
+    Missing,
+    /// Anything else (auth, rate limit, transport): the whole check stops, nothing written.
+    Failed(String),
+}
+
+/// Port: whether a pull request merged.
+pub trait Merged {
+    /// Whether `OWNER/NAME` pull request `number` merged.
+    ///
+    /// # Errors
+    /// [`Lookup`] when the forge gives no yes or no.
+    fn merged(&self, owner: &str, name: &str, number: u64) -> Result<bool, Lookup>;
+}
+
+/// A link [`keep_merged`] took out of the plan, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Dropped {
+    /// The card.
+    pub id: Uuid,
+    /// The pull request.
+    pub url: String,
+    /// `not merged` or `not found`.
+    pub why: &'static str,
+}
+
+/// Keep only the links that merged, asking `forge` once per pull request; a card left with
+/// none leaves the plan. Opt-in (`--check-merged`): it turns the plan's `named_in` from the
+/// only check into a second one.
+///
+/// # Errors
+/// The first [`Lookup::Failed`], so a bad token or a rate limit never shrinks the plan.
+pub fn keep_merged(
+    plan: Vec<Fill>,
+    forge: &dyn Merged,
+) -> Result<(Vec<Fill>, Vec<Dropped>), String> {
+    let mut seen: BTreeMap<String, Result<(), &'static str>> = BTreeMap::new();
+    let mut dropped = Vec::new();
+    let mut kept = Vec::new();
+    for mut fill in plan {
+        let mut links = Vec::new();
+        for link in fill.links {
+            let answer = match seen.get(&link.url) {
+                Some(v) => *v,
+                None => {
+                    let v = verdict(forge, &link.url)?;
+                    seen.insert(link.url.clone(), v);
+                    v
+                }
+            };
+            match answer {
+                Ok(()) => links.push(link),
+                Err(why) => dropped.push(Dropped {
+                    id: fill.id,
+                    url: link.url,
+                    why,
+                }),
+            }
+        }
+        if !links.is_empty() {
+            fill.links = links;
+            kept.push(fill);
+        }
+    }
+    Ok((kept, dropped))
+}
+
+/// `Ok(())` to keep `url`, `Err(why)` to drop it.
+fn verdict(forge: &dyn Merged, url: &str) -> Result<Result<(), &'static str>, String> {
+    let (owner, name, number) = pull_parts(url).ok_or_else(|| format!("{url}: not a pull URL"))?;
+    match forge.merged(owner, name, number) {
+        Ok(true) => Ok(Ok(())),
+        Ok(false) => Ok(Err("not merged")),
+        Err(Lookup::Missing) => Ok(Err("not found")),
+        Err(Lookup::Failed(e)) => Err(format!("checking {url}: {e}")),
+    }
+}
+
+/// `(OWNER, NAME, N)` of a link [`pull_urls`] or [`pr_mentions`] built.
+fn pull_parts(url: &str) -> Option<(&str, &str, u64)> {
+    let mut parts = url.strip_prefix(GITHUB)?.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    let number = parts.next().filter(|p| *p == "pull").and(parts.next())?;
+    let n = digits(number).filter(|_| number.bytes().all(|b| b.is_ascii_digit()))?;
+    (parts.next().is_none() && plain(owner) && plain(name)).then_some((owner, name, n))
 }
 
 /// Save `plan` as the record file at `path`, which must not exist yet, and sync it: what
@@ -578,6 +669,71 @@ mod tests {
             "x=a/..",
         ] {
             assert!(parse_repos(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A forge that answers from a table: merged, unmerged, missing, or failing.
+    struct Table(BTreeMap<u64, Result<bool, Lookup>>, std::cell::Cell<usize>);
+
+    impl Merged for Table {
+        fn merged(&self, owner: &str, name: &str, number: u64) -> Result<bool, Lookup> {
+            assert_eq!((owner, name), ("Rusty-Mill", "rusty_mill"));
+            self.1.set(self.1.get() + 1);
+            self.0.get(&number).cloned().unwrap_or(Err(Lookup::Missing))
+        }
+    }
+
+    fn table(rows: &[(u64, Result<bool, Lookup>)]) -> Table {
+        Table(rows.iter().cloned().collect(), std::cell::Cell::new(0))
+    }
+
+    #[test]
+    fn keep_merged_keeps_merged_links_and_reports_the_rest() {
+        let a = done("PR #1 then PR #2, and PR #3", &[]);
+        let b = done("only PR #2", &[]);
+        let c = done("PR #1 again", &[]);
+        let p = plan(&[a.clone(), b.clone(), c], &mapped);
+        let forge = table(&[(1, Ok(true)), (2, Ok(false))]);
+        let (kept, dropped) = keep_merged(p, &forge).expect("check");
+        assert_eq!(forge.1.get(), 3, "each pull request is asked once");
+        assert_eq!(kept.len(), 2, "b names nothing merged: {kept:?}");
+        assert_eq!(kept[0].id, a.id);
+        let urls: Vec<&str> = kept[0].links.iter().map(|l| l.url.as_str()).collect();
+        assert_eq!(urls, [format!("{GITHUB}{RM}/pull/1")]);
+        let why: Vec<(Uuid, &str)> = dropped.iter().map(|d| (d.id, d.why)).collect();
+        assert_eq!(
+            why,
+            [
+                (a.id, "not merged"),
+                (a.id, "not found"),
+                (b.id, "not merged")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_lookup_stops_the_check() {
+        let p = plan(&[done("PR #1 PR #2", &[])], &mapped);
+        let forge = table(&[(1, Ok(true)), (2, Err(Lookup::Failed("403".into())))]);
+        let err = keep_merged(p, &forge).expect_err("stops");
+        assert!(err.contains("/pull/2") && err.contains("403"), "{err}");
+    }
+
+    #[test]
+    fn pull_parts_reads_only_the_links_the_plan_builds() {
+        assert_eq!(
+            pull_parts(&format!("{GITHUB}{RM}/pull/42")),
+            Some(("Rusty-Mill", "rusty_mill", 42))
+        );
+        for bad in [
+            "https://github.com/o/r/issues/1",
+            "https://github.com/o/r/pull/0",
+            "https://github.com/o/r/pull/1/files",
+            "https://github.com/o/r/pull/1x",
+            "https://github.com/../r/pull/1",
+            "https://example.com/o/r/pull/1",
+        ] {
+            assert_eq!(pull_parts(bad), None, "{bad}");
         }
     }
 }
