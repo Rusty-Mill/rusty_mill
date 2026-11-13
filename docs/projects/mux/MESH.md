@@ -1,8 +1,10 @@
 # Own mesh network (proposed C80): design note
 
-Status: Proposed (2026-11-13). Docs only. Nothing here is built, and starting any stage needs
+Status: Proposed (2026-11-13). Nano answered the six questions below on 2026-11-13 17:12Z (all
+recommendations concurred, with two comments, recorded under "Answers"); each build step still
+needs its own go (D37). Docs only. Nothing here is built, and starting any stage needs
 Nano's go (D37). Answers Nano's question: "Instead of tailnet, can we develop our own
-meshnet, tailnet-like, and have it be part of the mux server?" Decision rows D241-D246 are
+meshnet, tailnet-like, and have it be part of the mux server?" Decision rows D241-D252 are
 **Proposed** until Nano accepts them on the PR.
 
 ## Short answer
@@ -190,15 +192,16 @@ Estimates are for an agent with review turnaround, not calendar time.
   manually promoted standby. Relays are not single points: a mesh can list several.
 - **Platforms.** `ts-magicsock` uses `platform-linux`'s UDP socket and `ts-tun` is Linux-only,
   so the mesh is Linux first. Both ends of a mesh connection need a node, so a Linux-only mesh
-  also excludes Nano's Windows client (D51, D227), not just the server. Windows keeps SSH and
-  (later) TLS; a Windows UDP adapter is a separate card.
+  also excludes Nano's Windows client (D51, D227), not just the server. Windows is Nano's main
+  platform (Answers), so the port of `ts-magicsock` to `WindowsUdpSocket` (spike A-W) follows
+  spike A directly; until then Windows keeps SSH and (later) TLS.
 - **Key rotation** is not implemented in `rusty_tailscale` (DESIGN.md, Phase 6). A leaked node
   key stays valid until the hub deletes the node; stage 2 must ship revoke.
 - **Weight.** boringtun and smoltcp enter the server binary. Behind `mesh`, off by default.
 - **Fully-owned WireGuard** is a larger job than the rest of this note combined and is not
   needed to meet the goal. It stays a later spike.
 
-## Decisions (Proposed, D241-D246)
+## Decisions (Proposed, D241-D252)
 
 The `ts:` and `ts-node:` principals are #1665's (open, not yet in the pack). Rows for the pack (`docs/projects/rusty_term/handoff/DECISIONS.md`) are appended by
 `rusty-term-expert`; IDs are reserved here so parallel PRs do not clash (D240 is #1665's; renumber if it lands differently).
@@ -212,7 +215,23 @@ The `ts:` and `ts-node:` principals are #1665's (open, not yet in the pack). Row
 | D245 | Spikes A, B, C with the pass/fail tests above; B starts only after A passes |
 | D246 | Mesh peers use TCP streams; mux UDP transport (C13) is not run inside the mesh |
 
-## Questions for Nano
+## Answers (Nano, 2026-11-13)
+
+Nano concurred with all six recommendations, with two comments.
+
+- **Q2:** Tailscale-compatible hub, and **real Tailscale stays a supported option** for a user
+  who already has a tailnet, like SSH next to the mux's own transport. So the tailnet listener
+  (#1665) and the embedded node joining Tailscale or Headscale are kept, not retired.
+- **Q6:** Windows is Nano's main platform, so **Linux-only is not a comfortable end state**.
+  Windows is a priority, not a footnote. A cheaper path than the note first assumed:
+  `rustils` already has `platform-windows::WindowsUdpSocket`, and `ts-magicsock` is gated to
+  `target_os = "linux"` only because it names `LinuxUdpSocket`. Spike A runs on Linux (the
+  harness is there); a spike A-W then ports `ts-magicsock` to the `platform::net::UdpSocket`
+  port so the same node runs on Windows (pass: spike A's test, run client and server on
+  Windows, no `tailscaled`, no admin). The embedded node needs no TUN, so `wintun` is not
+  needed for the mesh.
+
+## Questions for Nano (answered above)
 
 1. **Go on spike A (embedded node, 1-2 days)?** Recommend yes: it removes `tailscaled`, adds
    no dependency, and tells us how much of the mesh we already own.
@@ -227,4 +246,4 @@ The `ts:` and `ts-node:` principals are #1665's (open, not yet in the pack). Row
 5. **WireGuard: keep boringtun, or start an in-house `rusty_wg` spike?** Recommend keep
    boringtun now and revisit after stage 2; it sits behind `WgPeer`, so the swap is local.
 6. **Platforms: is a Linux-only mesh acceptable for stages 1-2, knowing it excludes the
-   Windows client?** Recommend yes. Windows keeps SSH and the TLS listener; a Windows UDP adapter is its own card.
+   Windows client?** Recommend yes. Windows keeps SSH and the TLS listener; a Windows UDP adapter is its own card. *(Answered: Windows is a priority; see Answers.)*
