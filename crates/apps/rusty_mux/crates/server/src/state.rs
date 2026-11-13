@@ -1237,6 +1237,11 @@ impl State {
             M::Rename { req, target, name } => (
                 req,
                 self.require(client, Features::LABELS, "rename")
+                    .and_then(|()| {
+                        self.mux
+                            .authorize_manage(client, target)
+                            .map_err(Refusal::from)
+                    })
                     .and_then(|()| match target {
                         EntityId::Block(block) => self.owns(client, [block]),
                         _ => Ok(()),
@@ -1246,6 +1251,11 @@ impl State {
             M::NameSession { req, session, name } => (
                 req,
                 self.require(client, Features::NAME_SESSION, "name-session")
+                    .and_then(|()| {
+                        self.mux
+                            .authorize_manage(client, EntityId::Session(session))
+                            .map_err(Refusal::from)
+                    })
                     .and_then(|()| done(self.mux.name_session(session, name))),
             ),
             M::Disconnect {

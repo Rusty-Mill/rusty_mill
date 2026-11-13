@@ -107,5 +107,23 @@ fn a_connection_that_is_gone_is_forgotten() {
     guests.add(alice(), &gone);
     drop(gone);
     guests.add(alice(), &Rc::new(Notify::new()));
-    assert_eq!(guests.0.borrow().len(), 1);
+    assert_eq!(guests.open.borrow().len(), 1);
+}
+
+#[test]
+fn a_guest_revoked_before_it_registers_is_closed_when_it_does() {
+    // It connected, held back `Hello`, and was revoked meanwhile.
+    let guests = Guests::default();
+    guests.revoke_unlisted(&lookups("uid:1002\n").expect("parses"));
+    let late = Rc::new(Notify::new());
+    guests.add(alice(), &late);
+    let runtime = rusty_tokio::Builder::new_current_thread()
+        .build_local(&rusty_tokio::LocalOptions::default())
+        .expect("runtime");
+    runtime.block_on(async {
+        let closed =
+            rusty_tokio::time::timeout(std::time::Duration::from_secs(5), late.notified()).await;
+        assert!(closed.is_ok(), "alice was served after her revoke");
+    });
+    assert!(guests.open.borrow().is_empty());
 }

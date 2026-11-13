@@ -1080,6 +1080,41 @@ impl Mux {
         self.drop_lease_if_held(client, block);
     }
 
+    /// On a shared server (D232), succeeds when `client` may rename or
+    /// close `target`: it is of the server's own account or of the
+    /// principal that created the session `target` is in (the C33 rule). An
+    /// unshared server, a client target and an unknown one are left to
+    /// their own rules.
+    pub fn authorize_manage(&self, client: ClientId, target: EntityId) -> Result<(), Error> {
+        let Some(account) = self.shared_account.as_ref() else {
+            return Ok(());
+        };
+        let session = match target {
+            EntityId::Session(s) => Some(s),
+            EntityId::Window(w) => self.windows.get(&w).map(|w| w.session),
+            EntityId::Block(b) => self
+                .blocks
+                .get(&b)
+                .and_then(|b| self.windows.get(&b.window))
+                .map(|w| w.session),
+            EntityId::Client(_) => None,
+        };
+        let Some(session) = session.and_then(|s| self.sessions.get(&s)) else {
+            return Ok(());
+        };
+        let caller = self
+            .clients
+            .get(&client)
+            .ok_or(Error::UnknownClient(client))?
+            .principal
+            .id();
+        let allowed = caller == account.id() || session.creator().is_some_and(|c| c.id() == caller);
+        match allowed {
+            true => Ok(()),
+            false => Err(Error::NotCreator { client }),
+        }
+    }
+
     /// Succeeds when `client` may change `block`: it has no owner, or
     /// `client` owns it (C46).
     pub fn authorize_owner(&self, client: ClientId, block: BlockId) -> Result<(), Error> {
@@ -1096,6 +1131,7 @@ impl Mux {
     /// and also, once the block is orphaned, for a client of its owner's
     /// principal, to clean it up.
     pub fn authorize_close(&self, client: ClientId, block: BlockId) -> Result<(), Error> {
+        self.authorize_manage(client, EntityId::Block(block))?;
         let refused = match self.authorize_owner(client, block) {
             Err(Error::Orphaned(b)) => Error::Orphaned(b),
             other => return other,

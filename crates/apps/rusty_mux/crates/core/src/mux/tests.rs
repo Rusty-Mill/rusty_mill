@@ -1603,3 +1603,65 @@ fn a_server_that_is_not_shared_leases_an_open_block_to_anyone() {
     mux.attach(guest, block).expect("attach");
     assert_eq!(mux.acquire_lease(guest, block), Ok(()));
 }
+
+#[test]
+fn on_a_shared_server_only_the_account_and_the_creator_rename_or_close() {
+    let (mut mux, session, window, block) = fixture();
+    mux.share_leases(Principal::unix(1000, Some("me".into())).expect("principal"));
+    let creator = connect_other(&mut mux);
+    let creator_principal = mux.client(creator).expect("client").principal().clone();
+    mux.set_creator(session, creator_principal)
+        .expect("creator");
+    let account = connect(&mut mux);
+    let stranger = mux.connect(
+        Principal::unix(1002, Some("third".into())).expect("principal"),
+        Transport::Socket,
+    );
+    for target in [
+        EntityId::Session(session),
+        EntityId::Window(window),
+        EntityId::Block(block),
+    ] {
+        assert_eq!(
+            mux.authorize_manage(stranger, target),
+            Err(Error::NotCreator { client: stranger }),
+            "{target:?}"
+        );
+        assert_eq!(mux.authorize_manage(creator, target), Ok(()), "{target:?}");
+        assert_eq!(mux.authorize_manage(account, target), Ok(()), "{target:?}");
+    }
+    // An unowned block is no one's to close but the creator's and the account's.
+    assert_eq!(
+        mux.authorize_close(stranger, block),
+        Err(Error::NotCreator { client: stranger })
+    );
+    assert_eq!(mux.authorize_close(creator, block), Ok(()));
+}
+
+#[test]
+fn a_session_with_no_creator_is_the_accounts_to_rename_or_close() {
+    let (mut mux, session, _, block) = fixture();
+    mux.share_leases(Principal::unix(1000, Some("me".into())).expect("principal"));
+    let guest = connect_other(&mut mux);
+    let account = connect(&mut mux);
+    assert_eq!(
+        mux.authorize_manage(guest, EntityId::Session(session)),
+        Err(Error::NotCreator { client: guest })
+    );
+    assert_eq!(
+        mux.authorize_close(guest, block),
+        Err(Error::NotCreator { client: guest })
+    );
+    assert_eq!(mux.authorize_close(account, block), Ok(()));
+}
+
+#[test]
+fn a_server_that_is_not_shared_lets_any_client_rename_and_close() {
+    let (mut mux, session, _, block) = fixture();
+    let other = connect_other(&mut mux);
+    assert_eq!(
+        mux.authorize_manage(other, EntityId::Session(session)),
+        Ok(())
+    );
+    assert_eq!(mux.authorize_close(other, block), Ok(()));
+}

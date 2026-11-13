@@ -82,7 +82,9 @@ impl Allow {
     /// The principal of the listed `uid`, or `None` if it is not listed.
     pub(crate) fn principal(&self, uid: u32) -> Option<Principal> {
         let user = self.users.get(&uid)?;
-        Principal::unix(uid, user.clone()).ok()
+        Principal::unix(uid, user.clone())
+            .inspect_err(|err| eprintln!("rusty-mux-server: shared: uid {uid}: {err}"))
+            .ok()
     }
 
     /// Whether `principal` is still listed.
@@ -108,21 +110,37 @@ pub(crate) fn admit(owner: u32, uid: u32, allow: &Allow) -> Peer {
 /// A guest's connection: its principal, and the notice that closes it.
 type Connection = (Principal, Weak<Notify>);
 
-/// The connections of guests, so a reload can close the ones it revokes.
+/// The connections of guests, so a reload can close the ones it revokes,
+/// and the list in force, so a connection that registers after a reload
+/// is checked against it (it registers only once it has sent `Hello`).
 #[derive(Clone, Default)]
-pub(crate) struct Guests(Rc<RefCell<Vec<Connection>>>);
+pub(crate) struct Guests {
+    open: Rc<RefCell<Vec<Connection>>>,
+    listed: Rc<RefCell<Option<Allow>>>,
+}
 
 impl Guests {
-    /// Remembers a connection of `principal`; `cancel` closes it.
+    /// Remembers a connection of `principal`; `cancel` closes it. A
+    /// principal the list in force no longer names is closed at once.
     pub(crate) fn add(&self, principal: Principal, cancel: &Rc<Notify>) {
-        let mut all = self.0.borrow_mut();
+        if self
+            .listed
+            .borrow()
+            .as_ref()
+            .is_some_and(|allow| !allow.names(&principal))
+        {
+            return cancel.notify_one();
+        }
+        let mut all = self.open.borrow_mut();
         all.retain(|(_, c)| c.strong_count() > 0);
         all.push((principal, Rc::downgrade(cancel)));
     }
 
-    /// Closes every connection whose principal `allow` no longer names.
+    /// Makes `allow` the list in force and closes every connection whose
+    /// principal it does not name.
     pub(crate) fn revoke_unlisted(&self, allow: &Allow) {
-        let mut all = self.0.borrow_mut();
+        *self.listed.borrow_mut() = Some(allow.clone());
+        let mut all = self.open.borrow_mut();
         all.retain(|(principal, cancel)| {
             let Some(cancel) = cancel.upgrade() else {
                 return false;
@@ -183,6 +201,7 @@ pub async fn serve_shared(
 ) -> io::Result<()> {
     let allow = Rc::new(RefCell::new(load(sharing.allow.clone()).await?));
     let guests = Guests::default();
+    guests.revoke_unlisted(&allow.borrow());
     let owner = rusty_libc::process::geteuid();
     let admitting = allow.clone();
     let allowed = move |stream: &rusty_tokio::io::UnixStream| {
