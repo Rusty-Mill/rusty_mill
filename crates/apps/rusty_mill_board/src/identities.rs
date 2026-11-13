@@ -7,8 +7,11 @@
 //! A model that holds a token cannot act as any other actor or role. An optional
 //! `"projects": ["rocket_league"]` limits it to those projects: it cannot see, take
 //! or change cards of any other.
+//!
+//! An optional `"parent": "lead"` marks a credential an agent minted for itself through
+//! `agent_enrol`; its actor is then `lead.label`. Removing the lead removes its children.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use rusty_crypto_key::constant_time_eq;
@@ -21,6 +24,9 @@ use crate::projects::Projects;
 /// Shortest accepted token, in characters.
 const MIN_TOKEN: usize = 16;
 
+/// Most credentials one agent may mint for itself.
+pub const MAX_CHILDREN: usize = 8;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Entry {
@@ -28,6 +34,7 @@ struct Entry {
     actor: String,
     role: String,
     projects: Option<Vec<String>>,
+    parent: Option<String>,
 }
 
 /// One credential as the file holds it.
@@ -38,11 +45,13 @@ struct EntryOut<'a> {
     role: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     projects: &'a Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<&'a String>,
 }
 
-/// Token -> identity.
+/// Token -> identity, and which credentials were minted by which agent (child -> lead).
 #[derive(Clone)]
-pub struct Credentials(Vec<(String, Identity)>);
+pub struct Credentials(Vec<(String, Identity)>, BTreeMap<String, String>);
 
 /// Read a file that holds secrets. On Unix it must not be readable by group or others.
 ///
@@ -110,6 +119,7 @@ impl Credentials {
         }
         let mut seen = HashSet::new();
         let mut out = Vec::new();
+        let mut parents = BTreeMap::new();
         for e in entries {
             let bad = |why: &str| format!("identity {:?}: {why}", e.actor);
             if e.actor.trim().is_empty() {
@@ -134,6 +144,9 @@ impl Credentials {
                     return Err(bad(&format!("unknown project {unknown:?}")));
                 }
             }
+            if let Some(parent) = e.parent {
+                parents.insert(e.actor.clone(), parent);
+            }
             out.push((
                 e.token,
                 Identity {
@@ -143,7 +156,15 @@ impl Credentials {
                 },
             ));
         }
-        Ok(Self(out))
+        for (child, parent) in &parents {
+            let named = out.iter().any(|(_, i)| &i.actor == parent);
+            if !named || !child.starts_with(&format!("{parent}.")) || parents.contains_key(parent) {
+                return Err(format!(
+                    "identity {child:?}: parent {parent:?} must be a credential of its own, and the name must be `parent.label`"
+                ));
+            }
+        }
+        Ok(Self(out, parents))
     }
 
     /// Wrap for sharing between the web layer and the settings.
@@ -212,6 +233,52 @@ impl Credentials {
         Ok(())
     }
 
+    /// Mint a credential for `lead` named `lead.label` (`agent_enrol`): the caller checks the
+    /// role and project ceilings; this checks the name, the cap and that `lead` is itself a
+    /// top-level credential. Returns the token.
+    ///
+    /// # Errors
+    /// If `lead` is unknown or is itself a child, the label or resulting name is invalid or
+    /// taken, or `lead` already holds [`MAX_CHILDREN`] children.
+    pub fn add_child(
+        &mut self,
+        lead: &str,
+        label: &str,
+        role: String,
+        projects: Option<Vec<String>>,
+    ) -> Result<String, String> {
+        if !self.contains(lead) || self.1.contains_key(lead) {
+            return Err(format!("{lead:?} is not a top-level agent"));
+        }
+        if !valid_actor(label) {
+            return Err(format!("label {label:?} must be letters, digits . _ -"));
+        }
+        if self.children(lead).count() >= MAX_CHILDREN {
+            return Err(format!("{lead:?} already has {MAX_CHILDREN} minted agents"));
+        }
+        let actor = format!("{lead}.{label}");
+        let token = self.add(Identity {
+            actor: actor.clone(),
+            role,
+            projects,
+        })?;
+        self.1.insert(actor, lead.to_owned());
+        Ok(token)
+    }
+
+    /// The credentials `lead` minted.
+    pub fn children<'a>(&'a self, lead: &'a str) -> impl Iterator<Item = &'a str> {
+        self.1
+            .iter()
+            .filter(move |(_, p)| p.as_str() == lead)
+            .map(|(c, _)| c.as_str())
+    }
+
+    /// Who minted `actor`'s credential, if an agent did.
+    pub fn parent_of(&self, actor: &str) -> Option<&str> {
+        self.1.get(actor).map(String::as_str)
+    }
+
     /// Give every agent holding role `from` the role `to` instead.
     pub fn rename_role(&mut self, from: &str, to: &str) {
         for (_, i) in self.0.iter_mut().filter(|(_, i)| i.role == from) {
@@ -240,7 +307,11 @@ impl Credentials {
     /// If there is no such agent.
     pub fn remove(&mut self, actor: &str) -> Result<(), String> {
         let before = self.0.len();
-        self.0.retain(|(_, i)| i.actor != actor);
+        let gone = |name: &str| name == actor || self.1.get(name).is_some_and(|p| p == actor);
+        let kept: Vec<_> = self.0.drain(..).filter(|(_, i)| !gone(&i.actor)).collect();
+        self.0 = kept;
+        self.1
+            .retain(|child, parent| child != actor && parent != actor);
         (self.0.len() < before)
             .then_some(())
             .ok_or_else(|| format!("no agent {actor:?}"))
@@ -259,6 +330,7 @@ impl Credentials {
                 actor: &i.actor,
                 role: &i.role,
                 projects: &i.projects,
+                parent: self.1.get(&i.actor),
             })
             .collect();
         serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())
@@ -278,7 +350,7 @@ impl Credentials {
     /// # Errors
     /// If the OS cannot supply random bytes.
     pub fn first_admin(role: &str) -> Result<(Self, String), String> {
-        let mut creds = Self(Vec::new());
+        let mut creds = Self(Vec::new(), BTreeMap::new());
         let token = creds.add(Identity {
             actor: "admin".into(),
             role: role.into(),

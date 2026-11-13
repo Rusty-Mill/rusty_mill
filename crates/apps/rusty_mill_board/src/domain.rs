@@ -125,11 +125,14 @@ pub enum Capability {
     Project,
     /// Change the board's settings: agents and their credentials, repositories, projects, roles.
     Admin,
+    /// Mint credentials for itself (`agent_enrol`): at most [`crate::identities::MAX_CHILDREN`],
+    /// never wider than the minter's own role and projects, and never `enrol` or `admin`.
+    Enrol,
 }
 
 impl Capability {
     /// Every capability, in display order.
-    pub const ALL: [Capability; 11] = [
+    pub const ALL: [Capability; 12] = [
         Capability::Triage,
         Capability::Plan,
         Capability::Architect,
@@ -141,6 +144,7 @@ impl Capability {
         Capability::Record,
         Capability::Project,
         Capability::Admin,
+        Capability::Enrol,
     ];
 
     /// What holding this lets a role do, for the settings view.
@@ -163,6 +167,9 @@ impl Capability {
             }
             Capability::Project => "Add a project (never change or remove one).",
             Capability::Admin => "Change these settings: agents, projects, roles, GitHub, apps.",
+            Capability::Enrol => {
+                "Mint credentials for its own workers: no wider than its own role and projects."
+            }
         }
     }
 }
