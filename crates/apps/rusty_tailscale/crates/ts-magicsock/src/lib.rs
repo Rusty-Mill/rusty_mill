@@ -83,6 +83,12 @@ struct PeerPaths {
 }
 
 impl PeerPaths {
+    /// Whether `ep` is already a candidate or the current direct endpoint.
+    fn knows(&self, ep: SocketAddr) -> bool {
+        self.direct.is_some_and(|(addr, _)| addr == ep)
+            || self.candidates.iter().any(|(addr, _)| *addr == ep)
+    }
+
     fn path(&self) -> PathKind {
         match self.direct {
             Some((addr, last)) if last.elapsed() < PATH_STALE_AFTER => PathKind::Direct(addr),
@@ -361,8 +367,14 @@ impl MagicSock {
                 let pong = Message::Pong { tx, src };
                 let pkt = ts_disco::seal(&self.disco, &disco_key, &pong);
                 let _ = self.udp.send_to(&pkt, src).await;
+                // Ping back only a source we have not tried yet. Answering
+                // every ping with a ping makes two nodes on a direct path
+                // ping each other without end (the heartbeat keeps it alive).
+                let known = paths.knows(src);
                 self.add_candidate(node, src);
-                self.send_ping(node, src).await;
+                if !known {
+                    self.send_ping(node, src).await;
+                }
             }
             DiscoVia::Derp => {
                 // A ping relayed over DERP reports the sender's own view; we
@@ -638,6 +650,21 @@ fn from_platform_err(e: PlatformError) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_known_endpoint_is_not_pinged_back() {
+        let known: SocketAddr = "192.0.2.1:41641".parse().unwrap();
+        let direct: SocketAddr = "192.0.2.2:41641".parse().unwrap();
+        let paths = PeerPaths {
+            disco_key: DiscoPublic([0; 32]),
+            candidates: vec![(known, Instant::now())],
+            direct: Some((direct, Instant::now())),
+            last_call_me_maybe: None,
+        };
+        assert!(paths.knows(known));
+        assert!(paths.knows(direct));
+        assert!(!paths.knows("192.0.2.3:41641".parse().unwrap()));
+    }
+
     use super::*;
 
     #[test]
