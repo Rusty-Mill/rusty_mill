@@ -127,3 +127,95 @@ fn a_guest_revoked_before_it_registers_is_closed_when_it_does() {
     });
     assert!(guests.open.borrow().is_empty());
 }
+
+#[test]
+fn tailnet_peers_are_listed_by_their_principal_id() {
+    let allow = lookups("uid:1001\nts:nano@example.com\nts-node:srv.t.ts.net # a server\n")
+        .expect("parses");
+    let named = |id: &str| allow.names(&Principal::new(id, "").expect("principal"));
+    assert!(named("ts:nano@example.com"));
+    assert!(named("ts-node:srv.t.ts.net"));
+    assert!(!named("ts:other@example.com"));
+    assert!(!named("ts-node:other.t.ts.net"));
+    assert!(allow.names(&alice()));
+}
+
+#[test]
+fn a_tailnet_user_name_never_stands_for_a_local_one() {
+    // `ts:alice` is a tailnet login, not the account `alice`, and the other
+    // way round: neither entry admits the other's principal.
+    let allow = lookups("ts:alice\n").expect("parses");
+    assert!(!allow.names(&alice()));
+    assert!(allow.principal(1001).is_none());
+    let local = lookups("user:alice\n").expect("parses");
+    assert!(!local.names(&Principal::new("ts:alice", "").expect("principal")));
+}
+
+#[test]
+fn bad_tailnet_lines_refuse_the_whole_list() {
+    for bad in [
+        "ts:\n",
+        "ts-node:\n",
+        "ts:a\nts:a\n",
+        "ts:*\nts:a\nts:a\n",
+        "tailnet:a\n",
+    ] {
+        assert!(lookups(bad).is_err(), "{bad:?}");
+    }
+}
+
+fn runtime() -> rusty_tokio::LocalRuntime {
+    rusty_tokio::Builder::new_current_thread()
+        .build_local(&rusty_tokio::LocalOptions::default())
+        .expect("runtime")
+}
+
+#[test]
+fn a_listener_off_the_tailnet_is_refused() {
+    runtime().block_on(async {
+        for addr in ["127.0.0.1:0", "0.0.0.0:0"] {
+            let listener = TcpListener::bind(addr).await.expect("bind");
+            let refused = Tailnet::new(listener, Whois::new("/nonexistent")).err();
+            assert!(refused.is_some(), "{addr} was taken for a tailnet address");
+        }
+    });
+}
+
+#[test]
+fn a_peer_tailscaled_cannot_name_is_closed_before_it_says_anything() {
+    use std::io::Read;
+    let config = crate::Config {
+        program: "/bin/sh".into(),
+        args: Vec::new(),
+        cwd: "/".into(),
+        console_host: crate::ConsoleHost::default(),
+        state_dir: None,
+        grapheme_clustering: false,
+        config_file: None,
+    };
+    runtime().block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // The listener is on loopback here, which `Tailnet::new` refuses;
+        // building it directly tests what follows the accept.
+        let tailnet = Tailnet {
+            listener,
+            whois: Whois::new("/nonexistent/tailscaled.sock"),
+            allow: Rc::new(RefCell::new(
+                lookups("ts:nano@example.com\n").expect("parses"),
+            )),
+        };
+        let state = state::State::shared(config, None);
+        rusty_tokio::task::spawn_local(accept_tailnet(tailnet, state, Guests::default()));
+        let mut peer = std::net::TcpStream::connect(addr).expect("connect");
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .expect("timeout");
+        let closed = rusty_tokio::task::spawn_blocking(move || {
+            let mut byte = [0u8; 1];
+            peer.read(&mut byte)
+        })
+        .await
+        .expect("join");
+        assert_eq!(closed.expect("read"), 0, "the connection stayed open");
+    });
+}

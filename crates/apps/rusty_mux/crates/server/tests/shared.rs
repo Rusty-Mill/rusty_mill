@@ -79,9 +79,18 @@ impl Shared {
             let result = runtime.block_on(async move {
                 let listener = UnixListener::bind(&bind).expect("bind");
                 ready_tx.send(()).expect("ready");
-                serve_shared(listener, config(), Sharing { allow }, reloads, async {
-                    let _ = stopped.await;
-                })
+                serve_shared(
+                    listener,
+                    config(),
+                    Sharing {
+                        allow,
+                        tailnet: None,
+                    },
+                    reloads,
+                    async {
+                        let _ = stopped.await;
+                    },
+                )
                 .await
             });
             let _ = ended_tx.send(result);

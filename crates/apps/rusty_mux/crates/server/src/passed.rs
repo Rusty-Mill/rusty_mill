@@ -43,6 +43,7 @@ pub(crate) trait Descriptors {
 }
 
 impl Descriptors for rusty_tokio::io::OwnedUnixReadHalf {}
+impl Descriptors for rusty_tokio::io::OwnedReadHalf {}
 
 /// Which descriptors, if any, belong to the frame at stream offsets
 /// `[start, end)`. The kernel ends a read with the segment that carried

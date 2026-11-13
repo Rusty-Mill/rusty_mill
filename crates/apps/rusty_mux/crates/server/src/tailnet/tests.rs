@@ -150,3 +150,30 @@ fn a_stalled_tailscaled_times_out() {
     held.join().unwrap();
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn only_tailnet_addresses_are_tailnet_addresses() {
+    let yes = [
+        "100.64.0.1",
+        "100.127.255.254",
+        "fd7a:115c:a1e0::1",
+        "fd7a:115c:a1e0:ab12::9",
+    ];
+    let no = [
+        "100.63.255.255",
+        "100.128.0.1",
+        "127.0.0.1",
+        "0.0.0.0",
+        "192.168.1.1",
+        "::1",
+        "::",
+        "fd7a:115c:a1e1::1",
+        "fe80::1",
+    ];
+    for ip in yes {
+        assert!(is_tailnet_addr(ip.parse().unwrap()), "{ip}");
+    }
+    for ip in no {
+        assert!(!is_tailnet_addr(ip.parse().unwrap()), "{ip}");
+    }
+}
