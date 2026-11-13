@@ -1529,6 +1529,9 @@ impl State {
             .blocks
             .get(&block)
             .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        self.mux
+            .authorize_attach(client, block)
+            .map_err(Refusal::from)?;
         let unknown = || Refusal {
             reason: format!("terminal blocks have no method `{method}`"),
             code: Some(Code::MethodNotFound),
@@ -3132,6 +3135,52 @@ mod regression {
                 takeover,
             );
             assert_eq!(again, client, "the token still works for its owner");
+        });
+    }
+
+    /// On a shared server a guest reads nothing from a block it could not
+    /// attach to: block calls take the same check as `attach` (C26, D239).
+    #[test]
+    fn a_guest_block_call_on_the_accounts_block_is_refused() {
+        runtime().block_on(async {
+            let (shared, _, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let features = Features::CHECKPOINT_V6.union(Features::BLOCK_CALL);
+            let (out, _inbox, _) = outbox();
+            let account = state.connect(out, test_owner(), Transport::Socket, features, None, None);
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _guest_inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            for method in ["terminal.format", "terminal.history", "terminal.title"] {
+                let refused = state
+                    .block_call(guest, 1, block, method, Vec::new())
+                    .err()
+                    .map(|r| r.reason);
+                assert!(
+                    refused.as_deref().is_some_and(|r| r.contains("principal")),
+                    "{method}: {refused:?}"
+                );
+            }
+            let ok = state.block_call(
+                account,
+                2,
+                block,
+                "terminal.format",
+                vec![("history".into(), Value::Lines(0))],
+            );
+            assert!(
+                ok.is_ok(),
+                "the account reads its own block: {:?}",
+                ok.err()
+            );
         });
     }
 

@@ -931,7 +931,7 @@ impl Mux {
     /// otherwise a client of the principal that created the block's session
     /// or owns the block, or one granted its lease. An unshared server lets
     /// anyone attach.
-    fn authorize_attach(&self, client: ClientId, block: BlockId) -> Result<(), Error> {
+    pub fn authorize_attach(&self, client: ClientId, block: BlockId) -> Result<(), Error> {
         if self.shared_account.is_none() {
             return Ok(());
         }
