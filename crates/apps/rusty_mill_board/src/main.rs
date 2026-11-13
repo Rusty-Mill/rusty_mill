@@ -28,7 +28,7 @@ use rusty_mill_board::backfill;
 use rusty_mill_board::bbp_cli::BbpCli;
 use rusty_mill_board::board::{Board, Roles, system_ms};
 use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
-use rusty_mill_board::github::GithubMerged;
+use rusty_mill_board::github::{GITHUB_COM_API, GithubMerged};
 use rusty_mill_board::mcp;
 use rusty_mill_board::milestones::{MemMilestones, MilestoneStore};
 use rusty_mill_board::projects::Projects;
@@ -108,10 +108,11 @@ struct Cli {
     /// running again needs a new file); it is what --undo-backfill reads.
     #[arg(long, value_name = "FILE", requires = "backfill_evidence")]
     backfill_record: Option<PathBuf>,
-    /// With --backfill-evidence: ask GitHub (`GET /repos/O/N/pulls/N`, with GITHUB_TOKEN and
-    /// --github-api) whether each named pull request merged, and keep only those. Dropped
-    /// links are listed on stderr; a failed lookup (auth, rate limit) stops before anything
-    /// is written.
+    /// With --backfill-evidence: ask api.github.com (`GET /repos/O/N/pulls/N`, with
+    /// GITHUB_TOKEN) whether each named pull request merged, and keep only those. Dropped
+    /// links are listed on stderr, with the not-found count per repository (a token that
+    /// cannot see a repository gets 404s); a failed lookup (auth, rate limit) stops before
+    /// anything is written.
     #[arg(long, requires = "backfill_evidence")]
     check_merged: bool,
     /// Clear the evidence a backfill wrote, from its --backfill-record FILE, and exit. A card
@@ -364,11 +365,16 @@ fn run_backfill(cli: &Cli, store: &dyn Store) -> Result<(), String> {
             .github_token
             .as_deref()
             .ok_or("--check-merged needs GITHUB_TOKEN")?;
-        let forge = GithubMerged::new(&cli.github_api, token)?;
+        // Links are always github.com, so never --github-api (which may be an Enterprise host).
+        let forge = GithubMerged::new(GITHUB_COM_API, token)?;
         let (kept, dropped) =
             backfill::keep_merged(plan, &forge).map_err(|e| format!("--check-merged: {e}"))?;
         eprintln!("{}", json(&dropped)?);
-        eprintln!("--check-merged: {} link(s) dropped", dropped.len());
+        eprintln!(
+            "--check-merged: {} link(s) dropped; not found per repository: {}",
+            dropped.len(),
+            json(&backfill::not_found_per_repo(&dropped))?
+        );
         plan = kept;
     }
     let Some(record) = &cli.backfill_record else {

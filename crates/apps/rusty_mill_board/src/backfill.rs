@@ -93,8 +93,9 @@ pub fn parse_repos(spec: &str) -> Result<BTreeMap<String, String>, String> {
     Ok(out)
 }
 
-/// A repository, owner or name: letters, digits, `-`, `_` and `.`.
-fn plain(s: &str) -> bool {
+/// A repository, owner or name: letters, digits, `-`, `_` and `.`, never only dots (it
+/// goes into a URL path).
+pub(crate) fn plain(s: &str) -> bool {
     !s.is_empty()
         && !s.bytes().all(|b| b == b'.')
         && s.bytes()
@@ -233,7 +234,8 @@ pub struct Dropped {
     pub id: Uuid,
     /// The pull request.
     pub url: String,
-    /// `not merged` or `not found`.
+    /// `not merged`, or `not found` (also what GitHub answers when the token cannot see the
+    /// repository: check the token if a whole repository shows up here).
     pub why: &'static str,
 }
 
@@ -276,6 +278,19 @@ pub fn keep_merged(
         }
     }
     Ok((kept, dropped))
+}
+
+/// How many links each `OWNER/NAME` had not found: a whole repository here usually means
+/// the token cannot see it.
+#[must_use]
+pub fn not_found_per_repo(dropped: &[Dropped]) -> BTreeMap<String, usize> {
+    let mut out = BTreeMap::new();
+    for d in dropped.iter().filter(|d| d.why == "not found") {
+        if let Some((owner, name, _)) = pull_parts(&d.url) {
+            *out.entry(format!("{owner}/{name}")).or_insert(0) += 1;
+        }
+    }
+    out
 }
 
 /// `Ok(())` to keep `url`, `Err(why)` to drop it.
@@ -708,6 +723,11 @@ mod tests {
                 (a.id, "not found"),
                 (b.id, "not merged")
             ]
+        );
+        let missing = not_found_per_repo(&dropped);
+        assert_eq!(
+            missing.into_iter().collect::<Vec<_>>(),
+            [(RM.to_owned(), 1)]
         );
     }
 

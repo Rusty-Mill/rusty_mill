@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::backfill::{Lookup, Merged};
+use crate::backfill::{Lookup, Merged, plain};
 use crate::http::Http;
 use crate::sync::{Draft, Forge, Issue, SyncError};
 
@@ -54,15 +54,6 @@ impl GithubConfig {
     }
 }
 
-/// A URL path segment: plain name characters, and never `.`/`..`.
-fn plain(s: &str) -> bool {
-    s != "."
-        && s != ".."
-        && !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-}
-
 /// A checked API base (no trailing `/`) and token.
 fn base(api: &str, token: &str) -> Result<(String, String), String> {
     if !(api.starts_with("https://") || api.starts_with("http://")) {
@@ -94,6 +85,9 @@ fn send(
     ];
     http.send(method, url, &headers, body)
 }
+
+/// The REST base for `https://github.com/` links (the backfill only builds those).
+pub const GITHUB_COM_API: &str = "https://api.github.com";
 
 /// The backfill's merge check over `GET /repos/OWNER/NAME/pulls/N` (read-only; the token
 /// needs pull requests read on each repository).
