@@ -331,6 +331,29 @@ impl<S: Store> Board<S> {
             .map_err(BoardError::Storage)
     }
 
+    /// Set or clear registered agent `id`'s nickname; whether it exists.
+    ///
+    /// # Errors
+    /// [`BoardError::Refused`] for a bad nickname; [`BoardError::Storage`] if it cannot be saved.
+    pub fn set_agent_nickname(
+        &self,
+        id: &str,
+        nickname: Option<String>,
+    ) -> Result<bool, BoardError> {
+        self.agents().set_nickname(id, nickname).map_err(|e| {
+            if e.starts_with("a nickname") {
+                BoardError::Refused(e)
+            } else {
+                BoardError::Storage(e)
+            }
+        })
+    }
+
+    /// Registered agents' nicknames: id to nickname.
+    pub fn agent_nicknames(&self) -> BTreeMap<String, String> {
+        self.agents().nicknames()
+    }
+
     /// Remove registered agent `id`; whether it existed.
     ///
     /// # Errors

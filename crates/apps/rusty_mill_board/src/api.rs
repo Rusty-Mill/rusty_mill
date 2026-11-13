@@ -937,12 +937,13 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_whoami",
-            "Who you are on this board: your actor name, role and what that role may do.",
+            "Who you are on this board: your actor name, role and what that role may do, and the nicknames an admin gave registered agents (agent id to nickname; display only).",
             |b, i, _: Nothing| {
                 let Some(i) = i else {
                     return to_json(json!({
                         "authenticated": false,
-                        "note": "no per-model credential: pass actor and role on each call"
+                        "note": "no per-model credential: pass actor and role on each call",
+                        "nicknames": b.agent_nicknames()
                     }));
                 };
                 let who = b.roles().actor(&i.actor, &i.role)?;
@@ -950,7 +951,8 @@ pub fn ops() -> Vec<Op> {
                     "authenticated": true,
                     "actor": who.name,
                     "role": i.role,
-                    "capabilities": who.caps
+                    "capabilities": who.caps,
+                    "nicknames": b.agent_nicknames()
                 }))
             },
         ),
@@ -2244,6 +2246,21 @@ mod tests {
         assert!(write(&low, None).is_err());
         assert!(board.set_agent_grant(id, Grant::default()).expect("clear"));
         assert!(write(&plain, None).is_err());
+        // A nickname is display only: whoami lists it by id, to anyone.
+        assert!(
+            board
+                .set_agent_nickname(id, Some("QA bot".into()))
+                .expect("nick")
+        );
+        let me = call_as(
+            &board,
+            Some(&ident("claude-cli", "mid")),
+            "board_whoami",
+            json!({}),
+        );
+        assert_eq!(me.expect("whoami")["nicknames"][id], "QA bot");
+        let anon = call_as(&board, None, "board_whoami", json!({})).expect("anon");
+        assert_eq!(anon["nicknames"][id], "QA bot");
     }
 
     #[test]
