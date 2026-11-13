@@ -19,6 +19,8 @@ use crate::identities::new_token;
 pub const MAX_PER_CONNECTOR: usize = 64;
 /// An agent idle this long (30 days) is forgotten.
 pub const IDLE_MS: i64 = 30 * 24 * 3600 * 1000;
+/// Longest nickname, in characters.
+pub const MAX_NICKNAME: usize = 40;
 /// How stale `seen_ms` may get before a use is written back to the file.
 const SEEN_WRITE_MS: i64 = 24 * 3600 * 1000;
 
@@ -50,6 +52,9 @@ pub struct Agent {
     /// Its own role and projects, if narrowed or set by an admin.
     #[serde(flatten)]
     pub grant: Grant,
+    /// A display name an admin gave it (never an identity: claims and history keep the id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
 }
 
 /// A registered agent as listed: everything but its key.
@@ -66,6 +71,8 @@ pub struct AgentInfo {
     /// Its own role and projects.
     #[serde(flatten)]
     pub grant: Grant,
+    /// Its nickname.
+    pub nickname: Option<String>,
 }
 
 /// The registry, optionally kept in a file.
@@ -123,6 +130,7 @@ impl Registry {
             created_ms: now,
             seen_ms: now,
             grant,
+            nickname: None,
         };
         if self.agents.insert(id.clone(), agent).is_some() {
             return Err("agent id collided; try again".into());
@@ -163,6 +171,29 @@ impl Registry {
         Ok(true)
     }
 
+    /// Set or clear agent `id`'s nickname; whether it exists.
+    ///
+    /// # Errors
+    /// If the nickname is not 1 to 40 printable characters, or the file cannot be written.
+    pub fn set_nickname(&mut self, id: &str, nickname: Option<String>) -> Result<bool, String> {
+        let nickname = nickname
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty());
+        if let Some(n) = &nickname
+            && (n.chars().count() > MAX_NICKNAME || n.chars().any(char::is_control))
+        {
+            return Err(format!(
+                "a nickname is up to {MAX_NICKNAME} printable characters"
+            ));
+        }
+        let Some(agent) = self.agents.get_mut(id) else {
+            return Ok(false);
+        };
+        agent.nickname = nickname;
+        self.save()?;
+        Ok(true)
+    }
+
     /// Remove agent `id`; whether it existed.
     ///
     /// # Errors
@@ -185,7 +216,16 @@ impl Registry {
                 created_ms: a.created_ms,
                 seen_ms: a.seen_ms,
                 grant: a.grant.clone(),
+                nickname: a.nickname.clone(),
             })
+            .collect()
+    }
+
+    /// Every nickname: agent id to nickname.
+    pub fn nicknames(&self) -> std::collections::BTreeMap<String, String> {
+        self.agents
+            .iter()
+            .filter_map(|(id, a)| Some((id.clone(), a.nickname.clone()?)))
             .collect()
     }
 
@@ -297,5 +337,25 @@ mod tests {
         assert!(again.set_grant(&id, Grant::default()).expect("clear"));
         assert_eq!(again.verify("c", &id, &key, 3), Some(Grant::default()));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_nickname_is_trimmed_validated_listed_and_cleared() {
+        let mut r = Registry::default();
+        let (id, _) = r.register("c", Grant::default(), 0).expect("register");
+        assert!(r.set_nickname(&id, Some("  QA bot ".into())).expect("set"));
+        assert_eq!(r.nicknames().get(&id).map(String::as_str), Some("QA bot"));
+        assert_eq!(r.list()[0].nickname.as_deref(), Some("QA bot"));
+        assert!(r.set_nickname(&id, Some("x".repeat(41))).is_err());
+        assert!(r.set_nickname(&id, Some("bad\nname".into())).is_err());
+        assert!(
+            !r.set_nickname("c#nope00", Some("x".into()))
+                .expect("unknown")
+        );
+        assert!(
+            r.set_nickname(&id, Some("  ".into()))
+                .expect("blank clears")
+        );
+        assert!(r.nicknames().is_empty());
     }
 }
