@@ -204,6 +204,8 @@ impl Tailnet {
 
 /// Peers being looked up at once; more are closed unlooked-up.
 const LOOKUPS: usize = 16;
+/// How long the tailnet listener waits after a failed accept.
+const ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Serves tailnet peers: each is asked of `tailscaled` before it says
 /// anything, and served as the principal it names if the list in force
@@ -214,10 +216,30 @@ pub(crate) async fn accept_tailnet(
     guests: Guests,
 ) -> io::Result<()> {
     let looking = Rc::new(std::cell::Cell::new(0usize));
+    let mut dropped = 0u64;
     loop {
-        let (stream, peer) = tailnet.listener.accept().await?;
+        // An error here is not fatal: accept(2) also reports a network that
+        // went away (ENETDOWN, EHOSTUNREACH, ...) and a full descriptor table,
+        // and `tailscaled` restarting must not end the account's server, with
+        // every local session on it. Log, wait a moment so a persistent
+        // failure doesn't spin, and go on.
+        let (stream, peer) = match tailnet.listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(err) => {
+                eprintln!("rusty-mux-server: tailnet: accept: {err}");
+                rusty_tokio::time::sleep(ACCEPT_RETRY).await;
+                continue;
+            }
+        };
         if looking.get() >= LOOKUPS {
-            eprintln!("rusty-mux-server: tailnet: too many lookups, closing {peer}");
+            // One line for the first, then one per hundred, so a flood
+            // doesn't fill the log.
+            if dropped % 100 == 0 {
+                eprintln!(
+                    "rusty-mux-server: tailnet: too many lookups, closing {peer} ({dropped} closed before)"
+                );
+            }
+            dropped += 1;
             continue;
         }
         looking.set(looking.get() + 1);
