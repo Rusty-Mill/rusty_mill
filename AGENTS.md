@@ -56,13 +56,16 @@ in [docs/projects/millwright/DECISIONS.md](docs/projects/millwright/DECISIONS.md
 - A deliberate experiment is allowed when it is labelled `experiment`. It ends with a
   harvest: a one-page conclusion in remind-me.
 
-## Board identity: label your instance
+## Board identity: be a unique agent
 
-Agents that share one Mill Board credential or connector (for example every cloud session as
-`claude-cloud`) pass `actor` as `<credential>/<label>` on every write, label = a short id for
-your thread or session (up to 40 letters, digits, `.` `_` `-`): `claude-cloud/7x5uhx`.
-Claims, history and comments then tell instances apart. The credential still fixes your
-role and projects; the label is attribution, not authority.
-Use one label for the whole task, since a claim only matches the exact name that made it.
+A connector sign-in (claude.ai, every cloud session as `claude-cloud`) says what is connecting,
+not which agent. On a connector, call `agent_register` once per task and pass the returned
+`agent_id` and `agent_key` on every write; the board refuses writes without them. Keep the key
+private; if you lose it, register again (claims under the old id need a release).
+
+An agent with its own bearer token (CLI, jail, workers) needs no registration. It may add a
+label to its actor, `<credential>/<label>` (up to 40 letters, digits, `.` `_` `-`), such as
+`claude-cli/7x5uhx`, and should use one label for the whole task.
+The credential fixes role and projects either way.
 
 Tickets: [issue template](docs/agents/issue-tracker.md). The tooling lives in `.claude/`.

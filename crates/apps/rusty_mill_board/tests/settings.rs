@@ -182,6 +182,19 @@ fn a_new_directory_gets_a_first_admin_whose_token_works_and_is_kept_private() {
 }
 
 #[test]
+fn registered_agents_are_listed_and_an_unknown_one_cannot_be_revoked() {
+    let f = start("registered");
+    let (status, out, text) = f.admin("settings_get", &json!({}));
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(out["registered_agents"], json!([]));
+    let (status, _, _) = f.admin(
+        "settings_registered_agent_revoke",
+        &json!({"id": "x/abcdef"}),
+    );
+    assert_eq!(status, 422);
+}
+
+#[test]
 fn only_an_admin_may_change_settings() {
     let f = start("gate");
     let builder = f.add_agent("claude", "builder");
@@ -196,6 +209,7 @@ fn only_an_admin_may_change_settings() {
         "settings_role_rename",
         "settings_github_set",
         "settings_github_clear",
+        "settings_registered_agent_revoke",
         "settings_rules_set",
     ] {
         let (status, _, text) = call(f.addr, &builder, op, &json!({}));
@@ -815,6 +829,7 @@ fn without_files_settings_can_be_read_but_not_changed() {
         actor: "nano".into(),
         role: "human".into(),
         projects: None,
+        connector: false,
     };
     let get = settings
         .call("settings_get", Some(&human), json!({}))

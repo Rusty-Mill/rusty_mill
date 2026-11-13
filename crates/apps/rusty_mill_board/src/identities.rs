@@ -154,6 +154,7 @@ impl Credentials {
                     actor: e.actor,
                     role: e.role,
                     projects: e.projects,
+                    connector: false,
                 },
             ));
         }
@@ -262,6 +263,7 @@ impl Credentials {
             actor: actor.clone(),
             role,
             projects,
+            connector: false,
         })?;
         self.1.insert(actor, lead.to_owned());
         Ok(token)
@@ -393,6 +395,7 @@ impl Credentials {
             actor: "admin".into(),
             role: role.into(),
             projects: None,
+            connector: false,
         })?;
         Ok((creds, token))
     }
@@ -465,6 +468,7 @@ mod tests {
                 actor: "claude".into(),
                 role: "builder".into(),
                 projects: None,
+                connector: false,
             })
         );
         assert_eq!(c.identify("0123456789abcdef0124"), None);
