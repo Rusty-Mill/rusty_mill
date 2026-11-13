@@ -76,9 +76,7 @@ L1, L7 and L8 are answered (2026-11-12); see DECISIONS.md lel-m1-commit, lel-los
 
 ## Ecosystem-wide rules
 
-| # | Question | Recommendation |
-| --- | --- | --- |
-| E4 | Settle one Rust toolchain pin across the repos, and move Ledger and Conflux to the newer SQLite binding? Both are ask-first changes. | Yes to both. |
+None open.
 
 M1, M2, M5, O1, O2, O3 and O4 are answered (2026-11-12); see DECISIONS.md m1-role-fix,
 m2-design-role, m5-ask-first-stands, o1-operating-model-update, o2-claude-github-app,
@@ -90,3 +88,5 @@ paused is answered too: see DECISIONS.md project-priorities (Converge is not pau
 
 E1 (entry rule) and E3 (committed work this month) are answered; see DECISIONS.md
 entry-rule and audited-repos-this-month; X1 to X3 still stand (e3-x-reconcile).
+
+E4 (toolchain pin and SQLite binding) is answered; see DECISIONS.md s1-hygiene-scope.
