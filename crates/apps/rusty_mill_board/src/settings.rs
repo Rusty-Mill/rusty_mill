@@ -314,6 +314,12 @@ struct EnrolLabel {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisteredAgentId {
+    id: String,
+}
+
+#[derive(Deserialize)]
 struct AppId {
     client_id: String,
 }
@@ -448,6 +454,7 @@ impl Settings {
             "settings_workflow_set" => {
                 |s, by, a| s.workflow_set(by, parse::<WorkflowSet>(a)?.workflow)
             }
+            "settings_registered_agent_revoke" => |s, _, a| s.registered_agent_revoke(&parse(a)?),
             "settings_app_revoke" => |s, _, a| s.app_revoke(&parse(a)?),
             _ => return None,
         };
@@ -601,6 +608,7 @@ impl Settings {
             "workflow": self.board.workflow(),
             "project_status": self.board.statuses(),
             "apps": self.oauth.get().map(|p| p.store().list_clients()),
+            "registered_agents": self.board.agent_list().into_iter().map(|(id, connector, created_ms, seen_ms)| json!({"id": id, "connector": connector, "created_ms": created_ms, "seen_ms": seen_ms})).collect::<Vec<_>>(),
             "server": self.server,
             "paths": {
                 "agents": self.files.identities,
@@ -612,6 +620,15 @@ impl Settings {
                 "project_status": self.files.project_status,
             },
         }))
+    }
+
+    /// Forget a registered agent: its key stops working at once; it can register again.
+    fn registered_agent_revoke(&self, a: &RegisteredAgentId) -> Res {
+        if self.board.revoke_agent(&a.id)? {
+            Ok(json!({"revoked": a.id}))
+        } else {
+            Err(refused(format!("no registered agent {:?}", a.id)))
+        }
     }
 
     /// Sign an app out: drop its registration and every token it holds. It can sign in again.
@@ -684,6 +701,7 @@ impl Settings {
             actor: a.name.clone(),
             role: a.role.clone(),
             projects: a.projects.clone(),
+            connector: false,
         };
         let token = self.change_creds(|c| c.add(identity.clone()))?;
         Ok(json!({ "token": token, "agent": identity }))

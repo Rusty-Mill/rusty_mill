@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use rusty_mcp_server::{HttpConfig, HttpHandler, serve_stdio};
+use rusty_mill_board::agents::Registry;
 use rusty_mill_board::api::Shared;
 use rusty_mill_board::backfill;
 use rusty_mill_board::bbp_cli::BbpCli;
@@ -235,6 +236,16 @@ fn default_oauth_state(settings_dir: Option<&Path>, identities: Option<&Path>) -
     let identities = identities?;
     let stem = identities.file_stem()?.to_string_lossy();
     Some(identities.with_file_name(format!("{stem}.{OAUTH_STATE}")))
+}
+
+/// Where registered agents are kept: `agents.json` in the settings directory, else
+/// `<identities stem>.agents.json` beside the identities file (as for grants).
+fn agents_file(cli: &Cli, files: &Files) -> Option<PathBuf> {
+    default_oauth_state(cli.settings_dir.as_deref(), files.identities.as_deref()).map(|p| {
+        p.with_file_name(p.file_name().map_or_else(String::new, |n| {
+            n.to_string_lossy().replace("oauth", "agents")
+        }))
+    })
 }
 
 /// A file named by its own flag must exist; one found through `--settings-dir` may be missing.
@@ -459,7 +470,12 @@ fn run(cli: Cli) -> Result<(), String> {
         .map(load_statuses)
         .transpose()?
         .unwrap_or_default();
+    let agents = match agents_file(&cli, &files) {
+        Some(path) => Registry::open(path)?,
+        None => Registry::default(),
+    };
     let mut board = Board::new(store, roles.clone())
+        .with_agents(agents)
         .with_projects(projects.clone())
         .with_statuses(statuses)
         .with_move_rules(rules)

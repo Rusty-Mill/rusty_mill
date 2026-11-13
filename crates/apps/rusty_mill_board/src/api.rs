@@ -30,6 +30,10 @@ pub struct Identity {
     /// Projects this credential may work in; `None` is all of them.
     #[serde(default)]
     pub projects: Option<Vec<String>>,
+    /// Set by the transport for an OAuth sign-in (a shared connector): its writes must name a
+    /// registered agent (`agent_register`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub connector: bool,
 }
 
 /// Why a call failed.
@@ -111,6 +115,10 @@ pub(crate) struct Who {
     actor: Option<String>,
     /// Role name; see `board_roles`.
     role: Option<String>,
+    /// Your registered agent id, from `agent_register`. A connector sign-in needs it on every write.
+    agent_id: Option<String>,
+    /// Your agent's secret key, from `agent_register`.
+    agent_key: Option<String>,
 }
 
 /// The acting identity: the credential's if there is one, else the arguments'. A credential
@@ -122,6 +130,26 @@ pub(crate) fn acting(
     who: &Who,
 ) -> Result<Actor, BoardError> {
     match identity {
+        Some(i) if i.connector => {
+            let (Some(id), Some(key)) = (who.agent_id.as_deref(), who.agent_key.as_deref()) else {
+                return Err(BoardError::Invalid(
+                    "this connector needs a registered agent: call agent_register once, then pass agent_id and agent_key on every write",
+                ));
+            };
+            if !b.verify_agent(&i.actor, id, key) {
+                return Err(BoardError::Invalid(
+                    "unknown agent or wrong key: call agent_register again",
+                ));
+            }
+            if who.role.as_deref().is_some_and(|r| r != i.role) {
+                return Err(BoardError::Invalid(
+                    "role is fixed by your credential; omit it",
+                ));
+            }
+            let mut actor = b.roles().actor(id, &i.role)?;
+            actor.projects = i.projects.as_ref().map(|p| p.iter().cloned().collect());
+            Ok(actor)
+        }
         Some(i) => {
             let name = match who.actor.as_deref() {
                 None => i.actor.clone(),
@@ -727,6 +755,19 @@ pub fn ops() -> Vec<Op> {
                 });
                 b.retain_dates(&mut cards, &a.dates())?;
                 list_result(b, &a, cards)
+            },
+        ),
+        op(
+            "agent_register",
+            "Register yourself as a unique agent on this connector (once per session). Returns {agent_id, agent_key}: pass both on every write. The connector's role and projects still apply. Keep the key private; if you lose it, register again.",
+            |b, i, _: Nothing| {
+                let Some(identity) = i.filter(|i| i.connector) else {
+                    return Err(BoardError::Invalid(
+                        "agent_register is for connector sign-ins; your own token already names you",
+                    ));
+                };
+                let (agent, agent_key) = b.register_agent(&identity.actor)?;
+                to_json(json!({ "agent_id": agent, "agent_key": agent_key }))
             },
         ),
         op(
@@ -2052,7 +2093,50 @@ mod tests {
             projects: None,
             actor: actor.into(),
             role: role.into(),
+            connector: false,
         }
+    }
+
+    #[test]
+    fn a_connector_writes_only_as_a_registered_agent() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let connector = Identity {
+            connector: true,
+            ..ident("claude-cloud", "builder")
+        };
+        let add = |args: Value| call_as(&board, Some(&connector), "card_add", args);
+        let refused = |r: Result<Value, CallError>| {
+            matches!(r, Err(CallError::Board(BoardError::Invalid(_))))
+        };
+        assert!(refused(add(json!({"title": "t"}))), "no agent");
+        assert!(
+            refused(add(json!({"title": "t", "actor": "claude-cloud/x"}))),
+            "a label is not an agent"
+        );
+        let a = call_as(&board, Some(&connector), "agent_register", json!({})).expect("a");
+        let b = call_as(&board, Some(&connector), "agent_register", json!({})).expect("b");
+        assert_ne!(a["agent_id"], b["agent_id"]);
+        let ok = add(json!({"title": "t", "agent_id": a["agent_id"], "agent_key": a["agent_key"]}))
+            .expect("add");
+        assert_eq!(ok["card"]["column"], "backlog");
+        assert!(
+            refused(add(
+                json!({"title": "t", "agent_id": a["agent_id"], "agent_key": b["agent_key"]})
+            )),
+            "b's key"
+        );
+        assert!(refused(add(
+            json!({"title": "t", "agent_id": "claude-cloud/zzzzzz", "agent_key": a["agent_key"]})
+        )));
+        // A bearer-token credential is already unique: it needs no agent and cannot register.
+        let own = ident("claude-cli", "builder");
+        assert!(call_as(&board, Some(&own), "card_add", json!({"title": "t"})).is_ok());
+        assert!(refused(call_as(
+            &board,
+            Some(&own),
+            "agent_register",
+            json!({})
+        )));
     }
 
     #[test]
@@ -2164,6 +2248,8 @@ mod tests {
                 &Who {
                     actor: Some(actor.into()),
                     role: None,
+                    agent_id: None,
+                    agent_key: None,
                 },
             )
         };

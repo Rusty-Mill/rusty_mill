@@ -1,6 +1,6 @@
 # Design note: `agent_register` (a unique, server-issued identity per agent on a shared connector)
 
-Status: **proposed, not built** (Nano, 2026-11-13: the connector token identifies *what* is
+Status: **built in this PR** (Nano, 2026-11-13: the connector token identifies *what* is
 connecting; each agent needs its own unique identity). Belongs with Millwright M1/O4. Follows
 step 1 (instance labels) and `agent_enrol` ([agent-enrol-design.md](agent-enrol-design.md)),
 which only reaches agents that hold their own bearer token.
@@ -37,5 +37,14 @@ its permissions; it should not be the agent's identity.
 
 ## Open questions for Nano
 1. ~~Enforce `agent` + key on all connector writes, or keep labels optional?~~ **Decided (Nano, 2026-11-13): enforce.** Connector writes without a registered agent id and key are refused.
-2. Expiry: 30 days idle, or manual revoke only?
-3. Cap: 64 per connector?
+2. ~~Expiry~~ **Decided (Nano, 2026-11-13, "go"): 30 days idle, plus manual revoke.**
+3. ~~Cap~~ **Decided: 64 live agents per connector.**
+
+## As built
+- Args are `agent_id` and `agent_key` (not `agent`: `settings_agent_add` already uses that name).
+- Enforced for OAuth sign-ins only (`Identity.connector`, set by the web layer). Bearer-token
+  credentials are already unique, need no id, and get a refusal from `agent_register`.
+- `actor` labels are ignored on a connector; the agent id is the actor name.
+- Registry file: `agents.json` in the settings dir, else `<identities stem>.agents.json`; private (0600), keys in clear like identities tokens.
+- Admin: `settings_get` lists `registered_agents` (no keys); `settings_registered_agent_revoke {id}`. No UI panel yet.
+- Rollback: an older binary ignores the file and the new args fields are refused as unknown only on strict ops; connector callers need no change back.

@@ -150,6 +150,7 @@ fn owner() -> Identity {
         actor: "nano".into(),
         role: "human".into(),
         projects: None,
+        connector: false,
     }
 }
 
@@ -179,6 +180,7 @@ fn a_model_token_is_forbidden() {
         actor: "codex".into(),
         role: "builder".into(),
         projects: None,
+        connector: false,
     };
     assert!(refused(call(&b, &model, "inbox_list", json!({}))).contains("Admin"));
     let act = json!({"id": "T1/msg:1/3", "rev": 7, "action": "approve"});

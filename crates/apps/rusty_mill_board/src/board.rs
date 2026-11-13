@@ -120,6 +120,8 @@ pub struct Board<S> {
     escalations: Option<Arc<dyn Escalations>>,
     /// The projects' milestones, drawn on the roadmap.
     milestones: Box<dyn MilestoneStore>,
+    /// Agents registered on shared connectors.
+    agents: Mutex<crate::agents::Registry>,
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -185,6 +187,7 @@ impl<S: Store> Board<S> {
             clock,
             escalations: None,
             milestones: Box::new(MemMilestones::default()),
+            agents: Mutex::default(),
         }
     }
 
@@ -287,6 +290,51 @@ impl<S: Store> Board<S> {
     pub fn with_milestones(mut self, store: Box<dyn MilestoneStore>) -> Self {
         self.milestones = store;
         self
+    }
+
+    /// Keep registered agents in `registry`.
+    #[must_use]
+    pub fn with_agents(self, registry: crate::agents::Registry) -> Self {
+        *self.agents.lock().unwrap_or_else(PoisonError::into_inner) = registry;
+        self
+    }
+
+    /// Register a new agent on `connector`: its id and key.
+    ///
+    /// # Errors
+    /// See [`crate::agents::Registry::register`].
+    pub fn register_agent(&self, connector: &str) -> Result<(String, String), BoardError> {
+        let now = (self.clock)();
+        self.agents()
+            .register(connector, now)
+            .map_err(BoardError::Storage)
+    }
+
+    /// Whether `id` with `key` is a live agent of `connector`.
+    pub fn verify_agent(&self, connector: &str, id: &str, key: &str) -> bool {
+        let now = (self.clock)();
+        self.agents().verify(connector, id, key, now)
+    }
+
+    /// Remove registered agent `id`; whether it existed.
+    ///
+    /// # Errors
+    /// If the registry file cannot be written.
+    pub fn revoke_agent(&self, id: &str) -> Result<bool, BoardError> {
+        self.agents().revoke(id).map_err(BoardError::Storage)
+    }
+
+    /// Registered agents without keys: `(id, connector, created_ms, seen_ms)`.
+    pub fn agent_list(&self) -> Vec<(String, String, i64, i64)> {
+        self.agents()
+            .list()
+            .into_iter()
+            .map(|(id, c, a, b)| (id.to_owned(), c.to_owned(), a, b))
+            .collect()
+    }
+
+    fn agents(&self) -> std::sync::MutexGuard<'_, crate::agents::Registry> {
+        self.agents.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Serve the decision inbox from `source`.

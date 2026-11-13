@@ -245,7 +245,12 @@ impl Web {
                 .unwrap_or_else(PoisonError::into_inner)
                 .by_actor(subject.as_str())
                 .cloned()
-                .map(Some),
+                .map(|i| {
+                    Some(Identity {
+                        connector: true,
+                        ..i
+                    })
+                }),
         }
     }
 

@@ -20,6 +20,7 @@
 //! - [`drain`]: work in flight, so a stop can wait for it.
 //! - [`inbox`]: the decision inbox, open BBP escalations and the actions on them (#595); [`bbp_cli`] reads them from the host's `bbp`.
 
+pub mod agents;
 pub mod api;
 pub mod backfill;
 pub mod bbp_cli;
