@@ -8,9 +8,11 @@ use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use rusty_mux_core::TailscaleState;
 use rusty_mux_core::{
     BlockId, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Mux, Principal, Side, Size,
-    TailscaleState, Transport, WindowId,
+    Transport, WindowId,
 };
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
@@ -2463,7 +2465,8 @@ impl State {
     }
 
     /// Announces the server's tailnet node in `state` (C27) to the clients
-    /// that asked for it.
+    /// that asked for it. Only the Linux shared server has a tailnet.
+    #[cfg(target_os = "linux")]
     pub(crate) fn tailscale_status(&mut self, state: TailscaleState, node: Option<String>) {
         self.mux.note_tailscale_status(state, node);
         self.flush();
