@@ -215,6 +215,7 @@ members = [
     "crates/apps/rusty_skillopt/crates/skillopt-model",
     "crates/apps/rusty_skillopt/crates/skillopt-envs",
     "crates/apps/rusty_skillopt/crates/skillopt-cli",
+    "crates/apps/ai_env_manager/crates/ai_env_core",
     "crates/apps/rusty_rsi/crates/rsi-core",
     "crates/apps/rusty_rsi/crates/rsi-runtime",
     "crates/apps/rusty_rsi/crates/rsi-cli",

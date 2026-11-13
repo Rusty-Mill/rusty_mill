@@ -170,6 +170,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | rusty_whisper | rusty-whisper | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) |
 | libs | rusty_wiremock | rusty_wiremock | A blocking std::net HTTP mock server that answers canned responses, for Rusty Mill test suites |
 | libs | rusty_worktree | rusty_worktree | Git worktrees that share one repository's object store, driven through the git CLI with hooks off and the git directory always named explicitly |
+| apps | ai_env_manager | ai_env_core | Ai Env Manager core: entry model and link planner. Pure, no I/O, no dependencies. |
 | apps | coreutils | coreutils | Modular pure-Rust implementation of core GNU/POSIX utilities |
 | apps | coreutils-async | coreutils-async | Reference consumer for platform-async: arun, an async port of rustils' rrun. |
 | apps | mill-term | mill-term | Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement) |
