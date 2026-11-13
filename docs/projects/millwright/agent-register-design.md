@@ -47,4 +47,4 @@ its permissions; it should not be the agent's identity.
 - `actor` labels are ignored on a connector; the agent id is the actor name.
 - Registry file: `agents.json` in the settings dir, else `<identities stem>.agents.json`; private (0600), keys in clear like identities tokens.
 - Admin: `settings_get` lists `registered_agents` (no keys); `settings_registered_agent_revoke {id}`. No UI panel yet.
-- Rollback: an older binary ignores the file and the new args fields are refused as unknown only on strict ops; connector callers need no change back.
+- Rollback: an older binary ignores `agents.json` and stops enforcing, so connector writes fall back to step 1 labels.
