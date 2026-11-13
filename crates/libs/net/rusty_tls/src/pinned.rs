@@ -10,7 +10,6 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{CertificateError, DigitallySignedStruct, SignatureScheme};
-use rusty_sha2::{Hash, Sha256};
 
 /// The SHA-256 fingerprint of a DER-encoded certificate: the value
 /// [`TrustPolicy::PinnedCertSha256`](crate::TrustPolicy::PinnedCertSha256)
@@ -20,7 +19,16 @@ use rusty_sha2::{Hash, Sha256};
 /// [`TlsStream::peer_certificate_der`](crate::TlsStream::peer_certificate_der),
 /// show this fingerprint to the user, and store it.
 pub fn certificate_sha256(der: &[u8]) -> [u8; 32] {
-    Sha256::digest(der)
+    // SHA-256 from the ring provider rustls already runs on, so this adds no
+    // dependency and keeps the crate's rust-version. The suite is fixed at
+    // compile time and is a TLS 1.3 suite whose hash is SHA-256.
+    let suite = rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256
+        .tls13()
+        .expect("TLS13_AES_128_GCM_SHA256 is a TLS 1.3 suite");
+    let digest = suite.common.hash_provider.hash(der);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(digest.as_ref());
+    out
 }
 
 /// Accepts a server whose end-entity certificate's SHA-256 fingerprint is
