@@ -25,6 +25,21 @@ control server" as a non-goal. So "our own mesh" is two moves:
 
 Each move stands alone. Move 1 is days of work; move 2 is weeks and is the real "own it".
 
+## Shape: one server, many clients
+
+Like Tailscale, the mesh has a **server side** and **clients**. The server side is the
+**hub**, shipped with the mux server (`rusty-mux-server --hub`, D244). It has two jobs that
+scale differently:
+
+- **Coordinator:** who is in the mesh, their keys and addresses. One active per mesh.
+- **Relays** (DERP and STUN): carry traffic when two nodes cannot connect directly. Many per
+  mesh; the coordinator hands nodes a list and they pick the nearest. Any mux server with a
+  public address can add itself as a relay.
+
+Every other mux server and client is a plain node with the embedded `ts-net`. Every mux
+server can run the hub code, but only one coordinator is switched on per mesh. Separate
+meshes (one hub each) are fine; joining meshes (federation) is out of scope.
+
 ## Goals and non-goals
 
 Goals:
@@ -95,6 +110,15 @@ copy of the same mechanism. Mesh peers use TCP streams; C13 stays for the SSH pa
    evidence: the two-NAT harness and the symmetric-NAT case, which DESIGN.md defers. The mesh
    works without it; direct paths only take load and latency off the relay.
 
+4. **Stage 4: coordinator failover.** The coordinator's state (node table, keys, pre-auth
+   keys) is small. The active coordinator streams it to one or more standby mux servers; nodes
+   hold a list of coordinator addresses from registration. If the active one dies, an operator
+   promotes a standby (`--hub --promote`). Manual promotion on purpose: it cannot split-brain
+   (two coordinators handing out conflicting data). Automatic election (Raft-style) is out of
+   scope: new consensus code, hard to test, a worse failure when wrong. Until stage 4, and
+   even after, a dead coordinator is a soft outage: existing WireGuard sessions keep working;
+   only new joins, key changes and revocations wait.
+
 "Identity and relay first, direct paths later" is therefore stages 1-2 then 3, in the same
 order `rusty_tailscale` was built (DERP-only data plane before NAT traversal).
 
@@ -150,6 +174,7 @@ the story with almost no new code.
 | 1 embedded node | 3-5 days | glue, a netmap lookup behind the `Whois` interface, feature gating, tests |
 | 2 hub | 2-4 weeks | the ts2021 server side (~2-3k lines), DERP server (~1k), STUN (~200), pre-auth key store, tests against stock `tailscaled` |
 | 3 direct paths | 1 week | the NAT harness and the symmetric-NAT evidence |
+| 4 failover | 1 week | state replication to standbys, address list in the netmap, `--promote`, a kill-and-promote test |
 
 Estimates are for an agent with review turnaround, not calendar time.
 
@@ -160,8 +185,9 @@ Estimates are for an agent with review turnaround, not calendar time.
 - **The hub is a new internet-facing service.** DERP is an open relay if it admits unknown
   keys: it must relay only for node keys in the table. Rate limits, a per-key bandwidth cap,
   and no logs of payload. Independent security review before stage 2 ships.
-- **Hub as a single point.** If it is down, existing connections continue (WireGuard sessions
-  stay up) and new ones fail. Stage 2 accepts that; a second hub is out of scope.
+- **Coordinator as a single point.** If it is down, existing connections continue
+  (WireGuard sessions stay up) and new ones fail. Stage 2 accepts that; stage 4 adds a
+  manually promoted standby. Relays are not single points: a mesh can list several.
 - **Platforms.** `ts-magicsock` uses `platform-linux`'s UDP socket and `ts-tun` is Linux-only,
   so the mesh is Linux first. Both ends of a mesh connection need a node, so a Linux-only mesh
   also excludes Nano's Windows client (D51, D227), not just the server. Windows keeps SSH and
