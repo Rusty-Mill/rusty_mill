@@ -112,8 +112,10 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   or renamed, so no status outlives its project.
 - **Record (merged work, narrowed).** `record` is `close` for recording merged work and nothing else: it moves a
   claimed Building or V&Ving card to Done, or lets `card_add` with `done: true` record merged work, only when the
-  card (or the call) carries a GitHub pull request link as evidence (`https://github.com/<owner>/<repo>/pull/<n>`). It
-  cannot archive or restore, and an issue or other link does not count. This checks the link's shape, not that the
+  card (or the call) carries a GitHub pull request link as evidence (`https://github.com/<owner>/<repo>/pull/<n>`, with
+  at most `/files`, `/commits` or `/checks` after the number). Evidence it adds is pull request links only. It works
+  only from a work column and on the actor's own claim, even with movement rules off, and cannot archive or restore.
+  An issue or other link does not count. This checks the link's shape, not that the
   pull request merged: that check against GitHub is not built yet. Give agent roles `record` instead of `close`.
 - **Shipped needs evidence.** A Done card counts as shipped only with evidence: a merged PR or any http(s) link
   with a host that shows the work (printable ASCII, at most 512 bytes; `card_evidence`, or `evidence` on

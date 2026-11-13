@@ -1123,7 +1123,7 @@ impl<S: Store> Board<S> {
             return Err(BoardError::Forbidden(Capability::Close));
         }
         if !new.evidence.is_empty() {
-            check_records_shipped(by)?;
+            check_records_shipped(by, &new.evidence)?;
         }
         let mut card = Card::new(new.title, new.body, new.tags, (self.clock)())?;
         if new.done {
@@ -1552,12 +1552,13 @@ impl<S: Store> Board<S> {
     }
 
     /// Add evidence links to a card (see [`Card::add_evidence`]). Needs `Close`, `Merge` or
-    /// `Triage`: whoever may record work as shipped.
+    /// `Triage`, or `Record` for GitHub pull request links only: whoever may record work as
+    /// shipped.
     ///
     /// # Errors
     /// A missing capability, or see [`Card::add_evidence`].
     pub fn add_evidence(&self, id: Uuid, links: &[String], by: &Actor) -> Result<Card, BoardError> {
-        check_records_shipped(by)?;
+        check_records_shipped(by, links)?;
         self.apply(id, by, EventKind::Edited, |c, now| {
             c.add_evidence(links, now)
         })
@@ -1932,16 +1933,28 @@ fn answerer(actor: &str) -> String {
     }
 }
 
-/// Who may record work as shipped (add evidence): a holder of `Close`, `Record`, `Merge` or `Triage`.
-fn check_records_shipped(by: &Actor) -> Result<(), BoardError> {
+/// Who may record work as shipped (add evidence): a holder of `Close`, `Merge` or `Triage`, or
+/// of `Record` for GitHub pull request links only.
+fn check_records_shipped(by: &Actor, links: &[String]) -> Result<(), BoardError> {
     const MAY: &[Capability] = &[
         Capability::Close,
         Capability::Record,
         Capability::Merge,
         Capability::Triage,
     ];
-    if MAY.iter().any(|c| by.caps.contains(c)) {
+    if [Capability::Close, Capability::Merge, Capability::Triage]
+        .iter()
+        .any(|c| by.caps.contains(c))
+    {
         return Ok(());
     }
-    Err(BoardError::ForbiddenAny(MAY))
+    if !by.caps.contains(&Capability::Record) {
+        return Err(BoardError::ForbiddenAny(MAY));
+    }
+    if links.iter().all(|l| is_pull_link(l.trim())) {
+        return Ok(());
+    }
+    Err(BoardError::Invalid(
+        "record adds only GitHub pull request links (https://github.com/<owner>/<repo>/pull/<n>)",
+    ))
 }

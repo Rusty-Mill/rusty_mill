@@ -420,8 +420,10 @@ fn evidence_link_ok(link: &str) -> bool {
 }
 
 /// Whether `link` names a GitHub pull request: `https://github.com/<owner>/<repo>/pull/<n>`,
-/// optionally followed by a path, query or fragment. A shape check only; it does not ask GitHub
-/// whether the pull request merged.
+/// with `<n>` a positive number without leading zeros, optionally followed by one of `/files`,
+/// `/commits` or `/checks`, then a query or fragment. Anything else after the number, or a `.`
+/// or `..` segment, is refused, so the link cannot be walked to another page. A shape check
+/// only; it does not ask GitHub whether the pull request merged.
 pub fn is_pull_link(link: &str) -> bool {
     let Some(rest) = link.strip_prefix("https://github.com/") else {
         return false;
@@ -434,12 +436,18 @@ pub fn is_pull_link(link: &str) -> bool {
             && s.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
     };
+    let number =
+        |n: &str| !n.starts_with('0') && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
     let mut seg = path.split('/');
+    let head = (seg.next(), seg.next(), seg.next(), seg.next());
+    let tail = seg.next();
+    let more = seg.next().is_some();
     matches!(
-        (seg.next(), seg.next(), seg.next(), seg.next()),
+        head,
         (Some(owner), Some(repo), Some("pull"), Some(n))
-            if plain(owner) && plain(repo) && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
-    )
+            if plain(owner) && plain(repo) && number(n)
+    ) && !more
+        && matches!(tail, None | Some("files" | "commits" | "checks"))
 }
 
 /// Where a project stands. Absent means [`ProjectStatus::Active`].
@@ -1065,16 +1073,21 @@ impl Card {
         self.evidence.iter().any(|l| is_pull_link(l))
     }
 
-    /// `by`, counted as holding `Close` for a move to Done when it holds `Record` and this card
-    /// carries a pull request link: recording merged work, narrowed.
-    fn recorder<'a>(&self, by: &'a Actor, to: &Column) -> Cow<'a, Actor> {
-        if *to == Column::DONE && by.caps.contains(&Capability::Record) && self.has_pull_evidence()
-        {
-            let mut closer = by.clone();
-            closer.caps.insert(Capability::Close);
-            return Cow::Owned(closer);
+    /// `by`, counted as holding `Close` for a move to Done when it holds `Record` (and not
+    /// `Close`), this card carries a pull request link, and the card is in a work column:
+    /// recording merged work, narrowed. The flag says that this happened.
+    fn recorder<'a>(&self, flow: &Workflow, by: &'a Actor, to: &Column) -> (Cow<'a, Actor>, bool) {
+        let applies = *to == Column::DONE
+            && by.caps.contains(&Capability::Record)
+            && !by.caps.contains(&Capability::Close)
+            && flow.kind(&self.column) == Some(Kind::Work)
+            && self.has_pull_evidence();
+        if !applies {
+            return (Cow::Borrowed(by), false);
         }
-        Cow::Borrowed(by)
+        let mut closer = by.clone();
+        closer.caps.insert(Capability::Close);
+        (Cow::Owned(closer), true)
     }
 
     /// Move to `to` along `flow`. The claim is cleared on arrival, so the next stage's
@@ -1091,7 +1104,8 @@ impl Card {
         by: &Actor,
         now_ms: i64,
     ) -> Result<Self, BoardError> {
-        let by = &*self.recorder(by, to);
+        let (by, _) = self.recorder(flow, by, to);
+        let by = &*by;
         if let Some(ts) = flow.transition(&self.column, to)? {
             check_any(&ts, by)?;
         }
@@ -1136,7 +1150,12 @@ impl Card {
         if by.caps.is_empty() {
             return Err(BoardError::Invalid("moving a card needs some capability"));
         }
-        let by = &*self.recorder(by, to);
+        let (by, recording) = self.recorder(flow, by, to);
+        let by = &*by;
+        // Recording merged work is the claim holder's move, even with the rules off.
+        if recording && self.claim.as_deref() != Some(&by.name) {
+            return Err(BoardError::NotClaimant);
+        }
         // Gates hold with the rules off. A listed move with a gated way of making it needs one
         // of its ways (a gated merge, or the `close` beside it); a move that jumps over a gate
         // needs `Admin`, or one of its listed ways.
@@ -1839,6 +1858,8 @@ mod tests {
         for ok in [
             "https://github.com/Rusty-Mill/rusty_mill/pull/1648",
             "https://github.com/a/b/pull/1/files",
+            "https://github.com/a/b/pull/1/commits?x=1",
+            "https://github.com/a/b/pull/1/checks",
             "https://github.com/a.b/c_d/pull/7#issuecomment-1",
             "https://github.com/a/b/pull/7?diff=split",
         ] {
@@ -1848,6 +1869,12 @@ mod tests {
             "https://github.com/a/b/issues/1",
             "https://github.com/a/b/pull/",
             "https://github.com/a/b/pull/x1",
+            "https://github.com/a/b/pull/0",
+            "https://github.com/a/b/pull/007",
+            "https://github.com/a/b/pull/1/../../issues/5",
+            "https://github.com/a/b/pull/1/issues/5",
+            "https://github.com/a/b/pull/1/files/extra",
+            "https://github.com/./b/pull/1",
             "https://github.com/a/../pull/1",
             "https://github.com.evil.example/a/b/pull/1",
             "https://evil.example/https://github.com/a/b/pull/1",
@@ -1900,6 +1927,51 @@ mod tests {
                 with_pr.move_to(&flow(), &Column::DONE, &bystander, 3),
                 Err(BoardError::Forbidden(Capability::Close)),
                 "the link alone grants nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn record_needs_a_work_column_and_the_claim() {
+        let rec = actor("rec", &[Capability::Build, Capability::Record]);
+        let other = actor("other", &[Capability::Build]);
+        let pr = vec!["https://github.com/a/b/pull/9".to_owned()];
+        // An admin-edited workflow that lists `close` on moves out of queue and blocked columns.
+        let mut raw = serde_json::to_value(flow()).expect("serialize");
+        for from in ["backlog", "ready", "blocked"] {
+            raw["transitions"]
+                .as_array_mut()
+                .expect("transitions")
+                .push(serde_json::json!({"from": from, "to": "done", "cap": "close"}));
+        }
+        let wide: Workflow = serde_json::from_value(raw).expect("workflow");
+        for from in [Column::BACKLOG, Column::READY, Column::BLOCKED] {
+            let mut c = card();
+            c.column = from;
+            let c = c.add_evidence(&pr, 1).expect("evidence");
+            assert_eq!(
+                c.move_to(&wide, &Column::DONE, &rec, 2),
+                Err(BoardError::Forbidden(Capability::Close)),
+                "record never closes a card outside a work column"
+            );
+        }
+        let mut c = card();
+        c.column = Column::BUILDING;
+        let held = c
+            .claim(&other, 1)
+            .expect("claim")
+            .add_evidence(&pr, 1)
+            .expect("evidence");
+        for rules_on in [true, false] {
+            let moved = if rules_on {
+                held.move_to(&flow(), &Column::DONE, &rec, 2)
+            } else {
+                held.move_freely(&flow(), &Column::DONE, &rec, 2)
+            };
+            assert_eq!(
+                moved,
+                Err(BoardError::NotClaimant),
+                "rules on: {rules_on}; another agent's claimed card"
             );
         }
     }

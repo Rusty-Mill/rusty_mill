@@ -2099,6 +2099,33 @@ mod tests {
         )
         .expect("record");
         assert_eq!(added["card"]["column"], "done");
+        // Evidence from `record` is pull request links only, on a new card or an existing one.
+        let rejected = |r: Result<Value, CallError>| matches!(r, Err(CallError::Board(BoardError::Invalid(m))) if m.contains("pull request"));
+        assert!(rejected(call_as(
+            &board,
+            Some(&rec),
+            "card_evidence",
+            json!({"id": "#1", "links": ["https://example.org/x"]})
+        )));
+        assert!(rejected(call_as(
+            &board,
+            Some(&rec),
+            "card_evidence",
+            json!({"id": "#1", "links": [pr, "https://github.com/a/b/issues/5"]})
+        )));
+        assert!(rejected(call_as(
+            &board,
+            Some(&rec),
+            "card_add",
+            json!({"title": "t", "evidence": ["https://example.org/x"]})
+        )));
+        call_as(
+            &board,
+            Some(&rec),
+            "card_evidence",
+            json!({"id": "#1", "links": ["https://github.com/a/b/pull/2"]}),
+        )
+        .expect("another pull request link");
         for op in ["card_archive", "card_restore"] {
             assert!(
                 matches!(
