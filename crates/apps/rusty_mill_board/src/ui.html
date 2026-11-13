@@ -1288,13 +1288,18 @@ function registeredAgents(){
   const box=el("div"),err=el("div",null,"err"),list=cfg.registered_agents||[];
   box.append(el("h3","Registered agents"));
   if(!list.length){box.append(el("p","None yet. A session on a shared connector (such as claude-cloud) calls agent_register once, then passes its agent_id and agent_key on every write.","note"));return box}
-  const tbl=el("table"),head=el("tr");["Agent","Connector","Registered","Last used",""].forEach(h=>head.append(el("th",h)));tbl.append(head);
+  const tbl=el("table"),head=el("tr");["Agent","Connector","Role","Projects","Last used",""].forEach(h=>head.append(el("th",h)));tbl.append(head);
   for(const a of list){
-    const tr=el("tr"),rv=el("button","Revoke"),td=el("td");rv.type="button";
+    const tr=el("tr"),role=roleSelect(a.role),pick=projectPicker(a.projects),acts=el("td");
+    role.insertBefore(new Option("connector's role",""),role.firstChild);role.value=a.role||"";
+    const save=el("button","Save"),rv=el("button","Revoke");[save,rv].forEach(b=>{b.type="button"});
+    save.onclick=guard(err,()=>setting("settings_registered_agent_set",{id:a.id,agent_role:role.value||null,agent_projects:pick.value()}));
     rv.onclick=guard(err,async()=>{if(!confirm("Revoke "+a.id+"? Its key stops working; it can register again."))return;await setting("settings_registered_agent_revoke",{id:a.id})});
-    td.append(rv);tr.append(el("td",a.id),el("td",a.connector),el("td",new Date(a.created_ms).toLocaleString()),el("td",new Date(a.seen_ms).toLocaleString()),td);tbl.append(tr);
+    acts.append(save," ",rv);
+    const r=el("td"),p=el("td");r.append(role);p.append(pick);
+    tr.append(el("td",a.id),el("td",a.connector),r,p,el("td",new Date(a.seen_ms).toLocaleString()),acts);tbl.append(tr);
   }
-  box.append(tbl,err);
+  box.append(tbl,err,el("p","Left at the connector's role, and all projects, an agent acts as its connector. Any role chosen here is applied at once, even a wider one.","note"));
   return box;
 }
 

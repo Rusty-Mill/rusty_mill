@@ -192,6 +192,16 @@ fn registered_agents_are_listed_and_an_unknown_one_cannot_be_revoked() {
         &json!({"id": "x/abcdef"}),
     );
     assert_eq!(status, 422);
+    // Setting a grant: an unknown agent, and a role or project that does not exist, are refused.
+    for body in [
+        json!({"id": "x#abcdef", "agent_role": "builder"}),
+        json!({"id": "x#abcdef", "agent_role": "nope"}),
+        json!({"id": "x#abcdef", "agent_projects": ["nope"]}),
+        json!({"id": "x#abcdef", "agent_roles": "builder"}),
+    ] {
+        let (status, _, text) = f.admin("settings_registered_agent_set", &body);
+        assert!(status == 422 || status == 400, "{body}: {status} {text}");
+    }
 }
 
 #[test]
@@ -210,6 +220,7 @@ fn only_an_admin_may_change_settings() {
         "settings_github_set",
         "settings_github_clear",
         "settings_registered_agent_revoke",
+        "settings_registered_agent_set",
         "settings_rules_set",
     ] {
         let (status, _, text) = call(f.addr, &builder, op, &json!({}));

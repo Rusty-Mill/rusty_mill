@@ -1,6 +1,7 @@
 //! The service: resolves actors from roles, applies domain operations and
 //! commits them through a [`Store`], retrying on revision conflicts.
 
+use crate::agents::{AgentInfo, Grant};
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -299,21 +300,35 @@ impl<S: Store> Board<S> {
         self
     }
 
-    /// Register a new agent on `connector`: its id and key.
+    /// Register a new agent on `connector` with `grant`: its id and key.
     ///
     /// # Errors
     /// See [`crate::agents::Registry::register`].
-    pub fn register_agent(&self, connector: &str) -> Result<(String, String), BoardError> {
+    pub fn register_agent(
+        &self,
+        connector: &str,
+        grant: Grant,
+    ) -> Result<(String, String), BoardError> {
         let now = (self.clock)();
         self.agents()
-            .register(connector, now)
+            .register(connector, grant, now)
             .map_err(BoardError::Storage)
     }
 
-    /// Whether `id` with `key` is a live agent of `connector`.
-    pub fn verify_agent(&self, connector: &str, id: &str, key: &str) -> bool {
+    /// The grant of `id` if it is a live agent of `connector` holding `key`.
+    pub fn verify_agent(&self, connector: &str, id: &str, key: &str) -> Option<Grant> {
         let now = (self.clock)();
         self.agents().verify(connector, id, key, now)
+    }
+
+    /// Replace registered agent `id`'s own role and projects; whether it exists.
+    ///
+    /// # Errors
+    /// If the registry file cannot be written.
+    pub fn set_agent_grant(&self, id: &str, grant: Grant) -> Result<bool, BoardError> {
+        self.agents()
+            .set_grant(id, grant)
+            .map_err(BoardError::Storage)
     }
 
     /// Remove registered agent `id`; whether it existed.
@@ -324,13 +339,59 @@ impl<S: Store> Board<S> {
         self.agents().revoke(id).map_err(BoardError::Storage)
     }
 
-    /// Registered agents without keys: `(id, connector, created_ms, seen_ms)`.
-    pub fn agent_list(&self) -> Vec<(String, String, i64, i64)> {
-        self.agents()
-            .list()
-            .into_iter()
-            .map(|(id, c, a, b)| (id.to_owned(), c.to_owned(), a, b))
-            .collect()
+    /// Registered agents without keys.
+    pub fn agent_list(&self) -> Vec<AgentInfo> {
+        self.agents().list()
+    }
+
+    /// Check a registered agent's `grant`: its role must exist and its projects be known. With
+    /// `within` (the connector's role and projects) it may only narrow them: no capability the
+    /// connector lacks, no project outside the connector's.
+    ///
+    /// # Errors
+    /// [`BoardError::Refused`] naming what is wrong.
+    pub fn check_agent_grant(
+        &self,
+        grant: &Grant,
+        within: Option<(&str, Option<&[String]>)>,
+    ) -> Result<(), BoardError> {
+        let refused = |why: String| BoardError::Refused(why);
+        if let Some(role) = &grant.role {
+            let roles = read(&self.roles);
+            let caps = roles
+                .0
+                .get(role)
+                .ok_or_else(|| refused(format!("there is no role {role:?}")))?;
+            let ceiling = within.and_then(|(r, _)| roles.0.get(r));
+            if let Some(extra) = within.and_then(|_| {
+                caps.iter()
+                    .find(|c| !ceiling.is_some_and(|k| k.contains(c)))
+            }) {
+                return Err(refused(format!(
+                    "your connector does not hold {extra:?}, so you cannot take it: ask an admin to set your role"
+                )));
+            }
+        }
+        let Some(asked) = &grant.projects else {
+            return Ok(());
+        };
+        if asked.is_empty() {
+            return Err(refused(
+                "a project limit must name at least one project (omit it for all)".into(),
+            ));
+        }
+        let known = read(&self.projects);
+        if let Some(p) = asked.iter().find(|p| !known.contains(p)) {
+            return Err(refused(format!("there is no project {p:?}")));
+        }
+        if let Some((_, Some(own))) = within
+            && let Some(p) = asked.iter().find(|p| !own.contains(*p))
+        {
+            return Err(refused(format!(
+                "your connector does not work in project {p:?}"
+            )));
+        }
+        Ok(())
     }
 
     fn agents(&self) -> std::sync::MutexGuard<'_, crate::agents::Registry> {
