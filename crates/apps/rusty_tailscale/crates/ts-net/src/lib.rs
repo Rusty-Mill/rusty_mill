@@ -123,6 +123,17 @@ impl Node {
         &self.engine
     }
 
+    /// Opens a TCP connection to a tailnet peer (`addr` must be an IPv4
+    /// tailnet address). Await [`wait_ip`](Node::wait_ip) first.
+    pub async fn connect(&self, addr: std::net::SocketAddr) -> std::io::Result<TcpStream> {
+        let (reply, rx) = oneshot::channel();
+        self.net
+            .send(stack::Request::Connect { addr, reply })
+            .map_err(|_| std::io::Error::other("ts-net: stack stopped"))?;
+        rx.await
+            .map_err(|_| std::io::Error::other("ts-net: stack stopped"))?
+    }
+
     /// Binds a TCP port on the tailnet and returns a listener. Ensure the
     /// tailnet IP is assigned first (await [`wait_ip`](Node::wait_ip)).
     pub async fn bind(&self, port: u16) -> Result<TcpListener, Error> {

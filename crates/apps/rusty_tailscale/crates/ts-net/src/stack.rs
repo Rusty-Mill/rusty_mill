@@ -59,6 +59,25 @@ pub(crate) enum Request {
     /// The application took a chunk off its queue: there is room again, so
     /// service the sockets (a held chunk, a window update).
     Poke,
+    /// Open a connection to `addr` on the tailnet; the reply is the stream
+    /// once established, or why it was not.
+    Connect {
+        addr: SocketAddr,
+        reply: oneshot::Sender<io::Result<TcpStream>>,
+    },
+}
+
+/// How long an outbound connection may take to establish.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// First ephemeral local port for outbound connections.
+const EPHEMERAL_PORT_START: u16 = 49152;
+
+/// An outbound connection still in its handshake.
+struct Dialing {
+    handle: SocketHandle,
+    peer: SocketAddr,
+    since: StdInstant,
+    reply: oneshot::Sender<io::Result<TcpStream>>,
 }
 
 /// Spawns the stack task and returns the request sender.
@@ -108,6 +127,8 @@ struct Stack {
     conns: HashMap<usize, Conn>,
     handle_to_id: HashMap<SocketHandle, usize>,
     next_id: usize,
+    dialing: Vec<Dialing>,
+    next_port: u16,
     addr: Option<Ipv4Addr>,
     start: StdInstant,
     /// Cloned into each `TcpStream` so the app can send `Data`/`Close`.
@@ -139,6 +160,8 @@ impl Stack {
             conns: HashMap::new(),
             handle_to_id: HashMap::new(),
             next_id: 1,
+            dialing: Vec::new(),
+            next_port: EPHEMERAL_PORT_START,
             addr: None,
             start,
             req_tx,
@@ -198,6 +221,7 @@ impl Stack {
             }
             // The app drained its queue: service the sockets again.
             Request::Poke => {}
+            Request::Connect { addr, reply } => self.dial(addr, reply),
             Request::Close { id } => {
                 if let Some(conn) = self.conns.get_mut(&id) {
                     conn.closing = true;
@@ -234,6 +258,105 @@ impl Stack {
         accept_rx
     }
 
+    /// Wraps an established socket in a [`Conn`] and returns its stream.
+    fn register(&mut self, handle: SocketHandle, peer: SocketAddr) -> TcpStream {
+        let id = self.next_id;
+        self.next_id += 1;
+        let (to_app, from_net) = mpsc::channel(APP_QUEUE_DEPTH);
+        let out_len = Arc::new(AtomicUsize::new(0));
+        let write_waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+        self.conns.insert(
+            id,
+            Conn {
+                handle,
+                to_app,
+                pending_rx: None,
+                out: Vec::new(),
+                closing: false,
+                out_len: out_len.clone(),
+                write_waker: write_waker.clone(),
+            },
+        );
+        self.handle_to_id.insert(handle, id);
+
+        let stream = TcpStream {
+            id,
+            net: self.req_tx.clone(),
+            from_net,
+            leftover: Vec::new(),
+            pos: 0,
+            peer,
+            write_closed: false,
+            out_len,
+            write_waker,
+        };
+        stream
+    }
+
+    /// Starts an outbound connection; `service_sockets` finishes it.
+    fn dial(&mut self, addr: SocketAddr, reply: oneshot::Sender<io::Result<TcpStream>>) {
+        let (Some(_), IpAddr::V4(ip)) = (self.addr, addr.ip()) else {
+            let _ = reply.send(Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "ts-net: no tailnet address yet, or not an IPv4 peer",
+            )));
+            return;
+        };
+        let mut sock = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0u8; SOCKET_BUFFER]),
+            tcp::SocketBuffer::new(vec![0u8; SOCKET_BUFFER]),
+        );
+        let port = self.next_port;
+        self.next_port = if port == u16::MAX {
+            EPHEMERAL_PORT_START
+        } else {
+            port + 1
+        };
+        let remote = smoltcp::wire::IpEndpoint::new(IpAddress::Ipv4(ip), addr.port());
+        if let Err(e) = sock.connect(self.iface.context(), remote, port) {
+            let _ = reply.send(Err(io::Error::other(format!("ts-net: connect: {e}"))));
+            return;
+        }
+        let handle = self.sockets.add(sock);
+        self.dialing.push(Dialing {
+            handle,
+            peer: addr,
+            since: StdInstant::now(),
+            reply,
+        });
+    }
+
+    /// Hands established outbound connections to their callers, and fails
+    /// refused or timed-out ones.
+    fn finish_dials(&mut self) {
+        let dialing = std::mem::take(&mut self.dialing);
+        for dial in dialing {
+            let state = self.sockets.get::<tcp::Socket>(dial.handle).state();
+            match state {
+                tcp::State::Established => {
+                    let stream = self.register(dial.handle, dial.peer);
+                    let _ = dial.reply.send(Ok(stream));
+                }
+                tcp::State::SynSent | tcp::State::SynReceived
+                    if dial.since.elapsed() < CONNECT_TIMEOUT =>
+                {
+                    self.dialing.push(dial);
+                }
+                other => {
+                    self.sockets.remove(dial.handle);
+                    let kind = if matches!(other, tcp::State::Closed) {
+                        io::ErrorKind::ConnectionRefused
+                    } else {
+                        io::ErrorKind::TimedOut
+                    };
+                    let _ = dial
+                        .reply
+                        .send(Err(io::Error::new(kind, "ts-net: connect failed")));
+                }
+            }
+        }
+    }
+
     /// Creates a fresh TCP socket in LISTEN on `port` and returns its handle.
     fn open_listen_socket(&mut self, port: u16) -> SocketHandle {
         let mut sock = tcp::Socket::new(
@@ -249,6 +372,7 @@ impl Stack {
     /// promotes freshly-connected listen sockets, and reaps dead connections.
     fn service_sockets(&mut self) {
         self.accept_new();
+        self.finish_dials();
 
         let ids: Vec<usize> = self.conns.keys().copied().collect();
         for id in ids {
@@ -274,36 +398,8 @@ impl Stack {
                     .map(|ep| SocketAddr::new(smol_addr(ep.addr), ep.port))
                     .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
 
-                let id = self.next_id;
-                self.next_id += 1;
-                let (to_app, from_net) = mpsc::channel(APP_QUEUE_DEPTH);
-                let out_len = Arc::new(AtomicUsize::new(0));
-                let write_waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
-                self.conns.insert(
-                    id,
-                    Conn {
-                        handle,
-                        to_app,
-                        pending_rx: None,
-                        out: Vec::new(),
-                        closing: false,
-                        out_len: out_len.clone(),
-                        write_waker: write_waker.clone(),
-                    },
-                );
-                self.handle_to_id.insert(handle, id);
-
-                let stream = TcpStream {
-                    id,
-                    net: self.req_tx.clone(),
-                    from_net,
-                    leftover: Vec::new(),
-                    pos: 0,
-                    peer,
-                    write_closed: false,
-                    out_len,
-                    write_waker,
-                };
+                let stream = self.register(handle, peer);
+                let id = stream.id;
                 // Replace the claimed listen socket with a fresh one.
                 let replacement = self.open_listen_socket(port);
                 let listener = &mut self.listeners[li];
@@ -610,6 +706,7 @@ mod tests {
     const SYN: u8 = 0x02;
     const ACK: u8 = 0x10;
     const PSH: u8 = 0x08;
+    const RST: u8 = 0x04;
 
     fn tcp_flags(segment: &[u8]) -> u8 {
         segment[33]
@@ -687,6 +784,128 @@ mod tests {
         // Keep the outbound receiver alive to the end so the stack's device
         // never sees a closed channel mid-handshake.
         drop(outbound_rx);
+    }
+
+    /// `connect` sends a SYN, finishes on the peer's SYN-ACK, and the stream
+    /// carries data both ways.
+    #[rusty_tokio::test]
+    async fn connect_completes_on_syn_ack_and_carries_data() {
+        use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (inbound_tx, inbound_rx) = mpsc::channel(16);
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let stack = Stack::new(req_tx.clone(), inbound_rx, req_rx, outbound_tx);
+        rusty_tokio::spawn(stack.run());
+
+        let our = Ipv4Addr::new(100, 64, 0, 1);
+        let peer = Ipv4Addr::new(100, 64, 0, 9);
+        req_tx.send(Request::SetAddr(our)).unwrap();
+        let (reply, rx) = oneshot::channel();
+        req_tx
+            .send(Request::Connect {
+                addr: SocketAddr::new(IpAddr::V4(peer), 7600),
+                reply,
+            })
+            .unwrap();
+
+        let syn = rusty_tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tcp_flags(&syn), SYN, "an outbound SYN");
+        let our_port = u16::from_be_bytes([syn[20], syn[21]]);
+        let our_isn = u32::from_be_bytes([syn[24], syn[25], syn[26], syn[27]]);
+        inbound_tx
+            .send(tcp_segment(
+                peer,
+                our,
+                7600,
+                our_port,
+                500,
+                our_isn.wrapping_add(1),
+                SYN | ACK,
+                &[],
+            ))
+            .await
+            .unwrap();
+        let mut stream = rusty_tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("connect completes")
+            .unwrap()
+            .expect("established");
+        assert_eq!(stream.peer_addr(), SocketAddr::new(IpAddr::V4(peer), 7600));
+
+        stream.write_all(b"ping").await.unwrap();
+        let mut sent = Vec::new();
+        while sent.len() < 4 {
+            let pkt = rusty_tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            sent.extend_from_slice(&pkt[40..]);
+        }
+        assert_eq!(sent, b"ping");
+
+        inbound_tx
+            .send(tcp_segment(
+                peer,
+                our,
+                7600,
+                our_port,
+                501,
+                our_isn.wrapping_add(5),
+                ACK | PSH,
+                b"pong",
+            ))
+            .await
+            .unwrap();
+        let mut buf = [0u8; 8];
+        let n = rusty_tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..n], b"pong");
+    }
+
+    /// A refused connection (RST) is an error, not a hang.
+    #[rusty_tokio::test]
+    async fn connect_refused_is_an_error() {
+        let (inbound_tx, inbound_rx) = mpsc::channel(16);
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let stack = Stack::new(req_tx.clone(), inbound_rx, req_rx, outbound_tx);
+        rusty_tokio::spawn(stack.run());
+        let our = Ipv4Addr::new(100, 64, 0, 1);
+        let peer = Ipv4Addr::new(100, 64, 0, 9);
+        req_tx.send(Request::SetAddr(our)).unwrap();
+        let (reply, rx) = oneshot::channel();
+        req_tx
+            .send(Request::Connect {
+                addr: SocketAddr::new(IpAddr::V4(peer), 7600),
+                reply,
+            })
+            .unwrap();
+        let syn = outbound_rx.recv().await.unwrap();
+        let our_port = u16::from_be_bytes([syn[20], syn[21]]);
+        let our_isn = u32::from_be_bytes([syn[24], syn[25], syn[26], syn[27]]);
+        inbound_tx
+            .send(tcp_segment(
+                peer,
+                our,
+                7600,
+                our_port,
+                0,
+                our_isn.wrapping_add(1),
+                RST | ACK,
+                &[],
+            ))
+            .await
+            .unwrap();
+        let result = rusty_tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("an answer")
+            .unwrap();
+        assert!(result.is_err());
     }
 
     /// A burst larger than the app queue (16 chunks) must arrive whole and in
