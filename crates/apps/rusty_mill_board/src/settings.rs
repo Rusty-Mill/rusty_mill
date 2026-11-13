@@ -291,15 +291,26 @@ struct AgentName {
 
 /// `agent_enrol`: `agent_role` and `agent_projects`, because `role` already names the caller's.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Enrol {
     label: String,
     agent_role: String,
     agent_projects: Option<Vec<String>>,
+    // The caller's own `actor` and `role` (see `Who`), read by `acting`; refused if they differ.
+    #[serde(rename = "actor")]
+    _actor: Option<String>,
+    #[serde(rename = "role")]
+    _role: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EnrolLabel {
     label: String,
+    #[serde(rename = "actor")]
+    _actor: Option<String>,
+    #[serde(rename = "role")]
+    _role: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -464,7 +475,7 @@ impl Settings {
         let out = if name == "agent_enrol" {
             self.enrol(&actor, &lead.actor, &parse(args)?)
         } else {
-            self.enrol_revoke(&actor, &lead.actor, &parse(args)?)
+            self.enrol_revoke(&lead.actor, &parse(args)?)
         };
         out.map_err(CallError::Board)
     }
@@ -508,13 +519,13 @@ impl Settings {
     }
 
     /// Remove one agent the caller minted, and nothing else.
-    fn enrol_revoke(&self, caller: &Actor, lead: &str, a: &EnrolLabel) -> Res {
+    fn enrol_revoke(&self, lead: &str, a: &EnrolLabel) -> Res {
         let child = format!("{lead}.{}", a.label);
         self.change_creds(|c| match c.parent_of(&child) {
             Some(p) if p == lead => c.remove(&child),
             _ => Err(format!("you did not mint {child:?}")),
         })?;
-        rusty_log::warn!(lead = %caller.name, agent = %child, "minted agent revoked");
+        rusty_log::warn!(lead = %lead, agent = %child, "minted agent revoked");
         Ok(json!({ "ok": true }))
     }
 

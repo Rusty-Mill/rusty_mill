@@ -1264,3 +1264,51 @@ fn minted_agents_survive_a_restart_and_keep_their_lead() {
         .expect("reloads");
     assert_eq!(creds.parent_of("chief.w"), Some("chief"));
 }
+
+#[test]
+fn enrol_refuses_a_misspelt_argument_and_a_name_that_is_taken() {
+    let f = start("enrol_args");
+    with_lead_role(&f);
+    let lead = lead_with(&f, "chief", None);
+    let mint = |body: Value| call(f.addr, &lead, "agent_enrol", &body);
+    // `projects` where `agent_projects` belongs would otherwise mint an agent for every project.
+    let (status, ..) = mint(json!({"label": "w", "agent_role": "worker", "projects": ["x"]}));
+    assert_eq!(status, 422);
+    // Stating your own actor and role is still fine.
+    let (status, ..) =
+        mint(json!({"label": "w", "agent_role": "worker", "actor": "chief", "role": "lead"}));
+    assert_eq!(status, 200);
+    let (status, _, text) = mint(json!({"label": "w", "agent_role": "worker"}));
+    assert_eq!((status, text.contains("already")), (422, true), "{text}");
+}
+
+#[test]
+fn a_credentials_file_with_a_bad_parent_is_refused() {
+    let roles = Roles::default();
+    let projects = Projects::default();
+    let file = |entries: &str| format!("[{entries}]");
+    let lead = r#"{"token":"0123456789abcdef0123","actor":"chief","role":"builder"}"#;
+    let kid = |actor: &str, parent: &str| {
+        format!(
+            r#"{{"token":"{actor}-token-0123456789","actor":"{actor}","role":"builder","parent":"{parent}"}}"#
+        )
+    };
+    // A child whose lead is missing, whose name lacks the `lead.` prefix, and a grandchild.
+    for bad in [
+        file(&format!("{lead},{}", kid("chief.a", "ghost"))),
+        file(&format!("{lead},{}", kid("other", "chief"))),
+        file(&format!(
+            "{lead},{},{}",
+            kid("chief.a", "chief"),
+            kid("chief.a.b", "chief.a")
+        )),
+    ] {
+        assert!(
+            Credentials::parse(&bad, &roles, &projects).is_err(),
+            "{bad}"
+        );
+    }
+    let good = file(&format!("{lead},{}", kid("chief.a", "chief")));
+    let creds = Credentials::parse(&good, &roles, &projects).expect("good");
+    assert_eq!(creds.parent_of("chief.a"), Some("chief"));
+}
