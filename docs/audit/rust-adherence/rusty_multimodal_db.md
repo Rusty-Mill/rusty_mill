@@ -60,7 +60,7 @@ Three findings below are marked "by reading": they follow from the code but were
 Adheres:
 - The server library has **no `panic!`** (0 hits in lib) and 4 `.unwrap()`. Storage and wire code returns typed errors: `JournalError` (`src/server/journal.rs:152`), `ChangeLogError` (`src/server/changelog.rs:65`), `DataDirLockError` (`src/server/data_lock.rs:43`), `FrameError` (`src/server/framing.rs:22`).
 - Oversized frames are refused before allocation (`src/server/framing.rs:86-89`).
-- The accept loop uses `thread::Builder::spawn` and handles the error (`src/server/serve.rs:5746`, fixed by `48d48cb6a`).
+- The accept loop uses `thread::Builder::spawn` and handles the error (`src/server/serve.rs:5747`, fixed by `48d48cb6a`).
 
 Drifts:
 - **46 `expect` in library code.** 16 are `expect(LOCK_POISONED)` in `src/production.rs` (for example `:295`, `:343`, `:379`), so one panic while the write lock is held turns every later call into a panic. 4 `.lock().unwrap()` in `src/server/mvcc.rs:328,336,347,494`.
@@ -69,7 +69,7 @@ Drifts:
 - 3 `unreachable!` in the client's SQL path: `src/server/client.rs:1544,1667,1939`.
 - Public API panics: `serve_tables` asserts `primary < tables.len()` (`src/server/serve.rs:5672`, documented under `# Panics`) and checks unique table names only with `debug_assert!` (`:5679`).
 - `From<Vec<DogRecord>> for ProductionStore` creates a temp directory and an mmap file and panics if either fails (`src/production.rs:432-445`, `:447-455`, `ConcurrentStore::new` at `:406-413`).
-- **Server binaries report every startup error by panicking**: 58 `panic!` across the five server `main`s (25 in `src/bin/memory_server.rs`, for example `:439`, `:449`, `:786`), plus `assert!` at `:842`. `open_stores` returns `Result<_, String>` (`:978`) and its caller does `unwrap_or_else(|e| panic!("{e}"))` (`:490` region).
+- **Server binaries report every startup error by panicking**: 58 `panic!` across the five server `main`s (25 in `src/bin/memory_server.rs`, for example `:439`, `:450`, `:786`), plus `assert!` at `:842`. `open_stores` returns `Result<_, String>` (`:978`) and its caller does `unwrap_or_else(|e| panic!("{e}"))` (`:496`).
 - The harness binaries (prototypes) hold 100 of the 110 bin `expect`s.
 
 ### 2. Ownership and types; illegal states unrepresentable; immutability
@@ -91,7 +91,7 @@ Drifts:
 
 ### 3. Async only where there is real I/O concurrency
 
-Adheres fully. There is no `async` and no runtime dependency. The server is one OS thread per connection over blocking `Read`/`Write` (`src/server/serve.rs:5746`). The costs of that choice are in the open: a 20 ms accept poll to see a shutdown flag (`:5563`, `:5704-5716`), a 50 ms poll thread for signals (`src/bin/memory_server.rs:403-408`), and `thread::sleep` in the drain wait (`src/server/serve.rs:5764-5766`).
+Adheres fully. There is no `async` and no runtime dependency. The server is one OS thread per connection over blocking `Read`/`Write` (`src/server/serve.rs:5747`). The costs of that choice are in the open: a 20 ms accept poll to see a shutdown flag (`:5563`, `:5704-5716`), a 50 ms poll thread for signals (`src/bin/memory_server.rs:406-411`), and `thread::sleep` in the drain wait (`src/server/serve.rs:5764-5766`).
 
 ### 4. Explicit, flat control flow, short functions
 
@@ -148,20 +148,20 @@ Drifts:
 ### 8. Minimal dependencies; no secrets logged; input validated at the boundary
 
 Adheres:
-- Every dependency carries a reason in `Cargo.toml`. Constant-time comparison is delegated to `subtle` (`src/server/serve.rs:3528-3548`). TLS, HTTP and base64 come from workspace crates behind `optional = true`.
+- Every dependency carries a reason in `Cargo.toml`. Constant-time comparison is delegated to `subtle` (`src/server/serve.rs:3531-3550`). TLS, HTTP and base64 come from workspace crates behind `optional = true`.
 - No key material is committed; TLS tests generate certificates with `rcgen`.
 - The binaries refuse a non-loopback bind without both auth and TLS (`src/server/exposure.rs:87-98`), and a non-loopback metrics listener (`:102-108`).
 - Backup targets are confined to one directory and installed by rename (`src/server/serve.rs:2844-2877`). Snapshot manifests from a server are checked by a strict portable-name rule before any file is created (`src/server/client.rs:906-929`, commit `7397f5df6`).
 - Request sizes are bounded: frame (`src/server/framing.rs:19`), staged ops and bytes (`src/server/protocol.rs:185,200`), chunk length (`src/server/snapshot.rs:149`), tracked peers (`src/server/serve.rs:3621`).
 
 Drifts:
-- **`Debug` for `ServeOptions` prints the read-only and read-write tokens** (`src/server/serve.rs:3099-3100`). The same impl redacts `replication_token` (`:3147-3153`), and the struct's doc says tokens "are never logged or echoed back on any path" (`:3008-3009`). `Request` derives `Debug` with `Authenticate { token: String }` (`src/server/protocol.rs:804,845-847`), and `ConnectOptions` derives `Debug` with `token: Option<String>` (`src/server/client.rs:387-389`).
-- An exported-but-empty token variable becomes a configured empty token: `std::env::var(..).ok()` (`src/server/serve.rs:3358-3359,3369`) yields `Some("")`, and `check("")` then matches it (`:3528-3548`). By reading. `memory_server` treats empty values as unset for other variables (`src/bin/memory_server.rs:322-325`).
+- **`Debug` for `ServeOptions` prints the read-only and read-write tokens** (`src/server/serve.rs:3099-3100`). The same impl redacts `replication_token` (`:3146-3153`), and the struct's doc says tokens "are never logged or echoed back on any path" (`:3009`). `Request` derives `Debug` with `Authenticate { token: String }` (`src/server/protocol.rs:804,845-847`), and `ConnectOptions` derives `Debug` with `token: Option<String>` (`src/server/client.rs:387-389`).
+- An exported-but-empty token variable becomes a configured empty token: `std::env::var(..).ok()` (`src/server/serve.rs:3358-3359,3370`) yields `Some("")`, and `check("")` then matches it (`:3531-3550`). By reading. `memory_server` treats empty values as unset for other variables (`src/bin/memory_server.rs:322-325`).
 - Half a TLS configuration is silently plaintext: a chain path without a key path falls to `_ => None` (`src/server/serve.rs:3932`), pinned by the test at `:6105`. Only the client-CA-without-chain case is an error (`:3927-3931`).
 - The server's own `Backup` name check is the weak rule the client fix replaced: it refuses only `/`, `\`, `.`, `..` and empty (`src/server/serve.rs:2851`), not `:` or device names that `is_plain_file_name` refuses (`src/server/client.rs:906`).
 - The snapshot handle, described as "unguessable enough", is `RandomState::new().build_hasher().finish()` (`src/server/snapshot.rs:203-207`). That is a hash-map seed, not a documented source of secret randomness.
 - The auth rate limiter fails open when its mutex is poisoned (`src/server/serve.rs:3698-3700`, `:3717-3719`).
-- `refuse_busy` starts an unaccounted watchdog thread per refusal that sleeps 6 s (`src/server/serve.rs:5842-5846`). The refusal slot is held by the outer thread only (`:5828-5830`), so a peer that connects past the cap and closes at once frees the slot in milliseconds while the watchdog lives on. Thread count then grows with refusal rate, which the 16-slot pool was meant to prevent (`:5891`). By reading.
+- `refuse_busy` starts an unaccounted watchdog thread per refusal that sleeps 6 s (`src/server/serve.rs:5842-5847`). The refusal slot is held by the outer thread only (`:5828-5830`), so a peer that connects past the cap and closes at once frees the slot in milliseconds while the watchdog lives on. Thread count then grows with refusal rate, which the 16-slot pool was meant to prevent (`:5891`). By reading.
 - On-disk input is trusted more than wire input. A journal shorter than its 12-byte header is "not a batch journal" and the server will not start (`src/server/journal.rs:318-320`), yet creation writes the header in two calls before the sync (`:304-306`); by reading. Journal and change-log records have a length prefix and no checksum (`src/server/journal.rs:334-342`, `src/server/changelog.rs:202-206`). `MmapAgeStore::open` derives the record count by integer division and never checks the remainder (`src/durability/mmap_store.rs:300-302,577`).
 - `rand` is an unconditional dependency (`Cargo.toml`, `[dependencies.rand]`) used only in modules gated on `research` or `cfg(test)` (`src/generator.rs`, `src/bench_support.rs`, `src/generic_spike/order_bench_support.rs`).
 
@@ -170,7 +170,7 @@ Drifts:
 Adheres: `ServeOptions` is one value built by `with_*` methods; the library reads the environment in only two documented places (`ServeOptions::from_env`, `TlsConfig::from_env`), and `from_env_values` exists so tests never touch the process environment (`src/server/serve.rs:3906-3920`). Feature gating is clean: `client` compiles no server code (`src/server/mod.rs:150-231`).
 
 Drifts:
-- `memory_server` reads 21 environment variables inline through `main` with three different on/off conventions: presence, so `SERVER_MVCC_ISOLATION=0` turns MVCC **on** (`src/bin/memory_server.rs:459`); strict `0`/`1` (`:350-360`); and exactly `1` (`src/server/exposure.rs:113`). Empty-means-unset is applied to some path variables (`:839`, `:777`) and not to others (`:702`, `:719`, `:425`).
+- `memory_server` makes 21 `std::env::var`/`var_os` calls inline through `main` with three different on/off conventions: presence, so `SERVER_MVCC_ISOLATION=0` turns MVCC **on** (`src/bin/memory_server.rs:459`); strict `0`/`1` (`:350-360`); and exactly `1` (`src/server/exposure.rs:113`). Empty-means-unset is applied to some path variables (`:839`, `:777`) and not to others (`:702`, `:719`, `:425`).
 - `SERVER_AUTH_REPLICATION_TOKEN` is read twice, once in `ServeOptions::from_env` and again in `main` (`src/bin/memory_server.rs:710`).
 - A process-wide `static IN_FLIGHT` caps metrics connections for every `ServeOptions` in the process (`src/server/metrics_http.rs:27`), unlike the per-options `in_flight` counter.
 - `pub use serve::*` (`src/server/mod.rs:231`) makes all 57 `pub` items of `serve.rs` public API, including planner internals such as `intersect_ids` (`src/server/serve.rs:1480`) and `EQ_INTERSECT_RATIO` (`:1460`).
@@ -188,7 +188,7 @@ What is already enforced for this crate (from `_workspace.md`): `cargo fmt --che
 |---|---|---|
 | `clippy::expect_used` | 46 / 110 (100 of the bin hits are harness prototypes) | `src/production.rs:295`, `src/server/memory.rs:1629`, `src/server/serve.rs:2510` |
 | `clippy::unwrap_used` | 4 / 0 | `src/server/mvcc.rs:328`, `:336`, `:494` |
-| `clippy::panic` | 0 / 63 (58 in the five server bins) | `src/bin/memory_server.rs:439`, `:449`, `src/bin/dog_server.rs:134` |
+| `clippy::panic` | 0 / 63 (58 in the five server bins) | `src/bin/memory_server.rs:439`, `:450`, `src/bin/dog_server.rs:133` |
 | `clippy::unreachable` | 4 / 0 | `src/server/serve.rs:2541`, `src/server/client.rs:1544` |
 | `clippy::unwrap_in_result` | 9 / 0 | `src/production.rs:416`, `src/durability/mmap_store.rs:391` |
 | `clippy::indexing_slicing` | 96 / 5 | `src/server/changelog.rs:199`, `src/durability/mmap_store.rs:643`, `src/server/journal.rs:318` |
@@ -209,12 +209,12 @@ What is already enforced for this crate (from `_workspace.md`): `cargo fmt --che
 | `clippy::print_stderr` | 2 / 20 | `src/server/audit.rs:328`, `src/server/access.rs:143` |
 | `clippy::print_stdout` | 0 / 39 (all harness) | `src/bin/crash_safety_harness.rs` |
 | `clippy::exit` | 0 / 2 | `src/bin/crash_writer.rs:182`, `:198` |
-| `unsafe_code` (the workspace table would set `warn`) | 4 / 3 | `src/durability/mmap_store.rs:464`, `:500`, `src/bin/memory_server.rs:399` |
+| `unsafe_code` (the workspace table would set `warn`) | 4 / 3 | `src/durability/mmap_store.rs:464`, `:500`, `src/bin/memory_server.rs:404` |
 | `clippy::allow_attributes_without_reason` | 4 / 0 | see the allow list below |
 | `clippy::match_same_arms` | 8 / 0 | `src/server/serve.rs` (5) |
 | `clippy::needless_pass_by_value` | 14 / 0 | `src/durability/mmap_store.rs` (2), `src/server/client.rs` (2) |
 | `clippy::must_use_candidate`, `clippy::missing_const_for_fn` | 93, 95 | low value; listed for completeness |
-| `clippy::disallowed_methods` for `std::thread::spawn` (needs `clippy.toml`) | 1 / 3, counted by grep | `src/server/serve.rs:5693`, `src/bin/memory_server.rs:403` |
+| `clippy::disallowed_methods` for `std::thread::spawn` (needs `clippy.toml`) | 1 / 3, counted by grep | `src/server/serve.rs:5693`, `src/bin/memory_server.rs:406` |
 | CI: clippy and tests on Windows | not run | the crate holds Windows-specific reasoning (`src/server/client.rs:896-929`, `src/server/data_lock.rs:17-18`) that no job compiles |
 | CI: fuzz or property test of frame and journal decoding | none exists | `src/server/framing.rs:82`, `src/server/journal.rs:293` |
 
@@ -265,7 +265,7 @@ Rules a fluent Rust author applies without being asked, which this code shows we
 
 | Rule | File:line or commit | What was seen |
 |---|---|---|
-| 1 | `src/server/serve.rs:3099-3100` | Hand-written `Debug` prints two token fields; the third is redacted at `:3147-3153` |
+| 1 | `src/server/serve.rs:3099-3100` | Hand-written `Debug` prints two token fields; the third is redacted at `:3146-3153` |
 | 1 | `src/server/protocol.rs:804,845-847` | `Request` derives `Debug`; `Authenticate { token: String }` |
 | 1 | `src/server/client.rs:387-389` | `ConnectOptions` derives `Debug` over `token: Option<String>` |
 | 2 | `src/server/protocol.rs:544-547` | `field: Option<FieldRef>`, "`None` only for `Count`" |
@@ -325,10 +325,10 @@ Rules a fluent Rust author applies without being asked, which this code shows we
 | MSRV is 1.89, fixed by `File::try_lock`. The workspace toolchain is newer, so a std API can be deprecated on the toolchain before its replacement exists at the MSRV; the fix is to hand-write the operation. | `Cargo.toml:5-11`; `7874688ec` (`fetch_update` replaced by a compare-and-swap loop because `try_update` is too new) |
 | The crate is excluded from Windows clippy and test legs. | `_workspace.md` ("has never been linted or tested on Windows") |
 | The generic store, `codec` and `DurabilityError` live in `rusty_multimodal_db_engine` and are re-exported so old paths resolve. Because of the orphan rule, `DurabilityError::Store` holds a boxed error that this crate downcasts back to `StoreError`. | `src/lib.rs:142`, `src/durability/mod.rs:11-14,41-61`; `414fe987b` |
-| Every metric is named `dogserver_*` whatever the domain. | `src/server/metrics.rs:70,244`, `src/server/serve.rs:3413` |
+| Every metric is named `dogserver_*` whatever the domain. | `src/server/metrics.rs:70,244`, `src/server/serve.rs:3419` |
 | Comments address decisions by id: ~1,656 `ADR-nnnn` and ~1,845 `XXX-FR-nnn` references in `src/`, against 139 files in `docs/decisions/`. A comment often cannot be understood without the ADR. | `grep -rhoE 'ADR-[0-9]{4}' src \| wc -l` |
 | A table's files are found by file-name prefix. A table whose base name is a prefix of another's would pull the other's files into its backup and snapshot. | `src/server/serve.rs:871-888` |
-| Opening a generic mmap store folds and clears its pending insert log. Anything that needs the log (MVCC reconstruction) must read it first, and a table must not be opened twice. | `24d880d27`, `9219449ad`, `f8deb1a60`; `src/bin/memory_server.rs:471-483` |
+| Opening a generic mmap store folds and clears its pending insert log. Anything that needs the log (MVCC reconstruction) must read it first, and a table must not be opened twice. | `24d880d27`, `9219449ad`, `f8deb1a60`; `src/bin/memory_server.rs:480-488` |
 | The journal checkpoint size was "chosen without measurement". | `src/server/journal.rs:71-75` |
 | The journal accepts format 2 and 3; a truncate rewrites the header to 3. | `src/server/journal.rs:57-70,484-491`; `40e33158c` |
 | The wire protocol is append-only and at version 36. Golden vectors are written to `tests/fixtures/wire-vectors.txt` for foreign clients. A Python reference client is tested and needs `python3` on `PATH`; the test fails without it. | `src/server/protocol.rs:128,1527-1533`; `Cargo.toml` (`server_python_client`, `server_fair_play_integration`) |
@@ -386,7 +386,7 @@ Rules a fluent Rust author applies without being asked, which this code shows we
 |---|---|---|
 | 1 | `61096d25c` | 4,096 staged ops of up to 16 MiB each; a byte budget was added |
 | 2 | `3b9c6f716`, `f8deb1a60` | The refusal path got a drain deadline, then a whole-refusal deadline, in two successive fixes |
-| 3 | `src/server/serve.rs:5828-5830,5842-5846,5891` | The watchdog thread is spawned outside the 16-slot refusal pool and outlives the slot |
+| 3 | `src/server/serve.rs:5828-5830,5842-5847,5891` | The watchdog thread is spawned outside the 16-slot refusal pool and outlives the slot |
 | 4 | `7a92acba4` | Two refusal tests were flaky with `BrokenPipe`/`ConnectionReset` until the close became a FIN after a drain |
 | 5 | `6017a748e` | A pipelined request ran after shutdown; the flag is now checked before reading and before acting |
 | 6 | `src/server/serve.rs:5721-5724`, `src/server/metrics_http.rs:45-48` | `Err(_) => continue` with no log and no delay |
@@ -407,7 +407,7 @@ Rules a fluent Rust author applies without being asked, which this code shows we
 | 1 | `7d02359a6`, `src/server/exposure.rs:4-12,87-98` | A server on `0.0.0.0` with nothing set served every peer read-write "and said so only in a banner" |
 | 1 | `3b9c6f716` | The same refusal was then added for the metrics listener |
 | 2 | `src/server/serve.rs:3922-3933,6105` | Chain path without key path gives `None` (plaintext); a test asserts it |
-| 3 | `src/server/serve.rs:3358-3359,3369,3528-3548` | `env::var(..).ok()` keeps `""`; `check` compares it as a token. By reading. |
+| 3 | `src/server/serve.rs:3358-3359,3370,3531-3550` | `env::var(..).ok()` keeps `""`; `check` compares it as a token. By reading. |
 | 4 | `7397f5df6`, `src/server/client.rs:906-929` | `C:escape` passed the clients' check; one strict rule now covers both clients |
 | 4 | `src/server/serve.rs:2851` | The server's `Backup` name still uses the earlier, weaker rule |
 | 5 | `src/server/snapshot.rs:203-207` | Handle taken from a `RandomState` hasher |
@@ -452,4 +452,4 @@ Rules a fluent Rust author applies without being asked, which this code shows we
 | 1 | `src/bin/memory_server.rs:459` vs `:350-360` vs `src/server/exposure.rs:113` | Presence, strict `0`/`1`, and exactly-`1` conventions side by side |
 | 1 | `48d48cb6a` | One variable was converted from presence to a `0`/`1` switch after the fact |
 | 2 | `48d48cb6a`, `0c18a5788`; `src/bin/memory_server.rs:839,777` vs `:702,719,425` | "empty env values are unset" applied to some path variables and not others |
-| 3 | `src/server/serve.rs:3369`, `src/bin/memory_server.rs:710,714` | One token variable read three times |
+| 3 | `src/server/serve.rs:3370`, `src/bin/memory_server.rs:710,714` | One token variable read three times |
