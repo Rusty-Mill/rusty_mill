@@ -70,3 +70,5 @@ C14 live sharing (#278) builds on shared mode and C77 leases and adds no second 
    c) The lease stays inside the creator's principal, and everyone else needs a C77 grant.
    Recommend c): the least new machinery, and the only option that stops a guest typing into
    the server account's shell without a grant.
+
+**Attach (Nano, 2026-11-13, as relayed):** owner's blocks only. Guests list everything but attach only to blocks their principal owns or was granted (C77); the server account's shell is not attachable by guests.

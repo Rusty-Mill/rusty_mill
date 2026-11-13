@@ -1588,12 +1588,32 @@ fn a_session_with_no_creator_belongs_to_the_servers_account() {
     let account = connect(&mut mux);
     let guest = connect_other(&mut mux);
     mux.attach(account, block).expect("attach");
-    mux.attach(guest, block).expect("attach");
     assert_eq!(
-        mux.acquire_lease(guest, block),
-        Err(Error::InputGated(block))
+        mux.attach(guest, block),
+        Err(Error::NotCreator { client: guest })
     );
     assert_eq!(mux.acquire_lease(account, block), Ok(()));
+}
+
+#[test]
+fn a_guest_attaches_only_to_blocks_it_owns_or_is_granted() {
+    let (mut mux, session, _, block) = fixture();
+    mux.share_leases(Principal::unix(1000, Some("me".into())).expect("principal"));
+    let creator = connect_other(&mut mux);
+    let creator_principal = mux.client(creator).expect("client").principal().clone();
+    mux.set_creator(session, creator_principal)
+        .expect("creator");
+    let account = connect(&mut mux);
+    let stranger = mux.connect(
+        Principal::unix(1002, Some("third".into())).expect("principal"),
+        Transport::Socket,
+    );
+    assert_eq!(
+        mux.attach(stranger, block),
+        Err(Error::NotCreator { client: stranger })
+    );
+    assert_eq!(mux.attach(creator, block), Ok(()));
+    assert_eq!(mux.attach(account, block), Ok(()));
 }
 
 #[test]
