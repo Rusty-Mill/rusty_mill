@@ -279,7 +279,7 @@ impl Stack {
         );
         self.handle_to_id.insert(handle, id);
 
-        let stream = TcpStream {
+        TcpStream {
             id,
             net: self.req_tx.clone(),
             from_net,
@@ -289,8 +289,7 @@ impl Stack {
             write_closed: false,
             out_len,
             write_waker,
-        };
-        stream
+        }
     }
 
     /// Starts an outbound connection; `service_sockets` finishes it.
