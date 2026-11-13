@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::domain::{
     Actor, BoardError, Capability, Card, CloseReason, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS,
     Dates, Edit, Event, EventKind, ExecutionLink, MoveRules, Plan, ProjectStatus, Shelf, View,
-    import_id, text_hash,
+    import_id, is_pull_link, text_hash,
 };
 use crate::external::Observation;
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
@@ -1117,7 +1117,9 @@ impl<S: Store> Board<S> {
         project: &str,
         new: NewCard<'_>,
     ) -> Result<Card, BoardError> {
-        if new.done && !by.caps.contains(&Capability::Close) {
+        let records_merged_work = by.caps.contains(&Capability::Record)
+            && new.evidence.iter().any(|l| is_pull_link(l.trim()));
+        if new.done && !by.caps.contains(&Capability::Close) && !records_merged_work {
             return Err(BoardError::Forbidden(Capability::Close));
         }
         if !new.evidence.is_empty() {
@@ -1930,9 +1932,14 @@ fn answerer(actor: &str) -> String {
     }
 }
 
-/// Who may record work as shipped (add evidence): a holder of `Close`, `Merge` or `Triage`.
+/// Who may record work as shipped (add evidence): a holder of `Close`, `Record`, `Merge` or `Triage`.
 fn check_records_shipped(by: &Actor) -> Result<(), BoardError> {
-    const MAY: &[Capability] = &[Capability::Close, Capability::Merge, Capability::Triage];
+    const MAY: &[Capability] = &[
+        Capability::Close,
+        Capability::Record,
+        Capability::Merge,
+        Capability::Triage,
+    ];
     if MAY.iter().any(|c| by.caps.contains(c)) {
         return Ok(());
     }

@@ -1900,7 +1900,7 @@ mod tests {
             as_("reviewer", json!({"id": "#2", "links": [pr]})),
         );
         assert!(
-            matches!(&refused, Err(CallError::Board(BoardError::ForbiddenAny(cs))) if cs.len() == 3),
+            matches!(&refused, Err(CallError::Board(BoardError::ForbiddenAny(cs))) if cs.len() == 4),
             "{refused:?}"
         );
         // Nor can evidence come in with a new card, done or not, without those capabilities.
@@ -2067,6 +2067,47 @@ mod tests {
         )
         .expect("add");
         assert_eq!(plain["card"]["column"], "backlog");
+    }
+
+    #[test]
+    fn record_adds_merged_work_with_a_pull_request_link_and_nothing_else() {
+        let mut roles = Roles::default();
+        roles.0.insert(
+            "recorder".into(),
+            [Capability::Build, Capability::Record]
+                .into_iter()
+                .collect(),
+        );
+        let board: Shared = Board::new(Box::new(MemStore::default()), roles);
+        let rec = ident("claude", "recorder");
+        let pr = "https://github.com/Rusty-Mill/rusty_mill/pull/1648";
+        let refused = |args: Value| {
+            matches!(
+                call_as(&board, Some(&rec), "card_add", args),
+                Err(CallError::Board(BoardError::Forbidden(Capability::Close)))
+            )
+        };
+        assert!(refused(json!({"title": "t", "done": true})));
+        assert!(refused(
+            json!({"title": "t", "done": true, "evidence": ["https://example.org/x"]})
+        ));
+        let added = call_as(
+            &board,
+            Some(&rec),
+            "card_add",
+            json!({"title": "shipped", "done": true, "evidence": [pr]}),
+        )
+        .expect("record");
+        assert_eq!(added["card"]["column"], "done");
+        for op in ["card_archive", "card_restore"] {
+            assert!(
+                matches!(
+                    call_as(&board, Some(&rec), op, json!({"id": "#1"})),
+                    Err(CallError::Board(BoardError::Forbidden(Capability::Close)))
+                ),
+                "{op} stays with Close"
+            );
+        }
     }
 
     #[test]
