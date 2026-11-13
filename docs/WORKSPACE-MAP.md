@@ -172,6 +172,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | rusty_worktree | rusty_worktree | Git worktrees that share one repository's object store, driven through the git CLI with hooks off and the git directory always named explicitly |
 | libs | ts-types | ts-types | Core wire and API types: keys, node/peer status, netmap, DERP map (serde) |
 | apps | ai_env_manager | ai_env_core | Ai Env Manager core: entry model and link planner. Pure, no I/O, no dependencies. |
+| apps | ai_env_manager | ai_env_fs | Ai Env Manager filesystem adapter: observes a tool folder and applies a link plan (symlink, junction, marked copy). |
 | apps | coreutils | coreutils | Modular pure-Rust implementation of core GNU/POSIX utilities |
 | apps | coreutils-async | coreutils-async | Reference consumer for platform-async: arun, an async port of rustils' rrun. |
 | apps | mill-term | mill-term | Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement) |
