@@ -1,7 +1,7 @@
 # TLS listener (card #506): design note
 
-Status: Proposed. Nothing is built. Owner gates apply before any code: a `rusty_tls` change,
-a new dependency, or a new crate. Nano's go is needed.
+Status: Accepted-pending-PR-confirmation. Nano answered the three questions (rusty_term DECISIONS D235-D237, 2026-11-13) but has not yet confirmed on PR #1656. Nothing is built. Owner gates apply before any code: a `rusty_tls` change,
+a new dependency, or a new crate; each capability row needs its own go.
 
 ## Context
 
@@ -56,8 +56,8 @@ until the server accepts TCP.
 
 ## Questions for Nano
 
-1. Build the tailnet path (C27) first and the TLS listener after? Recommended: yes, since it
-   needs no certificate, token or `rusty_tls` change.
-2. For TLS, the user supplies the certificate and the client pins its fingerprint (no
-   generator)? Recommended: yes. Otherwise a generator needs a dependency or `rusty_tls` work.
-3. Tokens stored hashed, shown once, rotated by `rusty-mux-ctl`? Recommended: yes.
+All three answered "Recommend" (2026-11-13, project thread cmsg_014f6o52E2iAAAgMm9v8hh1w5paA1SoRFaJMyA9U2SJRr4); pending his confirmation on the PR.
+
+1. Build the tailnet path (C27) first and the TLS listener after? **Answered: yes** (D235).
+2. For TLS, the user supplies the certificate and the client pins its fingerprint (no generator)? **Answered: yes** (D236).
+3. Tokens stored hashed, shown once, rotated by `rusty-mux-ctl`? **Answered: yes** (D237).
