@@ -34,7 +34,7 @@ use std::io;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
-use rusty_mux_core::{Principal, Transport};
+use rusty_mux_core::{Principal, TailscaleState, Transport};
 use rusty_tokio::io::{TcpListener, UnixListener};
 use rusty_tokio::sync::{Notify, mpsc::UnboundedReceiver};
 
@@ -234,6 +234,7 @@ pub(crate) async fn accept_tailnet(
     state: state::Shared,
     guests: Guests,
 ) -> io::Result<()> {
+    rusty_tokio::task::spawn_local(watch_status(tailnet.whois.clone(), state.clone()));
     let looking = Rc::new(std::cell::Cell::new(0usize));
     let mut dropped = 0u64;
     loop {
@@ -286,6 +287,30 @@ pub(crate) async fn accept_tailnet(
             )
             .await;
         });
+    }
+}
+
+/// How often the server asks `tailscaled` where its node stands.
+const STATUS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Tells clients when the tailnet node changes state or name (C27): asks
+/// `tailscaled` every [`STATUS_EVERY`] and announces only a change. A
+/// `tailscaled` that cannot be reached reads as `Other` with no name, so
+/// clients learn it went away. Runs until the server stops.
+async fn watch_status(whois: Whois, state: state::Shared) {
+    let mut last = None;
+    loop {
+        let now = whois.status().await.unwrap_or_else(|err| {
+            if last.is_some() {
+                eprintln!("rusty-mux-server: tailnet: status: {err}");
+            }
+            (TailscaleState::Other, None)
+        });
+        if last.as_ref() != Some(&now) {
+            state.borrow_mut().tailscale_status(now.0, now.1.clone());
+            last = Some(now);
+        }
+        rusty_tokio::time::sleep(STATUS_EVERY).await;
     }
 }
 

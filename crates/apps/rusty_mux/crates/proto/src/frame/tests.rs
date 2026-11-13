@@ -1,6 +1,6 @@
 use rusty_mux_core::{
     Axis, BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
-    SessionId, Share, Side, Size, Toward, Transport, WindowId,
+    SessionId, Share, Side, Size, TailscaleState, Toward, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::Writer;
@@ -501,6 +501,14 @@ fn every_event_round_trips() {
             window: None,
         },
         Event::ConfigReloaded,
+        Event::TailscaleStatusChanged {
+            state: TailscaleState::Running,
+            node: Some("box.t.ts.net".into()),
+        },
+        Event::TailscaleStatusChanged {
+            state: TailscaleState::NeedsLogin,
+            node: None,
+        },
         Event::BlockCreated {
             block,
             window,

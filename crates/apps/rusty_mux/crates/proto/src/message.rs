@@ -2,7 +2,7 @@
 
 use rusty_mux_core::{
     Axis, BlockId, ClientId, EntityId, Event, ExitStatus, InputMode, Layout, Principal, Progress,
-    Selection, SessionId, Share, Side, Size, Toward, Transport, WindowId,
+    Selection, SessionId, Share, Side, Size, TailscaleState, Toward, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::{Reader, Writer};
@@ -224,6 +224,10 @@ impl Features {
     /// and waits for the program without ever killing it. Linux only: only a Linux server offers it.
     pub const SIGNAL_RELEASE: Self = Self(1 << 44);
 
+    /// [`Event::TailscaleStatusChanged`] (C27), skipped for a client
+    /// without it: a server on a tailnet says when its node changes state.
+    pub const TAILSCALE_STATUS: Self = Self(1 << 45);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -314,6 +318,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::AGENT_LAUNCH, "agent launch"),
     (Features::HOLD, "hold on exit"),
     (Features::SIGNAL_RELEASE, "signal and release"),
+    (Features::TAILSCALE_STATUS, "tailscale status"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -1013,8 +1018,10 @@ const FDS: u32 = 59;
 const HOLD: u32 = 60;
 /// A block entry's mark that its program has exited: 1, or absent (C78).
 const EXITED: u32 = 61;
-// IDs 1..=EXITED are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = EXITED as usize;
+/// A [`TailscaleState`]: 1 running, 2 needs login, 3 stopped, 4 other (C27).
+const TAILSCALE: u32 = 62;
+// IDs 1..=TAILSCALE are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = TAILSCALE as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -1953,6 +1960,7 @@ mod kind {
     pub const WINDOW_MOVED: u64 = 31;
     pub const FOCUS_CHANGED: u64 = 32;
     pub const GRANT_CHANGED: u64 = 33;
+    pub const TAILSCALE_STATUS_CHANGED: u64 = 34;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -2115,6 +2123,13 @@ fn put_event(out: &mut Out, event: &Event) {
         E::ConfigReloaded => {
             out.varint(KIND, kind::CONFIG_RELOADED);
         }
+        E::TailscaleStatusChanged { state, ref node } => {
+            out.varint(KIND, kind::TAILSCALE_STATUS_CHANGED)
+                .varint(TAILSCALE, tailscale_wire(state));
+            if let Some(node) = node {
+                out.bytes(NAME, node.as_bytes());
+            }
+        }
         E::ClipboardWritten { block, selection } => {
             out.varint(KIND, kind::CLIPBOARD_WRITTEN)
                 .uuid(BLOCK, block.uuid())
@@ -2162,6 +2177,16 @@ fn put_event(out: &mut Out, event: &Event) {
 
 fn renamed(out: &mut Out, kind: u64, target: EntityId, name: &str) {
     put_target(out.varint(KIND, kind), target).bytes(NAME, name.as_bytes());
+}
+
+/// The wire number of `state`, as [`TAILSCALE`] says.
+const fn tailscale_wire(state: TailscaleState) -> u64 {
+    match state {
+        TailscaleState::Running => 1,
+        TailscaleState::NeedsLogin => 2,
+        TailscaleState::Stopped => 3,
+        TailscaleState::Other => 4,
+    }
 }
 
 fn put_progress(out: &mut Out, progress: Progress) {
@@ -2263,6 +2288,16 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
             client: client(f, CLIENT)?,
         },
         kind::CONFIG_RELOADED => E::ConfigReloaded,
+        kind::TAILSCALE_STATUS_CHANGED => E::TailscaleStatusChanged {
+            state: match f.varint(TAILSCALE)? {
+                1 => TailscaleState::Running,
+                2 => TailscaleState::NeedsLogin,
+                3 => TailscaleState::Stopped,
+                // A state a newer server names is still "some other state".
+                _ => TailscaleState::Other,
+            },
+            node: f.opt(NAME, In::string)?,
+        },
         kind::CLIPBOARD_WRITTEN => E::ClipboardWritten {
             block: block(f, BLOCK)?,
             selection: selection(f)?,

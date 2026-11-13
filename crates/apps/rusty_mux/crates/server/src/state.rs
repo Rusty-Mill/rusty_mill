@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use rusty_mux_core::{
     BlockId, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Mux, Principal, Side, Size,
-    Transport, WindowId,
+    TailscaleState, Transport, WindowId,
 };
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
@@ -104,9 +104,10 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(UNIX_ONLY);
 
 /// Offered on Linux only: signal and release (C76) act on a Unix process
-/// group, and orch, their one client, runs there.
+/// group, and orch, their one client, runs there; the tailscale status
+/// event (C27) comes from a `tailscaled` this server asks on Linux.
 #[cfg(target_os = "linux")]
-const UNIX_ONLY: Features = Features::SIGNAL_RELEASE;
+const UNIX_ONLY: Features = Features::SIGNAL_RELEASE.union(Features::TAILSCALE_STATUS);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
 
@@ -2461,6 +2462,13 @@ impl State {
         }
     }
 
+    /// Announces the server's tailnet node in `state` (C27) to the clients
+    /// that asked for it.
+    pub(crate) fn tailscale_status(&mut self, state: TailscaleState, node: Option<String>) {
+        self.mux.note_tailscale_status(state, node);
+        self.flush();
+    }
+
     /// Deletes closed `block`'s spool by its path, whether or not a handle
     /// to it is left. A stopping server closes no block, so keeps them all.
     fn forget_history(&self, block: BlockId) {
@@ -2605,6 +2613,7 @@ fn receives(features: Features, event: &Event) -> bool {
         Event::WindowMoved { .. } => Features::LAYOUT_EDIT,
         Event::FocusChanged { .. } => Features::FOCUS,
         Event::GrantChanged { .. } => Features::INPUT_GATE,
+        Event::TailscaleStatusChanged { .. } => Features::TAILSCALE_STATUS,
         _ => Features::NONE,
     };
     features.contains(needs)

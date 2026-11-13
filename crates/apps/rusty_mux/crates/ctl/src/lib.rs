@@ -1205,7 +1205,8 @@ impl<S: io::Read + Write> Session<'_, S> {
             .union(Features::ACTIVE_WINDOW)
             .union(Features::CONFIG_RELOAD)
             .union(Features::LAYOUT_EDIT)
-            .union(Features::FOCUS);
+            .union(Features::FOCUS)
+            .union(Features::TAILSCALE_STATUS);
         let (features, start) = self.hello(wanted, after)?;
         if let Some((kind, _)) = needs.iter().find(|(_, need)| !features.contains(*need)) {
             return Err(Failure::Failed(format!(

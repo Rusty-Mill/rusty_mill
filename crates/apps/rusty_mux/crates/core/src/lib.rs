@@ -37,7 +37,7 @@ mod saved;
 
 pub use entity::{Block, Client, InputMode, Owner, Session, Size, Window};
 pub use error::Error;
-pub use event::{Event, ExitStatus, Progress, Selection};
+pub use event::{Event, ExitStatus, Progress, Selection, TailscaleState};
 pub use id::{BlockId, ClientId, EntityId, SessionId, WindowId};
 pub use identity::{Principal, Transport};
 pub use layout::{Axis, Layout, MAX_DEPTH, ParseError, Rect, Share, Side, Toward};

@@ -15,7 +15,9 @@ use rusty_http::async_tokio::AsyncTransport;
 use rusty_http::head::RequestHead;
 use rusty_http::{HeaderMap, Method, Version};
 use rusty_mux_core::Principal;
+use rusty_mux_core::TailscaleState;
 use rusty_tokio::io::UnixStream;
+use ts_types::Status;
 use ts_types::tailcfg::WhoIsResponse;
 
 /// Where `tailscaled` listens on Linux.
@@ -57,7 +59,8 @@ impl Whois {
     /// The principal behind `peer`, an address on the tailnet. A stalled
     /// `tailscaled` fails the call after [`DEADLINE`].
     pub async fn principal(&self, peer: SocketAddr) -> io::Result<Principal> {
-        let body = rusty_tokio::time::timeout(DEADLINE, self.get(peer))
+        let target = format!("/localapi/v0/whois?addr={}", encode_addr(peer));
+        let body = rusty_tokio::time::timeout(DEADLINE, self.get(target, "whois"))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tailscaled whois timed out"))??;
         let who: WhoIsResponse =
@@ -65,7 +68,21 @@ impl Whois {
         principal_of(&who).map_err(invalid)
     }
 
-    async fn get(&self, peer: SocketAddr) -> io::Result<Vec<u8>> {
+    /// Where this node stands: `tailscaled`'s backend state, and the node's
+    /// own name when it has one. Fails after [`DEADLINE`] like a lookup.
+    pub async fn status(&self) -> io::Result<(TailscaleState, Option<String>)> {
+        let target = "/localapi/v0/status?peers=false".to_owned();
+        let body = rusty_tokio::time::timeout(DEADLINE, self.get(target, "status"))
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "tailscaled status timed out")
+            })??;
+        let status: Status =
+            serde_json::from_slice(&body).map_err(|e| invalid(format!("status reply: {e}")))?;
+        Ok(state_of(&status))
+    }
+
+    async fn get(&self, target: String, what: &str) -> io::Result<Vec<u8>> {
         let stream = UnixStream::connect(&self.socket).await.map_err(|e| {
             io::Error::new(
                 e.kind(),
@@ -78,7 +95,7 @@ impl Whois {
         headers.insert("Content-Length", "0").map_err(http)?;
         let head = RequestHead {
             method: Method::Get,
-            target: format!("/localapi/v0/whois?addr={}", encode_addr(peer)),
+            target,
             version: Version::Http11,
             headers,
         };
@@ -93,7 +110,7 @@ impl Whois {
         let body = transport.read_body(framing).await.map_err(http)?;
         if !reply.status.is_success() {
             return Err(io::Error::other(format!(
-                "tailscaled whois {peer}: status {}: {}",
+                "tailscaled {what}: status {}: {}",
                 reply.status,
                 String::from_utf8_lossy(&body).trim()
             )));
@@ -128,6 +145,18 @@ pub fn principal_of(who: &WhoIsResponse) -> Result<Principal, String> {
         format!("ts-node:{name}")
     };
     Principal::new(id, "").map_err(|e| e.to_string())
+}
+
+/// The state and node name a status reply says. The node's name is its
+/// DNS name without the trailing dot, if it has one.
+fn state_of(status: &Status) -> (TailscaleState, Option<String>) {
+    let node = status
+        .self_
+        .as_ref()
+        .map(|me| me.dns_name.trim_end_matches('.'))
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    (TailscaleState::from_backend(&status.backend_state), node)
 }
 
 /// `addr` as a query value: `%` (an IPv6 zone) and an IPv6 peer's brackets

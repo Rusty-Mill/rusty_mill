@@ -198,6 +198,7 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("clipboard-written", &["block", "selection"]),
     ("status-removed", &["block", "id"]),
     ("config-reloaded", &[]),
+    ("tailscale-status-changed", &["state", "node"]),
     ("hosts-changed", &[]),
 ];
 
