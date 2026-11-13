@@ -234,7 +234,7 @@ pub(crate) async fn accept_tailnet(
         if looking.get() >= LOOKUPS {
             // One line for the first, then one per hundred, so a flood
             // doesn't fill the log.
-            if dropped % 100 == 0 {
+            if dropped.is_multiple_of(100) {
                 eprintln!(
                     "rusty-mux-server: tailnet: too many lookups, closing {peer} ({dropped} closed before)"
                 );
