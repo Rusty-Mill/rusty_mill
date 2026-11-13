@@ -249,6 +249,14 @@ impl Web {
         }
     }
 
+    /// Whether the request carries one of the board's own tokens, not an OAuth access token.
+    fn holds_own_token(&self, request: &Request<'_>) -> bool {
+        let presented = request
+            .authorization
+            .and_then(rusty_oauth::bearer::token_from_authorization);
+        matches!(self.own_identity(presented), Ok(Some(_)))
+    }
+
     /// The board's own credentials: `Err` for a missing or wrong one.
     fn own_identity(&self, presented: Option<&str>) -> Result<Option<Identity>, ()> {
         match &self.auth {
@@ -392,6 +400,12 @@ impl SharedHandler for Web {
             return reply(StatusCode::NOT_FOUND, json!({"error": "not found"}));
         };
         match self.identify(request) {
+            // Minting credentials takes the agent's own token: an OAuth app it approved must not
+            // be able to mint raw tokens that revoking the app would not take back.
+            Ok(_) if name.starts_with("agent_enrol") && !self.holds_own_token(request) => reply(
+                StatusCode::FORBIDDEN,
+                json!({"error": "agent_enrol needs the agent's own token, not an OAuth sign-in"}),
+            ),
             Ok(identity) => self.api(name, identity.as_ref(), request),
             Err(()) => reply(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"})),
         }

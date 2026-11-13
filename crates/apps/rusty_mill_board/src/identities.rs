@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::Identity;
 use crate::board::Roles;
+use crate::domain::Capability;
 use crate::projects::Projects;
 
 /// Shortest accepted token, in characters.
@@ -264,6 +265,43 @@ impl Credentials {
         })?;
         self.1.insert(actor, lead.to_owned());
         Ok(token)
+    }
+
+    /// Minted agents (`agent_enrol`) that no longer fit under their lead under `roles`: a role
+    /// with a capability the lead's lacks, or `enrol` or `admin`; projects wider than the
+    /// lead's; or a lead or role that is gone. Checked when a lead is narrowed.
+    pub fn exceeding(&self, roles: &Roles) -> Vec<String> {
+        let find = |actor: &str| self.0.iter().map(|(_, i)| i).find(|i| i.actor == actor);
+        let caps = |i: &Identity| roles.0.get(&i.role);
+        self.1
+            .iter()
+            .filter(|(child, lead)| {
+                let (Some(c), Some(l)) = (find(child), find(lead)) else {
+                    return true;
+                };
+                let (Some(cc), Some(lc)) = (caps(c), caps(l)) else {
+                    return true;
+                };
+                let wider_caps = !cc.is_subset(lc)
+                    || cc.contains(&Capability::Enrol)
+                    || cc.contains(&Capability::Admin);
+                let wider_projects = match (&l.projects, &c.projects) {
+                    (None, _) => false,
+                    (Some(_), None) => true,
+                    (Some(lp), Some(cp)) => !cp.iter().all(|p| lp.contains(p)),
+                };
+                wider_caps || wider_projects
+            })
+            .map(|(child, _)| child.clone())
+            .collect()
+    }
+
+    /// Remove what [`Self::exceeding`] names; returns it.
+    pub fn prune_children(&mut self, roles: &Roles) -> Vec<String> {
+        let gone = self.exceeding(roles);
+        self.0.retain(|(_, i)| !gone.contains(&i.actor));
+        self.1.retain(|child, _| !gone.contains(child));
+        gone
     }
 
     /// The credentials `lead` minted.

@@ -1312,3 +1312,37 @@ fn a_credentials_file_with_a_bad_parent_is_refused() {
     let creds = Credentials::parse(&good, &roles, &projects).expect("good");
     assert_eq!(creds.parent_of("chief.a"), Some("chief"));
 }
+
+#[test]
+fn narrowing_a_lead_removes_the_agents_it_minted_that_no_longer_fit() {
+    let f = start("enrol_prune");
+    with_lead_role(&f);
+    let (_, got, _) = f.admin("settings_get", &json!({}));
+    let mut roles = got["roles"].clone();
+    roles["helper"] = json!(["plan"]);
+    assert_eq!(
+        f.admin("settings_roles_set", &json!({"roles": roles})).0,
+        200
+    );
+    let lead = lead_with(&f, "chief", None);
+    let mint = |label: &str, role: &str| {
+        let (status, out, text) = call(
+            f.addr,
+            &lead,
+            "agent_enrol",
+            &json!({"label": label, "agent_role": role}),
+        );
+        assert_eq!(status, 200, "{text}");
+        out["token"].as_str().expect("token").to_owned()
+    };
+    let (worker, helper) = (mint("w", "worker"), mint("h", "helper"));
+    // Moving the lead to a role without `build` drops the worker but keeps the helper.
+    let (status, out, text) = f.admin(
+        "settings_agent_update",
+        &json!({"agent": {"name": "chief", "role": "helper"}}),
+    );
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(out["removed"], json!(["chief.w"]));
+    assert_eq!(call(f.addr, &worker, "board_whoami", &json!({})).0, 401);
+    assert_eq!(call(f.addr, &helper, "board_whoami", &json!({})).0, 200);
+}

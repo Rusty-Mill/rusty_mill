@@ -518,6 +518,23 @@ impl Settings {
         Ok(json!({ "token": token, "agent": format!("{lead}.{}", a.label) }))
     }
 
+    /// Remove minted agents that no longer fit under their lead (after a lead or roles change).
+    fn prune_minted(&self) -> Result<Vec<String>, BoardError> {
+        let roles = self.board.roles();
+        let due = self.creds.as_ref().is_some_and(|c| {
+            !c.read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .exceeding(&roles)
+                .is_empty()
+        });
+        if !due {
+            return Ok(Vec::new());
+        }
+        let gone = self.change_creds(|c| Ok(c.prune_children(&roles)))?;
+        rusty_log::warn!(removed = ?gone, "minted agents removed: they exceeded their lead");
+        Ok(gone)
+    }
+
     /// Remove one agent the caller minted, and nothing else.
     fn enrol_revoke(&self, lead: &str, a: &EnrolLabel) -> Res {
         let child = format!("{lead}.{}", a.label);
@@ -687,7 +704,8 @@ impl Settings {
         let role = a.role.clone().unwrap_or(current_role);
         self.check_grant(&role, a.projects.as_ref().and_then(Option::as_deref))?;
         self.change_creds(|c| c.update(&a.name, Some(role), a.projects.clone()))?;
-        Ok(json!({ "ok": true }))
+        let pruned = self.prune_minted()?;
+        Ok(json!({ "ok": true, "removed": pruned }))
     }
 
     fn agent_remove(&self, a: &AgentName) -> Res {
@@ -729,7 +747,8 @@ impl Settings {
 
     fn roles_set(&self, a: &RolesSet) -> Res {
         self.write_roles(&a.roles)?;
-        Ok(json!({ "roles": a.roles }))
+        let pruned = self.prune_minted()?;
+        Ok(json!({ "roles": a.roles, "removed": pruned }))
     }
 
     /// Validate `roles` against the agents, write them to their file, then apply them.
