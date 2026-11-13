@@ -52,14 +52,18 @@ front ends share the same safety rules (D4). Mutations are a `Plan` first, appli
 with explicit consent (D6). Home when code starts: `crates/apps/ai_env_manager/` (D11).
 
 ## Acceptance — first slice (M0: core and linker)
-- [ ] Core crate with `Entry` (kind = skill to start), `Source`, `Tool`, `Link`, `Plan`;
-      no I/O, unit-tested.
+- [x] Core crate with `Entry` (kind = skill to start), `Source`, `Tool`, `Link`, `Plan`;
+      no I/O, unit-tested. (`ai_env_core`, D19)
+      Ids are lower-case `[a-z0-9._-]`, no leading or trailing dot, no Windows device
+      names; a hand-edited managed copy is refused, never replaced (D20).
 - [ ] Tool catalog as TOML data, seeded with the tools Nano uses (Q4 interim: Claude Code,
       Codex, Cursor, Gemini CLI).
 - [ ] CLI `list`, `enable`, `disable` producing a plan; `--yes` applies.
 - [ ] Linker: symlink, then junction (Windows), then marked copy; managed-path marker.
 - [ ] Tests: enable/disable round-trip on Linux and Windows CI; an unmarked folder is
       never deleted or replaced.
+      (Core half done: the planner's tests refuse unmanaged paths, D19. Round-trip
+      on disk and Windows CI wait for the fs adapter.)
 
 Later milestones (M1 sources and adoption, M2 scanner and gated install, M3 profiles and
 lint, M4 MCP then desktop) are in `sources/skills-tool-recommendation.md` § Build plan.

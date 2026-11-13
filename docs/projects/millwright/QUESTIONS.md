@@ -8,8 +8,8 @@ acted on.
 ## Answer these seven first
 
 1. **L2:** authorise Let Em Loose's deployment and confirm the host. This gets a smoke run, the first time the system runs end to end. (L1, committing the first milestone, answered 2026-11-12; see DECISIONS.md lel-m1-commit.)
-2. **M1:** approve the minimal role fix on Mill Board. Today any builder agent can pass every gate.
-3. **O2:** give Claude its own GitHub identity. Cross-family review cannot be enforced without it.
+2. ~~**M1:** approve the minimal role fix on Mill Board.~~ Answered 2026-11-12; see DECISIONS.md m1-role-fix.
+3. ~~**O2:** give Claude its own GitHub identity.~~ Answered 2026-11-12; see DECISIONS.md o2-claude-github-app.
 4. **P1:** decide Portfolio Intelligence's shorter MVP path. Nothing there is dispatchable until then.
 5. **R1:** approve the remind-me order of work. The dormancy fix protects a store in daily use.
 6. ~~**X1 to X3:** close the three experiments against their written conclusions.~~ Answered 2026-11-12; see DECISIONS.md close-ledger, pause-conflux, archive-swarm-os.
@@ -35,15 +35,8 @@ L1, L7 and L8 are answered (2026-11-12); see DECISIONS.md lel-m1-commit, lel-los
 
 | # | Question | Recommendation |
 | --- | --- | --- |
-| M1 | Approve the minimal role fix: one credential per agent, the builder role loses admin, merge and triage, and "close" is gated or replaced by a narrow "record merged work" capability? | Yes. It is configuration, not code. |
-| M2 | Which role should Claude chat and voice sessions hold? Today they sign in as the human admin. | A design role: add and comment on cards, no gates, no merge. |
-| M5 | Does the ask-first list (data migrations, deletions, dependency and toolchain bumps, public API changes) still reach Nano once agents may merge and deploy? | Yes, keep it. |
 | M6 | Where do the evidence gates live? | In Let Em Loose. Do not build richer gate machinery into Mill Board's columns. |
 | M7 | Drop the Hermes Kanban pilot agreed in the 2026-11-10 Mill Board audit? | Yes. One executor fewer to keep honest. ("No fourth executor" is Let Em Loose D20, which Nano reopened for mux-hosted agents on 2026-11-04, so it is not by itself a reason.) |
-| O1 | Update the Assistant Operating Model with the audit findings (lanes bound to credentials, design produces notes not cards, research enters as claims, the board's own store, deploys)? | Yes. |
-| O2 | Create a GitHub identity for Claude's work, so its pull requests and reviews stop posting as Nano? | Yes. Dottius already has one; GitHub's own review rules can then enforce cross-family review. |
-| O3 | Confirm Duetius as coordinator, including choosing between two agents' positions on reversible changes? He is Claude-family, like the primary builder. | Yes for routing and chasing. For disputes over Claude-authored work, Dottius or Codex decides. |
-| O4 | Add one design-first card, "enforce the operating model", covering identities, roles and the switch to the new merge rule? | Yes. |
 
 ## remind-me
 
@@ -86,6 +79,11 @@ L1, L7 and L8 are answered (2026-11-12); see DECISIONS.md lel-m1-commit, lel-los
 | # | Question | Recommendation |
 | --- | --- | --- |
 | E4 | Settle one Rust toolchain pin across the repos, and move Ledger and Conflux to the newer SQLite binding? Both are ask-first changes. | Yes to both. |
+
+M1, M2, M5, O1, O2, O3 and O4 are answered (2026-11-12); see DECISIONS.md m1-role-fix,
+m2-design-role, m5-ask-first-stands, o1-operating-model-update, o2-claude-github-app,
+o3-duetius-coordinator, o4-enforce-operating-model-card. Still open under O2: which of
+g1-identity.md's options a/b/c covers cloud Claude acting as `baileyrd` (handoff/OPEN_QUESTIONS.md Q10).
 
 E2 (run the triage) is answered; see DECISIONS.md backlog-triage. Which projects count as
 paused is answered too: see DECISIONS.md project-priorities (Converge is not paused).

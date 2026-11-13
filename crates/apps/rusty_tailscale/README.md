@@ -29,7 +29,7 @@ dependency table for the migration record.
 ## Layout
 
 Cargo workspace, one crate per subsystem under [`crates/`](crates/). Live:
-`ts-types` (wire/API types), `ts-key` (keys), `ts-control` (ts2021 Noise IK
+`ts-types` (wire/API types; now in `crates/libs/net/ts-types`), `ts-key` (keys), `ts-control` (ts2021 Noise IK
 + register + netmap), `ts-derp` (DERP relay client), `ts-wg` (boringtun
 WireGuard adapter), `ts-tun` (TUN device + MagicDNS), `ts-stun` (STUN
 client), `ts-disco` (disco codec), `ts-magicsock` (direct/DERP path mux),

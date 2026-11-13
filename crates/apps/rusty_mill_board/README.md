@@ -110,9 +110,16 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `board_projects` reports `status` for non-active projects. The board's status picker (Active, Experiment, Paused,
   Archived, All projects) starts on Active. A paused or archived project must be made active before it is removed
   or renamed, so no status outlives its project.
+- **Record (merged work, narrowed).** `record` is `close` for recording merged work and nothing else: it moves a
+  claimed Building or V&Ving card to Done, or lets `card_add` with `done: true` record merged work, only when the
+  card (or the call) carries a GitHub pull request link as evidence (`https://github.com/<owner>/<repo>/pull/<n>`, with
+  at most `/files`, `/commits` or `/checks` after the number). Evidence it adds is pull request links only. It works
+  only from a work column and on the actor's own claim, even with movement rules off, and cannot archive or restore.
+  An issue or other link does not count. This checks the link's shape, not that the
+  pull request merged: that check against GitHub is not built yet. Give agent roles `record` instead of `close`.
 - **Shipped needs evidence.** A Done card counts as shipped only with evidence: a merged PR or any http(s) link
   with a host that shows the work (printable ASCII, at most 512 bytes; `card_evidence`, or `evidence` on
-  `card_add`, both needing `close`, `merge` or `triage`), at most 8 per card, kept in the card's rusty_tick board
+  `card_add`, both needing `close`, `record`, `merge` or `triage`), at most 8 per card, kept in the card's rusty_tick board
   document. A dropped card takes none. Without evidence it is a prototype: `board_metrics` counts it as
   `prototype` (per week and per project) and leaves it out of shipped and lead time; the Metrics view shows
   prototypes beside shipped work. Cards Done before evidence existed are backfilled once, with the board stopped:
@@ -120,8 +127,13 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   prints which Done cards (not dropped, no evidence yet) would get the pull requests their body and comments
   name (`https://github.com/O/N/pull/N` anywhere; `PR #N` or `pull request #N` in a mapped repository's
   projects; never a bare `#N`), at most 8 each; add `--backfill-record FILE` to write, and
-  `--undo-backfill FILE` clears what it wrote. Observed external refs (ADR-0006) never count. Cards that were Done before evidence existed read as
-  prototypes until someone adds a link.
+  `--undo-backfill FILE` clears what it wrote. Observed external refs (ADR-0006) never count. Done cards that name no pull request read as prototypes
+  until someone adds a link. The plan lists, per link, every place it is named (the text around it): read it, since a card
+  may say "superseded by PR #5". Add `--check-merged` (with `GITHUB_TOKEN`, read access to pull requests) to ask GitHub
+  whether each one merged and keep only those; dropped links go to stderr, and a failed lookup (auth, rate limit)
+  stops the run before anything is written. A card changed while the backfill runs is
+  skipped and reported.
+  Each run writes its own `--backfill-record` file (an existing one is refused); undo a run with that run's file.
 - **Close reasons (dropped work).** `card_close` closes an unstarted card (Backlog or a queue) without shipping
   it, for a required `reason`: `wont_do`, `duplicate` or `superseded`; an optional `note` becomes the closer's
   comment. It needs `triage`, and is refused for started, blocked or Done cards. The card goes to Done with no

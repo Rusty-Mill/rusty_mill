@@ -63,3 +63,7 @@ Source: CAPABILITIES C25, C26, C33; D164, D166, D231; mux DECISIONS 2026-11-01.
 ## Did Nano confirm the shared-mode access model on PR #1650? (card #274)
 Asked 2026-11-13. Yes: Nano commented on PR #1650 (comment 6841530923, 2026-11-13T01:57Z) agreeing to the allowlist file, everyone-sees-everything `list` for the first slice, and creator-held input lease with explicit grants for others. That confirms D232 as written; D233 is not covered by that comment.
 Source: DECISIONS D232, D234.
+
+## What did Nano answer on the three TLS-LISTENER.md questions (card #506, PR #1656)?
+Asked 2026-11-13. Nano answered "Recommend" to all three: (1) tailnet path (C27) first, TLS listener after (D235); (2) user-supplied certificate and key with client-side fingerprint pinning, no generator (D236); (3) 256-bit random tokens, stored hashed, shown once, rotated and revoked by `rusty-mux-ctl` (D237). Not yet confirmed on the PR itself; Dottius needs that (D37). Tag: stated.
+Source: D235; D236; D237; `docs/projects/mux/TLS-LISTENER.md`.

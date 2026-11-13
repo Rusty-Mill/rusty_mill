@@ -193,6 +193,18 @@ pub struct Node {
     pub home_derp: i64,
     pub online: Option<bool>,
     pub created: Rfc3339,
+    /// ACL tags; a tagged node belongs to its tags, not to a user.
+    #[serde(deserialize_with = "crate::null_default")]
+    pub tags: Vec<String>,
+}
+
+/// Response of `GET /localapi/v0/whois` (`apitype.WhoIsResponse`): who a
+/// tailnet address belongs to. Either part is absent for an unknown peer.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "PascalCase")]
+pub struct WhoIsResponse {
+    pub node: Option<Node>,
+    pub user_profile: Option<crate::UserProfile>,
 }
 
 impl Node {
