@@ -113,8 +113,9 @@ pub(crate) struct Who {
     role: Option<String>,
 }
 
-/// The acting identity: the credential's if there is one (a disagreeing
-/// `actor`/`role` is refused), else the arguments'.
+/// The acting identity: the credential's if there is one, else the arguments'. A credential
+/// fixes the role and the actor; the actor may only gain a `/label` naming the agent
+/// instance (attribution, not authority). Anything else that disagrees is refused.
 pub(crate) fn acting(
     b: &Shared,
     identity: Option<&Identity>,
@@ -122,14 +123,20 @@ pub(crate) fn acting(
 ) -> Result<Actor, BoardError> {
     match identity {
         Some(i) => {
-            let differs = who.actor.as_deref().is_some_and(|a| a != i.actor)
-                || who.role.as_deref().is_some_and(|r| r != i.role);
-            if differs {
+            let name = match who.actor.as_deref() {
+                None => i.actor.clone(),
+                Some(a) => crate::identities::instance_name(&i.actor, a).ok_or(
+                    BoardError::Invalid(
+                        "actor is fixed by your credential: omit it, or add /label (letters, digits . _ -)",
+                    ),
+                )?,
+            };
+            if who.role.as_deref().is_some_and(|r| r != i.role) {
                 return Err(BoardError::Invalid(
-                    "actor and role are fixed by your credential; omit them",
+                    "role is fixed by your credential; omit it",
                 ));
             }
-            let mut actor = b.roles().actor(&i.actor, &i.role)?;
+            let mut actor = b.roles().actor(&name, &i.role)?;
             actor.projects = i.projects.as_ref().map(|p| p.iter().cloned().collect());
             Ok(actor)
         }
@@ -2143,6 +2150,35 @@ mod tests {
                 ),
                 "{op} stays with Close"
             );
+        }
+    }
+
+    #[test]
+    fn a_credential_lets_an_instance_label_its_actor_not_its_role() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let dev = ident("claude", "builder");
+        let who = |actor: &str| {
+            acting(
+                &board,
+                Some(&dev),
+                &Who {
+                    actor: Some(actor.into()),
+                    role: None,
+                },
+            )
+        };
+        let labelled = who("claude/thread-7x5").expect("label");
+        assert_eq!(labelled.name, "claude/thread-7x5");
+        assert_eq!(labelled.caps, who("claude").expect("base").caps);
+        for bad in [
+            "claude/",
+            "claude/a/b",
+            "claude/ x",
+            "claudex",
+            "nano/thread",
+            "nano",
+        ] {
+            assert!(who(bad).is_err(), "{bad}");
         }
     }
 
