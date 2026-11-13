@@ -110,7 +110,7 @@ mod tests {
     use super::*;
 
     fn fixture_status() -> Status {
-        serde_json::from_str(include_str!("../../ts-types/tests/fixtures/status.json")).unwrap()
+        serde_json::from_str(include_str!("../../../../../libs/net/ts-types/tests/fixtures/status.json")).unwrap()
     }
 
     #[test]
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn renders_pong() {
         let pr: PingResult =
-            serde_json::from_str(include_str!("../../ts-types/tests/fixtures/ping.json")).unwrap();
+            serde_json::from_str(include_str!("../../../../../libs/net/ts-types/tests/fixtures/ping.json")).unwrap();
         assert_eq!(
             pong(&pr),
             "pong from node2 (100.64.0.2) via 127.0.0.1:41642 in 0ms"

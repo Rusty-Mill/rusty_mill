@@ -100,7 +100,7 @@ revisited if the CLI surface grows), `hex` (two 30-line functions in ts-types),
   (`ipn/ipnstate/ipnstate.go`) and the LocalAPI client
   (`client/tailscale/localclient.go`) at tailscale v1.86; golden fixtures
   captured from a live tailscaled 1.86.2 on a real Headscale tailnet (see
-  `crates/ts-types/tests/fixtures/`).
+  `crates/libs/net/ts-types/tests/fixtures/`).
 - **HTTP details mirrored from the Go client**: requests go to
   `http://local-tailscaled.sock/localapi/v0/...` over the UDS at
   `/var/run/tailscale/tailscaled.sock`; the `Host` header is
