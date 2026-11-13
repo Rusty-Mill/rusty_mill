@@ -38,11 +38,22 @@ pub struct Mux {
     pub(crate) blocks: BTreeMap<BlockId, Block>,
     clients: BTreeMap<ClientId, Client>,
     events: Vec<Event>,
+    /// The server's own account on a shared server (C26, D232): it scopes
+    /// input leases to the principal that made the block.
+    shared_account: Option<Principal>,
 }
 
 impl Mux {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Makes this a shared server run by `account` (C26, D232): an open
+    /// block's input lease goes only to a client of the principal that
+    /// created its session (`account` for one with no creator) or to one
+    /// that principal granted. Owner-only blocks keep their own rule.
+    pub fn share_leases(&mut self, account: Principal) {
+        self.shared_account = Some(account);
     }
 
     /// Returns the queued events, oldest first, and clears the queue.
@@ -1010,13 +1021,46 @@ impl Mux {
         }
     }
 
-    /// Succeeds when `owner` owns `block` and may grant its lease.
+    /// Succeeds when `owner` owns `block` and may grant its lease; on a
+    /// shared server (D232) also, for a block with no owner, a client of
+    /// the principal that created its session.
     fn authorize_granter(&self, owner: ClientId, block: BlockId) -> Result<(), Error> {
         let target = self.blocks.get(&block).ok_or(Error::UnknownBlock(block))?;
         if target.owner.is_none() {
-            return Err(Error::Unowned(block));
+            if self.shared_account.is_none() {
+                return Err(Error::Unowned(block));
+            }
+            return match self.is_creator(owner, block) {
+                true => Ok(()),
+                false => Err(Error::NotOwner {
+                    client: owner,
+                    block,
+                }),
+            };
         }
         self.authorize_owner(owner, block)
+    }
+
+    /// Whether `client` is of the principal that created `block`'s session
+    /// (the server's account for a session with no creator, D164).
+    fn is_creator(&self, client: ClientId, block: BlockId) -> bool {
+        let Some(asker) = self.clients.get(&client).map(|c| c.principal.id()) else {
+            return false;
+        };
+        let creator = self
+            .blocks
+            .get(&block)
+            .and_then(|b| self.windows.get(&b.window))
+            .and_then(|w| self.sessions.get(&w.session))
+            .and_then(Session::creator)
+            .or(self.shared_account.as_ref());
+        creator.is_some_and(|c| c.id() == asker)
+    }
+
+    /// Whether the open `block` takes `client`'s lease without a grant:
+    /// always, but on a shared server only for its creator's principal.
+    fn may_lease_here(&self, client: ClientId, block: BlockId) -> bool {
+        self.shared_account.is_none() || self.is_creator(client, block)
     }
 
     /// Removes `client`'s grant on `block`, if any, and the lease it holds
@@ -1036,6 +1080,41 @@ impl Mux {
         self.drop_lease_if_held(client, block);
     }
 
+    /// On a shared server (D232), succeeds when `client` may rename or
+    /// close `target`: it is of the server's own account or of the
+    /// principal that created the session `target` is in (the C33 rule). An
+    /// unshared server, a client target and an unknown one are left to
+    /// their own rules.
+    pub fn authorize_manage(&self, client: ClientId, target: EntityId) -> Result<(), Error> {
+        let Some(account) = self.shared_account.as_ref() else {
+            return Ok(());
+        };
+        let session = match target {
+            EntityId::Session(s) => Some(s),
+            EntityId::Window(w) => self.windows.get(&w).map(|w| w.session),
+            EntityId::Block(b) => self
+                .blocks
+                .get(&b)
+                .and_then(|b| self.windows.get(&b.window))
+                .map(|w| w.session),
+            EntityId::Client(_) => None,
+        };
+        let Some(session) = session.and_then(|s| self.sessions.get(&s)) else {
+            return Ok(());
+        };
+        let caller = self
+            .clients
+            .get(&client)
+            .ok_or(Error::UnknownClient(client))?
+            .principal
+            .id();
+        let allowed = caller == account.id() || session.creator().is_some_and(|c| c.id() == caller);
+        match allowed {
+            true => Ok(()),
+            false => Err(Error::NotCreator { client }),
+        }
+    }
+
     /// Succeeds when `client` may change `block`: it has no owner, or
     /// `client` owns it (C46).
     pub fn authorize_owner(&self, client: ClientId, block: BlockId) -> Result<(), Error> {
@@ -1052,6 +1131,7 @@ impl Mux {
     /// and also, once the block is orphaned, for a client of its owner's
     /// principal, to clean it up.
     pub fn authorize_close(&self, client: ClientId, block: BlockId) -> Result<(), Error> {
+        self.authorize_manage(client, EntityId::Block(block))?;
         let refused = match self.authorize_owner(client, block) {
             Err(Error::Orphaned(b)) => Error::Orphaned(b),
             other => return other,
@@ -1087,9 +1167,11 @@ impl Mux {
             return Err(Error::Orphaned(block));
         }
         let owner = target.owner.as_ref().and_then(|o| o.client);
-        let gated = target.input == InputMode::OwnerOnly
-            && owner != Some(client)
-            && !target.grants.contains_key(&client);
+        let granted = target.grants.contains_key(&client);
+        let gated = match target.input {
+            InputMode::OwnerOnly => owner != Some(client) && !granted,
+            InputMode::Open => !granted && !self.may_lease_here(client, block),
+        };
         if gated {
             return Err(Error::InputGated(block));
         }

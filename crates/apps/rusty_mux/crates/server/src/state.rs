@@ -581,6 +581,12 @@ impl State {
         self.account = Some(account);
     }
 
+    /// Makes this a shared server (C26, D232): input leases go by the
+    /// principal that created a block's session; see [`Mux::share_leases`].
+    pub(crate) fn share_leases(&mut self, account: Principal) {
+        self.mux.share_leases(account);
+    }
+
     /// Lets clients of the server's own account ([`State::serve_as`]) stop
     /// it with `shutdown`; the receiver resolves on the first such request.
     pub(crate) fn stop_on_request(&mut self) -> oneshot::Receiver<()> {
@@ -1231,6 +1237,11 @@ impl State {
             M::Rename { req, target, name } => (
                 req,
                 self.require(client, Features::LABELS, "rename")
+                    .and_then(|()| {
+                        self.mux
+                            .authorize_manage(client, target)
+                            .map_err(Refusal::from)
+                    })
                     .and_then(|()| match target {
                         EntityId::Block(block) => self.owns(client, [block]),
                         _ => Ok(()),
@@ -1240,6 +1251,11 @@ impl State {
             M::NameSession { req, session, name } => (
                 req,
                 self.require(client, Features::NAME_SESSION, "name-session")
+                    .and_then(|()| {
+                        self.mux
+                            .authorize_manage(client, EntityId::Session(session))
+                            .map_err(Refusal::from)
+                    })
                     .and_then(|()| done(self.mux.name_session(session, name))),
             ),
             M::Disconnect {

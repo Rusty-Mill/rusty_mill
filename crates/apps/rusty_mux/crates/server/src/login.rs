@@ -641,11 +641,22 @@ async fn load_map(path: PathBuf) -> io::Result<AccountMap> {
         .map_err(|_| io::Error::other("the map reader stopped"))?
 }
 
-/// Reads the map at `path`, refusing a file anyone but root or this user
-/// could have written, anything but a regular file (opened without
-/// blocking, so a FIFO is refused, not waited on), and one over
-/// [`MAX_MAP`] bytes.
+/// Reads the map at `path`: [`read_checked`], then parsed.
 fn read_map(path: &Path) -> io::Result<AccountMap> {
+    let text = read_checked(path, "map")?;
+    AccountMap::parse(&text).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: {e}", path.display()),
+        )
+    })
+}
+
+/// Reads the `what` file at `path`, refusing a file anyone but root or
+/// this user could have written, anything but a regular file (opened
+/// without blocking, so a FIFO is refused, not waited on), and one over
+/// [`MAX_MAP`] bytes.
+pub(crate) fn read_checked(path: &Path, what: &str) -> io::Result<String> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(rusty_libc::fd::O_NONBLOCK)
@@ -657,7 +668,7 @@ fn read_map(path: &Path) -> io::Result<AccountMap> {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "{}: the map must be a regular file of root's or this user's that no one else can write",
+                "{}: the {what} must be a regular file of root's or this user's that no one else can write",
                 path.display()
             ),
         ));
@@ -667,15 +678,10 @@ fn read_map(path: &Path) -> io::Result<AccountMap> {
     if text.len() as u64 > MAX_MAP {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{}: the map is over {MAX_MAP} bytes", path.display()),
+            format!("{}: the {what} is over {MAX_MAP} bytes", path.display()),
         ));
     }
-    AccountMap::parse(&text).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{}: {e}", path.display()),
-        )
-    })
+    Ok(text)
 }
 
 /// Reads the map again; on success, closes every relay its principal no

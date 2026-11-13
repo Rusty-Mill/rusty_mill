@@ -43,6 +43,8 @@ mod process;
 mod pty;
 #[cfg(any(target_os = "linux", windows))]
 mod settings;
+#[cfg(target_os = "linux")]
+mod shared;
 #[cfg(any(target_os = "linux", windows))]
 mod spool;
 #[cfg(any(target_os = "linux", windows))]
@@ -67,6 +69,8 @@ use rusty_tokio::io::{UdpSocket, UnixListener};
 
 #[cfg(target_os = "linux")]
 pub use login::{Limits, Login, MAX_MAP, Reload, bind as bind_front_door, serve_login};
+#[cfg(target_os = "linux")]
+pub use shared::{Sharing, serve_shared};
 
 /// How the server starts each block's program.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +158,7 @@ pub async fn serve(listener: UnixListener, config: Config) -> io::Result<()> {
         None,
         peer_check,
         None,
+        None,
         std::future::pending(),
     )
     .await
@@ -169,6 +174,7 @@ pub async fn serve_udp(listener: UnixListener, config: Config, udp: Udp) -> io::
         config,
         Some(udp),
         peer_check,
+        None,
         None,
         std::future::pending(),
     )
@@ -192,7 +198,7 @@ pub async fn serve_until(
     udp: Option<Udp>,
     stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
-    serve_for(listener, config, udp, peer_check, None, stop).await
+    serve_for(listener, config, udp, peer_check, None, None, stop).await
 }
 
 /// [`serve_until`], also ending cleanly once the server has had no block
@@ -206,7 +212,7 @@ pub async fn serve_until_idle(
     idle: Duration,
     stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
-    serve_for(listener, config, udp, peer_check, Some(idle), stop).await
+    serve_for(listener, config, udp, peer_check, Some(idle), None, stop).await
 }
 
 /// [`serve_until`] for an account's server behind login mode's front
@@ -231,7 +237,7 @@ pub async fn serve_forwarded(
             Peer::Refused(format!("uid {uid}"))
         })
     };
-    serve_for(listener, config, None, allowed, None, stop).await
+    serve_for(listener, config, None, allowed, None, None, stop).await
 }
 
 /// The principal every client of this server has: its own user, the only
@@ -262,6 +268,10 @@ pub(crate) enum Peer {
     /// the principal it verified.
     #[cfg(target_os = "linux")]
     Forwarded,
+    /// A user a shared server lists (C26, D232): served as this principal,
+    /// without passing descriptors.
+    #[cfg(target_os = "linux")]
+    Guest(Principal),
     /// Who was refused, for the log.
     Refused(String),
 }
@@ -301,6 +311,8 @@ async fn serve_for(
     udp: Option<Udp>,
     allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
     idle: Option<Duration>,
+    #[cfg(target_os = "linux")] guests: Option<shared::Guests>,
+    #[cfg(not(target_os = "linux"))] guests: Option<()>,
     stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
     let socket = listener
@@ -311,6 +323,9 @@ async fn serve_for(
     let owner = owner()?;
     let state = state::State::shared(config, socket);
     state.borrow_mut().serve_as(owner.clone());
+    if guests.is_some() {
+        state.borrow_mut().share_leases(owner.clone());
+    }
     state
         .borrow_mut()
         .load_config()
@@ -320,7 +335,7 @@ async fn serve_for(
     rusty_tokio::task::spawn_local(state::save_periodically(std::rc::Rc::downgrade(&state)));
     let requested = state.borrow_mut().stop_on_request();
     let served = rusty_tokio::select! {
-        result = serve_clients(listener, state.clone(), udp, allowed, owner) => result,
+        result = serve_clients(listener, state.clone(), udp, allowed, owner, guests) => result,
         () = stop => Ok(()),
         () = idle_for(&state, idle) => Ok(()),
         () = stop_requested(requested) => Ok(()),
@@ -379,9 +394,11 @@ async fn serve_clients(
     udp: Option<Udp>,
     allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
     owner: Principal,
+    #[cfg(target_os = "linux")] guests: Option<shared::Guests>,
+    #[cfg(not(target_os = "linux"))] guests: Option<()>,
 ) -> io::Result<()> {
     let Some(udp) = udp else {
-        return accept(listener, state, allowed, owner).await;
+        return accept(listener, state, allowed, owner, guests).await;
     };
     let registry = datagram::Registry::new(udp.socket.local_addr()?.port());
     let lifetimes = state::Lifetimes {
@@ -393,7 +410,7 @@ async fn serve_clients(
         .offer_datagrams(registry.clone(), lifetimes);
     let socket = std::rc::Rc::new(udp.socket);
     rusty_tokio::select! {
-        result = accept(listener, state.clone(), allowed, owner) => result,
+        result = accept(listener, state.clone(), allowed, owner, guests) => result,
         result = datagram::serve(socket, registry, state, udp.idle, datagram::LEASE_SILENCE) => result,
     }
 }
@@ -406,6 +423,8 @@ async fn accept(
     state: state::Shared,
     allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
     owner: Principal,
+    #[cfg(target_os = "linux")] guests: Option<shared::Guests>,
+    #[cfg(not(target_os = "linux"))] _guests: Option<()>,
 ) -> io::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
@@ -427,6 +446,24 @@ async fn accept(
             #[cfg(target_os = "linux")]
             Ok(Peer::Forwarded) => {
                 rusty_tokio::task::spawn_local(forwarded(state.clone(), stream));
+            }
+            #[cfg(target_os = "linux")]
+            Ok(Peer::Guest(principal)) => {
+                let (rd, wr) = stream.into_split();
+                let seen = guests.clone();
+                let who = principal.clone();
+                rusty_tokio::task::spawn_local(conn::run(
+                    state.clone(),
+                    rd,
+                    wr,
+                    principal,
+                    Transport::Socket,
+                    move |_, cancel| {
+                        if let Some(guests) = seen {
+                            guests.add(who, cancel);
+                        }
+                    },
+                ));
             }
             Ok(Peer::Refused(who)) => eprintln!("rusty-mux-server: refusing a client of {who}"),
             Err(err) => eprintln!("rusty-mux-server: reading a client's credentials: {err}"),
