@@ -110,7 +110,8 @@ the family and its application part has none. Applied at this commit:
 | `rusty_adk` | Keep intact in `libs/`, including `examples/*` members. | It is an SDK by purpose; no external dependents yet. |
 | `rusty_search`, `rusty_db` | Keep intact in `libs/storage/`. | Library families with backend adapters; `rusty-db` has one external dependent (`rusty-hister-model`). |
 | `nexus` | Keep intact in `apps/`. | 42 crates, one product. `nexus-hashline` and `nexus-plugin-api` are `[workspace.dependencies]` entries but no crate outside nexus uses them at this commit. |
-| `rusty_tailscale` (incl. `xtask`), `rusty_meshed`, `rusty_key`, `rusty_yirp`, `rusty_provider`, `rusty_agent_gateway`, `rusty_hister`, `rusty_inventrory`, `rusty_skillopt`, `rusty_multimodal_db` | Keep intact in `apps/`. | Product families with binaries; no crate outside the family depends on any member. `rusty_provider`'s `rp-core`/`rp-providers` become a `libs/` move the day another family depends on them, which the Phase 0 check will flag as an app-to-app edge. |
+| `rusty_meshed`, `rusty_key`, `rusty_yirp`, `rusty_provider`, `rusty_agent_gateway`, `rusty_hister`, `rusty_inventrory`, `rusty_skillopt`, `rusty_multimodal_db` | Keep intact in `apps/`. | Product families with binaries; no crate outside the family depends on any member. `rusty_provider`'s `rp-core`/`rp-providers` become a `libs/` move the day another family depends on them, which the Phase 0 check will flag as an app-to-app edge. |
+| `rusty_tailscale` (incl. `xtask`) | Split: `ts-types` moves to `libs/net/`; the other 13 crates stay in `apps/`. | The mux server's C27 identity mapping needs the peer and user types, so a crate outside the family now depends on `ts-types` (owner go, 2026-11-13, rusty_term D233). Its dependencies (`rusty_hex`, serde, serde_json, thiserror) are all lower layers, and the family's crates depend on it downward. |
 | `rusty_serde`, `rusty_json`, `rusty_err`, `rusty_tokio`, `rusty_term` | Keep intact (a library plus its derive/macro/side-channel crate). | Same reason: one library. |
 | `rusty_boot` | `tools/`. Its `src/main.rs` header calls it a "kernel-to-application demonstration binary" that exercises Level 0 to Level 3/4; it depends on 22 workspace crates including the shell `rush` (an app) and the terminal library `rusty_term`. It is an integration harness, not a product. | `crates/rusty_boot/src/main.rs` lines 1 to 3; `crates/rusty_boot/Cargo.toml` lines 13 to 38. |
 | `rusty_text`, `rusty_croc`, `rusty_voice`, `rusty_homelab_mcp`, `rusty_fedora_agent`, `rush`, `mill-term` | `apps/`. | Binaries; the only cross-family dependents are `mill-term` (shells out to `rsed`/`rawk`, not a Cargo edge) and `rusty_boot` (tools). |
@@ -626,7 +627,7 @@ ts-magicsock	apps	crates/rusty_tailscale/crates/ts-magicsock	crates/apps/rusty_t
 ts-net	apps	crates/rusty_tailscale/crates/ts-net	crates/apps/rusty_tailscale/crates/ts-net
 ts-stun	apps	crates/rusty_tailscale/crates/ts-stun	crates/apps/rusty_tailscale/crates/ts-stun
 ts-tun	apps	crates/rusty_tailscale/crates/ts-tun	crates/apps/rusty_tailscale/crates/ts-tun
-ts-types	apps	crates/rusty_tailscale/crates/ts-types	crates/apps/rusty_tailscale/crates/ts-types
+ts-types	libs	crates/rusty_tailscale/crates/ts-types	crates/libs/net/ts-types
 ts-wg	apps	crates/rusty_tailscale/crates/ts-wg	crates/apps/rusty_tailscale/crates/ts-wg
 xtask	apps	crates/rusty_tailscale/xtask	crates/apps/rusty_tailscale/xtask
 rusty_text	apps	crates/rusty_text	crates/apps/rusty_text

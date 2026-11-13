@@ -241,7 +241,7 @@ members = [
     "crates/apps/rusty_key/crates/app",
     "crates/apps/rusty_key/crates/agui",
     "crates/libs/ai/rusty_llama",
-    "crates/apps/rusty_tailscale/crates/ts-types",
+    "crates/libs/net/ts-types",
     "crates/apps/rusty_tailscale/crates/ts-key",
     "crates/apps/rusty_tailscale/crates/ts-control",
     "crates/apps/rusty_tailscale/crates/ts-derp",
@@ -734,7 +734,7 @@ tiny_http = "0.12"
 # from `../rusty_http`-style (relative to its own former root) to this
 # root's `crates/` layout; `platform`/`platform-linux` above already cover
 # the pins its ts-magicsock/ts-tun crates used to carry.
-ts-types = { path = "crates/apps/rusty_tailscale/crates/ts-types" }
+ts-types = { path = "crates/libs/net/ts-types" }
 ts-key = { path = "crates/apps/rusty_tailscale/crates/ts-key" }
 ts-control = { path = "crates/apps/rusty_tailscale/crates/ts-control" }
 ts-derp = { path = "crates/apps/rusty_tailscale/crates/ts-derp" }

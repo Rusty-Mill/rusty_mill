@@ -39,7 +39,7 @@ sites exist.
 
 ## Workspace layout
 
-One crate per subsystem under `crates/` (`ts-types`, `ts-key`, `ts-control`,
+One crate per subsystem under `crates/` (`ts-types` now lives in `crates/libs/net/ts-types`, `ts-key`, `ts-control`,
 `ts-derp`, `ts-stun`, `ts-disco`, `ts-magicsock`, `ts-wg`, `ts-tun`,
 `ts-filter`, `ts-engine`, `ts-localapi`, `ts-daemon`, `ts-cli`, `ts-net`) plus
 `xtask/` for the integration harness. Crates not yet reached by the phase plan
