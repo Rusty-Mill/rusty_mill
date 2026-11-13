@@ -2,7 +2,7 @@
 name = "ai_env_fs"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.98.1"
 description = "Ai Env Manager filesystem adapter: observes a tool folder and applies a link plan (symlink, junction, marked copy)."
 license = "MIT OR Apache-2.0"
 
