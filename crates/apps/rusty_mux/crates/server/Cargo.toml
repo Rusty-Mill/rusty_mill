@@ -24,9 +24,6 @@ rusty_mux_status = { workspace = true }
 # The UDP association behind `--udp`; its keys come from the OS CSPRNG.
 rusty_mux_transport = { workspace = true }
 rusty_rand = { workspace = true }
-# Access tokens (#506): stored as SHA-256, shown as hex.
-rusty_sha2 = { workspace = true }
-rusty_hex = { workspace = true }
 rusty_base64 = { workspace = true }
 # Headless engine only: no `gui` or `l13`, so no tokio reaches this binary.
 rusty_term_core = { workspace = true }

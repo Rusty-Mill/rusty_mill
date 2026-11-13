@@ -1,6 +1,6 @@
 # TLS listener (card #506): design note
 
-Status: Accepted-pending-PR-confirmation. Nano answered the three questions (rusty_term DECISIONS D235-D237, 2026-11-13) but has not yet confirmed on PR #1656. Nothing is built. Owner gates apply before any code: a `rusty_tls` change,
+Status: Accepted-pending-PR-confirmation. Nano answered the three questions (rusty_term DECISIONS D235-D237, 2026-11-13) but has not yet confirmed on PR #1656. Slice 1 (server side) is built on card #506 (see Built below). Owner gates apply before any code: a `rusty_tls` change,
 a new dependency, or a new crate; each capability row needs its own go.
 
 ## Context
@@ -61,3 +61,14 @@ All three answered "Recommend" (2026-11-13, project thread cmsg_014f6o52E2iAAAgM
 1. Build the tailnet path (C27) first and the TLS listener after? **Answered: yes** (D235).
 2. For TLS, the user supplies the certificate and the client pins its fingerprint (no generator)? **Answered: yes** (D236).
 3. Tokens stored hashed, shown once, rotated by `rusty-mux-ctl`? **Answered: yes** (D237).
+
+## Built: slice 1, server side (card #506)
+
+`rusty-mux-server --shared ALLOW --tls ADDR:PORT --tls-cert PEM --tls-key PEM --tokens FILE` (Linux).
+
+- **Certificate:** PEM files, PKCS#8 key, checked as the allowlist is. The server only calls `TlsAcceptor`; `rusty_tls` is unchanged. A tiny PEM reader lives in the server (no shared parser exists).
+- **Token frame:** 32 raw bytes, first after the handshake and before the existing preface. The server hashes it and compares to every entry in constant time. Peers have 5 s for handshake and token, at most 64 are at the door, and a refused peer is held 1 s before the close.
+- **Token file:** `NAME HEXSHA256` per line, in `rusty_mux_script::token` so ctl and the server share it. `rusty-mux-ctl token create|rotate|revoke NAME --file FILE` edits it (atomic rename, mode 0600) and prints the token once.
+- **Principal:** `token:NAME`, named in the allowlist like `uid:N`. SIGHUP reads both files; a bad one is refused and keeps the old; only rotated or revoked tokens lose their connections.
+- **Not built (own go each):** the client side. Pinning the server certificate's SHA-256 fingerprint needs a new `rusty_tls` `TrustPolicy` variant (an owner gate, D236); `PinnedAnchors` with the server's own certificate is an option that needs no `rusty_tls` change but pins the whole certificate. Also `hosts.json` addresses for TLS, and `rusty-mux --host` over TLS.
+- **Tests:** `server/tests/tls.rs` (right token served; wrong, missing and unlisted closed; a reload that revokes a token), token and PEM unit tests, flag tests, ctl tests.

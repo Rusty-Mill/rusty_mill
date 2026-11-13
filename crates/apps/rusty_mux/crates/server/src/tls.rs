@@ -18,14 +18,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use rusty_mux_core::Transport;
+use rusty_mux_core::{Principal, Transport};
 use rusty_tls::TlsAcceptor;
 use rusty_tokio::io::{AsyncReadExt, TcpListener};
 
 use crate::login::read_checked;
 use crate::shared::{Allow, Guests};
-use crate::token::{self, Tokens};
 use crate::{conn, pem, state};
+use rusty_mux_script::token::{self, Tokens};
 
 /// Handshakes and token reads in progress at once; more are closed.
 const PENDING: usize = 64;
@@ -108,7 +108,7 @@ async fn serve_peer(
         let mut tls = acceptor.accept_async(stream).ok()?;
         tls.complete_handshake().await.ok()?;
         let name = authenticate(&mut tls, &tokens).await?;
-        let principal = token::principal(&name).ok()?;
+        let principal = Principal::new(format!("token:{name}"), "").ok()?;
         let listed = allow.borrow().names(&principal);
         listed.then_some((tls, principal))
     })

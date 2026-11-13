@@ -14,3 +14,8 @@ layer = "apps"
 [dependencies]
 rusty_json = { workspace = true }
 rusty_mux_proto = { workspace = true }
+# Access tokens (#506): random, stored as SHA-256, shown as hex.
+rusty_crypto_key = { workspace = true }
+rusty_hex = { workspace = true }
+rusty_rand = { workspace = true }
+rusty_sha2 = { workspace = true }

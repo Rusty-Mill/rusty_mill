@@ -41,8 +41,8 @@ use rusty_tokio::sync::{Notify, mpsc::UnboundedReceiver};
 use crate::login::{Reload, read_checked};
 use crate::tailnet::{Whois, is_tailnet_addr};
 use crate::tls::{Tls, read_tokens};
-use crate::token;
 use crate::{Config, Peer, conn, state};
+use rusty_mux_script::token;
 
 /// Who a shared server serves besides its own user: uid to user name.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -344,7 +344,7 @@ fn read(path: &std::path::Path) -> io::Result<Allow> {
 /// keeps the old tokens; a good one closes only the connections of tokens it
 /// rotated or revoked.
 fn reload_tokens(
-    tokens: &Option<(PathBuf, Rc<RefCell<crate::token::Tokens>>)>,
+    tokens: &Option<(PathBuf, Rc<RefCell<rusty_mux_script::token::Tokens>>)>,
     guests: &Guests,
 ) -> io::Result<()> {
     let Some((file, kept)) = tokens else {

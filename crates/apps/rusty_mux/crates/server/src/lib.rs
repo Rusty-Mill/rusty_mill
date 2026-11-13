@@ -53,13 +53,13 @@ mod state;
 mod store;
 pub use rusty_mux_proto::style;
 #[cfg(any(target_os = "linux", windows))]
+#[cfg(target_os = "linux")]
 mod pem;
 #[cfg(target_os = "linux")]
 pub mod tailnet;
 mod terminal;
 #[cfg(target_os = "linux")]
 mod tls;
-pub mod token;
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -342,7 +342,7 @@ async fn serve_for(
     let requested = state.borrow_mut().stop_on_request();
     let served = rusty_tokio::select! {
         result = serve_clients(listener, state.clone(), udp, allowed, owner, guests.as_ref().cloned()) => result,
-        result = serve_tailnet(guests.clone(), state.clone()) => result,
+        result = serve_tailnet(guests.as_ref().cloned(), state.clone()) => result,
         result = serve_tls(guests, state.clone()) => result,
         () = stop => Ok(()),
         () = idle_for(&state, idle) => Ok(()),

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rusty_mux_proto::{Features, Message, decode, encode};
-use rusty_mux_server::token::{self, Tokens};
+use rusty_mux_script::token::{self, Tokens};
 use rusty_mux_server::{Config, Sharing, Tls, serve_shared};
 use rusty_tls::{AsyncTlsStream, TrustPolicy};
 use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt, TcpListener, TcpStream, UnixListener};

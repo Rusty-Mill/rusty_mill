@@ -86,8 +86,3 @@ fn a_generated_token_is_random_and_round_trips_through_hex() {
     assert_ne!(one, generate().unwrap().0);
     assert_eq!(from_hex("abc"), None);
 }
-
-#[test]
-fn the_principal_carries_the_token_name() {
-    assert_eq!(principal("laptop").unwrap().id(), "token:laptop");
-}

@@ -4,7 +4,8 @@
 //! The server keeps only its SHA-256, in a token file of one `NAME HASH` per
 //! line (`#` starts a comment). A connection that presents a token is the
 //! principal `token:NAME`, which the shared-mode allowlist names like any
-//! other principal (one access table, not two).
+//! other principal (one access table, not two). The file lives here, with
+//! the other files ctl and the server both read.
 //!
 //! `create`, `rotate` and `revoke` are pure edits of the file's text; the
 //! caller reads and writes the file (checked as the allowlist is).
@@ -12,7 +13,6 @@
 use std::collections::BTreeMap;
 
 use rusty_crypto_key::constant_time_eq;
-use rusty_mux_core::Principal;
 use rusty_sha2::{Hash, Sha256};
 
 /// A token's length in bytes.
@@ -32,7 +32,7 @@ fn hash(token: &[u8]) -> [u8; 32] {
 }
 
 /// Whether `name` is a usable token name: letters, digits, `.`, `_` and `-`.
-pub(crate) fn check_name(name: &str) -> Result<(), String> {
+pub fn check_name(name: &str) -> Result<(), String> {
     let ok = !name.is_empty()
         && name.len() <= MAX_NAME
         && name
@@ -44,11 +44,6 @@ pub(crate) fn check_name(name: &str) -> Result<(), String> {
     Err(format!(
         "{name:?} is not a token name (1 to {MAX_NAME} of letters, digits, `.`, `_`, `-`)"
     ))
-}
-
-/// The principal of the token `name`.
-pub fn principal(name: &str) -> Result<Principal, String> {
-    Principal::new(format!("token:{name}"), "").map_err(|e| e.to_string())
 }
 
 impl Tokens {
