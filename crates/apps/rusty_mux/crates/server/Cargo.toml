@@ -15,6 +15,10 @@ layer = "apps"
 name = "rusty-mux-server"
 path = "src/main.rs"
 
+[features]
+# Spike A: serve mux over an embedded tailnet node (no tailscaled, no root).
+mesh = ["dep:ts-net"]
+
 [dependencies]
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true, features = ["screen"] }
@@ -47,6 +51,8 @@ rusty_http = { workspace = true, features = ["rusty-tokio"] }
 serde_json = { workspace = true }
 ts-types = { workspace = true }
 platform-linux = { workspace = true }
+# Spike A (throwaway): the embedded tailnet node behind `--mesh`.
+ts-net = { workspace = true, optional = true }
 rusty_libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]

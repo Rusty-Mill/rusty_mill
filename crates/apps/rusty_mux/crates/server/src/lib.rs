@@ -52,6 +52,8 @@ mod state;
 #[cfg(any(target_os = "linux", windows))]
 mod store;
 pub use rusty_mux_proto::style;
+#[cfg(all(feature = "mesh", target_os = "linux"))]
+pub mod mesh;
 #[cfg(target_os = "linux")]
 pub mod tailnet;
 #[cfg(any(target_os = "linux", windows))]
@@ -336,7 +338,8 @@ async fn serve_for(
     let requested = state.borrow_mut().stop_on_request();
     let served = rusty_tokio::select! {
         result = serve_clients(listener, state.clone(), udp, allowed, owner, guests.as_ref().cloned()) => result,
-        result = serve_tailnet(guests, state.clone()) => result,
+        result = serve_tailnet(guests.clone(), state.clone()) => result,
+        result = serve_mesh(guests, state.clone()) => result,
         () = stop => Ok(()),
         () = idle_for(&state, idle) => Ok(()),
         () = stop_requested(requested) => Ok(()),
@@ -349,6 +352,21 @@ async fn serve_for(
         );
     }
     served
+}
+
+/// Serves the embedded mesh node of a shared server (spike A); never without one.
+#[cfg(all(feature = "mesh", target_os = "linux"))]
+async fn serve_mesh(guests: Option<shared::Guests>, state: state::Shared) -> io::Result<()> {
+    let mesh = guests.as_ref().and_then(|g| g.mesh.borrow_mut().take());
+    match (mesh, guests) {
+        (Some(mesh), Some(guests)) => mesh::accept(mesh, state, guests).await,
+        _ => std::future::pending().await,
+    }
+}
+
+#[cfg(not(all(feature = "mesh", target_os = "linux")))]
+async fn serve_mesh(_guests: Option<impl Sized>, _state: state::Shared) -> io::Result<()> {
+    std::future::pending().await
 }
 
 /// Serves the tailnet listener of a shared server (C27); never without one.

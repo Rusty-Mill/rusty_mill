@@ -11020,6 +11020,7 @@ dependencies = [
  "rusty_uuid",
  "serde",
  "serde_json",
+ "ts-net",
  "ts-types",
  "uuid",
 ]

@@ -490,10 +490,56 @@ fn run_shared(
                 Some(rusty_mux_server::Tailnet::new(listener, whois)?)
             }
         };
-        let sharing = rusty_mux_server::Sharing { allow, tailnet };
+        // Spike A (feature `mesh`): the embedded node is set by environment,
+        // so the key never shows in `ps` and the CLI is unchanged.
+        #[cfg(feature = "mesh")]
+        let mesh = mesh_from_env().await?;
+        let sharing = rusty_mux_server::Sharing {
+            allow,
+            tailnet,
+            #[cfg(feature = "mesh")]
+            mesh,
+        };
         rusty_mux_server::serve_shared(listener, config, sharing, reloads, stop_requested()?).await
     });
     served.and(owned.release())
+}
+
+/// The embedded mesh node of `RUSTY_MUX_MESH_URL` (with `RUSTY_MUX_MESH_AUTHKEY`,
+/// and optionally `_STATE`, `_PORT`, `_HOST`), if the URL is set.
+#[cfg(all(feature = "mesh", target_os = "linux"))]
+async fn mesh_from_env() -> std::io::Result<Option<rusty_mux_server::mesh::Mesh>> {
+    use rusty_mux_server::mesh::{Mesh, MeshConfig};
+    let var = |name: &str| std::env::var(format!("RUSTY_MUX_MESH_{name}")).ok();
+    let Some(control_url) = var("URL") else {
+        return Ok(None);
+    };
+    let authkey = var("AUTHKEY").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "RUSTY_MUX_MESH_AUTHKEY is not set",
+        )
+    })?;
+    let port = var("PORT")
+        .map(|p| p.parse())
+        .transpose()
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "RUSTY_MUX_MESH_PORT: not a port",
+            )
+        })?
+        .unwrap_or(7600);
+    let (mesh, ip) = Mesh::start(MeshConfig {
+        control_url,
+        authkey,
+        hostname: var("HOST").unwrap_or_else(|| "rusty-mux".into()),
+        state_dir: var("STATE").map_or_else(|| PathBuf::from("mesh-state"), PathBuf::from),
+        port,
+    })
+    .await?;
+    eprintln!("rusty-mux-server: mesh: serving on {ip}:{port} (embedded node, no tailscaled)");
+    Ok(Some(mesh))
 }
 
 /// Resolves on Ctrl+C or Ctrl+Break, the server's clean stops on Windows.

@@ -132,6 +132,9 @@ pub(crate) struct Guests {
     listed: Rc<RefCell<Option<Allow>>>,
     /// The tailnet listener, until the server takes it to serve.
     tailnet: Rc<RefCell<Option<Tailnet>>>,
+    /// The embedded mesh node (spike A), until the server takes it to serve.
+    #[cfg(feature = "mesh")]
+    pub(crate) mesh: Rc<RefCell<Option<crate::mesh::Mesh>>>,
 }
 
 impl Guests {
@@ -276,6 +279,9 @@ pub struct Sharing {
     pub allow: PathBuf,
     /// A listener for tailnet peers, if any.
     pub tailnet: Option<Tailnet>,
+    /// An embedded tailnet node serving mux (spike A), if any.
+    #[cfg(feature = "mesh")]
+    pub mesh: Option<crate::mesh::Mesh>,
 }
 
 /// Reads the list at `path` on a thread of its own: a file on a hung file
@@ -324,6 +330,13 @@ pub async fn serve_shared(
     });
     let guests = Guests::default();
     *guests.tailnet.borrow_mut() = tailnet;
+    #[cfg(feature = "mesh")]
+    {
+        *guests.mesh.borrow_mut() = sharing.mesh.map(|mut mesh| {
+            mesh.allow = allow.clone();
+            mesh
+        });
+    }
     guests.revoke_unlisted(&allow.borrow());
     let owner = rusty_libc::process::geteuid();
     let admitting = allow.clone();

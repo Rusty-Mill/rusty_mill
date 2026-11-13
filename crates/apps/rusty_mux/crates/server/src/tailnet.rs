@@ -112,16 +112,24 @@ pub fn principal_of(who: &WhoIsResponse) -> Result<Principal, String> {
         .node
         .as_ref()
         .ok_or("tailscaled does not know the peer")?;
-    let id = if node.tags.is_empty() {
-        let login = who
-            .user_profile
-            .as_ref()
-            .map(|u| u.login_name.as_str())
+    let login = who.user_profile.as_ref().map(|u| u.login_name.as_str());
+    principal_named(&node.tags, &node.name, login)
+}
+
+/// The principal for a peer's tags, node name and user login (shared by
+/// `tailscaled`'s answer and an embedded node's netmap).
+pub(crate) fn principal_named(
+    tags: &[String],
+    node_name: &str,
+    login: Option<&str>,
+) -> Result<Principal, String> {
+    let id = if tags.is_empty() {
+        let login = login
             .filter(|l| !l.is_empty() && *l != TAGGED_LOGIN)
             .ok_or("the peer's node has no user")?;
         format!("ts:{login}")
     } else {
-        let name = node.name.trim_end_matches('.');
+        let name = node_name.trim_end_matches('.');
         if name.is_empty() {
             return Err("the peer's tagged node has no name".into());
         }
