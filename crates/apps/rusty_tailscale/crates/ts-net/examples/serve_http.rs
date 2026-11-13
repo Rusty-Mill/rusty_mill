@@ -78,9 +78,6 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
-fn main() {}
-
 #[rusty_tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     tracing_subscriber_init();
