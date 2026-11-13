@@ -56,6 +56,9 @@ pub(crate) enum Request {
     Data { id: usize, bytes: Vec<u8> },
     /// The application closed connection `id`'s write side.
     Close { id: usize },
+    /// The application took a chunk off its queue: there is room again, so
+    /// service the sockets (a held chunk, a window update).
+    Poke,
 }
 
 /// Spawns the stack task and returns the request sender.
@@ -73,6 +76,9 @@ struct Conn {
     handle: SocketHandle,
     /// net → app data.
     to_app: mpsc::Sender<Vec<u8>>,
+    /// A chunk already taken from smoltcp's receive buffer that the app
+    /// queue had no room for; retried first, never dropped.
+    pending_rx: Option<Vec<u8>>,
     /// app → net bytes not yet accepted by smoltcp.
     out: Vec<u8>,
     /// Application closed its write half; close once `out` drains.
@@ -190,6 +196,8 @@ impl Stack {
                     conn.out.extend_from_slice(&bytes);
                 }
             }
+            // The app drained its queue: service the sockets again.
+            Request::Poke => {}
             Request::Close { id } => {
                 if let Some(conn) = self.conns.get_mut(&id) {
                     conn.closing = true;
@@ -276,6 +284,7 @@ impl Stack {
                     Conn {
                         handle,
                         to_app,
+                        pending_rx: None,
                         out: Vec::new(),
                         closing: false,
                         out_len: out_len.clone(),
@@ -343,23 +352,33 @@ impl Stack {
 
         // net → app: drain smoltcp's receive buffer into the app channel until
         // it fills (then leave the rest to apply TCP backpressure).
-        while sock.can_recv() {
-            let mut buf = vec![0u8; MTU];
-            match sock.recv_slice(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    buf.truncate(n);
-                    match conn.to_app.try_send(buf) {
-                        Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => break,
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            // App dropped the read half: tear the connection down.
-                            sock.abort();
-                            break;
+        loop {
+            let chunk = match conn.pending_rx.take() {
+                Some(chunk) => chunk,
+                None if sock.can_recv() => {
+                    let mut buf = vec![0u8; MTU];
+                    match sock.recv_slice(&mut buf) {
+                        Ok(n) if n > 0 => {
+                            buf.truncate(n);
+                            buf
                         }
+                        _ => break,
                     }
                 }
-                Err(_) => break,
+                None => break,
+            };
+            match conn.to_app.try_send(chunk) {
+                Ok(()) => {}
+                // Already out of smoltcp's buffer: keep it for the next pass.
+                Err(mpsc::error::TrySendError::Full(chunk)) => {
+                    conn.pending_rx = Some(chunk);
+                    break;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    // App dropped the read half: tear the connection down.
+                    sock.abort();
+                    break;
+                }
             }
         }
 
@@ -453,6 +472,7 @@ impl AsyncRead for TcpStream {
         }
         match self.from_net.poll_recv(cx) {
             Poll::Ready(Some(chunk)) => {
+                let _ = self.net.send(Request::Poke);
                 let n = chunk.len().min(buf.remaining());
                 buf.put_slice(&chunk[..n]);
                 if n < chunk.len() {
@@ -667,6 +687,80 @@ mod tests {
         // Keep the outbound receiver alive to the end so the stack's device
         // never sees a closed channel mid-handshake.
         drop(outbound_rx);
+    }
+
+    /// A burst larger than the app queue (16 chunks) must arrive whole and in
+    /// order: a chunk taken from smoltcp that the queue had no room for was
+    /// once dropped, so a message of more than ~30 KB never completed.
+    #[rusty_tokio::test]
+    async fn a_burst_larger_than_the_app_queue_is_delivered_whole() {
+        let (inbound_tx, inbound_rx) = mpsc::channel(16);
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let stack = Stack::new(req_tx.clone(), inbound_rx, req_rx, outbound_tx);
+        rusty_tokio::spawn(stack.run());
+
+        let our = Ipv4Addr::new(100, 64, 0, 1);
+        let peer = Ipv4Addr::new(100, 64, 0, 9);
+        req_tx.send(Request::SetAddr(our)).unwrap();
+        let (reply, rx) = oneshot::channel();
+        req_tx.send(Request::Bind { port: 8080, reply }).unwrap();
+        let mut accept_rx = rx.await.unwrap();
+
+        inbound_tx
+            .send(tcp_segment(peer, our, 40000, 8080, 100, 0, SYN, &[]))
+            .await
+            .unwrap();
+        let synack = rusty_tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let isn = u32::from_be_bytes([synack[24], synack[25], synack[26], synack[27]]);
+        let ack = isn.wrapping_add(1);
+        inbound_tx
+            .send(tcp_segment(peer, our, 40000, 8080, 101, ack, ACK, &[]))
+            .await
+            .unwrap();
+
+        // 60 segments of 1000 bytes, none read until all are in.
+        let mut sent = Vec::new();
+        for i in 0..60u32 {
+            let payload: Vec<u8> = (0..1000).map(|j| (i as u8).wrapping_add(j as u8)).collect();
+            inbound_tx
+                .send(tcp_segment(
+                    peer,
+                    our,
+                    40000,
+                    8080,
+                    101 + i * 1000,
+                    ack,
+                    ACK | PSH,
+                    &payload,
+                ))
+                .await
+                .unwrap();
+            sent.extend_from_slice(&payload);
+            // Keep the ACKs the stack emits from piling up unread.
+            while outbound_rx.try_recv().is_ok() {}
+        }
+        let mut stream = rusty_tokio::time::timeout(Duration::from_secs(2), accept_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        rusty_tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        while got.len() < sent.len() {
+            let n = rusty_tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf))
+                .await
+                .expect("a chunk was lost: the read never completes")
+                .unwrap();
+            assert!(n > 0, "closed after {} of {} bytes", got.len(), sent.len());
+            got.extend_from_slice(&buf[..n]);
+            while outbound_rx.try_recv().is_ok() {}
+        }
+        assert!(got == sent, "bytes arrived out of order or altered");
     }
 
     /// Round 5: `TcpStream::poll_write` used to unconditionally accept every
