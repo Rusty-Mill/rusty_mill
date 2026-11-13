@@ -36,6 +36,6 @@ its permissions; it should not be the agent's identity.
 - Trusting MCP session ids: the connector gives no stable per-agent session binding.
 
 ## Open questions for Nano
-1. Enforce `agent` + key on all connector writes (recommended), or keep labels optional?
+1. ~~Enforce `agent` + key on all connector writes, or keep labels optional?~~ **Decided (Nano, 2026-11-13): enforce.** Connector writes without a registered agent id and key are refused.
 2. Expiry: 30 days idle, or manual revoke only?
 3. Cap: 64 per connector?
