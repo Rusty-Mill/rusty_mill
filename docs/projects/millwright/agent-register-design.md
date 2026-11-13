@@ -14,7 +14,7 @@ its permissions; it should not be the agent's identity.
 ## Proposal
 - `agent_register {}` over MCP, allowed to any authenticated connector credential. The board
   returns a unique `agent` id (`<credential>#<random 6 hex>`) and a secret `agent_key`,
-  shown once. The registry stores the id, key hash, connector credential and created time.
+  shown once. The registry stores the id, key (in clear, see As built), connector credential and created time.
 - Writes from a connector credential pass `agent` + `agent_key`. The board checks them and
   attributes claims, comments and moves to that agent. Enforcement is on at deploy (Nano: enforce, no migration switch); `actor` labels are ignored on a connector.
 - Ceiling: the agent's role and projects are the connector's, never wider. It gets the connector's role unchanged (so an admin connector's agents act as admin, as the connector did before); it is not narrowed further.
