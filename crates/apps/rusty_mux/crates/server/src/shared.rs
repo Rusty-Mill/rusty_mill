@@ -40,6 +40,7 @@ use rusty_tokio::sync::{Notify, mpsc::UnboundedReceiver};
 
 use crate::login::{Reload, read_checked};
 use crate::tailnet::{Whois, is_tailnet_addr};
+use crate::tls::{Tls, read_tokens};
 use crate::token;
 use crate::{Config, Peer, conn, state};
 
@@ -141,12 +142,34 @@ pub(crate) struct Guests {
     listed: Rc<RefCell<Option<Allow>>>,
     /// The tailnet listener, until the server takes it to serve.
     tailnet: Rc<RefCell<Option<Tailnet>>>,
+    /// The TLS listener, until the server takes it to serve.
+    tls: Rc<RefCell<Option<Tls>>>,
 }
 
 impl Guests {
     /// Takes the tailnet listener, if there is one and it was not taken.
     pub(crate) fn take_tailnet(&self) -> Option<Tailnet> {
         self.tailnet.borrow_mut().take()
+    }
+
+    /// Takes the TLS listener, if there is one and it was not taken.
+    pub(crate) fn take_tls(&self) -> Option<Tls> {
+        self.tls.borrow_mut().take()
+    }
+
+    /// Closes every connection of the tokens `names`: rotated or revoked.
+    pub(crate) fn revoke_tokens(&self, names: &[&str]) {
+        let gone: Vec<String> = names.iter().map(|n| format!("token:{n}")).collect();
+        self.open.borrow_mut().retain(|(principal, cancel)| {
+            let Some(cancel) = cancel.upgrade() else {
+                return false;
+            };
+            let revoked = gone.iter().any(|id| id == principal.id());
+            if revoked {
+                cancel.notify_one();
+            }
+            !revoked
+        });
     }
 
     /// Remembers a connection of `principal`; `cancel` closes it. A
@@ -285,6 +308,8 @@ pub struct Sharing {
     pub allow: PathBuf,
     /// A listener for tailnet peers, if any.
     pub tailnet: Option<Tailnet>,
+    /// A TLS listener for peers with a token, if any.
+    pub tls: Option<Tls>,
 }
 
 /// Reads the list at `path` on a thread of its own: a file on a hung file
@@ -315,6 +340,24 @@ fn read(path: &std::path::Path) -> io::Result<Allow> {
     })
 }
 
+/// Reads the token file again, if there is one. A bad file is refused and
+/// keeps the old tokens; a good one closes only the connections of tokens it
+/// rotated or revoked.
+fn reload_tokens(
+    tokens: &Option<(PathBuf, Rc<RefCell<crate::token::Tokens>>)>,
+    guests: &Guests,
+) -> io::Result<()> {
+    let Some((file, kept)) = tokens else {
+        return Ok(());
+    };
+    let fresh = read_tokens(file).inspect_err(|err| {
+        eprintln!("rusty-mux-server: tls: keeping the old tokens: {err}");
+    })?;
+    guests.revoke_tokens(&kept.borrow().changed(&fresh));
+    *kept.borrow_mut() = fresh;
+    Ok(())
+}
+
 /// [`crate::serve_until`] for a shared server: serves its own user and the
 /// users `sharing.allow` lists, until `stop` resolves. A bad list stops it
 /// before it serves anyone. Each [`Reload`] on `reloads` reads the list
@@ -331,8 +374,16 @@ pub async fn serve_shared(
         tailnet.allow = allow.clone();
         tailnet
     });
+    let tls = sharing.tls.map(|mut tls| {
+        tls.allow = allow.clone();
+        tls
+    });
+    let tokens = tls
+        .as_ref()
+        .map(|tls| (tls.tokens_file.clone(), tls.tokens.clone()));
     let guests = Guests::default();
     *guests.tailnet.borrow_mut() = tailnet;
+    *guests.tls.borrow_mut() = tls;
     guests.revoke_unlisted(&allow.borrow());
     let owner = rusty_libc::process::geteuid();
     let admitting = allow.clone();
@@ -351,7 +402,8 @@ pub async fn serve_shared(
                 guests.revoke_unlisted(fresh);
                 *allow.borrow_mut() = fresh.clone();
             }
-            let _ = answer.send(result.map(|_| ()));
+            let result = result.and_then(|_| reload_tokens(&tokens, &guests));
+            let _ = answer.send(result);
         }
         std::future::pending::<()>().await;
     };
