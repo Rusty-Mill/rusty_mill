@@ -156,8 +156,14 @@ mod tests {
 
     #[test]
     fn absolute_paths_pass_through() {
-        let t = parse("[[tool]]\nid = \"x\"\nskills_dir = \"/opt/skills\"\n").unwrap();
-        assert_eq!(t[0].skills_dir, Path::new("/opt/skills"));
+        // `/opt/skills` is not absolute on Windows (no drive), so pick per OS.
+        let abs = if cfg!(windows) {
+            "C:\\opt\\skills"
+        } else {
+            "/opt/skills"
+        };
+        let t = parse(&format!("[[tool]]\nid = \"x\"\nskills_dir = '{abs}'\n")).unwrap();
+        assert_eq!(t[0].skills_dir, Path::new(abs));
     }
 
     #[test]

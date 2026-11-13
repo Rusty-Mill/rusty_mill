@@ -1,5 +1,5 @@
 use super::*;
-use crate::marker::MARKER;
+use crate::marker::{marker_source, MARKER};
 use ai_env_core::{plan_disable, plan_enable, Kind};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -204,7 +204,17 @@ fn source_that_changes_during_copy_reads_stale_not_modified() {
 }
 
 #[test]
-fn source_paths_that_break_the_marker_are_refused_before_any_change() {
+fn source_paths_that_break_the_marker_are_refused() {
+    assert!(marker_source(Path::new("a/b")).is_ok());
+    assert!(marker_source(Path::new("line\nbreak")).is_err());
+    assert!(marker_source(Path::new("cr\rhere")).is_err());
+}
+
+/// End to end, so the refusal is proven to happen before any change. Needs a
+/// filesystem that allows a line break in a name, which Windows does not.
+#[cfg(unix)]
+#[test]
+fn unrecordable_source_is_refused_before_any_change() {
     let tmp = Tmp::new();
     let (mut e, t) = fixture(&tmp);
     let odd = tmp.0.join("src/line\nbreak");

@@ -99,7 +99,7 @@ pub fn read_marker(dir: &Path) -> Option<Marker> {
 
 /// The marker stores the source as one text line, so a path that cannot
 /// round-trip through it is refused up front.
-fn marker_source(from: &Path) -> io::Result<&str> {
+pub(crate) fn marker_source(from: &Path) -> io::Result<&str> {
     from.to_str()
         .filter(|s| !s.contains(['\n', '\r']))
         .ok_or_else(|| invalid("source path is not valid UTF-8 or has a line break", from))
