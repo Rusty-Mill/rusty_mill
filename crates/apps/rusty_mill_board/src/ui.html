@@ -1209,7 +1209,7 @@ async function openSettings(){
 }
 /* Settings fill the page: sections down the left, the chosen one on the right with what it is for. */
 const SECTIONS=[
-  ["agents","Agents","Who may use the board. Each agent signs in with its own token and acts with one role, in all projects or a chosen few."],
+  ["agents","Agents","Who may use the board. Each agent signs in with its own token and acts with one role, in all projects or a chosen few. Agents on a shared connector register themselves and are listed below."],
   ["repos","Repositories","The repositories this board serves and their projects. A project owns the repository paths listed under it; each repository's own project owns the rest."],
   ["roles","Roles","A role is a set of capabilities. Tick what each role may do; hover a capability for what it allows."],
   ["columns","Columns","The board's columns, their order and kind, and the moves between them with the capability each needs."],
@@ -1279,7 +1279,23 @@ function agentsTab(){
   go.onclick=guard(err,async()=>{const n=nm.value.trim();const r=await setting("settings_agent_add",{agent:{name:n,role:role.value,projects:pick.value()}});secret={name:n,token:r.token}});
   add.append(nm,role,pick,go);
   t.append(tbl,el("h3","Add an agent"),add,err,el("p","An agent connects with its token as a bearer token. The board shows a token once; \"New token\" replaces it.","note"));
+  t.append(registeredAgents());
   return t;
+}
+
+/* Agents registered on a shared connector (agent_register): one row each; Revoke stops its key at once. */
+function registeredAgents(){
+  const box=el("div"),err=el("div",null,"err"),list=cfg.registered_agents||[];
+  box.append(el("h3","Registered agents"));
+  if(!list.length){box.append(el("p","None yet. A session on a shared connector (such as claude-cloud) calls agent_register once, then passes its agent_id and agent_key on every write.","note"));return box}
+  const tbl=el("table"),head=el("tr");["Agent","Connector","Registered","Last used",""].forEach(h=>head.append(el("th",h)));tbl.append(head);
+  for(const a of list){
+    const tr=el("tr"),rv=el("button","Revoke"),td=el("td");rv.type="button";
+    rv.onclick=guard(err,async()=>{if(!confirm("Revoke "+a.id+"? Its key stops working; it can register again."))return;await setting("settings_registered_agent_revoke",{id:a.id})});
+    td.append(rv);tr.append(el("td",a.id),el("td",a.connector),el("td",new Date(a.created_ms).toLocaleString()),el("td",new Date(a.seen_ms).toLocaleString()),td);tbl.append(tr);
+  }
+  box.append(tbl,err);
+  return box;
 }
 
 /* The draft of the repositories tab survives redraws made while restructuring (add or remove a row)
