@@ -110,9 +110,16 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `board_projects` reports `status` for non-active projects. The board's status picker (Active, Experiment, Paused,
   Archived, All projects) starts on Active. A paused or archived project must be made active before it is removed
   or renamed, so no status outlives its project.
+- **Record (merged work, narrowed).** `record` is `close` for recording merged work and nothing else: it moves a
+  claimed Building or V&Ving card to Done, or lets `card_add` with `done: true` record merged work, only when the
+  card (or the call) carries a GitHub pull request link as evidence (`https://github.com/<owner>/<repo>/pull/<n>`, with
+  at most `/files`, `/commits` or `/checks` after the number). Evidence it adds is pull request links only. It works
+  only from a work column and on the actor's own claim, even with movement rules off, and cannot archive or restore.
+  An issue or other link does not count. This checks the link's shape, not that the
+  pull request merged: that check against GitHub is not built yet. Give agent roles `record` instead of `close`.
 - **Shipped needs evidence.** A Done card counts as shipped only with evidence: a merged PR or any http(s) link
   with a host that shows the work (printable ASCII, at most 512 bytes; `card_evidence`, or `evidence` on
-  `card_add`, both needing `close`, `merge` or `triage`), at most 8 per card, kept in the card's rusty_tick board
+  `card_add`, both needing `close`, `record`, `merge` or `triage`), at most 8 per card, kept in the card's rusty_tick board
   document. A dropped card takes none. Without evidence it is a prototype: `board_metrics` counts it as
   `prototype` (per week and per project) and leaves it out of shipped and lead time; the Metrics view shows
   prototypes beside shipped work. Cards Done before evidence existed are backfilled once, with the board stopped:
