@@ -24,6 +24,10 @@ pub const DEFAULT_SOCKET: &str = "/var/run/tailscale/tailscaled.sock";
 const HOST: &str = "local-tailscaled.sock";
 /// The most response head we buffer; the body is a short JSON document.
 const MAX_HEAD_LEN: usize = 64 * 1024;
+/// How long one lookup, connect to last byte, may take.
+pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+/// The login `tailscaled` gives every tagged node: shared, so never an identity.
+const TAGGED_LOGIN: &str = "tagged-devices";
 
 /// A client of `tailscaled`'s LocalAPI.
 #[derive(Debug, Clone)]
@@ -32,16 +36,21 @@ pub struct Whois {
 }
 
 impl Whois {
+    /// A client of the LocalAPI socket at `socket`, [`DEFAULT_SOCKET`] on Linux.
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: socket.into(),
         }
     }
 
-    /// The principal behind `peer`, an address on the tailnet.
+    /// The principal behind `peer`, an address on the tailnet. A stalled
+    /// `tailscaled` fails the call after [`DEADLINE`].
     pub async fn principal(&self, peer: SocketAddr) -> io::Result<Principal> {
-        let who: WhoIsResponse = serde_json::from_slice(&self.get(peer).await?)
-            .map_err(|e| invalid(format!("whois reply: {e}")))?;
+        let body = rusty_tokio::time::timeout(DEADLINE, self.get(peer))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tailscaled whois timed out"))??;
+        let who: WhoIsResponse =
+            serde_json::from_slice(&body).map_err(|e| invalid(format!("whois reply: {e}")))?;
         principal_of(&who).map_err(invalid)
     }
 
@@ -82,32 +91,41 @@ impl Whois {
     }
 }
 
-/// `principal` for a decoded answer: a tagged node is its node name
+/// The principal for a decoded answer: a tagged node is its node name
 /// (`ts-node:NAME`), anything else its user's login (`ts:LOGIN`). A peer
-/// `tailscaled` does not know is refused.
+/// `tailscaled` does not know, or one with no name or login of its own, is
+/// refused. `user` stays empty: it names a local account in login routing,
+/// and a tailnet name must never be taken for one; route by `id`.
 pub fn principal_of(who: &WhoIsResponse) -> Result<Principal, String> {
     let node = who
         .node
         .as_ref()
         .ok_or("tailscaled does not know the peer")?;
-    let (id, user) = if node.tags.is_empty() {
+    let id = if node.tags.is_empty() {
         let login = who
             .user_profile
             .as_ref()
             .map(|u| u.login_name.as_str())
-            .filter(|l| !l.is_empty())
+            .filter(|l| !l.is_empty() && *l != TAGGED_LOGIN)
             .ok_or("the peer's node has no user")?;
-        (format!("ts:{login}"), login.to_owned())
+        format!("ts:{login}")
     } else {
         let name = node.name.trim_end_matches('.');
-        (format!("ts-node:{name}"), name.to_owned())
+        if name.is_empty() {
+            return Err("the peer's tagged node has no name".into());
+        }
+        format!("ts-node:{name}")
     };
-    Principal::new(id, user).map_err(|e| e.to_string())
+    Principal::new(id, "").map_err(|e| e.to_string())
 }
 
-/// `addr` as a query value: an IPv6 peer's brackets are escaped.
+/// `addr` as a query value: `%` (an IPv6 zone) and an IPv6 peer's brackets
+/// are escaped.
 fn encode_addr(peer: SocketAddr) -> String {
-    peer.to_string().replace('[', "%5B").replace(']', "%5D")
+    peer.to_string()
+        .replace('%', "%25")
+        .replace('[', "%5B")
+        .replace(']', "%5D")
 }
 
 fn invalid(msg: impl Into<String>) -> io::Error {
