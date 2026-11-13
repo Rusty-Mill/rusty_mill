@@ -480,6 +480,13 @@ pub enum HostsCommand {
         address: Address,
     },
     Remove(String),
+    /// Appends the TLS listener at `addr` to the host called `name`, pinned
+    /// to the certificate it presents now (term pack D236, "first use"): the
+    /// user has chosen this server, and the fingerprint is printed to check.
+    PinFirstUse {
+        name: String,
+        addr: String,
+    },
 }
 
 /// Which machine's `hosts.json` a sync writes.
@@ -505,7 +512,9 @@ pub struct Sync {
 }
 
 const HOSTS_USAGE: &str = "usage: hosts list | hosts add NAME --socket PATH | \
-     hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] | hosts remove NAME | \
+     hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] | \
+     hosts add NAME --tls HOST:PORT --pin HEX | hosts add NAME --tls HOST:PORT --pin-first-use | \
+     hosts remove NAME | \
      hosts pull|push DEST [--replace] [--dry-run]";
 
 fn hosts(args: &[String]) -> Result<HostsCommand, String> {
@@ -513,20 +522,52 @@ fn hosts(args: &[String]) -> Result<HostsCommand, String> {
         [verb] if verb == "list" => Ok(HostsCommand::List),
         [verb, name] if verb == "remove" => Ok(HostsCommand::Remove(name.clone())),
         [verb, name, rest @ ..] if verb == "add" => {
-            let flags = flags("hosts add", rest, |_| false)?;
-            let mut socket = None;
-            let mut dest = None;
-            let mut udp_host = None;
+            let flags = flags("hosts add", rest, |flag| flag == "pin-first-use")?;
+            let (mut socket, mut dest, mut udp_host) = (None, None, None);
+            let (mut tls, mut pin, mut first_use) = (None, None, false);
             for (flag, value) in flags {
                 let slot = match flag {
                     "socket" => &mut socket,
                     "ssh" => &mut dest,
                     "udp-host" => &mut udp_host,
+                    "tls" => &mut tls,
+                    "pin" => &mut pin,
+                    "pin-first-use" => {
+                        if std::mem::replace(&mut first_use, true) {
+                            return Err("hosts add: --pin-first-use given twice".into());
+                        }
+                        continue;
+                    }
                     _ => return Err(format!("hosts add: unknown flag --{flag}")),
                 };
                 if slot.replace(value.to_owned()).is_some() {
                     return Err(format!("hosts add: --{flag} given twice"));
                 }
+            }
+            if let Some(addr) = tls {
+                if socket.is_some() || dest.is_some() || udp_host.is_some() {
+                    return Err("hosts add: --tls goes with --pin or --pin-first-use only".into());
+                }
+                return match (pin, first_use) {
+                    (Some(pin), false) => Ok(HostsCommand::Add {
+                        name: name.clone(),
+                        address: Address::Tls {
+                            addr,
+                            pin: pin.to_ascii_lowercase(),
+                        },
+                    }),
+                    (None, true) => Ok(HostsCommand::PinFirstUse {
+                        name: name.clone(),
+                        addr,
+                    }),
+                    _ => Err(
+                        "hosts add: --tls needs exactly one of --pin HEX and --pin-first-use"
+                            .into(),
+                    ),
+                };
+            }
+            if pin.is_some() || first_use {
+                return Err("hosts add: --pin and --pin-first-use need --tls".into());
             }
             let socket = socket.ok_or("hosts add: --socket PATH is required")?;
             let address = match (dest, udp_host) {
@@ -1054,6 +1095,7 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "List, add or remove saved hosts for --host: hosts list |\n\
          \x20                  hosts add NAME --socket PATH |\n\
          \x20                  hosts add NAME --ssh DEST --socket PATH [--udp-host HOST] |\n\
+         \x20                  hosts add NAME --tls HOST:PORT --pin HEX|--pin-first-use |\n\
          \x20                  hosts remove NAME |\n\
          \x20                  hosts pull|push DEST [--replace] [--dry-run]",
     ),

@@ -45,6 +45,8 @@ pub(crate) struct Reached {
     pub(crate) socket: PathBuf,
     #[cfg(unix)]
     _forward: Option<rusty_mux_client::ssh::Forward>,
+    #[cfg(unix)]
+    _relay: Option<rusty_mux_client::tls::Relay>,
 }
 
 impl Reached {
@@ -54,6 +56,8 @@ impl Reached {
             socket,
             #[cfg(unix)]
             _forward: None,
+            #[cfg(unix)]
+            _relay: None,
         }
     }
 }
@@ -259,6 +263,17 @@ pub(crate) fn run(
     err: &mut dyn Write,
 ) -> Result<(), (Exit, String)> {
     let failed = |e: String| (Exit::Failed, e);
+    let pinned;
+    let command = match command {
+        HostsCommand::PinFirstUse { name, addr } => {
+            pinned = HostsCommand::Add {
+                name: name.clone(),
+                address: first_use(addr, out).map_err(failed)?,
+            };
+            &pinned
+        }
+        other => other,
+    };
     let declared = match load_declared(env.config.as_deref()) {
         Ok(declared) => declared,
         // Without the config, `add` cannot tell a declared name (D200).
@@ -294,6 +309,12 @@ pub(crate) fn run(
             }
             hosts::add(&mut known.saved, name, address.clone()).map_err(|e| (Exit::Usage, e))?;
         }
+        // Turned into an `Add` above.
+        HostsCommand::PinFirstUse { .. } => {
+            return Err(failed(
+                "internal error: pin-first-use was not resolved".into(),
+            ));
+        }
         HostsCommand::Remove(name) => {
             let declared = known.declared.host(name).is_some();
             if !hosts::remove(&mut known.saved, name) {
@@ -318,6 +339,23 @@ pub(crate) fn run(
         Some(note) => writeln!(out, "{note}").map_err(|e| failed(e.to_string())),
         None => Ok(()),
     }
+}
+
+/// The TLS address `addr` pinned to the certificate it presents now. The
+/// fingerprint is printed, so the user can compare it with the server's.
+#[cfg(unix)]
+fn first_use(addr: &str, out: &mut dyn Write) -> Result<Address, String> {
+    let pin = rusty_mux_client::tls::hex(&rusty_mux_client::tls::fingerprint(addr)?);
+    writeln!(out, "pinned {addr} to {pin}").map_err(|e| e.to_string())?;
+    Ok(Address::Tls {
+        addr: addr.to_owned(),
+        pin,
+    })
+}
+
+#[cfg(not(unix))]
+fn first_use(_: &str, _: &mut dyn Write) -> Result<Address, String> {
+    Err("TLS hosts need Unix".to_owned())
 }
 
 /// One line per host, its name then each address, a declared host's
@@ -394,7 +432,7 @@ pub(crate) fn resolve(name: &str, env: &Env, stop: &Stop) -> Result<Reached, (Ex
     })?;
     let mut reasons = Vec::new();
     for address in &host.addresses {
-        match reach(address, env, stop) {
+        match reach(name, address, env, stop) {
             Ok(reached) => return Ok(reached),
             Err(reason) => reasons.push(format!("  {}: {reason}", address.describe())),
         }
@@ -416,8 +454,9 @@ pub(crate) fn resolve(_: &str, _: &Env, _: &Stop) -> Result<Reached, (Exit, Stri
 /// The socket `address` reaches: a local one once a connection to it
 /// succeeds, an ssh one once its forward is up.
 #[cfg(any(unix, windows))]
-fn reach(address: &Address, env: &Env, stop: &Stop) -> Result<Reached, String> {
+fn reach(name: &str, address: &Address, env: &Env, stop: &Stop) -> Result<Reached, String> {
     match address {
+        Address::Tls { addr, pin } => relay(name, addr, pin, env),
         Address::Socket { socket } => probe(PathBuf::from(socket), stop).map(Reached::local),
         Address::Ssh { dest, socket, .. } => forward(dest, Path::new(socket), env, stop),
     }
@@ -451,7 +490,55 @@ fn forward(dest: &str, remote: &Path, env: &Env, stop: &Stop) -> Result<Reached,
     Ok(Reached {
         socket: forward.socket().to_path_buf(),
         _forward: Some(forward),
+        _relay: None,
     })
+}
+
+/// The relay to the TLS listener at `addr`, once its certificate is the
+/// pinned one. The token is the file `tokens/NAME` next to the hosts file,
+/// readable by its owner alone; it is never in the hosts file.
+#[cfg(unix)]
+fn relay(name: &str, addr: &str, pin: &str, env: &Env) -> Result<Reached, String> {
+    use rusty_mux_client::tls::{Relay, TOKEN_LEN, unhex};
+
+    let pin = unhex::<32>(pin).ok_or("the pin is not 64 hex digits")?;
+    let file = env
+        .hosts
+        .as_deref()
+        .and_then(Path::parent)
+        .ok_or("no hosts file: set XDG_CONFIG_HOME or HOME")?
+        .join("tokens")
+        .join(name);
+    let token = unhex::<TOKEN_LEN>(&read_token(&file)?)
+        .ok_or_else(|| format!("{}: not 64 hex digits", file.display()))?;
+    let relay = Relay::start(addr, pin, token)?;
+    Ok(Reached {
+        socket: relay.socket().to_path_buf(),
+        _forward: None,
+        _relay: Some(relay),
+    })
+}
+
+/// The token file's text, refused unless it is a regular file that only
+/// its owner can read (as the server's key and token files are).
+#[cfg(unix)]
+fn read_token(file: &Path) -> Result<String, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let shown = file.display();
+    let meta = std::fs::metadata(file)
+        .map_err(|e| format!("{shown}: {e} (put the host's token there, mode 0600)"))?;
+    if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
+        return Err(format!(
+            "{shown}: must be a regular file only its owner can access (chmod 600)"
+        ));
+    }
+    std::fs::read_to_string(file).map_err(|e| format!("{shown}: {e}"))
+}
+
+#[cfg(not(unix))]
+fn relay(_: &str, _: &str, _: &str, _: &Env) -> Result<Reached, String> {
+    Err("TLS hosts need Unix".to_owned())
 }
 
 #[cfg(windows)]
@@ -662,6 +749,27 @@ mod tests {
         tracker.next = Instant::now();
         assert_eq!(tracker.check(), Change::Changed, "fixed");
         let _gone = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_token_file_others_can_read_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("rusty-mux-ctl-token-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("box");
+        std::fs::write(&file, "ab\n").expect("token");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert!(read_token(&file).unwrap_err().contains("only its owner"));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        assert_eq!(read_token(&file).as_deref(), Ok("ab\n"));
+        assert!(
+            read_token(&dir.join("none"))
+                .unwrap_err()
+                .contains("mode 0600")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

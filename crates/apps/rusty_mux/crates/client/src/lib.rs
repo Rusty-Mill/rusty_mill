@@ -6,7 +6,8 @@
 //! server's socket, says Hello, reads the Welcome, takes a client over on a
 //! fresh path and reads what a window shows from a List. [`older`] words the
 //! notice for a server that lacks features this client asked for (C36).
-//! [`ssh`] forwards a local socket to a server's over OpenSSH, for the
+//! [`tls`] reaches a server over TLS, pinned to its certificate's fingerprint
+//! and logged in with a token (#506). [`ssh`] forwards a local socket to a server's over OpenSSH, for the
 //! terminal client's `--ssh` and `rusty-mux-ctl`'s saved hosts (term pack
 //! D194). Checkpoint assembly and the cell style codec come from
 //! `rusty_mux_proto` and are re-exported here with the `screen` feature,
@@ -19,6 +20,8 @@ pub mod attach;
 pub mod autostart;
 pub mod conn;
 pub mod ssh;
+#[cfg(unix)]
+pub mod tls;
 
 pub use conn::Conn;
 pub use rusty_mux_proto::older;
