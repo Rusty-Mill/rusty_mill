@@ -28,6 +28,7 @@ use rusty_mill_board::backfill;
 use rusty_mill_board::bbp_cli::BbpCli;
 use rusty_mill_board::board::{Board, Roles, system_ms};
 use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
+use rusty_mill_board::github::{GITHUB_COM_API, GithubMerged};
 use rusty_mill_board::mcp;
 use rusty_mill_board::milestones::{MemMilestones, MilestoneStore};
 use rusty_mill_board::projects::Projects;
@@ -103,9 +104,17 @@ struct Cli {
     #[arg(long, value_name = "REPO=OWNER/NAME,...", conflicts_with_all = ["export_projects", "retag_columns", "undo_retag", "undo_backfill"])]
     backfill_evidence: Option<String>,
     /// With --backfill-evidence: a new file the plan is saved to before any card is written
-    /// (stop the board first); it is what --undo-backfill reads.
+    /// (best with the board stopped; a card changed meanwhile is skipped and reported, and
+    /// running again needs a new file); it is what --undo-backfill reads.
     #[arg(long, value_name = "FILE", requires = "backfill_evidence")]
     backfill_record: Option<PathBuf>,
+    /// With --backfill-evidence: ask api.github.com (`GET /repos/O/N/pulls/N`, with
+    /// GITHUB_TOKEN) whether each named pull request merged, and keep only those. Dropped
+    /// links are listed on stderr, with the not-found count per repository (a token that
+    /// cannot see a repository gets 404s); a failed lookup (auth, rate limit) stops before
+    /// anything is written.
+    #[arg(long, requires = "backfill_evidence")]
+    check_merged: bool,
     /// Clear the evidence a backfill wrote, from its --backfill-record FILE, and exit. A card
     /// whose evidence has changed since is left alone and reported.
     #[arg(long, value_name = "FILE", conflicts_with_all = ["export_projects", "retag_columns", "undo_retag"])]
@@ -350,7 +359,24 @@ fn run_backfill(cli: &Cli, store: &dyn Store) -> Result<(), String> {
             .and_then(|r| github.get(r).cloned())
     };
     let cards = store.list().map_err(|e| e.to_string())?;
-    let plan = backfill::plan(&cards, &github_of);
+    let mut plan = backfill::plan(&cards, &github_of);
+    if cli.check_merged {
+        let token = cli
+            .github_token
+            .as_deref()
+            .ok_or("--check-merged needs GITHUB_TOKEN")?;
+        // Links are always github.com, so never --github-api (which may be an Enterprise host).
+        let forge = GithubMerged::new(GITHUB_COM_API, token)?;
+        let (kept, dropped) =
+            backfill::keep_merged(plan, &forge).map_err(|e| format!("--check-merged: {e}"))?;
+        eprintln!("{}", json(&dropped)?);
+        eprintln!(
+            "--check-merged: {} link(s) dropped; not found per repository: {}",
+            dropped.len(),
+            json(&backfill::not_found_per_repo(&dropped))?
+        );
+        plan = kept;
+    }
     let Some(record) = &cli.backfill_record else {
         println!("{}", json(&plan)?);
         eprintln!(
@@ -360,13 +386,7 @@ fn run_backfill(cli: &Cli, store: &dyn Store) -> Result<(), String> {
         return Ok(());
     };
     let fail = |e: String| format!("--backfill-record {}: {e}", record.display());
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(record)
-        .map_err(|e| fail(format!("not saved, nothing written: {e}")))?;
-    std::io::Write::write_all(&mut file, json(&plan)?.as_bytes())
-        .and_then(|()| file.sync_all())
+    backfill::save_record(record, &plan)
         .map_err(|e| fail(format!("not saved, nothing written: {e}")))?;
     let out = backfill::apply(store, &plan, system_ms())
         .map_err(|e| fail(format!("{e}; undo what was written with --undo-backfill")))?;

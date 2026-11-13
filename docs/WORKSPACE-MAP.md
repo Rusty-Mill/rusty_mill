@@ -170,6 +170,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | rusty_whisper | rusty-whisper | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) |
 | libs | rusty_wiremock | rusty_wiremock | A blocking std::net HTTP mock server that answers canned responses, for Rusty Mill test suites |
 | libs | rusty_worktree | rusty_worktree | Git worktrees that share one repository's object store, driven through the git CLI with hooks off and the git directory always named explicitly |
+| libs | ts-types | ts-types | Core wire and API types: keys, node/peer status, netmap, DERP map (serde) |
 | apps | ai_env_manager | ai_env_core | Ai Env Manager core: entry model and link planner. Pure, no I/O, no dependencies. |
 | apps | coreutils | coreutils | Modular pure-Rust implementation of core GNU/POSIX utilities |
 | apps | coreutils-async | coreutils-async | Reference consumer for platform-async: arun, an async port of rustils' rrun. |
@@ -295,7 +296,6 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_tailscale | ts-net | Embeddable node: smoltcp userspace netstack, no TUN, no root |
 | apps | rusty_tailscale | ts-stun | Minimal STUN (RFC 5389) binding requests for endpoint discovery |
 | apps | rusty_tailscale | ts-tun | TUN device, routes, and DNS platform adapters |
-| apps | rusty_tailscale | ts-types | Core wire and API types: keys, node/peer status, netmap, DERP map (serde) |
 | apps | rusty_tailscale | ts-wg | WireGuard data-plane adapter (boringtun; kernel-WG later) |
 | apps | rusty_tailscale | xtask | Integration harness: Headscale in a container, multi-node NAT simulation |
 | apps | rusty_text | rusty_text | Pure Rust stream editing (sed) and pattern scanning/processing (awk) engines |
