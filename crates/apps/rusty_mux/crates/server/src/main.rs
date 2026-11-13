@@ -75,7 +75,8 @@ use rusty_tokio::{Builder, LocalOptions};
 const USAGE: &str = "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] [--config FILE]
                         [--state DIR | --no-state] [--idle-exit SECS] [<socket>]
        rusty-mux-server --login MAP [--runtime DIR] <socket>
-       rusty-mux-server --shared ALLOW [--config FILE] [--state DIR | --no-state] <socket>";
+       rusty-mux-server --shared ALLOW [--tailnet ADDR:PORT] [--config FILE]
+                        [--state DIR | --no-state] <socket>";
 /// Where login mode puts each account's server unless `--runtime` says.
 const RUNTIME: &str = "/run/rusty-mux";
 /// The UDP port when `--udp` names an address only.
@@ -118,8 +119,9 @@ enum Mode {
     Forwarded(u32),
     /// The front door: the map file and the runtime directory.
     Login { map: PathBuf, runtime: PathBuf },
-    /// One server that also serves the users this allowlist names (C26).
-    Shared(PathBuf),
+    /// One server that also serves the users this allowlist names (C26),
+    /// and the tailnet peers it names, on `--tailnet`'s address (C27).
+    Shared(PathBuf, Option<SocketAddr>),
 }
 
 fn main() -> ExitCode {
@@ -150,6 +152,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let (mut socket, mut udp, mut idle, mut config) = (None, None, UDP_IDLE, None);
     let (mut login, mut runtime, mut forwarded_by) = (None, None, None);
     let mut shared = None;
+    let mut tailnet = None;
     let mut state = StateDir::Default;
     let mut idle_exit = None;
     while let Some(arg) = args.next() {
@@ -168,6 +171,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             Some("--no-state") => state = StateDir::Off,
             Some("--login") => login = Some(PathBuf::from(value("--login")?)),
             Some("--shared") => shared = Some(PathBuf::from(value("--shared")?)),
+            Some("--tailnet") => tailnet = Some(tailnet_addr(&value("--tailnet")?)?),
             Some("--runtime") => runtime = Some(PathBuf::from(value("--runtime")?)),
             Some("--forwarded-by") => {
                 let uid = value("--forwarded-by")?;
@@ -203,9 +207,12 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             idle,
             config,
             state,
-            mode: Mode::Shared(allow),
+            mode: Mode::Shared(allow, tailnet),
             idle_exit,
         });
+    }
+    if tailnet.is_some() {
+        return Err("--tailnet needs --shared: the allowlist decides who is served".into());
     }
     let mode = match (login, runtime, forwarded_by) {
         (None, None, None) => Mode::Personal,
@@ -252,6 +259,26 @@ fn seconds(flag: &str, secs: &str) -> Result<Duration, String> {
         .ok_or(format!("{flag} {secs}: not a whole number of seconds"))
 }
 
+/// `--tailnet`'s `ADDR:PORT`: the address must be a tailnet one, the only
+/// kind whose peers `tailscaled` can name.
+#[cfg(target_os = "linux")]
+fn tailnet_addr(text: &str) -> Result<SocketAddr, String> {
+    let addr: SocketAddr = text
+        .parse()
+        .map_err(|_| format!("--tailnet {text}: not ADDR:PORT"))?;
+    match rusty_mux_server::tailnet::is_tailnet_addr(addr.ip()) {
+        true => Ok(addr),
+        false => Err(format!(
+            "--tailnet {text}: not a tailnet address (100.64.0.0/10 or fd7a:115c:a1e0::/48)"
+        )),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tailnet_addr(_text: &str) -> Result<SocketAddr, String> {
+    Err("--tailnet runs on Linux only".into())
+}
+
 /// `ADDR:PORT`, or `ADDR` alone for [`UDP_PORT`]; an IPv6 address with a
 /// port goes in brackets.
 fn udp_addr(value: &str) -> Result<SocketAddr, String> {
@@ -289,8 +316,8 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
         StateDir::Default => default_state_dir(&socket, |name| std::env::var_os(name)),
     };
     #[cfg(target_os = "linux")]
-    if let Mode::Shared(allow) = &args.mode {
-        return run_shared(&socket, allow.clone(), config);
+    if let Mode::Shared(allow, tailnet) = &args.mode {
+        return run_shared(&socket, allow.clone(), *tailnet, config);
     }
     // Before the runtime starts a thread: binding sets the umask, and the
     // activation variables are read and removed. No authentication in
@@ -429,7 +456,12 @@ fn run_login(socket: PathBuf, map: PathBuf, runtime: PathBuf) -> std::io::Result
 /// A shared server (C26): its socket is open to every local user and the
 /// allowlist decides who is served. SIGHUP reads the list again.
 #[cfg(target_os = "linux")]
-fn run_shared(socket: &std::path::Path, allow: PathBuf, config: Config) -> std::io::Result<()> {
+fn run_shared(
+    socket: &std::path::Path,
+    allow: PathBuf,
+    tailnet: Option<SocketAddr>,
+    config: Config,
+) -> std::io::Result<()> {
     use rusty_tokio::signal::unix::{SignalKind, signal};
 
     // Before the runtime starts a thread: binding sets the umask.
@@ -448,7 +480,17 @@ fn run_shared(socket: &std::path::Path, allow: PathBuf, config: Config) -> std::
                 }
             }
         });
-        let sharing = rusty_mux_server::Sharing { allow };
+        let tailnet = match tailnet {
+            None => None,
+            Some(addr) => {
+                let listener = rusty_tokio::io::TcpListener::bind(addr).await?;
+                let whois = rusty_mux_server::tailnet::Whois::new(
+                    rusty_mux_server::tailnet::DEFAULT_SOCKET,
+                );
+                Some(rusty_mux_server::Tailnet::new(listener, whois)?)
+            }
+        };
+        let sharing = rusty_mux_server::Sharing { allow, tailnet };
         rusty_mux_server::serve_shared(listener, config, sharing, reloads, stop_requested()?).await
     });
     served.and(owned.release())
@@ -615,7 +657,7 @@ mod tests {
     #[test]
     fn shared_mode_takes_an_allowlist_and_a_socket() {
         let shared = parse_str(&["--shared", "allow", "--no-state", "s.sock"]).unwrap();
-        assert_eq!(shared.mode, Mode::Shared(PathBuf::from("allow")));
+        assert_eq!(shared.mode, Mode::Shared(PathBuf::from("allow"), None));
         assert_eq!(shared.socket, Some(PathBuf::from("s.sock")));
         assert_eq!(shared.state, StateDir::Off);
         for bad in [
@@ -626,6 +668,26 @@ mod tests {
             &["--shared", "a", "--login", "m", "s"],
             &["--shared", "a", "--forwarded-by", "0", "s"],
             &["--shared", "a", "--runtime", "r", "s"],
+        ] {
+            assert!(parse_str(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_tailnet_listener_is_shared_mode_and_a_tailnet_address() {
+        let ok = parse_str(&["--shared", "a", "--tailnet", "100.64.0.7:7000", "s"]).unwrap();
+        assert_eq!(
+            ok.mode,
+            Mode::Shared(PathBuf::from("a"), Some("100.64.0.7:7000".parse().unwrap()))
+        );
+        for bad in [
+            &["--tailnet", "100.64.0.7:7000", "s"][..],
+            &["--shared", "a", "--tailnet", "127.0.0.1:7000", "s"],
+            &["--shared", "a", "--tailnet", "0.0.0.0:7000", "s"],
+            &["--shared", "a", "--tailnet", "192.168.1.2:7000", "s"],
+            &["--shared", "a", "--tailnet", "100.64.0.7", "s"],
+            &["--shared", "a", "--tailnet"],
         ] {
             assert!(parse_str(bad).is_err(), "{bad:?}");
         }

@@ -72,3 +72,7 @@ C14 live sharing (#278) builds on shared mode and C77 leases and adds no second 
    the server account's shell without a grant.
 
 **Attach (Nano, 2026-11-13, as relayed):** owner's blocks only. Guests list everything but attach only to blocks their principal owns or was granted (C77); the server account's shell is not attachable by guests.
+
+**Tailnet (C27 slice 2, proposed):** `--tailnet ADDR:PORT` adds a listener on a tailnet address. A peer is served only if the allowlist names its `ts:LOGIN` or `ts-node:NAME`, with the same guest rules as above.
+
+A `ts:` or `ts-node:` entry matches the principal id exactly, so `ts:Nano@example.com` and `ts:nano@example.com` are different entries.

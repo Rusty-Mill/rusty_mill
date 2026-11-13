@@ -29,6 +29,17 @@ pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 /// The login `tailscaled` gives every tagged node: shared, so never an identity.
 const TAGGED_LOGIN: &str = "tagged-devices";
 
+/// Whether `ip` is a tailnet address: `100.64.0.0/10` or `fd7a:115c:a1e0::/48`.
+/// A listener binds only to one, so a peer's address is one `tailscaled` can
+/// name; loopback and every other address mean nothing to it.
+pub fn is_tailnet_addr(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => v4.octets()[0] == 100 && v4.octets()[1] & 0xc0 == 64,
+        IpAddr::V6(v6) => v6.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+    }
+}
+
 /// A client of `tailscaled`'s LocalAPI.
 #[derive(Debug, Clone)]
 pub struct Whois {

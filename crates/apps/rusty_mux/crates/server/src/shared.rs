@@ -9,7 +9,8 @@
 //! blocks run as the server's account, so a name on the list is account-level
 //! power, as an entry in a login map is.
 //!
-//! The list has one entry per line, `uid:N` or `user:NAME`; `#` starts a
+//! The list has one entry per line, `uid:N` or `user:NAME`, or, for tailnet
+//! peers (C27), `ts:LOGIN` or `ts-node:NAME`; `#` starts a
 //! comment and blank lines are skipped. There is no wildcard, so root is
 //! served only when an entry names it (`uid:0` or `user:root`). A file
 //! with no entries lets in the server's own user alone. A repeated user,
@@ -28,22 +29,25 @@
 //! principal or was granted it (`Mux::share_leases`).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
-use rusty_mux_core::Principal;
-use rusty_tokio::io::UnixListener;
+use rusty_mux_core::{Principal, Transport};
+use rusty_tokio::io::{TcpListener, UnixListener};
 use rusty_tokio::sync::{Notify, mpsc::UnboundedReceiver};
 
 use crate::login::{Reload, read_checked};
-use crate::{Config, Peer};
+use crate::tailnet::{Whois, is_tailnet_addr};
+use crate::{Config, Peer, conn, state};
 
 /// Who a shared server serves besides its own user: uid to user name.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Allow {
     users: HashMap<u32, Option<String>>,
+    /// Tailnet principals by id (`ts:LOGIN`, `ts-node:NAME`).
+    tailnet: HashSet<String>,
 }
 
 impl Allow {
@@ -55,6 +59,7 @@ impl Allow {
         name: impl Fn(u32) -> Option<String>,
     ) -> Result<Self, String> {
         let mut users = HashMap::new();
+        let mut tailnet = HashSet::new();
         for (n, line) in text.lines().enumerate() {
             let line = line.split('#').next().unwrap_or_default().trim();
             if line.is_empty() {
@@ -62,13 +67,19 @@ impl Allow {
             }
             let at = |why: String| format!("line {}: {why}", n + 1);
             let uid = match line.split_once(':') {
+                Some(("ts" | "ts-node", name)) if !name.is_empty() => {
+                    if !tailnet.insert(line.to_string()) {
+                        return Err(at(format!("{line} is listed already")));
+                    }
+                    continue;
+                }
                 Some(("uid", id)) => id.parse().map_err(|_| at(format!("{id:?} is not a uid")))?,
                 Some(("user", user)) => {
                     account(user).ok_or_else(|| at(format!("no account {user}")))?
                 }
                 _ => {
                     return Err(at(format!(
-                        "{line:?} is not `uid:N` or `user:NAME` (there is no wildcard)"
+                        "{line:?} is not `uid:N`, `user:NAME`, `ts:LOGIN` or `ts-node:NAME` (there is no wildcard)"
                     )));
                 }
             };
@@ -76,7 +87,7 @@ impl Allow {
                 return Err(at(format!("uid {uid} is listed already")));
             }
         }
-        Ok(Self { users })
+        Ok(Self { users, tailnet })
     }
 
     /// The principal of the listed `uid`, or `None` if it is not listed.
@@ -89,9 +100,11 @@ impl Allow {
 
     /// Whether `principal` is still listed.
     pub(crate) fn names(&self, principal: &Principal) -> bool {
-        self.users
-            .keys()
-            .any(|uid| format!("uid:{uid}") == principal.id())
+        self.tailnet.contains(principal.id())
+            || self
+                .users
+                .keys()
+                .any(|uid| format!("uid:{uid}") == principal.id())
     }
 }
 
@@ -117,9 +130,16 @@ type Connection = (Principal, Weak<Notify>);
 pub(crate) struct Guests {
     open: Rc<RefCell<Vec<Connection>>>,
     listed: Rc<RefCell<Option<Allow>>>,
+    /// The tailnet listener, until the server takes it to serve.
+    tailnet: Rc<RefCell<Option<Tailnet>>>,
 }
 
 impl Guests {
+    /// Takes the tailnet listener, if there is one and it was not taken.
+    pub(crate) fn take_tailnet(&self) -> Option<Tailnet> {
+        self.tailnet.borrow_mut().take()
+    }
+
     /// Remembers a connection of `principal`; `cancel` closes it. A
     /// principal the list in force no longer names is closed at once.
     pub(crate) fn add(&self, principal: Principal, cancel: &Rc<Notify>) {
@@ -154,10 +174,108 @@ impl Guests {
     }
 }
 
+/// The tailnet side of a shared server (C27): a TCP listener on a tailnet
+/// address, and the `tailscaled` that says who each peer is.
+pub struct Tailnet {
+    listener: TcpListener,
+    whois: Whois,
+    allow: Rc<RefCell<Allow>>,
+}
+
+impl Tailnet {
+    /// A listener for `listener`, which must be bound to a tailnet address:
+    /// WireGuard authenticates the peer only there, and `whois` of any other
+    /// address means nothing.
+    pub fn new(listener: TcpListener, whois: Whois) -> io::Result<Self> {
+        let addr = listener.local_addr()?;
+        if !is_tailnet_addr(addr.ip()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{addr} is not a tailnet address (100.64.0.0/10 or fd7a:115c:a1e0::/48)"),
+            ));
+        }
+        Ok(Self {
+            listener,
+            whois,
+            allow: Rc::default(),
+        })
+    }
+}
+
+/// Peers being looked up at once; more are closed unlooked-up.
+const LOOKUPS: usize = 16;
+/// How long the tailnet listener waits after a failed accept.
+const ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Serves tailnet peers: each is asked of `tailscaled` before it says
+/// anything, and served as the principal it names if the list in force
+/// names it too. A guest like any other: no descriptors (C75), no UDP.
+pub(crate) async fn accept_tailnet(
+    tailnet: Tailnet,
+    state: state::Shared,
+    guests: Guests,
+) -> io::Result<()> {
+    let looking = Rc::new(std::cell::Cell::new(0usize));
+    let mut dropped = 0u64;
+    loop {
+        // An error here is not fatal: accept(2) also reports a network that
+        // went away (ENETDOWN, EHOSTUNREACH, ...) and a full descriptor table,
+        // and `tailscaled` restarting must not end the account's server, with
+        // every local session on it. Log, wait a moment so a persistent
+        // failure doesn't spin, and go on.
+        let (stream, peer) = match tailnet.listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(err) => {
+                eprintln!("rusty-mux-server: tailnet: accept: {err}");
+                rusty_tokio::time::sleep(ACCEPT_RETRY).await;
+                continue;
+            }
+        };
+        if looking.get() >= LOOKUPS {
+            // One line for the first, then one per hundred, so a flood
+            // doesn't fill the log.
+            if dropped.is_multiple_of(100) {
+                eprintln!(
+                    "rusty-mux-server: tailnet: too many lookups, closing {peer} ({dropped} closed before)"
+                );
+            }
+            dropped += 1;
+            continue;
+        }
+        looking.set(looking.get() + 1);
+        let (state, guests, looking) = (state.clone(), guests.clone(), looking.clone());
+        let (whois, allow) = (tailnet.whois.clone(), tailnet.allow.clone());
+        rusty_tokio::task::spawn_local(async move {
+            let who = whois.principal(peer).await;
+            looking.set(looking.get() - 1);
+            let principal = match who {
+                Ok(principal) if allow.borrow().names(&principal) => principal,
+                Ok(principal) => {
+                    return eprintln!("rusty-mux-server: tailnet: refusing {}", principal.id());
+                }
+                Err(err) => return eprintln!("rusty-mux-server: tailnet: {peer}: {err}"),
+            };
+            let (rd, wr) = stream.into_split();
+            let who = principal.clone();
+            conn::run(
+                state,
+                rd,
+                wr,
+                principal,
+                Transport::Socket,
+                move |_, cancel| guests.add(who, cancel),
+            )
+            .await;
+        });
+    }
+}
+
 /// How a shared server is set up.
 pub struct Sharing {
     /// The allowlist file.
     pub allow: PathBuf,
+    /// A listener for tailnet peers, if any.
+    pub tailnet: Option<Tailnet>,
 }
 
 /// Reads the list at `path` on a thread of its own: a file on a hung file
@@ -200,7 +318,12 @@ pub async fn serve_shared(
     stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
     let allow = Rc::new(RefCell::new(load(sharing.allow.clone()).await?));
+    let tailnet = sharing.tailnet.map(|mut tailnet| {
+        tailnet.allow = allow.clone();
+        tailnet
+    });
     let guests = Guests::default();
+    *guests.tailnet.borrow_mut() = tailnet;
     guests.revoke_unlisted(&allow.borrow());
     let owner = rusty_libc::process::geteuid();
     let admitting = allow.clone();
