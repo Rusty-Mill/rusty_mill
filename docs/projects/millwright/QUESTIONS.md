@@ -5,9 +5,9 @@ each with a recommendation. An answered question moves to [DECISIONS.md](DECISIO
 with the date and where he said it, and its row is removed here. Nothing below has been
 acted on.
 
-## Answer these seven first
+## Answer these six first
 
-1. **L2:** authorise Let Em Loose's deployment and confirm the host. This gets a smoke run, the first time the system runs end to end. (L1, committing the first milestone, answered 2026-11-12; see DECISIONS.md lel-m1-commit.)
+1. ~~**L2:** authorise Let Em Loose's deployment and confirm the host.~~ Answered 2026-11-13; see DECISIONS.md l2-baileyai-host.
 2. ~~**M1:** approve the minimal role fix on Mill Board.~~ Answered 2026-11-12; see DECISIONS.md m1-role-fix.
 3. ~~**O2:** give Claude its own GitHub identity.~~ Answered 2026-11-12; see DECISIONS.md o2-claude-github-app.
 4. **P1:** decide Portfolio Intelligence's shorter MVP path. Nothing there is dispatchable until then.
@@ -19,11 +19,10 @@ acted on.
 
 These are also tracked by `let-em-loose-expert`; its pack is the authority for that project.
 
-L1, L7 and L8 are answered (2026-11-12); see DECISIONS.md lel-m1-commit, lel-lost-designs, lel-m1-design-batch.
+L1, L7 and L8 are answered (2026-11-12) and L2 (2026-11-13); see DECISIONS.md lel-m1-commit, lel-lost-designs, lel-m1-design-batch, l2-baileyai-host.
 
 | # | Question | Recommendation |
 | --- | --- | --- |
-| L2 | Authorise deploying the protocol host, orch and the inbox, and confirm the host? The record says BaileyAi; one card proposes probing MS-01 first. | Yes, on BaileyAi. Skip the probe unless BaileyAi lacks headroom. |
 | L3 | Is the smoke run (one toy claim, local model, no builders, no spend) the first target, ahead of the full experiment? | Yes. |
 | L4 | Approve the first live run and its spend ceiling? Today's rule is flat-rate subscriptions and local models only. | Flat-rate and local only for the first run; revisit paid calls after it. |
 | L5 | Which credential lets the Claude CLI work inside the builder jail, which is meant to hold no secrets? This blocks the builder work. | Nano's call. Simplest: a subscription login on a dedicated account used only by this jail. |
