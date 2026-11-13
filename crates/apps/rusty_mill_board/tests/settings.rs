@@ -405,6 +405,7 @@ fn roles_are_edited_live_and_written_to_their_file() {
             "review",
             "merge",
             "close",
+            "record",
             "project",
             "admin"
         ])

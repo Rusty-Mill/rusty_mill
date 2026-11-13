@@ -75,6 +75,17 @@ fn valid_actor(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// The name an agent acts under: its credential's `base`, optionally `base/label` to tell
+/// instances sharing the credential apart. The label changes only the name recorded in
+/// claims and history, never the role, capabilities or projects.
+pub fn instance_name(base: &str, claimed: &str) -> Option<String> {
+    if claimed == base {
+        return Some(claimed.to_owned());
+    }
+    let label = claimed.strip_prefix(base)?.strip_prefix('/')?;
+    valid_actor(label).then(|| claimed.to_owned())
+}
+
 /// A fresh random token: 24 bytes of OS randomness as hex.
 ///
 /// # Errors
@@ -309,6 +320,25 @@ mod tests {
 
     fn entry(token: &str, role: &str) -> String {
         format!(r#"[{{"token":"{token}","actor":"claude","role":"{role}"}}]"#)
+    }
+
+    #[test]
+    fn instance_names_extend_only_their_own_credential() {
+        assert_eq!(instance_name("claude", "claude").as_deref(), Some("claude"));
+        assert_eq!(
+            instance_name("claude", "claude/t-1").as_deref(),
+            Some("claude/t-1")
+        );
+        for bad in [
+            "claude/",
+            "claude/a/b",
+            "claude/-x",
+            "claudex",
+            "codex/t-1",
+            "",
+        ] {
+            assert_eq!(instance_name("claude", bad), None, "{bad}");
+        }
     }
 
     #[test]

@@ -118,6 +118,9 @@ pub enum Capability {
     /// outside the board's flow (the PR was reviewed and merged on the forge).
     /// Also archives and restores Done cards.
     Close,
+    /// `Close`, narrowed: record as Done a card whose work already merged, but only when the
+    /// card carries a GitHub pull request link as evidence. Never archives or restores.
+    Record,
     /// Add a project (never change or remove one).
     Project,
     /// Change the board's settings: agents and their credentials, repositories, projects, roles.
@@ -126,7 +129,7 @@ pub enum Capability {
 
 impl Capability {
     /// Every capability, in display order.
-    pub const ALL: [Capability; 10] = [
+    pub const ALL: [Capability; 11] = [
         Capability::Triage,
         Capability::Plan,
         Capability::Architect,
@@ -135,6 +138,7 @@ impl Capability {
         Capability::Review,
         Capability::Merge,
         Capability::Close,
+        Capability::Record,
         Capability::Project,
         Capability::Admin,
     ];
@@ -153,6 +157,9 @@ impl Capability {
             Capability::Merge => "Move reviewed cards to Done.",
             Capability::Close => {
                 "Move Building or QA cards whose PR already merged straight to Done, and archive or restore Done cards."
+            }
+            Capability::Record => {
+                "Like Close for recording merged work, but only on a card with a GitHub pull request link as evidence. Cannot archive or restore."
             }
             Capability::Project => "Add a project (never change or remove one).",
             Capability::Admin => "Change these settings: agents, projects, roles, GitHub, apps.",
@@ -410,6 +417,37 @@ fn evidence_link_ok(link: &str) -> bool {
     (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
         && !host.is_empty()
         && !host.starts_with(':')
+}
+
+/// Whether `link` names a GitHub pull request: `https://github.com/<owner>/<repo>/pull/<n>`,
+/// with `<n>` a positive number without leading zeros, optionally followed by one of `/files`,
+/// `/commits` or `/checks`, then a query or fragment. Anything else after the number, or a `.`
+/// or `..` segment, is refused, so the link cannot be walked to another page. A shape check
+/// only; it does not ask GitHub whether the pull request merged.
+pub fn is_pull_link(link: &str) -> bool {
+    let Some(rest) = link.strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let path = rest.split(['?', '#']).next().unwrap_or_default();
+    let plain = |s: &str| {
+        s != "."
+            && s != ".."
+            && !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    };
+    let number =
+        |n: &str| !n.starts_with('0') && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+    let mut seg = path.split('/');
+    let head = (seg.next(), seg.next(), seg.next(), seg.next());
+    let tail = seg.next();
+    let more = seg.next().is_some();
+    matches!(
+        head,
+        (Some(owner), Some(repo), Some("pull"), Some(n))
+            if plain(owner) && plain(repo) && number(n)
+    ) && !more
+        && matches!(tail, None | Some("files" | "commits" | "checks"))
 }
 
 /// Where a project stands. Absent means [`ProjectStatus::Active`].
@@ -1030,6 +1068,28 @@ impl Card {
         }
     }
 
+    /// Whether the card carries a GitHub pull request link as evidence.
+    pub fn has_pull_evidence(&self) -> bool {
+        self.evidence.iter().any(|l| is_pull_link(l))
+    }
+
+    /// `by`, counted as holding `Close` for a move to Done when it holds `Record` (and not
+    /// `Close`), this card carries a pull request link, and the card is in a work column:
+    /// recording merged work, narrowed. The flag says that this happened.
+    fn recorder<'a>(&self, flow: &Workflow, by: &'a Actor, to: &Column) -> (Cow<'a, Actor>, bool) {
+        let applies = *to == Column::DONE
+            && by.caps.contains(&Capability::Record)
+            && !by.caps.contains(&Capability::Close)
+            && flow.kind(&self.column) == Some(Kind::Work)
+            && self.has_pull_evidence();
+        if !applies {
+            return (Cow::Borrowed(by), false);
+        }
+        let mut closer = by.clone();
+        closer.caps.insert(Capability::Close);
+        (Cow::Owned(closer), true)
+    }
+
     /// Move to `to` along `flow`. The claim is cleared on arrival, so the next stage's
     /// worker claims it afresh. Leaving a worked column ([`Kind::Work`]) requires holding
     /// the claim, unless the actor holds `Triage` (the human override).
@@ -1044,6 +1104,8 @@ impl Card {
         by: &Actor,
         now_ms: i64,
     ) -> Result<Self, BoardError> {
+        let (by, _) = self.recorder(flow, by, to);
+        let by = &*by;
         if let Some(ts) = flow.transition(&self.column, to)? {
             check_any(&ts, by)?;
         }
@@ -1087,6 +1149,12 @@ impl Card {
         }
         if by.caps.is_empty() {
             return Err(BoardError::Invalid("moving a card needs some capability"));
+        }
+        let (by, recording) = self.recorder(flow, by, to);
+        let by = &*by;
+        // Recording merged work is the claim holder's move, even with the rules off.
+        if recording && self.claim.as_deref() != Some(&by.name) {
+            return Err(BoardError::NotClaimant);
         }
         // Gates hold with the rules off. A listed move with a gated way of making it needs one
         // of its ways (a gated merge, or the `close` beside it); a move that jumps over a gate
@@ -1783,6 +1851,129 @@ mod tests {
         );
         assert_eq!(c.release(&other, 2), Err(BoardError::Claimed("dev".into())));
         assert!(c.release(&dev, 2).expect("release").claim.is_none());
+    }
+
+    #[test]
+    fn only_a_github_pull_request_link_counts_as_pull_evidence() {
+        for ok in [
+            "https://github.com/Rusty-Mill/rusty_mill/pull/1648",
+            "https://github.com/a/b/pull/1/files",
+            "https://github.com/a/b/pull/1/commits?x=1",
+            "https://github.com/a/b/pull/1/checks",
+            "https://github.com/a.b/c_d/pull/7#issuecomment-1",
+            "https://github.com/a/b/pull/7?diff=split",
+        ] {
+            assert!(is_pull_link(ok), "{ok}");
+        }
+        for bad in [
+            "https://github.com/a/b/issues/1",
+            "https://github.com/a/b/pull/",
+            "https://github.com/a/b/pull/x1",
+            "https://github.com/a/b/pull/0",
+            "https://github.com/a/b/pull/007",
+            "https://github.com/a/b/pull/1/../../issues/5",
+            "https://github.com/a/b/pull/1/issues/5",
+            "https://github.com/a/b/pull/1/files/extra",
+            "https://github.com/./b/pull/1",
+            "https://github.com/a/../pull/1",
+            "https://github.com.evil.example/a/b/pull/1",
+            "https://evil.example/https://github.com/a/b/pull/1",
+            "http://github.com/a/b/pull/1",
+            "https://github.com/a/b",
+            "",
+        ] {
+            assert!(!is_pull_link(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn record_moves_to_done_only_with_a_pull_request_link() {
+        let rec = actor("rec", &[Capability::Build, Capability::Record]);
+        let pr = vec!["https://github.com/a/b/pull/9".to_owned()];
+        for from in [Column::BUILDING, Column::QA] {
+            let mut c = card();
+            c.column = from;
+            let c = c.claim(&rec, 1).expect("claim");
+            assert_eq!(
+                c.move_to(&flow(), &Column::DONE, &rec, 2),
+                Err(BoardError::Forbidden(Capability::Close)),
+                "no evidence"
+            );
+            let issue = c
+                .add_evidence(&["https://github.com/a/b/issues/9".to_owned()], 2)
+                .expect("evidence");
+            assert_eq!(
+                issue.move_to(&flow(), &Column::DONE, &rec, 3),
+                Err(BoardError::Forbidden(Capability::Close)),
+                "an issue link is not a pull request"
+            );
+            let with_pr = c.add_evidence(&pr, 2).expect("evidence");
+            assert_eq!(
+                with_pr
+                    .move_to(&flow(), &Column::DONE, &rec, 3)
+                    .expect("record")
+                    .column,
+                Column::DONE
+            );
+            assert_eq!(
+                with_pr
+                    .move_freely(&flow(), &Column::DONE, &rec, 3)
+                    .expect("record with the rules off")
+                    .column,
+                Column::DONE
+            );
+            let bystander = actor("x", &[Capability::Build]);
+            assert_eq!(
+                with_pr.move_to(&flow(), &Column::DONE, &bystander, 3),
+                Err(BoardError::Forbidden(Capability::Close)),
+                "the link alone grants nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn record_needs_a_work_column_and_the_claim() {
+        let rec = actor("rec", &[Capability::Build, Capability::Record]);
+        let other = actor("other", &[Capability::Build]);
+        let pr = vec!["https://github.com/a/b/pull/9".to_owned()];
+        // An admin-edited workflow that lists `close` on moves out of queue and blocked columns.
+        let mut raw = serde_json::to_value(flow()).expect("serialize");
+        for from in ["backlog", "ready", "blocked"] {
+            raw["transitions"]
+                .as_array_mut()
+                .expect("transitions")
+                .push(serde_json::json!({"from": from, "to": "done", "cap": "close"}));
+        }
+        let wide: Workflow = serde_json::from_value(raw).expect("workflow");
+        for from in [Column::BACKLOG, Column::READY, Column::BLOCKED] {
+            let mut c = card();
+            c.column = from;
+            let c = c.add_evidence(&pr, 1).expect("evidence");
+            assert_eq!(
+                c.move_to(&wide, &Column::DONE, &rec, 2),
+                Err(BoardError::Forbidden(Capability::Close)),
+                "record never closes a card outside a work column"
+            );
+        }
+        let mut c = card();
+        c.column = Column::BUILDING;
+        let held = c
+            .claim(&other, 1)
+            .expect("claim")
+            .add_evidence(&pr, 1)
+            .expect("evidence");
+        for rules_on in [true, false] {
+            let moved = if rules_on {
+                held.move_to(&flow(), &Column::DONE, &rec, 2)
+            } else {
+                held.move_freely(&flow(), &Column::DONE, &rec, 2)
+            };
+            assert_eq!(
+                moved,
+                Err(BoardError::NotClaimant),
+                "rules on: {rules_on}; another agent's claimed card"
+            );
+        }
     }
 
     #[test]
