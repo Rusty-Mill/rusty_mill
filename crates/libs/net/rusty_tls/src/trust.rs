@@ -6,6 +6,7 @@ use rustls::{ClientConfig, ConfigBuilder, RootCertStore};
 
 use crate::danger::NoServerCertVerification;
 use crate::error::Error;
+use crate::pin::PinnedFingerprintVerifier;
 use crate::provider::ring_provider;
 
 /// The entry point every `ClientConfig` in this file builds from, instead
@@ -91,6 +92,16 @@ pub enum TrustPolicy {
         /// DER-encoded CRLs to check presented certificates against.
         crls: Vec<CertificateRevocationListDer<'static>>,
     },
+    /// Accept exactly the server whose own certificate has one of these
+    /// SHA-256 fingerprints (of its DER encoding), like SSH's `known_hosts`:
+    /// the pin is the identity, so there is no chain to build, no expiry or
+    /// hostname check, and a self-signed certificate works. The handshake
+    /// signature is still verified against the pinned certificate, so holding
+    /// the (public) certificate is not enough to impersonate its server.
+    ///
+    /// An empty list is [`Error::NoTrustAnchors`]: it would trust nothing.
+    /// Not supported by the hand-rolled engine.
+    PinnedFingerprints(Vec<[u8; 32]>),
 }
 
 /// Load the OS trust anchors as raw DER, from whichever `platform`
@@ -192,6 +203,15 @@ fn client_config_builder(
         TrustPolicy::DangerNoVerification => client_config_entry()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoServerCertVerification::new())),
+        TrustPolicy::PinnedFingerprints(pins) => {
+            if pins.is_empty() {
+                return Err(Error::NoTrustAnchors);
+            }
+            let verifier = PinnedFingerprintVerifier::new(pins.clone(), ring_provider());
+            client_config_entry()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(verifier))
+        }
         TrustPolicy::PinnedAnchorsWithRevocation { roots, crls } => {
             let mut root_store = RootCertStore::empty();
             for cert in roots {
