@@ -56,4 +56,12 @@ in [docs/projects/millwright/DECISIONS.md](docs/projects/millwright/DECISIONS.md
 - A deliberate experiment is allowed when it is labelled `experiment`. It ends with a
   harvest: a one-page conclusion in remind-me.
 
+## Board identity: label your instance
+
+Agents that share one Mill Board credential or connector (for example every cloud session as
+`claude-cloud`) pass `actor` as `<credential>/<label>`, label = your thread or session id, on
+every write: `claude-cloud/7x5uhx`. Claims, history and comments then tell instances apart.
+The credential still fixes your role and projects; the label is attribution, not authority.
+Use one label for the whole task, since a claim only matches the exact name that made it.
+
 Tickets: [issue template](docs/agents/issue-tracker.md). The tooling lives in `.claude/`.
