@@ -69,5 +69,5 @@ Asked 2026-11-13. Nano answered "Recommend" to all three: (1) tailnet path (C27)
 Source: D235; D236; D237; `docs/projects/mux/TLS-LISTENER.md`.
 
 ## What did Nano answer on the six MESH.md questions (C80, own mesh)?
-Asked 2026-11-13. Nano concurred with the recommendations, with comments on 2 (Tailscale stays a supported option) and 6 (Windows is a priority): spike A go (D247); Option A, Tailscale kept (D248); lift non-goal after spike A, own hub only (D249); `ts-hub` crate (D250); keep boringtun (D251); Windows priority, spike A-W needs its own go (D252).
-Source: D247-D252; `docs/projects/mux/MESH.md`.
+Asked 2026-11-13. Nano concurred with the recommendations, with comments on 2 (Tailscale stays a supported option) and 6 (Windows is a priority): spike A go (D248); Option A, Tailscale kept (D249); lift non-goal after spike A, own hub only (D250); `ts-hub` crate (D251); keep boringtun (D252); Windows priority, spike A-W needs its own go (D253).
+Source: D248-D253; `docs/projects/mux/MESH.md`.

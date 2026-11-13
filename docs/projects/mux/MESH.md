@@ -4,7 +4,7 @@ Status: Proposed (2026-11-13). Nano answered the six questions below on 2026-11-
 recommendations concurred, with two comments, recorded under "Answers"); each build step still
 needs its own go (D37). Docs only. Nothing here is built, and starting any stage needs
 Nano's go (D37). Answers Nano's question: "Instead of tailnet, can we develop our own
-meshnet, tailnet-like, and have it be part of the mux server?" Decision rows D241-D252 are
+meshnet, tailnet-like, and have it be part of the mux server?" Decision rows D242-D253 are
 **Proposed** until Nano accepts them on the PR.
 
 ## Short answer
@@ -30,7 +30,7 @@ Each move stands alone. Move 1 is days of work; move 2 is weeks and is the real 
 ## Shape: one server, many clients
 
 Like Tailscale, the mesh has a **server side** and **clients**. The server side is the
-**hub**, shipped with the mux server (`rusty-mux-server --hub`, D244). It has two jobs that
+**hub**, shipped with the mux server (`rusty-mux-server --hub`, D245). It has two jobs that
 scale differently:
 
 - **Coordinator:** who is in the mesh, their keys and addresses. One active per mesh.
@@ -201,19 +201,19 @@ Estimates are for an agent with review turnaround, not calendar time.
 - **Fully-owned WireGuard** is a larger job than the rest of this note combined and is not
   needed to meet the goal. It stays a later spike.
 
-## Decisions (Proposed, D241-D252)
+## Decisions (Proposed, D242-D253)
 
 The `ts:` and `ts-node:` principals are #1665's (open, not yet in the pack). Rows for the pack (`docs/projects/rusty_term/handoff/DECISIONS.md`) are appended by
-`rusty-term-expert`; IDs are reserved here so parallel PRs do not clash (D240 is #1665's; renumber if it lands differently).
+`rusty-term-expert`; IDs are reserved here so parallel PRs do not clash (D240-D241 are #1665's).
 
 | ID | Proposal |
 |---|---|
-| D241 | Build the mesh as stages 1-3 above: embedded node, then first-party hub, then direct paths |
-| D242 | The mesh data plane reuses `rusty_tailscale` (`ts-net`, boringtun); no new third-party dependency in any stage |
-| D243 | The hub speaks the ts2021 subset the embedded node speaks (Option A); this lifts `rusty_tailscale`'s "no control server" non-goal for the hub only |
-| D244 | The hub is a role of the mux codebase, not a new service: a library launched by `rusty-mux-server --hub` and by `ts-daemon hub`; the crate itself is a separate owner gate |
-| D245 | Spikes A, B, C with the pass/fail tests above; B starts only after A passes |
-| D246 | Mesh peers use TCP streams; mux UDP transport (C13) is not run inside the mesh |
+| D242 | Build the mesh as stages 1-3 above: embedded node, then first-party hub, then direct paths |
+| D243 | The mesh data plane reuses `rusty_tailscale` (`ts-net`, boringtun); no new third-party dependency in any stage |
+| D244 | The hub speaks the ts2021 subset the embedded node speaks (Option A); this lifts `rusty_tailscale`'s "no control server" non-goal for the hub only |
+| D245 | The hub is a role of the mux codebase, not a new service: a library launched by `rusty-mux-server --hub` and by `ts-daemon hub`; the crate itself is a separate owner gate |
+| D246 | Spikes A, B, C with the pass/fail tests above; B starts only after A passes |
+| D247 | Mesh peers use TCP streams; mux UDP transport (C13) is not run inside the mesh |
 
 ## Answers (Nano, 2026-11-13)
 
