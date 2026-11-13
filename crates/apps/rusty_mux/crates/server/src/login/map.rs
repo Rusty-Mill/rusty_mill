@@ -4,11 +4,14 @@
 //! One rule per line, `PRINCIPAL ACCOUNT`, separated by spaces or tabs;
 //! `#` starts a comment, and blank lines are skipped. `PRINCIPAL` is
 //! `uid:N`, `user:NAME` or `*` (anyone the others do not name); `ACCOUNT`
-//! is an account name, or `=` for the principal's own account:
+//! is an account name, or `=` for the principal's own account. A tailnet
+//! peer (C27) is named `ts:LOGIN` or `ts-node:NAME`, and only to a named
+//! account: it has no account of its own, and `*` never matches it:
 //!
 //! ```text
 //! uid:1000   alice
 //! user:bob   =
+//! ts:carol@example.com  carol
 //! *          guest
 //! ```
 //!
@@ -28,6 +31,8 @@ pub(crate) const MAX_ACCOUNT: usize = 32;
 pub(crate) struct AccountMap {
     uids: HashMap<u32, Target>,
     users: HashMap<String, Target>,
+    /// Tailnet principals by id (`ts:LOGIN`, `ts-node:NAME`) to an account.
+    tailnet: HashMap<String, String>,
     anyone: Option<Target>,
 }
 
@@ -85,7 +90,15 @@ impl AccountMap {
     }
 
     fn add(&mut self, principal: &str, target: Target) -> Result<(), String> {
-        let fresh = if principal == "*" {
+        let fresh = if principal.starts_with("ts:") || principal.starts_with("ts-node:") {
+            let Target::Named(account) = target else {
+                return Err(format!(
+                    "{principal}: a tailnet peer has no account of its own, name one"
+                ));
+            };
+            tailnet_id(principal)?;
+            self.tailnet.insert(principal.to_owned(), account).is_none()
+        } else if principal == "*" {
             self.anyone.replace(target).is_none()
         } else if let Some(uid) = principal.strip_prefix("uid:") {
             let uid = uid.parse().map_err(|_| format!("{principal}: not a uid"))?;
@@ -96,13 +109,25 @@ impl AccountMap {
             }
             self.users.insert(user.to_owned(), target).is_none()
         } else {
-            return Err(format!("{principal}: not `uid:N`, `user:NAME` or `*`"));
+            return Err(format!(
+                "{principal}: not `uid:N`, `user:NAME`, `ts:LOGIN`, `ts-node:NAME` or `*`"
+            ));
         };
         if fresh {
             Ok(())
         } else {
             Err(format!("{principal} has a rule already"))
         }
+    }
+
+    /// The account for the tailnet principal `id`, if a rule names it: never
+    /// through `*`, and always exact, so root is reachable by naming it.
+    pub(crate) fn route_tailnet(&self, id: &str) -> Option<Route> {
+        Some(Route {
+            account: self.tailnet.get(id)?.clone(),
+            exact: true,
+            own: false,
+        })
     }
 
     /// The account for the principal `uid`, whose account name is `user`
@@ -123,6 +148,22 @@ impl AccountMap {
             exact,
             own,
         })
+    }
+}
+
+/// `id` as a tailnet principal: `ts:` or `ts-node:` and a name with no
+/// space, no `#` and at most [`rusty_mux_core::MAX_NAME`] bytes.
+fn tailnet_id(id: &str) -> Result<(), String> {
+    let name = id.split_once(':').map_or("", |(_, name)| name);
+    let ok = !name.is_empty()
+        && id.len() <= rusty_mux_core::MAX_NAME
+        && !id
+            .chars()
+            .any(|c| c.is_whitespace() || c == '#' || c.is_control());
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("{id}: not a tailnet principal"))
     }
 }
 
@@ -150,13 +191,13 @@ pub(crate) fn is_account_name(name: &str) -> bool {
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b))
 }
 
-/// Whether `route`, taken by the principal `peer_uid`, may reach the
-/// account whose uid is `account_uid`: root (uid 0) only through a rule
-/// naming the principal, and `=` only to an account of the principal's own
-/// uid. The name `=` looked up can belong to another uid when two account
+/// Whether `route`, taken by the principal `peer_uid` (`None` for a tailnet
+/// peer, which has no uid), may reach the account whose uid is
+/// `account_uid`: root (uid 0) only through a rule naming the principal,
+/// and `=` only to an account of the principal's own uid. The name `=` looked up can belong to another uid when two account
 /// databases (files and LDAP, say) both have it.
-pub(crate) fn admits(route: &Route, peer_uid: u32, account_uid: u32) -> bool {
-    (account_uid != 0 || route.exact) && (!route.own || account_uid == peer_uid)
+pub(crate) fn admits(route: &Route, peer_uid: Option<u32>, account_uid: u32) -> bool {
+    (account_uid != 0 || route.exact) && (!route.own || peer_uid == Some(account_uid))
 }
 
 #[cfg(test)]
@@ -201,15 +242,19 @@ mod tests {
     fn root_comes_only_through_a_rule_that_names_it() {
         let anyone = AccountMap::parse("* =\n").unwrap();
         let via_star = anyone.route(0, "root").unwrap();
-        assert!(!admits(&via_star, 0, 0), "* = let root in");
+        assert!(!admits(&via_star, Some(0), 0), "* = let root in");
         let to_root = AccountMap::parse("* root\n").unwrap();
-        assert!(!admits(&to_root.route(1000, "alice").unwrap(), 1000, 0));
+        assert!(!admits(
+            &to_root.route(1000, "alice").unwrap(),
+            Some(1000),
+            0
+        ));
         let named = AccountMap::parse("uid:0 root\nuser:alice root\n").unwrap();
-        assert!(admits(&named.route(0, "root").unwrap(), 0, 0));
-        assert!(admits(&named.route(1000, "alice").unwrap(), 1000, 0));
+        assert!(admits(&named.route(0, "root").unwrap(), Some(0), 0));
+        assert!(admits(&named.route(1000, "alice").unwrap(), Some(1000), 0));
         // Anyone else may still reach an ordinary account through `*`.
         let alice = anyone.route(1000, "alice").unwrap();
-        assert!(admits(&alice, 1000, 1000));
+        assert!(admits(&alice, Some(1000), 1000));
     }
 
     /// `=` means the principal's own account, not whichever account has
@@ -220,12 +265,57 @@ mod tests {
         for text in ["* =\n", "user:bob =\n", "uid:5000 =\n"] {
             let map = AccountMap::parse(text).unwrap();
             let route = map.route(5000, "bob").unwrap();
-            assert!(!admits(&route, 5000, 1001), "{text}: a shadowed bob got in");
-            assert!(admits(&route, 5000, 5000), "{text}");
+            assert!(
+                !admits(&route, Some(5000), 1001),
+                "{text}: a shadowed bob got in"
+            );
+            assert!(admits(&route, Some(5000), 5000), "{text}");
         }
         // A named account is a grant, whatever its uid.
         let named = AccountMap::parse("uid:5000 deploy\n").unwrap();
-        assert!(admits(&named.route(5000, "bob").unwrap(), 5000, 1001));
+        assert!(admits(&named.route(5000, "bob").unwrap(), Some(5000), 1001));
+    }
+
+    #[test]
+    fn a_tailnet_rule_names_an_account_and_star_never_matches_a_tailnet_peer() {
+        let map = AccountMap::parse("ts:carol@example.com carol\nts-node:box.tail root\n* guest\n")
+            .unwrap();
+        let carol = map.route_tailnet("ts:carol@example.com").unwrap();
+        assert_eq!(
+            (carol.account.as_str(), carol.exact, carol.own),
+            ("carol", true, false)
+        );
+        // Root only through a rule that names the peer, which this does.
+        let box_ = map.route_tailnet("ts-node:box.tail").unwrap();
+        assert!(admits(&box_, None, 0));
+        // Nobody else, and `*` is not a way in.
+        assert_eq!(map.route_tailnet("ts:mallory@example.com"), None);
+        assert_eq!(
+            AccountMap::parse("* guest\n")
+                .unwrap()
+                .route_tailnet("ts:a"),
+            None
+        );
+        // A tailnet name is never read as a local user.
+        assert_eq!(
+            route(&map, 1000, "carol@example.com"),
+            Some(("guest".into(), false))
+        );
+    }
+
+    #[test]
+    fn a_tailnet_rule_must_be_well_formed_and_cannot_be_own() {
+        for text in [
+            "ts:carol =",
+            "ts-node:box =",
+            "ts: carol",
+            "ts: =",
+            "ts:a b c",
+            "ts:carol@example.com carol\nts:carol@example.com bob",
+            "ts:Carol Smith carol",
+        ] {
+            AccountMap::parse(text).expect_err(text);
+        }
     }
 
     #[test]

@@ -202,6 +202,25 @@ impl Tailnet {
     }
 }
 
+impl Tailnet {
+    /// [`Tailnet::new`] without the address check, for tests that listen on
+    /// loopback. The server's own start-up never calls it.
+    #[doc(hidden)]
+    pub fn unchecked(listener: TcpListener, whois: Whois) -> Self {
+        Self {
+            listener,
+            whois,
+            allow: Rc::default(),
+        }
+    }
+
+    /// The listener and the `tailscaled` client, for a front door (C27)
+    /// that applies its own map instead of an allowlist.
+    pub(crate) fn into_parts(self) -> (TcpListener, Whois) {
+        (self.listener, self.whois)
+    }
+}
+
 /// Peers being looked up at once; more are closed unlooked-up.
 const LOOKUPS: usize = 16;
 /// How long the tailnet listener waits after a failed accept.
