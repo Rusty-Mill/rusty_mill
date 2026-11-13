@@ -38,11 +38,22 @@ pub struct Mux {
     pub(crate) blocks: BTreeMap<BlockId, Block>,
     clients: BTreeMap<ClientId, Client>,
     events: Vec<Event>,
+    /// The server's own account on a shared server (C26, D232): it scopes
+    /// input leases to the principal that made the block.
+    shared_account: Option<Principal>,
 }
 
 impl Mux {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Makes this a shared server run by `account` (C26, D232): an open
+    /// block's input lease goes only to a client of the principal that
+    /// created its session (`account` for one with no creator) or to one
+    /// that principal granted. Owner-only blocks keep their own rule.
+    pub fn share_leases(&mut self, account: Principal) {
+        self.shared_account = Some(account);
     }
 
     /// Returns the queued events, oldest first, and clears the queue.
@@ -1010,13 +1021,46 @@ impl Mux {
         }
     }
 
-    /// Succeeds when `owner` owns `block` and may grant its lease.
+    /// Succeeds when `owner` owns `block` and may grant its lease; on a
+    /// shared server (D232) also, for a block with no owner, a client of
+    /// the principal that created its session.
     fn authorize_granter(&self, owner: ClientId, block: BlockId) -> Result<(), Error> {
         let target = self.blocks.get(&block).ok_or(Error::UnknownBlock(block))?;
         if target.owner.is_none() {
-            return Err(Error::Unowned(block));
+            if self.shared_account.is_none() {
+                return Err(Error::Unowned(block));
+            }
+            return match self.is_creator(owner, block) {
+                true => Ok(()),
+                false => Err(Error::NotOwner {
+                    client: owner,
+                    block,
+                }),
+            };
         }
         self.authorize_owner(owner, block)
+    }
+
+    /// Whether `client` is of the principal that created `block`'s session
+    /// (the server's account for a session with no creator, D164).
+    fn is_creator(&self, client: ClientId, block: BlockId) -> bool {
+        let Some(asker) = self.clients.get(&client).map(|c| c.principal.id()) else {
+            return false;
+        };
+        let creator = self
+            .blocks
+            .get(&block)
+            .and_then(|b| self.windows.get(&b.window))
+            .and_then(|w| self.sessions.get(&w.session))
+            .and_then(Session::creator)
+            .or(self.shared_account.as_ref());
+        creator.is_some_and(|c| c.id() == asker)
+    }
+
+    /// Whether the open `block` takes `client`'s lease without a grant:
+    /// always, but on a shared server only for its creator's principal.
+    fn may_lease_here(&self, client: ClientId, block: BlockId) -> bool {
+        self.shared_account.is_none() || self.is_creator(client, block)
     }
 
     /// Removes `client`'s grant on `block`, if any, and the lease it holds
@@ -1087,9 +1131,11 @@ impl Mux {
             return Err(Error::Orphaned(block));
         }
         let owner = target.owner.as_ref().and_then(|o| o.client);
-        let gated = target.input == InputMode::OwnerOnly
-            && owner != Some(client)
-            && !target.grants.contains_key(&client);
+        let granted = target.grants.contains_key(&client);
+        let gated = match target.input {
+            InputMode::OwnerOnly => owner != Some(client) && !granted,
+            InputMode::Open => !granted && !self.may_lease_here(client, block),
+        };
         if gated {
             return Err(Error::InputGated(block));
         }

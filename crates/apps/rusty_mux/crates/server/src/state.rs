@@ -581,6 +581,12 @@ impl State {
         self.account = Some(account);
     }
 
+    /// Makes this a shared server (C26, D232): input leases go by the
+    /// principal that created a block's session; see [`Mux::share_leases`].
+    pub(crate) fn share_leases(&mut self, account: Principal) {
+        self.mux.share_leases(account);
+    }
+
     /// Lets clients of the server's own account ([`State::serve_as`]) stop
     /// it with `shutdown`; the receiver resolves on the first such request.
     pub(crate) fn stop_on_request(&mut self) -> oneshot::Receiver<()> {

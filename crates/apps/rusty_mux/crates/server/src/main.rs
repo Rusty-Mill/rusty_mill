@@ -27,6 +27,11 @@
 //! association, and its clients, last `--udp-idle` seconds (a day unless
 //! given).
 //!
+//! `rusty-mux-server --shared ALLOW [--config FILE] [--state DIR | --no-state]
+//! <socket>` (Linux) is one server that also serves the users `ALLOW` lists
+//! (C26 shared mode); its socket is open to every local user, and the list
+//! decides. SIGHUP reads the list again. See `shared.rs`.
+//!
 //! `rusty-mux-server --login MAP [--runtime DIR] <socket>` runs login
 //! mode's front door instead (Linux, normally as root): any local user may
 //! connect, and `MAP` says which account each may use; each account gets a
@@ -69,7 +74,8 @@ use rusty_tokio::{Builder, LocalOptions};
 
 const USAGE: &str = "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] [--config FILE]
                         [--state DIR | --no-state] [--idle-exit SECS] [<socket>]
-       rusty-mux-server --login MAP [--runtime DIR] <socket>";
+       rusty-mux-server --login MAP [--runtime DIR] <socket>
+       rusty-mux-server --shared ALLOW [--config FILE] [--state DIR | --no-state] <socket>";
 /// Where login mode puts each account's server unless `--runtime` says.
 const RUNTIME: &str = "/run/rusty-mux";
 /// The UDP port when `--udp` names an address only.
@@ -112,6 +118,8 @@ enum Mode {
     Forwarded(u32),
     /// The front door: the map file and the runtime directory.
     Login { map: PathBuf, runtime: PathBuf },
+    /// One server that also serves the users this allowlist names (C26).
+    Shared(PathBuf),
 }
 
 fn main() -> ExitCode {
@@ -141,6 +149,7 @@ fn main() -> ExitCode {
 fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let (mut socket, mut udp, mut idle, mut config) = (None, None, UDP_IDLE, None);
     let (mut login, mut runtime, mut forwarded_by) = (None, None, None);
+    let mut shared = None;
     let mut state = StateDir::Default;
     let mut idle_exit = None;
     while let Some(arg) = args.next() {
@@ -158,6 +167,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             Some("--state") => state = StateDir::At(PathBuf::from(value("--state")?)),
             Some("--no-state") => state = StateDir::Off,
             Some("--login") => login = Some(PathBuf::from(value("--login")?)),
+            Some("--shared") => shared = Some(PathBuf::from(value("--shared")?)),
             Some("--runtime") => runtime = Some(PathBuf::from(value("--runtime")?)),
             Some("--forwarded-by") => {
                 let uid = value("--forwarded-by")?;
@@ -173,6 +183,29 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             _ if socket.is_some() => return Err("one socket only".into()),
             _ => socket = Some(PathBuf::from(arg)),
         }
+    }
+    if let Some(allow) = shared {
+        if login.is_some() || runtime.is_some() || forwarded_by.is_some() {
+            return Err("--shared is a mode of its own".into());
+        }
+        if udp.is_some() || idle_exit.is_some() {
+            return Err("shared mode takes no --udp or --idle-exit yet".into());
+        }
+        if socket.is_none() {
+            return Err("shared mode needs a socket: other users must find it".into());
+        }
+        if !cfg!(target_os = "linux") {
+            return Err("shared mode runs on Linux only".into());
+        }
+        return Ok(Args {
+            socket,
+            udp,
+            idle,
+            config,
+            state,
+            mode: Mode::Shared(allow),
+            idle_exit,
+        });
     }
     let mode = match (login, runtime, forwarded_by) {
         (None, None, None) => Mode::Personal,
@@ -255,6 +288,10 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
         StateDir::At(dir) => Some(dir),
         StateDir::Default => default_state_dir(&socket, |name| std::env::var_os(name)),
     };
+    #[cfg(target_os = "linux")]
+    if let Mode::Shared(allow) = &args.mode {
+        return run_shared(&socket, allow.clone(), config);
+    }
     // Before the runtime starts a thread: binding sets the umask, and the
     // activation variables are read and removed. No authentication in
     // Phase 1: only this user may connect (0600).
@@ -387,6 +424,34 @@ fn run_login(socket: PathBuf, map: PathBuf, runtime: PathBuf) -> std::io::Result
         });
         rusty_mux_server::serve_login(listener, login, reloads).await
     })
+}
+
+/// A shared server (C26): its socket is open to every local user and the
+/// allowlist decides who is served. SIGHUP reads the list again.
+#[cfg(target_os = "linux")]
+fn run_shared(socket: &std::path::Path, allow: PathBuf, config: Config) -> std::io::Result<()> {
+    use rusty_tokio::signal::unix::{SignalKind, signal};
+
+    // Before the runtime starts a thread: binding sets the umask.
+    let (listener, owned) = rusty_mux_server::endpoint::bind(socket, 0o000)?;
+    let runtime = Builder::new_current_thread().build_local(&LocalOptions::default())?;
+    let served = runtime.block_on(async {
+        let mut hangups = signal(SignalKind::hangup())?;
+        let listener = UnixListener::from_std(listener)?;
+        let (reload, reloads) = rusty_tokio::sync::mpsc::unbounded_channel();
+        rusty_tokio::task::spawn_local(async move {
+            while hangups.recv().await.is_some() {
+                // The server logs the answer; nobody waits here.
+                let (answer, _) = rusty_tokio::sync::oneshot::channel();
+                if reload.send(answer).is_err() {
+                    break;
+                }
+            }
+        });
+        let sharing = rusty_mux_server::Sharing { allow };
+        rusty_mux_server::serve_shared(listener, config, sharing, reloads, stop_requested()?).await
+    });
+    served.and(owned.release())
 }
 
 /// Resolves on Ctrl+C or Ctrl+Break, the server's clean stops on Windows.
@@ -544,6 +609,26 @@ mod tests {
         assert_eq!(elsewhere.mode, expected);
         let behind = parse_str(&["--forwarded-by", "0", "s"]).unwrap();
         assert_eq!(behind.mode, Mode::Forwarded(0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shared_mode_takes_an_allowlist_and_a_socket() {
+        let shared = parse_str(&["--shared", "allow", "--no-state", "s.sock"]).unwrap();
+        assert_eq!(shared.mode, Mode::Shared(PathBuf::from("allow")));
+        assert_eq!(shared.socket, Some(PathBuf::from("s.sock")));
+        assert_eq!(shared.state, StateDir::Off);
+        for bad in [
+            &["--shared", "allow"][..],
+            &["--shared"],
+            &["--shared", "a", "--udp", "0.0.0.0", "s"],
+            &["--shared", "a", "--idle-exit", "5", "s"],
+            &["--shared", "a", "--login", "m", "s"],
+            &["--shared", "a", "--forwarded-by", "0", "s"],
+            &["--shared", "a", "--runtime", "r", "s"],
+        ] {
+            assert!(parse_str(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
