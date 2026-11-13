@@ -1,6 +1,6 @@
 //! The planner: observed state in, [`Plan`] out. Never touches the disk.
 
-use crate::model::{Entry, LinkMethod, Tool};
+use crate::model::{Entry, Kind, LinkMethod, Tool};
 use std::path::PathBuf;
 
 /// What an adapter found at an entry's target path.
@@ -10,8 +10,13 @@ pub enum Observed {
     Absent,
     /// A link or copy carrying our marker, pointing at this entry's source.
     ManagedCurrent,
-    /// Carries our marker but points elsewhere or is stale.
+    /// Carries our marker, is unmodified, but points elsewhere or is outdated:
+    /// safe to replace.
     ManagedStale,
+    /// A marked copy edited in place (its content no longer matches what we
+    /// wrote). Removing it would lose the edits, so it is treated like
+    /// [`Observed::Unmanaged`]: never replaced or removed.
+    ManagedModified,
     /// Something we cannot prove we own. Never replaced or removed.
     Unmanaged,
 }
@@ -35,13 +40,19 @@ pub enum Action {
     },
 }
 
-/// An ordered list of actions. Empty means nothing to do.
+/// An ordered list of actions. Empty means nothing to do. Only the planners
+/// build one, so every `Unlink` in a plan was decided from an [`Observed`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Plan {
-    pub actions: Vec<Action>,
+    actions: Vec<Action>,
 }
 
 impl Plan {
+    /// The steps, in order.
+    pub fn actions(&self) -> &[Action] {
+        &self.actions
+    }
+
     pub fn is_noop(&self) -> bool {
         self.actions.is_empty()
     }
@@ -56,6 +67,8 @@ impl Plan {
 
 const UNMANAGED: &str =
     "exists and is not managed by Ai Env Manager; refusing to replace or remove it";
+const MODIFIED: &str = "is a managed copy that was edited in place; refusing to discard the edits";
+const KIND: &str = "only skills are supported so far";
 
 fn one(action: Action) -> Plan {
     Plan {
@@ -63,9 +76,16 @@ fn one(action: Action) -> Plan {
     }
 }
 
-/// Plan linking `entry` into `tool` with `method`.
+/// Plan linking `entry` into `tool` with `method`. Only skills are planned for
+/// now (a tool has one skills folder, and a junction only works on folders).
 pub fn plan_enable(entry: &Entry, tool: &Tool, observed: Observed, method: LinkMethod) -> Plan {
     let to = tool.target(entry);
+    if entry.kind != Kind::Skill {
+        return one(Action::Refuse {
+            path: to,
+            reason: KIND,
+        });
+    }
     match observed {
         Observed::ManagedCurrent => Plan::default(),
         Observed::Absent => one(Action::Link {
@@ -88,18 +108,29 @@ pub fn plan_enable(entry: &Entry, tool: &Tool, observed: Observed, method: LinkM
             path: to,
             reason: UNMANAGED,
         }),
+        Observed::ManagedModified => one(Action::Refuse {
+            path: to,
+            reason: MODIFIED,
+        }),
     }
 }
 
 /// Plan removing `entry` from `tool`.
 pub fn plan_disable(entry: &Entry, tool: &Tool, observed: Observed) -> Plan {
     let path = tool.target(entry);
+    if entry.kind != Kind::Skill {
+        return one(Action::Refuse { path, reason: KIND });
+    }
     match observed {
         Observed::Absent => Plan::default(),
         Observed::ManagedCurrent | Observed::ManagedStale => one(Action::Unlink { path }),
         Observed::Unmanaged => one(Action::Refuse {
             path,
             reason: UNMANAGED,
+        }),
+        Observed::ManagedModified => one(Action::Refuse {
+            path,
+            reason: MODIFIED,
         }),
     }
 }
@@ -127,8 +158,8 @@ mod tests {
         let (e, t) = fixture();
         let p = plan_enable(&e, &t, Observed::Absent, LinkMethod::Symlink);
         assert_eq!(
-            p.actions,
-            vec![Action::Link {
+            p.actions(),
+            [Action::Link {
                 from: "/src/skills/code-review".into(),
                 to: "/home/u/.claude/skills/code-review".into(),
                 method: LinkMethod::Symlink
@@ -147,7 +178,7 @@ mod tests {
         let (e, t) = fixture();
         let p = plan_enable(&e, &t, Observed::ManagedStale, LinkMethod::Copy);
         assert!(matches!(
-            p.actions[..],
+            p.actions(),
             [
                 Action::Unlink { .. },
                 Action::Link {
@@ -173,11 +204,11 @@ mod tests {
     fn disable_managed_unlinks_and_absent_is_noop() {
         let (e, t) = fixture();
         assert!(matches!(
-            plan_disable(&e, &t, Observed::ManagedCurrent).actions[..],
+            plan_disable(&e, &t, Observed::ManagedCurrent).actions(),
             [Action::Unlink { .. }]
         ));
         assert!(matches!(
-            plan_disable(&e, &t, Observed::ManagedStale).actions[..],
+            plan_disable(&e, &t, Observed::ManagedStale).actions(),
             [Action::Unlink { .. }]
         ));
         assert!(plan_disable(&e, &t, Observed::Absent).is_noop());
@@ -188,12 +219,17 @@ mod tests {
         let (e, t) = fixture();
         let p = plan_disable(&e, &t, Observed::Unmanaged);
         assert!(p.has_refusals());
-        assert!(!p.actions.iter().any(|a| matches!(a, Action::Unlink { .. })));
+        assert!(!p
+            .actions()
+            .iter()
+            .any(|a| matches!(a, Action::Unlink { .. })));
     }
 
     #[test]
     fn ids_reject_traversal_and_junk() {
-        for bad in ["", ".", "..", ".hidden", "a/b", "a\\b", "a b", "../x", "é"] {
+        for bad in [
+            "", ".", "..", ".hidden", "a/b", "a\\b", "a b", "../x", "é", "a:b",
+        ] {
             assert_eq!(
                 bad.parse::<crate::EntryId>(),
                 Err(Error::InvalidId(bad.to_owned())),
@@ -201,6 +237,74 @@ mod tests {
             );
         }
         assert!("code-review_2.0".parse::<crate::EntryId>().is_ok());
+    }
+
+    #[test]
+    fn ids_reject_windows_hazards() {
+        // Device names (with or without extension), trailing dot, and any
+        // upper case (two entries must never share one path on NTFS/APFS).
+        for bad in [
+            "con", "nul", "aux", "prn", "com1", "lpt9", "nul.txt", "com3.md", "foo.", "Foo", "CON",
+            "NUL",
+        ] {
+            assert_eq!(
+                bad.parse::<crate::EntryId>(),
+                Err(Error::InvalidId(bad.to_owned())),
+                "{bad:?}"
+            );
+        }
+        // Near misses stay valid.
+        for ok in [
+            "console",
+            "com",
+            "com0",
+            "com10",
+            "lpt",
+            "nullable",
+            "aux-tools",
+        ] {
+            assert!(ok.parse::<crate::EntryId>().is_ok(), "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn modified_copy_is_never_replaced_or_removed() {
+        let (e, t) = fixture();
+        for p in [
+            plan_enable(&e, &t, Observed::ManagedModified, LinkMethod::Copy),
+            plan_disable(&e, &t, Observed::ManagedModified),
+        ] {
+            assert!(p.has_refusals());
+            assert!(!p
+                .actions()
+                .iter()
+                .any(|a| matches!(a, Action::Link { .. } | Action::Unlink { .. })));
+        }
+    }
+
+    #[test]
+    fn non_skill_kinds_are_refused_in_both_planners() {
+        let (mut e, t) = fixture();
+        for kind in [
+            Kind::Agent,
+            Kind::ClaudeMd,
+            Kind::AgentsMd,
+            Kind::Prompt,
+            Kind::Mod,
+        ] {
+            e.kind = kind;
+            for o in [
+                Observed::Absent,
+                Observed::ManagedCurrent,
+                Observed::ManagedStale,
+            ] {
+                assert!(
+                    plan_enable(&e, &t, o, LinkMethod::Junction).has_refusals(),
+                    "{kind:?} {o:?}"
+                );
+                assert!(plan_disable(&e, &t, o).has_refusals(), "{kind:?} {o:?}");
+            }
+        }
     }
 
     #[test]

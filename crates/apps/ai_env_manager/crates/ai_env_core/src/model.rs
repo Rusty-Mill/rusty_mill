@@ -8,8 +8,8 @@ use std::str::FromStr;
 /// Why a value was rejected at the boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// An id was empty, started with `.`, or held a character outside
-    /// `[A-Za-z0-9._-]` (so it can never traverse out of a tools folder).
+    /// An id breaks the rules in [`validate_id`], so it could not be used
+    /// safely as a folder name on every supported OS.
     InvalidId(String),
     /// An unknown entry kind name.
     UnknownKind(String),
@@ -20,7 +20,8 @@ impl fmt::Display for Error {
         match self {
             Error::InvalidId(s) => write!(
                 f,
-                "invalid id {s:?}: use [A-Za-z0-9._-], not starting with '.'"
+                "invalid id {s:?}: use lower-case [a-z0-9._-], not starting or ending with '.', \
+                 and not a Windows device name (con, nul, com1, ...)"
             ),
             Error::UnknownKind(s) => write!(f, "unknown entry kind {s:?}"),
         }
@@ -29,11 +30,28 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Windows device names, reserved with or without an extension.
+fn is_windows_device(stem: &str) -> bool {
+    matches!(stem, "con" | "prn" | "aux" | "nul")
+        || ["com", "lpt"].iter().any(|p| {
+            stem.strip_prefix(p)
+                .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
+        })
+}
+
+/// An id is a folder name that must be the same path on Windows, macOS and
+/// Linux: lower-case only (so `Foo` and `foo` can never be two entries that
+/// share one path), no separators, `:` or traversal, no leading or trailing
+/// dot (Windows drops a trailing one, so `foo.` would land on `foo`), and not a
+/// Windows device name (`NUL`, `COM1`, `nul.txt`, ...).
 fn validate_id(s: &str) -> Result<(), Error> {
+    let stem = s.split('.').next().unwrap_or_default();
     let ok = !s.is_empty()
         && !s.starts_with('.')
+        && !s.ends_with('.')
         && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+        && !is_windows_device(stem);
     if ok {
         Ok(())
     } else {

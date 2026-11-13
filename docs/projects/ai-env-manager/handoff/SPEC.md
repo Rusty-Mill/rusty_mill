@@ -54,6 +54,8 @@ with explicit consent (D6). Home when code starts: `crates/apps/ai_env_manager/`
 ## Acceptance — first slice (M0: core and linker)
 - [x] Core crate with `Entry` (kind = skill to start), `Source`, `Tool`, `Link`, `Plan`;
       no I/O, unit-tested. (`ai_env_core`, D19)
+      Ids are lower-case `[a-z0-9._-]`, no leading or trailing dot, no Windows device
+      names; a hand-edited managed copy is refused, never replaced (D20).
 - [ ] Tool catalog as TOML data, seeded with the tools Nano uses (Q4 interim: Claude Code,
       Codex, Cursor, Gemini CLI).
 - [ ] CLI `list`, `enable`, `disable` producing a plan; `--yes` applies.
