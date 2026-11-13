@@ -75,3 +75,7 @@ Source: D248-D253; `docs/projects/mux/MESH.md`.
 ## Is spike A-W started, and is the rusty_tailscale crate move part of it?
 Asked 2026-11-13. A-W has Nano's go (D254), on a throwaway branch with no merge. The 13-crate move to `crates/libs/` (Q60, D233) stays a separate step (D255); Q60 stays open.
 Source: D254; D255; D253; `docs/projects/mux/MESH.md`.
+
+## Is the mesh client dial path a go, and what did the spikes show?
+Asked 2026-11-13. Dial path has a go, tagged `[default]` because it came by the coordinator's relay with no Nano message id; Nano should confirm on the PR (D256). Spikes A-W, A and dial passed on throwaway branches; two bug fixes and the Windows reactor idle spin are open and need their own PRs and go (D257; Q61-Q63). D255 stands.
+Source: D256; D257; D255; `docs/projects/mux/MESH.md`.
