@@ -917,12 +917,46 @@ impl Mux {
         if current == Some(block) {
             return Ok(());
         }
+        self.authorize_attach(client, block)?;
         self.unattach(client);
         if let Some(c) = self.clients.get_mut(&client) {
             c.attached = Some(block);
         }
         self.events.push(Event::Attached { client, block });
         Ok(())
+    }
+
+    /// On a shared server (D232), a client may attach, and so read a block's
+    /// screen, only to a block of its own: the server's account to any, and
+    /// otherwise a client of the principal that created the block's session
+    /// or owns the block, or one granted its lease. An unshared server lets
+    /// anyone attach.
+    pub fn authorize_attach(&self, client: ClientId, block: BlockId) -> Result<(), Error> {
+        if self.shared_account.is_none() {
+            return Ok(());
+        }
+        let caller = self
+            .clients
+            .get(&client)
+            .ok_or(Error::UnknownClient(client))?
+            .principal
+            .id();
+        let target = self.blocks.get(&block).ok_or(Error::UnknownBlock(block))?;
+        let owns = target
+            .owner
+            .as_ref()
+            .is_some_and(|o| o.principal.id() == caller);
+        let ours = self.is_creator(client, block)
+            || owns
+            || target.grants.contains_key(&client)
+            || self
+                .shared_account
+                .as_ref()
+                .is_some_and(|a| a.id() == caller);
+        match ours {
+            true => Ok(()),
+            false => Err(Error::NotCreator { client }),
+        }
     }
 
     /// Detaches the client from its block, if any, releasing the lease it holds.
