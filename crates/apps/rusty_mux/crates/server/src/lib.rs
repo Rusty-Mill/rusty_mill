@@ -55,6 +55,7 @@ pub use rusty_mux_proto::style;
 #[cfg(target_os = "linux")]
 pub mod tailnet;
 #[cfg(any(target_os = "linux", windows))]
+pub mod token;
 mod terminal;
 
 use std::ffi::{OsStr, OsString};

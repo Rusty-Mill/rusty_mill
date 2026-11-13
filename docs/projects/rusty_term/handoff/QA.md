@@ -79,3 +79,7 @@ Source: D254; D255; D253; `docs/projects/mux/MESH.md`.
 ## Is the mesh client dial path a go, and what did the spikes show?
 Asked 2026-11-13. Dial path has a go, tagged `[default]` because it came by the coordinator's relay with no Nano message id; Nano should confirm on the PR (D256). Spikes A-W, A and dial passed on throwaway branches; two bug fixes and the Windows reactor idle spin are open and need their own PRs and go (D257; Q61-Q63). D255 stands.
 Source: D256; D257; D255; `docs/projects/mux/MESH.md`.
+
+## Is the TLS listener (#506) slice 1 gated, and what can it build without a `rusty_tls` change?
+Asked 2026-11-13 after Nano's "A" (start #506). "A" is the row-start go (D235); D236 says a `rusty_tls` fingerprint-pin change "is asked for separately", so that change stays an owner gate. Slice 1 is the server side (generic `conn::run` already done by C27, `--tls-cert`/`--tls-key`, `TlsAcceptor`, token frame and `rusty-mux-ctl token`), using in-workspace `rusty_sha2` (SHA-256), `rusty_base64` and `rusty_rand`; no third-party dependency. Client pinning waits for the separate go. Next free D id on main: D258.
+Source: D235; D236; D237; `docs/projects/mux/TLS-LISTENER.md`; `crates/libs/net/rusty_tls/src/trust.rs`.
