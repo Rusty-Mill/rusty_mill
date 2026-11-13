@@ -62,6 +62,8 @@ A connector sign-in (claude.ai, every cloud session as `claude-cloud`) says what
 not which agent. On a connector, call `agent_register` once per task and pass the returned
 `agent_id` and `agent_key` on every write; the board refuses writes without them. Keep the key
 private; if you lose it, register again (claims under the old id need a release).
+You act with the connector's role unless an admin gave you your own in Settings; you may ask
+for less at registration (`agent_role`, `agent_projects`), never more.
 
 An agent with its own bearer token (CLI, jail, workers) needs no registration. It may add a
 label to its actor, `<credential>/<label>` (up to 40 letters, digits, `.` `_` `-`), such as

@@ -34,7 +34,9 @@ pub fn server_with(board: Arc<Shared>, flight: Arc<InFlight>) -> Result<Arc<Serv
         "Kanban board shared by humans and models. Start with board_whoami. If it says you are \
          authenticated, your actor and role are fixed: omit them. Otherwise pass `actor` and `role` on \
          every write. On a connector sign-in (claude.ai) call agent_register once first, then pass its \
-         `agent_id` and `agent_key` on every write; reads need neither. Working loop: card_take (your next card, claimed for you; null means nothing is \
+         `agent_id` and `agent_key` on every write; reads need neither. You act with the connector's \
+         role unless an admin gave you your own; you may ask for less (`agent_role`, `agent_projects`). \
+         Working loop: card_take (your next card, claimed for you; null means nothing is \
          waiting), do the work, card_comment what you did and anything the next person needs, then \
          card_move it to the next column (leaving a work column needs your claim). board_columns lists \
          the columns, their kinds and the moves between them with the capability each needs; a move \
