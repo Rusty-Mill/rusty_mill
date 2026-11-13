@@ -4,7 +4,9 @@
 //! server was pointed at (`--settings-dir`, or one flag per file). A change is validated, written
 //! atomically (secrets owner-only), and only then applied to the running board, so the UI and the
 //! files never disagree and every file stays human-readable. Each operation needs the `Admin`
-//! capability. They are not MCP tools: a model should not mint credentials.
+//! capability. They are not MCP tools: a model should not mint credentials. The one exception is
+//! `agent_enrol` (and `agent_enrol_revoke`), over `/api` only: it needs `Enrol`, mints only within
+//! the caller's own role and projects, and only for itself (`lead.label`, at most 8).
 //!
 //! Apps signed in through OAuth are listed and revoked here too; their grants live in OAuth's own
 //! state file. Nothing here ever returns a token except the one it just made, once.
@@ -287,6 +289,30 @@ struct AgentName {
     name: String,
 }
 
+/// `agent_enrol`: `agent_role` and `agent_projects`, because `role` already names the caller's.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Enrol {
+    label: String,
+    agent_role: String,
+    agent_projects: Option<Vec<String>>,
+    // The caller's own `actor` and `role` (see `Who`), read by `acting`; refused if they differ.
+    #[serde(rename = "actor")]
+    _actor: Option<String>,
+    #[serde(rename = "role")]
+    _role: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnrolLabel {
+    label: String,
+    #[serde(rename = "actor")]
+    _actor: Option<String>,
+    #[serde(rename = "role")]
+    _role: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct AppId {
     client_id: String,
@@ -401,6 +427,9 @@ impl Settings {
         identity: Option<&Identity>,
         args: Value,
     ) -> Option<Result<Value, CallError>> {
+        if matches!(name, "agent_enrol" | "agent_enrol_revoke") {
+            return Some(self.enrolling(name, identity, args));
+        }
         let run: fn(&Self, &Actor, Value) -> Res = match name {
             "settings_get" => |s, _, _| s.get(),
             "settings_agent_add" => |s, _, a| s.agent_add(&parse::<WithAgent<AgentAdd>>(a)?.agent),
@@ -425,6 +454,98 @@ impl Settings {
         Some(self.admin(identity, args, run))
     }
 
+    /// `agent_enrol` and `agent_enrol_revoke`: not admin settings, but gated by `Enrol` and bound
+    /// to the caller's own credential, which becomes the lead of whatever it mints.
+    fn enrolling(
+        &self,
+        name: &str,
+        identity: Option<&Identity>,
+        args: Value,
+    ) -> Result<Value, CallError> {
+        let Some(lead) = identity else {
+            return Err(refused("this needs an authenticated credential").into());
+        };
+        let who: Who =
+            serde_json::from_value(args.clone()).map_err(|e| CallError::BadArgs(e.to_string()))?;
+        let actor = acting(&self.board, identity, &who)?;
+        if !actor.caps.contains(&Capability::Enrol) {
+            return Err(BoardError::Forbidden(Capability::Enrol).into());
+        }
+        let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
+        let out = if name == "agent_enrol" {
+            self.enrol(&actor, &lead.actor, &parse(args)?)
+        } else {
+            self.enrol_revoke(&lead.actor, &parse(args)?)
+        };
+        out.map_err(CallError::Board)
+    }
+
+    /// Mint `lead.label` for the caller, no wider than the caller: a role whose capabilities are
+    /// a subset of the caller's and never `Enrol` or `Admin`, and projects within the caller's.
+    fn enrol(&self, caller: &Actor, lead: &str, a: &Enrol) -> Res {
+        let roles = self.board.roles();
+        let caps = roles
+            .0
+            .get(&a.agent_role)
+            .ok_or_else(|| refused(format!("there is no role {:?}", a.agent_role)))?;
+        if caps.contains(&Capability::Enrol) || caps.contains(&Capability::Admin) {
+            return Err(refused("a minted agent cannot hold enrol or admin"));
+        }
+        if let Some(extra) = caps.iter().find(|c| !caller.caps.contains(c)) {
+            return Err(refused(format!(
+                "you do not hold {extra:?}, so you cannot mint it"
+            )));
+        }
+        let projects = match (&caller.projects, &a.agent_projects) {
+            (Some(_), None) => {
+                return Err(refused(
+                    "you are limited to some projects: name agent_projects",
+                ));
+            }
+            (Some(own), Some(asked)) => {
+                if let Some(p) = asked.iter().find(|p| !own.contains(*p)) {
+                    return Err(refused(format!("you do not work in project {p:?}")));
+                }
+                a.agent_projects.clone()
+            }
+            (None, _) => a.agent_projects.clone(),
+        };
+        self.check_grant(&a.agent_role, projects.as_deref())?;
+        let token = self.change_creds(|c| {
+            c.add_child(lead, &a.label, a.agent_role.clone(), projects.clone())
+        })?;
+        rusty_log::warn!(lead = %lead, label = %a.label, role = %a.agent_role, projects = ?projects, "agent minted");
+        Ok(json!({ "token": token, "agent": format!("{lead}.{}", a.label) }))
+    }
+
+    /// Remove minted agents that no longer fit under their lead (after a lead or roles change).
+    fn prune_minted(&self) -> Result<Vec<String>, BoardError> {
+        let roles = self.board.roles();
+        let due = self.creds.as_ref().is_some_and(|c| {
+            !c.read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .exceeding(&roles)
+                .is_empty()
+        });
+        if !due {
+            return Ok(Vec::new());
+        }
+        let gone = self.change_creds(|c| Ok(c.prune_children(&roles)))?;
+        rusty_log::warn!(removed = ?gone, "minted agents removed: they exceeded their lead");
+        Ok(gone)
+    }
+
+    /// Remove one agent the caller minted, and nothing else.
+    fn enrol_revoke(&self, lead: &str, a: &EnrolLabel) -> Res {
+        let child = format!("{lead}.{}", a.label);
+        self.change_creds(|c| match c.parent_of(&child) {
+            Some(p) if p == lead => c.remove(&child),
+            _ => Err(format!("you did not mint {child:?}")),
+        })?;
+        rusty_log::warn!(lead = %lead, agent = %child, "minted agent revoked");
+        Ok(json!({ "ok": true }))
+    }
+
     fn admin(
         &self,
         identity: Option<&Identity>,
@@ -443,10 +564,17 @@ impl Settings {
 
     fn get(&self) -> Res {
         let agents: Vec<Value> = self.creds.as_ref().map_or_else(Vec::new, |c| {
-            c.read()
-                .unwrap_or_else(PoisonError::into_inner)
+            let creds = c.read().unwrap_or_else(PoisonError::into_inner);
+            creds
                 .list()
-                .map(|i| json!({ "actor": i.actor, "role": i.role, "projects": i.projects }))
+                .map(|i| {
+                    let mut agent =
+                        json!({ "actor": i.actor, "role": i.role, "projects": i.projects });
+                    if let Some(lead) = creds.parent_of(&i.actor) {
+                        agent["parent"] = json!(lead);
+                    }
+                    agent
+                })
                 .collect()
         });
         let github = self.github.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|g| {
@@ -576,7 +704,8 @@ impl Settings {
         let role = a.role.clone().unwrap_or(current_role);
         self.check_grant(&role, a.projects.as_ref().and_then(Option::as_deref))?;
         self.change_creds(|c| c.update(&a.name, Some(role), a.projects.clone()))?;
-        Ok(json!({ "ok": true }))
+        let pruned = self.prune_minted()?;
+        Ok(json!({ "ok": true, "removed": pruned }))
     }
 
     fn agent_remove(&self, a: &AgentName) -> Res {
@@ -618,7 +747,8 @@ impl Settings {
 
     fn roles_set(&self, a: &RolesSet) -> Res {
         self.write_roles(&a.roles)?;
-        Ok(json!({ "roles": a.roles }))
+        let pruned = self.prune_minted()?;
+        Ok(json!({ "roles": a.roles, "removed": pruned }))
     }
 
     /// Validate `roles` against the agents, write them to their file, then apply them.

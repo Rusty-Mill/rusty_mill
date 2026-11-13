@@ -407,7 +407,8 @@ fn roles_are_edited_live_and_written_to_their_file() {
             "close",
             "record",
             "project",
-            "admin"
+            "admin",
+            "enrol"
         ])
     );
     let mut roles = out["roles"].clone();
@@ -1099,4 +1100,249 @@ fn a_malformed_project_status_file_is_refused_at_load() {
         assert!(load_statuses(&path).is_err(), "{bad}");
     }
     std::fs::remove_dir_all(&dir).expect("clean up");
+}
+
+/// A lead role that may enrol, plus one worker role, saved through settings.
+fn with_lead_role(f: &Fixture) {
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    let mut roles = out["roles"].clone();
+    roles["lead"] = json!(["build", "plan", "test", "enrol"]);
+    roles["worker"] = json!(["build"]);
+    let (status, _, text) = f.admin("settings_roles_set", &json!({"roles": roles}));
+    assert_eq!(status, 200, "{text}");
+}
+
+fn lead_with(f: &Fixture, name: &str, projects: Option<Value>) -> String {
+    let (status, out, text) = f.admin(
+        "settings_agent_add",
+        &json!({"agent": {"name": name, "role": "lead", "projects": projects}}),
+    );
+    assert_eq!(status, 200, "{text}");
+    out["token"].as_str().expect("token").to_owned()
+}
+
+#[test]
+fn a_lead_mints_a_worker_that_works_at_once_within_its_ceilings() {
+    let f = start("enrol");
+    with_lead_role(&f);
+    let lead = lead_with(&f, "chief", None);
+    let (status, out, text) = call(
+        f.addr,
+        &lead,
+        "agent_enrol",
+        &json!({"label": "w1", "agent_role": "worker"}),
+    );
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(out["agent"], "chief.w1");
+    let worker = out["token"].as_str().expect("token");
+    let (_, me, _) = call(f.addr, worker, "board_whoami", &json!({}));
+    assert_eq!(
+        (me["actor"].clone(), me["role"].clone()),
+        (json!("chief.w1"), json!("worker"))
+    );
+    // The admin sees it under its lead, and removing the lead removes it.
+    let (_, got, _) = f.admin("settings_get", &json!({}));
+    let agents = got["agents"].as_array().expect("agents");
+    assert!(
+        agents
+            .iter()
+            .any(|a| a["actor"] == "chief.w1" && a["parent"] == "chief")
+    );
+    assert_eq!(
+        f.admin("settings_agent_remove", &json!({"name": "chief"}))
+            .0,
+        200
+    );
+    let (status, ..) = call(f.addr, worker, "board_whoami", &json!({}));
+    assert_eq!(
+        status, 401,
+        "a removed lead takes its minted agents with it"
+    );
+}
+
+#[test]
+fn enrol_needs_the_capability_and_refuses_anything_wider() {
+    let f = start("enrol_ceilings");
+    with_lead_role(&f);
+    let plain = f.add_agent("plain", "builder");
+    let mint = |token: &str, body: Value| call(f.addr, token, "agent_enrol", &body);
+    let (status, ..) = mint(&plain, json!({"label": "x", "agent_role": "builder"}));
+    assert_eq!(status, 403, "without enrol nothing is minted");
+
+    let lead = lead_with(&f, "chief", None);
+    for (role, why) in [
+        ("lead", "enrol"),
+        ("human", "enrol"),
+        ("reviewer", "Review"),
+        ("nope", "no role"),
+    ] {
+        let (status, _, text) = mint(&lead, json!({"label": "x", "agent_role": role}));
+        assert_eq!(status, 422, "{role}: {text}");
+        assert!(text.contains(why), "{role}: {text}");
+    }
+    let (status, ..) = mint(&lead, json!({"label": "bad label", "agent_role": "worker"}));
+    assert_eq!(status, 422);
+}
+
+#[test]
+fn a_project_limited_lead_mints_only_inside_its_projects_and_at_most_eight() {
+    let f = start("enrol_projects");
+    with_lead_role(&f);
+    let repos = json!({"rusty_mill": {"alpha": ["crates/alpha"], "beta": ["crates/beta"]}});
+    assert_eq!(
+        f.admin("settings_projects_set", &json!({"repos": repos})).0,
+        200
+    );
+    let lead = lead_with(&f, "chief", Some(json!(["alpha"])));
+    let mint = |body: Value| call(f.addr, &lead, "agent_enrol", &body);
+    let (status, _, text) = mint(json!({"label": "a", "agent_role": "worker"}));
+    assert_eq!(status, 422, "a limited lead must name projects: {text}");
+    let (status, ..) =
+        mint(json!({"label": "a", "agent_role": "worker", "agent_projects": ["beta"]}));
+    assert_eq!(status, 422, "beta is outside its projects");
+    for n in 0..8 {
+        let (status, _, text) = mint(
+            json!({"label": format!("w{n}"), "agent_role": "worker", "agent_projects": ["alpha"]}),
+        );
+        assert_eq!(status, 200, "{n}: {text}");
+    }
+    let (status, _, text) =
+        mint(json!({"label": "w8", "agent_role": "worker", "agent_projects": ["alpha"]}));
+    assert_eq!(status, 422, "the ninth is refused: {text}");
+}
+
+#[test]
+fn a_lead_revokes_its_own_agents_and_no_one_elses() {
+    let f = start("enrol_revoke");
+    with_lead_role(&f);
+    let chief = lead_with(&f, "chief", None);
+    let other = lead_with(&f, "other", None);
+    let mint = |token: &str, label: &str| {
+        call(
+            f.addr,
+            token,
+            "agent_enrol",
+            &json!({"label": label, "agent_role": "worker"}),
+        )
+    };
+    let worker = mint(&chief, "w").1["token"]
+        .as_str()
+        .expect("token")
+        .to_owned();
+    let revoke = |token: &str, label: &str| {
+        call(
+            f.addr,
+            token,
+            "agent_enrol_revoke",
+            &json!({"label": label}),
+        )
+        .0
+    };
+    assert_eq!(revoke(&other, "w"), 422, "another lead cannot revoke it");
+    assert_eq!(revoke(&chief, "w"), 200);
+    assert_eq!(call(f.addr, &worker, "board_whoami", &json!({})).0, 401);
+    assert_eq!(revoke(&chief, "w"), 422, "already gone");
+    // A hand-added agent is not its lead's to revoke.
+    f.add_agent("chief.hand", "worker");
+    assert_eq!(revoke(&chief, "hand"), 422);
+}
+
+#[test]
+fn minted_agents_survive_a_restart_and_keep_their_lead() {
+    let f = start("enrol_restart");
+    with_lead_role(&f);
+    let lead = lead_with(&f, "chief", None);
+    let (status, ..) = call(
+        f.addr,
+        &lead,
+        "agent_enrol",
+        &json!({"label": "w", "agent_role": "worker"}),
+    );
+    assert_eq!(status, 200);
+    let roles = restarts(&f);
+    let creds = Credentials::load(&f.file("identities.json"), &roles, &Projects::default())
+        .expect("reloads");
+    assert_eq!(creds.parent_of("chief.w"), Some("chief"));
+}
+
+#[test]
+fn enrol_refuses_a_misspelt_argument_and_a_name_that_is_taken() {
+    let f = start("enrol_args");
+    with_lead_role(&f);
+    let lead = lead_with(&f, "chief", None);
+    let mint = |body: Value| call(f.addr, &lead, "agent_enrol", &body);
+    // `projects` where `agent_projects` belongs would otherwise mint an agent for every project.
+    let (status, ..) = mint(json!({"label": "w", "agent_role": "worker", "projects": ["x"]}));
+    assert_eq!(status, 422);
+    // Stating your own actor and role is still fine.
+    let (status, ..) =
+        mint(json!({"label": "w", "agent_role": "worker", "actor": "chief", "role": "lead"}));
+    assert_eq!(status, 200);
+    let (status, _, text) = mint(json!({"label": "w", "agent_role": "worker"}));
+    assert_eq!((status, text.contains("already")), (422, true), "{text}");
+}
+
+#[test]
+fn a_credentials_file_with_a_bad_parent_is_refused() {
+    let roles = Roles::default();
+    let projects = Projects::default();
+    let file = |entries: &str| format!("[{entries}]");
+    let lead = r#"{"token":"0123456789abcdef0123","actor":"chief","role":"builder"}"#;
+    let kid = |actor: &str, parent: &str| {
+        format!(
+            r#"{{"token":"{actor}-token-0123456789","actor":"{actor}","role":"builder","parent":"{parent}"}}"#
+        )
+    };
+    // A child whose lead is missing, whose name lacks the `lead.` prefix, and a grandchild.
+    for bad in [
+        file(&format!("{lead},{}", kid("chief.a", "ghost"))),
+        file(&format!("{lead},{}", kid("other", "chief"))),
+        file(&format!(
+            "{lead},{},{}",
+            kid("chief.a", "chief"),
+            kid("chief.a.b", "chief.a")
+        )),
+    ] {
+        assert!(
+            Credentials::parse(&bad, &roles, &projects).is_err(),
+            "{bad}"
+        );
+    }
+    let good = file(&format!("{lead},{}", kid("chief.a", "chief")));
+    let creds = Credentials::parse(&good, &roles, &projects).expect("good");
+    assert_eq!(creds.parent_of("chief.a"), Some("chief"));
+}
+
+#[test]
+fn narrowing_a_lead_removes_the_agents_it_minted_that_no_longer_fit() {
+    let f = start("enrol_prune");
+    with_lead_role(&f);
+    let (_, got, _) = f.admin("settings_get", &json!({}));
+    let mut roles = got["roles"].clone();
+    roles["helper"] = json!(["plan"]);
+    assert_eq!(
+        f.admin("settings_roles_set", &json!({"roles": roles})).0,
+        200
+    );
+    let lead = lead_with(&f, "chief", None);
+    let mint = |label: &str, role: &str| {
+        let (status, out, text) = call(
+            f.addr,
+            &lead,
+            "agent_enrol",
+            &json!({"label": label, "agent_role": role}),
+        );
+        assert_eq!(status, 200, "{text}");
+        out["token"].as_str().expect("token").to_owned()
+    };
+    let (worker, helper) = (mint("w", "worker"), mint("h", "helper"));
+    // Moving the lead to a role without `build` drops the worker but keeps the helper.
+    let (status, out, text) = f.admin(
+        "settings_agent_update",
+        &json!({"agent": {"name": "chief", "role": "helper"}}),
+    );
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(out["removed"], json!(["chief.w"]));
+    assert_eq!(call(f.addr, &worker, "board_whoami", &json!({})).0, 401);
+    assert_eq!(call(f.addr, &helper, "board_whoami", &json!({})).0, 200);
 }
