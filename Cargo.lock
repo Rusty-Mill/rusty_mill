@@ -11006,6 +11006,7 @@ dependencies = [
  "platform-windows",
  "rusty_conhost",
  "rusty_crypto_key",
+ "rusty_http",
  "rusty_libc",
  "rusty_multimodal_db_engine",
  "rusty_mux_core",
@@ -11018,6 +11019,8 @@ dependencies = [
  "rusty_tokio",
  "rusty_uuid",
  "serde",
+ "serde_json",
+ "ts-types",
  "uuid",
 ]
 
