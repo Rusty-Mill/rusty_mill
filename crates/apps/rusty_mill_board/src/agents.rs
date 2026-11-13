@@ -1,9 +1,10 @@
 //! Registered agents: a unique, board-issued identity for each agent on a shared connector.
 //!
 //! A connector sign-in (OAuth) says *what* is connecting and fixes the role and projects.
-//! `agent_register` gives one agent on it an id (`<connector>/<6 hex>`) and a secret key; the
+//! `agent_register` gives one agent on it an id (`<connector>#<6 hex>`) and a secret key; the
 //! connector's writes then carry both, so every claim, comment and move names one agent that
-//! nobody else can pose as. Entries idle for [`IDLE_MS`] expire; a connector holds at most
+//! nobody else can pose as. The `#` is not a character an actor name or a step-1 label may
+//! hold, so no bearer-token holder can write under a registered id. Entries idle for [`IDLE_MS`] expire; a connector holds at most
 //! [`MAX_PER_CONNECTOR`] live agents. The file is private (it holds the keys).
 
 use std::collections::BTreeMap;
@@ -77,7 +78,7 @@ impl Registry {
                 "{connector} already has {MAX_PER_CONNECTOR} registered agents; revoke one in Settings"
             ));
         }
-        let id = format!("{connector}/{}", &new_token()?[..6]);
+        let id = format!("{connector}#{}", &new_token()?[..6]);
         let key = new_token()?;
         let agent = Agent {
             connector: connector.to_owned(),
@@ -153,11 +154,11 @@ mod tests {
     fn a_registered_agent_verifies_only_with_its_key_and_connector() {
         let mut r = Registry::default();
         let (id, key) = r.register("claude-cloud", 0).expect("register");
-        assert!(id.starts_with("claude-cloud/") && id.len() == "claude-cloud/".len() + 6);
+        assert!(id.starts_with("claude-cloud#") && id.len() == "claude-cloud#".len() + 6);
         assert!(r.verify("claude-cloud", &id, &key, 1));
         assert!(!r.verify("claude-cloud", &id, "wrong", 1));
         assert!(!r.verify("other", &id, &key, 1));
-        assert!(!r.verify("claude-cloud", "claude-cloud/nope00", &key, 1));
+        assert!(!r.verify("claude-cloud", "claude-cloud#nope00", &key, 1));
     }
 
     #[test]

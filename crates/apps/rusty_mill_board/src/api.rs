@@ -2126,10 +2126,19 @@ mod tests {
             "b's key"
         );
         assert!(refused(add(
-            json!({"title": "t", "agent_id": "claude-cloud/zzzzzz", "agent_key": a["agent_key"]})
+            json!({"title": "t", "agent_id": "claude-cloud#zzzzzz", "agent_key": a["agent_key"]})
         )));
         // A bearer-token credential is already unique: it needs no agent and cannot register.
         let own = ident("claude-cli", "builder");
+        // ...and cannot write under a registered id by naming it as a label.
+        let spoof = json!({"title": "t", "actor": a["agent_id"].as_str().expect("id").replace("claude-cloud", "claude-cli")});
+        assert!(refused(call_as(&board, Some(&own), "card_add", spoof)));
+        let cloud_bearer = ident("claude-cloud", "builder");
+        let spoof = json!({"title": "t", "actor": a["agent_id"]});
+        assert!(
+            refused(call_as(&board, Some(&cloud_bearer), "card_add", spoof)),
+            "a bearer holder cannot name a registered id"
+        );
         assert!(call_as(&board, Some(&own), "card_add", json!({"title": "t"})).is_ok());
         assert!(refused(call_as(
             &board,

@@ -13,12 +13,11 @@ its permissions; it should not be the agent's identity.
 
 ## Proposal
 - `agent_register {}` over MCP, allowed to any authenticated connector credential. The board
-  returns a unique `agent` id (`<credential>/<random 6 chars>`) and a secret `agent_key`,
+  returns a unique `agent` id (`<credential>#<random 6 hex>`) and a secret `agent_key`,
   shown once. The registry stores the id, key hash, connector credential and created time.
 - Writes from a connector credential pass `agent` + `agent_key`. The board checks them and
-  attributes claims, comments and moves to that agent. `actor` stays accepted for step 1
-  during migration (attribution only), then is refused once Nano switches enforcement on.
-- Ceiling: the agent's role and projects are the connector's, never wider. No `enrol`/`admin`.
+  attributes claims, comments and moves to that agent. Enforcement is on at deploy (Nano: enforce, no migration switch); `actor` labels are ignored on a connector.
+- Ceiling: the agent's role and projects are the connector's, never wider. It gets the connector's role unchanged (so an admin connector's agents act as admin, as the connector did before); it is not narrowed further.
 - Registry in the settings store, capped per connector (suggest 64 live; oldest idle expires
   after 30 days). Settings > Agents lists agents under their connector; revoke one or all.
 - Audit: register and revoke are `rusty_log` lines (board events are card-bound). The key is
@@ -44,7 +43,8 @@ its permissions; it should not be the agent's identity.
 - Args are `agent_id` and `agent_key` (not `agent`: `settings_agent_add` already uses that name).
 - Enforced for OAuth sign-ins only (`Identity.connector`, set by the web layer). Bearer-token
   credentials are already unique, need no id, and get a refusal from `agent_register`.
-- `actor` labels are ignored on a connector; the agent id is the actor name.
+- `actor` labels are ignored on a connector; the agent id is the actor name. The id uses `#`, which no actor name or step-1 label may contain, so a bearer-token holder cannot write under a registered id (tested).
+- Keys are stored in clear (not hashed), like identities tokens; the file is private. Hashing would need `rusty_sha2` as a new dependency: left out for now.
 - Registry file: `agents.json` in the settings dir, else `<identities stem>.agents.json`; private (0600), keys in clear like identities tokens.
 - Admin: `settings_get` lists `registered_agents` (no keys); `settings_registered_agent_revoke {id}`. No UI panel yet.
 - Rollback: an older binary ignores `agents.json` and stops enforcing, so connector writes fall back to step 1 labels.
