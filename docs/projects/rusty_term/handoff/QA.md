@@ -59,3 +59,7 @@ Source: `docs/projects/mux/AGENT-HOSTING.md` §C76 ("orch owns the end grace and
 ## What does "shared mode" mean in C26, and what does a personal server do with another user's connection today? (card #274)
 Asked 2026-11-12 (Arc 1, card #274 plan). **Sources only:** C26 says "shared mode (one server, several accounts, where C33 must be restricted)". Today a personal server's `peer_check` admits only its own uid and gives every client that principal (`server/src/lib.rs:238-251,273-280`); another principal reaches a server only by login mode's forwarded preface, trusted from the front door's uid (`serve_forwarded`, `lib.rs:215-236`). C33 is restricted (D166); takeover needs the client's own principal (`state.rs:789-806`). What is not sourced: who a shared server admits on its socket, and what each principal sees or may type. Those were escalated to Nano, not decided. Tag: answered from sources, escalations open.
 Source: CAPABILITIES C25, C26, C33; D164, D166, D231; mux DECISIONS 2026-11-01.
+
+## Did Nano confirm the shared-mode access model on PR #1650? (card #274)
+Asked 2026-11-13. Yes: Nano commented on PR #1650 (comment 6841530923, 2026-11-13T01:57Z) agreeing to the allowlist file, everyone-sees-everything `list` for the first slice, and creator-held input lease with explicit grants for others. That confirms D232 as written; D233 is not covered by that comment.
+Source: DECISIONS D232, D234.
