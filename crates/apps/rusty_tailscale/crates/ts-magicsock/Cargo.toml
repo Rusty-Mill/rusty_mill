@@ -21,6 +21,8 @@ rand_core.workspace = true
 rusty_log = { workspace = true }
 # rustils' D16 Net surface (rustils#41/#42) — justified in DESIGN.md:
 platform = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { workspace = true }
 
 [dev-dependencies]

@@ -14,4 +14,6 @@ layer = "apps"
 rusty_tokio.workspace = true
 # rustils' Tun/virtual-link surface (rustils#56, decision D14) — justified in DESIGN.md:
 platform = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { workspace = true }

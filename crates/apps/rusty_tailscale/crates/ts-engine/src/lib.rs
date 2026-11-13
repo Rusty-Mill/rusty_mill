@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 
 //! Engine: orchestrates control (netmap) → per-peer WireGuard →
 //! magicsock (direct/DERP) → TUN into a working data plane.
