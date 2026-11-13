@@ -11,7 +11,10 @@
 //! `Read + Write` stream, plus [`TrustPolicy`], the one place trust
 //! decisions are made — including
 //! [`PinnedAnchorsWithRevocation`](TrustPolicy::PinnedAnchorsWithRevocation)
-//! for CRL-based revocation checking. `new_with_client_identity` presents a
+//! for CRL-based revocation checking and
+//! [`PinnedCertSha256`](TrustPolicy::PinnedCertSha256) for a server trusted
+//! by its pinned certificate fingerprint ([`certificate_sha256`]).
+//! `new_with_client_identity` presents a
 //! client certificate (mTLS) to a server that requests one; `new_with_alpn`
 //! offers ALPN protocols (read back via `negotiated_alpn_protocol`).
 //! [`TlsConnector`] builds a config once for reuse across many connections,
@@ -50,6 +53,7 @@ mod client;
 mod connector;
 mod danger;
 mod error;
+mod pinned;
 mod provider;
 mod server;
 mod trust;
@@ -118,5 +122,6 @@ pub use async_server::AsyncTlsServerStream;
 pub use client::TlsStream;
 pub use connector::TlsConnector;
 pub use error::Error;
+pub use pinned::certificate_sha256;
 pub use server::{TlsAcceptor, TlsServerStream};
 pub use trust::TrustPolicy;

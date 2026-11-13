@@ -6,6 +6,7 @@ use rustls::{ClientConfig, ConfigBuilder, RootCertStore};
 
 use crate::danger::NoServerCertVerification;
 use crate::error::Error;
+use crate::pinned::PinnedCertVerifier;
 use crate::provider::ring_provider;
 
 /// The entry point every `ClientConfig` in this file builds from, instead
@@ -91,6 +92,21 @@ pub enum TrustPolicy {
         /// DER-encoded CRLs to check presented certificates against.
         crls: Vec<CertificateRevocationListDer<'static>>,
     },
+    /// Trust a server only if its end-entity certificate's SHA-256
+    /// fingerprint (see [`certificate_sha256`](crate::certificate_sha256))
+    /// is one of these. For a self-signed or user-made certificate pinned
+    /// on first use, with no CA.
+    ///
+    /// The server must still prove it holds the certificate's private key:
+    /// the handshake signature is verified as usual. The chain, validity
+    /// period and server name are not checked. The pin stands in for all
+    /// three, so the caller keeps pins per host and refuses a changed
+    /// certificate until the user re-pins it.
+    ///
+    /// More than one pin lets a server rotate its certificate. An empty
+    /// list trusts nothing and is a hard error
+    /// ([`Error::NoTrustAnchors`]).
+    PinnedCertSha256(Vec<[u8; 32]>),
 }
 
 /// Load the OS trust anchors as raw DER, from whichever `platform`
@@ -206,6 +222,18 @@ fn client_config_builder(
                     .build()
                     .map_err(|e| Error::InvalidRevocationConfig(e.to_string()))?;
             client_config_entry().with_webpki_verifier(verifier)
+        }
+        TrustPolicy::PinnedCertSha256(pins) => {
+            if pins.is_empty() {
+                return Err(Error::NoTrustAnchors);
+            }
+            let verifier = PinnedCertVerifier::new(
+                pins.clone(),
+                ring_provider().signature_verification_algorithms,
+            );
+            client_config_entry()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(verifier))
         }
     })
 }

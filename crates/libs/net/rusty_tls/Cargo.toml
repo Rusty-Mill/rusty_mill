@@ -62,7 +62,10 @@ ring = { version = "0.17", optional = true }
 # AES-GCM; and OS randomness. All first-party, so they add no external code
 # to the graph. Optional, behind `native-crypto`, and only used when
 # `--cfg rusty_tls_native_crypto` is also set.
-rusty_sha2 = { workspace = true, optional = true }
+# rusty_sha2 is the exception: always on, because
+# `TrustPolicy::PinnedCertSha256` hashes the server certificate with it
+# (first-party, so no external code; see `src/pinned.rs`).
+rusty_sha2 = { workspace = true }
 rusty_pk = { workspace = true, optional = true }
 rusty_aead = { workspace = true, optional = true }
 rusty_rand = { workspace = true, optional = true }
@@ -124,7 +127,7 @@ handrolled-engine = ["dep:ring"]
 # crate has no direct `ring` dependency, so the compiler itself checks that the
 # engine makes no `ring` call. `ring` stays in the graph through `rustls`.
 # Explicitly opt into AES-GCM so native TLS retains its existing cipher suites.
-native-crypto = ["rusty_aead/aes-gcm", "dep:rusty_sha2", "dep:rusty_pk", "dep:rusty_aead", "dep:rusty_rand", "dep:rusty_crypto_key"]
+native-crypto = ["rusty_aead/aes-gcm", "dep:rusty_pk", "dep:rusty_aead", "dep:rusty_rand", "dep:rusty_crypto_key"]
 
 [dev-dependencies]
 # Generates throwaway certificates (wrong hostname, expired, untrusted
