@@ -52,11 +52,12 @@ mod state;
 #[cfg(any(target_os = "linux", windows))]
 mod store;
 pub use rusty_mux_proto::style;
+#[cfg(any(target_os = "linux", windows))]
+mod pem;
 #[cfg(target_os = "linux")]
 pub mod tailnet;
-#[cfg(any(target_os = "linux", windows))]
-pub mod token;
 mod terminal;
+pub mod token;
 
 use std::ffi::{OsStr, OsString};
 use std::io;

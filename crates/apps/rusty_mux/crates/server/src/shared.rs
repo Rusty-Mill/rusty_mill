@@ -10,7 +10,7 @@
 //! power, as an entry in a login map is.
 //!
 //! The list has one entry per line, `uid:N` or `user:NAME`, or, for tailnet
-//! peers (C27), `ts:LOGIN` or `ts-node:NAME`; `#` starts a
+//! peers (C27), `ts:LOGIN` or `ts-node:NAME`, or, for TLS tokens (#506), `token:NAME`; `#` starts a
 //! comment and blank lines are skipped. There is no wildcard, so root is
 //! served only when an entry names it (`uid:0` or `user:root`). A file
 //! with no entries lets in the server's own user alone. A repeated user,
@@ -40,14 +40,16 @@ use rusty_tokio::sync::{Notify, mpsc::UnboundedReceiver};
 
 use crate::login::{Reload, read_checked};
 use crate::tailnet::{Whois, is_tailnet_addr};
+use crate::token;
 use crate::{Config, Peer, conn, state};
 
 /// Who a shared server serves besides its own user: uid to user name.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Allow {
     users: HashMap<u32, Option<String>>,
-    /// Tailnet principals by id (`ts:LOGIN`, `ts-node:NAME`).
-    tailnet: HashSet<String>,
+    /// Principals named by id: tailnet (`ts:LOGIN`, `ts-node:NAME`) and
+    /// token (`token:NAME`).
+    named: HashSet<String>,
 }
 
 impl Allow {
@@ -59,7 +61,7 @@ impl Allow {
         name: impl Fn(u32) -> Option<String>,
     ) -> Result<Self, String> {
         let mut users = HashMap::new();
-        let mut tailnet = HashSet::new();
+        let mut named = HashSet::new();
         for (n, line) in text.lines().enumerate() {
             let line = line.split('#').next().unwrap_or_default().trim();
             if line.is_empty() {
@@ -68,7 +70,14 @@ impl Allow {
             let at = |why: String| format!("line {}: {why}", n + 1);
             let uid = match line.split_once(':') {
                 Some(("ts" | "ts-node", name)) if !name.is_empty() => {
-                    if !tailnet.insert(line.to_string()) {
+                    if !named.insert(line.to_string()) {
+                        return Err(at(format!("{line} is listed already")));
+                    }
+                    continue;
+                }
+                Some(("token", name)) => {
+                    token::check_name(name).map_err(&at)?;
+                    if !named.insert(line.to_string()) {
                         return Err(at(format!("{line} is listed already")));
                     }
                     continue;
@@ -79,7 +88,7 @@ impl Allow {
                 }
                 _ => {
                     return Err(at(format!(
-                        "{line:?} is not `uid:N`, `user:NAME`, `ts:LOGIN` or `ts-node:NAME` (there is no wildcard)"
+                        "{line:?} is not `uid:N`, `user:NAME`, `ts:LOGIN`, `ts-node:NAME` or `token:NAME` (there is no wildcard)"
                     )));
                 }
             };
@@ -87,7 +96,7 @@ impl Allow {
                 return Err(at(format!("uid {uid} is listed already")));
             }
         }
-        Ok(Self { users, tailnet })
+        Ok(Self { users, named })
     }
 
     /// The principal of the listed `uid`, or `None` if it is not listed.
@@ -100,7 +109,7 @@ impl Allow {
 
     /// Whether `principal` is still listed.
     pub(crate) fn names(&self, principal: &Principal) -> bool {
-        self.tailnet.contains(principal.id())
+        self.named.contains(principal.id())
             || self
                 .users
                 .keys()

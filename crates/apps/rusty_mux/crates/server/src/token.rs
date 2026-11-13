@@ -32,7 +32,7 @@ fn hash(token: &[u8]) -> [u8; 32] {
 }
 
 /// Whether `name` is a usable token name: letters, digits, `.`, `_` and `-`.
-fn check_name(name: &str) -> Result<(), String> {
+pub(crate) fn check_name(name: &str) -> Result<(), String> {
     let ok = !name.is_empty()
         && name.len() <= MAX_NAME
         && name
@@ -77,10 +77,12 @@ impl Tokens {
 
     /// The file's text.
     pub fn text(&self) -> String {
-        self.0.iter().fold(String::new(), |mut out, (name, digest)| {
-            out.push_str(&format!("{name} {}\n", rusty_hex::encode(digest)));
-            out
-        })
+        self.0
+            .iter()
+            .fold(String::new(), |mut out, (name, digest)| {
+                out.push_str(&format!("{name} {}\n", rusty_hex::encode(digest)));
+                out
+            })
     }
 
     /// The name of the token `presented` is, if it is one. Every entry is
