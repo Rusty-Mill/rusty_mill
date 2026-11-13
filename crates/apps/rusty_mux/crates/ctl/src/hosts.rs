@@ -434,7 +434,14 @@ pub(crate) fn resolve(name: &str, env: &Env, stop: &Stop) -> Result<Reached, (Ex
     for address in &host.addresses {
         match reach(name, address, env, stop) {
             Ok(reached) => return Ok(reached),
-            Err(reason) => reasons.push(format!("  {}: {reason}", address.describe())),
+            // A changed certificate is no reason to try the next address:
+            // that would hide an interception behind a working fallback.
+            Err(Refusal::Pinned(why)) => {
+                return Err((Exit::Failed, format!("host `{name}`: {why}")));
+            }
+            Err(Refusal::Other(reason)) => {
+                reasons.push(format!("  {}: {reason}", address.describe()));
+            }
         }
     }
     Err((
@@ -454,11 +461,35 @@ pub(crate) fn resolve(_: &str, _: &Env, _: &Stop) -> Result<Reached, (Exit, Stri
 /// The socket `address` reaches: a local one once a connection to it
 /// succeeds, an ssh one once its forward is up.
 #[cfg(any(unix, windows))]
-fn reach(name: &str, address: &Address, env: &Env, stop: &Stop) -> Result<Reached, String> {
+fn reach(name: &str, address: &Address, env: &Env, stop: &Stop) -> Result<Reached, Refusal> {
     match address {
         Address::Tls { addr, pin } => relay(name, addr, pin, env),
-        Address::Socket { socket } => probe(PathBuf::from(socket), stop).map(Reached::local),
-        Address::Ssh { dest, socket, .. } => forward(dest, Path::new(socket), env, stop),
+        Address::Socket { socket } => Ok(probe(PathBuf::from(socket), stop).map(Reached::local)?),
+        Address::Ssh { dest, socket, .. } => Ok(forward(dest, Path::new(socket), env, stop)?),
+    }
+}
+
+/// Why an address was not reached.
+#[cfg(any(unix, windows))]
+enum Refusal {
+    /// The server's certificate is not the pinned one: no other address.
+    #[cfg_attr(not(unix), allow(dead_code))] // only the Unix relay pins
+    Pinned(String),
+    /// Not reachable: the next address may be.
+    Other(String),
+}
+
+#[cfg(any(unix, windows))]
+impl From<&str> for Refusal {
+    fn from(why: &str) -> Self {
+        Self::Other(why.to_owned())
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl From<String> for Refusal {
+    fn from(why: String) -> Self {
+        Self::Other(why)
     }
 }
 
@@ -498,8 +529,8 @@ fn forward(dest: &str, remote: &Path, env: &Env, stop: &Stop) -> Result<Reached,
 /// pinned one. The token is the file `tokens/NAME` next to the hosts file,
 /// readable by its owner alone; it is never in the hosts file.
 #[cfg(unix)]
-fn relay(name: &str, addr: &str, pin: &str, env: &Env) -> Result<Reached, String> {
-    use rusty_mux_client::tls::{Relay, TOKEN_LEN, unhex};
+fn relay(name: &str, addr: &str, pin: &str, env: &Env) -> Result<Reached, Refusal> {
+    use rusty_mux_client::tls::{Relay, StartError, TOKEN_LEN, unhex};
 
     let pin = unhex::<32>(pin).ok_or("the pin is not 64 hex digits")?;
     let file = env
@@ -511,7 +542,10 @@ fn relay(name: &str, addr: &str, pin: &str, env: &Env) -> Result<Reached, String
         .join(name);
     let token = unhex::<TOKEN_LEN>(&read_token(&file)?)
         .ok_or_else(|| format!("{}: not 64 hex digits", file.display()))?;
-    let relay = Relay::start(addr, pin, token)?;
+    let relay = Relay::start(addr, pin, token).map_err(|e| match e {
+        StartError::Changed(why) => Refusal::Pinned(why),
+        StartError::Failed(why) => Refusal::Other(why),
+    })?;
     Ok(Reached {
         socket: relay.socket().to_path_buf(),
         _forward: None,
@@ -537,8 +571,8 @@ fn read_token(file: &Path) -> Result<String, String> {
 }
 
 #[cfg(not(unix))]
-fn relay(_: &str, _: &str, _: &str, _: &Env) -> Result<Reached, String> {
-    Err("TLS hosts need Unix".to_owned())
+fn relay(_: &str, _: &str, _: &str, _: &Env) -> Result<Reached, Refusal> {
+    Err(Refusal::Other("TLS hosts need Unix".to_owned()))
 }
 
 #[cfg(windows)]

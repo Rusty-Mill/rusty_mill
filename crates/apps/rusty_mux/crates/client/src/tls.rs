@@ -83,6 +83,29 @@ pub fn fingerprint(addr: &str) -> Result<Pin, String> {
     fingerprint_sha256(der).map_err(|e| e.to_string())
 }
 
+/// Why a [`Relay`] did not start.
+#[derive(Debug)]
+pub enum StartError {
+    /// The server presents another certificate than the pinned one: the
+    /// caller must stop, not try another route.
+    Changed(String),
+    /// Anything else: the server is not there, or not usable.
+    Failed(String),
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Changed(why) | Self::Failed(why)) = self;
+        f.write_str(why)
+    }
+}
+
+impl From<String> for StartError {
+    fn from(why: String) -> Self {
+        Self::Failed(why)
+    }
+}
+
 /// A relay from a local socket to a server's TLS listener.
 pub struct Relay {
     socket: PathBuf,
@@ -95,15 +118,16 @@ pub struct Relay {
 impl Relay {
     /// Starts relaying to `addr`, which must present the certificate `pin`
     /// names, sending `token` first on each connection. Checks the pin now,
-    /// so a changed certificate fails here with both fingerprints.
-    pub fn start(addr: &str, pin: Pin, token: [u8; TOKEN_LEN]) -> Result<Self, String> {
+    /// so a changed certificate fails here, as [`StartError::Changed`], with both
+    /// fingerprints.
+    pub fn start(addr: &str, pin: Pin, token: [u8; TOKEN_LEN]) -> Result<Self, StartError> {
         let seen = fingerprint(addr)?;
         if seen != pin {
-            return Err(format!(
+            return Err(StartError::Changed(format!(
                 "the certificate of {addr} changed: pinned {}, now {}; re-pin only if you trust the change",
                 hex(&pin),
                 hex(&seen)
-            ));
+            )));
         }
         let (found, host) = resolve(addr)?;
         let dir = crate::ssh::private_dir().map_err(|e| e.to_string())?;
@@ -125,11 +149,13 @@ impl Relay {
             Ok(Ok(())) => Ok(relay),
             Ok(Err(e)) => {
                 relay.stop();
-                Err(e)
+                Err(e.into())
             }
             Err(_) => {
                 relay.stop();
-                Err("the TLS relay stopped before it was ready".into())
+                Err("the TLS relay stopped before it was ready"
+                    .to_owned()
+                    .into())
             }
         }
     }

@@ -80,6 +80,8 @@ fn a_changed_certificate_is_refused_with_both_fingerprints() {
     let mut other = pin;
     other[0] ^= 1;
     let err = Relay::start(&addr, other, TOKEN).err().expect("refused");
+    assert!(matches!(err, StartError::Changed(_)), "{err:?}");
+    let err = err.to_string();
     assert!(
         err.contains(&hex(&other)) && err.contains(&hex(&pin)),
         "{err}"
