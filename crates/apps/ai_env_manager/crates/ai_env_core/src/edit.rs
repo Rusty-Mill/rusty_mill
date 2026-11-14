@@ -77,7 +77,12 @@ impl RelPath {
     /// `..`, empty part, `:` (drive or stream), NUL or backslash.
     pub fn parse(s: &str) -> Result<Self, EditRefusal> {
         let plain = |part: &str| {
-            !part.is_empty() && part != "." && part != ".." && !part.contains(['\\', ':', '\0'])
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part.contains(['\\', ':', '\0'])
+                && !part.ends_with(['.', ' '])
+                && !windows_reserved(part)
         };
         if s.split('/').all(plain) {
             Ok(Self(s.to_owned()))
@@ -102,6 +107,18 @@ impl RelPath {
             .split('/')
             .fold(root.to_path_buf(), |p, part| p.join(part))
     }
+}
+
+/// A Windows device name (`CON`, `NUL`, `COM1`...), with or without an
+/// extension. A file so named cannot be opened normally there, so it is
+/// refused on every host to keep one catalog usable on all of them.
+fn windows_reserved(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or(part).to_ascii_uppercase();
+    let numbered = |p: &str| {
+        stem.strip_prefix(p)
+            .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
+    };
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT")
 }
 
 /// Who owns the file an edit would rewrite, as the adapter observed it.
@@ -142,15 +159,39 @@ pub fn check_text(bytes: &[u8]) -> Result<&str, EditRefusal> {
 /// what the adapter needs to apply it only if the file is still as read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditPlan {
-    pub entry: EntryId,
-    pub path: RelPath,
-    pub ownership: Ownership,
-    /// Content hash of the file as read; applying refuses if it differs now.
-    pub base_hash: String,
-    pub new_text: String,
+    entry: EntryId,
+    path: RelPath,
+    ownership: Ownership,
+    base_hash: String,
+    new_text: String,
 }
 
 impl EditPlan {
+    /// The entry the file belongs to.
+    pub fn entry(&self) -> &EntryId {
+        &self.entry
+    }
+
+    /// The file, relative to the entry's folder.
+    pub fn path(&self) -> &RelPath {
+        &self.path
+    }
+
+    /// Who owns the file being rewritten.
+    pub fn ownership(&self) -> Ownership {
+        self.ownership
+    }
+
+    /// Content hash of the file as read; applying refuses if it differs now.
+    pub fn base_hash(&self) -> &str {
+        &self.base_hash
+    }
+
+    /// The text to write.
+    pub fn new_text(&self) -> &str {
+        &self.new_text
+    }
+
     /// True when applying leaves a marked copy in the "edited" state.
     pub fn marks_edited(&self) -> bool {
         self.ownership == Ownership::MarkedCopy
@@ -221,11 +262,24 @@ mod tests {
             "C:/x",
             "a:b",
             "a\0b",
+            "CON",
+            "nul.txt",
+            "dir/Com1.md",
+            "LPT9",
+            "a.",
+            "a ",
         ] {
             assert!(
                 matches!(RelPath::parse(bad), Err(EditRefusal::BadPath(_))),
                 "{bad:?} should be refused"
             );
+        }
+    }
+
+    #[test]
+    fn relpath_accepts_names_that_only_look_reserved() {
+        for ok in ["CONSOLE.md", "com10", "COM0", "lpt", "a.b", ".hidden"] {
+            assert!(RelPath::parse(ok).is_ok(), "{ok:?} should be accepted");
         }
     }
 
@@ -277,8 +331,8 @@ mod tests {
     #[test]
     fn a_valid_edit_becomes_a_plan() {
         let p = plan(Ownership::Source, "SKILL.md", "old", "new").unwrap();
-        assert_eq!(p.new_text, "new");
-        assert_eq!(p.base_hash, "h");
+        assert_eq!(p.new_text(), "new");
+        assert_eq!(p.base_hash(), "h");
         assert!(!p.marks_edited());
     }
 

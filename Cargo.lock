@@ -588,6 +588,7 @@ name = "ai_env_fs"
 version = "0.1.0"
 dependencies = [
  "ai_env_core",
+ "rusty_atomic_file",
  "rusty_sha2",
 ]
 

@@ -27,7 +27,7 @@ fn invalid(msg: &str, p: &Path) -> io::Error {
 /// Files and folders under `root` as (relative `/` path, is_dir), sorted. The
 /// marker at the root is skipped. Symlinks are refused: following them could
 /// escape the entry or loop.
-fn walk(root: &Path) -> io::Result<Vec<(String, bool)>> {
+pub(crate) fn walk(root: &Path) -> io::Result<Vec<(String, bool)>> {
     let mut out = Vec::new();
     let mut stack = vec![PathBuf::new()];
     while let Some(rel) = stack.pop() {
@@ -56,7 +56,7 @@ fn walk(root: &Path) -> io::Result<Vec<(String, bool)>> {
     Ok(out)
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
