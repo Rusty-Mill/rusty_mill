@@ -8,7 +8,7 @@
 mod marker;
 
 use ai_env_core::{Action, Entry, LinkMethod, Observed, Os, Plan, Tool};
-use marker::{copy_marked, read_marker, tree_hash, MARKER};
+use marker::{copy_marked, read_marker, tree_hash};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -21,6 +21,9 @@ pub enum Error {
     Refused(PathBuf),
     /// An `Unlink` target is a plain file or a folder without our marker.
     NotManaged(PathBuf),
+    /// An `Unlink` target is a marked copy that was edited since; removing it
+    /// would lose the edits.
+    Modified(PathBuf),
     /// Every link method in the fallback chain failed; the last error.
     Io(PathBuf, io::Error),
 }
@@ -30,6 +33,7 @@ impl fmt::Display for Error {
         match self {
             Error::Refused(p) => write!(f, "plan refused for {}; nothing was changed", p.display()),
             Error::NotManaged(p) => write!(f, "{} is not managed; not removing it", p.display()),
+            Error::Modified(p) => write!(f, "{} was edited; not removing it", p.display()),
             Error::Io(p, e) => write!(f, "{}: {e}", p.display()),
         }
     }
@@ -52,7 +56,7 @@ pub fn observe(entry: &Entry, tool: &Tool) -> io::Result<Observed> {
     };
     if meta.file_type().is_symlink() {
         return Ok(match fs::read_link(&to) {
-            Ok(t) if t == entry.source => Observed::ManagedCurrent,
+            Ok(t) if same_path(&t, &entry.source) => Observed::ManagedCurrent,
             _ => Observed::Unmanaged,
         });
     }
@@ -70,6 +74,13 @@ pub fn observe(entry: &Entry, tool: &Tool) -> io::Result<Observed> {
     } else {
         Observed::ManagedStale
     })
+}
+
+/// True if both paths are the same file. A Windows junction can read back as
+/// a verbatim `\\?\C:\...` path, so equal text is not required: both sides
+/// are canonicalised when they exist.
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b || matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
 /// Applies `plan` in order. A plan with a refusal is rejected whole, before
@@ -128,10 +139,25 @@ fn symlink_dir(from: &Path, to: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_dir(from, to)
 }
 
+/// `cmd.exe` parses its arguments, and Rust does not escape for it, so a path
+/// holding one of its metacharacters must not reach `mklink`.
+#[cfg(any(windows, test))]
+fn cmd_safe(p: &Path) -> bool {
+    p.to_str().is_some_and(|s| {
+        !s.contains(['&', '|', '^', '"', '%', '<', '>', '(', ')', '!', '\n', '\r'])
+    })
+}
+
 /// Windows directory junction through `mklink /J` (no admin rights needed).
 /// Not verified in this repo's CI yet (pack Q5).
 #[cfg(windows)]
 fn junction(from: &Path, to: &Path) -> io::Result<()> {
+    if !(cmd_safe(from) && cmd_safe(to)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path has characters cmd.exe would interpret; not making a junction",
+        ));
+    }
     let status = std::process::Command::new("cmd")
         .args(["/C", "mklink", "/J"])
         .arg(to)
@@ -164,10 +190,13 @@ fn unlink(path: &Path) -> Result<(), Error> {
             .or_else(|_| fs::remove_dir(path))
             .map_err(io_err);
     }
-    if meta.is_dir() && path.join(MARKER).is_file() {
-        return fs::remove_dir_all(path).map_err(io_err);
+    let Some(mark) = meta.is_dir().then(|| read_marker(path)).flatten() else {
+        return Err(Error::NotManaged(path.to_owned()));
+    };
+    if tree_hash(path).map_err(io_err)? != mark.sha256 {
+        return Err(Error::Modified(path.to_owned()));
     }
-    Err(Error::NotManaged(path.to_owned()))
+    fs::remove_dir_all(path).map_err(io_err)
 }
 
 #[cfg(test)]

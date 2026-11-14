@@ -97,11 +97,21 @@ pub fn read_marker(dir: &Path) -> Option<Marker> {
     })
 }
 
+/// The marker stores the source as one text line, so a path that cannot
+/// round-trip through it is refused up front.
+pub(crate) fn marker_source(from: &Path) -> io::Result<&str> {
+    from.to_str()
+        .filter(|s| !s.contains(['\n', '\r']))
+        .ok_or_else(|| invalid("source path is not valid UTF-8 or has a line break", from))
+}
+
 /// Copies `from` to the new folder `to` and writes the marker last, so a
-/// folder with a marker is always complete. Cleans up after a failed copy.
+/// folder with a marker is always complete. The recorded hash is of what was
+/// written to `to`, so a source that changes mid-copy reads as stale, not as an
+/// edited copy. Cleans up after a failed copy and says so if it cannot.
 pub fn copy_marked(from: &Path, to: &Path) -> io::Result<()> {
+    let source = marker_source(from)?;
     let entries = walk(from)?;
-    let hash = tree_hash(from)?;
     fs::create_dir(to)?;
     let copy = || -> io::Result<()> {
         for (rel, is_dir) in &entries {
@@ -112,10 +122,14 @@ pub fn copy_marked(from: &Path, to: &Path) -> io::Result<()> {
                 fs::copy(&src, &dst)?;
             }
         }
-        let body = format!("source={}\nsha256={hash}\n", from.to_string_lossy());
-        fs::write(to.join(MARKER), body)
+        let hash = tree_hash(to)?;
+        fs::write(to.join(MARKER), format!("source={source}\nsha256={hash}\n"))
     };
-    copy().inspect_err(|_| {
-        let _ = fs::remove_dir_all(to);
+    copy().map_err(|e| match fs::remove_dir_all(to) {
+        Ok(()) => e,
+        Err(c) => io::Error::new(
+            e.kind(),
+            format!("{e}; cleaning up {} also failed: {c}", to.display()),
+        ),
     })
 }

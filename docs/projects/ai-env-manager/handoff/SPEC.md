@@ -56,8 +56,9 @@ with explicit consent (D6). Home when code starts: `crates/apps/ai_env_manager/`
       no I/O, unit-tested. (`ai_env_core`, D19)
       Ids are lower-case `[a-z0-9._-]`, no leading or trailing dot, no Windows device
       names; a hand-edited managed copy is refused, never replaced (D20).
-- [ ] Tool catalog as TOML data, seeded with the tools Nano uses (Q4 interim: Claude Code,
-      Codex, Cursor, Gemini CLI).
+- [x] Tool catalog as TOML data, seeded with the tools Nano uses (Q4 interim: Claude Code,
+      Codex, Cursor, Gemini CLI). (`ai_env_core`, D25: Claude Code and Codex so far;
+      Cursor and Gemini CLI wait until their skills folders are verified.)
 - [ ] CLI `list`, `enable`, `disable` producing a plan; `--yes` applies.
 - [x] Linker: symlink, then junction (Windows), then marked copy; managed-path marker.
       (`ai_env_fs`, D23; the junction path is not run in CI yet.)
