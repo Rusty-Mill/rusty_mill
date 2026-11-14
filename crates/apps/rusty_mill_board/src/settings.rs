@@ -488,7 +488,7 @@ impl Settings {
                 |s, by, a| s.agent_update(by, &parse::<WithAgent<AgentUpdate>>(a)?.agent)
             }
             "settings_agent_remove" => |s, _, a| s.agent_remove(&parse(a)?),
-            "settings_agent_rotate" => |s, _, a| s.agent_rotate(&parse(a)?),
+            "settings_agent_rotate" => |s, by, a| s.agent_rotate(by, &parse(a)?),
             "settings_projects_set" => |s, _, a| s.projects_set(&parse(a)?),
             "settings_roles_set" => |s, by, a| s.roles_set(by, &parse(a)?),
             "settings_role_rename" => |s, _, a| s.role_rename(&parse(a)?),
@@ -797,7 +797,11 @@ impl Settings {
             projects: a.agent_projects.clone(),
         };
         self.board.check_agent_grant(&grant, None)?;
-        if grant != Grant::default() {
+        if grant == Grant::default() {
+            // A reset hands back the connector's whole role and every project it works in.
+            let (role, projects) = self.connector_grant_of(&a.id)?;
+            self.may_grant(by, Some(&role), projects.as_deref())?;
+        } else {
             self.may_grant(by, a.agent_role.as_deref(), a.agent_projects.as_deref())?;
         }
         // The nickname first: a bad one then changes nothing.
@@ -808,6 +812,26 @@ impl Settings {
         } else {
             Err(refused(format!("no registered agent {:?}", a.id)))
         }
+    }
+
+    /// The role and project limit an agent falls back to: its connector's.
+    fn connector_grant_of(&self, id: &str) -> Result<(String, Option<Vec<String>>), BoardError> {
+        let agent = self
+            .board
+            .agent_list()
+            .into_iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| refused(format!("no registered agent {id:?}")))?;
+        let creds = self.creds.as_ref().ok_or_else(|| {
+            refused(
+                "the connector's role is not known here, so a reset cannot be checked".to_owned(),
+            )
+        })?;
+        let creds = creds.read().unwrap_or_else(PoisonError::into_inner);
+        let i = creds
+            .by_actor(&agent.connector)
+            .ok_or_else(|| refused(format!("no connector {:?}", agent.connector)))?;
+        Ok((i.role.clone(), i.projects.clone()))
     }
 
     /// Forget a registered agent: its key stops working at once; it can register again.
@@ -925,7 +949,14 @@ impl Settings {
         Ok(json!({ "ok": true }))
     }
 
-    fn agent_rotate(&self, a: &AgentName) -> Res {
+    fn agent_rotate(&self, by: &Caller, a: &AgentName) -> Res {
+        // A new raw token is a person's act in Settings: through a connector it would hand out
+        // (and lock out) any credential, an admin's included.
+        if by.via_connector {
+            return Err(refused(
+                "tokens are rotated by a person in Settings with their own token, not through a shared connector".to_owned(),
+            ));
+        }
         let token = self.change_creds(|c| c.rotate(&a.name))?;
         Ok(json!({ "token": token }))
     }

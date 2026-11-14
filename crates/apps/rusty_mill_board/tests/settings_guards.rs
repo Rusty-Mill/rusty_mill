@@ -2,12 +2,13 @@
 //! from a person's own token, never through a shared connector. Every call leaves an audit record.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use rusty_mill_board::agents::{Grant, Registry};
 use rusty_mill_board::api::{CallError, Identity, Shared};
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{BoardError, Capability};
+use rusty_mill_board::identities::Credentials;
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::settings::{Files, Settings};
 use rusty_mill_board::store::{MemStore, Store};
@@ -50,10 +51,18 @@ fn rig(name: &str) -> Rig {
             .with_projects(Projects::default())
             .with_agents(Registry::default()),
     );
+    // The shared connector acts as `boss`, so a reset hands an agent that role back.
+    let creds = Credentials::parse(
+        r#"[{"token":"conn-token-0123456789","actor":"conn","role":"boss"},
+            {"token":"nano-token-0123456789","actor":"nano","role":"mid"}]"#,
+        &board.roles(),
+        &board.projects(),
+    )
+    .expect("credentials");
     let settings = Settings::new(
         board.clone(),
         Files::in_dir(&dir),
-        None,
+        Some(Arc::new(RwLock::new(creds))),
         Syncer::new(board.clone()),
         None,
     );
@@ -255,4 +264,42 @@ fn every_settings_call_is_recorded_including_the_refused_and_denied_without_its_
     );
     // A read-only board never needs the audit file to exist, and its own read is not a record yet.
     assert!(r.dir.join("settings-audit.jsonl").exists());
+}
+
+#[test]
+fn a_connector_cannot_reset_an_agent_to_the_connectors_admin_role_or_rotate_a_token() {
+    let r = rig("reset");
+    let conn = connector("mid");
+    let me = r.agent("mid");
+    let target = r.agent("dev");
+    // A reset would hand `target` the connector's whole role, `boss`, with admin and enrol.
+    refused(
+        r.call(
+            &conn,
+            Some(&me),
+            "settings_registered_agent_set",
+            json!({"id": target.0}),
+        ),
+        "not through a shared connector",
+    );
+    // A new raw token is a person's act: a connector may not rotate a person admin's.
+    refused(
+        r.call(
+            &conn,
+            Some(&me),
+            "settings_agent_rotate",
+            json!({"name": "nano"}),
+        ),
+        "not through a shared connector",
+    );
+    // The person's own token may.
+    let out = r
+        .call(
+            &person("mid"),
+            None,
+            "settings_agent_rotate",
+            json!({"name": "nano"}),
+        )
+        .expect("a person rotates");
+    assert!(out["token"].is_string());
 }
