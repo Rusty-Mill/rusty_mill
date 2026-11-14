@@ -129,9 +129,17 @@ fn real_server_with(udp: Option<Duration>) -> (PathBuf, Option<u16>) {
             let socket = UdpSocket::bind("127.0.0.1:0").await.expect("udp");
             let port = socket.local_addr().expect("udp addr").port();
             ready_tx.send(Some(port)).expect("ready");
-            serve_udp(listener, config, Udp { socket, idle })
-                .await
-                .expect("serve");
+            serve_udp(
+                listener,
+                config,
+                Udp {
+                    socket,
+                    idle,
+                    life: None,
+                },
+            )
+            .await
+            .expect("serve");
         });
     });
     let port = ready_rx.recv_timeout(PATIENCE).expect("server bound");

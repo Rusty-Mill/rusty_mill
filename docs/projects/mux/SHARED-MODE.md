@@ -48,7 +48,7 @@ itself, and each connection carries its own kernel-verified `Principal` (`uid:N`
 |---|---|---|
 | Shared mode (this note) | #507, done as #1590 | Nano's answers below; independent security review |
 | PAM account and session checks in login mode | none | Owner gate: libpam is a native dependency (link or dlopen is part of the approval); security review (the front door is root) |
-| UDP for account servers behind the front door | none | Security review; a preface change visible to old peers would be a wire change |
+| UDP for account servers behind the front door | none | Built (#1461, [UDP-ACCOUNTS](UDP-ACCOUNTS.md)); security review owed before merge. An association skips the map once up, so it ends a hard hour after it began; a squatter on the port range can deny UDP, not forge it |
 
 C14 live sharing (#278) builds on shared mode and C77 leases and adds no second lease system.
 
