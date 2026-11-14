@@ -2,6 +2,7 @@
 //! `enable` and `disable` carry an entry and `--yes`.
 
 use ai_env_core::{EntryId, ToolId};
+use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -12,7 +13,9 @@ usage: aienv list --skills DIR... [--tool ID]...
 
   --skills DIR  a folder whose subfolders (each with a SKILL.md) are skills; repeatable
   --tool ID     limit to one tool from the catalog; repeatable (default: every tool)
-  --yes         apply the plan; without it enable and disable only show the plan";
+  --yes         apply the plan; without it enable and disable only show the plan
+
+exit status: 0 done, 1 a path was refused (nothing changed there), 2 usage, 3 error";
 
 /// Where to look and which tools to consider.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +56,17 @@ fn err<T>(msg: impl Into<String>) -> Result<T, UsageError> {
     Err(UsageError(msg.into()))
 }
 
+/// Turns the process arguments into text. A non-UTF-8 argument is a usage
+/// error, not a panic (Linux paths need not be UTF-8).
+pub fn from_os(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>, UsageError> {
+    args.into_iter()
+        .map(|a| {
+            a.into_string()
+                .map_err(|a| UsageError(format!("argument {a:?} is not valid UTF-8")))
+        })
+        .collect()
+}
+
 /// Parses everything after the program name.
 pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut it = args.iter();
@@ -65,11 +79,15 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--skills" => skills.push(PathBuf::from(value(&mut it, "--skills")?)),
-            "--tool" => tools.push(
-                value(&mut it, "--tool")?
+            "--tool" => {
+                let id: ToolId = value(&mut it, "--tool")?
                     .parse()
-                    .map_err(|e| UsageError(format!("{e}")))?,
-            ),
+                    .map_err(|e| UsageError(format!("{e}")))?;
+                if tools.contains(&id) {
+                    return err(format!("--tool {id} given twice"));
+                }
+                tools.push(id);
+            }
             "--yes" => yes = true,
             flag if flag.starts_with('-') => return err(format!("unknown option {flag:?}")),
             id if entry.is_none() => {
@@ -125,19 +143,29 @@ mod tests {
         assert!(!c.yes && c.entry.as_str() == "x");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_argument_is_a_usage_error() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = OsString::from_vec(vec![b'a', 0xff]);
+        assert!(from_os([OsString::from("list"), bad]).is_err());
+        assert_eq!(from_os([OsString::from("list")]).unwrap(), ["list"]);
+    }
+
     #[test]
     fn rejects_bad_command_lines() {
         for bad in [
             "frob",
-            "list",                           // no --skills
-            "list --skills",                  // missing value
-            "list --skills a --yes",          // --yes on list
-            "list x --skills a",              // entry on list
-            "enable --skills a",              // no entry
-            "enable x y --skills a",          // two entries
-            "enable X --skills a",            // invalid id
-            "enable x --skills a --tool Bad", // invalid tool id
-            "enable x --skills a --nope",     // unknown flag
+            "list",                                          // no --skills
+            "list --skills",                                 // missing value
+            "list --skills a --yes",                         // --yes on list
+            "list x --skills a",                             // entry on list
+            "enable --skills a",                             // no entry
+            "enable x y --skills a",                         // two entries
+            "enable X --skills a",                           // invalid id
+            "enable x --skills a --tool Bad",                // invalid tool id
+            "enable x --skills a --nope",                    // unknown flag
+            "enable x --skills a --tool codex --tool codex", // same tool twice
         ] {
             assert!(p(bad).is_err(), "{bad:?}");
         }

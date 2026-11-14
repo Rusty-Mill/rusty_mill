@@ -166,6 +166,12 @@ pub enum Os {
 }
 
 impl LinkMethod {
+    /// The method to try first on `os`: a symlink on every host, so a link the
+    /// user can see and follow is preferred to a junction or a copy.
+    pub fn preferred(_os: Os) -> LinkMethod {
+        LinkMethod::Symlink
+    }
+
     /// Methods to try, best first. Symlinks need Developer Mode on Windows;
     /// junctions do not, so they come second there.
     pub fn fallback_chain(os: Os) -> &'static [LinkMethod] {

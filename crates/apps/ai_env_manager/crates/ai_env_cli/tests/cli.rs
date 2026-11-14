@@ -46,12 +46,22 @@ impl Drop for Tmp {
     }
 }
 
-fn run_line(line: &str, home: &Path) -> (Result<Outcome, Error>, String) {
+/// Result, stdout and stderr of one command line.
+fn run_full(line: &str, home: &Path) -> (Result<Outcome, Error>, String, String) {
     let argv: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
     let cmd = args::parse(&argv).unwrap();
-    let mut out = Vec::new();
-    let result = run(&cmd, home, &mut out);
-    (result, String::from_utf8(out).unwrap())
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let result = run(&cmd, home, &mut out, &mut err);
+    (
+        result,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+fn run_line(line: &str, home: &Path) -> (Result<Outcome, Error>, String) {
+    let (r, out, _) = run_full(line, home);
+    (r, out)
 }
 
 fn line(verb: &str, skills: &Path, extra: &str) -> String {
@@ -159,7 +169,15 @@ fn bad_names_are_reported() {
     );
     assert!(matches!(r, Err(Error::DuplicateEntry(_))));
     let (r, _) = run_line("list --skills /no/such/folder", &t.home());
-    assert!(matches!(r, Err(Error::Io(_))));
+    let Err(Error::Folder(path, _)) = r else {
+        panic!("expected a folder error")
+    };
+    assert_eq!(path, Path::new("/no/such/folder"));
+    // A file where a folder is expected also names the path in the message.
+    let file = t.0.join("a-file");
+    fs::write(&file, "x").unwrap();
+    let (r, _) = run_line(&format!("list --skills {}", file.display()), &t.home());
+    assert!(r.unwrap_err().to_string().contains("a-file"));
 }
 
 #[test]
@@ -192,7 +210,19 @@ fn the_binary_sets_exit_codes() {
     assert_eq!(aienv(&["frob"]).status.code(), Some(2));
     assert_eq!(
         aienv(&["enable", "missing", "--skills", s]).status.code(),
-        Some(1)
+        Some(3)
+    );
+    assert_eq!(
+        aienv(&["list", "--skills", "/no/such/folder"])
+            .status
+            .code(),
+        Some(3)
+    );
+    assert_eq!(
+        aienv(&["list", "--skills", s, "--tool", "x", "--tool", "x"])
+            .status
+            .code(),
+        Some(2)
     );
     let foreign = t.target(".claude", "notes-helper");
     fs::create_dir_all(&foreign).unwrap();
@@ -202,4 +232,60 @@ fn the_binary_sets_exit_codes() {
             .code(),
         Some(1)
     );
+}
+
+#[test]
+fn skipped_folders_go_to_stderr_not_stdout() {
+    let t = Tmp::new();
+    let skills = t.skills();
+    fs::create_dir_all(skills.join("Bad_Name")).unwrap();
+    fs::write(skills.join("Bad_Name").join("SKILL.md"), "x").unwrap();
+    let (r, out, err) = run_full(&line("list", &skills, ""), &t.home());
+    assert!(matches!(r, Ok(Outcome::Done)));
+    assert!(err.contains("skipped") && err.contains("Bad_Name"), "{err}");
+    assert!(!out.contains("skipped"), "{out}");
+}
+
+#[test]
+fn a_failure_partway_says_which_tools_were_already_applied() {
+    let t = Tmp::new();
+    let skills = t.skills();
+    // codex links into home/.agents/skills; a file named .agents makes that fail
+    // after claude-code, which comes first in the catalog, has been applied.
+    fs::create_dir_all(t.home()).unwrap();
+    fs::write(t.home().join(".agents"), "in the way").unwrap();
+    let (r, out) = run_line(&line("enable code-review --yes", &skills, ""), &t.home());
+    assert!(r.is_err(), "{out}");
+    assert!(
+        out.contains("claude-code:\n") && out.contains("applied"),
+        "{out}"
+    );
+    assert!(fs::symlink_metadata(t.target(".claude", "code-review")).is_ok());
+}
+
+#[test]
+fn help_runs_without_a_home_folder() {
+    // The binary must print help even when HOME and USERPROFILE are unset.
+    let out = Command::new(env!("CARGO_BIN_EXE_aienv"))
+        .arg("--help")
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("usage: aienv"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_argument_exits_2_instead_of_panicking() {
+    use std::os::unix::ffi::OsStrExt;
+    let out = Command::new(env!("CARGO_BIN_EXE_aienv"))
+        .arg("list")
+        .arg("--skills")
+        .arg(std::ffi::OsStr::from_bytes(&[b'a', 0xff]))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not valid UTF-8"));
 }

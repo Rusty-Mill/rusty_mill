@@ -1,8 +1,14 @@
-use ai_env_cli::{args, run, Outcome};
+use ai_env_cli::args::{self, Command};
+use ai_env_cli::{run, Outcome};
 use std::env;
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+/// Exit status: 0 done, 1 a path was refused, 2 usage, 3 error.
+const REFUSED: u8 = 1;
+const USAGE: u8 = 2;
+const FAILED: u8 = 3;
 
 fn home() -> Option<PathBuf> {
     env::var_os("HOME")
@@ -12,24 +18,34 @@ fn home() -> Option<PathBuf> {
 }
 
 fn main() -> ExitCode {
-    let argv: Vec<String> = env::args().skip(1).collect();
-    let cmd = match args::parse(&argv) {
+    let cmd = match args::from_os(env::args_os().skip(1)).and_then(|a| args::parse(&a)) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("aienv: {e}\n\n{}", args::USAGE);
-            return ExitCode::from(2);
+            return ExitCode::from(USAGE);
         }
     };
-    let Some(home) = home() else {
-        eprintln!("aienv: set HOME (or USERPROFILE) so ~/ in the tool catalog can be resolved");
-        return ExitCode::from(2);
+    // Help needs no home folder.
+    let home = if cmd == Command::Help {
+        Some(PathBuf::new())
+    } else {
+        home()
     };
-    match run(&cmd, &home, &mut io::stdout().lock()) {
+    let Some(home) = home else {
+        eprintln!("aienv: set HOME (or USERPROFILE) so ~/ in the tool catalog can be resolved");
+        return ExitCode::from(USAGE);
+    };
+    match run(
+        &cmd,
+        &home,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+    ) {
         Ok(Outcome::Done) => ExitCode::SUCCESS,
-        Ok(Outcome::Refused) => ExitCode::from(1),
+        Ok(Outcome::Refused) => ExitCode::from(REFUSED),
         Err(e) => {
             eprintln!("aienv: {e}");
-            ExitCode::from(1)
+            ExitCode::from(FAILED)
         }
     }
 }

@@ -8,7 +8,7 @@ use ai_env_core::{
 };
 use std::fmt;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// How a run ended, for the exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,8 @@ pub enum Error {
     UnknownTool(String),
     UnknownEntry(String),
     DuplicateEntry(String),
+    /// A `--skills` folder could not be read.
+    Folder(PathBuf, io::Error),
     Fs(ai_env_fs::Error),
     Io(io::Error),
 }
@@ -39,6 +41,7 @@ impl fmt::Display for Error {
             Error::DuplicateEntry(e) => {
                 write!(f, "skill {e:?} appears in more than one --skills folder")
             }
+            Error::Folder(p, e) => write!(f, "{}: {e}", p.display()),
             Error::Fs(e) => e.fmt(f),
             Error::Io(e) => e.fmt(f),
         }
@@ -72,12 +75,12 @@ fn select_tools(scope: &Scope, home: &Path) -> Result<Vec<Tool>, Error> {
 
 /// Entries from every `--skills` folder, sorted by id; an id found twice is an
 /// error because it would mean two sources for one link.
-fn load_entries(scope: &Scope, out: &mut impl Write) -> Result<Vec<Entry>, Error> {
+fn load_entries(scope: &Scope, err: &mut impl Write) -> Result<Vec<Entry>, Error> {
     let mut entries: Vec<Entry> = Vec::new();
     for dir in &scope.skills {
-        let found = ai_env_fs::discover_skills(dir)?;
+        let found = ai_env_fs::discover_skills(dir).map_err(|e| Error::Folder(dir.clone(), e))?;
         for s in found.skipped {
-            writeln!(out, "skipped {}: {}", s.path.display(), s.reason)?;
+            writeln!(err, "skipped {}: {}", s.path.display(), s.reason)?;
         }
         entries.extend(found.entries);
     }
@@ -98,9 +101,14 @@ fn state(o: Observed) -> &'static str {
     }
 }
 
-fn list(scope: &Scope, home: &Path, out: &mut impl Write) -> Result<Outcome, Error> {
+fn list(
+    scope: &Scope,
+    home: &Path,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<Outcome, Error> {
     let tools = select_tools(scope, home)?;
-    for entry in load_entries(scope, out)? {
+    for entry in load_entries(scope, err)? {
         write!(out, "{}", entry.id)?;
         for tool in &tools {
             write!(
@@ -133,14 +141,20 @@ fn show(plan: &Plan, out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
-fn change(c: &Change, enable: bool, home: &Path, out: &mut impl Write) -> Result<Outcome, Error> {
+fn change(
+    c: &Change,
+    enable: bool,
+    home: &Path,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<Outcome, Error> {
     let tools = select_tools(&c.scope, home)?;
-    let entries = load_entries(&c.scope, out)?;
+    let entries = load_entries(&c.scope, err)?;
     let entry = entries
         .iter()
         .find(|e| e.id == c.entry)
         .ok_or_else(|| Error::UnknownEntry(c.entry.to_string()))?;
-    let method = LinkMethod::fallback_chain(ai_env_fs::HOST)[0];
+    let method = LinkMethod::preferred(ai_env_fs::HOST);
     let (mut outcome, mut pending) = (Outcome::Done, false);
     for tool in &tools {
         let observed = ai_env_fs::observe(entry, tool)?;
@@ -159,6 +173,7 @@ fn change(c: &Change, enable: bool, home: &Path, out: &mut impl Write) -> Result
             outcome = Outcome::Refused;
         } else if c.yes {
             ai_env_fs::apply(&plan)?;
+            writeln!(out, "  applied")?;
         } else {
             pending = true;
         }
@@ -169,15 +184,23 @@ fn change(c: &Change, enable: bool, home: &Path, out: &mut impl Write) -> Result
     Ok(outcome)
 }
 
-/// Runs `cmd`. `home` expands `~/` in the tool catalog.
-pub fn run(cmd: &Command, home: &Path, out: &mut impl Write) -> Result<Outcome, Error> {
+/// Runs `cmd`. `home` expands `~/` in the tool catalog. Results go to `out`;
+/// notes about skipped folders go to `err`. Tools are applied one at a time and
+/// each says "applied" when done, so after a failure the output shows which
+/// tools had already changed.
+pub fn run(
+    cmd: &Command,
+    home: &Path,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<Outcome, Error> {
     match cmd {
         Command::Help => {
             writeln!(out, "{USAGE}")?;
             Ok(Outcome::Done)
         }
-        Command::List(scope) => list(scope, home, out),
-        Command::Enable(c) => change(c, true, home, out),
-        Command::Disable(c) => change(c, false, home, out),
+        Command::List(scope) => list(scope, home, out, err),
+        Command::Enable(c) => change(c, true, home, out, err),
+        Command::Disable(c) => change(c, false, home, out, err),
     }
 }
