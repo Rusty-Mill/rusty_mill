@@ -117,6 +117,7 @@ fn start(dir: &Path, whois: PathBuf) -> (PathBuf, std::net::SocketAddr, oneshot:
                 Sharing {
                     allow,
                     tailnet: Some(tailnet),
+                    tls: None,
                 },
                 reloads,
                 async {
