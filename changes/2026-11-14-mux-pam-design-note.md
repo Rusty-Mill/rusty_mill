@@ -1,5 +1,5 @@
 ---
-category: Documentation
+category: Added
 changelog: Design note for PAM account checks in rusty-mux-server login mode.
 ---
 ## 2026-11-14 - rusty_mux PAM design note (#1460)
