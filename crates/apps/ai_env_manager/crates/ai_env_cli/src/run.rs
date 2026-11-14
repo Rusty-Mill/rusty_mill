@@ -1,14 +1,13 @@
-//! Runs a parsed command against the disk, through the core planners and the
-//! `ai_env_fs` adapter. Output goes to a writer so tests can read it.
+//! Runs a parsed command against the disk through `ai_env_app` and prints the
+//! result. Output goes to a writer so tests can read it.
 
 use crate::args::{Change, Command, Scope, USAGE};
-use ai_env_core::{
-    parse_catalog, plan_disable, plan_enable, Action, CatalogError, Entry, LinkMethod, Observed,
-    Plan, Restricted, Tool, BUILTIN_TOOLS,
-};
-use std::fmt;
+use ai_env_app::{apply, find_entry, load_entries, observe, plan, select_tools};
+use ai_env_core::{Action, Observed, Plan};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+pub use ai_env_app::Error;
 
 /// How a run ended, for the exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,77 +17,13 @@ pub enum Outcome {
     Refused,
 }
 
-#[derive(Debug)]
-pub enum Error {
-    Catalog(CatalogError),
-    UnknownTool(String),
-    UnknownEntry(String),
-    DuplicateEntry(String),
-    /// A `--skills` folder could not be read.
-    Folder(PathBuf, io::Error),
-    Fs(ai_env_fs::Error),
-    Io(io::Error),
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::Catalog(e) => write!(f, "tool catalog: {e}"),
-            Error::UnknownTool(t) => {
-                write!(f, "unknown tool {t:?}; see `aienv list` for the catalog")
-            }
-            Error::UnknownEntry(e) => write!(f, "no skill {e:?} in the --skills folders"),
-            Error::DuplicateEntry(e) => {
-                write!(f, "skill {e:?} appears in more than one --skills folder")
-            }
-            Error::Folder(p, e) => write!(f, "{}: {e}", p.display()),
-            Error::Fs(e) => e.fmt(f),
-            Error::Io(e) => e.fmt(f),
-        }
+/// Notes on skipped folders go to `err`.
+fn entries(scope: &Scope, err: &mut impl Write) -> Result<Vec<ai_env_core::Entry>, Error> {
+    let loaded = load_entries(scope)?;
+    for s in loaded.skipped {
+        writeln!(err, "skipped {}: {}", s.path.display(), s.reason)?;
     }
-}
-
-impl std::error::Error for Error {}
-
-macro_rules! from {
-    ($($t:ty => $v:ident),*) => {$(impl From<$t> for Error { fn from(e: $t) -> Self { Error::$v(e) } })*};
-}
-from!(CatalogError => Catalog, ai_env_fs::Error => Fs, io::Error => Io);
-
-/// Tools to act on: those named in `scope`, or all of the catalog.
-fn select_tools(scope: &Scope, home: &Path) -> Result<Vec<Tool>, Error> {
-    let all = parse_catalog(&Restricted, BUILTIN_TOOLS, home)?;
-    if scope.tools.is_empty() {
-        return Ok(all);
-    }
-    scope
-        .tools
-        .iter()
-        .map(|id| {
-            all.iter()
-                .find(|t| &t.id == id)
-                .cloned()
-                .ok_or_else(|| Error::UnknownTool(id.to_string()))
-        })
-        .collect()
-}
-
-/// Entries from every `--skills` folder, sorted by id; an id found twice is an
-/// error because it would mean two sources for one link.
-fn load_entries(scope: &Scope, err: &mut impl Write) -> Result<Vec<Entry>, Error> {
-    let mut entries: Vec<Entry> = Vec::new();
-    for dir in &scope.skills {
-        let found = ai_env_fs::discover_skills(dir).map_err(|e| Error::Folder(dir.clone(), e))?;
-        for s in found.skipped {
-            writeln!(err, "skipped {}: {}", s.path.display(), s.reason)?;
-        }
-        entries.extend(found.entries);
-    }
-    entries.sort_by(|a, b| a.id.cmp(&b.id));
-    if let Some(w) = entries.windows(2).find(|w| w[0].id == w[1].id) {
-        return Err(Error::DuplicateEntry(w[0].id.to_string()));
-    }
-    Ok(entries)
+    Ok(loaded.entries)
 }
 
 fn state(o: Observed) -> &'static str {
@@ -108,15 +43,10 @@ fn list(
     err: &mut impl Write,
 ) -> Result<Outcome, Error> {
     let tools = select_tools(scope, home)?;
-    for entry in load_entries(scope, err)? {
+    for entry in entries(scope, err)? {
         write!(out, "{}", entry.id)?;
         for tool in &tools {
-            write!(
-                out,
-                "  {}={}",
-                tool.id,
-                state(ai_env_fs::observe(&entry, tool)?)
-            )?;
+            write!(out, "  {}={}", tool.id, state(observe(&entry, tool)?))?;
         }
         writeln!(out)?;
     }
@@ -149,20 +79,11 @@ fn change(
     err: &mut impl Write,
 ) -> Result<Outcome, Error> {
     let tools = select_tools(&c.scope, home)?;
-    let entries = load_entries(&c.scope, err)?;
-    let entry = entries
-        .iter()
-        .find(|e| e.id == c.entry)
-        .ok_or_else(|| Error::UnknownEntry(c.entry.to_string()))?;
-    let method = LinkMethod::preferred(ai_env_fs::HOST);
+    let entries = entries(&c.scope, err)?;
+    let entry = find_entry(&entries, &c.entry)?;
     let (mut outcome, mut pending) = (Outcome::Done, false);
     for tool in &tools {
-        let observed = ai_env_fs::observe(entry, tool)?;
-        let plan = if enable {
-            plan_enable(entry, tool, observed, method)
-        } else {
-            plan_disable(entry, tool, observed)
-        };
+        let plan = plan(entry, tool, enable)?;
         writeln!(out, "{}:", tool.id)?;
         if plan.is_noop() {
             writeln!(out, "  nothing to do")?;
@@ -172,7 +93,7 @@ fn change(
         if plan.has_refusals() {
             outcome = Outcome::Refused;
         } else if c.yes {
-            ai_env_fs::apply(&plan)?;
+            apply(&plan)?;
             writeln!(out, "  applied")?;
         } else {
             pending = true;

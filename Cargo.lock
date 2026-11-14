@@ -564,11 +564,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "ai_env_cli"
+name = "ai_env_app"
 version = "0.1.0"
 dependencies = [
  "ai_env_core",
  "ai_env_fs",
+]
+
+[[package]]
+name = "ai_env_cli"
+version = "0.1.0"
+dependencies = [
+ "ai_env_app",
+ "ai_env_core",
 ]
 
 [[package]]
