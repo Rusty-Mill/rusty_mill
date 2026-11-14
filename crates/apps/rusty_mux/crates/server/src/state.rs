@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use rusty_mux_core::TailscaleState;
 use rusty_mux_core::{
     BlockId, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Mux, Principal, Side, Size,
     Transport, WindowId,
@@ -104,9 +106,10 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(UNIX_ONLY);
 
 /// Offered on Linux only: signal and release (C76) act on a Unix process
-/// group, and orch, their one client, runs there.
+/// group, and orch, their one client, runs there; the tailscale status
+/// event (C27) comes from a `tailscaled` this server asks on Linux.
 #[cfg(target_os = "linux")]
-const UNIX_ONLY: Features = Features::SIGNAL_RELEASE;
+const UNIX_ONLY: Features = Features::SIGNAL_RELEASE.union(Features::TAILSCALE_STATUS);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
 
@@ -703,6 +706,7 @@ impl State {
         takeover: Option<Takeover>,
     ) -> ClientId {
         let features = theirs.intersection(self.offered());
+        let who = principal.clone();
         let continued = takeover.and_then(|t| self.takes_over(t, &principal, features));
         let client = match continued {
             Some(client) => {
@@ -731,7 +735,7 @@ impl State {
             None => self.tokens.remove(&client),
         };
         let (cursor, missed) = if features.contains(Features::EVENT_SEQ) {
-            let (cursor, missed) = self.missed(resume, features);
+            let (cursor, missed) = self.missed(resume, features, &who);
             (Some(cursor), missed)
         } else {
             (None, Vec::new())
@@ -768,13 +772,18 @@ impl State {
     /// Where a client's stream starts, and the events it missed: from
     /// `resume` when possible, else from now with nothing to replay. Only
     /// events its `features` let it receive are replayed.
-    fn missed(&self, resume: Option<Cursor>, features: Features) -> (Cursor, Vec<Message>) {
+    fn missed(
+        &self,
+        resume: Option<Cursor>,
+        features: Features,
+        principal: &Principal,
+    ) -> (Cursor, Vec<Message>) {
         let replay = resume.and_then(|from| Some((from, self.history.since(from)?)));
         let Some((from, events)) = replay else {
             return (self.history.cursor(), Vec::new());
         };
         let messages = events
-            .filter(|(_, event)| receives(features, event))
+            .filter(|(_, event)| receives(features, principal, event))
             .map(|(seq, event)| Message::Event {
                 seq: Some(*seq),
                 event: event.clone(),
@@ -2461,6 +2470,14 @@ impl State {
         }
     }
 
+    /// Announces the server's tailnet node in `state` (C27) to the clients
+    /// that asked for it. Only the Linux shared server has a tailnet.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn tailscale_status(&mut self, state: TailscaleState, node: Option<String>) {
+        self.mux.note_tailscale_status(state, node);
+        self.flush();
+    }
+
     /// Deletes closed `block`'s spool by its path, whether or not a handle
     /// to it is left. A stopping server closes no block, so keeps them all.
     fn forget_history(&self, block: BlockId) {
@@ -2494,7 +2511,11 @@ impl State {
                 let clients: Vec<(ClientId, bool)> = self
                     .features
                     .iter()
-                    .filter(|(_, f)| receives(**f, &event))
+                    .filter(|(c, f)| {
+                        self.mux
+                            .client(**c)
+                            .is_some_and(|client| receives(**f, client.principal(), &event))
+                    })
                     .map(|(c, f)| (*c, f.contains(Features::EVENT_SEQ)))
                     .collect();
                 for (client, numbers) in clients {
@@ -2582,7 +2603,7 @@ fn launched(config: &Config, launch: &Launch) -> Result<Config, Refusal> {
 /// with [`Features::STATUS`], a pwd or title event only with
 /// [`Features::TERMINAL_EVENTS`], so older clients never see a kind they
 /// can't decode.
-fn receives(features: Features, event: &Event) -> bool {
+fn receives(features: Features, principal: &Principal, event: &Event) -> bool {
     let needs = match event {
         Event::BlockStatus { .. } => Features::STATUS,
         Event::PwdChanged { .. } | Event::TitleChanged { .. } => Features::TERMINAL_EVENTS,
@@ -2605,9 +2626,18 @@ fn receives(features: Features, event: &Event) -> bool {
         Event::WindowMoved { .. } => Features::LAYOUT_EDIT,
         Event::FocusChanged { .. } => Features::FOCUS,
         Event::GrantChanged { .. } => Features::INPUT_GATE,
+        Event::TailscaleStatusChanged { .. } if !is_tailnet(principal) => return false,
+        Event::TailscaleStatusChanged { .. } => Features::TAILSCALE_STATUS,
         _ => Features::NONE,
     };
     features.contains(needs)
+}
+
+/// Whether `principal` came in over the tailnet (`ts:` or `ts-node:`): the
+/// only connections told where the node stands (C27, D265).
+fn is_tailnet(principal: &Principal) -> bool {
+    let id = principal.id();
+    id.starts_with("ts:") || id.starts_with("ts-node:")
 }
 
 /// A principal for tests, which build a state without a peer check.
@@ -4107,5 +4137,31 @@ mod offered {
                 assert_eq!(feature.names().len(), 1, "bit {bit} has no name");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tailscale_status {
+    use super::*;
+
+    fn event() -> Event {
+        Event::TailscaleStatusChanged {
+            state: rusty_mux_core::TailscaleState::Running,
+            node: Some("box.t.ts.net".into()),
+        }
+    }
+
+    /// Only a tailnet connection that negotiated the bit is told where the
+    /// node stands (D265): not a local one, and not a tailnet one without it.
+    #[test]
+    fn only_a_tailnet_connection_with_the_bit_receives_it() {
+        let local = test_owner();
+        let tailnet = Principal::new("ts:carol@example.com", "").expect("valid");
+        let node = Principal::new("ts-node:box.t.ts.net", "").expect("valid");
+        let bit = Features::TAILSCALE_STATUS;
+        assert!(receives(bit, &tailnet, &event()));
+        assert!(receives(bit, &node, &event()));
+        assert!(!receives(bit, &local, &event()), "a local client got it");
+        assert!(!receives(Features::NONE, &tailnet, &event()));
     }
 }

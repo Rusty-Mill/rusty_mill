@@ -204,6 +204,7 @@ fn a_peer_tailscaled_cannot_name_is_closed_before_it_says_anything() {
             allow: Rc::new(RefCell::new(
                 lookups("ts:nano@example.com\n").expect("parses"),
             )),
+            status_every: STATUS_EVERY,
         };
         let state = state::State::shared(config, None);
         rusty_tokio::task::spawn_local(accept_tailnet(tailnet, state, Guests::default()));

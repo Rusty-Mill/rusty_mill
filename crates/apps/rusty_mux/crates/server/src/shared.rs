@@ -34,7 +34,7 @@ use std::io;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
-use rusty_mux_core::{Principal, Transport};
+use rusty_mux_core::{Principal, TailscaleState, Transport};
 use rusty_tokio::io::{TcpListener, UnixListener};
 use rusty_tokio::sync::{Notify, mpsc::UnboundedReceiver};
 
@@ -212,6 +212,7 @@ pub struct Tailnet {
     listener: TcpListener,
     whois: Whois,
     allow: Rc<RefCell<Allow>>,
+    status_every: std::time::Duration,
 }
 
 impl Tailnet {
@@ -230,6 +231,7 @@ impl Tailnet {
             listener,
             whois,
             allow: Rc::default(),
+            status_every: STATUS_EVERY,
         })
     }
 }
@@ -243,7 +245,17 @@ impl Tailnet {
             listener,
             whois,
             allow: Rc::default(),
+            status_every: STATUS_EVERY,
         }
+    }
+
+    /// Asks `tailscaled` for the node's status every `every` instead of
+    /// [`STATUS_EVERY`], so a test need not wait seconds.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn status_every(mut self, every: std::time::Duration) -> Self {
+        self.status_every = every;
+        self
     }
 
     /// The listener and the `tailscaled` client, for a front door (C27)
@@ -291,6 +303,11 @@ pub(crate) async fn accept_tailnet(
     state: state::Shared,
     guests: Guests,
 ) -> io::Result<()> {
+    rusty_tokio::task::spawn_local(watch_status(
+        tailnet.whois.clone(),
+        state.clone(),
+        tailnet.status_every,
+    ));
     let looking = Lookups::default();
     let mut dropped = 0u64;
     loop {
@@ -343,6 +360,43 @@ pub(crate) async fn accept_tailnet(
             )
             .await;
         });
+    }
+}
+
+/// How often the server asks `tailscaled` where its node stands.
+const STATUS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Tells clients when the tailnet node changes state or name (C27): asks
+/// `tailscaled` every [`STATUS_EVERY`] and announces only a change. A
+/// `tailscaled` that cannot be reached twice running reads as `Other` with
+/// no name, so clients learn it went away without one lost poll flapping
+/// the state. The failure is logged once, as it starts, and again when it
+/// ends. Runs until the server stops.
+async fn watch_status(whois: Whois, state: state::Shared, every: std::time::Duration) {
+    let mut last = None;
+    let mut failures = 0u32;
+    loop {
+        let now = match whois.status().await {
+            Ok(now) => {
+                if failures > 0 {
+                    eprintln!("rusty-mux-server: tailnet: status: tailscaled answers again");
+                }
+                failures = 0;
+                Some(now)
+            }
+            Err(err) => {
+                failures = failures.saturating_add(1);
+                if failures == 1 {
+                    eprintln!("rusty-mux-server: tailnet: status: {err}");
+                }
+                (failures >= 2).then_some((TailscaleState::Other, None))
+            }
+        };
+        if let Some(now) = now.filter(|now| last.as_ref() != Some(now)) {
+            state.borrow_mut().tailscale_status(now.0, now.1.clone());
+            last = Some(now);
+        }
+        rusty_tokio::time::sleep(every).await;
     }
 }
 

@@ -17,7 +17,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common::{Client, PATIENCE, shell};
+use common::{Client, PATIENCE, bridge, shell};
 use rusty_mux_core::SessionId;
 use rusty_mux_proto::{Entry, Features, Message};
 use rusty_mux_server::{
@@ -870,44 +870,6 @@ fn fake_tailscaled(dir: &Path, login: &str, own: &str) -> PathBuf {
                 }
                 let asks_status = seen.starts_with(b"GET /localapi/v0/status");
                 let _ = stream.write_all(if asks_status { &status } else { &whois }.as_bytes());
-            });
-        }
-    });
-    path
-}
-
-/// A Unix socket in `dir` whose every connection is relayed to the TCP
-/// `addr`, so the blocking test client can speak to the tailnet listener.
-fn bridge(dir: &Path, addr: std::net::SocketAddr) -> PathBuf {
-    use std::io::Read;
-    use std::net::TcpStream;
-    let path = dir.join("bridge.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&path).expect("bridge");
-    std::thread::spawn(move || {
-        for local in listener.incoming().flatten() {
-            let Ok(remote) = TcpStream::connect(addr) else {
-                continue;
-            };
-            // Each direction, then the end of the stream passed on.
-            let (mut local_in, mut local_out) = (local.try_clone().expect("clone"), local);
-            let (mut remote_in, mut remote_out) = (remote.try_clone().expect("clone"), remote);
-            std::thread::spawn(move || {
-                let mut buf = [0u8; 4096];
-                while let Ok(n @ 1..) = local_in.read(&mut buf) {
-                    if remote_out.write_all(&buf[..n]).is_err() {
-                        break;
-                    }
-                }
-                let _ = remote_out.shutdown(std::net::Shutdown::Both);
-            });
-            std::thread::spawn(move || {
-                let mut buf = [0u8; 4096];
-                while let Ok(n @ 1..) = remote_in.read(&mut buf) {
-                    if local_out.write_all(&buf[..n]).is_err() {
-                        break;
-                    }
-                }
-                let _ = local_out.shutdown(std::net::Shutdown::Both);
             });
         }
     });

@@ -15,7 +15,9 @@ use rusty_http::async_tokio::AsyncTransport;
 use rusty_http::head::RequestHead;
 use rusty_http::{HeaderMap, Method, Version};
 use rusty_mux_core::Principal;
+use rusty_mux_core::TailscaleState;
 use rusty_tokio::io::UnixStream;
+use ts_types::Status;
 use ts_types::tailcfg::WhoIsResponse;
 
 /// Where `tailscaled` listens on Linux.
@@ -80,14 +82,28 @@ impl Whois {
         principal_of(&who).map_err(invalid)
     }
 
+    /// Where this node stands: `tailscaled`'s backend state, and the node's
+    /// own name when it has one. Fails after [`DEADLINE`] like a lookup.
+    pub async fn status(&self) -> io::Result<(TailscaleState, Option<String>)> {
+        let status = rusty_tokio::time::timeout(DEADLINE, self.fetch_status())
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "tailscaled status timed out")
+            })??;
+        Ok(state_of(&status))
+    }
+
     /// This node's own tailnet addresses, from `tailscaled`'s status.
     async fn own_addrs(&self) -> io::Result<Vec<std::net::IpAddr>> {
+        Ok(self.fetch_status().await?.tailscale_ips)
+    }
+
+    /// `tailscaled`'s status without its peers.
+    async fn fetch_status(&self) -> io::Result<Status> {
         let body = self
             .get("/localapi/v0/status?peers=false".to_owned(), "status")
             .await?;
-        let status: ts_types::Status =
-            serde_json::from_slice(&body).map_err(|e| invalid(format!("status reply: {e}")))?;
-        Ok(status.tailscale_ips)
+        serde_json::from_slice(&body).map_err(|e| invalid(format!("status reply: {e}")))
     }
 
     async fn get(&self, target: String, what: &str) -> io::Result<Vec<u8>> {
@@ -153,6 +169,18 @@ pub fn principal_of(who: &WhoIsResponse) -> Result<Principal, String> {
         format!("ts-node:{name}")
     };
     Principal::new(id, "").map_err(|e| e.to_string())
+}
+
+/// The state and node name a status reply says. The node's name is its
+/// DNS name without the trailing dot, if it has one.
+fn state_of(status: &Status) -> (TailscaleState, Option<String>) {
+    let node = status
+        .self_
+        .as_ref()
+        .map(|me| me.dns_name.trim_end_matches('.'))
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    (TailscaleState::from_backend(&status.backend_state), node)
 }
 
 /// `addr` as a query value: `%` (an IPv6 zone) and an IPv6 peer's brackets

@@ -6,7 +6,7 @@ use crate::names;
 use crate::{
     Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Layout,
     MAX_DEPTH, Owner, Principal, Progress, Selection, Session, SessionId, Share, Side, Size,
-    Toward, Transport, Window, WindowId,
+    TailscaleState, Toward, Transport, Window, WindowId,
 };
 
 /// The longest name any entity may have, in UTF-8 bytes. Names travel in
@@ -673,6 +673,13 @@ impl Mux {
     /// config; the host that does calls this.
     pub fn note_config_reloaded(&mut self) {
         self.events.push(Event::ConfigReloaded);
+    }
+
+    /// Announces that the server's tailnet node is in `state` (C27). The
+    /// model does not watch `tailscaled`; the host that does calls this.
+    pub fn note_tailscale_status(&mut self, state: TailscaleState, node: Option<String>) {
+        self.events
+            .push(Event::TailscaleStatusChanged { state, node });
     }
 
     /// Announces that the block's program wrote `selection`.
