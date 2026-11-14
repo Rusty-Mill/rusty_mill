@@ -7,11 +7,16 @@
 //! removed ([`Action::Refuse`]).
 
 mod catalog;
+mod edit;
 mod model;
 mod plan;
 mod toml;
 
 pub use catalog::{parse_catalog, CatalogError, BUILTIN as BUILTIN_TOOLS};
+pub use edit::{
+    check_editable, check_text, plan_edit, EditPlan, EditRefusal, Ownership, RelPath, MARKER_FILE,
+    MAX_EDIT_BYTES,
+};
 pub use model::{Entry, EntryId, Error, Kind, LinkMethod, Os, Tool, ToolId};
 pub use plan::{plan_disable, plan_enable, Action, Observed, Plan};
 pub use toml::{ParseError, Restricted, Table, TomlReader};
