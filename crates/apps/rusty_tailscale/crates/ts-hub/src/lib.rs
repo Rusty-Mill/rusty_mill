@@ -24,7 +24,7 @@ use rusty_tokio::net::{TcpListener, TcpStream};
 use rusty_tokio::sync::watch;
 use ts_control::controlbase::{self, INITIATION_LEN};
 use ts_key::MachinePrivate;
-use ts_types::tailcfg::{Hostinfo, RegisterResponse};
+use ts_types::tailcfg::{Hostinfo, MapResponse, RegisterResponse};
 use ts_types::{DiscoPublic, MachinePublic, NodePublic};
 
 pub use state::{NodeRec, RegisterError, State};
@@ -39,6 +39,8 @@ pub struct Hub {
     key: MachinePrivate,
     state: Mutex<State>,
     relay: derp::Relay,
+    /// The `DERPMap` every netmap carries, once the hub knows its address.
+    derp_map: Mutex<Option<serde_json::Value>>,
     /// Bumped whenever the node table changes; map streams wait on it.
     changed: watch::Sender<u64>,
     /// Kept so streams can clone a fresh receiver.
@@ -53,6 +55,7 @@ impl Hub {
             key: MachinePrivate::generate(),
             state: Mutex::new(State::default()),
             relay: derp::Relay::new(),
+            derp_map: Mutex::new(None),
             changed,
             changes,
         })
@@ -61,6 +64,32 @@ impl Hub {
     /// Admits `login` for nodes that register with `key`.
     pub fn add_preauth(&self, key: &str, login: &str) {
         self.with_state(|s| s.add_preauth(key, login));
+    }
+
+    /// Advertises this hub's relay and STUN responder to nodes as a single
+    /// DERP region at `host`. The relay shares the control port, spoken
+    /// over plain HTTP (`InsecureForTests`), which suits a private spike.
+    pub fn advertise(&self, host: &str, port: u16, stun_port: u16) {
+        let map = serde_json::json!({"Regions": {"1": {
+            "RegionID": 1, "RegionCode": "hub", "RegionName": "hub",
+            "Nodes": [{
+                "Name": "1a", "RegionID": 1, "HostName": host,
+                "DERPPort": port, "STUNPort": stun_port,
+                "InsecureForTests": true,
+            }],
+        }}});
+        *self.derp_map.lock().unwrap_or_else(|e| e.into_inner()) = Some(map);
+    }
+
+    /// The netmap for `machine` with the advertised `DERPMap` attached.
+    fn netmap(&self, machine: &MachinePublic, omit_peers: bool) -> Option<MapResponse> {
+        let mut map = self.with_state(|s| s.netmap(machine, omit_peers))?;
+        map.derp_map = self
+            .derp_map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        Some(map)
     }
 
     /// The hub's Noise public key, as served on `GET /key`.
@@ -240,7 +269,7 @@ impl Hub {
         if changed {
             self.bump();
         }
-        let Some(first) = self.with_state(|s| s.netmap(&machine, req.omit_peers)) else {
+        let Some(first) = self.netmap(&machine, req.omit_peers) else {
             return send_status(respond, 404).await;
         };
         if !req.stream {
@@ -256,7 +285,7 @@ impl Hub {
         loop {
             let frame_bytes = match rusty_tokio::time::timeout(KEEPALIVE, rx.changed()).await {
                 Ok(Ok(())) => {
-                    let Some(map) = self.with_state(|s| s.netmap(&machine, req.omit_peers)) else {
+                    let Some(map) = self.netmap(&machine, req.omit_peers) else {
                         return Ok(());
                     };
                     frame(&map)?
