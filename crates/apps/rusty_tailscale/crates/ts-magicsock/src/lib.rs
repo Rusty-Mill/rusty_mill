@@ -650,6 +650,8 @@ fn from_platform_err(e: PlatformError) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn a_known_endpoint_is_not_pinged_back() {
         let known: SocketAddr = "192.0.2.1:41641".parse().unwrap();
@@ -664,8 +666,6 @@ mod tests {
         assert!(paths.knows(direct));
         assert!(!paths.knows("192.0.2.3:41641".parse().unwrap()));
     }
-
-    use super::*;
 
     #[test]
     fn primary_local_ip_is_discovered() {

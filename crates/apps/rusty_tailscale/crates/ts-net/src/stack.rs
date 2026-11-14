@@ -7,12 +7,12 @@
 //! (`SetAddr`, `Bind`) and per-connection app→net traffic (`Data`, `Close`)
 //! travel the same queue, so there is never a second owner of a socket.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Instant as StdInstant;
 
@@ -98,6 +98,9 @@ struct Conn {
     /// A chunk already taken from smoltcp's receive buffer that the app
     /// queue had no room for; retried first, never dropped.
     pending_rx: Option<Vec<u8>>,
+    /// Set while `pending_rx` is held; the reader clears it and pokes the
+    /// stack, so a read wakes the stack only when something is waiting.
+    held: Arc<AtomicBool>,
     /// app → net bytes not yet accepted by smoltcp.
     out: Vec<u8>,
     /// Application closed its write half; close once `out` drains.
@@ -265,12 +268,14 @@ impl Stack {
         let (to_app, from_net) = mpsc::channel(APP_QUEUE_DEPTH);
         let out_len = Arc::new(AtomicUsize::new(0));
         let write_waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+        let held = Arc::new(AtomicBool::new(false));
         self.conns.insert(
             id,
             Conn {
                 handle,
                 to_app,
                 pending_rx: None,
+                held: held.clone(),
                 out: Vec::new(),
                 closing: false,
                 out_len: out_len.clone(),
@@ -289,7 +294,33 @@ impl Stack {
             write_closed: false,
             out_len,
             write_waker,
+            held,
         }
+    }
+
+    /// Next ephemeral port that no live socket (outbound or listening) holds.
+    fn free_port(&mut self) -> Option<u16> {
+        let used: HashSet<u16> = self
+            .sockets
+            .iter()
+            .map(|(_, s)| {
+                let smoltcp::socket::Socket::Tcp(t) = s;
+                t.local_endpoint()
+                    .map_or(t.listen_endpoint().port, |e| e.port)
+            })
+            .collect();
+        (EPHEMERAL_PORT_START..=u16::MAX)
+            .cycle()
+            .skip((self.next_port - EPHEMERAL_PORT_START) as usize)
+            .take((u16::MAX - EPHEMERAL_PORT_START) as usize + 1)
+            .find(|p| !used.contains(p))
+            .inspect(|p| {
+                self.next_port = if *p == u16::MAX {
+                    EPHEMERAL_PORT_START
+                } else {
+                    p + 1
+                };
+            })
     }
 
     /// Starts an outbound connection; `service_sockets` finishes it.
@@ -305,11 +336,12 @@ impl Stack {
             tcp::SocketBuffer::new(vec![0u8; SOCKET_BUFFER]),
             tcp::SocketBuffer::new(vec![0u8; SOCKET_BUFFER]),
         );
-        let port = self.next_port;
-        self.next_port = if port == u16::MAX {
-            EPHEMERAL_PORT_START
-        } else {
-            port + 1
+        let Some(port) = self.free_port() else {
+            let _ = reply.send(Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "ts-net: no free local port",
+            )));
+            return;
         };
         let remote = smoltcp::wire::IpEndpoint::new(IpAddress::Ipv4(ip), addr.port());
         if let Err(e) = sock.connect(self.iface.context(), remote, port) {
@@ -462,8 +494,11 @@ impl Stack {
                 }
                 None => break,
             };
+            // Raised before the send so a reader that drains the queue right
+            // after a `Full` still sees it and pokes.
+            conn.held.store(true, Ordering::Release);
             match conn.to_app.try_send(chunk) {
-                Ok(()) => {}
+                Ok(()) => conn.held.store(false, Ordering::Release),
                 // Already out of smoltcp's buffer: keep it for the next pass.
                 Err(mpsc::error::TrySendError::Full(chunk)) => {
                     conn.pending_rx = Some(chunk);
@@ -542,6 +577,8 @@ pub struct TcpStream {
     /// task when `poll_write` parks so the stack can wake it once `out`
     /// drains.
     write_waker: Arc<Mutex<Option<Waker>>>,
+    /// Mirrors the stack's `Conn::held`: a chunk is waiting for queue room.
+    held: Arc<AtomicBool>,
 }
 
 impl TcpStream {
@@ -567,7 +604,9 @@ impl AsyncRead for TcpStream {
         }
         match self.from_net.poll_recv(cx) {
             Poll::Ready(Some(chunk)) => {
-                let _ = self.net.send(Request::Poke);
+                if self.held.swap(false, Ordering::AcqRel) {
+                    let _ = self.net.send(Request::Poke);
+                }
                 let n = chunk.len().min(buf.remaining());
                 buf.put_slice(&chunk[..n]);
                 if n < chunk.len() {
@@ -907,6 +946,28 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Ephemeral ports skip those a live socket holds, including across the
+    /// wrap from `u16::MAX` back to the start of the range.
+    #[rusty_tokio::test]
+    async fn free_port_skips_ports_in_use_across_the_wrap() {
+        let (_inbound_tx, inbound_rx) = mpsc::channel(1);
+        let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let mut stack = Stack::new(req_tx, inbound_rx, req_rx, outbound_tx);
+        for port in [EPHEMERAL_PORT_START, EPHEMERAL_PORT_START + 1] {
+            let mut sock = tcp::Socket::new(
+                tcp::SocketBuffer::new(vec![0u8; 16]),
+                tcp::SocketBuffer::new(vec![0u8; 16]),
+            );
+            sock.listen(port).unwrap();
+            stack.sockets.add(sock);
+        }
+        stack.next_port = u16::MAX;
+        assert_eq!(stack.free_port(), Some(u16::MAX));
+        assert_eq!(stack.free_port(), Some(EPHEMERAL_PORT_START + 2));
+        assert_eq!(stack.free_port(), Some(EPHEMERAL_PORT_START + 3));
+    }
+
     /// A burst larger than the app queue (16 chunks) must arrive whole and in
     /// order: a chunk taken from smoltcp that the queue had no room for was
     /// once dropped, so a message of more than ~30 KB never completed.
@@ -1004,6 +1065,7 @@ mod tests {
             write_closed: false,
             out_len: out_len.clone(),
             write_waker: write_waker.clone(),
+            held: Arc::new(AtomicBool::new(false)),
         };
         let mut cx = Context::from_waker(Waker::noop());
 
