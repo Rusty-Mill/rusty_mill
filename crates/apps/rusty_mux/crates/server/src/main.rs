@@ -905,6 +905,8 @@ mod tests {
         assert!(own.is_err());
     }
 
+    // Account servers and the front door exist on Linux only.
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_account_server_and_the_front_door_take_udp_ports() {
         let range = "10.0.0.1:2000-2009".parse::<UdpPorts>().unwrap();
