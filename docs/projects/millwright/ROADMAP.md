@@ -99,7 +99,7 @@ Let Em Loose questions go to `let-em-loose-expert`, not to this folder.
 | Code | Deliverable | Done when | Depends on | Lane | Size | Needs Nano |
 | --- | --- | --- | --- | --- | --- | --- |
 | S0 | Experiments closed out | Ledger, Conflux and Swarm OS each have a conclusion in remind-me and no open cards; Swarm OS is labelled a prototype | B0 | Design, Coordination | S | X1 to X3 |
-| S1 | Shared hygiene | One Rust toolchain pin across the repos; Ledger and Conflux on the newer SQLite binding, or archived instead | S0 | Build | S | E4 |
+| S1 | Shared hygiene | Ledger pinned to rusty_mill's 1.98.1 and on rusqlite 0.41; Conflux's repo archived. Converge and Communications are left alone (s1-hygiene-scope). Done 2026-11-13: baileyrd/ledger#5 merged (pin 1.98.1, rusqlite 0.41.1), Conflux archived | S0 | Build | S | E4 |
 | S2 | Two bounded trials | Communications has run one real-model trial and has a one-page conclusion; Converge has baseline numbers for rework, integration latency and redundant builds | G1 | Research, Build | M | X4, X5, a call budget |
 | S3 | Jujutsu trial | Two weeks of real work with Jujutsu, the merge queue and the affected-crate planner, measured against the baseline | S2 | Build, Merge steward | M | None |
 | S4 | Converge decision | A go or no-go on the kernel, written from the measured numbers | S3 | Nano | S | Decide |

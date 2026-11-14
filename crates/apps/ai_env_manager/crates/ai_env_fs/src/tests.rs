@@ -1,4 +1,5 @@
 use super::*;
+use crate::marker::{marker_source, MARKER};
 use ai_env_core::{plan_disable, plan_enable, Kind};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -180,4 +181,65 @@ fn tree_hash_ignores_marker_and_sees_changes() {
     assert_eq!(tree_hash(&e.source).unwrap(), before);
     fs::write(e.source.join("refs/a.md"), "b").unwrap();
     assert_ne!(tree_hash(&e.source).unwrap(), before);
+}
+
+#[test]
+fn unlink_refuses_an_edited_copy_even_if_the_plan_said_remove() {
+    let tmp = Tmp::new();
+    let (e, t) = fixture(&tmp);
+    enable(&e, &t, LinkMethod::Copy).unwrap();
+    fs::write(t.target(&e).join("SKILL.md"), "my edit").unwrap();
+    assert!(matches!(unlink(&t.target(&e)), Err(Error::Modified(_))));
+    assert!(t.target(&e).join("SKILL.md").is_file());
+}
+
+#[test]
+fn source_that_changes_during_copy_reads_stale_not_modified() {
+    let tmp = Tmp::new();
+    let (e, t) = fixture(&tmp);
+    enable(&e, &t, LinkMethod::Copy).unwrap();
+    // The marker hashes what was written, so a later source change is Stale.
+    fs::write(e.source.join("SKILL.md"), "changed").unwrap();
+    assert_eq!(observe(&e, &t).unwrap(), Observed::ManagedStale);
+}
+
+#[test]
+fn source_paths_that_break_the_marker_are_refused() {
+    assert!(marker_source(Path::new("a/b")).is_ok());
+    assert!(marker_source(Path::new("line\nbreak")).is_err());
+    assert!(marker_source(Path::new("cr\rhere")).is_err());
+}
+
+/// End to end, so the refusal is proven to happen before any change. Needs a
+/// filesystem that allows a line break in a name, which Windows does not.
+#[cfg(unix)]
+#[test]
+fn unrecordable_source_is_refused_before_any_change() {
+    let tmp = Tmp::new();
+    let (mut e, t) = fixture(&tmp);
+    let odd = tmp.0.join("src/line\nbreak");
+    fs::rename(&e.source, &odd).unwrap();
+    e.source = odd;
+    assert!(enable(&e, &t, LinkMethod::Copy).is_err());
+    assert!(!t.target(&e).exists());
+}
+
+#[test]
+fn cmd_metacharacters_are_not_safe_for_mklink() {
+    assert!(cmd_safe(Path::new("C:\\Users\\me\\skills\\code-review")));
+    for bad in ["a&b", "a|b", "a^b", "a\"b", "%PATH%", "a>b", "a(b)", "a!b"] {
+        assert!(!cmd_safe(Path::new(bad)), "{bad}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_by_another_spelling_of_the_source_is_still_ours() {
+    let tmp = Tmp::new();
+    let (e, t) = fixture(&tmp);
+    fs::create_dir_all(&t.skills_dir).unwrap();
+    // `src/./code-review` is a different path text for the same folder.
+    let alias = tmp.0.join("src/./code-review");
+    std::os::unix::fs::symlink(&alias, t.target(&e)).unwrap();
+    assert_eq!(observe(&e, &t).unwrap(), Observed::ManagedCurrent);
 }
