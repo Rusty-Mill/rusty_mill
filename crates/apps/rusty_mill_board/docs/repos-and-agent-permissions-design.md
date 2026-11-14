@@ -1,6 +1,6 @@
 # Design: repositories apart from projects, and agents that act like humans
 
-- **Status:** Proposed (2026-11-14). Not implemented. Needs Nano's approval of the recommendations below.
+- **Status:** Accepted (2026-11-14, Nano: projects may span repos; an agent cannot grant Admin; token minting and rotation stay HTTP-only). Not implemented yet.
 - **Scope:** `rusty_mill_board` (settings, registry, MCP/API). `rusty_tick` is unchanged (see "Tick impact").
 - **Builds on:** ADR-0003 (projects), ADR-0004 (settings), #1667/#1668 (registered agents), #1675 (per-agent role and projects), #1677 (nicknames), #1643 (project status).
 
