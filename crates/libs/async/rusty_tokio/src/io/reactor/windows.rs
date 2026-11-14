@@ -49,7 +49,7 @@ use std::mem;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{NtCancelIoFileEx, NtCreateFile, FILE_OPEN};
@@ -85,6 +85,19 @@ const POLL_CONNECT_FAIL: u32 = 0b1_0000_0000;
 const READABLE_FLAGS: u32 =
     POLL_RECEIVE | POLL_DISCONNECT | POLL_ACCEPT | POLL_ABORT | POLL_CONNECT_FAIL;
 const WRITABLE_FLAGS: u32 = POLL_SEND | POLL_ABORT | POLL_CONNECT_FAIL;
+/// Flags that mean "this direction is ready" and only that direction.
+const READ_ONLY_FLAGS: u32 = POLL_RECEIVE | POLL_DISCONNECT | POLL_ACCEPT;
+const WRITE_ONLY_FLAGS: u32 = POLL_SEND;
+
+/// Flags to stop watching after `interest` was delivered a second time
+/// without the caller clearing it, and to watch again once it is cleared.
+fn direction_flags(interest: Interest) -> u32 {
+    match interest {
+        Interest::Read => READ_ONLY_FLAGS,
+        Interest::Write => WRITE_ONLY_FLAGS,
+    }
+}
+
 /// Always registered for, regardless of what the caller actually wants
 /// this round -- see this module's docs on why there's no dynamic
 /// interest tracking here.
@@ -336,6 +349,15 @@ struct SockState {
     /// True for as long as a poll request the kernel might still
     /// complete into `iosb`/`poll_info` is outstanding.
     pending: bool,
+    /// Flags left out of the next poll: a direction that fired while it
+    /// was still marked ready (the caller has not hit `WouldBlock` yet)
+    /// would complete again at once, a busy loop for an idle UDP socket
+    /// that is always writable. Cleared by `ScheduledIo`'s `on_clear` hook,
+    /// which is the epoll/kqueue edge behaviour.
+    suppressed: u32,
+    /// A direction was un-suppressed while a poll was outstanding: that
+    /// poll was cancelled and its completion must resubmit, not report.
+    rearm: bool,
     /// Set by `deregister` -- once true, a completion for this socket is
     /// drained and dropped rather than resubmitted.
     deleting: bool,
@@ -360,6 +382,12 @@ pub(crate) struct Reactor {
     registry: Mutex<HashMap<RawIo, Arc<Mutex<SockState>>>>,
     shutdown: AtomicBool,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Set by `start`; lets a socket's `on_clear` hook reach the reactor
+    /// without keeping it alive.
+    me: OnceLock<Weak<Reactor>>,
+    /// Poll completions handled, so a test can see an idle-socket spin.
+    #[cfg(test)]
+    completions: std::sync::atomic::AtomicU64,
 }
 
 // SAFETY: `cp` is a plain IOCP handle; `CreateIoCompletionPort`/
@@ -408,6 +436,9 @@ impl Reactor {
             registry: Mutex::new(HashMap::new()),
             shutdown: AtomicBool::new(false),
             thread: Mutex::new(None),
+            me: OnceLock::new(),
+            #[cfg(test)]
+            completions: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -416,6 +447,7 @@ impl Reactor {
     /// thread closure needs an `Arc<Reactor>`, which doesn't exist until
     /// after construction.
     pub(crate) fn start(self: &Arc<Self>) {
+        let _ = self.me.set(Arc::downgrade(self));
         let reactor = self.clone();
         let handle = std::thread::Builder::new()
             .name("rusty_tokio-reactor".to_string())
@@ -467,6 +499,8 @@ impl Reactor {
                     // this loop is what actually drives exit.
                     continue;
                 }
+                #[cfg(test)]
+                self.completions.fetch_add(1, Ordering::Relaxed);
                 // SAFETY: `lpOverlapped` is exactly the raw
                 // `Arc<Mutex<SockState>>` pointer `submit_poll` leaked
                 // via `Arc::into_raw`, handed back unchanged by the
@@ -485,6 +519,17 @@ impl Reactor {
                 // completion was actually retrieved, i.e. only once the
                 // kernel is done writing it.
                 let status = unsafe { guard.iosb.Anonymous.Status };
+                if status < 0 && guard.rearm {
+                    // Our own cancel (see `rearm`): nothing happened to
+                    // the socket, just poll again with the new mask.
+                    guard.rearm = false;
+                    let scheduled_io = guard.scheduled_io.clone();
+                    drop(guard);
+                    if self.submit_poll(&state).is_err() {
+                        mark_orphaned(&scheduled_io);
+                    }
+                    continue;
+                }
                 if status < 0 {
                     // The overlapped poll itself failed in an unexpected
                     // way (distinct from a deliberate cancel, already
@@ -507,13 +552,28 @@ impl Reactor {
                     guard.deleting = true;
                     continue;
                 }
-                if events & READABLE_FLAGS != 0 {
-                    guard.scheduled_io.mark_ready(Interest::Read);
-                }
-                if events & WRITABLE_FLAGS != 0 {
-                    guard.scheduled_io.mark_ready(Interest::Write);
-                }
+                guard.rearm = false;
                 let scheduled_io = guard.scheduled_io.clone();
+                for (interest, flags) in [
+                    (Interest::Read, READABLE_FLAGS),
+                    (Interest::Write, WRITABLE_FLAGS),
+                ] {
+                    let fired = events & flags;
+                    if fired == 0 {
+                        continue;
+                    }
+                    // Already ready and not yet cleared: polling for it
+                    // again would complete at once. Wait for the clear.
+                    // `POLL_ABORT` and `POLL_CONNECT_FAIL` are in both
+                    // directions' flags and are never un-suppressed: they
+                    // are terminal states, the caller's next syscall
+                    // reports the error. Needs the clear hook, or nothing
+                    // would ever watch the direction again.
+                    if scheduled_io.has_clear_hook() && scheduled_io.is_ready(interest) {
+                        guard.suppressed |= fired;
+                    }
+                    scheduled_io.mark_ready(interest);
+                }
                 drop(guard);
                 // Level-triggered, like every other backend (see this
                 // crate's top-level reactor docs): immediately re-arm so
@@ -559,16 +619,17 @@ impl Reactor {
     /// `event_loop` (every resubmission after a completion).
     fn submit_poll(&self, state: &Arc<Mutex<SockState>>) -> io::Result<()> {
         let mut guard = state.lock().unwrap();
-        if guard.deleting {
+        if guard.deleting || guard.pending {
             return Ok(());
         }
+        let events = (WATCHED_FLAGS & !guard.suppressed) | POLL_LOCAL_CLOSE;
         guard.poll_info = AfdPollInfo {
             timeout: i64::MAX,
             number_of_handles: 1,
             exclusive: 0,
             handles: [AfdPollHandleInfo {
                 handle: guard.base_socket as HANDLE,
-                events: WATCHED_FLAGS,
+                events,
                 status: 0,
             }],
         };
@@ -604,6 +665,39 @@ impl Reactor {
         }
     }
 
+    /// `interest` was cleared after `WouldBlock`: watch it again. With no
+    /// poll outstanding, just submit one; otherwise cancel the running one,
+    /// whose completion then resubmits (see `event_loop`).
+    fn rearm(&self, state: &Arc<Mutex<SockState>>, interest: Interest) {
+        let mut guard = state.lock().unwrap();
+        let flags = direction_flags(interest);
+        if guard.deleting || guard.suppressed & flags == 0 {
+            return;
+        }
+        guard.suppressed &= !flags;
+        if !guard.pending {
+            let scheduled_io = guard.scheduled_io.clone();
+            drop(guard);
+            if self.submit_poll(state).is_err() {
+                mark_orphaned(&scheduled_io);
+            }
+            return;
+        }
+        guard.rearm = true;
+        let iosb_ptr: *mut IO_STATUS_BLOCK = &mut guard.iosb;
+        // SAFETY: `guard.pending` confirms a poll request is still
+        // outstanding against `iosb_ptr`, `Afd::cancel`'s precondition.
+        if unsafe { self.afd.cancel(iosb_ptr) }.is_err() {
+            // The running poll keeps its old mask and nothing else would
+            // watch this direction: surface readiness so the caller's own
+            // syscall finds the truth, like the other failed re-arms.
+            guard.rearm = false;
+            let scheduled_io = guard.scheduled_io.clone();
+            drop(guard);
+            mark_orphaned(&scheduled_io);
+        }
+    }
+
     pub(crate) fn register(&self, sock: RawIo) -> io::Result<Arc<ScheduledIo>> {
         self.register_with(sock, InitialReadiness::Optimistic)
     }
@@ -628,8 +722,18 @@ impl Reactor {
             iosb: unsafe { mem::zeroed() },
             poll_info: unsafe { mem::zeroed() },
             pending: false,
+            suppressed: 0,
+            rearm: false,
             deleting: false,
         }));
+        if let Some(reactor) = self.me.get().cloned() {
+            let weak_state = Arc::downgrade(&state);
+            let _ = scheduled_io.on_clear.set(Box::new(move |interest| {
+                if let (Some(reactor), Some(state)) = (reactor.upgrade(), weak_state.upgrade()) {
+                    reactor.rearm(&state, interest);
+                }
+            }));
+        }
         self.registry.lock().unwrap().insert(sock, state.clone());
         self.submit_poll(&state)?;
         Ok(scheduled_io)
@@ -712,4 +816,51 @@ fn get_base_socket(sock: RawIo) -> io::Result<RawIo> {
         return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
     }
     Ok(base)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::windows::io::AsRawSocket;
+    use std::time::Duration;
+
+    /// An idle UDP socket is writable all the time. It must not make the
+    /// reactor complete a poll over and over: after the first delivery the
+    /// write direction stays unwatched until the caller clears it.
+    #[test]
+    fn an_idle_udp_socket_does_not_spin_the_reactor() {
+        let reactor = Arc::new(Reactor::new().unwrap());
+        reactor.start();
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        sock.set_nonblocking(true).unwrap();
+        let io = reactor.register(sock.as_raw_socket()).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let idle = reactor.completions.load(Ordering::Relaxed);
+        assert!(idle < 10, "{idle} poll completions on an idle socket");
+
+        // Clearing write after a `WouldBlock` watches it again, and the
+        // socket still reports readable once data arrives.
+        let token = io.snapshot(Interest::Write);
+        assert!(io.clear_if_unchanged(Interest::Write, token));
+        let rtoken = io.snapshot(Interest::Read);
+        assert!(io.clear_if_unchanged(Interest::Read, rtoken));
+        let addr = sock.local_addr().unwrap();
+        std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .send_to(b"x", addr)
+            .unwrap();
+        // Poll until a deadline: a loaded runner may be slow, not wrong.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !(io.is_ready(Interest::Read) && io.is_ready(Interest::Write)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "read ready: {}, write ready: {}",
+                io.is_ready(Interest::Read),
+                io.is_ready(Interest::Write)
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        reactor.deregister(sock.as_raw_socket());
+        reactor.shutdown();
+    }
 }

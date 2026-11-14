@@ -774,7 +774,9 @@ impl Settings {
 
     fn projects_set(&self, a: &ProjectsSet) -> Res {
         let path = self.file(&self.files.projects)?;
-        let new = Projects::from_listing(a.repos.clone()).map_err(refused)?;
+        let new = Projects::from_listing(a.repos.clone())
+            .map_err(refused)?
+            .keeping_facts_of(&self.board.projects());
         if let Some(creds) = &self.creds {
             let creds = creds.read().unwrap_or_else(PoisonError::into_inner);
             if let Some((who, p)) = creds.list().find_map(|i| {

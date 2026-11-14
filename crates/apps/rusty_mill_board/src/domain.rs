@@ -585,6 +585,10 @@ pub struct Card {
     /// The project (application) this card belongs to; see `projects`.
     #[serde(default = "default_project")]
     pub project: String,
+    /// The repository its work is in, when its project spans several and the card is not in
+    /// the project's `default_repo`; always one of the project's repositories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     /// Discussion, oldest first.
     pub comments: Vec<Comment>,
     /// Higher is taken first within a queue; one of [`PRIORITIES`].
@@ -978,6 +982,7 @@ impl Card {
             claim: None,
             tags,
             project: default_project(),
+            repo: None,
             comments: Vec::new(),
             priority: 0,
             deps: Vec::new(),
@@ -1034,11 +1039,13 @@ impl Card {
         }
     }
 
-    /// Move the card to `project`, dropping any claim (the claimant may not be in scope there).
-    /// Only the project changes: the column stays, so a Done card is re-filed, never reopened.
-    pub fn assign(&self, project: &str, now_ms: i64) -> Self {
+    /// Move the card to `project` (and `repo` of it, if it spans several), dropping any claim
+    /// (the claimant may not be in scope there). Only the project and repository change: the
+    /// column stays, so a Done card is re-filed, never reopened.
+    pub fn assign(&self, project: &str, repo: Option<&str>, now_ms: i64) -> Self {
         Self {
             project: project.to_owned(),
+            repo: repo.map(str::to_owned),
             claim: None,
             ..self.next(now_ms)
         }
