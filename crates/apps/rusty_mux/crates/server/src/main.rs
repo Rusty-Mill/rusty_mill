@@ -77,6 +77,7 @@ const USAGE: &str = "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SEC
                         [--state DIR | --no-state] [--idle-exit SECS] [<socket>]
        rusty-mux-server --login MAP [--runtime DIR] [--tailnet ADDR:PORT] <socket>
        rusty-mux-server --shared ALLOW [--tailnet ADDR:PORT] [--config FILE]
+                        [--tls ADDR:PORT --tls-cert PEM --tls-key PEM --tokens FILE]
                         [--state DIR | --no-state] <socket>";
 /// Where login mode puts each account's server unless `--runtime` says.
 const RUNTIME: &str = "/run/rusty-mux";
@@ -127,7 +128,16 @@ enum Mode {
     },
     /// One server that also serves the users this allowlist names (C26),
     /// and the tailnet peers it names, on `--tailnet`'s address (C27).
-    Shared(PathBuf, Option<SocketAddr>),
+    Shared(PathBuf, Option<SocketAddr>, Option<TlsArgs>),
+}
+
+/// `--tls`: the address and the files of the TLS listener (#506).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TlsArgs {
+    addr: SocketAddr,
+    cert: PathBuf,
+    key: PathBuf,
+    tokens: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -159,6 +169,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let (mut login, mut runtime, mut forwarded_by) = (None, None, None);
     let mut shared = None;
     let mut tailnet = None;
+    let (mut tls, mut tls_cert, mut tls_key, mut tokens) = (None, None, None, None);
     let mut state = StateDir::Default;
     let mut idle_exit = None;
     while let Some(arg) = args.next() {
@@ -178,6 +189,16 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             Some("--login") => login = Some(PathBuf::from(value("--login")?)),
             Some("--shared") => shared = Some(PathBuf::from(value("--shared")?)),
             Some("--tailnet") => tailnet = Some(tailnet_addr(&value("--tailnet")?)?),
+            Some("--tls") => {
+                let text = value("--tls")?;
+                let addr = text
+                    .parse::<SocketAddr>()
+                    .map_err(|_| format!("--tls {text}: not ADDR:PORT"))?;
+                tls = Some(addr);
+            }
+            Some("--tls-cert") => tls_cert = Some(PathBuf::from(value("--tls-cert")?)),
+            Some("--tls-key") => tls_key = Some(PathBuf::from(value("--tls-key")?)),
+            Some("--tokens") => tokens = Some(PathBuf::from(value("--tokens")?)),
             Some("--runtime") => runtime = Some(PathBuf::from(value("--runtime")?)),
             Some("--forwarded-by") => {
                 let uid = value("--forwarded-by")?;
@@ -207,18 +228,22 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         if !cfg!(target_os = "linux") {
             return Err("shared mode runs on Linux only".into());
         }
+        let tls = tls_args(tls, tls_cert, tls_key, tokens)?;
         return Ok(Args {
             socket,
             udp,
             idle,
             config,
             state,
-            mode: Mode::Shared(allow, tailnet),
+            mode: Mode::Shared(allow, tailnet, tls),
             idle_exit,
         });
     }
     if tailnet.is_some() && login.is_none() {
         return Err("--tailnet needs --shared or --login: a list decides who is served".into());
+    }
+    if tls.is_some() || tls_cert.is_some() || tls_key.is_some() || tokens.is_some() {
+        return Err("--tls needs --shared: the allowlist decides who is served".into());
     }
     let mode = match (login, runtime, forwarded_by) {
         (None, None, None) => Mode::Personal,
@@ -267,6 +292,25 @@ fn seconds(flag: &str, secs: &str) -> Result<Duration, String> {
         .filter(|s| *s > 0)
         .map(Duration::from_secs)
         .ok_or(format!("{flag} {secs}: not a whole number of seconds"))
+}
+
+/// The TLS listener's flags: all four or none.
+fn tls_args(
+    addr: Option<SocketAddr>,
+    cert: Option<PathBuf>,
+    key: Option<PathBuf>,
+    tokens: Option<PathBuf>,
+) -> Result<Option<TlsArgs>, String> {
+    match (addr, cert, key, tokens) {
+        (None, None, None, None) => Ok(None),
+        (Some(addr), Some(cert), Some(key), Some(tokens)) => Ok(Some(TlsArgs {
+            addr,
+            cert,
+            key,
+            tokens,
+        })),
+        _ => Err("--tls needs --tls-cert, --tls-key and --tokens, and they need --tls".into()),
+    }
 }
 
 /// `--tailnet`'s `ADDR:PORT`: the address must be a tailnet one, the only
@@ -331,8 +375,8 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
         StateDir::Default => default_state_dir(&socket, |name| std::env::var_os(name)),
     };
     #[cfg(target_os = "linux")]
-    if let Mode::Shared(allow, tailnet) = &args.mode {
-        return run_shared(&socket, allow.clone(), *tailnet, config);
+    if let Mode::Shared(allow, tailnet, tls) = &args.mode {
+        return run_shared(&socket, allow.clone(), *tailnet, tls.clone(), config);
     }
     // Before the runtime starts a thread: binding sets the umask, and the
     // activation variables are read and removed. No authentication in
@@ -495,6 +539,7 @@ fn run_shared(
     socket: &std::path::Path,
     allow: PathBuf,
     tailnet: Option<SocketAddr>,
+    tls: Option<TlsArgs>,
     config: Config,
 ) -> std::io::Result<()> {
     use rusty_tokio::signal::unix::{SignalKind, signal};
@@ -516,7 +561,23 @@ fn run_shared(
             }
         });
         let tailnet = bind_tailnet(tailnet).await?;
-        let sharing = rusty_mux_server::Sharing { allow, tailnet };
+        let tls = match tls {
+            None => None,
+            Some(args) => {
+                let listener = rusty_tokio::io::TcpListener::bind(args.addr).await?;
+                Some(rusty_mux_server::Tls::new(
+                    listener,
+                    &args.cert,
+                    &args.key,
+                    args.tokens,
+                )?)
+            }
+        };
+        let sharing = rusty_mux_server::Sharing {
+            allow,
+            tailnet,
+            tls,
+        };
         rusty_mux_server::serve_shared(listener, config, sharing, reloads, stop_requested()?).await
     });
     served.and(owned.release())
@@ -693,7 +754,10 @@ mod tests {
     #[test]
     fn shared_mode_takes_an_allowlist_and_a_socket() {
         let shared = parse_str(&["--shared", "allow", "--no-state", "s.sock"]).unwrap();
-        assert_eq!(shared.mode, Mode::Shared(PathBuf::from("allow"), None));
+        assert_eq!(
+            shared.mode,
+            Mode::Shared(PathBuf::from("allow"), None, None)
+        );
         assert_eq!(shared.socket, Some(PathBuf::from("s.sock")));
         assert_eq!(shared.state, StateDir::Off);
         for bad in [
@@ -711,11 +775,47 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn the_tls_listener_takes_all_four_flags_and_shared_mode() {
+        let all = [
+            "--shared",
+            "a",
+            "--tls",
+            "0.0.0.0:7001",
+            "--tls-cert",
+            "c",
+            "--tls-key",
+            "k",
+            "--tokens",
+            "t",
+            "s",
+        ];
+        let ok = parse_str(&all).unwrap();
+        let Mode::Shared(_, None, Some(tls)) = ok.mode else {
+            panic!("no tls");
+        };
+        assert_eq!(tls.addr, "0.0.0.0:7001".parse().unwrap());
+        assert_eq!(tls.tokens, PathBuf::from("t"));
+        // Each flag is needed, and none without --shared.
+        for skip in [2, 4, 6, 8] {
+            let mut part = all.to_vec();
+            part.drain(skip..skip + 2);
+            assert!(parse_str(&part).is_err(), "{part:?}");
+        }
+        assert!(parse_str(&["--tls", "0.0.0.0:7001", "s"]).is_err());
+        assert!(parse_str(&["--shared", "a", "--tls", "nope", "s"]).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn the_tailnet_listener_is_shared_mode_and_a_tailnet_address() {
         let ok = parse_str(&["--shared", "a", "--tailnet", "100.64.0.7:7000", "s"]).unwrap();
         assert_eq!(
             ok.mode,
-            Mode::Shared(PathBuf::from("a"), Some("100.64.0.7:7000".parse().unwrap()))
+            Mode::Shared(
+                PathBuf::from("a"),
+                Some("100.64.0.7:7000".parse().unwrap()),
+                None
+            )
         );
         for bad in [
             &["--tailnet", "100.64.0.7:7000", "s"][..],

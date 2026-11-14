@@ -85,6 +85,7 @@ impl Shared {
                     Sharing {
                         allow,
                         tailnet: None,
+                        tls: None,
                     },
                     reloads,
                     async {

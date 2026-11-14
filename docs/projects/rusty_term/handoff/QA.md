@@ -80,6 +80,10 @@ Source: D254; D255; D253; `docs/projects/mux/MESH.md`.
 Asked 2026-11-13. Dial path has a go, tagged `[default]` because it came by the coordinator's relay with no Nano message id; Nano should confirm on the PR (D256). Spikes A-W, A and dial passed on throwaway branches; two bug fixes and the Windows reactor idle spin are open and need their own PRs and go (D257; Q61-Q63). D255 stands.
 Source: D256; D257; D255; `docs/projects/mux/MESH.md`.
 
+## Is the TLS listener (#506) slice 1 gated, and what can it build without a `rusty_tls` change?
+Asked 2026-11-13 after Nano's "A" (start #506). "A" is the row-start go (D235); D236 says a `rusty_tls` fingerprint-pin change "is asked for separately", so that change stays an owner gate. Slice 1 is the server side (generic `conn::run` already done by C27, `--tls-cert`/`--tls-key`, `TlsAcceptor`, token frame and `rusty-mux-ctl token`), using in-workspace `rusty_sha2` (SHA-256), `rusty_base64` and `rusty_rand`; no third-party dependency. Client pinning waits for the separate go. Next free D id on main: D258.
+Source: D235; D236; D237; `docs/projects/mux/TLS-LISTENER.md`; `crates/libs/net/rusty_tls/src/trust.rs`.
+
 ## What does PAM login mode check, and how does a refusal look?
 Asked 2026-11-14 (#1460). Account checks only (`pam_acct_mgmt` on the target account, for every principal source); never passwords; sessions deferred because account servers outlive the front door. Off unless `--pam`; fails closed; a refusal is a closed socket plus a stderr line, no wire change (D266). The dependency is loaded with dlopen at run time, no link and no `-dev` package (Nano, D267 [stated]); the session scope stays open (Q65).
 Source: D266; D267; D233; D39; mux `RISKS.md` R17; `REX-DELTA.md` R8/D9; `crates/apps/rusty_mux/crates/server/src/login.rs` `admit`.
