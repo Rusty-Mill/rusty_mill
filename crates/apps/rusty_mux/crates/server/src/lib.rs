@@ -60,6 +60,7 @@ pub mod tailnet;
 mod terminal;
 #[cfg(target_os = "linux")]
 mod tls;
+mod udp_ports;
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -79,6 +80,7 @@ pub use login::{
 pub use shared::{Sharing, Tailnet, serve_shared};
 #[cfg(target_os = "linux")]
 pub use tls::Tls;
+pub use udp_ports::UdpPorts;
 
 /// How the server starts each block's program.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +150,10 @@ pub struct Udp {
     pub socket: UdpSocket,
     /// How long an association, and the clients on it, outlive silence.
     pub idle: Duration,
+    /// A hard end for every association, however much it is heard, so a
+    /// peer whose admission was withdrawn cannot keep one alive by
+    /// talking. The client asks again, through whatever admitted it.
+    pub life: Option<Duration>,
 }
 
 /// Accepts clients on `listener` until accepting fails, then stops as
@@ -232,6 +238,7 @@ pub async fn serve_forwarded(
     listener: UnixListener,
     config: Config,
     forwarder: u32,
+    udp: Option<Udp>,
     stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
     let owner = rusty_libc::process::geteuid();
@@ -245,7 +252,7 @@ pub async fn serve_forwarded(
             Peer::Refused(format!("uid {uid}"))
         })
     };
-    serve_for(listener, config, None, allowed, None, None, stop).await
+    serve_for(listener, config, udp, allowed, None, None, stop).await
 }
 
 /// The principal every client of this server has: its own user, the only
@@ -444,6 +451,7 @@ async fn serve_clients(
     let lifetimes = state::Lifetimes {
         idle: udp.idle,
         lease: datagram::LEASE_SILENCE,
+        life: udp.life,
     };
     state
         .borrow_mut()
@@ -451,7 +459,7 @@ async fn serve_clients(
     let socket = std::rc::Rc::new(udp.socket);
     rusty_tokio::select! {
         result = accept(listener, state.clone(), allowed, owner, guests) => result,
-        result = datagram::serve(socket, registry, state, udp.idle, datagram::LEASE_SILENCE) => result,
+        result = datagram::serve(socket, registry, state, udp.idle, datagram::LEASE_SILENCE, udp.life) => result,
     }
 }
 

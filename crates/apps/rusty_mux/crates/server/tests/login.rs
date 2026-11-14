@@ -21,8 +21,8 @@ use common::{Client, PATIENCE, bridge, shell};
 use rusty_mux_core::SessionId;
 use rusty_mux_proto::{Entry, Features, Message};
 use rusty_mux_server::{
-    Limits, Login, MAX_MAP, Reload, Tailnet, bind_front_door, serve_forwarded, serve_login_with,
-    tailnet::Whois,
+    Limits, Login, MAX_MAP, Reload, Tailnet, UdpPorts, bind_front_door, serve_forwarded,
+    serve_login_with, tailnet::Whois,
 };
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::sync::{mpsc, oneshot};
@@ -75,6 +75,7 @@ fn login(dir: &Path) -> Login {
         runtime: dir.join("run"),
         server: PathBuf::from(env!("CARGO_BIN_EXE_rusty-mux-server")),
         limits: Limits::default(),
+        udp: None,
     }
 }
 
@@ -753,7 +754,7 @@ fn start_forwarded(path: &Path, forwarder: u32) {
         runtime.block_on(async move {
             let listener = UnixListener::bind(&bind).expect("bind");
             ready_tx.send(()).expect("ready");
-            serve_forwarded(listener, shell(), forwarder, std::future::pending()).await
+            serve_forwarded(listener, shell(), forwarder, None, std::future::pending()).await
         })
     });
     ready_rx.recv_timeout(PATIENCE).expect("bound");
@@ -992,4 +993,106 @@ fn a_tailnet_peer_at_the_nodes_own_address_is_closed() {
         );
         front.stop();
     }
+}
+
+/// The port a client's `OpenDatagram` is answered with, or why not.
+fn open_datagram(client: &mut Client) -> Result<u16, String> {
+    const REQ: u64 = 9_000;
+    client.send(&Message::OpenDatagram { req: REQ });
+    loop {
+        match client.recv() {
+            Message::Datagram { req: REQ, port, .. } => return Ok(port),
+            Message::Failed {
+                req: REQ, reason, ..
+            } => return Err(reason),
+            _ => {}
+        }
+    }
+}
+
+/// A run of three UDP ports on loopback, free when asked, and the first
+/// of them.
+fn udp_range() -> (UdpPorts, u16) {
+    let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe");
+    let lo = probe.local_addr().expect("addr").port();
+    drop(probe);
+    let ports = format!("127.0.0.1:{lo}-{}", lo + 2).parse().expect("range");
+    (ports, lo)
+}
+
+/// A front door that gives account servers `ports`, with this user's own
+/// account mapped from itself.
+fn front_with_udp(dir: &Path, ports: UdpPorts) -> Front {
+    let (uid, user) = me();
+    write_map(dir, &format!("uid:{uid} {user}\n"));
+    let udp = Some(ports);
+    Front::with(dir, "login.sock", Login { udp, ..login(dir) })
+}
+
+const WITH_UDP: Features = IDENTITY.union(Features::DATAGRAM);
+
+#[test]
+fn an_account_server_binds_the_first_free_port_of_the_range() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (ports, lo) = udp_range();
+    // Someone else holds the first port: the account takes the next.
+    let _held = std::net::UdpSocket::bind(("127.0.0.1", lo)).expect("hold");
+    let front = front_with_udp(&dir, ports);
+    let mut client = Client::connect_with(&front.socket, WITH_UDP, None);
+    assert_eq!(open_datagram(&mut client), Ok(lo + 1));
+    front.stop();
+}
+
+#[test]
+fn an_account_server_with_no_free_port_serves_without_udp() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (ports, lo) = udp_range();
+    let _held: Vec<_> = (lo..=lo + 2)
+        .map(|p| std::net::UdpSocket::bind(("127.0.0.1", p)).expect("hold"))
+        .collect();
+    let front = front_with_udp(&dir, ports);
+    let mut client = Client::connect_with(&front.socket, WITH_UDP, None);
+    // Still served, and still its own principal: only UDP is missing.
+    assert_eq!(whoami(&mut client).0, format!("uid:{}", me().0));
+    assert!(open_datagram(&mut client).is_err());
+    front.stop();
+}
+
+#[test]
+fn a_front_door_without_ports_offers_no_udp() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(&dir, &format!("uid:{uid} {user}\n"));
+    let front = Front::start(&dir, "login.sock");
+    let mut client = Client::connect_with(&front.socket, WITH_UDP, None);
+    assert!(open_datagram(&mut client).is_err());
+    front.stop();
+}
+
+#[test]
+fn a_tailnet_peer_is_refused_a_datagram_association() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (ports, lo) = udp_range();
+    let (uid, user) = me();
+    write_map(
+        &dir,
+        &format!("uid:{uid} {user}\nts:carol@example.com {user}\n"),
+    );
+    let whois = fake_tailscaled(&dir, "carol@example.com", "100.64.0.1");
+    let udp = Some(ports);
+    let login = Login { udp, ..login(&dir) };
+    let (front, addr) = Front::with_tailnet(&dir, "login.sock", login, Some(whois));
+    let door = bridge(&dir, addr.expect("tailnet address"));
+
+    let mut local = Client::connect_with(&front.socket, WITH_UDP, None);
+    assert_eq!(open_datagram(&mut local), Ok(lo));
+    let mut tailnet = Client::connect_with(&door, WITH_UDP, None);
+    assert_eq!(whoami(&mut tailnet).0, "ts:carol@example.com");
+    let why = open_datagram(&mut tailnet).expect_err("a tailnet peer has no UDP");
+    assert!(why.contains("tailnet"), "{why}");
+    front.stop();
 }
