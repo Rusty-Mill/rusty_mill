@@ -4146,7 +4146,7 @@ mod tailscale_status {
 
     fn event() -> Event {
         Event::TailscaleStatusChanged {
-            state: TailscaleState::Running,
+            state: rusty_mux_core::TailscaleState::Running,
             node: Some("box.t.ts.net".into()),
         }
     }
