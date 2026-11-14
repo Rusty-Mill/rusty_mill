@@ -243,3 +243,28 @@ fn a_symlink_by_another_spelling_of_the_source_is_still_ours() {
     std::os::unix::fs::symlink(&alias, t.target(&e)).unwrap();
     assert_eq!(observe(&e, &t).unwrap(), Observed::ManagedCurrent);
 }
+
+#[test]
+fn discovery_finds_skill_folders_and_reports_bad_names() {
+    let tmp = Tmp::new();
+    let root = tmp.0.join("skills");
+    for (name, has_skill) in [
+        ("beta", true),
+        ("alpha", true),
+        ("Bad_Name", true),
+        ("notes", false),
+    ] {
+        fs::create_dir_all(root.join(name)).unwrap();
+        if has_skill {
+            fs::write(root.join(name).join("SKILL.md"), "x").unwrap();
+        }
+    }
+    fs::write(root.join("README.md"), "x").unwrap();
+    let found = discover_skills(&root).unwrap();
+    let ids: Vec<_> = found.entries.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, ["alpha", "beta"]);
+    assert!(found.entries.iter().all(|e| e.source.is_absolute()));
+    assert_eq!(found.skipped.len(), 1);
+    assert!(found.skipped[0].path.ends_with("Bad_Name"));
+    assert!(discover_skills(&tmp.0.join("missing")).is_err());
+}
