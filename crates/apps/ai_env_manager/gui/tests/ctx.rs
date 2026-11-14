@@ -1,6 +1,7 @@
 //! The commands' logic on real temp folders (a fake home and a skills folder),
 //! without opening a window.
 
+use ai_env_gui_lib::view::{Outcome, Verb};
 use ai_env_gui_lib::{parse_scope, Ctx};
 use std::ffi::OsString;
 use std::fs;
@@ -63,26 +64,26 @@ fn plan_writes_nothing_then_apply_enables_and_disables() {
     let t = Tmp::new();
     let ctx = t.ctx(&["one"]);
 
-    let plans = ctx.plan("one", true).unwrap();
+    let plans = ctx.plan("one", Verb::Enable).unwrap();
     assert!(plans.iter().all(|p| !p.noop && !p.refused));
     assert!(ctx.list().unwrap().rows[0]
         .cells
         .iter()
         .all(|c| c.state == "absent"));
 
-    let done = ctx.apply("one", true).unwrap();
-    assert!(done.iter().all(|r| r.outcome == "applied"));
+    let done = ctx.apply("one", Verb::Enable).unwrap();
+    assert!(done.iter().all(|r| r.outcome == Outcome::Applied));
     assert!(ctx.list().unwrap().rows[0]
         .cells
         .iter()
         .all(|c| c.state == "enabled"));
     assert!(ctx
-        .apply("one", true)
+        .apply("one", Verb::Enable)
         .unwrap()
         .iter()
-        .all(|r| r.outcome == "nothing"));
+        .all(|r| r.outcome == Outcome::Nothing));
 
-    ctx.apply("one", false).unwrap();
+    ctx.apply("one", Verb::Disable).unwrap();
     assert!(ctx.list().unwrap().rows[0]
         .cells
         .iter()
@@ -97,11 +98,17 @@ fn a_foreign_folder_is_refused_and_left_alone_while_other_tools_apply() {
     fs::create_dir_all(&foreign).unwrap();
     fs::write(foreign.join("mine.txt"), "x").unwrap();
 
-    let plans = ctx.plan("one", true).unwrap();
+    let plans = ctx.plan("one", Verb::Enable).unwrap();
     assert_eq!(plans.iter().filter(|p| p.refused).count(), 1);
-    let done = ctx.apply("one", true).unwrap();
+    let done = ctx.apply("one", Verb::Enable).unwrap();
     let outcomes: Vec<_> = done.iter().map(|r| (r.tool.as_str(), r.outcome)).collect();
-    assert_eq!(outcomes, [("claude-code", "applied"), ("codex", "refused")]);
+    assert_eq!(
+        outcomes,
+        [
+            ("claude-code", Outcome::Applied),
+            ("codex", Outcome::Refused)
+        ]
+    );
     assert!(foreign.join("mine.txt").exists());
 }
 
@@ -109,15 +116,28 @@ fn a_foreign_folder_is_refused_and_left_alone_while_other_tools_apply() {
 fn unknown_and_invalid_ids_are_errors_not_panics() {
     let t = Tmp::new();
     let ctx = t.ctx(&["one"]);
-    assert!(ctx.plan("nope", true).is_err());
-    assert!(ctx.apply("../escape", true).is_err());
+    assert!(ctx.plan("nope", Verb::Enable).is_err());
+    assert!(ctx.apply("../escape", Verb::Enable).is_err());
 }
 
 #[test]
 fn plan_serializes_with_stable_names() {
     let t = Tmp::new();
-    let plans = t.ctx(&["one"]).plan("one", true).unwrap();
+    let plans = t.ctx(&["one"]).plan("one", Verb::Enable).unwrap();
     let json = serde_json::to_value(&plans).unwrap();
     assert_eq!(json[0]["actions"][0]["kind"], "link");
     assert_eq!(json[0]["tool"], "claude-code");
+}
+
+#[test]
+fn verbs_and_outcomes_keep_their_wire_names() {
+    assert_eq!(
+        serde_json::from_str::<Verb>("\"enable\"").unwrap(),
+        Verb::Enable
+    );
+    assert!(serde_json::from_str::<Verb>("true").is_err());
+    assert_eq!(
+        serde_json::to_string(&Outcome::Nothing).unwrap(),
+        "\"nothing\""
+    );
 }

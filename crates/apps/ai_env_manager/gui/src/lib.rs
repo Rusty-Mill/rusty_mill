@@ -7,13 +7,11 @@
 
 pub mod view;
 
-use ai_env_app::{
-    apply, find_entry, home_dir, load_entries, observe, plan, select_tools, Op, Scope,
-};
+use ai_env_app::{apply, find_entry, home_dir, load_entries, observe, plan, select_tools, Scope};
 use ai_env_core::{EntryId, Tool, ToolId};
 use std::ffi::OsString;
 use std::path::PathBuf;
-use view::{ListView, Skipped, ToolPlan, ToolResult};
+use view::{ListView, Outcome, Skipped, ToolPlan, ToolResult, Verb};
 
 /// Fixed at launch; what the commands act on.
 pub struct Ctx {
@@ -47,14 +45,6 @@ pub fn parse_scope(args: impl IntoIterator<Item = OsString>) -> Result<Scope, St
         return Err(format!("--skills is required\n{USAGE}"));
     }
     Ok(Scope { skills, tools })
-}
-
-fn op(enable: bool) -> Op {
-    if enable {
-        Op::Enable
-    } else {
-        Op::Disable
-    }
 }
 
 impl Ctx {
@@ -100,12 +90,12 @@ impl Ctx {
     }
 
     /// Preview only: reads the disk, writes nothing.
-    pub fn plan(&self, entry: &str, enable: bool) -> Result<Vec<ToolPlan>, String> {
+    pub fn plan(&self, entry: &str, verb: Verb) -> Result<Vec<ToolPlan>, String> {
         let entry = self.entry(entry)?;
         self.tools()?
             .iter()
             .map(|t| {
-                let p = plan(&entry, t, op(enable)).map_err(|e| e.to_string())?;
+                let p = plan(&entry, t, verb.into()).map_err(|e| e.to_string())?;
                 Ok(view::tool_plan(t, &p))
             })
             .collect()
@@ -113,25 +103,25 @@ impl Ctx {
 
     /// Plans again and applies each tool whose plan has no refusal, like
     /// `aienv --yes`. A failure partway names the tools already changed.
-    pub fn apply(&self, entry: &str, enable: bool) -> Result<Vec<ToolResult>, String> {
+    pub fn apply(&self, entry: &str, verb: Verb) -> Result<Vec<ToolResult>, String> {
         let entry = self.entry(entry)?;
         let mut done: Vec<ToolResult> = Vec::new();
         for tool in self.tools()? {
-            let p = plan(&entry, &tool, op(enable)).map_err(|e| e.to_string())?;
+            let p = plan(&entry, &tool, verb.into()).map_err(|e| e.to_string())?;
             let outcome = if p.is_noop() {
-                "nothing"
+                Outcome::Nothing
             } else if p.has_refusals() {
-                "refused"
+                Outcome::Refused
             } else {
                 if let Err(e) = apply(&p) {
                     let changed: Vec<&str> = done
                         .iter()
-                        .filter(|r| r.outcome == "applied")
+                        .filter(|r| r.outcome == Outcome::Applied)
                         .map(|r| r.tool.as_str())
                         .collect();
                     return Err(format!("{}: {e} (already changed: {changed:?})", tool.id));
                 }
-                "applied"
+                Outcome::Applied
             };
             done.push(ToolResult {
                 tool: tool.id.to_string(),
@@ -148,21 +138,17 @@ fn list(ctx: tauri::State<Ctx>) -> Result<ListView, String> {
 }
 
 #[tauri::command]
-fn plan_change(
-    ctx: tauri::State<Ctx>,
-    entry: String,
-    enable: bool,
-) -> Result<Vec<ToolPlan>, String> {
-    ctx.plan(&entry, enable)
+fn plan_change(ctx: tauri::State<Ctx>, entry: String, verb: Verb) -> Result<Vec<ToolPlan>, String> {
+    ctx.plan(&entry, verb)
 }
 
 #[tauri::command]
 fn apply_change(
     ctx: tauri::State<Ctx>,
     entry: String,
-    enable: bool,
+    verb: Verb,
 ) -> Result<Vec<ToolResult>, String> {
-    ctx.apply(&entry, enable)
+    ctx.apply(&entry, verb)
 }
 
 /// Opens the window. `args` are the command-line arguments after the program.

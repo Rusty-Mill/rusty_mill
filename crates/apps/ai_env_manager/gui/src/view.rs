@@ -2,7 +2,7 @@
 //! mapping, no I/O, so it is tested without a window.
 
 use ai_env_core::{Action, Entry, Observed, Plan, Tool};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 fn path(p: &Path) -> String {
@@ -117,10 +117,36 @@ pub fn tool_plan(tool: &Tool, plan: &Plan) -> ToolPlan {
     }
 }
 
+/// What the page asks for. Serialized as `"enable"` or `"disable"`.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Verb {
+    Enable,
+    Disable,
+}
+
+impl From<Verb> for ai_env_app::Op {
+    fn from(v: Verb) -> Self {
+        match v {
+            Verb::Enable => ai_env_app::Op::Enable,
+            Verb::Disable => ai_env_app::Op::Disable,
+        }
+    }
+}
+
 /// How one tool's apply ended.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Outcome {
+    Applied,
+    /// Already as asked.
+    Nothing,
+    /// Left untouched.
+    Refused,
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct ToolResult {
     pub tool: String,
-    /// `applied`, `nothing` (already as asked) or `refused` (left untouched).
-    pub outcome: &'static str,
+    pub outcome: Outcome,
 }

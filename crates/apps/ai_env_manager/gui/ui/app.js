@@ -61,7 +61,7 @@ async function refresh() {
 
 async function preview(entry, enable) {
   try {
-    const plans = await invoke("plan_change", { entry, enable });
+    const plans = await invoke("plan_change", { entry, verb: enable ? "enable" : "disable" });
     pending = { entry, enable };
     $("plan-title").textContent = `${enable ? "Enable" : "Disable"} ${entry}`;
     const body = $("plan-body");
@@ -98,7 +98,7 @@ $("plan-apply").addEventListener("click", async () => {
   const { entry, enable } = pending;
   $("plan").close();
   try {
-    await invoke("apply_change", { entry, enable });
+    await invoke("apply_change", { entry, verb: enable ? "enable" : "disable" });
   } catch (e) {
     showError(e);
   }
