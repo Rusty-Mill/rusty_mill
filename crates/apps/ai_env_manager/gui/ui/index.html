@@ -2,23 +2,31 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ai Env Manager</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header><h1>Ai Env Manager</h1><span id="count"></span></header>
-<main>
-  <p id="error" class="error" hidden></p>
-  <table id="grid"><thead></thead><tbody></tbody></table>
+<main class="wrap">
+  <div class="top">
+    <h1>Skills<small id="count"></small></h1>
+    <label class="search"><span hidden>Search skills</span><input id="q" type="search" placeholder="Search name or source" autocomplete="off"></label>
+  </div>
+  <p id="error" class="error" role="alert" hidden></p>
+  <div class="card">
+    <table id="grid"><thead></thead><tbody></tbody></table>
+    <p id="empty" class="empty" hidden>No skills match.</p>
+  </div>
   <p id="skipped" class="dim" hidden></p>
+  <p class="legend">Enabled: our link, current. Stale: ours, points elsewhere, safe to replace. Edited: our copy was changed by hand, never replaced. Foreign: not ours, never touched.</p>
 </main>
-<footer class="dim">enabled = our link, current · stale = ours, points elsewhere (safe to replace) · edited = our copy changed by hand (never replaced) · foreign = not ours (never touched)</footer>
-<dialog id="plan">
-  <h2 id="plan-title"></h2>
-  <p class="dim">Preview only. Nothing is written until you confirm. If files change before you press Apply, the plan is recalculated; anything refused stays refused.</p>
-  <div id="plan-body"></div>
-  <p id="plan-summary" class="dim"></p>
-  <menu><button id="plan-cancel">Cancel</button><button id="plan-apply" class="primary">Apply</button></menu>
+<dialog id="plan" aria-labelledby="plan-title">
+  <div class="dlg-head"><h2 id="plan-title"></h2><p id="plan-summary" class="dim"></p></div>
+  <div id="plan-body" class="dlg-body"></div>
+  <div class="dlg-foot">
+    <p class="dim">Nothing is written until you apply. If files change first, the plan is recalculated and anything refused stays refused.</p>
+    <button id="plan-cancel">Cancel</button><button id="plan-apply" class="primary">Apply</button>
+  </div>
 </dialog>
 <script src="app.js"></script>
 </body>

@@ -1,19 +1,58 @@
-:root{color-scheme:dark;--bg:#1b1d23;--line:#2a2d36;--dim:#7d8493}
+/* Tokens follow the design boards. Fonts are system stacks: the CSP allows no remote fonts. */
+:root{color-scheme:dark;--bg:#0d1014;--panel:#13171d;--hover:#171c24;--line:#262d38;--line2:#1e242d;--text:#e7ebf0;--dim:#a7b0bd;--faint:#8b95a3;
+--accent:#6ca8ff;--warn:#f2b45a;--warn-text:#f5d9a6;--warn-bg:#1b160d;--warn-line:#6b5220;
+--mono:ui-monospace,"IBM Plex Mono","Cascadia Mono",Consolas,monospace;--ease:160ms cubic-bezier(.2,.8,.2,1)}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:#e6e8ee;font:14px/1.4 system-ui,sans-serif}
-header{display:flex;gap:12px;align-items:baseline;padding:12px 16px;border-bottom:1px solid var(--line)}
-h1{font-size:15px;margin:0}main{padding:8px 16px}footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px}
-.dim{color:var(--dim)}.error{color:#ef6b6b}
-table{width:100%;border-collapse:collapse}th{text-align:left;font-weight:500;color:var(--dim);font-size:12px;padding:8px 6px}
-td{padding:10px 6px;border-top:1px solid var(--line)}td small{display:block;color:var(--dim)}
-.badge{display:inline-block;padding:2px 9px;border-radius:10px;font-size:12px;background:#23262e;color:var(--dim)}
-.enabled{background:#12301f;color:#5fd38d}.foreign{background:#3a2a10;color:#f0b24a}
-.stale{background:#10283a;color:#6bb6f0}.edited{background:#33203a;color:#d08be8}
-button{border:1px solid #3b4050;border-radius:6px;padding:5px 12px;background:#232630;color:inherit;font:inherit;cursor:pointer}
-button.primary{background:#2f6fed;border-color:#2f6fed;color:#fff}
-dialog{width:min(880px,92vw);background:var(--bg);color:inherit;border:1px solid #3b4050;border-radius:12px;padding:18px}
-dialog::backdrop{background:#000a}
-.tool{background:#14161b;border:1px solid #2f333d;border-radius:10px;padding:12px 16px;margin:10px 0}
-.row{display:flex;gap:10px;padding:3px 0;font:12.5px ui-monospace,monospace}
-.kind{width:60px;font-weight:600;flex:none}.link{color:#5fd38d}.unlink{color:#f0b24a}.refuse{color:#ef6b6b}
-menu{display:flex;justify-content:flex-end;gap:8px;padding:0}
+html{scrollbar-color:#343d4a transparent;font-variant-numeric:tabular-nums}
+body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font:14px/1.45 "IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif}
+::selection{background:#2b4a7a}
+.wrap{max-width:1040px;margin:0 auto;padding:24px 28px;display:flex;flex-direction:column;gap:18px}
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:12px}
+h1{margin:0;font-size:22px;font-weight:600;flex:1 1 200px}
+h1 small{margin-left:10px;font-size:13px;font-weight:400;color:var(--dim)}
+.search{flex:1 1 260px;max-width:380px;min-height:44px;padding:0 12px;display:flex;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+.search:focus-within{border-color:var(--accent)}
+.search input{flex:1;min-width:0;background:transparent;border:0;outline:0;color:inherit;font:inherit;caret-color:var(--accent)}
+.search input::placeholder{color:var(--faint)}
+.dim{color:var(--dim)}.faint{color:var(--faint)}
+.label{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.error{margin:0;padding:12px 16px;border:1px solid #6b2b2e;border-radius:10px;background:#2a1215;color:#ff8a80}
+.card{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+table{width:100%;min-width:640px;border-collapse:collapse}
+th{padding:10px 16px;border-bottom:1px solid var(--line);text-align:left;font-weight:400;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+td{padding:10px 16px;border-top:1px solid var(--line2)}
+tbody tr:first-child td{border-top:0}
+tbody tr:hover{background:var(--hover)}
+td.id{font-family:var(--mono);font-size:13px;font-weight:500}
+td.id small{display:block;margin-top:2px;font-weight:400;font-size:12px;color:var(--dim);overflow-wrap:anywhere}
+td.act,th.act{text-align:right}td.act button{min-width:104px}
+.state{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;border:1.5px solid var(--faint);flex:none}
+.state.enabled .dot{background:var(--accent);border-color:var(--accent)}
+.state.stale .dot{border-color:var(--accent)}
+.state.edited .dot{background:var(--warn);border-color:var(--warn);border-radius:2px}
+.state.foreign .dot{border-color:var(--warn)}
+.empty{padding:36px 16px;text-align:center;color:var(--dim)}
+button{min-height:44px;padding:0 16px;border:1px solid #343d4a;border-radius:8px;background:#1a2028;color:var(--text);font:inherit;font-weight:500;cursor:pointer;transition:background-color var(--ease),filter var(--ease)}
+button:hover{filter:brightness(1.14)}button:active{filter:brightness(.94)}
+button:disabled{opacity:.5;cursor:default;filter:none}
+button:focus-visible{outline:2px solid #9cc4ff;outline-offset:2px}
+button.primary{border:0;background:var(--accent);color:var(--bg);font-weight:600;padding:0 20px}
+.legend{margin:0;font-size:12px;color:var(--faint)}
+dialog{width:min(880px,94vw);max-height:90vh;padding:0;overflow:hidden;background:var(--panel);color:inherit;border:1px solid var(--line);border-radius:14px}
+dialog[open]{display:flex;flex-direction:column}
+dialog::backdrop{background:#080a0dcc}
+.dlg-head{padding:24px 28px 18px;border-bottom:1px solid var(--line)}
+.dlg-head h2{margin:0 0 6px;font-size:20px;font-weight:600}.dlg-head p{margin:0}
+.dlg-body{padding:18px 28px;overflow-y:auto;display:flex;flex-direction:column;gap:18px}
+.group{display:flex;flex-direction:column;gap:8px}
+.rows{border:1px solid var(--line);border-radius:10px;background:var(--bg)}
+.group.refused .rows{border-color:var(--warn-line);background:var(--warn-bg)}
+.pr{display:grid;grid-template-columns:76px 150px minmax(0,1fr);gap:12px;padding:12px 14px;border-top:1px solid var(--line2);font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}
+.pr:first-child{border-top:0}
+.group.refused .pr{border-color:#3a2e14;color:var(--warn-text)}
+.pr .k{font-weight:500}.pr .k.link{color:var(--accent)}.pr .k.refuse{color:var(--warn)}
+.pr .d{color:var(--dim)}.group.refused .pr .d{color:var(--warn-text);font-family:inherit}
+.dlg-foot{padding:16px 28px 24px;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;align-items:center;gap:12px}
+.dlg-foot p{flex:1 1 240px;margin:0;font-size:13px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
