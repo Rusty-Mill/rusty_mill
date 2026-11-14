@@ -302,6 +302,7 @@ jobs:
       term_web: ${{ steps.plan.outputs.term_web }}
       term_bench: ${{ steps.plan.outputs.term_bench }}
       key_desktop: ${{ steps.plan.outputs.key_desktop }}
+      ai_env_gui: ${{ steps.plan.outputs.ai_env_gui }}
       tick: ${{ steps.plan.outputs.tick }}
       fair_play: ${{ steps.plan.outputs.fair_play }}
       agui: ${{ steps.plan.outputs.agui }}
@@ -1108,6 +1109,43 @@ jobs:
           cache-dependency-path: crates/apps/rusty_key/desktop/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm run build
+
+  # Ai Env Manager's desktop shell (Tauri 2) is its own cargo workspace, excluded from the
+  # root one like rusty_key's, so none of the root jobs build, lint or test it. This runs its
+  # tests and clippy (needs WebKitGTK for the Tauri crates to compile) only when the crate or
+  # an ai_env_* package it path-depends on changes.
+  ai-env-gui:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-ai-env-gui
+      queue: max
+      cancel-in-progress: false
+    name: ai-env-gui (test, clippy)
+    needs: plan
+    if: needs.plan.outputs.ai_env_gui == 'true' && needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/apps/ai_env_manager/gui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - name: Install WebKitGTK (Tauri build dependencies)
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          # Retry transient downloads, but bound stalled acquisition and setup.
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          # Partial index refreshes must fail before installation starts.
+          sudo apt-get "${apt_options[@]}" --error-on=any update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --locked
 
   # rusty_win32 is deliberately Windows-only and edition 2021 for MSRV
   # reasons (see crates/foundation/rusty_win32/Cargo.toml) — this mirrors its own CI's
@@ -2039,6 +2077,7 @@ jobs:
       - rusty-fair-play-web
       - rusty-fair-play-e2e
       - rusty-key-desktop
+      - ai-env-gui
       - win32-cross-compile-check
       - multimodal-db-feature-sets
       - multimodal-db-msrv

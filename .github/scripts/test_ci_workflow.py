@@ -28,6 +28,7 @@ PLAN_KEYS = {
     "dashboard",
     "term_web",
     "key_desktop",
+    "ai_env_gui",
     "tick",
     "fair_play",
     "agui",
@@ -382,6 +383,21 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertEqual(outputs["tick"], "true")
         self.assertEqual(outputs["fair_play"], "false")
 
+    def test_ai_env_gui_runs_for_its_packages_and_not_for_others(self) -> None:
+        # The GUI is a standalone workspace, so only its path-dependencies' packages trigger it.
+        self.assertEqual(self._planner_map("--packages", "ai_env_core")["ai_env_gui"], "true")
+        self.assertEqual(self._planner_map("--packages", "ai_env_app")["ai_env_gui"], "true")
+        self.assertEqual(self._planner_map("--packages", "rusty_tick")["ai_env_gui"], "false")
+
+    def test_ai_env_gui_job_is_gated_and_required(self) -> None:
+        start = self.workflow.index("  ai-env-gui:\n")
+        end = self.workflow.index("\n  # rusty_win32 is deliberately", start)
+        job = self.workflow[start:end]
+        self.assertIn("needs.plan.outputs.ai_env_gui == 'true'", job)
+        self.assertIn("working-directory: crates/apps/ai_env_manager/gui", job)
+        self.assertIn("cargo test --locked", job)
+        self.assertIn("      - ai-env-gui\n", self.workflow)
+
     def test_shallow_clone_becomes_narrowable_after_history_is_complete(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -415,7 +431,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "ai_env_gui": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
         )
 
     def test_rleval_jobs_follow_cargo_impact_and_the_viewer_fixture(self) -> None:
@@ -552,11 +568,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "ai_env_gui": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "ai_env_gui": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
         )
 
     def test_agui_package_change_selects_tick_web_too(self) -> None:
