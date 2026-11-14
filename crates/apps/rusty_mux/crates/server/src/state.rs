@@ -1341,6 +1341,9 @@ impl State {
             .ok_or("unknown client")?
             .principal()
             .clone();
+        if is_tailnet(&principal) {
+            return Err("a tailnet peer has no UDP".into());
+        }
         let (port, id, key) = registry.offer(Instant::now(), principal)?;
         reply(
             "open datagram",

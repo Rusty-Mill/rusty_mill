@@ -94,6 +94,9 @@ pub struct Login {
     pub server: PathBuf,
     /// How many connections it holds at once.
     pub limits: Limits,
+    /// With `--udp-ports`: the ports an account's server may bind for UDP.
+    /// The front door itself never opens a UDP socket.
+    pub udp: Option<crate::UdpPorts>,
 }
 
 /// How many connections the front door holds at once, counting those still
@@ -508,9 +511,13 @@ impl Drop for Forget {
 
 /// A connection to `account`'s server, started first if none answers.
 async fn server_for(front: &Shared, account: &Account) -> io::Result<UnixStream> {
-    let (dir, server) = {
+    let (dir, server, udp) = {
         let f = front.borrow();
-        (f.login.runtime.join(&account.name), f.login.server.clone())
+        (
+            f.login.runtime.join(&account.name),
+            f.login.server.clone(),
+            f.login.udp,
+        )
     };
     let socket = dir.join("server.sock");
     let lock = front
@@ -544,7 +551,7 @@ async fn server_for(front: &Shared, account: &Account) -> io::Result<UnixStream>
             .ok_or_else(|| io::Error::other(format!("groups of {}", account.name)))?;
         Some(groups)
     };
-    let started = watch(command(&server, &socket, account, groups))?;
+    let started = watch(command(&server, &socket, account, groups, udp))?;
     served_by(ready(&socket, &started).await?, account)
 }
 
@@ -631,16 +638,42 @@ fn account_dir(dir: &Path, account: &Account) -> io::Result<()> {
     }
 }
 
+/// How long a silent UDP association lasts on an account's server. It skips
+/// the map, a reload and the caps once up, so a user removed from the map
+/// keeps it no longer than this (Nano, 2026-11-14: one hour).
+const ACCOUNT_UDP_IDLE: &str = "3600";
+
+/// `--udp RANGE --udp-idle` for an account's server, if the front door has
+/// ports to give.
+fn udp_args(udp: Option<crate::UdpPorts>) -> Vec<String> {
+    udp.map_or_else(Vec::new, |ports| {
+        [
+            "--udp".into(),
+            ports.to_string(),
+            "--udp-idle".into(),
+            ACCOUNT_UDP_IDLE.into(),
+        ]
+        .into()
+    })
+}
+
 /// The command that starts `server` for `account` on `socket`, in a
 /// session of its own, as the account (with its `groups`) when the front
 /// door is root.
-fn command(server: &Path, socket: &Path, account: &Account, groups: Option<Vec<u32>>) -> Command {
+fn command(
+    server: &Path,
+    socket: &Path,
+    account: &Account,
+    groups: Option<Vec<u32>>,
+    udp: Option<crate::UdpPorts>,
+) -> Command {
     let me = rusty_libc::process::geteuid();
     let (uid, gid) = (account.uid, account.gid);
     let mut command = Command::new(server);
     command
         .arg("--forwarded-by")
         .arg(me.to_string())
+        .args(udp_args(udp))
         .arg(socket)
         .env_clear()
         .env("HOME", &account.home)
@@ -946,5 +979,15 @@ mod tests {
             .expect("run");
         assert!(check_parts(&run, me, false).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_account_server_gets_the_range_and_an_hour_of_idle() {
+        assert!(udp_args(None).is_empty());
+        let ports = "127.0.0.1:2000-2009".parse().unwrap();
+        assert_eq!(
+            udp_args(Some(ports)),
+            ["--udp", "127.0.0.1:2000-2009", "--udp-idle", "3600"]
+        );
     }
 }

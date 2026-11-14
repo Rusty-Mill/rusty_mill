@@ -60,6 +60,7 @@ pub mod tailnet;
 mod terminal;
 #[cfg(target_os = "linux")]
 mod tls;
+mod udp_ports;
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -79,6 +80,7 @@ pub use login::{
 pub use shared::{Sharing, Tailnet, serve_shared};
 #[cfg(target_os = "linux")]
 pub use tls::Tls;
+pub use udp_ports::UdpPorts;
 
 /// How the server starts each block's program.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +234,7 @@ pub async fn serve_forwarded(
     listener: UnixListener,
     config: Config,
     forwarder: u32,
+    udp: Option<Udp>,
     stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
     let owner = rusty_libc::process::geteuid();
@@ -245,7 +248,7 @@ pub async fn serve_forwarded(
             Peer::Refused(format!("uid {uid}"))
         })
     };
-    serve_for(listener, config, None, allowed, None, None, stop).await
+    serve_for(listener, config, udp, allowed, None, None, stop).await
 }
 
 /// The principal every client of this server has: its own user, the only
