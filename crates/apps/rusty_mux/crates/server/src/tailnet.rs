@@ -58,11 +58,21 @@ impl Whois {
 
     /// The principal behind `peer`, an address on the tailnet. A stalled
     /// `tailscaled` fails the call after [`DEADLINE`].
+    ///
+    /// A peer at one of this node's own addresses is refused: any local
+    /// process can dial the node's tailnet address, and `tailscaled` would
+    /// name it as the node's owner.
     pub async fn principal(&self, peer: SocketAddr) -> io::Result<Principal> {
         let target = format!("/localapi/v0/whois?addr={}", encode_addr(peer));
-        let body = rusty_tokio::time::timeout(DEADLINE, self.get(target, "whois"))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tailscaled whois timed out"))??;
+        let (body, own) = rusty_tokio::time::timeout(DEADLINE, async {
+            let body = self.get(target, "whois").await?;
+            Ok::<_, io::Error>((body, self.own_addrs().await?))
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tailscaled whois timed out"))??;
+        if own.contains(&peer.ip()) {
+            return Err(invalid("the peer is this node itself: a local process"));
+        }
         let who: WhoIsResponse =
             serde_json::from_slice(&body).map_err(|e| invalid(format!("whois reply: {e}")))?;
         principal_of(&who).map_err(invalid)
@@ -80,6 +90,16 @@ impl Whois {
         let status: Status =
             serde_json::from_slice(&body).map_err(|e| invalid(format!("status reply: {e}")))?;
         Ok(state_of(&status))
+    }
+
+    /// This node's own tailnet addresses, from `tailscaled`'s status.
+    async fn own_addrs(&self) -> io::Result<Vec<std::net::IpAddr>> {
+        let body = self
+            .get("/localapi/v0/status?peers=false".to_owned(), "status")
+            .await?;
+        let status: ts_types::Status =
+            serde_json::from_slice(&body).map_err(|e| invalid(format!("status reply: {e}")))?;
+        Ok(status.tailscale_ips)
     }
 
     async fn get(&self, target: String, what: &str) -> io::Result<Vec<u8>> {

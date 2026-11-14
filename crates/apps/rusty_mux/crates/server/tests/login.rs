@@ -829,21 +829,31 @@ fn a_root_front_door_refuses_a_socket_the_account_does_not_serve() {
     front.stop();
 }
 
-/// A `tailscaled` LocalAPI that names every peer `login`, on a socket in
-/// `dir`; it answers for the life of the test process.
+/// A `tailscaled` LocalAPI that names every peer `login` (a peer it does
+/// not know when `login` is empty), on a socket in `dir`; its own address
+/// is `100.64.0.1`. It answers for the life of the test process.
 fn fake_tailscaled(dir: &Path, login: &str) -> PathBuf {
     use std::io::Read;
     let path = dir.join("tailscaled.sock");
     let listener = std::os::unix::net::UnixListener::bind(&path).expect("tailscaled");
-    let body =
+    let whois =
         format!(r#"{{"Node":{{"Name":"lap.t.ts.net."}},"UserProfile":{{"LoginName":"{login}"}}}}"#);
-    let reply = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
-        body.len()
-    );
+    let status = r#"{"BackendState":"Running","TailscaleIPs":["100.64.0.1"]}"#;
+    let respond = |code: &str, body: &str| {
+        format!(
+            "HTTP/1.1 {code}\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let whois = if login.is_empty() {
+        respond("404 Not Found", "no such peer")
+    } else {
+        respond("200 OK", &whois)
+    };
+    let status = respond("200 OK", status);
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let (mut stream, reply) = (stream, reply.clone());
+            let (mut stream, whois, status) = (stream, whois.clone(), status.clone());
             std::thread::spawn(move || {
                 let mut seen = Vec::new();
                 let mut buf = [0u8; 1024];
@@ -853,7 +863,8 @@ fn fake_tailscaled(dir: &Path, login: &str) -> PathBuf {
                         Ok(n) => seen.extend_from_slice(&buf[..n]),
                     }
                 }
-                let _ = stream.write_all(reply.as_bytes());
+                let asks_status = seen.starts_with(b"GET /localapi/v0/status");
+                let _ = stream.write_all(if asks_status { &status } else { &whois }.as_bytes());
             });
         }
     });
@@ -941,5 +952,56 @@ fn a_tailnet_peer_the_map_does_not_name_is_closed_even_with_a_star_rule() {
     // The local door still works.
     let mut local = Client::connect_with(&front.socket, IDENTITY, None);
     assert_eq!(whoami(&mut local).0, format!("uid:{uid}"));
+    front.stop();
+}
+
+#[test]
+fn a_tailnet_peer_tailscaled_does_not_know_is_closed() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (_, user) = me();
+    write_map(&dir, &format!("ts:carol@example.com {user}\n"));
+    let whois = fake_tailscaled(&dir, "");
+    let (front, addr) = Front::with_tailnet(&dir, "login.sock", login(&dir), Some(whois));
+    let door = bridge(&dir, addr.expect("tailnet address"));
+    assert!(closed_unheard(&door), "an unknown tailnet peer was served");
+    front.stop();
+}
+
+/// The per-peer limit counts a tailnet peer by its principal, apart from
+/// the local uids.
+#[test]
+fn one_tailnet_principal_cannot_hold_more_than_its_share() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(
+        &dir,
+        &format!("ts:carol@example.com {user}\nuid:{uid} {user}\n"),
+    );
+    let whois = fake_tailscaled(&dir, "carol@example.com");
+    let limits = Limits {
+        total: 8,
+        per_peer: 1,
+    };
+    let (front, addr) = Front::with_tailnet(
+        &dir,
+        "login.sock",
+        Login {
+            limits,
+            ..login(&dir)
+        },
+        Some(whois),
+    );
+    let door = bridge(&dir, addr.expect("tailnet address"));
+    let mut first = Client::connect_with(&door, IDENTITY, None);
+    assert!(
+        closed_unheard(&door),
+        "a second connection of one principal got in"
+    );
+    // A local user is counted on its own.
+    let mut local = Client::connect_with(&front.socket, IDENTITY, None);
+    assert_eq!(whoami(&mut local).0, format!("uid:{uid}"));
+    assert_eq!(whoami(&mut first).0, "ts:carol@example.com");
     front.stop();
 }

@@ -71,7 +71,7 @@ use rusty_tokio::sync::oneshot;
 use rusty_tokio::task::AbortHandle;
 
 use crate::endpoint::{self, check_parts, unsafe_dir};
-use crate::shared::Tailnet;
+use crate::shared::{ACCEPT_RETRY, Lookups, Tailnet};
 use map::{AccountMap, Route, admits};
 
 /// How long an account's new server has to start listening.
@@ -426,29 +426,26 @@ where
     let _ = rusty_tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
 }
 
-/// Peers being looked up at once; more are closed unlooked-up.
-const LOOKUPS: usize = 16;
-
 /// Accepts tailnet peers: each is asked of `tailscaled` who it is before it
 /// says anything, then admitted as the principal it names, if the map does.
 /// An accept error is not fatal (`tailscaled` restarting must not end the
 /// front door): it is logged and the accept retried.
 async fn accept_tailnet(tailnet: Tailnet, front: Shared) -> io::Result<()> {
     let (listener, whois) = tailnet.into_parts();
-    let looking = Rc::new(std::cell::Cell::new(0usize));
+    let looking = Lookups::default();
     let mut dropped = 0u64;
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
             Err(err) => {
                 eprintln!("rusty-mux-server: login: tailnet accept: {err}");
-                rusty_tokio::time::sleep(ACCEPT_BACKOFF).await;
+                rusty_tokio::time::sleep(ACCEPT_RETRY).await;
                 continue;
             }
         };
         let id = {
             let mut f = front.borrow_mut();
-            let room = if looking.get() >= LOOKUPS {
+            let room = if looking.full() {
                 Err("too many lookups")
             } else {
                 room_for(&f, &Peer::Looking)
@@ -466,12 +463,12 @@ async fn accept_tailnet(tailnet: Tailnet, front: Shared) -> io::Result<()> {
             f.next = f.next.wrapping_add(1);
             f.next
         };
-        looking.set(looking.get() + 1);
-        let (front2, whois, looking) = (front.clone(), whois.clone(), looking.clone());
+        let slot = looking.take();
+        let (front2, whois) = (front.clone(), whois.clone());
         let task = rusty_tokio::task::spawn_local(async move {
             let _forget = Forget(front2.clone(), id);
             let who = whois.principal(peer).await;
-            looking.set(looking.get() - 1);
+            drop(slot);
             let principal = match who {
                 Ok(principal) => principal,
                 Err(err) => return eprintln!("rusty-mux-server: login: tailnet {peer}: {err}"),

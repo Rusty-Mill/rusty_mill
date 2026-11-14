@@ -290,6 +290,11 @@ mod tests {
         assert!(admits(&box_, None, 0));
         // Nobody else, and `*` is not a way in.
         assert_eq!(map.route_tailnet("ts:mallory@example.com"), None);
+        // Another case is another name.
+        assert_eq!(map.route_tailnet("ts:Carol@example.com"), None);
+        // A local rule never names a tailnet peer, whatever its login says.
+        let local = AccountMap::parse("uid:1000 a\nuser:carol@example.com b\n").unwrap_or_default();
+        assert_eq!(local.route_tailnet("ts:carol@example.com"), None);
         assert_eq!(
             AccountMap::parse("* guest\n")
                 .unwrap()
