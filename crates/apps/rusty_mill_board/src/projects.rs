@@ -463,22 +463,31 @@ impl Projects {
             }
             serde_json::json!({ REPOS_KEY: repos })
         } else {
-            let projects = explicit.into_iter().map(|(name, p)| {
-                let multi = p.edges.len() > 1;
-                let file = ProjectFile {
-                    repos: p.edges,
-                    default_repo: multi.then_some(p.default_repo),
-                };
-                (name, file)
-            });
-            serde_json::to_value(FileV2 {
-                version: 2,
-                repos: self.repos.clone(),
-                projects: projects.collect(),
-            })
-            .map_err(|e| e.to_string())?
+            self.registry_value()?
         };
         serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+    }
+
+    /// The registry in the version 2 form, whatever it holds: what a settings editor reads and
+    /// writes back (see [`Projects::parse`]).
+    ///
+    /// # Errors
+    /// If serialisation fails.
+    pub fn registry_value(&self) -> Result<serde_json::Value, String> {
+        let projects = self.explicit().into_iter().map(|(name, p)| {
+            let multi = p.edges.len() > 1;
+            let file = ProjectFile {
+                repos: p.edges,
+                default_repo: multi.then_some(p.default_repo),
+            };
+            (name, file)
+        });
+        serde_json::to_value(FileV2 {
+            version: 2,
+            repos: self.repos.clone(),
+            projects: projects.collect(),
+        })
+        .map_err(|e| e.to_string())
     }
 
     /// Whether `name` is a project.

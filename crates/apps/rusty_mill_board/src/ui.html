@@ -1208,12 +1208,12 @@ async function setting(op,args){return api(op,{...who(),...args})}
 async function openSettings(){
   try{cfg=await setting("settings_get")}
   catch(e){toast(e.status===403?"Settings need the admin capability.":e.message);return}
-  secret=null;reposDraft=null;flowDraft=null;tab="agents";drawSettings();if(!$("settings").open)$("settings").showModal();
+  secret=null;reposDraft=reposGithub=null;flowDraft=null;tab="agents";drawSettings();if(!$("settings").open)$("settings").showModal();
 }
 /* Settings fill the page: sections down the left, the chosen one on the right with what it is for. */
 const SECTIONS=[
   ["agents","Agents","Who may use the board. Each agent signs in with its own token and acts with one role, in all projects or a chosen few. Agents on a shared connector register themselves and are listed below."],
-  ["repos","Repositories","The repositories this board serves and their projects. A project owns the repository paths listed under it; each repository's own project owns the rest."],
+  ["repos","Repositories","The repositories this board serves and their projects. A project owns the repository paths listed under it; each repository's own project owns the rest. Give a project the same name under two repositories to make it span both."],
   ["roles","Roles","A role is a set of capabilities. Tick what each role may do; hover a capability for what it allows."],
   ["columns","Columns","The board's columns, their order and kind, and the moves between them with the capability each needs."],
   ["rules","Rules","Whether card moves follow the Columns moves and each role's capabilities."],
@@ -1226,7 +1226,7 @@ function drawSettings(){
   tabs.append(el("div","Settings","stitle"));
   for(const [id,label] of SECTIONS){
     const b=el("button",label,tab===id?"on":"");b.type="button";b.setAttribute("aria-current",tab===id?"page":"false");
-    b.onclick=()=>{tab=id;secret=null;reposDraft=null;flowDraft=null;drawSettings()};tabs.append(b)}
+    b.onclick=()=>{tab=id;secret=null;reposDraft=reposGithub=null;flowDraft=null;drawSettings()};tabs.append(b)}
   const close=el("button","Close","close");close.type="button";close.onclick=()=>d.close();tabs.append(close);
   const [,title,about]=SECTIONS.find(([id])=>id===tab),pane=el("div",null,"pane");
   pane.append(el("h2",title),el("p",about,"lead"),{agents:agentsTab,repos:reposTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
@@ -1308,23 +1308,37 @@ function registeredAgents(){
 
 /* The draft of the repositories tab survives redraws made while restructuring (add or remove a row)
    and is dropped once saved or when leaving the tab. */
-let reposDraft=null;
+let reposDraft=null,reposGithub=null;
 function reposTab(){
   const t=el("div"),err=el("div",null,"err");
   if(!cfg.files.projects)t.append(unwritable("--projects FILE"));
   // repo -> [{name, paths}], without each repository's own project (it is implied).
   reposDraft=reposDraft||Object.fromEntries(Object.entries(cfg.repos).map(([r,ps])=>[r,Object.entries(ps).filter(([n])=>n!==r).map(([n,paths])=>({name:n,paths:paths.join("\n")}))]));
-  const draft=reposDraft,inputs=[];
+  // repo -> its GitHub slug ("" for none), kept like the draft until saved.
+  reposGithub=reposGithub||Object.fromEntries(Object.keys(cfg.repos).map(r=>[r,(cfg.registry.repos[r]||{}).github||""]));
+  const draft=reposDraft,gh=reposGithub,inputs=[];
   const statusSelect=name=>{
     const st=field("select",{});st.setAttribute("aria-label",name+" status");st.disabled=!cfg.files.project_status;
     st.append(...STATUSES.map(x=>new Option(x,x)));const ps=cfg.project_status||{};st.value=Object.hasOwn(ps,name)?ps[name]:"active";
     st.onchange=guard(err,()=>setting("settings_project_status_set",{project:name,status:st.value}));
     return st;
   };
-  const collect=()=>Object.fromEntries(Object.entries(draft).map(([r,ps])=>[r,Object.fromEntries(ps.map(p=>[p.name,p.paths.split("\n").map(x=>x.trim()).filter(Boolean)]))]));
+  // The same project name under several repositories is one project spanning them; its default
+  // repository is the one it had, else the first it appears under.
+  const collect=()=>{
+    const repos=Object.fromEntries(Object.keys(draft).map(r=>[r,gh[r]?{github:gh[r]}:{}])),projects={};
+    for(const [r,ps] of Object.entries(draft))for(const p of ps){
+      const paths=p.paths.split("\n").map(x=>x.trim()).filter(Boolean),e=projects[p.name]||=({repos:{}});e.repos[r]=paths}
+    for(const [n,e] of Object.entries(projects)){
+      const keys=Object.keys(e.repos);if(keys.length<2)continue;
+      const was=(cfg.registry.projects[n]||{}).default_repo;e.default_repo=keys.includes(was)?was:keys[0]}
+    return {version:2,repos,projects}};
   const restructure=fn=>()=>{inputs.forEach(f=>f());fn();drawSettings()};   // keep what was typed, change the shape, redraw
   for(const r of Object.keys(draft)){
     const fs=el("fieldset");fs.append(el("legend",r));
+    const slug=field("input",{value:gh[r]||"",size:26,placeholder:"owner/name on GitHub (optional)"});
+    slug.setAttribute("aria-label",r+" GitHub repository");inputs.push(()=>{gh[r]=slug.value.trim()});
+    const ghrow=el("div",null,"row");ghrow.append(slug);fs.append(ghrow);
     // A repository's own project is implied, so it is not in the draft; its status is set here (not the Inbox's).
     if(r!==INBOX&&cfg.repos[r]&&Object.hasOwn(cfg.repos[r],r)){
       const own=el("div",null,"row");own.append(el("span",r+" (repository project)"),statusSelect(r));fs.append(own);
@@ -1347,7 +1361,7 @@ function reposTab(){
   const newr=field("input",{placeholder:"new repository name",size:22}),addr=el("button","+ repository"),save=el("button","Save repositories and projects");
   addr.type=save.type="button";
   addr.onclick=restructure(()=>{const n=newr.value.trim();if(n&&!(n in draft))draft[n]=[]});
-  save.onclick=guard(err,async()=>{inputs.forEach(f=>f());await setting("settings_projects_set",{repos:collect()});reposDraft=null});
+  save.onclick=guard(err,async()=>{inputs.forEach(f=>f());await setting("settings_projects_set",{registry:collect()});reposDraft=reposGithub=null});
   const row=el("div",null,"row");row.append(newr,addr);
   t.append(row,save,err);
   return t;
