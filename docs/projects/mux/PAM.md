@@ -26,20 +26,26 @@ whether an account may log in. Reading `/etc/shadow` ourselves would ignore it.
 
 1. **Off by default.** `--pam[=SERVICE]` on `--login`. Service `rusty-mux`, file
    `/etc/pam.d/rusty-mux`. A sample ships under `docs/`; nothing installs it.
-2. **Loading.** `dlopen("libpam.so.0")` once at start, with the five symbols used
+2. **Loading.** `dlopen` of `libpam.so.0` once at start, by absolute path from a short list
+   of system directories (`/lib/x86_64-linux-gnu`, `/usr/lib64`, `/usr/lib`, and their
+   siblings) with `RTLD_NOW|RTLD_LOCAL`, so the root process never searches
+   `LD_LIBRARY_PATH` (D267). The functions are the five symbols used
    (`pam_start`, `pam_acct_mgmt`, `pam_set_item`, `pam_end`, `pam_strerror`) resolved by
    `dlsym` into a small `Pam` struct of typed function pointers. Needs `dlopen`, which the
    workspace `libc` dependency already exposes: no `-dev` package at build, no new crate,
    no new Rust dependency, and a host without libpam still runs the binary.
 3. **Fail closed, at start.** With `--pam` the front door refuses to start if libpam does
    not load, if the service file is absent (Linux-PAM would fall back to `other`, which may
-   allow), or if a probe `pam_start` fails. Without `--pam` nothing is loaded.
+   allow), or if a probe `pam_start` fails. Only `/etc/pam.d/rusty-mux` counts: a file in a vendor
+   directory (`/usr/lib/pam.d`) or an entry in `/etc/pam.conf` is not accepted, so a site
+   that relies on one is refused at start, never silently allowed. Without `--pam` nothing is loaded.
 4. **Where.** In `admit`, after the account lookup and the `still_by` re-check, before
    `server_for`. The call runs on the blocking pool under a timeout (5 s; `pam_ldap` can
    hang). A timeout leaves its thread running, so at most 16 checks run at once and a
    17th is refused, as for whois lookups.
 5. **Call.** `pam_start(service, account, conv, &h)`; a conversation function that answers
-   every prompt `PAM_CONV_ERR`; `PAM_RUSER` set to the peer's user; `pam_acct_mgmt(h,
+   every prompt `PAM_CONV_ERR`; `PAM_RUSER` set to the peer's local user, and **unset for a tailnet peer**: its `user` is
+   empty (C27), and a `ts:` id is not a local name that `pam_access` could match; `pam_acct_mgmt(h,
    PAM_SILENT)`; `pam_end`. Result `PAM_SUCCESS` admits. Everything else refuses,
    including `PAM_NEW_AUTHTOK_REQD` (an expired password cannot be changed here).
 6. **A refusal looks like "no rule".** The front door closes the socket and logs the PAM
