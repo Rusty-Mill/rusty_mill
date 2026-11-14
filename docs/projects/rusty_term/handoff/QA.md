@@ -79,3 +79,7 @@ Source: D254; D255; D253; `docs/projects/mux/MESH.md`.
 ## Is the mesh client dial path a go, and what did the spikes show?
 Asked 2026-11-13. Dial path has a go, tagged `[default]` because it came by the coordinator's relay with no Nano message id; Nano should confirm on the PR (D256). Spikes A-W, A and dial passed on throwaway branches; two bug fixes and the Windows reactor idle spin are open and need their own PRs and go (D257; Q61-Q63). D255 stands.
 Source: D256; D257; D255; `docs/projects/mux/MESH.md`.
+
+## What does PAM login mode check, and how does a refusal look?
+Asked 2026-11-14 (#1460). Account checks only (`pam_acct_mgmt` on the target account, for every principal source); never passwords; sessions deferred because account servers outlive the front door. Off unless `--pam`; fails closed; a refusal is a closed socket plus a stderr line, no wire change (D266). The dependency is loaded with dlopen at run time, no link and no `-dev` package (Nano, D267 [stated]); the session scope stays open (Q65).
+Source: D266; D267; D233; D39; mux `RISKS.md` R17; `REX-DELTA.md` R8/D9; `crates/apps/rusty_mux/crates/server/src/login.rs` `admit`.
