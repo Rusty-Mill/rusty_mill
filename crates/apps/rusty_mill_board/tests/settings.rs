@@ -198,6 +198,7 @@ fn registered_agents_are_listed_and_an_unknown_one_cannot_be_revoked() {
         json!({"id": "x#abcdef", "agent_role": "nope"}),
         json!({"id": "x#abcdef", "agent_projects": ["nope"]}),
         json!({"id": "x#abcdef", "agent_roles": "builder"}),
+        json!({"id": "x#abcdef", "nickname": "x".repeat(41)}),
     ] {
         let (status, _, text) = f.admin("settings_registered_agent_set", &body);
         assert!(status == 422 || status == 400, "{body}: {status} {text}");

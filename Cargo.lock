@@ -564,8 +564,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai_env_cli"
+version = "0.1.0"
+dependencies = [
+ "ai_env_core",
+ "ai_env_fs",
+]
+
+[[package]]
 name = "ai_env_core"
 version = "0.1.0"
+
+[[package]]
+name = "ai_env_fs"
+version = "0.1.0"
+dependencies = [
+ "ai_env_core",
+ "rusty_sha2",
+]
 
 [[package]]
 name = "aisdk"

@@ -138,6 +138,7 @@ Precise contracts used by this guide:
 | D128 | M1 committed: #758 items 1-3, #1123, #1124, #1166 to Ready; #1092 waits for the BaileyAi host; #754 out | [stated] 2026-11-12 (general, M1) |
 | D129 | Lost designs not needed for M1; #1402 builder-session rebuild waits until after the first run | [stated] 2026-11-12 (general, M1) |
 | D130 | M1 design steps approved as one batch of runbooks and config (changes D25 for M1) | [stated] 2026-11-12 (general, M1) |
+| D131 | Deploy on BaileyAi authorised for M1 (protocol host, orch, Mill Board inbox); BaileyAi confirmed as host; #1092 released | [stated] 2026-11-13 (general, M1) |
 
 ## D1. Lenses, not stages
 
@@ -1269,3 +1270,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_970ab68163f14d498f99ddf976739c5f
 **Key.** lel:general:m1-design-steps-batch-approved
 **Source.** Nano, Mill thread message `cmsg_01632CBKCXsWe6RyFWvE9dov81m5TvtNmj43NpXMCV23tc`, 2026-11-12T19:22:57Z, project thread `cmsg_01632CBKCXsWe6RyFWvE9dov5LxGS7LhnBwjYdXbAXf7nm`, verbatim: "Go, a, a, a". The third "a" answers Millwright L8, option a. Changes D25 for M1; D127, D128. Numbered D130 after D129.
+
+## D131. Deploy on BaileyAi authorised for M1 (protocol host, orch, Mill Board inbox); BaileyAi confirmed as host; #1092 released
+
+**Decision.** Nano authorised deploying the protocol (BBP) host, orch and the Mill Board inbox on BaileyAi, and confirmed BaileyAi as the host (Millwright L2). This confirms D53 and lifts the D128 hold on #1092 (deploy layout). The MS-01 probe #754 stays out of M1 unless BaileyAi turns out to lack headroom. Nano also reported moving #758, #1123, #1124 and #1166 from Backlog to Ready (D128's gate); the Millwright thread agent then reported all four in Ready. #1092's dependency link on #754 still has to be removed on the board.
+**Why.** Deploying on BaileyAi is ask-first (D128); this is Nano's answer, and BaileyAi is where D53 already put everything.
+**Rejected.** MS-01 probe #754 as a precondition for M1.
+**Tag.** [stated] · remind-me: mem_1592b43423844f33b090418ac5b6c46d
+**Key.** lel:general:m1-baileyai-deploy-authorised
+**Source.** Nano, Millwright project thread message `cmsg_01632CBKCXsWe6RyFWvE9dovEkaSZSapKW11x6su2fCt41`, 2026-11-13T23:27:31Z, project thread `cmsg_01632CBKCXsWe6RyFWvE9dov5LxGS7LhnBwjYdXbAXf7nm`, verbatim: "1. Done 2. Yes BaileyAi". Answers Millwright L2. Confirms D53; releases D128's hold; D127, D130. Not lifted: #1092's design is approved only as D130's batch; work on Nano's machines goes as a paste-ready prompt (D94); paid model calls, schema or API changes and the other ask-first items still go to Nano; review and merge gates unchanged. Numbered D131 after D130.

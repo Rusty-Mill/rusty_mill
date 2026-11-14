@@ -314,13 +314,15 @@ struct EnrolLabel {
     _role: Option<String>,
 }
 
-/// A registered agent's own role and projects; both left out returns it to its connector's.
+/// A registered agent's own role, projects and nickname; anything left out is cleared (the agent
+/// acts as its connector again, with no nickname).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegisteredAgentSet {
     id: String,
     agent_role: Option<String>,
     agent_projects: Option<Vec<String>>,
+    nickname: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -641,7 +643,9 @@ impl Settings {
             projects: a.agent_projects.clone(),
         };
         self.board.check_agent_grant(&grant, None)?;
-        if self.board.set_agent_grant(&a.id, grant)? {
+        // The nickname first: a bad one then changes nothing.
+        let known = self.board.set_agent_nickname(&a.id, a.nickname.clone())?;
+        if known && self.board.set_agent_grant(&a.id, grant)? {
             rusty_log::warn!(agent = %a.id, role = ?a.agent_role, projects = ?a.agent_projects, "registered agent regranted");
             Ok(json!({"id": a.id, "agent_role": a.agent_role, "agent_projects": a.agent_projects}))
         } else {
