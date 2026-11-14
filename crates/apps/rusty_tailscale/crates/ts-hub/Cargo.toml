@@ -14,6 +14,9 @@ layer = "apps"
 ts-control.workspace = true
 ts-types.workspace = true
 ts-key.workspace = true
+ts-derp.workspace = true
+ts-stun.workspace = true
+crypto_box.workspace = true
 rusty_tokio.workspace = true
 rusty_h2 = { path = "../../../../libs/net/rusty_h2", features = ["rusty-tokio"] }
 rusty_http = { workspace = true, features = ["rusty-tokio"] }
@@ -21,3 +24,5 @@ rusty_base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]

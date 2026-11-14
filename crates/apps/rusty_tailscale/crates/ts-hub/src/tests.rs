@@ -120,3 +120,52 @@ async fn two_nodes_see_each_other_with_disco_keys_and_endpoints() {
     .await;
     result.expect("no timeout").expect("poll ends cleanly");
 }
+
+/// Registers a node with the hub and returns its node key.
+async fn registered(url: &str, name: &str) -> NodePrivate {
+    let p = peer(url, name).await;
+    p.client.register(p.node.public(), "k1").await.unwrap();
+    p.node
+}
+
+#[rusty_tokio::test]
+async fn two_registered_nodes_move_4_mib_through_the_hub_derp() {
+    use ts_derp::DerpClient;
+    let (_hub, url) = start().await;
+    let (ka, kb) = (registered(&url, "a").await, registered(&url, "b").await);
+    let a = DerpClient::connect(&url, &ka).await.unwrap();
+    let mut b = DerpClient::connect(&url, &kb).await.unwrap();
+
+    let data: Vec<u8> = (0..4u32 << 20)
+        .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
+        .collect();
+    let sender = a.sender();
+    let to = kb.public();
+    let outgoing = data.clone();
+    rusty_tokio::spawn(async move {
+        for chunk in outgoing.chunks(16 << 10) {
+            sender.send(to, chunk.to_vec()).await.unwrap();
+        }
+    });
+
+    let mut got = Vec::with_capacity(data.len());
+    let read = rusty_tokio::time::timeout(Duration::from_secs(30), async {
+        while got.len() < data.len() {
+            let packet = b.recv().await.expect("relay stays up");
+            assert_eq!(packet.peer, ka.public());
+            got.extend_from_slice(&packet.payload);
+        }
+    })
+    .await;
+    read.expect("all 4 MiB arrive");
+    assert!(got == data, "bytes differ");
+}
+
+#[rusty_tokio::test]
+async fn an_unregistered_node_key_is_refused_by_the_derp_relay() {
+    use ts_derp::DerpClient;
+    let (_hub, url) = start().await;
+    let stranger = NodePrivate::generate();
+    let result = DerpClient::connect(&url, &stranger).await;
+    assert!(result.is_err(), "relay admitted a stranger");
+}

@@ -85,6 +85,11 @@ impl State {
         Ok(&self.nodes[self.nodes.len() - 1])
     }
 
+    /// Whether `key` belongs to a registered node.
+    pub fn has_node_key(&self, key: &NodePublic) -> bool {
+        self.nodes.iter().any(|n| &n.node_key == key)
+    }
+
     /// The registered node for this Noise-authenticated machine key.
     pub fn by_machine(&self, machine: &MachinePublic) -> Option<&NodeRec> {
         self.nodes.iter().find(|n| &n.machine == machine)

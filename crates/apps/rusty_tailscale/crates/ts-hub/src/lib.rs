@@ -7,7 +7,9 @@
 //! each node's disco key and endpoints. DERP and STUN servers, ACLs and
 //! persistence are later slices.
 
+mod derp;
 mod state;
+pub mod stun;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,6 +38,7 @@ const KEEPALIVE: Duration = Duration::from_secs(60);
 pub struct Hub {
     key: MachinePrivate,
     state: Mutex<State>,
+    relay: derp::Relay,
     /// Bumped whenever the node table changes; map streams wait on it.
     changed: watch::Sender<u64>,
     /// Kept so streams can clone a fresh receiver.
@@ -49,6 +52,7 @@ impl Hub {
         Arc::new(Self {
             key: MachinePrivate::generate(),
             state: Mutex::new(State::default()),
+            relay: derp::Relay::new(),
             changed,
             changes,
         })
@@ -90,6 +94,7 @@ impl Hub {
         let path = head.target.split('?').next().unwrap_or("");
         match (&head.method, path) {
             (Method::Get, "/key") => self.serve_key(transport).await,
+            (Method::Get, "/derp") => self.serve_derp(transport).await,
             (Method::Post, "/ts2021") => {
                 let init = decode_initiation(head.headers.get("X-Tailscale-Handshake"))?;
                 self.upgrade(transport, &init).await
@@ -117,6 +122,28 @@ impl Hub {
             })
             .await?;
         write_all(&mut transport, &body).await
+    }
+
+    async fn serve_derp(&self, mut transport: AsyncTransport<TcpStream>) -> Result<(), HubError> {
+        let mut headers = HeaderMap::new();
+        headers.insert("Upgrade", "DERP")?;
+        headers.insert("Connection", "Upgrade")?;
+        transport
+            .write_response_head(&ResponseHead {
+                status: StatusCode::SWITCHING_PROTOCOLS,
+                reason: "Switching Protocols".into(),
+                version: Version::Http11,
+                headers,
+            })
+            .await?;
+        let (stream, leftover) = transport.into_parts();
+        let (read, write) = stream.into_split();
+        self.relay
+            .session(Replay::new(leftover, read), write, |k| {
+                self.with_state(|s| s.has_node_key(k))
+            })
+            .await
+            .map_err(|e| HubError::Bad(e.to_string()))
     }
 
     async fn upgrade(
