@@ -553,6 +553,19 @@ impl<S: Store> Board<S> {
                 card.project, card.title
             )));
         }
+        // A card's repository must stay one of its project's.
+        if let Some(card) = self.store.list()?.iter().find(|c| {
+            c.repo.as_deref().is_some_and(|r| {
+                projects.contains(&c.project) && !projects.repos_of(&c.project).any(|own| own == r)
+            })
+        }) {
+            return Err(BoardError::Refused(format!(
+                "card {:?} is in repository {:?} of project {:?}, which would no longer have it; move the card first",
+                card.title,
+                card.repo.as_deref().unwrap_or_default(),
+                card.project
+            )));
+        }
         persist(&projects).map_err(BoardError::Refused)?;
         *guard = projects;
         Ok(())

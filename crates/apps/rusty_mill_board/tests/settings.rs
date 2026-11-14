@@ -762,6 +762,56 @@ fn repositories_and_projects_are_edited_live_and_written_to_their_file() {
 }
 
 #[test]
+fn a_registry_with_a_spanning_project_is_saved_read_back_and_kept_while_cards_use_it() {
+    let f = start("projects");
+    let registry = json!({
+        "version": 2,
+        "repos": {"mill": {"github": "rusty-mill/rusty_mill"}, "py": {}},
+        "projects": {"tooling": {"repos": {"mill": [".github"], "py": ["ci"]}, "default_repo": "mill"}},
+    });
+    let (status, _, text) = f.admin("settings_projects_set", &json!({"registry": registry}));
+    assert_eq!(status, 200, "{text}");
+    let on_disk = std::fs::read_to_string(f.file("projects.json")).expect("file");
+    assert!(on_disk.contains("\"version\": 2") && on_disk.contains("rusty-mill/rusty_mill"));
+    let (status, got, text) = f.admin("settings_get", &json!({}));
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(
+        got["registry"]["projects"]["tooling"]["default_repo"],
+        "mill"
+    );
+    assert_eq!(
+        got["registry"]["repos"]["mill"]["github"],
+        "rusty-mill/rusty_mill"
+    );
+    // One of the two forms, never both or neither.
+    for both in [json!({"registry": registry, "repos": {}}), json!({})] {
+        assert_eq!(f.admin("settings_projects_set", &both).0, 422, "{both}");
+    }
+    // A card in the second repository stops the project from losing it.
+    let (status, _, text) = f.admin(
+        "card_add",
+        &json!({"title": "t", "project": "tooling", "repo": "py"}),
+    );
+    assert_eq!(status, 200, "{text}");
+    let before = std::fs::read_to_string(f.file("projects.json")).expect("read");
+    let narrowed = json!({
+        "version": 2,
+        "repos": {"mill": {}, "py": {}},
+        "projects": {"tooling": {"repos": {"mill": [".github"]}}},
+    });
+    let (status, _, text) = f.admin("settings_projects_set", &json!({"registry": narrowed}));
+    assert_eq!(
+        (status, text.contains("move the card")),
+        (422, true),
+        "{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.file("projects.json")).expect("read"),
+        before
+    );
+}
+
+#[test]
 fn the_github_sync_is_configured_without_ever_showing_its_token() {
     let f = start("github");
     let secret = "ghp_secret_token_value_0123456789";

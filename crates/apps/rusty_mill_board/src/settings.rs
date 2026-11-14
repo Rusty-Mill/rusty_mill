@@ -338,7 +338,12 @@ struct AppId {
 
 #[derive(Deserialize)]
 struct ProjectsSet {
-    repos: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    /// The older listing: repository -> project -> paths (one repository per project).
+    #[serde(default)]
+    repos: Option<BTreeMap<String, BTreeMap<String, Vec<String>>>>,
+    /// The version 2 registry (see `Projects::parse`): repositories and spanning projects.
+    #[serde(default)]
+    registry: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -613,6 +618,7 @@ impl Settings {
             },
             "agents": agents,
             "repos": self.board.projects(),
+            "registry": self.board.projects().registry_value().map_err(refused)?,
             "roles": self.board.roles(),
             "capabilities": Capability::ALL,
             "capability_about": Capability::ALL.map(|c| (c, c.about())).into_iter().collect::<BTreeMap<_, _>>(),
@@ -774,9 +780,17 @@ impl Settings {
 
     fn projects_set(&self, a: &ProjectsSet) -> Res {
         let path = self.file(&self.files.projects)?;
-        let new = Projects::from_listing(a.repos.clone())
-            .map_err(refused)?
-            .keeping_facts_of(&self.board.projects());
+        let new = match (&a.repos, &a.registry) {
+            (Some(repos), None) => Projects::from_listing(repos.clone())
+                .map_err(refused)?
+                .keeping_facts_of(&self.board.projects()),
+            (None, Some(registry)) => Projects::parse(&registry.to_string()).map_err(refused)?,
+            _ => {
+                return Err(refused(
+                    "give either `repos` or `registry`, not both".to_owned(),
+                ));
+            }
+        };
         if let Some(creds) = &self.creds {
             let creds = creds.read().unwrap_or_else(PoisonError::into_inner);
             if let Some((who, p)) = creds.list().find_map(|i| {

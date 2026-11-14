@@ -60,10 +60,25 @@ await dialog.getByRole("button", { name: "+ repository" }).click();
 await dialog.getByRole("button", { name: "+ project" }).last().click();
 await dialog.locator("input[placeholder='project name']").fill("rocket_league");
 await dialog.locator("textarea").fill("crates/apps/rocket_league");
-await dialog.getByRole("button", { name: "Save repositories and projects" }).click();
+// A save redraws the sheet from fresh settings; wait for that before touching it again.
+const saved = () => Promise.all([page.waitForResponse((r) => r.url().includes("/api/settings_get")), dialog.getByRole("button", { name: "Save repositories and projects" }).click()]).then(() => page.waitForTimeout(300));
+await saved();
 await page.waitForFunction(() => !document.querySelector("#settings .err")?.textContent);
 const listed = (await api(rotated, "board_projects")).body.repos;
 check(listed.rusty_mill?.rocket_league?.[0] === "crates/apps/rocket_league", "a repository with a project is saved");
+
+// The same project name under a second repository makes it span both; the first stays its default.
+await dialog.locator("input[placeholder='new repository name']").fill("tools");
+await dialog.getByRole("button", { name: "+ repository" }).click();
+await dialog.getByRole("button", { name: "+ project" }).last().click();
+await dialog.locator("input[placeholder='project name']").last().fill("rocket_league");
+await dialog.locator("textarea").last().fill("ci");
+await dialog.locator("input[aria-label='tools GitHub repository']").fill("rusty-mill/tools");
+await saved();
+await page.waitForFunction(() => !document.querySelector("#settings .err")?.textContent);
+const spanning = (await api(rotated, "board_projects")).body.projects.rocket_league;
+check(spanning?.default_repo === "rusty_mill" && spanning.repos.tools?.[0] === "ci" && spanning.repos.rusty_mill?.[0] === "crates/apps/rocket_league", "a project named under two repositories spans both, keeping its default");
+check((await api(TOKEN, "settings_get")).body.registry.repos.tools?.github === "rusty-mill/tools", "and a repository's GitHub slug is saved");
 await dialog.getByRole("button", { name: "Close" }).click();
 await page.locator("#repo option", { hasText: "rusty_mill" }).waitFor({ state: "attached", timeout: 3000 }).catch(() => {});
 check((await page.locator("#repo option", { hasText: "rusty_mill" }).count()) >= 1, "and appears in the repository picker at once");
