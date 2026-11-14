@@ -45,7 +45,7 @@ Two registries, linked by an explicit edge.
 - `Repo`: name plus optional facts (`github`). No status. A repository is *served* or not.
 - `Project`: name, status, and a map `repo -> paths`. An empty list means "the project's share of that repo is whatever no other project of it claims" (today's implicit project semantics, made explicit).
 - Invariants, checked once in `Projects::parse`: names valid and unique per kind; every edge names a known repo; within one repo no two projects claim overlapping paths and at most one project has the empty claim (the *rest* owner); every repo has a rest owner (see migration).
-- Cards stay `project`-only. `repo_of` becomes `repos_of`. A card in a multi-repo project gets an **optional** `repo` field (default: the project's first repo, so single-repo projects change nothing). It is set at `card_add`/`card_assign`, validated against the project's edges.
+- Cards stay `project`-only. `repo_of` becomes `repos_of`. A card in a multi-repo project gets an **optional** `repo` field (default: the project's `default_repo`, an explicit field that is required whenever a project has more than one edge, so nothing depends on map order; single-repo projects change nothing). It is set at `card_add`/`card_assign`, validated against the project's edges.
 
 ### Options
 
@@ -84,9 +84,10 @@ A2 keeps `Board::apply` scope checks untouched (they key on the project name), s
 1. **Expose `settings_*` as MCP tools**, each running the existing `Settings::admin` path: same `acting()`, same `Admin` check, same lock, same validation. No new authority path. A human token and an agent hit the identical code.
 2. **Exceptions by *result*, not by caller**: operations that return a secret (`settings_agent_add`, `settings_agent_rotate`, minting) stay HTTP-only. A secret would land in a chat transcript. This is a property of the operation, so it also holds for a human using MCP.
 3. **No self-elevation** (applies to all actors):
-   - an actor cannot change its own grant or revoke itself;
-   - anything it grants (`settings_registered_agent_set`, `settings_roles_set`, `agent_enrol`) must be a subset of its own capabilities and projects. `Admin` and `Enrol` are grantable only by a holder of `Admin` (today minted agents can never hold them; this relaxes that to "an Admin may grant Admin", a human decision made in Settings once).
-4. **Audit**: every settings write is appended as a `board_events` record (actor id, nickname if any, operation, target, no values that could be secret). This covers the "settings change history unbuilt" gap and is what lets Nano see what an agent did with a grant.
+   - an actor cannot change its own grant or revoke itself; editing a role the actor holds counts as changing its own grant (`settings_roles_set` refuses it);
+   - no actor may revoke or narrow the last human Admin;
+   - anything it grants (`settings_registered_agent_set`, `settings_roles_set`, `agent_enrol`) must be a subset of its own capabilities and projects. `Admin` and `Enrol` stay human-only grants made in Settings: today minted agents can never hold them, and an Admin agent that could grant Admin could register a second agent, raise it, and have it change the first's grant or demote the human Admins.
+4. **Audit**: every settings call is appended as a `board_events` record (actor id, nickname if any, operation, target, outcome; denied attempts included, so probing past a grant is visible; no values that could be secret). This covers the "settings change history unbuilt" gap and is what lets Nano see what an agent did with a grant.
 5. **Grant flow**: agent registers (narrow by default) -> Nano raises its grant in Settings -> it acts. This already exists; the nickname from #1677 shows in the audit.
 6. **Finer capabilities (not now)**: splitting `Admin` into `admin:agents`, `admin:projects`, `admin:roles` is the obvious next step, but there is no second call site today. Defer until a real grant wants a partial Admin (YAGNI). Roles stay admin-managed data and already allow this later without a schema change.
 
@@ -116,7 +117,7 @@ PR 4 lands before 5 so no tool is exposed without its guard rails. Each PR gets 
 ## 6. Open questions for Nano
 
 1. Do you want a project to be able to span repositories (A2), or is "one project, one repository, repository is just a parent" (A1 plus a cleaner UI) enough? Recommendation: A2.
-2. May an `Admin` agent grant `Admin` to another agent (3.3), or should that stay a human-only step? Recommendation: allow, subset rule applies, audited.
+2. May an `Admin` agent grant `Admin` to another agent (3.3)? Recommendation: no, it stays a human step in Settings (a reviewer showed that allowing it defeats the self-elevation rule).
 3. Is HTTP-only for token minting/rotation acceptable (3.2)? Recommendation: yes, since MCP would put the secret in the transcript.
 
 ## 7. Rejected
