@@ -8,7 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Marker file name, at the root of a managed copy.
-pub const MARKER: &str = ".aienv-managed";
+pub const MARKER: &str = ai_env_core::MARKER_FILE;
 
 /// What the marker records.
 #[derive(Debug, PartialEq, Eq)]
