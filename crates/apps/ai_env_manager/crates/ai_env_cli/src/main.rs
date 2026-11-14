@@ -33,7 +33,7 @@ fn main() -> ExitCode {
     };
     let Some(home) = home else {
         eprintln!("aienv: set HOME (or USERPROFILE) so ~/ in the tool catalog can be resolved");
-        return ExitCode::from(USAGE);
+        return ExitCode::from(FAILED);
     };
     match run(
         &cmd,

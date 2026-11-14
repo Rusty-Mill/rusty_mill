@@ -166,10 +166,12 @@ pub enum Os {
 }
 
 impl LinkMethod {
-    /// The method to try first on `os`: a symlink on every host, so a link the
-    /// user can see and follow is preferred to a junction or a copy.
-    pub fn preferred(_os: Os) -> LinkMethod {
-        LinkMethod::Symlink
+    /// The method to try first on `os`: the head of its fallback chain.
+    pub fn preferred(os: Os) -> LinkMethod {
+        Self::fallback_chain(os)
+            .first()
+            .copied()
+            .unwrap_or(LinkMethod::Copy)
     }
 
     /// Methods to try, best first. Symlinks need Developer Mode on Windows;

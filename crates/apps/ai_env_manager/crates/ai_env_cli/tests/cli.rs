@@ -276,6 +276,18 @@ fn help_runs_without_a_home_folder() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("usage: aienv"));
 }
 
+#[test]
+fn a_missing_home_folder_is_an_error_not_usage() {
+    let out = Command::new(env!("CARGO_BIN_EXE_aienv"))
+        .args(["list", "--skills", "."])
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("set HOME"));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_non_utf8_argument_exits_2_instead_of_panicking() {
