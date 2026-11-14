@@ -5,7 +5,7 @@ each with a recommendation. An answered question moves to [DECISIONS.md](DECISIO
 with the date and where he said it, and its row is removed here. Nothing below has been
 acted on.
 
-## Answer these six first
+## Answer these seven first
 
 1. ~~**L2:** authorise Let Em Loose's deployment and confirm the host.~~ Answered 2026-11-13; see DECISIONS.md l2-baileyai-host.
 2. ~~**M1:** approve the minimal role fix on Mill Board.~~ Answered 2026-11-12; see DECISIONS.md m1-role-fix.
