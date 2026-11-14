@@ -11009,8 +11009,12 @@ dependencies = [
 name = "rusty_mux_script"
 version = "0.1.0"
 dependencies = [
+ "rusty_crypto_key",
+ "rusty_hex",
  "rusty_json",
  "rusty_mux_proto",
+ "rusty_rand",
+ "rusty_sha2",
 ]
 
 [[package]]
@@ -11020,6 +11024,7 @@ dependencies = [
  "platform",
  "platform-linux",
  "platform-windows",
+ "rusty_base64",
  "rusty_conhost",
  "rusty_crypto_key",
  "rusty_http",
@@ -11032,6 +11037,7 @@ dependencies = [
  "rusty_mux_transport",
  "rusty_rand",
  "rusty_term_core",
+ "rusty_tls",
  "rusty_tokio",
  "rusty_uuid",
  "serde",

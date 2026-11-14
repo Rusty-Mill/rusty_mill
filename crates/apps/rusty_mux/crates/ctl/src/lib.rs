@@ -58,6 +58,7 @@ mod stop;
 mod sync;
 pub mod target;
 mod terminfo;
+mod token;
 mod wait;
 mod watch;
 
@@ -459,6 +460,12 @@ pub fn run_until(
                 Err((exit, reason)) => report(err, exit, &reason),
             };
         }
+        Command::Token(command) => {
+            return match token::run(&command, invocation.json, out) {
+                Ok(()) => Exit::Ok,
+                Err((exit, reason)) => report(err, exit, &reason),
+            };
+        }
         Command::Sync(sync) => {
             return match sync::run(&sync, env, invocation.json, out) {
                 Ok(()) => Exit::Ok,
@@ -768,6 +775,7 @@ fn execute(
         | Command::Config(_)
         | Command::Hosts(_)
         | Command::Sync(_)
+        | Command::Token(_)
         | Command::Ssh(_)
         | Command::Terminfo(_)
         | Command::Agent(_)

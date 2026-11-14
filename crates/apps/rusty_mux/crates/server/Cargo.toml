@@ -24,6 +24,7 @@ rusty_mux_status = { workspace = true }
 # The UDP association behind `--udp`; its keys come from the OS CSPRNG.
 rusty_mux_transport = { workspace = true }
 rusty_rand = { workspace = true }
+rusty_base64 = { workspace = true }
 # Headless engine only: no `gui` or `l13`, so no tokio reaches this binary.
 rusty_term_core = { workspace = true }
 rusty_tokio = { workspace = true }
@@ -44,6 +45,8 @@ uuid = { workspace = true }
 # Tailscale identity (C27): `tailscaled`'s LocalAPI `whois`, over its Unix
 # socket, with the types the `tailscale` CLI decodes it with.
 rusty_http = { workspace = true, features = ["rusty-tokio"] }
+# The TLS listener (#506): the server side only, with the certificate the user supplies.
+rusty_tls = { workspace = true, features = ["rusty-tokio"] }
 serde_json = { workspace = true }
 ts-types = { workspace = true }
 platform-linux = { workspace = true }

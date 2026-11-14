@@ -53,9 +53,13 @@ mod state;
 mod store;
 pub use rusty_mux_proto::style;
 #[cfg(target_os = "linux")]
+mod pem;
+#[cfg(target_os = "linux")]
 pub mod tailnet;
 #[cfg(any(target_os = "linux", windows))]
 mod terminal;
+#[cfg(target_os = "linux")]
+mod tls;
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -73,6 +77,8 @@ pub use login::{
 };
 #[cfg(target_os = "linux")]
 pub use shared::{Sharing, Tailnet, serve_shared};
+#[cfg(target_os = "linux")]
+pub use tls::Tls;
 
 /// How the server starts each block's program.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,7 +344,8 @@ async fn serve_for(
     let requested = state.borrow_mut().stop_on_request();
     let served = rusty_tokio::select! {
         result = serve_clients(listener, state.clone(), udp, allowed, owner, guests.as_ref().cloned()) => result,
-        result = serve_tailnet(guests, state.clone()) => result,
+        result = serve_tailnet(guests.as_ref().cloned(), state.clone()) => result,
+        result = serve_tls(guests, state.clone()) => result,
         () = stop => Ok(()),
         () = idle_for(&state, idle) => Ok(()),
         () = stop_requested(requested) => Ok(()),
@@ -365,6 +372,21 @@ async fn serve_tailnet(guests: Option<shared::Guests>, state: state::Shared) -> 
 
 #[cfg(not(target_os = "linux"))]
 async fn serve_tailnet(_guests: Option<()>, _state: state::Shared) -> io::Result<()> {
+    std::future::pending().await
+}
+
+/// Serves the TLS listener of a shared server (#506); never without one.
+#[cfg(target_os = "linux")]
+async fn serve_tls(guests: Option<shared::Guests>, state: state::Shared) -> io::Result<()> {
+    let tls = guests.as_ref().and_then(shared::Guests::take_tls);
+    match (tls, guests) {
+        (Some(tls), Some(guests)) => tls::accept_tls(tls, state, guests).await,
+        _ => std::future::pending().await,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn serve_tls(_guests: Option<()>, _state: state::Shared) -> io::Result<()> {
     std::future::pending().await
 }
 

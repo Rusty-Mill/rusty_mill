@@ -44,6 +44,11 @@ pub(crate) trait Descriptors {
 
 impl Descriptors for rusty_tokio::io::OwnedUnixReadHalf {}
 impl Descriptors for rusty_tokio::io::OwnedReadHalf {}
+#[cfg(target_os = "linux")]
+impl Descriptors
+    for rusty_tokio::io::SplitReadHalf<rusty_tls::AsyncTlsServerStream<rusty_tokio::io::TcpStream>>
+{
+}
 
 /// Which descriptors, if any, belong to the frame at stream offsets
 /// `[start, end)`. The kernel ends a read with the segment that carried
