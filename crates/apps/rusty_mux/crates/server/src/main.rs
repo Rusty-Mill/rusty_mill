@@ -805,6 +805,7 @@ mod tests {
         assert!(parse_str(&["--shared", "a", "--tls", "nope", "s"]).is_err());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_tailnet_listener_is_shared_mode_and_a_tailnet_address() {
         let ok = parse_str(&["--shared", "a", "--tailnet", "100.64.0.7:7000", "s"]).unwrap();
