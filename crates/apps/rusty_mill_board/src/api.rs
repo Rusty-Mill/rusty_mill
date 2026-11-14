@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::agents::Grant;
 use crate::board::{Board, NewCard};
 use crate::domain::{
     Actor, BoardError, Card, CardSummary, CloseReason, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS,
@@ -136,18 +137,21 @@ pub(crate) fn acting(
                     "this connector needs a registered agent: call agent_register once, then pass agent_id and agent_key on every write",
                 ));
             };
-            if !b.verify_agent(&i.actor, id, key) {
+            let Some(grant) = b.verify_agent(&i.actor, id, key) else {
                 return Err(BoardError::Invalid(
                     "unknown agent or wrong key: call agent_register again",
                 ));
-            }
-            if who.role.as_deref().is_some_and(|r| r != i.role) {
+            };
+            // The agent's own role and projects, else its connector's.
+            let role = grant.role.as_ref().unwrap_or(&i.role);
+            if who.role.as_deref().is_some_and(|r| r != role) {
                 return Err(BoardError::Invalid(
                     "role is fixed by your credential; omit it",
                 ));
             }
-            let mut actor = b.roles().actor(id, &i.role)?;
-            actor.projects = i.projects.as_ref().map(|p| p.iter().cloned().collect());
+            let mut actor = b.roles().actor(id, role)?;
+            let projects = grant.projects.as_ref().or(i.projects.as_ref());
+            actor.projects = projects.map(|p| p.iter().cloned().collect());
             Ok(actor)
         }
         Some(i) => {
@@ -197,6 +201,16 @@ fn bound_acting(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Ac
 
 #[derive(Deserialize, JsonSchema)]
 struct Nothing {}
+
+/// The arguments of `agent_register`.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RegisterArgs {
+    /// A role to act with instead of the connector's: it may hold no capability the connector's lacks.
+    agent_role: Option<String>,
+    /// Projects to work in instead of all of the connector's: each must be one of the connector's.
+    agent_projects: Option<Vec<String>>,
+}
 
 /// The arguments of an operation that takes only who is acting.
 #[derive(Deserialize, JsonSchema)]
@@ -759,15 +773,21 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "agent_register",
-            "Register yourself as a unique agent on this connector (once per session). Returns {agent_id, agent_key}: pass both on every write. The connector's role and projects still apply. Keep the key private; if you lose it, register again.",
-            |b, i, _: Nothing| {
+            "Register yourself as a unique agent on this connector (once per task). Returns {agent_id, agent_key}: pass both on every write. By default you act with the connector's role and projects; `agent_role` and `agent_projects` narrow them (never wider than the connector's). An admin can later set a different role for you in Settings. Keep the key private; if you lose it, register again.",
+            |b, i, a: RegisterArgs| {
                 let Some(identity) = i.filter(|i| i.connector) else {
                     return Err(BoardError::Invalid(
                         "agent_register is for connector sign-ins; your own token already names you",
                     ));
                 };
-                let (agent, agent_key) = b.register_agent(&identity.actor)?;
-                to_json(json!({ "agent_id": agent, "agent_key": agent_key }))
+                let grant = Grant {
+                    role: a.agent_role,
+                    projects: a.agent_projects,
+                };
+                let own = identity.projects.as_deref();
+                b.check_agent_grant(&grant, Some((&identity.role, own)))?;
+                let (agent_id, agent_key) = b.register_agent(&identity.actor, grant)?;
+                to_json(json!({ "agent_id": agent_id, "agent_key": agent_key }))
             },
         ),
         op(
@@ -917,12 +937,13 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_whoami",
-            "Who you are on this board: your actor name, role and what that role may do.",
+            "Who you are on this board: your actor name, role and what that role may do, and the nicknames an admin gave registered agents (agent id to nickname; display only).",
             |b, i, _: Nothing| {
                 let Some(i) = i else {
                     return to_json(json!({
                         "authenticated": false,
-                        "note": "no per-model credential: pass actor and role on each call"
+                        "note": "no per-model credential: pass actor and role on each call",
+                        "nicknames": b.agent_nicknames()
                     }));
                 };
                 let who = b.roles().actor(&i.actor, &i.role)?;
@@ -930,7 +951,8 @@ pub fn ops() -> Vec<Op> {
                     "authenticated": true,
                     "actor": who.name,
                     "role": i.role,
-                    "capabilities": who.caps
+                    "capabilities": who.caps,
+                    "nicknames": b.agent_nicknames()
                 }))
             },
         ),
@@ -2146,6 +2168,99 @@ mod tests {
             "agent_register",
             json!({})
         )));
+    }
+
+    #[test]
+    fn a_registered_agent_may_narrow_itself_and_an_admin_may_widen_it() {
+        let mut roles = Roles::default();
+        let caps = |c: &[Capability]| c.iter().copied().collect();
+        roles
+            .0
+            .insert("wide".into(), caps(&[Capability::Build, Capability::Close]));
+        roles
+            .0
+            .insert("mid".into(), caps(&[Capability::Build, Capability::Record]));
+        roles.0.insert("low".into(), caps(&[Capability::Build]));
+        let board: Shared = Board::new(Box::new(MemStore::default()), roles);
+        let connector = Identity {
+            connector: true,
+            ..ident("claude-cloud", "mid")
+        };
+        let register = |args: Value| call_as(&board, Some(&connector), "agent_register", args);
+        // Wider or unknown roles and unknown projects are refused; a narrower role is accepted.
+        for bad in [
+            json!({"agent_role": "wide"}),
+            json!({"agent_role": "nope"}),
+            json!({"agent_projects": ["nope"]}),
+            json!({"agent_projects": []}),
+            json!({"agent_roles": "low"}),
+        ] {
+            assert!(register(bad.clone()).is_err(), "{bad}");
+        }
+        let low = register(json!({"agent_role": "low"})).expect("narrow");
+        let plain = register(json!({})).expect("plain");
+        let write = |who: &Value, role: Option<&str>| {
+            let mut args = json!({"title": "t", "done": true,
+                "agent_id": who["agent_id"], "agent_key": who["agent_key"]});
+            if let Some(r) = role {
+                args["role"] = json!(r);
+            }
+            call_as(&board, Some(&connector), "card_add", args)
+        };
+        // `done: true` needs Close: neither holds it yet. The narrowed agent also lacks Record.
+        assert!(matches!(
+            write(&low, None),
+            Err(CallError::Board(BoardError::Forbidden(_)))
+        ));
+        assert!(
+            write(&plain, Some("low")).is_err(),
+            "role is fixed by the credential"
+        );
+        // An admin gives the plain agent a wider role than the connector holds: it can close.
+        let id = plain["agent_id"].as_str().expect("id");
+        board
+            .check_agent_grant(
+                &Grant {
+                    role: Some("wide".into()),
+                    projects: None,
+                },
+                None,
+            )
+            .expect("admin may widen");
+        assert!(
+            board
+                .set_agent_grant(
+                    id,
+                    Grant {
+                        role: Some("wide".into()),
+                        projects: None
+                    }
+                )
+                .expect("set")
+        );
+        assert_eq!(
+            write(&plain, None).expect("closes")["card"]["column"],
+            "done"
+        );
+        // The other agent is unaffected, and clearing the grant returns to the connector's role.
+        assert!(write(&low, None).is_err());
+        assert!(board.set_agent_grant(id, Grant::default()).expect("clear"));
+        assert!(write(&plain, None).is_err());
+        // A nickname is display only: whoami lists it by id, to anyone.
+        assert!(
+            board
+                .set_agent_nickname(id, Some("QA bot".into()))
+                .expect("nick")
+        );
+        let me = call_as(
+            &board,
+            Some(&ident("claude-cli", "mid")),
+            "board_whoami",
+            json!({}),
+        );
+        assert_eq!(me.expect("whoami")["nicknames"][id], "QA bot");
+        let anon = call_as(&board, None, "board_whoami", json!({})).expect("anon");
+        assert_eq!(anon["nicknames"][id], "QA bot");
     }
 
     #[test]

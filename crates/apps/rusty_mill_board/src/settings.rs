@@ -21,6 +21,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
+use crate::agents::Grant;
 use crate::api::{CallError, Identity, Shared, Who, acting};
 use crate::board::{ProjectsSink, Roles};
 use crate::domain::{Actor, BoardError, Capability, MoveRules, ProjectStatus};
@@ -313,6 +314,17 @@ struct EnrolLabel {
     _role: Option<String>,
 }
 
+/// A registered agent's own role, projects and nickname; anything left out is cleared (the agent
+/// acts as its connector again, with no nickname).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisteredAgentSet {
+    id: String,
+    agent_role: Option<String>,
+    agent_projects: Option<Vec<String>>,
+    nickname: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegisteredAgentId {
@@ -454,6 +466,7 @@ impl Settings {
             "settings_workflow_set" => {
                 |s, by, a| s.workflow_set(by, parse::<WorkflowSet>(a)?.workflow)
             }
+            "settings_registered_agent_set" => |s, _, a| s.registered_agent_set(&parse(a)?),
             "settings_registered_agent_revoke" => |s, _, a| s.registered_agent_revoke(&parse(a)?),
             "settings_app_revoke" => |s, _, a| s.app_revoke(&parse(a)?),
             _ => return None,
@@ -608,7 +621,7 @@ impl Settings {
             "workflow": self.board.workflow(),
             "project_status": self.board.statuses(),
             "apps": self.oauth.get().map(|p| p.store().list_clients()),
-            "registered_agents": self.board.agent_list().into_iter().map(|(id, connector, created_ms, seen_ms)| json!({"id": id, "connector": connector, "created_ms": created_ms, "seen_ms": seen_ms})).collect::<Vec<_>>(),
+            "registered_agents": self.board.agent_list(),
             "server": self.server,
             "paths": {
                 "agents": self.files.identities,
@@ -620,6 +633,24 @@ impl Settings {
                 "project_status": self.files.project_status,
             },
         }))
+    }
+
+    /// Give a registered agent its own role and projects (an admin may widen as well as narrow);
+    /// with neither, it acts as its connector again.
+    fn registered_agent_set(&self, a: &RegisteredAgentSet) -> Res {
+        let grant = Grant {
+            role: a.agent_role.clone(),
+            projects: a.agent_projects.clone(),
+        };
+        self.board.check_agent_grant(&grant, None)?;
+        // The nickname first: a bad one then changes nothing.
+        let known = self.board.set_agent_nickname(&a.id, a.nickname.clone())?;
+        if known && self.board.set_agent_grant(&a.id, grant)? {
+            rusty_log::warn!(agent = %a.id, role = ?a.agent_role, projects = ?a.agent_projects, "registered agent regranted");
+            Ok(json!({"id": a.id, "agent_role": a.agent_role, "agent_projects": a.agent_projects}))
+        } else {
+            Err(refused(format!("no registered agent {:?}", a.id)))
+        }
     }
 
     /// Forget a registered agent: its key stops working at once; it can register again.

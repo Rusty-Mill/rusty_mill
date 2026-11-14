@@ -402,6 +402,9 @@ function assignSlots(){
   for(const n of known){let k=hash(n)%SLOTS;for(let i=0;i<SLOTS&&used.has(k);i++)k=(k+1)%SLOTS;used.add(k);slotOf[n]=k}
 }
 assignSlots();
+/* Nicknames an admin gave registered agents (board_whoami's `nicknames`): display only, ids stay the identity. */
+let NICKS={};
+const nick=a=>NICKS[a]||a;
 function agentColor(n){
   if(!(n in slotOf)){known=[...new Set([...known,n])].sort();pref("agents",JSON.stringify(known));assignSlots()}
   return "hsl("+(slotOf[n]*30+8)+" 62% var(--al))";
@@ -501,7 +504,7 @@ function ticket(k){
   if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");t.title=repoOf(k.project);m.append(t)}
   if(k.claim){
     d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
-    const t=el("span",null,"tag agent"+(working().includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
+    const t=el("span",null,"tag agent"+(working().includes(k.column)?" running":""));t.append(el("i",null,"dot"),nick(k.claim));t.title=k.claim;m.append(t);
   }
   const work=kindOf(k.column)==="work",age=Date.now()-k.updated_ms;
   if(work&&age>DAY)m.append(el("span","idle "+ago(k.updated_ms),"idle"));
@@ -762,7 +765,7 @@ async function renderRoadmap(){
       const d=el("div",null,"card");d.append(...heading(k));
       const m=el("div",null,"meta");
       if(l.lane==="now")m.append(el("span",colLabel(k.column)));
-      if(k.claim){const t=el("span",null,"tag agent");t.style.setProperty("--ag",agentColor(k.claim));t.append(el("i",null,"dot"),k.claim);m.append(t)}
+      if(k.claim){const t=el("span",null,"tag agent");t.style.setProperty("--ag",agentColor(k.claim));t.append(el("i",null,"dot"),nick(k.claim));t.title=k.claim;m.append(t)}
       m.append(...tagChips(k));
       if(k.waits_on.length)m.append(el("span","waits on "+k.waits_on.length));
       if(k.done_ms)m.append(el("span","shipped "+new Date(k.done_ms).toLocaleDateString()));
@@ -824,7 +827,7 @@ async function renderMetrics(){
   const PFILL={5:"var(--red-fill)",3:"var(--ink)",1:"var(--mute)",0:"var(--line2)"};
   pri.append(...rows(m.by_priority.map(t=>({label:PRIORITY[t.key],n:t.count,fill:PFILL[t.key]}))));
   const agents=panel("In progress by agent","w4","claimed cards in work columns");
-  agents.append(...rows(m.by_claim.map(t=>({label:t.key,n:t.count,fill:agentColor(t.key)}))));
+  agents.append(...rows(m.by_claim.map(t=>({label:nick(t.key),n:t.count,fill:agentColor(t.key)}))));
   const parts=[flow,cols,pri,agents];
   const idle=panel("Idle longest","w4 idlelist","open cards past backlog, longest untouched first");
   for(const k of m.idle.slice(0,6)){
@@ -1007,7 +1010,7 @@ function refLines(k){
   return (k.external_refs??[]).map(r=>{
     const d=el("div"),name=r.provider+" "+r.ref;
     if(r.url){const a=el("a",name);a.href=r.url;a.target="_blank";a.rel="noopener noreferrer";d.append(a)}else d.append(el("span",name));
-    d.append(el("span"," · "+r.state+" · seen "+new Date(r.observed_at_ms).toLocaleString()+" by "+r.by,"meta"));
+    d.append(el("span"," · "+r.state+" · seen "+new Date(r.observed_at_ms).toLocaleString()+" by "+nick(r.by),"meta"));
     return d;
   });
 }
@@ -1027,7 +1030,7 @@ function syncDialog(){
   f.meta.textContent=colLabel(k.column)+(k.archived_ms!=null?" · archived":"")+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
   f.ar.hidden=!isDone(k);f.ar.textContent=shelved(k)?"Restore":"Archive";
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
-  f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
+  f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",nick(c.by)+": "),el("span",c.text));return d}));
   f.ex.replaceChildren(...refLines(k));
   const theirs=snap(k);
   if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
@@ -1288,13 +1291,18 @@ function registeredAgents(){
   const box=el("div"),err=el("div",null,"err"),list=cfg.registered_agents||[];
   box.append(el("h3","Registered agents"));
   if(!list.length){box.append(el("p","None yet. A session on a shared connector (such as claude-cloud) calls agent_register once, then passes its agent_id and agent_key on every write.","note"));return box}
-  const tbl=el("table"),head=el("tr");["Agent","Connector","Registered","Last used",""].forEach(h=>head.append(el("th",h)));tbl.append(head);
+  const tbl=el("table"),head=el("tr");["Agent","Nickname","Connector","Role","Projects","Last used",""].forEach(h=>head.append(el("th",h)));tbl.append(head);
   for(const a of list){
-    const tr=el("tr"),rv=el("button","Revoke"),td=el("td");rv.type="button";
+    const tr=el("tr"),role=roleSelect(a.role),pick=projectPicker(a.projects),acts=el("td"),nk=field("input",{value:a.nickname||"",placeholder:"nickname",size:14,maxlength:40});
+    role.insertBefore(new Option("connector's role",""),role.firstChild);role.value=a.role||"";
+    const save=el("button","Save"),rv=el("button","Revoke");[save,rv].forEach(b=>{b.type="button"});
+    save.onclick=guard(err,()=>setting("settings_registered_agent_set",{id:a.id,agent_role:role.value||null,agent_projects:pick.value(),nickname:nk.value.trim()||null}));
     rv.onclick=guard(err,async()=>{if(!confirm("Revoke "+a.id+"? Its key stops working; it can register again."))return;await setting("settings_registered_agent_revoke",{id:a.id})});
-    td.append(rv);tr.append(el("td",a.id),el("td",a.connector),el("td",new Date(a.created_ms).toLocaleString()),el("td",new Date(a.seen_ms).toLocaleString()),td);tbl.append(tr);
+    acts.append(save," ",rv);
+    const r=el("td"),p=el("td");r.append(role);p.append(pick);
+    const nm=el("td");nm.append(nk);tr.append(el("td",a.id),nm,el("td",a.connector),r,p,el("td",new Date(a.seen_ms).toLocaleString()),acts);tbl.append(tr);
   }
-  box.append(tbl,err);
+  box.append(tbl,err,el("p","Left at the connector's role, and all projects, an agent acts as its connector. Any role chosen here is applied at once, even a wider one.","note"));
   return box;
 }
 
@@ -1493,7 +1501,7 @@ async function loadMeta(){
   $("role").value=roles.includes(cur)?cur:(pref("role")&&roles.includes(pref("role"))?pref("role"):(roles.includes("human")?"human":roles[0]));
   FLOW=await meta("board_columns",FLOW);
   // With a per-model token, who you are is fixed by the token: show it, do not ask.
-  const me=await meta("board_whoami",{});
+  const me=await meta("board_whoami",{});NICKS=me.nicknames||{};
   if(me.authenticated){$("actor").value=me.actor;$("actor").disabled=true;$("role").value=me.role;$("role").disabled=true;
     $("actor").hidden=$("role").hidden=true;const c=$("me");c.hidden=false;
     c.replaceChildren(el("span",(me.actor[0]||"?").toUpperCase(),"av"),el("b",me.actor),"· "+me.role);c.title="Signed in as "+me.actor+" ("+me.role+")"}

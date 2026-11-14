@@ -568,6 +568,14 @@ name = "ai_env_core"
 version = "0.1.0"
 
 [[package]]
+name = "ai_env_fs"
+version = "0.1.0"
+dependencies = [
+ "ai_env_core",
+ "rusty_sha2",
+]
+
+[[package]]
 name = "aisdk"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -48,3 +48,16 @@ its permissions; it should not be the agent's identity.
 - Registry file: `agents.json` in the settings dir, else `<identities stem>.agents.json`; private (0600), keys in clear like identities tokens.
 - Admin: `settings_get` lists `registered_agents` (no keys); `settings_registered_agent_revoke {id}`. No UI panel yet.
 - Rollback: an older binary ignores `agents.json` and stops enforcing, so connector writes fall back to step 1 labels.
+
+## Per-agent role and projects (follow-up; Nano chose "Both", 2026-11-13)
+A registered agent acts with its connector's role and projects unless it has its own grant.
+- **Narrow yourself:** `agent_register {agent_role?, agent_projects?}`. The role may hold no capability the connector's role lacks; projects must be a subset of the connector's. Anything wider is refused.
+- **Admin sets any:** Settings > Agents > Registered agents has a role and project picker per agent (`settings_registered_agent_set {id, agent_role?, agent_projects?}`). An admin may widen beyond the connector (for example an agent allowed to close cards); sending neither returns the agent to its connector's grant.
+- The grant is stored in `agents.json` with the agent. A role removed from Settings later makes that agent's writes fail until an admin resets it.
+
+## Nicknames (follow-up; Nano, 2026-11-13: "I need it for me")
+An admin can give a registered agent a nickname (up to 40 printable characters) in Settings > Agents > Registered agents, so ids like `claude-cloud#fe3bbb` read as "QA bot".
+- Display only, set by the admin only: agents cannot name themselves, so no one can pose under another's name. Claims, history and the registry keep the id.
+- `board_whoami` lists the nicknames (id to nickname); the board UI shows the nickname in place of the id on claim tags, comments, metrics and execution observations, with the id as the tooltip on claim tags.
+- Set through `settings_registered_agent_set` (the nickname travels with the role and projects; anything left out is cleared). Bearer-token agents already have readable names, so they get none.
+

@@ -19,8 +19,23 @@ use crate::identities::new_token;
 pub const MAX_PER_CONNECTOR: usize = 64;
 /// An agent idle this long (30 days) is forgotten.
 pub const IDLE_MS: i64 = 30 * 24 * 3600 * 1000;
+/// Longest nickname, in characters.
+pub const MAX_NICKNAME: usize = 40;
 /// How stale `seen_ms` may get before a use is written back to the file.
 const SEEN_WRITE_MS: i64 = 24 * 3600 * 1000;
+
+/// What one registered agent may do instead of its connector's role and projects. A field left
+/// `None` falls back to the connector's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Grant {
+    /// Its own role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Its own project limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projects: Option<Vec<String>>,
+}
 
 /// One registered agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +49,30 @@ pub struct Agent {
     pub created_ms: i64,
     /// Last used (Unix ms).
     pub seen_ms: i64,
+    /// Its own role and projects, if narrowed or set by an admin.
+    #[serde(flatten)]
+    pub grant: Grant,
+    /// A display name an admin gave it (never an identity: claims and history keep the id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+}
+
+/// A registered agent as listed: everything but its key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentInfo {
+    /// Its id.
+    pub id: String,
+    /// The connector it registered through.
+    pub connector: String,
+    /// Registered at (Unix ms).
+    pub created_ms: i64,
+    /// Last used (Unix ms).
+    pub seen_ms: i64,
+    /// Its own role and projects.
+    #[serde(flatten)]
+    pub grant: Grant,
+    /// Its nickname.
+    pub nickname: Option<String>,
 }
 
 /// The registry, optionally kept in a file.
@@ -62,11 +101,16 @@ impl Registry {
         })
     }
 
-    /// Register a new agent on `connector`: its id and key.
+    /// Register a new agent on `connector` with `grant`: its id and key.
     ///
     /// # Errors
     /// If the connector is full of live agents, randomness fails, or the file cannot be written.
-    pub fn register(&mut self, connector: &str, now: i64) -> Result<(String, String), String> {
+    pub fn register(
+        &mut self,
+        connector: &str,
+        grant: Grant,
+        now: i64,
+    ) -> Result<(String, String), String> {
         self.expire(now);
         let live = self
             .agents
@@ -85,6 +129,8 @@ impl Registry {
             key: key.clone(),
             created_ms: now,
             seen_ms: now,
+            grant,
+            nickname: None,
         };
         if self.agents.insert(id.clone(), agent).is_some() {
             return Err("agent id collided; try again".into());
@@ -93,23 +139,59 @@ impl Registry {
         Ok((id, key))
     }
 
-    /// Whether `id` with `key` is a live agent of `connector`; a hit counts as use.
-    pub fn verify(&mut self, connector: &str, id: &str, key: &str, now: i64) -> bool {
-        let Some(agent) = self.agents.get_mut(id) else {
-            return false;
-        };
+    /// The grant of `id` if it is a live agent of `connector` holding `key`; a hit counts as use.
+    pub fn verify(&mut self, connector: &str, id: &str, key: &str, now: i64) -> Option<Grant> {
+        let agent = self.agents.get_mut(id)?;
         let ok = agent.connector == connector
             && now - agent.seen_ms <= IDLE_MS
             && constant_time_eq(agent.key.as_bytes(), key.as_bytes());
-        if ok && now - agent.seen_ms > SEEN_WRITE_MS {
-            agent.seen_ms = now;
-            if let Err(e) = self.save() {
-                rusty_log::warn!(error = %e, "could not record agent use");
-            }
-        } else if ok {
-            agent.seen_ms = now;
+        if !ok {
+            return None;
         }
-        ok
+        let stale = now - agent.seen_ms > SEEN_WRITE_MS;
+        agent.seen_ms = now;
+        let grant = agent.grant.clone();
+        if stale && let Err(e) = self.save() {
+            rusty_log::warn!(error = %e, "could not record agent use");
+        }
+        Some(grant)
+    }
+
+    /// Replace agent `id`'s own role and projects (`Grant::default()` returns it to its
+    /// connector's); whether it exists.
+    ///
+    /// # Errors
+    /// If the file cannot be written.
+    pub fn set_grant(&mut self, id: &str, grant: Grant) -> Result<bool, String> {
+        let Some(agent) = self.agents.get_mut(id) else {
+            return Ok(false);
+        };
+        agent.grant = grant;
+        self.save()?;
+        Ok(true)
+    }
+
+    /// Set or clear agent `id`'s nickname; whether it exists.
+    ///
+    /// # Errors
+    /// If the nickname is not 1 to 40 printable characters, or the file cannot be written.
+    pub fn set_nickname(&mut self, id: &str, nickname: Option<String>) -> Result<bool, String> {
+        let nickname = nickname
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty());
+        if let Some(n) = &nickname
+            && (n.chars().count() > MAX_NICKNAME || n.chars().any(char::is_control))
+        {
+            return Err(format!(
+                "a nickname is up to {MAX_NICKNAME} printable characters"
+            ));
+        }
+        let Some(agent) = self.agents.get_mut(id) else {
+            return Ok(false);
+        };
+        agent.nickname = nickname;
+        self.save()?;
+        Ok(true)
     }
 
     /// Remove agent `id`; whether it existed.
@@ -124,11 +206,26 @@ impl Registry {
         Ok(found)
     }
 
-    /// Every agent without its key: `(id, connector, created_ms, seen_ms)`.
-    pub fn list(&self) -> Vec<(&str, &str, i64, i64)> {
+    /// Every agent without its key.
+    pub fn list(&self) -> Vec<AgentInfo> {
         self.agents
             .iter()
-            .map(|(id, a)| (id.as_str(), a.connector.as_str(), a.created_ms, a.seen_ms))
+            .map(|(id, a)| AgentInfo {
+                id: id.clone(),
+                connector: a.connector.clone(),
+                created_ms: a.created_ms,
+                seen_ms: a.seen_ms,
+                grant: a.grant.clone(),
+                nickname: a.nickname.clone(),
+            })
+            .collect()
+    }
+
+    /// Every nickname: agent id to nickname.
+    pub fn nicknames(&self) -> std::collections::BTreeMap<String, String> {
+        self.agents
+            .iter()
+            .filter_map(|(id, a)| Some((id.clone(), a.nickname.clone()?)))
             .collect()
     }
 
@@ -153,44 +250,52 @@ mod tests {
     #[test]
     fn a_registered_agent_verifies_only_with_its_key_and_connector() {
         let mut r = Registry::default();
-        let (id, key) = r.register("claude-cloud", 0).expect("register");
+        let (id, key) = r
+            .register("claude-cloud", Grant::default(), 0)
+            .expect("register");
         assert!(id.starts_with("claude-cloud#") && id.len() == "claude-cloud#".len() + 6);
-        assert!(r.verify("claude-cloud", &id, &key, 1));
-        assert!(!r.verify("claude-cloud", &id, "wrong", 1));
-        assert!(!r.verify("other", &id, &key, 1));
-        assert!(!r.verify("claude-cloud", "claude-cloud#nope00", &key, 1));
+        assert!(r.verify("claude-cloud", &id, &key, 1).is_some());
+        assert!(r.verify("claude-cloud", &id, "wrong", 1).is_none());
+        assert!(r.verify("other", &id, &key, 1).is_none());
+        assert!(
+            r.verify("claude-cloud", "claude-cloud#nope00", &key, 1)
+                .is_none()
+        );
     }
 
     #[test]
     fn ids_are_unique() {
         let mut r = Registry::default();
-        let a = r.register("c", 0).expect("a").0;
-        let b = r.register("c", 0).expect("b").0;
+        let a = r.register("c", Grant::default(), 0).expect("a").0;
+        let b = r.register("c", Grant::default(), 0).expect("b").0;
         assert_ne!(a, b);
     }
 
     #[test]
     fn an_idle_agent_expires_and_use_keeps_it_alive() {
         let mut r = Registry::default();
-        let (idle, k1) = r.register("c", 0).expect("idle");
-        let (busy, k2) = r.register("c", 0).expect("busy");
-        assert!(r.verify("c", &busy, &k2, IDLE_MS - 1));
-        assert!(r.verify("c", &busy, &k2, 2 * IDLE_MS - 2));
-        assert!(!r.verify("c", &idle, &k1, 2 * IDLE_MS - 2));
+        let (idle, k1) = r.register("c", Grant::default(), 0).expect("idle");
+        let (busy, k2) = r.register("c", Grant::default(), 0).expect("busy");
+        assert!(r.verify("c", &busy, &k2, IDLE_MS - 1).is_some());
+        assert!(r.verify("c", &busy, &k2, 2 * IDLE_MS - 2).is_some());
+        assert!(r.verify("c", &idle, &k1, 2 * IDLE_MS - 2).is_none());
     }
 
     #[test]
     fn a_connector_is_capped_and_expiry_frees_room() {
         let mut r = Registry::default();
         for _ in 0..MAX_PER_CONNECTOR {
-            r.register("c", 0).expect("fits");
+            r.register("c", Grant::default(), 0).expect("fits");
         }
-        assert!(r.register("c", 1).is_err());
+        assert!(r.register("c", Grant::default(), 1).is_err());
         assert!(
-            r.register("d", 1).is_ok(),
+            r.register("d", Grant::default(), 1).is_ok(),
             "another connector is unaffected"
         );
-        assert!(r.register("c", IDLE_MS + 1).is_ok(), "idle agents expired");
+        assert!(
+            r.register("c", Grant::default(), IDLE_MS + 1).is_ok(),
+            "idle agents expired"
+        );
     }
 
     #[test]
@@ -199,13 +304,58 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("agents.json");
         let mut r = Registry::open(path.clone()).expect("open");
-        let (a, ka) = r.register("c", 0).expect("a");
-        let (b, kb) = r.register("c", 0).expect("b");
+        let (a, ka) = r.register("c", Grant::default(), 0).expect("a");
+        let (b, kb) = r.register("c", Grant::default(), 0).expect("b");
         assert!(r.revoke(&a).expect("revoke"));
         assert!(!r.revoke(&a).expect("again"));
         let mut again = Registry::open(path).expect("reopen");
-        assert!(!again.verify("c", &a, &ka, 1));
-        assert!(again.verify("c", &b, &kb, 1));
+        assert!(again.verify("c", &a, &ka, 1).is_none());
+        assert!(again.verify("c", &b, &kb, 1).is_some());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_grant_is_kept_returned_replaced_and_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("agents.json");
+        let mut r = Registry::open(path.clone()).expect("open");
+        let qa = Grant {
+            role: Some("qa".into()),
+            projects: Some(vec!["rusty_term".into()]),
+        };
+        let (id, key) = r.register("c", qa.clone(), 0).expect("register");
+        assert_eq!(r.verify("c", &id, &key, 1), Some(qa));
+        let reviewer = Grant {
+            role: Some("reviewer".into()),
+            projects: None,
+        };
+        assert!(r.set_grant(&id, reviewer.clone()).expect("set"));
+        assert!(!r.set_grant("c#nope00", reviewer.clone()).expect("unknown"));
+        let mut again = Registry::open(path).expect("reopen");
+        assert_eq!(again.verify("c", &id, &key, 2), Some(reviewer));
+        assert!(again.set_grant(&id, Grant::default()).expect("clear"));
+        assert_eq!(again.verify("c", &id, &key, 3), Some(Grant::default()));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_nickname_is_trimmed_validated_listed_and_cleared() {
+        let mut r = Registry::default();
+        let (id, _) = r.register("c", Grant::default(), 0).expect("register");
+        assert!(r.set_nickname(&id, Some("  QA bot ".into())).expect("set"));
+        assert_eq!(r.nicknames().get(&id).map(String::as_str), Some("QA bot"));
+        assert_eq!(r.list()[0].nickname.as_deref(), Some("QA bot"));
+        assert!(r.set_nickname(&id, Some("x".repeat(41))).is_err());
+        assert!(r.set_nickname(&id, Some("bad\nname".into())).is_err());
+        assert!(
+            !r.set_nickname("c#nope00", Some("x".into()))
+                .expect("unknown")
+        );
+        assert!(
+            r.set_nickname(&id, Some("  ".into()))
+                .expect("blank clears")
+        );
+        assert!(r.nicknames().is_empty());
     }
 }
