@@ -235,6 +235,9 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             _ => socket = Some(PathBuf::from(arg)),
         }
     }
+    if life.is_some() && udp.is_none() {
+        return Err("--udp-lifetime needs --udp".into());
+    }
     if let Some(allow) = shared {
         if login.is_some() || runtime.is_some() || forwarded_by.is_some() {
             return Err("--shared is a mode of its own".into());
@@ -942,6 +945,8 @@ mod tests {
             &["--forwarded-by", "x", "s"],
             &["--forwarded-by", "-1", "s"],
             &["--udp-ports", "0.0.0.0:2000-2009", "s"],
+            &["--udp-lifetime", "60", "s"],
+            &["--login", "m", "--udp-lifetime", "60", "s"],
             &[
                 "--forwarded-by",
                 "0",
