@@ -313,6 +313,13 @@ impl ScheduledIo {
         cleared
     }
 
+    /// Whether a clear will reach the reactor, so a suppressed direction
+    /// is guaranteed to be watched again.
+    #[cfg(windows)]
+    fn has_clear_hook(&self) -> bool {
+        self.on_clear.get().is_some()
+    }
+
     /// Whether `interest` is currently marked ready.
     #[cfg(windows)]
     fn is_ready(&self, interest: Interest) -> bool {

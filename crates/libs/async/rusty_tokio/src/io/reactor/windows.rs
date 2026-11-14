@@ -564,7 +564,12 @@ impl Reactor {
                     }
                     // Already ready and not yet cleared: polling for it
                     // again would complete at once. Wait for the clear.
-                    if scheduled_io.is_ready(interest) {
+                    // `POLL_ABORT` and `POLL_CONNECT_FAIL` are in both
+                    // directions' flags and are never un-suppressed: they
+                    // are terminal states, the caller's next syscall
+                    // reports the error. Needs the clear hook, or nothing
+                    // would ever watch the direction again.
+                    if scheduled_io.has_clear_hook() && scheduled_io.is_ready(interest) {
                         guard.suppressed |= fired;
                     }
                     scheduled_io.mark_ready(interest);
@@ -682,7 +687,15 @@ impl Reactor {
         let iosb_ptr: *mut IO_STATUS_BLOCK = &mut guard.iosb;
         // SAFETY: `guard.pending` confirms a poll request is still
         // outstanding against `iosb_ptr`, `Afd::cancel`'s precondition.
-        let _ = unsafe { self.afd.cancel(iosb_ptr) };
+        if unsafe { self.afd.cancel(iosb_ptr) }.is_err() {
+            // The running poll keeps its old mask and nothing else would
+            // watch this direction: surface readiness so the caller's own
+            // syscall finds the truth, like the other failed re-arms.
+            guard.rearm = false;
+            let scheduled_io = guard.scheduled_io.clone();
+            drop(guard);
+            mark_orphaned(&scheduled_io);
+        }
     }
 
     pub(crate) fn register(&self, sock: RawIo) -> io::Result<Arc<ScheduledIo>> {
@@ -831,15 +844,22 @@ mod tests {
         assert!(io.clear_if_unchanged(Interest::Write, token));
         let rtoken = io.snapshot(Interest::Read);
         assert!(io.clear_if_unchanged(Interest::Read, rtoken));
-        std::thread::sleep(Duration::from_millis(100));
         let addr = sock.local_addr().unwrap();
         std::net::UdpSocket::bind("127.0.0.1:0")
             .unwrap()
             .send_to(b"x", addr)
             .unwrap();
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(io.is_ready(Interest::Read), "data arrival marks read ready");
-        assert!(io.is_ready(Interest::Write), "write is watched again");
+        // Poll until a deadline: a loaded runner may be slow, not wrong.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !(io.is_ready(Interest::Read) && io.is_ready(Interest::Write)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "read ready: {}, write ready: {}",
+                io.is_ready(Interest::Read),
+                io.is_ready(Interest::Write)
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         reactor.deregister(sock.as_raw_socket());
         reactor.shutdown();
     }
