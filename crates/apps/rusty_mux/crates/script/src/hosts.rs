@@ -48,6 +48,15 @@ pub enum Address {
         /// Where a long-lived client sends UDP instead of `dest`'s host.
         udp_host: Option<String>,
     },
+    /// A server's TLS listener (#506), reached by `HOST:PORT` and trusted
+    /// only if its certificate's SHA-256 is `pin` (term pack D236). The token
+    /// that logs in is never saved here, so the file can be synced.
+    Tls {
+        /// `HOST:PORT`.
+        addr: String,
+        /// The certificate's SHA-256, 64 lowercase hex digits.
+        pin: String,
+    },
 }
 
 impl Address {
@@ -63,6 +72,21 @@ impl Address {
                 word("ssh", dest)?;
                 absolute("socket", socket)?;
                 udp_host.as_deref().map_or(Ok(()), |h| word("udp_host", h))
+            }
+            Self::Tls { addr, pin } => {
+                word("tls", addr)?;
+                let port = addr.rsplit_once(':').map(|(_, port)| port);
+                if addr.contains(char::is_whitespace)
+                    || !port.is_some_and(|p| p.parse::<u16>().is_ok())
+                {
+                    return Err(format!("tls `{addr}` is not HOST:PORT"));
+                }
+                let hex =
+                    pin.len() == 64 && pin.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+                match hex {
+                    true => Ok(()),
+                    false => Err("pin must be 64 lowercase hex digits (a SHA-256)".into()),
+                }
             }
         }
     }
@@ -81,6 +105,7 @@ impl Address {
                 socket,
                 udp_host: Some(udp),
             } => format!("ssh {dest} {socket} udp {udp}"),
+            Self::Tls { addr, pin } => format!("tls {addr} pin {}", pin.get(..16).unwrap_or(pin)),
         }
     }
 
@@ -101,6 +126,10 @@ impl Address {
                 if let Some(udp) = udp_host {
                     map.insert("udp_host".into(), udp.as_str().into());
                 }
+            }
+            Self::Tls { addr, pin } => {
+                map.insert("tls".into(), addr.as_str().into());
+                map.insert("pin".into(), pin.as_str().into());
             }
         }
         map.into()
@@ -389,7 +418,28 @@ impl Check {
     }
 
     fn address(&mut self, at: &str, value: &Value) -> Option<Address> {
-        let map = self.object(at, value, &["socket", "ssh", "udp_host"])?;
+        let map = self.object(at, value, &["socket", "ssh", "udp_host", "tls", "pin"])?;
+        if let Some(addr) = map.get("tls") {
+            for other in ["socket", "ssh", "udp_host"] {
+                if map.contains_key(other) {
+                    self.problem(at, format!("`{other}` does not go with `tls`"));
+                }
+            }
+            let addr = self.string(&format!("{at}.tls"), Some(addr));
+            let pin = self.string(&format!("{at}.pin"), map.get("pin"));
+            let address = Address::Tls {
+                addr: addr?.to_owned(),
+                pin: pin?.to_ascii_lowercase(),
+            };
+            if let Err(reason) = address.check() {
+                self.problem(at, reason);
+                return None;
+            }
+            return Some(address);
+        }
+        if map.contains_key("pin") {
+            self.problem(at, "`pin` needs `tls`");
+        }
         let socket = self.string(&format!("{at}.socket"), map.get("socket"));
         let address = match map.get("ssh") {
             None => {
@@ -500,6 +550,56 @@ mod tests {
         assert_eq!(hosts[0].addresses, vec![socket("/a.sock"), ssh]);
         assert_eq!(hosts[1].name, "alpha", "file order, not sorted");
         assert!(text.ends_with("}\n"), "{text}");
+    }
+
+    const PIN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn tls(addr: &str, pin: &str) -> Address {
+        Address::Tls {
+            addr: addr.into(),
+            pin: pin.into(),
+        }
+    }
+
+    #[test]
+    fn a_tls_address_round_trips_and_describes_its_pin_briefly() {
+        let mut hosts = Vec::new();
+        add(&mut hosts, "box", tls("box.example:7001", PIN)).expect("added");
+        assert_eq!(parse_hosts(&to_json(&hosts)), Ok(hosts.clone()));
+        assert_eq!(
+            hosts[0].addresses[0].describe(),
+            "tls box.example:7001 pin 0123456789abcdef"
+        );
+        let upper = format!(
+            r#"{{"hosts":[{{"name":"b","addresses":[{{"tls":"h:1","pin":"{}"}}]}}]}}"#,
+            PIN.to_uppercase()
+        );
+        assert_eq!(
+            parse_hosts(&upper).unwrap()[0].addresses,
+            vec![tls("h:1", PIN)]
+        );
+    }
+
+    #[test]
+    fn a_bad_tls_address_is_refused() {
+        for bad in [
+            tls("box", PIN),
+            tls("box:x", PIN),
+            tls("box:70000", PIN),
+            tls("-b:1", PIN),
+            tls("b b:1", PIN),
+            tls("b:1", "abc"),
+            tls("b:1", &PIN.to_uppercase()),
+        ] {
+            assert!(bad.check().is_err(), "{bad:?}");
+        }
+        for text in [
+            r#"{"hosts":[{"name":"b","addresses":[{"tls":"h:1"}]}]}"#,
+            r#"{"hosts":[{"name":"b","addresses":[{"tls":"h:1","pin":"00","socket":"/s"}]}]}"#,
+            r#"{"hosts":[{"name":"b","addresses":[{"socket":"/s","pin":"00"}]}]}"#,
+        ] {
+            assert!(parse_hosts(text).is_err(), "{text}");
+        }
     }
 
     #[test]

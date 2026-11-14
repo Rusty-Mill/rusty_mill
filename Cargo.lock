@@ -10938,8 +10938,11 @@ name = "rusty_mux_client"
 version = "0.1.0"
 dependencies = [
  "platform-windows",
+ "rusty_base64",
  "rusty_mux_core",
  "rusty_mux_proto",
+ "rusty_tls",
+ "rusty_tokio",
  "rusty_uuid",
 ]
 

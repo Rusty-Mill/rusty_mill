@@ -16,6 +16,12 @@ rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
 rusty_uuid = { workspace = true }
 
+# Reaching a server over TLS (#506): a local relay in a thread of its own,
+# pinned to the server's certificate by fingerprint (rusty_term D236).
+[target.'cfg(unix)'.dependencies]
+rusty_tls = { workspace = true, features = ["rusty-tokio"] }
+rusty_tokio = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 platform-windows = { workspace = true }
 
@@ -25,3 +31,7 @@ default = ["screen"]
 # rusty_mux_proto, for the clients that draw a screen. rusty-mux-ctl turns
 # it off, so it never builds the terminal engine.
 screen = ["rusty_mux_proto/screen"]
+
+[dev-dependencies]
+# Decodes the test certificate.
+rusty_base64 = { workspace = true }

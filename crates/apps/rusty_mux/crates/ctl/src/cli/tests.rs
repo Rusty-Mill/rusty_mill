@@ -76,6 +76,43 @@ fn hosts_verbs() {
 }
 
 #[test]
+fn tls_hosts_are_pinned_by_hex_or_on_first_use() {
+    let hosts = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Hosts(command)) => Ok(command),
+        Ok(other) => panic!("expected hosts, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    let pin = "AB".repeat(32);
+    assert_eq!(
+        hosts(&format!("hosts add box --tls box:7001 --pin {pin}")),
+        Ok(HostsCommand::Add {
+            name: "box".into(),
+            address: Address::Tls {
+                addr: "box:7001".into(),
+                pin: pin.to_ascii_lowercase()
+            },
+        })
+    );
+    assert_eq!(
+        hosts("hosts add box --tls box:7001 --pin-first-use"),
+        Ok(HostsCommand::PinFirstUse {
+            name: "box".into(),
+            addr: "box:7001".into()
+        })
+    );
+    for bad in [
+        "hosts add box --tls box:7001",
+        "hosts add box --tls box:7001 --pin ab --pin-first-use",
+        "hosts add box --pin ab",
+        "hosts add box --pin-first-use",
+        "hosts add box --tls box:7001 --pin-first-use --socket /s",
+        "hosts add box --tls box:7001 --pin-first-use --pin-first-use",
+    ] {
+        assert!(hosts(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn flags_take_a_separate_or_attached_value() {
     let line = format!("resize --block {ID} --cols=80 --rows 24");
     let [call] = calls(&line).try_into().expect("one call");
