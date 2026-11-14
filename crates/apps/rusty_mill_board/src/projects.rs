@@ -134,10 +134,14 @@ impl Serialize for Projects {
 impl Default for Projects {
     /// One repository, `default`, with only the `default` project.
     fn default() -> Self {
-        Self::build(BTreeMap::new(), BTreeMap::new()).unwrap_or_else(|_| Self {
-            repos: BTreeMap::new(),
-            projects: BTreeMap::new(),
-        })
+        let own = Project {
+            edges: Paths::from([(DEFAULT_PROJECT.to_owned(), Vec::new())]),
+            default_repo: DEFAULT_PROJECT.to_owned(),
+        };
+        Self {
+            repos: BTreeMap::from([(DEFAULT_PROJECT.to_owned(), RepoInfo::default())]),
+            projects: BTreeMap::from([(DEFAULT_PROJECT.to_owned(), own)]),
+        }
     }
 }
 
@@ -188,7 +192,11 @@ impl Projects {
             serde_json::from_str(json).map_err(|e| format!("projects: {e}"))?;
         let has = |key: &str| value.as_object().is_some_and(|o| o.contains_key(key));
         let bad = |e: serde_json::Error| format!("projects: {e}");
-        if has("projects") || has("version") {
+        // A flat file may name a project `version`; its value is a list, never a number.
+        if value
+            .get("version")
+            .is_some_and(serde_json::Value::is_number)
+        {
             let file: FileV2 = serde_json::from_value(value).map_err(bad)?;
             return Self::from_file(file);
         }
@@ -383,6 +391,18 @@ impl Projects {
             projects.remove(repo);
         }
         Self::from_repos(listed)
+    }
+
+    /// This registry with the facts (GitHub slugs) of `old`'s repositories that it still has.
+    /// A listing carries only names and paths, so a rebuild from one would otherwise drop them.
+    #[must_use]
+    pub fn keeping_facts_of(mut self, old: &Self) -> Self {
+        for (repo, info) in &mut self.repos {
+            if let Some(kept) = old.repos.get(repo) {
+                *info = kept.clone();
+            }
+        }
+        self
     }
 
     /// The projects that are not a repository's own.
@@ -790,6 +810,31 @@ mod tests {
         );
         let bad = r#"{"version": 2, "repos": {"a": {"github": "not a slug"}}}"#;
         assert!(Projects::parse(bad).expect_err("slug").contains("github"));
+    }
+
+    #[test]
+    fn a_flat_file_may_name_projects_projects_and_version() {
+        let p = Projects::parse(r#"{"projects": ["src"], "version": ["docs"]}"#).expect("flat");
+        assert_eq!(p.paths("projects"), ["src"]);
+        assert_eq!(p.paths("version"), ["docs"]);
+    }
+
+    #[test]
+    fn a_rebuild_from_a_listing_keeps_the_repository_facts() {
+        let old = Projects::parse(SPAN).expect("parse");
+        let listed = BTreeMap::from([(
+            "mill".to_owned(),
+            Paths::from([("term".to_owned(), vec!["crates/term".to_owned()])]),
+        )]);
+        let bare = Projects::from_listing(listed).expect("listing");
+        assert!(!bare.file_json().expect("json").contains("github"));
+        let kept = bare.keeping_facts_of(&old);
+        assert!(
+            kept.file_json()
+                .expect("json")
+                .contains("rusty-mill/rusty_mill")
+        );
+        assert!(!kept.contains("py"), "only repositories it still has");
     }
 
     #[test]
