@@ -53,6 +53,8 @@ pub struct Files {
     pub workflow: Option<PathBuf>,
     /// Each project's status (active unless listed).
     pub project_status: Option<PathBuf>,
+    /// The append-only record of settings calls (one JSON object a line, never a secret).
+    pub audit: Option<PathBuf>,
 }
 
 impl Files {
@@ -66,6 +68,7 @@ impl Files {
             rules: Some(dir.join("rules.json")),
             workflow: Some(dir.join("workflow.json")),
             project_status: Some(dir.join("project-status.json")),
+            audit: Some(dir.join("settings-audit.jsonl")),
         }
     }
 }
@@ -384,6 +387,28 @@ struct GithubSet {
 
 type Res = Result<Value, BoardError>;
 
+/// Who is changing settings: their authority, and whether they came through a shared connector.
+struct Caller {
+    actor: Actor,
+    via_connector: bool,
+}
+
+#[derive(Deserialize)]
+struct AuditRead {
+    /// How many of the newest records (1-500, default 50).
+    limit: Option<usize>,
+}
+
+/// Append `line` and a newline to `path`, creating it owner-only.
+fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    writeln!(options.open(path)?, "{line}")
+}
+
 fn refused(why: impl Into<String>) -> BoardError {
     BoardError::Refused(why.into())
 }
@@ -453,30 +478,33 @@ impl Settings {
         if matches!(name, "agent_enrol" | "agent_enrol_revoke") {
             return Some(self.enrolling(name, identity, args));
         }
-        let run: fn(&Self, &Actor, Value) -> Res = match name {
+        let run: fn(&Self, &Caller, Value) -> Res = match name {
             "settings_get" => |s, _, _| s.get(),
-            "settings_agent_add" => |s, _, a| s.agent_add(&parse::<WithAgent<AgentAdd>>(a)?.agent),
+            "settings_audit" => |s, _, a| s.audit_read(&parse(a)?),
+            "settings_agent_add" => {
+                |s, by, a| s.agent_add(by, &parse::<WithAgent<AgentAdd>>(a)?.agent)
+            }
             "settings_agent_update" => {
-                |s, _, a| s.agent_update(&parse::<WithAgent<AgentUpdate>>(a)?.agent)
+                |s, by, a| s.agent_update(by, &parse::<WithAgent<AgentUpdate>>(a)?.agent)
             }
             "settings_agent_remove" => |s, _, a| s.agent_remove(&parse(a)?),
-            "settings_agent_rotate" => |s, _, a| s.agent_rotate(&parse(a)?),
+            "settings_agent_rotate" => |s, by, a| s.agent_rotate(by, &parse(a)?),
             "settings_projects_set" => |s, _, a| s.projects_set(&parse(a)?),
-            "settings_roles_set" => |s, _, a| s.roles_set(&parse(a)?),
+            "settings_roles_set" => |s, by, a| s.roles_set(by, &parse(a)?),
             "settings_role_rename" => |s, _, a| s.role_rename(&parse(a)?),
             "settings_github_set" => |s, _, a| s.github_set(&parse(a)?),
             "settings_github_clear" => |s, _, _| s.github_clear(),
-            "settings_rules_set" => |s, by, a| s.rules_set(by, &parse(a)?),
-            "settings_project_status_set" => |s, by, a| s.project_status_set(by, &parse(a)?),
+            "settings_rules_set" => |s, by, a| s.rules_set(&by.actor, &parse(a)?),
+            "settings_project_status_set" => |s, by, a| s.project_status_set(&by.actor, &parse(a)?),
             "settings_workflow_set" => {
-                |s, by, a| s.workflow_set(by, parse::<WorkflowSet>(a)?.workflow)
+                |s, by, a| s.workflow_set(&by.actor, parse::<WorkflowSet>(a)?.workflow)
             }
-            "settings_registered_agent_set" => |s, _, a| s.registered_agent_set(&parse(a)?),
+            "settings_registered_agent_set" => |s, by, a| s.registered_agent_set(by, &parse(a)?),
             "settings_registered_agent_revoke" => |s, _, a| s.registered_agent_revoke(&parse(a)?),
             "settings_app_revoke" => |s, _, a| s.app_revoke(&parse(a)?),
             _ => return None,
         };
-        Some(self.admin(identity, args, run))
+        Some(self.admin(name, identity, args, run))
     }
 
     /// `agent_enrol` and `agent_enrol_revoke`: not admin settings, but gated by `Enrol` and bound
@@ -573,18 +601,138 @@ impl Settings {
 
     fn admin(
         &self,
+        op: &str,
         identity: Option<&Identity>,
         args: Value,
-        run: fn(&Self, &Actor, Value) -> Res,
+        run: fn(&Self, &Caller, Value) -> Res,
     ) -> Result<Value, CallError> {
         let who: Who =
             serde_json::from_value(args.clone()).map_err(|e| CallError::BadArgs(e.to_string()))?;
         let actor = acting(&self.board, identity, &who)?;
-        if !actor.caps.contains(&Capability::Admin) {
-            return Err(BoardError::Forbidden(Capability::Admin).into());
+        let caller = Caller {
+            actor,
+            via_connector: identity.is_some_and(|i| i.connector),
+        };
+        let op = op.to_owned();
+        if !caller.actor.caps.contains(&Capability::Admin) {
+            let denied = BoardError::Forbidden(Capability::Admin);
+            self.audit(&caller, &op, Err(&denied));
+            return Err(denied.into());
+        }
+        // The connector's registration proof is not an argument of the operation.
+        let mut args = args;
+        if let Some(m) = args.as_object_mut() {
+            m.remove("agent_id");
+            m.remove("agent_key");
         }
         let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
-        run(self, &actor, args).map_err(CallError::Board)
+        let out = run(self, &caller, args);
+        self.audit(&caller, &op, out.as_ref().map(|_| ()));
+        out.map_err(CallError::Board)
+    }
+
+    /// Record one settings call: who, which operation, how it ended. Never its arguments, which
+    /// may hold secrets. A record that cannot be written is logged, not hidden.
+    fn audit(&self, by: &Caller, op: &str, outcome: Result<(), &BoardError>) {
+        let (result, why) = match outcome {
+            Ok(()) => ("ok", None),
+            Err(
+                e @ (BoardError::Forbidden(_)
+                | BoardError::ForbiddenAny(_)
+                | BoardError::OutOfScope(_)),
+            ) => ("denied", Some(e.to_string())),
+            Err(e @ BoardError::Refused(_)) => ("refused", Some(e.to_string())),
+            Err(e) => ("failed", Some(e.to_string())),
+        };
+        let line = json!({
+            "at_ms": self.board.now_ms(),
+            "actor": by.actor.name,
+            "via_connector": by.via_connector,
+            "op": op,
+            "result": result,
+            "why": why,
+        });
+        rusty_log::warn!(actor = %by.actor.name, op = %op, result = result, "settings call");
+        let Some(path) = &self.files.audit else {
+            return;
+        };
+        if let Err(e) = append_line(path, &line.to_string()) {
+            rusty_log::warn!(error = %e, "could not write the settings audit record");
+        }
+    }
+
+    /// The newest `limit` audit records, oldest first.
+    fn audit_read(&self, a: &AuditRead) -> Res {
+        let path = self.file(&self.files.audit)?;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(refused(format!("{}: {e}", path.display()))),
+        };
+        let limit = a.limit.unwrap_or(50).clamp(1, 500);
+        let mut records: Vec<Value> = text
+            .lines()
+            .rev()
+            .take(limit)
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        records.reverse();
+        Ok(json!({ "records": records }))
+    }
+
+    /// What `by` may hand out: only capabilities and projects it holds itself, so no actor can
+    /// raise itself, directly or through another agent; and `admin` or `enrol` only from a
+    /// person's own token in Settings, never through a shared connector.
+    fn may_grant(
+        &self,
+        by: &Caller,
+        role: Option<&str>,
+        projects: Option<&[String]>,
+    ) -> Result<(), BoardError> {
+        if let Some(role) = role {
+            let roles = self.board.roles();
+            let caps = roles
+                .0
+                .get(role)
+                .ok_or_else(|| refused(format!("there is no role {role:?}")))?;
+            self.may_add(by, caps.iter().copied())?;
+        }
+        if let (Some(own), granted) = (&by.actor.projects, projects) {
+            let ok = granted.is_some_and(|g| g.iter().all(|p| own.contains(p)));
+            if !ok {
+                return Err(refused(
+                    "you are limited to some projects: grant only projects you work in",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `caps` may be given by `by`: `admin` and `enrol` only by a person's own token (the caller
+    /// is an admin already), never through a shared connector; any other capability only if
+    /// `by` holds it.
+    fn may_add(
+        &self,
+        by: &Caller,
+        caps: impl Iterator<Item = Capability>,
+    ) -> Result<(), BoardError> {
+        let caps: Vec<Capability> = caps.collect();
+        let privileged = |c: &&Capability| matches!(c, Capability::Admin | Capability::Enrol);
+        if by.via_connector && caps.iter().any(|c| privileged(&c)) {
+            return Err(refused(
+                "admin and enrol are granted by a person in Settings with their own token, not through a shared connector",
+            ));
+        }
+        for cap in caps {
+            if !matches!(cap, Capability::Admin | Capability::Enrol)
+                && !by.actor.caps.contains(&cap)
+            {
+                return Err(refused(format!(
+                    "you do not hold {cap:?}, so you cannot grant it"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn get(&self) -> Res {
@@ -643,12 +791,19 @@ impl Settings {
 
     /// Give a registered agent its own role and projects (an admin may widen as well as narrow);
     /// with neither, it acts as its connector again.
-    fn registered_agent_set(&self, a: &RegisteredAgentSet) -> Res {
+    fn registered_agent_set(&self, by: &Caller, a: &RegisteredAgentSet) -> Res {
         let grant = Grant {
             role: a.agent_role.clone(),
             projects: a.agent_projects.clone(),
         };
         self.board.check_agent_grant(&grant, None)?;
+        if grant == Grant::default() {
+            // A reset hands back the connector's whole role and every project it works in.
+            let (role, projects) = self.connector_grant_of(&a.id)?;
+            self.may_grant(by, Some(&role), projects.as_deref())?;
+        } else {
+            self.may_grant(by, a.agent_role.as_deref(), a.agent_projects.as_deref())?;
+        }
         // The nickname first: a bad one then changes nothing.
         let known = self.board.set_agent_nickname(&a.id, a.nickname.clone())?;
         if known && self.board.set_agent_grant(&a.id, grant)? {
@@ -657,6 +812,26 @@ impl Settings {
         } else {
             Err(refused(format!("no registered agent {:?}", a.id)))
         }
+    }
+
+    /// The role and project limit an agent falls back to: its connector's.
+    fn connector_grant_of(&self, id: &str) -> Result<(String, Option<Vec<String>>), BoardError> {
+        let agent = self
+            .board
+            .agent_list()
+            .into_iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| refused(format!("no registered agent {id:?}")))?;
+        let creds = self.creds.as_ref().ok_or_else(|| {
+            refused(
+                "the connector's role is not known here, so a reset cannot be checked".to_owned(),
+            )
+        })?;
+        let creds = creds.read().unwrap_or_else(PoisonError::into_inner);
+        let i = creds
+            .by_actor(&agent.connector)
+            .ok_or_else(|| refused(format!("no connector {:?}", agent.connector)))?;
+        Ok((i.role.clone(), i.projects.clone()))
     }
 
     /// Forget a registered agent: its key stops working at once; it can register again.
@@ -732,8 +907,9 @@ impl Settings {
             .ok_or_else(|| refused("that would leave no agent able to change settings"))
     }
 
-    fn agent_add(&self, a: &AgentAdd) -> Res {
+    fn agent_add(&self, by: &Caller, a: &AgentAdd) -> Res {
         self.check_grant(&a.role, a.projects.as_deref())?;
+        self.may_grant(by, Some(&a.role), a.projects.as_deref())?;
         let identity = Identity {
             actor: a.name.clone(),
             role: a.role.clone(),
@@ -744,7 +920,7 @@ impl Settings {
         Ok(json!({ "token": token, "agent": identity }))
     }
 
-    fn agent_update(&self, a: &AgentUpdate) -> Res {
+    fn agent_update(&self, by: &Caller, a: &AgentUpdate) -> Res {
         let current_role = self
             .creds
             .as_ref()
@@ -758,6 +934,11 @@ impl Settings {
             .ok_or_else(|| refused(format!("no agent {:?}", a.name)))?;
         let role = a.role.clone().unwrap_or(current_role);
         self.check_grant(&role, a.projects.as_ref().and_then(Option::as_deref))?;
+        self.may_grant(
+            by,
+            Some(&role),
+            a.projects.as_ref().and_then(Option::as_deref),
+        )?;
         self.change_creds(|c| c.update(&a.name, Some(role), a.projects.clone()))?;
         let pruned = self.prune_minted()?;
         Ok(json!({ "ok": true, "removed": pruned }))
@@ -768,7 +949,14 @@ impl Settings {
         Ok(json!({ "ok": true }))
     }
 
-    fn agent_rotate(&self, a: &AgentName) -> Res {
+    fn agent_rotate(&self, by: &Caller, a: &AgentName) -> Res {
+        // A new raw token is a person's act in Settings: through a connector it would hand out
+        // (and lock out) any credential, an admin's included.
+        if by.via_connector {
+            return Err(refused(
+                "tokens are rotated by a person in Settings with their own token, not through a shared connector".to_owned(),
+            ));
+        }
         let token = self.change_creds(|c| c.rotate(&a.name))?;
         Ok(json!({ "token": token }))
     }
@@ -810,7 +998,16 @@ impl Settings {
         Ok(json!({ "repos": new }))
     }
 
-    fn roles_set(&self, a: &RolesSet) -> Res {
+    fn roles_set(&self, by: &Caller, a: &RolesSet) -> Res {
+        let old = self.board.roles();
+        for (name, caps) in &a.roles.0 {
+            let before = old.0.get(name);
+            let added = caps
+                .iter()
+                .copied()
+                .filter(|c| !before.is_some_and(|b| b.contains(c)));
+            self.may_add(by, added)?;
+        }
         self.write_roles(&a.roles)?;
         let pruned = self.prune_minted()?;
         Ok(json!({ "roles": a.roles, "removed": pruned }))

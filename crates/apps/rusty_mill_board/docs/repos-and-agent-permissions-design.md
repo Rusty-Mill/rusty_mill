@@ -49,6 +49,8 @@ Two registries, linked by an explicit edge.
 
 **As built (PR 1):** each repository's own project stays implicit (it is the rest owner, as today), so the file never lists it. A file is written as version 2 only when a project spans repositories or a repository has a `github` slug; otherwise it is written in the older form, so the previous binary can still read it on rollback. A project's value is `{"repos": {repo: [paths]}, "default_repo": ...}`, with `default_repo` required only when it spans several.
 
+**As built (PR 4):** the subset rule is `Settings::may_grant`/`may_add`; `admin`/`enrol` are refused for connector callers and exempt from the subset rule for a person's token. The audit is `settings-audit.jsonl` (one JSON line per call, no arguments) read by the `settings_audit` operation, not `board_events`, which are card-bound. The last-admin guard is the existing `keeps_an_admin`. Review fixes: `agent_rotate` is refused through a connector (a new raw token is a person's act); resetting a registered agent's grant is checked as granting the connector's whole role and projects. Not guarded, by intent: `agent_remove`, `registered_agent_revoke` (bounded by `keeps_an_admin`) and `role_rename` (caps unchanged).
+
 ### Options
 
 | | A1: leave the shape, fix the UI | **A2: edge model above (recommended)** | A3: tags only (repo = tick tag) |
