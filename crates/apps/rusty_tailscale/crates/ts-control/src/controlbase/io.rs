@@ -5,8 +5,8 @@ use ts_key::MachinePrivate;
 
 use super::conn::Conn;
 use super::handshake::{
-    ClientHandshake, HandshakeError, MSG_TYPE_ERROR, MSG_TYPE_RESPONSE, RESPONSE_PAYLOAD_LEN,
-    client_initiation,
+    ClientHandshake, HandshakeError, INITIATION_LEN, MSG_TYPE_ERROR, MSG_TYPE_RESPONSE,
+    RESPONSE_PAYLOAD_LEN, client_initiation, server_respond,
 };
 
 /// Cap on server error-frame text we are willing to read.
@@ -75,4 +75,39 @@ where
         }
         other => Err(ConnectError::UnexpectedMessageType(other)),
     }
+}
+
+/// Server side of [`connect`]: reads the client's initiation from `io`,
+/// answers it, and returns the secured connection with the client's
+/// machine public key.
+pub async fn accept<T>(
+    mut io: T,
+    control_key: &MachinePrivate,
+) -> Result<(Conn<T>, [u8; 32]), ConnectError>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let mut init = [0u8; INITIATION_LEN];
+    io.read_exact(&mut init).await?;
+    accept_deferred(io, control_key, &init).await
+}
+
+/// Server side of [`connect_deferred`]: the initiation already arrived out
+/// of band (the controlhttp `X-Tailscale-Handshake` header).
+pub async fn accept_deferred<T>(
+    mut io: T,
+    control_key: &MachinePrivate,
+    init: &[u8; INITIATION_LEN],
+) -> Result<(Conn<T>, [u8; 32]), ConnectError>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let accepted = server_respond(control_key, init)?;
+    let mut reply = [0u8; 3 + RESPONSE_PAYLOAD_LEN];
+    reply[0] = MSG_TYPE_RESPONSE;
+    reply[1..3].copy_from_slice(&(RESPONSE_PAYLOAD_LEN as u16).to_be_bytes());
+    reply[3..].copy_from_slice(&accepted.response);
+    io.write_all(&reply).await?;
+    io.flush().await?;
+    Ok((Conn::new(io, accepted.keys), accepted.machine_public))
 }
