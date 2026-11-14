@@ -97,6 +97,15 @@ struct Project {
     default_repo: String,
 }
 
+/// What `board_projects` reports of one project: its paths in every repository it touches.
+#[derive(Debug, Serialize)]
+pub struct ProjectInfo<'a> {
+    /// repository -> the paths the project owns there (none for a repository's own project).
+    pub repos: &'a BTreeMap<String, Vec<String>>,
+    /// The repository to use when only one can be named.
+    pub default_repo: &'a str,
+}
+
 /// A project as written in a version 2 file.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -507,6 +516,15 @@ impl Projects {
             .flat_map(|p| p.edges.keys().map(String::as_str))
     }
 
+    /// The project's repositories and paths, for reporting.
+    pub fn info(&self, project: &str) -> Option<ProjectInfo<'_>> {
+        let p = self.projects.get(project)?;
+        Some(ProjectInfo {
+            repos: &p.edges,
+            default_repo: &p.default_repo,
+        })
+    }
+
     /// The project's own paths in its default repository (empty for a repository's own project,
     /// or an unknown name).
     pub fn paths(&self, project: &str) -> &[String] {
@@ -530,6 +548,15 @@ impl Projects {
         let Some(repo) = self.repo_of(project) else {
             return Vec::new();
         };
+        self.not_owned_by_in(project, repo, files)
+    }
+
+    /// [`Projects::not_owned_by`] for the files of repository `repo`. Empty if `project` is
+    /// unknown or has no paths there to speak of (it is not one of its repositories).
+    pub fn not_owned_by_in(&self, project: &str, repo: &str, files: &[String]) -> Vec<String> {
+        if !self.repos_of(project).any(|r| r == repo) {
+            return Vec::new();
+        }
         let foreign = |f: &&String| self.owner_of(repo, f) != project;
         files.iter().filter(foreign).cloned().collect()
     }
