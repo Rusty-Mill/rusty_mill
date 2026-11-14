@@ -32,13 +32,14 @@
 //! (C26 shared mode); its socket is open to every local user, and the list
 //! decides. SIGHUP reads the list again. See `shared.rs`.
 //!
-//! `rusty-mux-server --login MAP [--runtime DIR] <socket>` runs login
+//! `rusty-mux-server --login MAP [--runtime DIR] [--tailnet ADDR:PORT] <socket>` runs login
 //! mode's front door instead (Linux, normally as root): any local user may
 //! connect, and `MAP` says which account each may use; each account gets a
 //! server of its own under `DIR` (`/run/rusty-mux` unless given). SIGHUP
 //! reads `MAP` again. The front door starts each account's server with
 //! `--forwarded-by UID`, which serves a peer of that uid only after the
-//! preface naming who it verified. See `login.rs`.
+//! preface naming who it verified. `--tailnet` also takes tailnet peers
+//! (C27) that `MAP` names as `ts:LOGIN` or `ts-node:NAME`. See `login.rs`.
 //!
 //! On Windows (10 1809 or later, for ConPTY; AF_UNIX alone needs 1803)
 //! each block runs `%COMSPEC%` (or `cmd.exe`) in `%USERPROFILE%` (or `C:\`)
@@ -74,7 +75,7 @@ use rusty_tokio::{Builder, LocalOptions};
 
 const USAGE: &str = "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] [--config FILE]
                         [--state DIR | --no-state] [--idle-exit SECS] [<socket>]
-       rusty-mux-server --login MAP [--runtime DIR] <socket>
+       rusty-mux-server --login MAP [--runtime DIR] [--tailnet ADDR:PORT] <socket>
        rusty-mux-server --shared ALLOW [--tailnet ADDR:PORT] [--config FILE]
                         [--tls ADDR:PORT --tls-cert PEM --tls-key PEM --tokens FILE]
                         [--state DIR | --no-state] <socket>";
@@ -118,8 +119,13 @@ enum Mode {
     Personal,
     /// An account's server behind the front door, whose uid this is.
     Forwarded(u32),
-    /// The front door: the map file and the runtime directory.
-    Login { map: PathBuf, runtime: PathBuf },
+    /// The front door: the map file, the runtime directory and, for tailnet
+    /// peers (C27), `--tailnet`'s address.
+    Login {
+        map: PathBuf,
+        runtime: PathBuf,
+        tailnet: Option<SocketAddr>,
+    },
     /// One server that also serves the users this allowlist names (C26),
     /// and the tailnet peers it names, on `--tailnet`'s address (C27).
     Shared(PathBuf, Option<SocketAddr>, Option<TlsArgs>),
@@ -233,8 +239,8 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             idle_exit,
         });
     }
-    if tailnet.is_some() {
-        return Err("--tailnet needs --shared: the allowlist decides who is served".into());
+    if tailnet.is_some() && login.is_none() {
+        return Err("--tailnet needs --shared or --login: a list decides who is served".into());
     }
     if tls.is_some() || tls_cert.is_some() || tls_key.is_some() || tokens.is_some() {
         return Err("--tls needs --shared: the allowlist decides who is served".into());
@@ -252,7 +258,11 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
                 return Err("the front door takes no --udp, --config or --state".into());
             }
             let runtime = runtime.unwrap_or_else(|| PathBuf::from(RUNTIME));
-            Mode::Login { map, runtime }
+            Mode::Login {
+                map,
+                runtime,
+                tailnet,
+            }
         }
     };
     if mode != Mode::Personal && idle_exit.is_some() {
@@ -338,11 +348,16 @@ fn udp_addr(value: &str) -> Result<SocketAddr, String> {
 
 fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
-    if let Mode::Login { map, runtime } = args.mode {
+    if let Mode::Login {
+        map,
+        runtime,
+        tailnet,
+    } = args.mode
+    {
         let socket = args
             .socket
             .ok_or_else(|| std::io::Error::other("no socket"))?;
-        return run_login(socket, map, runtime);
+        return run_login(socket, map, runtime, tailnet);
     }
     let env = |name: &str| std::env::var_os(name);
     let (socket, _) = endpoint::resolve(args.socket, env).map_err(std::io::Error::other)?;
@@ -467,7 +482,12 @@ fn default_state_dir(
 /// The front door: any local user may connect, so the socket is open to
 /// all; the map decides who gets in. SIGHUP reads the map again.
 #[cfg(target_os = "linux")]
-fn run_login(socket: PathBuf, map: PathBuf, runtime: PathBuf) -> std::io::Result<()> {
+fn run_login(
+    socket: PathBuf,
+    map: PathBuf,
+    runtime: PathBuf,
+    tailnet: Option<SocketAddr>,
+) -> std::io::Result<()> {
     use rusty_tokio::signal::unix::{SignalKind, signal};
 
     // Before the runtime starts a thread: binding sets the umask.
@@ -493,8 +513,23 @@ fn run_login(socket: PathBuf, map: PathBuf, runtime: PathBuf) -> std::io::Result
                 }
             }
         });
-        rusty_mux_server::serve_login(listener, login, reloads).await
+        let tailnet = bind_tailnet(tailnet).await?;
+        rusty_mux_server::serve_login_with(listener, login, tailnet, reloads).await
     })
+}
+
+/// The listener for `--tailnet`'s address, if there is one, asking the
+/// local `tailscaled` who each peer is.
+#[cfg(target_os = "linux")]
+async fn bind_tailnet(
+    addr: Option<SocketAddr>,
+) -> std::io::Result<Option<rusty_mux_server::Tailnet>> {
+    let Some(addr) = addr else {
+        return Ok(None);
+    };
+    let listener = rusty_tokio::io::TcpListener::bind(addr).await?;
+    let whois = rusty_mux_server::tailnet::Whois::new(rusty_mux_server::tailnet::DEFAULT_SOCKET);
+    rusty_mux_server::Tailnet::new(listener, whois).map(Some)
 }
 
 /// A shared server (C26): its socket is open to every local user and the
@@ -525,16 +560,7 @@ fn run_shared(
                 }
             }
         });
-        let tailnet = match tailnet {
-            None => None,
-            Some(addr) => {
-                let listener = rusty_tokio::io::TcpListener::bind(addr).await?;
-                let whois = rusty_mux_server::tailnet::Whois::new(
-                    rusty_mux_server::tailnet::DEFAULT_SOCKET,
-                );
-                Some(rusty_mux_server::Tailnet::new(listener, whois)?)
-            }
-        };
+        let tailnet = bind_tailnet(tailnet).await?;
         let tls = match tls {
             None => None,
             Some(args) => {
@@ -702,14 +728,24 @@ mod tests {
         let expected = Mode::Login {
             map: "/etc/m".into(),
             runtime: RUNTIME.into(),
+            tailnet: None,
         };
         assert_eq!(front.mode, expected);
         let elsewhere = parse_str(&["--login", "m", "--runtime", "/tmp/r", "s"]).unwrap();
         let expected = Mode::Login {
             map: "m".into(),
             runtime: "/tmp/r".into(),
+            tailnet: None,
         };
         assert_eq!(elsewhere.mode, expected);
+        let tailnet = parse_str(&["--login", "m", "--tailnet", "100.64.0.7:7000", "s"]).unwrap();
+        let expected = Mode::Login {
+            map: "m".into(),
+            runtime: RUNTIME.into(),
+            tailnet: Some("100.64.0.7:7000".parse().unwrap()),
+        };
+        assert_eq!(tailnet.mode, expected);
+        assert!(parse_str(&["--login", "m", "--tailnet", "127.0.0.1:7000", "s"]).is_err());
         let behind = parse_str(&["--forwarded-by", "0", "s"]).unwrap();
         assert_eq!(behind.mode, Mode::Forwarded(0));
     }

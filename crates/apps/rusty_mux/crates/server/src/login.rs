@@ -32,6 +32,12 @@
 //! map in force once its lookups are done, so a reload during them cannot
 //! let it through on the old map.
 //!
+//! With a [`Tailnet`] ([`serve_login_with`]) the front door also takes
+//! tailnet peers (C27): each is asked of `tailscaled` who it is before it
+//! says anything, and the map must name its `ts:LOGIN` or `ts-node:NAME` (a
+//! named account only; `*` never matches it). The relay is the same: the
+//! preface carries the principal, `user` empty.
+//!
 //! The front door's socket ([`bind`]) is open to every user (mode 0666),
 //! given that mode as it is made, in a directory only root or this user
 //! can change.
@@ -65,6 +71,7 @@ use rusty_tokio::sync::oneshot;
 use rusty_tokio::task::AbortHandle;
 
 use crate::endpoint::{self, check_parts, unsafe_dir};
+use crate::shared::{ACCEPT_RETRY, Lookups, Tailnet};
 use map::{AccountMap, Route, admits};
 
 /// How long an account's new server has to start listening.
@@ -110,9 +117,6 @@ impl Default for Limits {
     }
 }
 
-/// How long accepting waits after running out of descriptors or memory.
-const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
-
 /// A request to read the map again, answered with whether the new map
 /// took (the old one stays when it did not).
 pub type Reload = oneshot::Sender<io::Result<()>>;
@@ -123,6 +127,17 @@ pub type Reload = oneshot::Sender<io::Result<()>>;
 pub async fn serve_login(
     listener: UnixListener,
     login: Login,
+    reloads: UnboundedReceiver<Reload>,
+) -> io::Result<()> {
+    serve_login_with(listener, login, None, reloads).await
+}
+
+/// [`serve_login`], also serving the tailnet peers `tailnet` listens for
+/// (C27) whose principals the map names.
+pub async fn serve_login_with(
+    listener: UnixListener,
+    login: Login,
+    tailnet: Option<Tailnet>,
     mut reloads: UnboundedReceiver<Reload>,
 ) -> io::Result<()> {
     let map = load_map(login.map.clone()).await?;
@@ -142,8 +157,15 @@ pub async fn serve_login(
         }
         std::future::pending::<()>().await;
     };
+    let tailnet = async {
+        match tailnet {
+            Some(tailnet) => accept_tailnet(tailnet, front.clone()).await,
+            None => std::future::pending().await,
+        }
+    };
     rusty_tokio::select! {
         result = accept(listener, front.clone()) => result,
+        result = tailnet => result,
         () = reload => Ok(()),
     }
 }
@@ -161,26 +183,59 @@ struct Front {
 
 /// A connection being relayed, and, once admitted, what let it in.
 struct Relay {
-    /// The peer's uid, for [`Limits::per_peer`].
-    uid: u32,
+    /// Who the peer is, for [`Limits::per_peer`].
+    peer: Peer,
     task: AbortHandle,
     /// `None` while its lookups run: [`admit`] checks it against the map
     /// in force when they end, so a reload meanwhile has nothing to close.
     admitted: Option<Admitted>,
 }
 
+/// Who is on the other end of a connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Peer {
+    /// A local user, by the uid the kernel reports.
+    Uid(u32),
+    /// A tailnet peer, by the principal `tailscaled` names.
+    Tailnet(Principal),
+    /// A tailnet peer whose lookup has not ended.
+    Looking,
+}
+
+/// What a relay was admitted as: the principal to look up in the map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Who {
+    Local { uid: u32, user: String },
+    Tailnet(String),
+}
+
+impl Who {
+    fn route(&self, map: &AccountMap) -> Option<Route> {
+        match self {
+            Self::Local { uid, user } => map.route(*uid, user),
+            Self::Tailnet(id) => map.route_tailnet(id),
+        }
+    }
+
+    fn uid(&self) -> Option<u32> {
+        match self {
+            Self::Local { uid, .. } => Some(*uid),
+            Self::Tailnet(_) => None,
+        }
+    }
+}
+
 /// What admitted a relay, for a reload to check against the new map.
 struct Admitted {
-    uid: u32,
-    user: String,
+    who: Who,
     account: String,
     account_uid: u32,
 }
 
 impl Admitted {
     fn still_by(&self, map: &AccountMap) -> bool {
-        map.route(self.uid, &self.user).is_some_and(|route: Route| {
-            route.account == self.account && admits(&route, self.uid, self.account_uid)
+        self.who.route(map).is_some_and(|route: Route| {
+            route.account == self.account && admits(&route, self.who.uid(), self.account_uid)
         })
     }
 }
@@ -206,7 +261,7 @@ async fn accept(listener: UnixListener, front: Shared) -> io::Result<()> {
         };
         let id = {
             let mut f = front.borrow_mut();
-            if let Err(why) = room_for(&f, uid) {
+            if let Err(why) = room_for(&f, &Peer::Uid(uid)) {
                 eprintln!("rusty-mux-server: login: refusing uid {uid}: {why}");
                 continue;
             }
@@ -214,11 +269,11 @@ async fn accept(listener: UnixListener, front: Shared) -> io::Result<()> {
             f.next
         };
         // The task first runs after the insert: nothing yields in between.
-        let task = rusty_tokio::task::spawn_local(relay(front.clone(), id, uid, stream));
+        let task = rusty_tokio::task::spawn_local(relay(front.clone(), id, Peer::Uid(uid), stream));
         front.borrow_mut().relays.insert(
             id,
             Relay {
-                uid,
+                peer: Peer::Uid(uid),
                 task: task.abort_handle(),
                 admitted: None,
             },
@@ -226,15 +281,19 @@ async fn accept(listener: UnixListener, front: Shared) -> io::Result<()> {
     }
 }
 
-/// Whether the front door may hold one more connection from `uid`.
-fn room_for(front: &Front, uid: u32) -> Result<(), &'static str> {
+/// Whether the front door may hold one more connection from `peer`.
+fn room_for(front: &Front, peer: &Peer) -> Result<(), &'static str> {
     let limits = front.login.limits;
     if front.relays.len() >= limits.total {
         return Err("the front door is full");
     }
-    let from_peer = front.relays.values().filter(|r| r.uid == uid).count();
+    // Lookups are bounded by their own count, not by who they will be.
+    if *peer == Peer::Looking {
+        return Ok(());
+    }
+    let from_peer = front.relays.values().filter(|r| r.peer == *peer).count();
     if from_peer >= limits.per_peer {
-        return Err("too many connections from this uid");
+        return Err("too many connections from this peer");
     }
     Ok(())
 }
@@ -261,23 +320,31 @@ async fn pause_after(err: io::Error) -> io::Result<()> {
         return Err(err);
     }
     eprintln!("rusty-mux-server: login: accepting: {err}; pausing");
-    rusty_tokio::time::sleep(ACCEPT_BACKOFF).await;
+    rusty_tokio::time::sleep(ACCEPT_RETRY).await;
     Ok(())
 }
 
-/// Maps the peer `uid` of relay `id` to an account, or refuses it with the
+/// Maps the peer of relay `id` to an account, or refuses it with the
 /// reason. The lookups run off this thread; the decision is made, and
 /// recorded on the relay, against the map in force after them, with no
 /// await in between.
-async fn admit(front: &Shared, id: u64, uid: u32) -> Result<(Account, Principal), String> {
-    let user = blocking(move || platform_linux::user_name(uid))
-        .await?
-        .unwrap_or_default();
-    let refuse = |why: &str| format!("refusing uid {uid} ({user}): {why}");
-    let name = front
-        .borrow()
-        .map
-        .route(uid, &user)
+async fn admit(front: &Shared, id: u64, peer: &Peer) -> Result<(Account, Principal), String> {
+    let (who, principal) = match peer {
+        Peer::Uid(uid) => {
+            let uid = *uid;
+            let user = blocking(move || platform_linux::user_name(uid))
+                .await?
+                .unwrap_or_default();
+            let principal = Principal::unix(uid, Some(user.clone()).filter(|u| !u.is_empty()))
+                .map_err(|e| format!("refusing uid {uid} ({user}): {e}"))?;
+            (Who::Local { uid, user }, principal)
+        }
+        Peer::Tailnet(principal) => (Who::Tailnet(principal.id().to_owned()), principal.clone()),
+        Peer::Looking => return Err("refusing a peer that was never looked up".into()),
+    };
+    let refuse = |why: &str| format!("refusing {} ({}): {why}", principal.id(), principal.user());
+    let name = who
+        .route(&front.borrow().map)
         .ok_or_else(|| refuse("no rule"))?
         .account;
     let looked_up = name.clone();
@@ -285,8 +352,7 @@ async fn admit(front: &Shared, id: u64, uid: u32) -> Result<(Account, Principal)
         .await?
         .ok_or_else(|| refuse(&format!("no account {name}")))?;
     let admitted = Admitted {
-        uid,
-        user: user.clone(),
+        who,
         account: account.name.clone(),
         account_uid: account.uid,
     };
@@ -301,8 +367,6 @@ async fn admit(front: &Shared, id: u64, uid: u32) -> Result<(Account, Principal)
     if me != 0 && account.uid != me {
         return Err(refuse("the front door is not root"));
     }
-    let principal = Principal::unix(uid, Some(user.clone()).filter(|u| !u.is_empty()))
-        .map_err(|e| refuse(&e.to_string()))?;
     let relay = f.relays.get_mut(&id).ok_or_else(|| refuse("closed"))?;
     relay.admitted = Some(admitted);
     Ok((account, principal))
@@ -317,18 +381,28 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| format!("an account lookup failed: {e}"))
 }
 
-/// Admits the connection from `uid`, then relays `stream` to its account's
+/// Admits the connection from `peer`, then relays `stream` to its account's
 /// server until either side ends; forgets it either way.
-async fn relay(front: Shared, id: u64, uid: u32, mut stream: UnixStream) {
+async fn relay<S>(front: Shared, id: u64, peer: Peer, stream: S)
+where
+    S: rusty_tokio::io::AsyncRead + rusty_tokio::io::AsyncWrite + Unpin,
+{
     let _forget = Forget(front.clone(), id);
-    let (account, principal) = match admit(&front, id, uid).await {
+    relay_admitted(&front, id, &peer, stream).await;
+}
+
+async fn relay_admitted<S>(front: &Shared, id: u64, peer: &Peer, mut stream: S)
+where
+    S: rusty_tokio::io::AsyncRead + rusty_tokio::io::AsyncWrite + Unpin,
+{
+    let (account, principal) = match admit(front, id, peer).await {
         Ok(admitted) => admitted,
         Err(why) => {
             eprintln!("rusty-mux-server: login: {why}");
             return;
         }
     };
-    let mut upstream = match server_for(&front, &account).await {
+    let mut upstream = match server_for(front, &account).await {
         Ok(upstream) => upstream,
         Err(err) => {
             eprintln!(
@@ -347,6 +421,78 @@ async fn relay(front: Shared, id: u64, uid: u32, mut stream: UnixStream) {
     }
     // Either side ending, or failing, ends the relay; neither is news.
     let _ = rusty_tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+}
+
+/// Accepts tailnet peers: each is asked of `tailscaled` who it is before it
+/// says anything, then admitted as the principal it names, if the map does.
+/// An accept error is not fatal (`tailscaled` restarting must not end the
+/// front door): it is logged and the accept retried.
+async fn accept_tailnet(tailnet: Tailnet, front: Shared) -> io::Result<()> {
+    let (listener, whois) = tailnet.into_parts();
+    let looking = Lookups::default();
+    let mut dropped = 0u64;
+    loop {
+        let (stream, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(err) => {
+                eprintln!("rusty-mux-server: login: tailnet accept: {err}");
+                rusty_tokio::time::sleep(ACCEPT_RETRY).await;
+                continue;
+            }
+        };
+        let id = {
+            let mut f = front.borrow_mut();
+            let room = if looking.full() {
+                Err("too many lookups")
+            } else {
+                room_for(&f, &Peer::Looking)
+            };
+            if let Err(why) = room {
+                // One line for the first, then one per hundred.
+                if dropped.is_multiple_of(100) {
+                    eprintln!(
+                        "rusty-mux-server: login: closing tailnet {peer}: {why} ({dropped} closed before)"
+                    );
+                }
+                dropped += 1;
+                continue;
+            }
+            f.next = f.next.wrapping_add(1);
+            f.next
+        };
+        let slot = looking.take();
+        let (front2, whois) = (front.clone(), whois.clone());
+        let task = rusty_tokio::task::spawn_local(async move {
+            let _forget = Forget(front2.clone(), id);
+            let who = whois.principal(peer).await;
+            drop(slot);
+            let principal = match who {
+                Ok(principal) => principal,
+                Err(err) => return eprintln!("rusty-mux-server: login: tailnet {peer}: {err}"),
+            };
+            let peer = Peer::Tailnet(principal);
+            let admitted = {
+                let mut f = front2.borrow_mut();
+                let room = room_for(&f, &peer);
+                if let (Ok(()), Some(relay)) = (&room, f.relays.get_mut(&id)) {
+                    relay.peer = peer.clone();
+                }
+                room
+            };
+            if let Err(why) = admitted {
+                return eprintln!("rusty-mux-server: login: tailnet {peer:?}: {why}");
+            }
+            relay_admitted(&front2, id, &peer, stream).await;
+        });
+        front.borrow_mut().relays.insert(
+            id,
+            Relay {
+                peer: Peer::Looking,
+                task: task.abort_handle(),
+                admitted: None,
+            },
+        );
+    }
 }
 
 /// Removes relay `.1` when its task ends, aborted or not.

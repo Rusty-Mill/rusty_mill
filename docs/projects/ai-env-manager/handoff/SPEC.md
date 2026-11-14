@@ -59,7 +59,8 @@ with explicit consent (D6). Home when code starts: `crates/apps/ai_env_manager/`
 - [x] Tool catalog as TOML data, seeded with the tools Nano uses (Q4 interim: Claude Code,
       Codex, Cursor, Gemini CLI). (`ai_env_core`, D25: Claude Code and Codex so far;
       Cursor and Gemini CLI wait until their skills folders are verified.)
-- [ ] CLI `list`, `enable`, `disable` producing a plan; `--yes` applies.
+- [x] CLI `list`, `enable`, `disable` producing a plan; `--yes` applies. (`ai_env_cli`, D26;
+      skills come from `--skills DIR` until sources land in M1.)
 - [x] Linker: symlink, then junction (Windows), then marked copy; managed-path marker.
       (`ai_env_fs`, D23; the junction path is not run in CI yet.)
 - [ ] Tests: enable/disable round-trip on Linux and Windows CI; an unmarked folder is

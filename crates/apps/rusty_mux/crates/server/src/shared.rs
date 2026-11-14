@@ -234,10 +234,54 @@ impl Tailnet {
     }
 }
 
+impl Tailnet {
+    /// [`Tailnet::new`] without the address check, for tests that listen on
+    /// loopback. The server's own start-up never calls it.
+    #[doc(hidden)]
+    pub fn unchecked(listener: TcpListener, whois: Whois) -> Self {
+        Self {
+            listener,
+            whois,
+            allow: Rc::default(),
+        }
+    }
+
+    /// The listener and the `tailscaled` client, for a front door (C27)
+    /// that applies its own map instead of an allowlist.
+    pub(crate) fn into_parts(self) -> (TcpListener, Whois) {
+        (self.listener, self.whois)
+    }
+}
+
 /// Peers being looked up at once; more are closed unlooked-up.
 const LOOKUPS: usize = 16;
 /// How long the tailnet listener waits after a failed accept.
-const ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+pub(crate) const ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How many peers are being asked of `tailscaled` at once, for a tailnet
+/// listener (shared mode's and login mode's alike).
+#[derive(Clone, Default)]
+pub(crate) struct Lookups(Rc<std::cell::Cell<usize>>);
+
+/// One lookup in progress; dropping it, however the task ends, frees it.
+pub(crate) struct Slot(Rc<std::cell::Cell<usize>>);
+
+impl Lookups {
+    pub(crate) fn full(&self) -> bool {
+        self.0.get() >= LOOKUPS
+    }
+
+    pub(crate) fn take(&self) -> Slot {
+        self.0.set(self.0.get() + 1);
+        Slot(self.0.clone())
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
+}
 
 /// Serves tailnet peers: each is asked of `tailscaled` before it says
 /// anything, and served as the principal it names if the list in force
@@ -247,7 +291,7 @@ pub(crate) async fn accept_tailnet(
     state: state::Shared,
     guests: Guests,
 ) -> io::Result<()> {
-    let looking = Rc::new(std::cell::Cell::new(0usize));
+    let looking = Lookups::default();
     let mut dropped = 0u64;
     loop {
         // An error here is not fatal: accept(2) also reports a network that
@@ -263,7 +307,7 @@ pub(crate) async fn accept_tailnet(
                 continue;
             }
         };
-        if looking.get() >= LOOKUPS {
+        if looking.full() {
             // One line for the first, then one per hundred, so a flood
             // doesn't fill the log.
             if dropped.is_multiple_of(100) {
@@ -274,12 +318,12 @@ pub(crate) async fn accept_tailnet(
             dropped += 1;
             continue;
         }
-        looking.set(looking.get() + 1);
-        let (state, guests, looking) = (state.clone(), guests.clone(), looking.clone());
+        let slot = looking.take();
+        let (state, guests) = (state.clone(), guests.clone());
         let (whois, allow) = (tailnet.whois.clone(), tailnet.allow.clone());
         rusty_tokio::task::spawn_local(async move {
             let who = whois.principal(peer).await;
-            looking.set(looking.get() - 1);
+            drop(slot);
             let principal = match who {
                 Ok(principal) if allow.borrow().names(&principal) => principal,
                 Ok(principal) => {

@@ -5,9 +5,11 @@
 //! Safety rules: a plan with a refusal is never applied, and an `Unlink`
 //! removes only a symlink/junction or a folder holding our marker.
 
+mod discover;
 mod marker;
 
 use ai_env_core::{Action, Entry, LinkMethod, Observed, Os, Plan, Tool};
+pub use discover::{discover_skills, Discovered, Skipped};
 use marker::{copy_marked, read_marker, tree_hash};
 use std::fmt;
 use std::fs;
