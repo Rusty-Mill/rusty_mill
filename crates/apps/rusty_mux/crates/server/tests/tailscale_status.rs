@@ -122,21 +122,11 @@ fn status(state: &str, name: &str) -> String {
     format!(r#"{{"BackendState":"{state}","Self":{{"DNSName":"{name}"}}}}"#)
 }
 
-/// The next status event `client` sees: its state and node name.
-fn next_status(client: &mut Client) -> (TailscaleState, Option<String>) {
-    loop {
-        let seen = client.events.len();
-        client.recv();
-        for (_, event) in &client.events[seen..] {
-            if let Event::TailscaleStatusChanged { state, node } = event {
-                return (*state, node.clone());
-            }
-        }
-    }
-}
-
+/// Local connections, the feature or not, are not told where the tailnet
+/// node stands (D265): only a tailnet peer is, and that is the unit test of
+/// `receives` in `state.rs`.
 #[test]
-fn a_change_of_the_nodes_state_reaches_the_clients_that_asked() {
+fn a_local_client_is_not_told_where_the_node_stands() {
     let dir = scratch();
     let body = Arc::new(Mutex::new(None));
     let (socket, stop) = start(&dir, fake_tailscaled(&dir, body.clone()));
@@ -145,29 +135,23 @@ fn a_change_of_the_nodes_state_reaches_the_clients_that_asked() {
     assert!(watcher.features.contains(Features::TAILSCALE_STATUS));
     assert!(!plain.features.contains(Features::TAILSCALE_STATUS));
 
-    // The first answer is the first event; the node's name loses its dot.
-    *body.lock().unwrap() = Some(status("Running", "box.t.ts.net."));
-    assert_eq!(
-        next_status(&mut watcher),
-        (TailscaleState::Running, Some("box.t.ts.net".into()))
-    );
-    // A later change is another event.
-    *body.lock().unwrap() = Some(status("NeedsLogin", "box.t.ts.net."));
-    assert_eq!(
-        next_status(&mut watcher),
-        (TailscaleState::NeedsLogin, Some("box.t.ts.net".into()))
-    );
-
-    // A client without the feature never sees the kind.
-    let listed = plain.answer(|req| Message::List { req });
-    assert!(!listed.iter().any(|m| matches!(m, Message::Failed { .. })));
-    assert!(
-        !plain
-            .events
-            .iter()
-            .any(|(_, e)| matches!(e, Event::TailscaleStatusChanged { .. })),
-        "a client without the feature got the event"
-    );
+    // Two changes, each polled; the server has gone through them once a
+    // request after it is answered.
+    for state in ["Running", "NeedsLogin"] {
+        *body.lock().unwrap() = Some(status(state, "box.t.ts.net."));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    for client in [&mut watcher, &mut plain] {
+        let listed = client.answer(|req| Message::List { req });
+        assert!(!listed.iter().any(|m| matches!(m, Message::Failed { .. })));
+        assert!(
+            !client
+                .events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::TailscaleStatusChanged { .. })),
+            "a local client got the event"
+        );
+    }
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(&dir);
 }

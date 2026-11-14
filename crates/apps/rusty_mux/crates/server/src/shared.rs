@@ -320,18 +320,31 @@ const STATUS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Tells clients when the tailnet node changes state or name (C27): asks
 /// `tailscaled` every [`STATUS_EVERY`] and announces only a change. A
-/// `tailscaled` that cannot be reached reads as `Other` with no name, so
-/// clients learn it went away. Runs until the server stops.
+/// `tailscaled` that cannot be reached twice running reads as `Other` with
+/// no name, so clients learn it went away without one lost poll flapping
+/// the state. The failure is logged once, as it starts, and again when it
+/// ends. Runs until the server stops.
 async fn watch_status(whois: Whois, state: state::Shared) {
     let mut last = None;
+    let mut failures = 0u32;
     loop {
-        let now = whois.status().await.unwrap_or_else(|err| {
-            if last.is_some() {
-                eprintln!("rusty-mux-server: tailnet: status: {err}");
+        let now = match whois.status().await {
+            Ok(now) => {
+                if failures > 0 {
+                    eprintln!("rusty-mux-server: tailnet: status: tailscaled answers again");
+                }
+                failures = 0;
+                Some(now)
             }
-            (TailscaleState::Other, None)
-        });
-        if last.as_ref() != Some(&now) {
+            Err(err) => {
+                failures = failures.saturating_add(1);
+                if failures == 1 {
+                    eprintln!("rusty-mux-server: tailnet: status: {err}");
+                }
+                (failures >= 2).then_some((TailscaleState::Other, None))
+            }
+        };
+        if let Some(now) = now.filter(|now| last.as_ref() != Some(now)) {
             state.borrow_mut().tailscale_status(now.0, now.1.clone());
             last = Some(now);
         }
