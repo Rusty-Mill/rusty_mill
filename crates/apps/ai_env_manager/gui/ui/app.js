@@ -2,17 +2,23 @@
 // Text is always set with textContent, never as HTML.
 const { invoke } = window.__TAURI__.core;
 
-// Theme: follow the system until the user picks one; the pick is remembered.
+// Theme: follow the system until the user picks one. The pick is kept in memory, and
+// persisted when storage allows it (it can be blocked, which must not break the toggle).
 const media = window.matchMedia("(prefers-color-scheme: light)");
-// Storage can be blocked; fall back to the system setting rather than failing to load.
-function saved() {
+function stored() {
   try { return localStorage.getItem("theme"); } catch { return null; }
 }
-const theme = () => saved() ?? (media.matches ? "light" : "dark");
+let chosen = stored();
+const theme = () => chosen ?? (media.matches ? "light" : "dark");
 function applyTheme() {
   const t = theme();
   document.documentElement.dataset.theme = t;
   $("theme").textContent = t === "light" ? "Dark theme" : "Light theme";
+}
+function toggleTheme() {
+  chosen = theme() === "light" ? "dark" : "light";
+  try { localStorage.setItem("theme", chosen); } catch { /* kept in memory only */ }
+  applyTheme();
 }
 const $ = (id) => document.getElementById(id);
 const LABEL = { absent: "not enabled", enabled: "enabled", stale: "stale", edited: "edited", foreign: "foreign" };
@@ -155,10 +161,7 @@ async function preview(entry, enable) {
 
 $("q").addEventListener("input", render);
 $("clear").addEventListener("click", () => { $("q").value = ""; filter = "all"; render(); });
-$("theme").addEventListener("click", () => { const next = theme() === "light" ? "dark" : "light";
-  try { localStorage.setItem("theme", next); } catch { /* not remembered, still applied below */ }
-  document.documentElement.dataset.theme = next;
-  $("theme").textContent = next === "light" ? "Dark theme" : "Light theme"; });
+$("theme").addEventListener("click", toggleTheme);
 media.addEventListener("change", applyTheme);
 $("plan-cancel").addEventListener("click", () => $("plan").close());
 $("plan-apply").addEventListener("click", async () => {
