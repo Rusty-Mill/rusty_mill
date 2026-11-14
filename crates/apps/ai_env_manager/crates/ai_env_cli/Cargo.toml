@@ -1,0 +1,18 @@
+[package]
+name = "ai_env_cli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+description = "Ai Env Manager command line (aienv): list, enable and disable skills per tool, previewing a plan before applying it."
+license = "MIT OR Apache-2.0"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[[bin]]
+name = "aienv"
+path = "src/main.rs"
+
+[dependencies]
+ai_env_core = { path = "../ai_env_core" }
+ai_env_fs = { path = "../ai_env_fs" }
