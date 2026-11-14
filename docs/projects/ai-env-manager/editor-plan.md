@@ -1,7 +1,7 @@
 # In-app file editor: design plan
 
 Status: plan only, no code. Answers the "how" of D37 (Nano, 2026-11-14: "I'd like it in"; in-app
-editing is in GUI v1, widening D34). Order stays D33/D35 (CLI, GUI, MCP). Unsettled scope is Q15;
+editing is in GUI v1, widening D34). Order stays D33/D35 (CLI, GUI, MCP). Scope is settled by D38 (Q15);
 choices below marked `[default]` are implementation detail and get logged through
 `ai-env-manager-expert` when a slice starts.
 
@@ -23,8 +23,9 @@ enables or disables them. The editor adds: open an entry's file, change its text
 
 `[default]` Only files inside a catalog entry's own folder are reachable; the editor never takes a
 path from the webview, only an entry id plus a path relative to that entry.
-Open: whether plugins, agents, mods and key md files (CLAUDE.md, AGENTS.md) count now or when the
-catalog holds them. Today the catalog holds skills only (D29), so v1 editing covers skills; see Q15.
+Stated (D38, Q15a): skill files in the catalog today, widening as the catalog does; plugins, agents,
+mods and key md files (CLAUDE.md, AGENTS.md) join when the catalog holds them. Today the catalog
+holds skills only (D29), so v1 editing covers skills.
 
 ## How it fits plan-first and consent (D6, D8)
 
@@ -108,16 +109,12 @@ Each slice is one change in flight (D16), docs and tests first.
 6. Optional later: `aienv edit` in the CLI, source-side "push edit back", code-editor widget
    (D12 ask), plugins, agents and key md files once the catalog holds them.
 
-## Escalations (Nano's intent, scope or taste)
+## Scope (stated, D38, was Q15)
 
-1. **Which files count (Q15a).** Options: a) skill files in the catalog today, widening as the
-   catalog does; b) every cataloged kind from day one, including CLAUDE.md and AGENTS.md.
-   Recommend a: the catalog holds skills only (D29), so b has nothing to open yet.
-2. **What "edit" covers (Q15b).** Options: a) text edits to existing files only; b) also create,
-   rename and delete files and new entries. Recommend a for v1: create/delete is a
-   new-write-class under D6 and deserves its own plan.
-3. **Editing a source folder outside our own folders.** The source is Nano's own folder, so writes
-   there are outside "our own folders" (D8). Options: a) allow with the per-save previewed
-   confirm described here; b) also require a one-time "allow editing in this source" setting.
-   Recommend a: the per-save preview plus Confirm already meets D8's previewed-plan rule.
-   Reverses no `[stated]` row.
+Nano took the recommended scope on all three points (D38, 2026-11-14).
+
+1. **Which files count (Q15a).** Skill files in the catalog today, widening as the catalog does.
+2. **What "edit" covers (Q15b).** Text edits to existing files only; no create, rename or delete,
+   and no new entries.
+3. **Editing a source folder outside our own folders (Q15c).** Allowed with the per-save diff
+   preview plus Confirm (D8). No one-time allow-editing setting.
