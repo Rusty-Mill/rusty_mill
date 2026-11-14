@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 
 pub mod hosts;
 mod parse;
+pub mod token;
 
 pub use parse::{parse, parse_declared, parse_server};
 
