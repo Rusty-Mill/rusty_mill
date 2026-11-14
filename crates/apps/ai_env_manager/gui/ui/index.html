@@ -2,23 +2,44 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ai Env Manager</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header><h1>Ai Env Manager</h1><span id="count"></span></header>
-<main>
-  <p id="error" class="error" hidden></p>
-  <table id="grid"><thead></thead><tbody></tbody></table>
+<main class="wrap">
+  <header class="top">
+    <div class="brand">
+      <svg aria-hidden="true" width="28" height="28" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="2" width="8" height="8" rx="2"/><rect x="12" y="2" width="8" height="8" rx="2"/><rect x="2" y="12" width="8" height="8" rx="2"/><path d="M16 12v8M12 16h8"/></svg>
+      <div><h1>Ai Env Manager</h1><p class="sub" id="sub"></p></div>
+    </div>
+    <label class="search">
+      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+      <input id="q" type="search" aria-label="Search skills" placeholder="Search name or source" autocomplete="off">
+    </label>
+    <button id="theme" class="ghost" aria-label="Switch colour theme"></button>
+  </header>
+  <p id="error" class="error" role="alert" hidden></p>
+  <div id="chips" class="chips" role="group" aria-label="Filter by state"></div>
+  <div class="card">
+    <table id="grid"><thead></thead><tbody></tbody></table>
+    <div id="empty" class="empty" hidden><p>No skills match.</p><button id="clear">Clear search and filter</button></div>
+  </div>
   <p id="skipped" class="dim" hidden></p>
+  <ul class="legend">
+    <li><span class="state enabled"><span class="dot"></span></span>Enabled: our link, current</li>
+    <li><span class="state stale"><span class="dot"></span></span>Stale: ours, points elsewhere, safe to replace</li>
+    <li><span class="state edited"><span class="dot"></span></span>Edited: changed by hand, never replaced</li>
+    <li><span class="state foreign"><span class="dot"></span></span>Foreign: not ours, never touched</li>
+  </ul>
 </main>
-<footer class="dim">enabled = our link, current · stale = ours, points elsewhere (safe to replace) · edited = our copy changed by hand (never replaced) · foreign = not ours (never touched)</footer>
-<dialog id="plan">
-  <h2 id="plan-title"></h2>
-  <p class="dim">Preview only. Nothing is written until you confirm. If files change before you press Apply, the plan is recalculated; anything refused stays refused.</p>
-  <div id="plan-body"></div>
-  <p id="plan-summary" class="dim"></p>
-  <menu><button id="plan-cancel">Cancel</button><button id="plan-apply" class="primary">Apply</button></menu>
+<dialog id="plan" aria-labelledby="plan-title">
+  <div class="dlg-head"><h2 id="plan-title"></h2><p id="plan-summary" class="dim"></p></div>
+  <div id="plan-body" class="dlg-body"></div>
+  <div class="dlg-foot">
+    <p class="dim">Nothing is written until you apply. If files change first, the plan is recalculated and anything refused stays refused.</p>
+    <button id="plan-cancel">Cancel</button><button id="plan-apply" class="primary">Apply</button>
+  </div>
 </dialog>
 <script src="app.js"></script>
 </body>
