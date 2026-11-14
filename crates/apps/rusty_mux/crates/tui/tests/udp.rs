@@ -58,6 +58,7 @@ fn udp_server() -> (PathBuf, SocketAddr) {
                 config_file: None,
             };
             let udp = Udp {
+                life: None,
                 socket,
                 idle: PATIENCE * 6,
             };

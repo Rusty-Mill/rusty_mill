@@ -181,14 +181,16 @@ enum Received {
 
 /// Receives on `socket` until receiving fails, starting a driver for each
 /// association that comes alive and a connection for each stream it opens.
-/// An association silent for `idle` ends; one silent for `silence` loses
-/// its clients' leases until it is heard again.
+/// An association silent for `idle` ends, and one older than `life` (if
+/// given) however much it is heard; one silent for `silence` loses its
+/// clients' leases until it is heard again.
 pub(crate) async fn serve(
     socket: Rc<UdpSocket>,
     registry: Registry,
     state: Shared,
     idle: Duration,
     silence: Duration,
+    life: Option<Duration>,
 ) -> io::Result<()> {
     // Room for any UDP datagram: one larger than the buffer is an error on
     // Windows (WSAEMSGSIZE), which would end the server. Too big for the
@@ -216,7 +218,11 @@ pub(crate) async fn serve(
                 link
             }
             Received::New(link) => {
-                let timers = Timers { idle, silence };
+                let timers = Timers {
+                    idle,
+                    silence,
+                    life,
+                };
                 let driver = drive(
                     link.clone(),
                     socket.clone(),
@@ -255,6 +261,9 @@ pub(crate) async fn serve(
 struct Timers {
     idle: Duration,
     silence: Duration,
+    /// A hard end, counted from the association's birth however much it
+    /// is heard: the client must then ask again.
+    life: Option<Duration>,
 }
 
 /// Sends what `link` has to send and sleeps until its next timer or a
@@ -391,6 +400,9 @@ impl Link {
     fn deadline(&self, now: Instant, timers: Timers) -> Option<Instant> {
         let heard = self.heard_at();
         let mut until = heard + timers.idle;
+        if let Some(life) = timers.life {
+            until = until.min(self.born + life);
+        }
         if self.assoc.borrow().is_ended() || now >= until {
             return None;
         }

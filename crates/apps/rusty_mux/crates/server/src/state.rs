@@ -450,6 +450,10 @@ pub(crate) struct State {
 pub(crate) struct Lifetimes {
     pub(crate) idle: Duration,
     pub(crate) lease: Duration,
+    /// `--udp-lifetime`: a hard end for every association. While it is set,
+    /// a new association is asked for over a socket connection only, never
+    /// over UDP, or a client could renew its hour without the front door.
+    pub(crate) life: Option<Duration>,
 }
 
 /// What became of a client when its connection ended.
@@ -480,6 +484,7 @@ impl State {
             lifetimes: Lifetimes {
                 idle: ORPHAN_GRACE,
                 lease: ORPHAN_GRACE,
+                life: None,
             },
             stale: HashMap::new(),
             silenced: HashMap::new(),
@@ -1335,12 +1340,14 @@ impl State {
     /// this reply, inside the client's connection.
     fn open_datagram(&self, client: ClientId, req: u64) -> Result<Outcome, Refusal> {
         let registry = self.datagrams.as_ref().ok_or("no UDP listener")?;
-        let principal = self
-            .mux
-            .client(client)
-            .ok_or("unknown client")?
-            .principal()
-            .clone();
+        let asking = self.mux.client(client).ok_or("unknown client")?;
+        if self.lifetimes.life.is_some() && asking.transport() == Transport::Datagram {
+            return Err("a new association is asked for over a socket connection".into());
+        }
+        let principal = asking.principal().clone();
+        if is_tailnet(&principal) {
+            return Err("a tailnet peer has no UDP".into());
+        }
         let (port, id, key) = registry.offer(Instant::now(), principal)?;
         reply(
             "open datagram",
