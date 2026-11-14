@@ -116,7 +116,7 @@ fn start(within: Duration) -> Running {
     };
     let path = config.path.clone();
     let mcp = HttpHandler::new(
-        mcp::server_with(Arc::clone(&board), Arc::clone(&flight)).expect("server"),
+        mcp::server_with(Arc::clone(&board), Arc::clone(&flight), None).expect("server"),
         config,
     );
     let web = Web::new(board, mcp, path, vec!["127.0.0.1".into()], Auth::Open)

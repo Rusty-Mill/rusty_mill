@@ -293,3 +293,28 @@ fn a_connector_cannot_reset_an_agent_to_the_connectors_admin_role_or_rotate_a_to
         "not through a shared connector",
     );
 }
+
+#[test]
+fn every_settings_tool_is_an_operation_and_none_carries_a_secret() {
+    let r = rig("tools");
+    let tools = rusty_mill_board::settings::tools();
+    assert!(!tools.is_empty());
+    for t in &tools {
+        assert_eq!(t.schema["type"], "object", "{}", t.name);
+        assert!(
+            r.settings
+                .call(t.name, Some(&person("mid")), json!({}))
+                .is_some(),
+            "{} is not a settings operation",
+            t.name
+        );
+        assert!(
+            !matches!(
+                t.name,
+                "settings_agent_add" | "settings_agent_rotate" | "settings_github_set"
+            ),
+            "{} hands out or takes in a secret",
+            t.name
+        );
+    }
+}
