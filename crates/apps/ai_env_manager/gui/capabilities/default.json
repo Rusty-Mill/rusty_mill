@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Invoke the three app commands. No fs, shell, http or dialog plugin (pack D32).",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

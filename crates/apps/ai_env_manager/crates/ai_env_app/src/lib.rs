@@ -11,6 +11,7 @@ use ai_env_core::{
     parse_catalog, plan_disable, plan_enable, CatalogError, Entry, EntryId, LinkMethod, Observed,
     Plan, Restricted, Tool, ToolId, BUILTIN_TOOLS,
 };
+use std::env;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,7 @@ pub struct Loaded {
     pub skipped: Vec<Skipped>,
 }
 
+/// Why a step failed. `Display` gives the text front ends show the user.
 #[derive(Debug)]
 pub enum Error {
     Catalog(CatalogError),
@@ -64,10 +66,31 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-macro_rules! from {
-    ($($t:ty => $v:ident),*) => {$(impl From<$t> for Error { fn from(e: $t) -> Self { Error::$v(e) } })*};
+impl From<CatalogError> for Error {
+    fn from(e: CatalogError) -> Self {
+        Error::Catalog(e)
+    }
 }
-from!(CatalogError => Catalog, ai_env_fs::Error => Fs, io::Error => Io);
+
+impl From<ai_env_fs::Error> for Error {
+    fn from(e: ai_env_fs::Error) -> Self {
+        Error::Fs(e)
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
+        Error::Io(e)
+    }
+}
+
+/// The user's home folder (`HOME`, else `USERPROFILE`), if set and not empty.
+pub fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
 
 /// Tools to act on: those named in `scope`, or all of the catalog. `home`
 /// expands `~/` in the catalog.
@@ -117,19 +140,24 @@ pub fn observe(entry: &Entry, tool: &Tool) -> Result<Observed, Error> {
     Ok(ai_env_fs::observe(entry, tool)?)
 }
 
-/// The plan to enable or disable `entry` for `tool`. Reads the disk, writes
-/// nothing.
-pub fn plan(entry: &Entry, tool: &Tool, enable: bool) -> Result<Plan, Error> {
+/// What to do with an entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    Enable,
+    Disable,
+}
+
+/// The plan to `op` `entry` for `tool`. Reads the disk, writes nothing.
+pub fn plan(entry: &Entry, tool: &Tool, op: Op) -> Result<Plan, Error> {
     let observed = observe(entry, tool)?;
-    Ok(if enable {
-        plan_enable(
+    Ok(match op {
+        Op::Enable => plan_enable(
             entry,
             tool,
             observed,
             LinkMethod::preferred(ai_env_fs::HOST),
-        )
-    } else {
-        plan_disable(entry, tool, observed)
+        ),
+        Op::Disable => plan_disable(entry, tool, observed),
     })
 }
 

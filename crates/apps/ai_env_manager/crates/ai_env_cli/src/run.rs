@@ -2,7 +2,7 @@
 //! result. Output goes to a writer so tests can read it.
 
 use crate::args::{Change, Command, Scope, USAGE};
-use ai_env_app::{apply, find_entry, load_entries, observe, plan, select_tools};
+use ai_env_app::{apply, find_entry, load_entries, observe, plan, select_tools, Op};
 use ai_env_core::{Action, Observed, Plan};
 use std::io::{self, Write};
 use std::path::Path;
@@ -73,7 +73,7 @@ fn show(plan: &Plan, out: &mut impl Write) -> io::Result<()> {
 
 fn change(
     c: &Change,
-    enable: bool,
+    op: Op,
     home: &Path,
     out: &mut impl Write,
     err: &mut impl Write,
@@ -83,7 +83,7 @@ fn change(
     let entry = find_entry(&entries, &c.entry)?;
     let (mut outcome, mut pending) = (Outcome::Done, false);
     for tool in &tools {
-        let plan = plan(entry, tool, enable)?;
+        let plan = plan(entry, tool, op)?;
         writeln!(out, "{}:", tool.id)?;
         if plan.is_noop() {
             writeln!(out, "  nothing to do")?;
@@ -121,7 +121,7 @@ pub fn run(
             Ok(Outcome::Done)
         }
         Command::List(scope) => list(scope, home, out, err),
-        Command::Enable(c) => change(c, true, home, out, err),
-        Command::Disable(c) => change(c, false, home, out, err),
+        Command::Enable(c) => change(c, Op::Enable, home, out, err),
+        Command::Disable(c) => change(c, Op::Disable, home, out, err),
     }
 }

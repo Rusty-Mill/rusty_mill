@@ -1,7 +1,7 @@
 //! The shared steps on real temp folders: a fake home, a skills folder, the
 //! built-in catalog (claude-code and codex).
 
-use ai_env_app::{apply, find_entry, load_entries, observe, plan, select_tools, Error, Scope};
+use ai_env_app::{apply, find_entry, load_entries, observe, plan, select_tools, Error, Op, Scope};
 use ai_env_core::{Observed, ToolId};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -118,13 +118,13 @@ fn plan_writes_nothing_and_apply_round_trips() {
     let entry = &loaded.entries[0];
     let tool = first_tool(&t.home());
 
-    let enable = plan(entry, &tool, true).unwrap();
+    let enable = plan(entry, &tool, Op::Enable).unwrap();
     assert_eq!(observe(entry, &tool).unwrap(), Observed::Absent);
     apply(&enable).unwrap();
     assert_eq!(observe(entry, &tool).unwrap(), Observed::ManagedCurrent);
 
-    assert!(plan(entry, &tool, true).unwrap().is_noop());
-    apply(&plan(entry, &tool, false).unwrap()).unwrap();
+    assert!(plan(entry, &tool, Op::Enable).unwrap().is_noop());
+    apply(&plan(entry, &tool, Op::Disable).unwrap()).unwrap();
     assert_eq!(observe(entry, &tool).unwrap(), Observed::Absent);
 }
 
@@ -139,7 +139,7 @@ fn a_foreign_folder_is_refused_and_apply_rejects_the_plan() {
     fs::create_dir_all(&target).unwrap();
     fs::write(target.join("mine.txt"), "x").unwrap();
 
-    let p = plan(entry, &tool, true).unwrap();
+    let p = plan(entry, &tool, Op::Enable).unwrap();
     assert!(p.has_refusals());
     assert!(apply(&p).is_err());
     assert!(target.join("mine.txt").exists());

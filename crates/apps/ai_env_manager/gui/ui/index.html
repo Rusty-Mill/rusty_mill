@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ai Env Manager</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header><h1>Ai Env Manager</h1><span id="count"></span></header>
+<main>
+  <p id="error" class="error" hidden></p>
+  <table id="grid"><thead></thead><tbody></tbody></table>
+  <p id="skipped" class="dim" hidden></p>
+</main>
+<footer class="dim">enabled = our link, current · stale = ours, points elsewhere (safe to replace) · edited = our copy changed by hand (never replaced) · foreign = not ours (never touched)</footer>
+<dialog id="plan">
+  <h2 id="plan-title"></h2>
+  <p class="dim">Preview only. Nothing is written until you confirm. If files change before you press Apply, the plan is recalculated; anything refused stays refused.</p>
+  <div id="plan-body"></div>
+  <p id="plan-summary" class="dim"></p>
+  <menu><button id="plan-cancel">Cancel</button><button id="plan-apply" class="primary">Apply</button></menu>
+</dialog>
+<script src="app.js"></script>
+</body>
+</html>

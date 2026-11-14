@@ -326,6 +326,8 @@ exclude = [
     "crates/platform/rustils/fuzz",
     "crates/apps/rusty_croc/fuzz",
     "crates/apps/rusty_key/desktop/src-tauri",
+    # Ai Env Manager desktop shell (Tauri): standalone workspace, like rusty_key.
+    "crates/apps/ai_env_manager/gui",
     # nexus's Tauri desktop shell (`shell/src-tauri`, crate `nexus-shell`)
     # was excluded from nexus's own workspace too: it is built by `tauri
     # build` from the pnpm side, carries its own dependency graph (tauri

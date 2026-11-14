@@ -1,0 +1,19 @@
+:root{color-scheme:dark;--bg:#1b1d23;--line:#2a2d36;--dim:#7d8493}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:#e6e8ee;font:14px/1.4 system-ui,sans-serif}
+header{display:flex;gap:12px;align-items:baseline;padding:12px 16px;border-bottom:1px solid var(--line)}
+h1{font-size:15px;margin:0}main{padding:8px 16px}footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px}
+.dim{color:var(--dim)}.error{color:#ef6b6b}
+table{width:100%;border-collapse:collapse}th{text-align:left;font-weight:500;color:var(--dim);font-size:12px;padding:8px 6px}
+td{padding:10px 6px;border-top:1px solid var(--line)}td small{display:block;color:var(--dim)}
+.badge{display:inline-block;padding:2px 9px;border-radius:10px;font-size:12px;background:#23262e;color:var(--dim)}
+.enabled{background:#12301f;color:#5fd38d}.foreign{background:#3a2a10;color:#f0b24a}
+.stale{background:#10283a;color:#6bb6f0}.edited{background:#33203a;color:#d08be8}
+button{border:1px solid #3b4050;border-radius:6px;padding:5px 12px;background:#232630;color:inherit;font:inherit;cursor:pointer}
+button.primary{background:#2f6fed;border-color:#2f6fed;color:#fff}
+dialog{width:min(880px,92vw);background:var(--bg);color:inherit;border:1px solid #3b4050;border-radius:12px;padding:18px}
+dialog::backdrop{background:#000a}
+.tool{background:#14161b;border:1px solid #2f333d;border-radius:10px;padding:12px 16px;margin:10px 0}
+.row{display:flex;gap:10px;padding:3px 0;font:12.5px ui-monospace,monospace}
+.kind{width:60px;font-weight:600;flex:none}.link{color:#5fd38d}.unlink{color:#f0b24a}.refuse{color:#ef6b6b}
+menu{display:flex;justify-content:flex-end;gap:8px;padding:0}

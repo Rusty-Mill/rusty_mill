@@ -1,0 +1,33 @@
+[package]
+name = "ai-env-gui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+description = "Ai Env Manager desktop shell (Tauri 2): a view over ai_env_app. No logic of its own (pack D32)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone workspace, like rusty_key's desktop shell: it pulls Tauri and
+# WebKitGTK, so it stays out of the root workspace and `cargo build
+# --workspace` stays lean. It path-depends on the core crates across the
+# boundary.
+[workspace]
+
+[lib]
+name = "ai_env_gui_lib"
+
+[[bin]]
+name = "ai-env-gui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ai_env_app = { path = "../crates/ai_env_app" }
+ai_env_core = { path = "../crates/ai_env_core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

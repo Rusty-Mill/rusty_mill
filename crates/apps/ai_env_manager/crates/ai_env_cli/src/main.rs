@@ -10,13 +10,6 @@ const REFUSED: u8 = 1;
 const USAGE: u8 = 2;
 const FAILED: u8 = 3;
 
-fn home() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
-}
-
 fn main() -> ExitCode {
     let cmd = match args::from_os(env::args_os().skip(1)).and_then(|a| args::parse(&a)) {
         Ok(c) => c,
@@ -29,7 +22,7 @@ fn main() -> ExitCode {
     let home = if cmd == Command::Help {
         Some(PathBuf::new())
     } else {
-        home()
+        ai_env_app::home_dir()
     };
     let Some(home) = home else {
         eprintln!("aienv: set HOME (or USERPROFILE) so ~/ in the tool catalog can be resolved");
