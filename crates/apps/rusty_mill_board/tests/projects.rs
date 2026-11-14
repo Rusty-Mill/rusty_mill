@@ -268,7 +268,7 @@ impl Store for ReassignAfterGet {
     fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
         let seen = self.inner.get(id)?;
         if self.armed.swap(false, Ordering::SeqCst) {
-            let moved = seen.as_ref().expect("card").assign(&self.to, 1);
+            let moved = seen.as_ref().expect("card").assign(&self.to, None, 1);
             self.inner
                 .replace(&moved, Event::of(&moved, EventKind::Assigned, "nano"))?;
         }

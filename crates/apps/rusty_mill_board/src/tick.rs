@@ -267,6 +267,8 @@ struct BoardDoc {
     parent: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     milestone: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     #[serde(default)]
     issue: Option<u64>,
     #[serde(default)]
@@ -295,6 +297,7 @@ impl BoardDoc {
             related: card.related.clone(),
             parent: card.parent,
             milestone: card.milestone,
+            repo: card.repo.clone(),
             issue: card.issue,
             synced_text: card.synced_text,
             execution: card.execution.clone(),
@@ -546,6 +549,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         claim,
         tags,
         project,
+        repo: doc.repo,
         comments,
         priority: task.priority,
         deps: doc.deps,

@@ -374,6 +374,34 @@ fn the_default_project_is_the_inbox_and_a_project_is_a_list() {
 }
 
 #[test]
+fn a_cards_repository_is_kept_in_its_board_document_and_read_back() {
+    let tick = FakeTick::default();
+    let projects = Projects::parse(
+        r#"{"version": 2, "repos": {"mill": {}, "py": {}},
+            "projects": {"tooling": {"repos": {"mill": [".github"], "py": ["ci"]},
+                                     "default_repo": "mill"}}}"#,
+    )
+    .expect("projects");
+    let board = Board::with_clock(TickStore::new(tick.clone()), Roles::default(), clock)
+        .with_projects(projects);
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board
+        .add_in(&human, "tooling", "a", "", vec![])
+        .expect("add");
+    assert_eq!(board.get(card.id).expect("get").repo, None);
+    let moved = board
+        .assign_in(card.id, "tooling", Some("py"), &human)
+        .expect("assign");
+    assert_eq!(moved.repo.as_deref(), Some("py"));
+    assert_eq!(board.get(card.id).expect("get").repo.as_deref(), Some("py"));
+    let back = board
+        .assign_in(card.id, "tooling", None, &human)
+        .expect("assign");
+    assert_eq!(back.repo, None);
+    assert_eq!(board.get(card.id).expect("get").repo, None);
+}
+
+#[test]
 fn a_done_card_moves_to_another_list_and_its_task_stays_closed() {
     let (board, tick) = board();
     let builder = board.roles().actor("claude", "builder").expect("role");

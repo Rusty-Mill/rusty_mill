@@ -40,6 +40,16 @@ pub struct Roles(pub BTreeMap<String, BTreeSet<Capability>>);
 
 /// The capability, besides `Triage`, that re-files a card in `column`: closing work is what
 /// files a Done card, so `Close` re-files one.
+/// `repo`, if named, must be one of `project`'s repositories.
+fn check_repo(registry: &Projects, project: &str, repo: Option<&str>) -> Result<(), BoardError> {
+    match repo {
+        Some(r) if !registry.repos_of(project).any(|own| own == r) => {
+            Err(BoardError::Invalid("the project has no such repository"))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn assign_capability(column: &Column) -> Capability {
     if *column == Column::DONE {
         Capability::Close
@@ -146,6 +156,8 @@ pub struct NewCard<'a> {
     pub parent: Option<Uuid>,
     /// Evidence links (see [`Card::add_evidence`]); none by default.
     pub evidence: Vec<String>,
+    /// The repository of a project that spans several; none means its default.
+    pub repo: Option<&'a str>,
 }
 
 impl<'a> NewCard<'a> {
@@ -1270,6 +1282,7 @@ impl<S: Store> Board<S> {
             self.store.get(p)?.ok_or(BoardError::NotFound(p))?;
             card.parent = Some(p);
         }
+        card.repo = new.repo.map(str::to_owned);
         self.create(by, project, card)
     }
 
@@ -1282,6 +1295,7 @@ impl<S: Store> Board<S> {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
         self.check_accepts(project)?;
+        check_repo(&registry, project, card.repo.as_deref())?;
         project.clone_into(&mut card.project);
         let card = self.insert_numbered(by, card)?;
         drop(registry);
@@ -1627,10 +1641,25 @@ impl<S: Store> Board<S> {
     /// An unknown project, a missing capability, an out-of-scope project, or a card claimed
     /// by someone else (without `Triage`).
     pub fn assign(&self, id: Uuid, project: &str, by: &Actor) -> Result<Card, BoardError> {
+        self.assign_in(id, project, None, by)
+    }
+
+    /// [`Board::assign`] into `repo` of a project that spans several repositories.
+    ///
+    /// # Errors
+    /// As [`Board::assign`], and if `repo` is not one of the project's repositories.
+    pub fn assign_in(
+        &self,
+        id: Uuid,
+        project: &str,
+        repo: Option<&str>,
+        by: &Actor,
+    ) -> Result<Card, BoardError> {
         let registry = self.registry();
         if !registry.contains(project) {
             return Err(BoardError::Invalid("unknown project"));
         }
+        check_repo(&registry, project, repo)?;
         if !by.may_work_in(project) {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
@@ -1648,7 +1677,7 @@ impl<S: Store> Board<S> {
                 Some(holder) if !triage && *holder != by.name => {
                     Err(BoardError::Claimed(holder.clone()))
                 }
-                _ => Ok(c.assign(project, now)),
+                _ => Ok(c.assign(project, repo, now)),
             }
         });
         drop(registry);

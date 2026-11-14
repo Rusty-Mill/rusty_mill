@@ -395,6 +395,8 @@ struct OwnsArgs {
     project: String,
     /// Repository paths to classify.
     files: Vec<String>,
+    /// The repository the paths are in, for a project that spans several (default: its default).
+    repo: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -405,6 +407,8 @@ struct AssignArgs {
     id: String,
     /// The project to move it to (see `board_projects`).
     project: String,
+    /// The repository, for a project that spans several (default: the project's `default_repo`).
+    repo: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -473,6 +477,8 @@ struct AddArgs {
     tags: Option<Vec<String>>,
     /// The project the card belongs to (default: `default`; see `board_projects`).
     project: Option<String>,
+    /// The repository, for a project that spans several (default: the project's `default_repo`).
+    repo: Option<String>,
     /// Create it straight in Done, to record work that already merged (needs `close`).
     done: Option<bool>,
     /// Id or number of the card this one is split from. Set it whenever you split work into
@@ -792,7 +798,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_projects",
-            "List the repositories this board serves, their projects (applications) and the repository paths each project may change: {repos: {repo: {project: [paths]}}}. Cards belong to one project; a repository's own project (named like it) owns every path no other project of that repository does.",
+            "List the repositories this board serves, their projects (applications) and the repository paths each project may change: {repos: {repo: {project: [paths]}}}, plus `projects`: {project: {repos: {repo: [paths]}, default_repo}} (a project may span repositories). Cards belong to one project; a repository's own project (named like it) owns every path no other project of that repository does.",
             |b, i, _: Nothing| {
                 // A limited credential is told only about the projects it may work in.
                 let mut repos = serde_json::to_value(b.projects())
@@ -813,8 +819,17 @@ pub fn ops() -> Vec<Op> {
                         status.insert(name.to_owned(), json!(s));
                     }
                 }
+                let registry = b.projects();
+                let projects: serde_json::Map<String, Value> = registry
+                    .names()
+                    .filter(|n| in_scope(scope(i), n))
+                    .filter_map(|n| {
+                        Some((n.to_owned(), serde_json::to_value(registry.info(n)?).ok()?))
+                    })
+                    .collect();
                 to_json(json!({
                     "repos": repos,
+                    "projects": projects,
                     "status": status,
                     "default": DEFAULT_PROJECT,
                     "count": b.projects().names().count(),
@@ -901,7 +916,17 @@ pub fn ops() -> Vec<Op> {
             "Which of `files` (repository paths, `/`-separated) the project does NOT own: those belonging to another project of its repository. Answers from the whole registry, so a runner limited to one project can still tell when work strays into a sibling's paths: {foreign: [paths]}.",
             |b, i, a: OwnsArgs| {
                 checked_project(b, scope(i), Some(&a.project))?;
-                to_json(json!({ "foreign": b.projects().not_owned_by(&a.project, &a.files) }))
+                let projects = b.projects();
+                let foreign = match a.repo.as_deref() {
+                    None => projects.not_owned_by(&a.project, &a.files),
+                    Some(repo) if projects.repos_of(&a.project).any(|r| r == repo) => {
+                        projects.not_owned_by_in(&a.project, repo, &a.files)
+                    }
+                    Some(_) => {
+                        return Err(BoardError::Invalid("the project has no such repository"));
+                    }
+                };
+                to_json(json!({ "foreign": foreign }))
             },
         ),
         op(
@@ -996,6 +1021,7 @@ pub fn ops() -> Vec<Op> {
                     done: a.done == Some(true),
                     parent: a.parent.as_deref().map(|r| card_ref(b, r)).transpose()?,
                     evidence: a.evidence.unwrap_or_default(),
+                    repo: a.repo.as_deref(),
                     ..NewCard::new(
                         &a.title,
                         a.body.as_deref().unwrap_or(""),
@@ -1047,7 +1073,7 @@ pub fn ops() -> Vec<Op> {
             "Move a card to another project (needs `triage`, or `project` for a card nobody else has claimed; a Done card needs `triage` or `close` and stays Done). Drops any claim.",
             |b, i, a: AssignArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.assign(card_ref(b, &a.id)?, &a.project, &who)?)
+                card(b.assign_in(card_ref(b, &a.id)?, &a.project, a.repo.as_deref(), &who)?)
             },
         ),
         op(
@@ -2800,6 +2826,76 @@ mod tests {
             Err(CallError::Board(BoardError::OutOfScope(_)))
         ));
     }
+    #[test]
+    fn a_card_of_a_project_spanning_repositories_names_its_repository() {
+        use crate::projects::Projects;
+        let projects = Projects::parse(
+            r#"{"version": 2, "repos": {"mill": {}, "py": {}},
+                "projects": {"tooling": {"repos": {"mill": [".github"], "py": ["ci"]},
+                                         "default_repo": "mill"},
+                             "term": {"repos": {"mill": ["crates/term"]}}}}"#,
+        )
+        .expect("projects");
+        let board: Shared = Board::new(
+            Box::new(MemStore::default()) as Box<dyn Store>,
+            Roles::default(),
+        )
+        .with_projects(projects);
+        let human = ident("nano", "human");
+        let run = |op: &str, args: Value| call_as(&board, Some(&human), op, args);
+        let added = run(
+            "card_add",
+            json!({"title": "c", "project": "tooling", "repo": "py"}),
+        )
+        .expect("add");
+        assert_eq!(added["card"]["repo"], "py");
+        let plain = run("card_add", json!({"title": "d", "project": "tooling"})).expect("add");
+        assert!(
+            plain["card"].get("repo").is_none(),
+            "no repo means the default: {plain}"
+        );
+        for bad in [
+            json!({"title": "e", "project": "tooling", "repo": "nope"}),
+            json!({"title": "e", "project": "term", "repo": "py"}),
+        ] {
+            assert!(matches!(
+                run("card_add", bad),
+                Err(CallError::Board(BoardError::Invalid(_)))
+            ));
+        }
+        let id = plain["card"]["id"].clone();
+        let moved = run(
+            "card_assign",
+            json!({"id": id, "project": "tooling", "repo": "py"}),
+        )
+        .expect("assign");
+        assert_eq!(moved["card"]["repo"], "py");
+        let refiled = run("card_assign", json!({"id": id, "project": "term"})).expect("assign");
+        assert!(
+            refiled["card"].get("repo").is_none(),
+            "re-filing clears the repo: {refiled}"
+        );
+        let listed = run("board_projects", json!({})).expect("projects");
+        assert_eq!(listed["projects"]["tooling"]["default_repo"], "mill");
+        assert_eq!(listed["projects"]["tooling"]["repos"]["py"], json!(["ci"]));
+        let owns = |repo: Option<&str>, files: Value| {
+            let mut args = json!({"project": "tooling", "files": files});
+            if let Some(r) = repo {
+                args["repo"] = json!(r);
+            }
+            run("board_owns", args)
+        };
+        let foreign = owns(Some("py"), json!(["ci/x.yml", "src/a.rs"])).expect("owns");
+        assert_eq!(foreign["foreign"], json!(["src/a.rs"]));
+        let foreign = owns(None, json!([".github/w.yml", "ci/x.yml"])).expect("owns");
+        assert_eq!(
+            foreign["foreign"],
+            json!(["ci/x.yml"]),
+            "the default repository"
+        );
+        assert!(owns(Some("zz"), json!([])).is_err());
+    }
+
     #[test]
     fn metrics_narrow_to_scope_project_and_repo() {
         use crate::projects::Projects;
