@@ -1315,10 +1315,20 @@ function reposTab(){
   // repo -> [{name, paths}], without each repository's own project (it is implied).
   reposDraft=reposDraft||Object.fromEntries(Object.entries(cfg.repos).map(([r,ps])=>[r,Object.entries(ps).filter(([n])=>n!==r).map(([n,paths])=>({name:n,paths:paths.join("\n")}))]));
   const draft=reposDraft,inputs=[];
+  const statusSelect=name=>{
+    const st=field("select",{});st.setAttribute("aria-label",name+" status");st.disabled=!cfg.files.project_status;
+    st.append(...STATUSES.map(x=>new Option(x,x)));const ps=cfg.project_status||{};st.value=Object.hasOwn(ps,name)?ps[name]:"active";
+    st.onchange=guard(err,()=>setting("settings_project_status_set",{project:name,status:st.value}));
+    return st;
+  };
   const collect=()=>Object.fromEntries(Object.entries(draft).map(([r,ps])=>[r,Object.fromEntries(ps.map(p=>[p.name,p.paths.split("\n").map(x=>x.trim()).filter(Boolean)]))]));
   const restructure=fn=>()=>{inputs.forEach(f=>f());fn();drawSettings()};   // keep what was typed, change the shape, redraw
   for(const r of Object.keys(draft)){
     const fs=el("fieldset");fs.append(el("legend",r));
+    // A repository's own project is implied, so it is not in the draft; its status is set here (not the Inbox's).
+    if(r!==INBOX&&cfg.repos[r]&&Object.hasOwn(cfg.repos[r],r)){
+      const own=el("div",null,"row");own.append(el("span",r+" (repository project)"),statusSelect(r));fs.append(own);
+    }
     for(const p of draft[r]){
       const row=el("div",null,"row"),nm=field("input",{value:p.name,size:18,placeholder:"project name"}),
             paths=field("textarea",{value:p.paths,placeholder:"one repository path per line, e.g. crates/apps/rocket_league"});
@@ -1326,12 +1336,7 @@ function reposTab(){
       const rm=el("button","Remove");rm.type="button";rm.onclick=restructure(()=>{draft[r]=draft[r].filter(x=>x!==p)});
       row.append(nm,rm);
       // A saved project's status applies at once, apart from the paths below.
-      if(cfg.repos[r]&&Object.hasOwn(cfg.repos[r],p.name)){
-        const st=field("select",{});st.setAttribute("aria-label",p.name+" status");st.disabled=!cfg.files.project_status;
-        st.append(...STATUSES.map(x=>new Option(x,x)));const ps=cfg.project_status||{};st.value=Object.hasOwn(ps,p.name)?ps[p.name]:"active";
-        st.onchange=guard(err,()=>setting("settings_project_status_set",{project:p.name,status:st.value}));
-        row.append(st);
-      }
+      if(cfg.repos[r]&&Object.hasOwn(cfg.repos[r],p.name))row.append(statusSelect(p.name));
       fs.append(row,paths);
     }
     const addp=el("button","+ project"),rmr=el("button","Remove repository");addp.type=rmr.type="button";

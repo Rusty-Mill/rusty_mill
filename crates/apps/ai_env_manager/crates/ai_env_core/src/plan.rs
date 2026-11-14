@@ -318,6 +318,13 @@ mod tests {
     }
 
     #[test]
+    fn preferred_method_heads_the_fallback_chain() {
+        for os in [Os::Unix, Os::Windows] {
+            assert_eq!(LinkMethod::fallback_chain(os)[0], LinkMethod::preferred(os));
+        }
+    }
+
+    #[test]
     fn windows_chain_has_junction_between_symlink_and_copy() {
         assert_eq!(
             LinkMethod::fallback_chain(Os::Windows),

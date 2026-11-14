@@ -166,6 +166,14 @@ pub enum Os {
 }
 
 impl LinkMethod {
+    /// The method to try first on `os`: the head of its fallback chain.
+    pub fn preferred(os: Os) -> LinkMethod {
+        Self::fallback_chain(os)
+            .first()
+            .copied()
+            .unwrap_or(LinkMethod::Copy)
+    }
+
     /// Methods to try, best first. Symlinks need Developer Mode on Windows;
     /// junctions do not, so they come second there.
     pub fn fallback_chain(os: Os) -> &'static [LinkMethod] {
