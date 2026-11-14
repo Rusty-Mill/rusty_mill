@@ -2849,6 +2849,15 @@ mod tests {
         )
         .expect("add");
         assert_eq!(added["card"]["repo"], "py");
+        let by_default = run(
+            "card_add",
+            json!({"title": "c2", "project": "tooling", "repo": "mill"}),
+        )
+        .expect("add");
+        assert!(
+            by_default["card"].get("repo").is_none(),
+            "the default repository has one spelling: {by_default}"
+        );
         let plain = run("card_add", json!({"title": "d", "project": "tooling"})).expect("add");
         assert!(
             plain["card"].get("repo").is_none(),

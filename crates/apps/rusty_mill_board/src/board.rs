@@ -38,18 +38,22 @@ const NUMBERER: &str = "board";
 #[serde(transparent)]
 pub struct Roles(pub BTreeMap<String, BTreeSet<Capability>>);
 
-/// The capability, besides `Triage`, that re-files a card in `column`: closing work is what
-/// files a Done card, so `Close` re-files one.
-/// `repo`, if named, must be one of `project`'s repositories.
-fn check_repo(registry: &Projects, project: &str, repo: Option<&str>) -> Result<(), BoardError> {
-    match repo {
-        Some(r) if !registry.repos_of(project).any(|own| own == r) => {
-            Err(BoardError::Invalid("the project has no such repository"))
-        }
-        _ => Ok(()),
+/// The repository to store for a card of `project`: `repo` if it names one of the project's
+/// repositories other than its default, else none (the default has one spelling).
+fn stored_repo(
+    registry: &Projects,
+    project: &str,
+    repo: Option<&str>,
+) -> Result<Option<String>, BoardError> {
+    let Some(r) = repo else { return Ok(None) };
+    if !registry.repos_of(project).any(|own| own == r) {
+        return Err(BoardError::Invalid("the project has no such repository"));
     }
+    Ok((registry.repo_of(project) != Some(r)).then(|| r.to_owned()))
 }
 
+/// The capability, besides `Triage`, that re-files a card in `column`: closing work is what
+/// files a Done card, so `Close` re-files one.
 fn assign_capability(column: &Column) -> Capability {
     if *column == Column::DONE {
         Capability::Close
@@ -1295,7 +1299,7 @@ impl<S: Store> Board<S> {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
         self.check_accepts(project)?;
-        check_repo(&registry, project, card.repo.as_deref())?;
+        card.repo = stored_repo(&registry, project, card.repo.as_deref())?;
         project.clone_into(&mut card.project);
         let card = self.insert_numbered(by, card)?;
         drop(registry);
@@ -1659,7 +1663,7 @@ impl<S: Store> Board<S> {
         if !registry.contains(project) {
             return Err(BoardError::Invalid("unknown project"));
         }
-        check_repo(&registry, project, repo)?;
+        let repo = stored_repo(&registry, project, repo)?;
         if !by.may_work_in(project) {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
@@ -1677,7 +1681,7 @@ impl<S: Store> Board<S> {
                 Some(holder) if !triage && *holder != by.name => {
                     Err(BoardError::Claimed(holder.clone()))
                 }
-                _ => Ok(c.assign(project, repo, now)),
+                _ => Ok(c.assign(project, repo.as_deref(), now)),
             }
         });
         drop(registry);
