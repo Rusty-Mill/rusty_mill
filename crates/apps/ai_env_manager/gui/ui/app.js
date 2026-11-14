@@ -4,7 +4,11 @@ const { invoke } = window.__TAURI__.core;
 
 // Theme: follow the system until the user picks one; the pick is remembered.
 const media = window.matchMedia("(prefers-color-scheme: light)");
-const theme = () => localStorage.getItem("theme") ?? (media.matches ? "light" : "dark");
+// Storage can be blocked; fall back to the system setting rather than failing to load.
+function saved() {
+  try { return localStorage.getItem("theme"); } catch { return null; }
+}
+const theme = () => saved() ?? (media.matches ? "light" : "dark");
 function applyTheme() {
   const t = theme();
   document.documentElement.dataset.theme = t;
@@ -74,7 +78,7 @@ function render() {
   const view = lastView;
   const q = $("q").value.trim().toLowerCase();
   const pick = FILTERS.find((f) => f[0] === filter)[2];
-  const rows = view.rows.filter((r) => pick(r) && `${r.id} ${r.source}`.toLowerCase().includes(q));
+  const rows = view.rows.filter((r) => pick(r) && `${r.id} ${r.source ?? ""}`.toLowerCase().includes(q));
   const chips = $("chips");
   chips.replaceChildren();
   for (const [key, label, test] of FILTERS) {
@@ -151,7 +155,10 @@ async function preview(entry, enable) {
 
 $("q").addEventListener("input", render);
 $("clear").addEventListener("click", () => { $("q").value = ""; filter = "all"; render(); });
-$("theme").addEventListener("click", () => { localStorage.setItem("theme", theme() === "light" ? "dark" : "light"); applyTheme(); });
+$("theme").addEventListener("click", () => { const next = theme() === "light" ? "dark" : "light";
+  try { localStorage.setItem("theme", next); } catch { /* not remembered, still applied below */ }
+  document.documentElement.dataset.theme = next;
+  $("theme").textContent = next === "light" ? "Dark theme" : "Light theme"; });
 media.addEventListener("change", applyTheme);
 $("plan-cancel").addEventListener("click", () => $("plan").close());
 $("plan-apply").addEventListener("click", async () => {
