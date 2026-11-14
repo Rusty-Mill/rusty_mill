@@ -117,9 +117,6 @@ impl Default for Limits {
     }
 }
 
-/// How long accepting waits after running out of descriptors or memory.
-const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
-
 /// A request to read the map again, answered with whether the new map
 /// took (the old one stays when it did not).
 pub type Reload = oneshot::Sender<io::Result<()>>;
@@ -323,7 +320,7 @@ async fn pause_after(err: io::Error) -> io::Result<()> {
         return Err(err);
     }
     eprintln!("rusty-mux-server: login: accepting: {err}; pausing");
-    rusty_tokio::time::sleep(ACCEPT_BACKOFF).await;
+    rusty_tokio::time::sleep(ACCEPT_RETRY).await;
     Ok(())
 }
 

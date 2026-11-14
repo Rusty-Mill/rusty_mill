@@ -68,8 +68,12 @@ impl Whois {
         })
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tailscaled whois timed out"))??;
-        if own.contains(&peer.ip()) {
-            return Err(invalid("the peer is this node itself: a local process"));
+        // No address of its own to compare means no way to tell a local
+        // process from a peer, so that fails closed too.
+        if own.is_empty() || own.contains(&peer.ip()) {
+            return Err(invalid(
+                "the peer is this node itself (a local process), or the node has no address",
+            ));
         }
         let who: WhoIsResponse =
             serde_json::from_slice(&body).map_err(|e| invalid(format!("whois reply: {e}")))?;
