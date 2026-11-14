@@ -14,5 +14,5 @@ name = "aienv"
 path = "src/main.rs"
 
 [dependencies]
+ai_env_app = { path = "../ai_env_app" }
 ai_env_core = { path = "../ai_env_core" }
-ai_env_fs = { path = "../ai_env_fs" }

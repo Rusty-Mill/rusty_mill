@@ -1,6 +1,7 @@
 //! Command line parsing: pure, no I/O. Illegal states are unrepresentable: only
 //! `enable` and `disable` carry an entry and `--yes`.
 
+pub use ai_env_app::Scope;
 use ai_env_core::{EntryId, ToolId};
 use std::ffi::OsString;
 use std::fmt;
@@ -16,13 +17,6 @@ usage: aienv list --skills DIR... [--tool ID]...
   --yes         apply the plan; without it enable and disable only show the plan
 
 exit status: 0 done, 1 a path was refused (nothing changed there), 2 usage, 3 error";
-
-/// Where to look and which tools to consider.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Scope {
-    pub skills: Vec<PathBuf>,
-    pub tools: Vec<ToolId>,
-}
 
 /// One entry to change, and whether to apply the plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
