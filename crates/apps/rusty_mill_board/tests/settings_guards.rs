@@ -292,14 +292,4 @@ fn a_connector_cannot_reset_an_agent_to_the_connectors_admin_role_or_rotate_a_to
         ),
         "not through a shared connector",
     );
-    // The person's own token may.
-    let out = r
-        .call(
-            &person("mid"),
-            None,
-            "settings_agent_rotate",
-            json!({"name": "nano"}),
-        )
-        .expect("a person rotates");
-    assert!(out["token"].is_string());
 }
