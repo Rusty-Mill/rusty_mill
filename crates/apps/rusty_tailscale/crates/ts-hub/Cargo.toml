@@ -26,3 +26,5 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+ts-net.workspace = true
+rusty_sha2.workspace = true
