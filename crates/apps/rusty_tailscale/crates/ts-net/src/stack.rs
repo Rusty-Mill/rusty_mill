@@ -7,12 +7,12 @@
 //! (`SetAddr`, `Bind`) and per-connection app→net traffic (`Data`, `Close`)
 //! travel the same queue, so there is never a second owner of a socket.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Instant as StdInstant;
 
@@ -56,6 +56,28 @@ pub(crate) enum Request {
     Data { id: usize, bytes: Vec<u8> },
     /// The application closed connection `id`'s write side.
     Close { id: usize },
+    /// The application took a chunk off its queue: there is room again, so
+    /// service the sockets (a held chunk, a window update).
+    Poke,
+    /// Open a connection to `addr` on the tailnet; the reply is the stream
+    /// once established, or why it was not.
+    Connect {
+        addr: SocketAddr,
+        reply: oneshot::Sender<io::Result<TcpStream>>,
+    },
+}
+
+/// How long an outbound connection may take to establish.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// First ephemeral local port for outbound connections.
+const EPHEMERAL_PORT_START: u16 = 49152;
+
+/// An outbound connection still in its handshake.
+struct Dialing {
+    handle: SocketHandle,
+    peer: SocketAddr,
+    since: StdInstant,
+    reply: oneshot::Sender<io::Result<TcpStream>>,
 }
 
 /// Spawns the stack task and returns the request sender.
@@ -73,6 +95,12 @@ struct Conn {
     handle: SocketHandle,
     /// net → app data.
     to_app: mpsc::Sender<Vec<u8>>,
+    /// A chunk already taken from smoltcp's receive buffer that the app
+    /// queue had no room for; retried first, never dropped.
+    pending_rx: Option<Vec<u8>>,
+    /// Set while `pending_rx` is held; the reader clears it and pokes the
+    /// stack, so a read wakes the stack only when something is waiting.
+    held: Arc<AtomicBool>,
     /// app → net bytes not yet accepted by smoltcp.
     out: Vec<u8>,
     /// Application closed its write half; close once `out` drains.
@@ -102,6 +130,8 @@ struct Stack {
     conns: HashMap<usize, Conn>,
     handle_to_id: HashMap<SocketHandle, usize>,
     next_id: usize,
+    dialing: Vec<Dialing>,
+    next_port: u16,
     addr: Option<Ipv4Addr>,
     start: StdInstant,
     /// Cloned into each `TcpStream` so the app can send `Data`/`Close`.
@@ -133,6 +163,8 @@ impl Stack {
             conns: HashMap::new(),
             handle_to_id: HashMap::new(),
             next_id: 1,
+            dialing: Vec::new(),
+            next_port: EPHEMERAL_PORT_START,
             addr: None,
             start,
             req_tx,
@@ -190,6 +222,9 @@ impl Stack {
                     conn.out.extend_from_slice(&bytes);
                 }
             }
+            // The app drained its queue: service the sockets again.
+            Request::Poke => {}
+            Request::Connect { addr, reply } => self.dial(addr, reply),
             Request::Close { id } => {
                 if let Some(conn) = self.conns.get_mut(&id) {
                     conn.closing = true;
@@ -226,6 +261,133 @@ impl Stack {
         accept_rx
     }
 
+    /// Wraps an established socket in a [`Conn`] and returns its stream.
+    fn register(&mut self, handle: SocketHandle, peer: SocketAddr) -> TcpStream {
+        let id = self.next_id;
+        self.next_id += 1;
+        let (to_app, from_net) = mpsc::channel(APP_QUEUE_DEPTH);
+        let out_len = Arc::new(AtomicUsize::new(0));
+        let write_waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+        let held = Arc::new(AtomicBool::new(false));
+        self.conns.insert(
+            id,
+            Conn {
+                handle,
+                to_app,
+                pending_rx: None,
+                held: held.clone(),
+                out: Vec::new(),
+                closing: false,
+                out_len: out_len.clone(),
+                write_waker: write_waker.clone(),
+            },
+        );
+        self.handle_to_id.insert(handle, id);
+
+        TcpStream {
+            id,
+            net: self.req_tx.clone(),
+            from_net,
+            leftover: Vec::new(),
+            pos: 0,
+            peer,
+            write_closed: false,
+            out_len,
+            write_waker,
+            held,
+        }
+    }
+
+    /// Next ephemeral port that no live socket (outbound or listening) holds.
+    fn free_port(&mut self) -> Option<u16> {
+        let used: HashSet<u16> = self
+            .sockets
+            .iter()
+            .map(|(_, s)| {
+                let smoltcp::socket::Socket::Tcp(t) = s;
+                t.local_endpoint()
+                    .map_or(t.listen_endpoint().port, |e| e.port)
+            })
+            .collect();
+        (EPHEMERAL_PORT_START..=u16::MAX)
+            .cycle()
+            .skip((self.next_port - EPHEMERAL_PORT_START) as usize)
+            .take((u16::MAX - EPHEMERAL_PORT_START) as usize + 1)
+            .find(|p| !used.contains(p))
+            .inspect(|p| {
+                self.next_port = if *p == u16::MAX {
+                    EPHEMERAL_PORT_START
+                } else {
+                    p + 1
+                };
+            })
+    }
+
+    /// Starts an outbound connection; `service_sockets` finishes it.
+    fn dial(&mut self, addr: SocketAddr, reply: oneshot::Sender<io::Result<TcpStream>>) {
+        let (Some(_), IpAddr::V4(ip)) = (self.addr, addr.ip()) else {
+            let _ = reply.send(Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "ts-net: no tailnet address yet, or not an IPv4 peer",
+            )));
+            return;
+        };
+        let mut sock = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0u8; SOCKET_BUFFER]),
+            tcp::SocketBuffer::new(vec![0u8; SOCKET_BUFFER]),
+        );
+        let Some(port) = self.free_port() else {
+            let _ = reply.send(Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "ts-net: no free local port",
+            )));
+            return;
+        };
+        let remote = smoltcp::wire::IpEndpoint::new(IpAddress::Ipv4(ip), addr.port());
+        if let Err(e) = sock.connect(self.iface.context(), remote, port) {
+            let _ = reply.send(Err(io::Error::other(format!("ts-net: connect: {e}"))));
+            return;
+        }
+        let handle = self.sockets.add(sock);
+        self.dialing.push(Dialing {
+            handle,
+            peer: addr,
+            since: StdInstant::now(),
+            reply,
+        });
+    }
+
+    /// Hands established outbound connections to their callers, and fails
+    /// refused or timed-out ones.
+    fn finish_dials(&mut self) {
+        let dialing = std::mem::take(&mut self.dialing);
+        for dial in dialing {
+            let state = self.sockets.get::<tcp::Socket>(dial.handle).state();
+            match state {
+                tcp::State::Established => {
+                    let stream = self.register(dial.handle, dial.peer);
+                    let _ = dial.reply.send(Ok(stream));
+                }
+                tcp::State::SynSent | tcp::State::SynReceived
+                    if dial.since.elapsed() < CONNECT_TIMEOUT =>
+                {
+                    self.dialing.push(dial);
+                }
+                other => {
+                    self.sockets.remove(dial.handle);
+                    let kind = if matches!(other, tcp::State::Closed) {
+                        io::ErrorKind::ConnectionRefused
+                    } else {
+                        io::ErrorKind::TimedOut
+                    };
+                    let _ = dial
+                        .reply
+                        .send(Err(io::Error::new(kind, "ts-net: connect failed")));
+                }
+            }
+        }
+    }
+
     /// Creates a fresh TCP socket in LISTEN on `port` and returns its handle.
     fn open_listen_socket(&mut self, port: u16) -> SocketHandle {
         let mut sock = tcp::Socket::new(
@@ -241,6 +403,7 @@ impl Stack {
     /// promotes freshly-connected listen sockets, and reaps dead connections.
     fn service_sockets(&mut self) {
         self.accept_new();
+        self.finish_dials();
 
         let ids: Vec<usize> = self.conns.keys().copied().collect();
         for id in ids {
@@ -266,35 +429,8 @@ impl Stack {
                     .map(|ep| SocketAddr::new(smol_addr(ep.addr), ep.port))
                     .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
 
-                let id = self.next_id;
-                self.next_id += 1;
-                let (to_app, from_net) = mpsc::channel(APP_QUEUE_DEPTH);
-                let out_len = Arc::new(AtomicUsize::new(0));
-                let write_waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
-                self.conns.insert(
-                    id,
-                    Conn {
-                        handle,
-                        to_app,
-                        out: Vec::new(),
-                        closing: false,
-                        out_len: out_len.clone(),
-                        write_waker: write_waker.clone(),
-                    },
-                );
-                self.handle_to_id.insert(handle, id);
-
-                let stream = TcpStream {
-                    id,
-                    net: self.req_tx.clone(),
-                    from_net,
-                    leftover: Vec::new(),
-                    pos: 0,
-                    peer,
-                    write_closed: false,
-                    out_len,
-                    write_waker,
-                };
+                let stream = self.register(handle, peer);
+                let id = stream.id;
                 // Replace the claimed listen socket with a fresh one.
                 let replacement = self.open_listen_socket(port);
                 let listener = &mut self.listeners[li];
@@ -343,23 +479,36 @@ impl Stack {
 
         // net → app: drain smoltcp's receive buffer into the app channel until
         // it fills (then leave the rest to apply TCP backpressure).
-        while sock.can_recv() {
-            let mut buf = vec![0u8; MTU];
-            match sock.recv_slice(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    buf.truncate(n);
-                    match conn.to_app.try_send(buf) {
-                        Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => break,
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            // App dropped the read half: tear the connection down.
-                            sock.abort();
-                            break;
+        loop {
+            let chunk = match conn.pending_rx.take() {
+                Some(chunk) => chunk,
+                None if sock.can_recv() => {
+                    let mut buf = vec![0u8; MTU];
+                    match sock.recv_slice(&mut buf) {
+                        Ok(n) if n > 0 => {
+                            buf.truncate(n);
+                            buf
                         }
+                        _ => break,
                     }
                 }
-                Err(_) => break,
+                None => break,
+            };
+            // Raised before the send so a reader that drains the queue right
+            // after a `Full` still sees it and pokes.
+            conn.held.store(true, Ordering::Release);
+            match conn.to_app.try_send(chunk) {
+                Ok(()) => conn.held.store(false, Ordering::Release),
+                // Already out of smoltcp's buffer: keep it for the next pass.
+                Err(mpsc::error::TrySendError::Full(chunk)) => {
+                    conn.pending_rx = Some(chunk);
+                    break;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    // App dropped the read half: tear the connection down.
+                    sock.abort();
+                    break;
+                }
             }
         }
 
@@ -428,6 +577,8 @@ pub struct TcpStream {
     /// task when `poll_write` parks so the stack can wake it once `out`
     /// drains.
     write_waker: Arc<Mutex<Option<Waker>>>,
+    /// Mirrors the stack's `Conn::held`: a chunk is waiting for queue room.
+    held: Arc<AtomicBool>,
 }
 
 impl TcpStream {
@@ -453,6 +604,9 @@ impl AsyncRead for TcpStream {
         }
         match self.from_net.poll_recv(cx) {
             Poll::Ready(Some(chunk)) => {
+                if self.held.swap(false, Ordering::AcqRel) {
+                    let _ = self.net.send(Request::Poke);
+                }
                 let n = chunk.len().min(buf.remaining());
                 buf.put_slice(&chunk[..n]);
                 if n < chunk.len() {
@@ -590,6 +744,7 @@ mod tests {
     const SYN: u8 = 0x02;
     const ACK: u8 = 0x10;
     const PSH: u8 = 0x08;
+    const RST: u8 = 0x04;
 
     fn tcp_flags(segment: &[u8]) -> u8 {
         segment[33]
@@ -669,6 +824,224 @@ mod tests {
         drop(outbound_rx);
     }
 
+    /// `connect` sends a SYN, finishes on the peer's SYN-ACK, and the stream
+    /// carries data both ways.
+    #[rusty_tokio::test]
+    async fn connect_completes_on_syn_ack_and_carries_data() {
+        use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (inbound_tx, inbound_rx) = mpsc::channel(16);
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let stack = Stack::new(req_tx.clone(), inbound_rx, req_rx, outbound_tx);
+        rusty_tokio::spawn(stack.run());
+
+        let our = Ipv4Addr::new(100, 64, 0, 1);
+        let peer = Ipv4Addr::new(100, 64, 0, 9);
+        req_tx.send(Request::SetAddr(our)).unwrap();
+        let (reply, rx) = oneshot::channel();
+        req_tx
+            .send(Request::Connect {
+                addr: SocketAddr::new(IpAddr::V4(peer), 7600),
+                reply,
+            })
+            .unwrap();
+
+        let syn = rusty_tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tcp_flags(&syn), SYN, "an outbound SYN");
+        let our_port = u16::from_be_bytes([syn[20], syn[21]]);
+        let our_isn = u32::from_be_bytes([syn[24], syn[25], syn[26], syn[27]]);
+        inbound_tx
+            .send(tcp_segment(
+                peer,
+                our,
+                7600,
+                our_port,
+                500,
+                our_isn.wrapping_add(1),
+                SYN | ACK,
+                &[],
+            ))
+            .await
+            .unwrap();
+        let mut stream = rusty_tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("connect completes")
+            .unwrap()
+            .expect("established");
+        assert_eq!(stream.peer_addr(), SocketAddr::new(IpAddr::V4(peer), 7600));
+
+        stream.write_all(b"ping").await.unwrap();
+        let mut sent = Vec::new();
+        while sent.len() < 4 {
+            let pkt = rusty_tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            sent.extend_from_slice(&pkt[40..]);
+        }
+        assert_eq!(sent, b"ping");
+
+        inbound_tx
+            .send(tcp_segment(
+                peer,
+                our,
+                7600,
+                our_port,
+                501,
+                our_isn.wrapping_add(5),
+                ACK | PSH,
+                b"pong",
+            ))
+            .await
+            .unwrap();
+        let mut buf = [0u8; 8];
+        let n = rusty_tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..n], b"pong");
+    }
+
+    /// A refused connection (RST) is an error, not a hang.
+    #[rusty_tokio::test]
+    async fn connect_refused_is_an_error() {
+        let (inbound_tx, inbound_rx) = mpsc::channel(16);
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let stack = Stack::new(req_tx.clone(), inbound_rx, req_rx, outbound_tx);
+        rusty_tokio::spawn(stack.run());
+        let our = Ipv4Addr::new(100, 64, 0, 1);
+        let peer = Ipv4Addr::new(100, 64, 0, 9);
+        req_tx.send(Request::SetAddr(our)).unwrap();
+        let (reply, rx) = oneshot::channel();
+        req_tx
+            .send(Request::Connect {
+                addr: SocketAddr::new(IpAddr::V4(peer), 7600),
+                reply,
+            })
+            .unwrap();
+        let syn = outbound_rx.recv().await.unwrap();
+        let our_port = u16::from_be_bytes([syn[20], syn[21]]);
+        let our_isn = u32::from_be_bytes([syn[24], syn[25], syn[26], syn[27]]);
+        inbound_tx
+            .send(tcp_segment(
+                peer,
+                our,
+                7600,
+                our_port,
+                0,
+                our_isn.wrapping_add(1),
+                RST | ACK,
+                &[],
+            ))
+            .await
+            .unwrap();
+        let result = rusty_tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("an answer")
+            .unwrap();
+        assert!(result.is_err());
+    }
+
+    /// Ephemeral ports skip those a live socket holds, including across the
+    /// wrap from `u16::MAX` back to the start of the range.
+    #[rusty_tokio::test]
+    async fn free_port_skips_ports_in_use_across_the_wrap() {
+        let (_inbound_tx, inbound_rx) = mpsc::channel(1);
+        let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let mut stack = Stack::new(req_tx, inbound_rx, req_rx, outbound_tx);
+        for port in [EPHEMERAL_PORT_START, EPHEMERAL_PORT_START + 1] {
+            let mut sock = tcp::Socket::new(
+                tcp::SocketBuffer::new(vec![0u8; 16]),
+                tcp::SocketBuffer::new(vec![0u8; 16]),
+            );
+            sock.listen(port).unwrap();
+            stack.sockets.add(sock);
+        }
+        stack.next_port = u16::MAX;
+        assert_eq!(stack.free_port(), Some(u16::MAX));
+        assert_eq!(stack.free_port(), Some(EPHEMERAL_PORT_START + 2));
+        assert_eq!(stack.free_port(), Some(EPHEMERAL_PORT_START + 3));
+    }
+
+    /// A burst larger than the app queue (16 chunks) must arrive whole and in
+    /// order: a chunk taken from smoltcp that the queue had no room for was
+    /// once dropped, so a message of more than ~30 KB never completed.
+    #[rusty_tokio::test]
+    async fn a_burst_larger_than_the_app_queue_is_delivered_whole() {
+        let (inbound_tx, inbound_rx) = mpsc::channel(16);
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let stack = Stack::new(req_tx.clone(), inbound_rx, req_rx, outbound_tx);
+        rusty_tokio::spawn(stack.run());
+
+        let our = Ipv4Addr::new(100, 64, 0, 1);
+        let peer = Ipv4Addr::new(100, 64, 0, 9);
+        req_tx.send(Request::SetAddr(our)).unwrap();
+        let (reply, rx) = oneshot::channel();
+        req_tx.send(Request::Bind { port: 8080, reply }).unwrap();
+        let mut accept_rx = rx.await.unwrap();
+
+        inbound_tx
+            .send(tcp_segment(peer, our, 40000, 8080, 100, 0, SYN, &[]))
+            .await
+            .unwrap();
+        let synack = rusty_tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let isn = u32::from_be_bytes([synack[24], synack[25], synack[26], synack[27]]);
+        let ack = isn.wrapping_add(1);
+        inbound_tx
+            .send(tcp_segment(peer, our, 40000, 8080, 101, ack, ACK, &[]))
+            .await
+            .unwrap();
+
+        // 60 segments of 1000 bytes, none read until all are in.
+        let mut sent = Vec::new();
+        for i in 0..60u32 {
+            let payload: Vec<u8> = (0..1000).map(|j| (i as u8).wrapping_add(j as u8)).collect();
+            inbound_tx
+                .send(tcp_segment(
+                    peer,
+                    our,
+                    40000,
+                    8080,
+                    101 + i * 1000,
+                    ack,
+                    ACK | PSH,
+                    &payload,
+                ))
+                .await
+                .unwrap();
+            sent.extend_from_slice(&payload);
+            // Keep the ACKs the stack emits from piling up unread.
+            while outbound_rx.try_recv().is_ok() {}
+        }
+        let mut stream = rusty_tokio::time::timeout(Duration::from_secs(2), accept_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        rusty_tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        while got.len() < sent.len() {
+            let n = rusty_tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf))
+                .await
+                .expect("a chunk was lost: the read never completes")
+                .unwrap();
+            assert!(n > 0, "closed after {} of {} bytes", got.len(), sent.len());
+            got.extend_from_slice(&buf[..n]);
+            while outbound_rx.try_recv().is_ok() {}
+        }
+        assert!(got == sent, "bytes arrived out of order or altered");
+    }
+
     /// Round 5: `TcpStream::poll_write` used to unconditionally accept every
     /// write into `Conn::out` regardless of how much was already queued
     /// there, so a fast writer against a slow/never-reading peer could grow
@@ -692,6 +1065,7 @@ mod tests {
             write_closed: false,
             out_len: out_len.clone(),
             write_waker: write_waker.clone(),
+            held: Arc::new(AtomicBool::new(false)),
         };
         let mut cx = Context::from_waker(Waker::noop());
 
