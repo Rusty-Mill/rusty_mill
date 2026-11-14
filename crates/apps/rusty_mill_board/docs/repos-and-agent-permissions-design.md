@@ -47,6 +47,8 @@ Two registries, linked by an explicit edge.
 - Invariants, checked once in `Projects::parse`: names valid and unique per kind; every edge names a known repo; within one repo no two projects claim overlapping paths and at most one project has the empty claim (the *rest* owner); every repo has a rest owner (see migration).
 - Cards stay `project`-only. `repo_of` becomes `repos_of`. A card in a multi-repo project gets an **optional** `repo` field (default: the project's `default_repo`, an explicit field that is required whenever a project has more than one edge, so nothing depends on map order; single-repo projects change nothing). It is set at `card_add`/`card_assign`, validated against the project's edges.
 
+**As built (PR 1):** each repository's own project stays implicit (it is the rest owner, as today), so the file never lists it. A file is written as version 2 only when a project spans repositories or a repository has a `github` slug; otherwise it is written in the older form, so the previous binary can still read it on rollback. A project's value is `{"repos": {repo: [paths]}, "default_repo": ...}`, with `default_repo` required only when it spans several.
+
 ### Options
 
 | | A1: leave the shape, fix the UI | **A2: edge model above (recommended)** | A3: tags only (repo = tick tag) |
