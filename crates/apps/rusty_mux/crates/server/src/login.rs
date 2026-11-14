@@ -44,11 +44,13 @@
 //!
 //! Account checks are only these: a rule admits the principal, the account
 //! exists, and root comes only through a rule naming its principal. No
-//! passwords are ever asked for, and PAM is not consulted yet. A front door
+//! passwords are ever asked for. With `--pam` the site's PAM policy must also let the
+//! account in (`pam_acct_mgmt` only, D266). A front door
 //! that is not root can only serve its own account.
 
 pub(crate) mod forward;
 pub(crate) mod map;
+pub(crate) mod pam;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -73,6 +75,7 @@ use rusty_tokio::task::AbortHandle;
 use crate::endpoint::{self, check_parts, unsafe_dir};
 use crate::shared::{ACCEPT_RETRY, Lookups, Tailnet};
 use map::{AccountMap, Route, admits};
+pub use pam::PamGate;
 
 /// How long an account's new server has to start listening.
 const READY: Duration = Duration::from_secs(10);
@@ -97,6 +100,9 @@ pub struct Login {
     /// With `--udp-ports`: the ports an account's server may bind for UDP.
     /// The front door itself never opens a UDP socket.
     pub udp: Option<crate::UdpPorts>,
+    /// With `--pam`: the site's PAM policy, checked for the account in
+    /// [`admit`]. `None` is today's behaviour.
+    pub pam: Option<PamGate>,
 }
 
 /// How many connections the front door holds at once, counting those still
@@ -354,6 +360,18 @@ async fn admit(front: &Shared, id: u64, peer: &Peer) -> Result<(Account, Princip
     let account = blocking(move || platform_linux::account(&looked_up))
         .await?
         .ok_or_else(|| refuse(&format!("no account {name}")))?;
+    let pam = front.borrow().login.pam.clone();
+    if let Some(pam) = pam {
+        // A tailnet peer has no local name for `pam_access` to match.
+        let ruser = match &who {
+            Who::Local { user, .. } => Some(user.as_str()).filter(|u| !u.is_empty()),
+            Who::Tailnet(_) => None,
+        };
+        // The reason goes to stderr; the client sees only a closed socket.
+        pam.admit(&account.name, ruser)
+            .await
+            .map_err(|e| refuse(&format!("PAM: {e}")))?;
+    }
     let admitted = Admitted {
         who,
         account: account.name.clone(),

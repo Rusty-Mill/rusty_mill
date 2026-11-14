@@ -76,6 +76,7 @@ fn login(dir: &Path) -> Login {
         server: PathBuf::from(env!("CARGO_BIN_EXE_rusty-mux-server")),
         limits: Limits::default(),
         udp: None,
+        pam: None,
     }
 }
 
@@ -1094,5 +1095,85 @@ fn a_tailnet_peer_is_refused_a_datagram_association() {
     assert_eq!(whoami(&mut tailnet).0, "ts:carol@example.com");
     let why = open_datagram(&mut tailnet).expect_err("a tailnet peer has no UDP");
     assert!(why.contains("tailnet"), "{why}");
+    front.stop();
+}
+
+/// What a test's PAM gate was asked: `(account, ruser)`.
+type Asked = std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+/// A PAM gate that answers `allow`, and what it was asked.
+fn gate(allow: bool) -> (rusty_mux_server::PamGate, Asked) {
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = asked.clone();
+    let gate = rusty_mux_server::PamGate::new(move |account, ruser| {
+        log.lock()
+            .unwrap()
+            .push((account.to_owned(), ruser.map(str::to_owned)));
+        if allow {
+            Ok(())
+        } else {
+            Err("account expired (13)".into())
+        }
+    });
+    (gate, asked)
+}
+
+#[test]
+fn pam_admits_an_account_it_allows_and_names_the_peer() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(&dir, &format!("uid:{uid} {user}\n"));
+    let (pam, asked) = gate(true);
+    let pam = Some(pam);
+    let front = Front::with(&dir, "login.sock", Login { pam, ..login(&dir) });
+    let mut client = Client::connect_with(&front.socket, IDENTITY, None);
+    assert_eq!(whoami(&mut client).0, format!("uid:{uid}"));
+    assert_eq!(*asked.lock().unwrap(), [(user.clone(), Some(user))]);
+    front.stop();
+}
+
+#[test]
+fn pam_closes_an_account_it_refuses_before_any_server_starts() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(&dir, &format!("uid:{uid} {user}\n"));
+    let (pam, asked) = gate(false);
+    let pam = Some(pam);
+    let front = Front::with(&dir, "login.sock", Login { pam, ..login(&dir) });
+    assert!(
+        closed_unheard(&front.socket),
+        "a refused account was served"
+    );
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    // No account server was started for it.
+    assert!(
+        !dir.join("run").join(&user).exists(),
+        "a server was started"
+    );
+    front.stop();
+}
+
+#[test]
+fn pam_gets_no_ruser_for_a_tailnet_peer() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(
+        &dir,
+        &format!("uid:{uid} {user}\nts:carol@example.com {user}\n"),
+    );
+    let whois = fake_tailscaled(&dir, "carol@example.com", "100.64.0.1");
+    let (pam, asked) = gate(true);
+    let login = Login {
+        pam: Some(pam),
+        ..login(&dir)
+    };
+    let (front, addr) = Front::with_tailnet(&dir, "login.sock", login, Some(whois));
+    let door = bridge(&dir, addr.expect("tailnet address"));
+    let mut tailnet = Client::connect_with(&door, IDENTITY, None);
+    assert_eq!(whoami(&mut tailnet).0, "ts:carol@example.com");
+    assert_eq!(*asked.lock().unwrap(), [(user, None)]);
     front.stop();
 }

@@ -1,9 +1,14 @@
 # PAM account checks for login mode (card #1460): design note
 
-Status: Proposed. Nano gave the go ("PAM", 2026-11-14) and chose to load libpam with `dlopen`
-(2026-11-14, decision card; rusty_term D266, D267). He has not confirmed the design below on
-the PR, and Dottius's security review is still owed. Nothing is built. Owner gates apply
-before code: this is a new native dependency (approved as `dlopen`, see 3) and no new crate.
+Status: Built (the build PR). Nano gave the go ("PAM", 2026-11-14), chose to load libpam with
+`dlopen` (decision card, 2026-11-14), and confirmed the five design points and the build with
+"Go" (2026-11-14T21:03:59Z; rusty_term D266, D267, D273). Dottius's security review of the
+build PR is still owed. The code: `platform-linux` `sys/pam.rs` (the `dlopen` loader and
+`pam_acct_mgmt`), `server/src/login/pam.rs` (`PamGate`: the blocking pool, the 5 s deadline,
+the cap of 16), `admit` in `server/src/login.rs`. One difference from item 4: the PAM check
+runs after the account lookup and before the `still_by` re-check, so the re-check is the
+last word after the await and a reload during the check still closes the connection. The
+sample service file is `docs/projects/mux/pam.d-rusty-mux.sample`; nothing installs it.
 
 ## Context
 

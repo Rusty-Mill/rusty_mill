@@ -83,10 +83,12 @@ const USAGE: &str =
     "usage: rusty-mux-server [--udp ADDR[:PORT|:LO-HI]] [--udp-idle SECS] [--udp-lifetime SECS]
                         [--config FILE] [--state DIR | --no-state] [--idle-exit SECS] [<socket>]
        rusty-mux-server --login MAP [--runtime DIR] [--udp-ports ADDR:LO-HI]
-                        [--tailnet ADDR:PORT] <socket>
+                        [--tailnet ADDR:PORT] [--pam[=SERVICE]] <socket>
        rusty-mux-server --shared ALLOW [--tailnet ADDR:PORT] [--config FILE]
                         [--tls ADDR:PORT --tls-cert PEM --tls-key PEM --tokens FILE]
                         [--state DIR | --no-state] <socket>";
+/// The PAM service `--pam` names unless told otherwise (`/etc/pam.d/rusty-mux`).
+const PAM_SERVICE: &str = "rusty-mux";
 /// Where login mode puts each account's server unless `--runtime` says.
 const RUNTIME: &str = "/run/rusty-mux";
 /// How long a silent association lasts unless `--udp-idle` says.
@@ -135,6 +137,9 @@ enum Mode {
         tailnet: Option<SocketAddr>,
         /// `--udp-ports`: what an account's server may bind for UDP.
         udp_ports: Option<UdpPorts>,
+        /// `--pam`: the PAM service whose policy must let an account in. It
+        /// checks the account, not the person.
+        pam: Option<String>,
     },
     /// One server that also serves the users this allowlist names (C26),
     /// and the tailnet peers it names, on `--tailnet`'s address (C27).
@@ -178,6 +183,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let (mut socket, mut udp, mut idle, mut config) = (None, None, UDP_IDLE, None);
     let (mut login, mut runtime, mut forwarded_by) = (None, None, None);
     let mut udp_ports = None;
+    let mut pam = None;
     let mut life = None;
     let mut shared = None;
     let mut tailnet = None;
@@ -197,6 +203,8 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
                 udp_ports =
                     Some(UdpPorts::range(&text).map_err(|why| format!("--udp-ports {why}"))?);
             }
+            Some("--pam") => pam = Some(PAM_SERVICE.to_owned()),
+            Some(a) if a.starts_with("--pam=") => pam = Some(pam_service(&a["--pam=".len()..])?),
             Some("--udp-lifetime") => {
                 life = Some(seconds("--udp-lifetime", &value("--udp-lifetime")?)?)
             }
@@ -245,6 +253,9 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         if udp.is_some() || udp_ports.is_some() || idle_exit.is_some() {
             return Err("shared mode takes no --udp or --idle-exit yet".into());
         }
+        if pam.is_some() {
+            return Err("--pam needs --login: shared mode has no accounts to check".into());
+        }
         if socket.is_none() {
             return Err("shared mode needs a socket: other users must find it".into());
         }
@@ -272,6 +283,9 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     if udp_ports.is_some() && login.is_none() {
         return Err("--udp-ports needs --login".into());
     }
+    if pam.is_some() && login.is_none() {
+        return Err("--pam needs --login: it checks the account the map names".into());
+    }
     let mode = match (login, runtime, forwarded_by) {
         (None, None, None) => Mode::Personal,
         (None, None, Some(uid)) => Mode::Forwarded(uid),
@@ -289,6 +303,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
                 runtime,
                 tailnet,
                 udp_ports,
+                pam,
             }
         }
     };
@@ -311,6 +326,19 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         mode,
         idle_exit,
     })
+}
+
+/// A PAM service name: a plain file name in `/etc/pam.d`.
+fn pam_service(name: &str) -> Result<String, String> {
+    let plain = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if name.is_empty() || name.starts_with('.') || !plain {
+        return Err(format!(
+            "--pam={name}: not a service name (letters, digits, - _ .)"
+        ));
+    }
+    Ok(name.to_owned())
 }
 
 /// A whole, positive number of seconds for `flag`.
@@ -398,12 +426,13 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
         runtime,
         tailnet,
         udp_ports,
+        pam,
     } = args.mode
     {
         let socket = args
             .socket
             .ok_or_else(|| std::io::Error::other("no socket"))?;
-        return run_login(socket, map, runtime, tailnet, udp_ports);
+        return run_login(socket, map, runtime, tailnet, udp_ports, pam);
     }
     let env = |name: &str| std::env::var_os(name);
     let (socket, _) = endpoint::resolve(args.socket, env).map_err(std::io::Error::other)?;
@@ -535,9 +564,18 @@ fn run_login(
     runtime: PathBuf,
     tailnet: Option<SocketAddr>,
     udp: Option<UdpPorts>,
+    pam: Option<String>,
 ) -> std::io::Result<()> {
     use rusty_tokio::signal::unix::{SignalKind, signal};
 
+    // Fail closed, before the socket exists: no library, no service file or
+    // no working `pam_start` means no front door.
+    let pam = pam
+        .map(|service| {
+            rusty_mux_server::PamGate::open(&service)
+                .map_err(|why| std::io::Error::other(format!("--pam {service}: {why}")))
+        })
+        .transpose()?;
     // Before the runtime starts a thread: binding sets the umask.
     let listener = rusty_mux_server::bind_front_door(&socket)?;
     let server = std::env::current_exe()?;
@@ -547,6 +585,7 @@ fn run_login(
         server,
         limits: rusty_mux_server::Limits::default(),
         udp,
+        pam,
     };
     let runtime = Builder::new_current_thread().build_local(&LocalOptions::default())?;
     runtime.block_on(async {
@@ -785,6 +824,7 @@ mod tests {
             runtime: RUNTIME.into(),
             tailnet: None,
             udp_ports: None,
+            pam: None,
         };
         assert_eq!(front.mode, expected);
         let elsewhere = parse_str(&["--login", "m", "--runtime", "/tmp/r", "s"]).unwrap();
@@ -793,6 +833,7 @@ mod tests {
             runtime: "/tmp/r".into(),
             tailnet: None,
             udp_ports: None,
+            pam: None,
         };
         assert_eq!(elsewhere.mode, expected);
         let tailnet = parse_str(&["--login", "m", "--tailnet", "100.64.0.7:7000", "s"]).unwrap();
@@ -801,6 +842,7 @@ mod tests {
             runtime: RUNTIME.into(),
             tailnet: Some("100.64.0.7:7000".parse().unwrap()),
             udp_ports: None,
+            pam: None,
         };
         assert_eq!(tailnet.mode, expected);
         assert!(parse_str(&["--login", "m", "--tailnet", "127.0.0.1:7000", "s"]).is_err());
@@ -861,6 +903,36 @@ mod tests {
         }
         assert!(parse_str(&["--tls", "0.0.0.0:7001", "s"]).is_err());
         assert!(parse_str(&["--shared", "a", "--tls", "nope", "s"]).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pam_is_off_unless_asked_and_names_a_plain_service() {
+        let pam = |extra: &[&str]| {
+            let mut args = vec!["--login", "m"];
+            args.extend(extra);
+            args.push("s");
+            match parse_str(&args)?.mode {
+                Mode::Login { pam, .. } => Ok(pam),
+                other => Err(format!("{other:?}")),
+            }
+        };
+        assert_eq!(pam(&[]), Ok(None));
+        assert_eq!(pam(&["--pam"]), Ok(Some("rusty-mux".into())));
+        assert_eq!(pam(&["--pam=site_1.x"]), Ok(Some("site_1.x".into())));
+        for bad in [
+            "--pam=",
+            "--pam=a/b",
+            "--pam=../x",
+            "--pam=.hid",
+            "--pam=a b",
+        ] {
+            assert!(pam(&[bad]).is_err(), "{bad}");
+        }
+        // It checks the account the map names, so it needs a map.
+        assert!(parse_str(&["--pam", "s"]).is_err());
+        assert!(parse_str(&["--shared", "a", "--pam", "s"]).is_err());
+        assert!(parse_str(&["--forwarded-by", "1", "--pam", "s"]).is_err());
     }
 
     #[cfg(target_os = "linux")]
