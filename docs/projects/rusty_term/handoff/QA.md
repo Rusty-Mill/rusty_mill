@@ -87,3 +87,7 @@ Source: D235; D236; D237; `docs/projects/mux/TLS-LISTENER.md`; `crates/libs/net/
 ## What does PAM login mode check, and how does a refusal look?
 Asked 2026-11-14 (#1460). Account checks only (`pam_acct_mgmt` on the target account, for every principal source); never passwords; sessions deferred because account servers outlive the front door. Off unless `--pam`; fails closed; a refusal is a closed socket plus a stderr line, no wire change (D266). The dependency is loaded with dlopen at run time, no link and no `-dev` package (Nano, D267 [stated]); the session scope stays open (Q65).
 Source: D266; D267; D233; D39; mux `RISKS.md` R17; `REX-DELTA.md` R8/D9; `crates/apps/rusty_mux/crates/server/src/login.rs` `admit`.
+
+## Does UDP work for login-mode account servers?
+Not yet; it is a go (D268) with a design note first (PR #1689). The front door only passes `--udp ADDR:LO-HI`; each account server binds the first free port itself and starts without UDP when the range is full. Tailnet principals are refused `OpenDatagram`; account servers use `--udp-idle 3600`; no wire change (D269, Q66).
+Source: D268; D269; D45; mux `UDP-ACCOUNTS.md`, `SHARED-MODE.md`; `crates/apps/rusty_mux/crates/server/src/main.rs` (250-258).
