@@ -122,6 +122,15 @@ pub(crate) struct Who {
     agent_key: Option<String>,
 }
 
+/// The `properties` of [`Who`]'s schema, for operations whose arguments are described by hand.
+pub(crate) fn who_properties() -> Value {
+    let schema = serde_json::to_value(schemars::schema_for!(Who)).unwrap_or(Value::Null);
+    schema
+        .get("properties")
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
+
 /// The acting identity: the credential's if there is one, else the arguments'. A credential
 /// fixes the role and the actor; the actor may only gain a `/label` naming the agent
 /// instance (attribution, not authority). Anything else that disagrees is refused.

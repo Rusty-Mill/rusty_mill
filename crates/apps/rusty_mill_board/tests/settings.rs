@@ -82,7 +82,10 @@ fn start_with(name: &str, oauth: bool) -> Fixture {
         ..HttpConfig::default()
     };
     let path = config.path.clone();
-    let mcp = HttpHandler::new(mcp::server(board.clone()).expect("server"), config);
+    let mcp = HttpHandler::new(
+        mcp::server_with(board.clone(), Arc::default(), Some(settings.clone())).expect("server"),
+        config,
+    );
     let web = Web::new(
         board,
         mcp,
@@ -1422,4 +1425,59 @@ fn narrowing_a_lead_removes_the_agents_it_minted_that_no_longer_fit() {
     assert_eq!(out["removed"], json!(["chief.w"]));
     assert_eq!(call(f.addr, &worker, "board_whoami", &json!({})).0, 401);
     assert_eq!(call(f.addr, &helper, "board_whoami", &json!({})).0, 200);
+}
+
+/// One JSON-RPC call to `/mcp`; the reply's `result`.
+fn mcp(addr: SocketAddr, token: &str, rpc: &Value) -> Value {
+    let body = rpc.to_string();
+    let raw = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let mut sock = TcpStream::connect(addr).expect("connect");
+    sock.write_all(raw.as_bytes()).expect("write");
+    let mut out = String::new();
+    sock.read_to_string(&mut out).expect("read");
+    let text = out.split("\r\n\r\n").nth(1).unwrap_or("");
+    let start = text.find('{').expect("a json reply");
+    let line = text[start..].lines().next().unwrap_or("");
+    serde_json::from_str::<Value>(line).expect("json-rpc")["result"].clone()
+}
+
+#[test]
+fn settings_are_mcp_tools_except_those_that_carry_a_secret() {
+    let f = start("mcp_tools");
+    let listed = mcp(
+        f.addr,
+        &f.admin,
+        &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+    );
+    let names: Vec<&str> = listed["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    for want in [
+        "settings_get",
+        "settings_audit",
+        "settings_registered_agent_set",
+        "settings_projects_set",
+    ] {
+        assert!(names.contains(&want), "{want} is a tool");
+    }
+    for secret in [
+        "settings_agent_add",
+        "settings_agent_rotate",
+        "settings_github_set",
+        "agent_enrol",
+    ] {
+        assert!(!names.contains(&secret), "{secret} stays HTTP-only");
+    }
+    let got = mcp(
+        f.addr,
+        &f.admin,
+        &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"settings_get","arguments":{}}}),
+    );
+    assert!(got["structuredContent"]["roles"].is_object(), "{got}");
 }

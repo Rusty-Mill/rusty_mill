@@ -525,8 +525,9 @@ fn run(cli: Cli) -> Result<(), String> {
     }
 
     let in_flight: Arc<InFlight> = Arc::default();
-    let server = mcp::server_with(board.clone(), in_flight.clone()).map_err(|e| e.to_string())?;
     let Some(addr) = cli.http else {
+        let server =
+            mcp::server_with(board.clone(), in_flight.clone(), None).map_err(|e| e.to_string())?;
         let _settings = Settings::new(board, files, None, syncer, github);
         return serve_stdio(server).map_err(|e| format!("stdio failed: {e}"));
     };
@@ -578,6 +579,8 @@ fn run(cli: Cli) -> Result<(), String> {
     let settings = Arc::new(
         Settings::new(board.clone(), files, creds, syncer, github).with_server(server_info),
     );
+    let server = mcp::server_with(board.clone(), in_flight.clone(), Some(settings.clone()))
+        .map_err(|e| e.to_string())?;
     let mut web = Web::new(
         board.clone(),
         HttpHandler::new(server, config),

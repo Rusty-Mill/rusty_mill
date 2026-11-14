@@ -387,6 +387,116 @@ struct GithubSet {
 
 type Res = Result<Value, BoardError>;
 
+/// A settings operation offered as an MCP tool.
+pub struct SettingsTool {
+    /// Tool name, the same as the `/api` operation.
+    pub name: &'static str,
+    /// Shown to agents.
+    pub description: &'static str,
+    /// JSON Schema of the arguments.
+    pub schema: Value,
+}
+
+/// The settings operations an agent may call over MCP: every one except those that hand out or
+/// take in a secret (`settings_agent_add`, `settings_agent_rotate` return a raw token;
+/// `settings_github_set` takes one), which stay HTTP-only, a person's act in Settings. Each needs
+/// the `admin` capability, and what it may grant is limited by the subset rule.
+pub fn tools() -> Vec<SettingsTool> {
+    let list = |item: Value| json!({"type": "array", "items": item});
+    let text = json!({"type": "string"});
+    let tool = |name, description, props: Value, required: &[&str]| {
+        let mut properties = crate::api::who_properties();
+        if let (Some(all), Some(mine)) = (properties.as_object_mut(), props.as_object()) {
+            all.extend(mine.clone());
+        }
+        SettingsTool {
+            name,
+            description,
+            schema: json!({"type": "object", "properties": properties, "required": required}),
+        }
+    };
+    vec![
+        tool(
+            "settings_get",
+            "Everything configurable (needs admin): agents, projects and repositories (`registry`), roles and capabilities, workflow, rules, project statuses, registered agents and files. Never a secret.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "settings_audit",
+            "Recent settings calls (needs admin), oldest first: who, operation, result (ok, refused, denied, failed) and why; never arguments.",
+            json!({"limit": {"type": "integer", "description": "How many of the newest records (1-500, default 50)."}}),
+            &[],
+        ),
+        tool(
+            "settings_registered_agent_set",
+            "Set a registered agent's own role, projects and nickname (needs admin). Anything left out is cleared, so it acts as its connector again. You can only give a role, capabilities and projects you hold; admin and enrol are never granted through a connector.",
+            json!({"id": text, "agent_role": text, "agent_projects": list(text.clone()), "nickname": text}),
+            &["id"],
+        ),
+        tool(
+            "settings_registered_agent_revoke",
+            "Forget a registered agent (needs admin): its key stops working at once; it can register again.",
+            json!({"id": text}),
+            &["id"],
+        ),
+        tool(
+            "settings_agent_update",
+            "Change a token credential's role or project limit (needs admin): `{agent: {name, role?, projects?}}`; `projects: null` lifts the limit. You can only give what you hold.",
+            json!({"agent": {"type": "object"}}),
+            &["agent"],
+        ),
+        tool(
+            "settings_agent_remove",
+            "Remove a token credential (needs admin): `{name}`. The last admin cannot be removed.",
+            json!({"name": text}),
+            &["name"],
+        ),
+        tool(
+            "settings_projects_set",
+            "Replace the projects registry (needs admin): either `repos` (repository -> project -> paths) or `registry` (the version 2 file: repositories with an optional `github` slug and projects spanning repositories). A project that cards still use cannot lose the repository they are in.",
+            json!({"repos": {"type": "object"}, "registry": {"type": "object"}}),
+            &[],
+        ),
+        tool(
+            "settings_roles_set",
+            "Replace the roles (needs admin): `{roles: {name: [capabilities]}}`. You can only add capabilities you hold; admin and enrol are never granted through a connector.",
+            json!({"roles": {"type": "object"}}),
+            &["roles"],
+        ),
+        tool(
+            "settings_role_rename",
+            "Rename a role, agents included (needs admin).",
+            json!({"from": text, "to": text}),
+            &["from", "to"],
+        ),
+        tool(
+            "settings_rules_set",
+            "Whether card moves follow the transition table (needs admin): `movement` is `enforced` or `open`.",
+            json!({"movement": {"type": "string", "enum": ["enforced", "open"]}}),
+            &["movement"],
+        ),
+        tool(
+            "settings_project_status_set",
+            "Set a project's status (needs admin), such as active or paused.",
+            json!({"project": text, "status": text}),
+            &["project", "status"],
+        ),
+        tool(
+            "settings_workflow_set",
+            "Replace the workflow, its columns and moves (needs admin): `{workflow}` as `board_columns` shows it.",
+            json!({"workflow": {"type": "object"}}),
+            &["workflow"],
+        ),
+        tool(
+            "settings_app_revoke",
+            "Sign an app out (needs admin): drop its registration and every token it holds.",
+            json!({"client_id": text}),
+            &["client_id"],
+        ),
+    ]
+}
+
 /// Who is changing settings: their authority, and whether they came through a shared connector.
 struct Caller {
     actor: Actor,
