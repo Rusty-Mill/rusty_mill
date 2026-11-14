@@ -258,3 +258,8 @@ pub use libc::{memfd_create, MFD_CLOEXEC};
 // `lseek`/`SEEK_SET`: test-only, for `memfd_create`'s own conformance
 // tests (rewind after a raw `write` to read back what was just written).
 pub use libc::{lseek, SEEK_SET};
+
+// `sys::pam`: libpam is loaded at run time (mux D267), never linked, so a
+// host without it still runs the binary. Absolute paths and `RTLD_LOCAL`
+// only; see the module for why.
+pub use libc::{c_void, dlclose, dlopen, dlsym, RTLD_LOCAL, RTLD_NOW};

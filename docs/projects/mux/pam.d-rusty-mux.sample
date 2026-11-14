@@ -1,0 +1,10 @@
+# /etc/pam.d/rusty-mux: the service `rusty-mux-server --login MAP --pam` asks.
+# Account checks only (pam_acct_mgmt): no auth, password or session lines are used.
+# Copy it to /etc/pam.d/rusty-mux; nothing installs it. Without that file --pam
+# refuses to start (Linux-PAM would fall back to `other`, which may allow).
+#
+# Debian/Ubuntu: honour /etc/nologin, expired and locked accounts, time and host rules.
+account  required  pam_nologin.so
+account  include   common-account
+# Other distributions: replace the include with their account stack, for example
+# account  required  pam_unix.so

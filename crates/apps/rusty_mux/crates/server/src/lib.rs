@@ -74,7 +74,7 @@ use rusty_tokio::io::{UdpSocket, UnixListener};
 
 #[cfg(target_os = "linux")]
 pub use login::{
-    Limits, Login, MAX_MAP, Reload, bind as bind_front_door, serve_login, serve_login_with,
+    Limits, Login, MAX_MAP, PamGate, Reload, bind as bind_front_door, serve_login, serve_login_with,
 };
 #[cfg(target_os = "linux")]
 pub use shared::{Sharing, Tailnet, serve_shared};
