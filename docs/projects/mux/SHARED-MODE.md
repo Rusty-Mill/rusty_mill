@@ -75,4 +75,6 @@ C14 live sharing (#278) builds on shared mode and C77 leases and adds no second 
 
 **Tailnet (C27 slice 2, proposed):** `--tailnet ADDR:PORT` adds a listener on a tailnet address. A peer is served only if the allowlist names its `ts:LOGIN` or `ts-node:NAME`, with the same guest rules as above.
 
+**Tailnet in login mode (C27 slice 3, proposed):** `--login MAP --tailnet ADDR:PORT` does the same on the front door, with the map in place of the allowlist: a `ts:LOGIN` or `ts-node:NAME` rule names the account the peer uses. No `=` and no `*` for tailnet peers.
+
 A `ts:` or `ts-node:` entry matches the principal id exactly, so `ts:Nano@example.com` and `ts:nano@example.com` are different entries.
