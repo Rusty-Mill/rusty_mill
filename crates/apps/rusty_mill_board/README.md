@@ -101,7 +101,7 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   task, beside `number:<n>`, so there is no migration.
 - **Project status.** A project is `active` (the default), `paused`, `experiment` or `archived`, kept in
   `project-status.json` in the settings directory (only non-active projects are listed; the projects file keeps its
-  format). Settings > Repositories sets it per project, a repository's own project included but not the Inbox
+  format). Settings > Repositories sets it per project, a repository's own project included (the screen shows no control for the Inbox)
   (`settings_project_status_set`, admin), written before it applies. Paused and archived projects refuse `card_add`, forge imports (retried once active), open cards moved in
   with `card_assign` (a Done card may still be re-filed there), `card_claim`, and moves into a work column from
   outside one; `card_take` hands out none of their work. Work already under way may move on and finish. An

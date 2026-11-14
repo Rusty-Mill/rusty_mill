@@ -1327,7 +1327,7 @@ function reposTab(){
     const fs=el("fieldset");fs.append(el("legend",r));
     // A repository's own project is implied, so it is not in the draft; its status is set here (not the Inbox's).
     if(r!==INBOX&&cfg.repos[r]&&Object.hasOwn(cfg.repos[r],r)){
-      const own=el("div",null,"row");own.append(el("span",r+" (the repository's own project) "),statusSelect(r));fs.append(own);
+      const own=el("div",null,"row");own.append(el("span",r+" (repository project)"),statusSelect(r));fs.append(own);
     }
     for(const p of draft[r]){
       const row=el("div",null,"row"),nm=field("input",{value:p.name,size:18,placeholder:"project name"}),
