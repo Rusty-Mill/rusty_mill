@@ -42,6 +42,8 @@ pub enum Command {
     Config(ConfigCommand),
     /// Lists, adds or removes saved hosts (C35).
     Hosts(HostsCommand),
+    /// Makes, replaces or removes an access token of the TLS listener (#506).
+    Token(TokenCommand),
     /// `hosts pull` or `hosts push`: merges saved hosts between this
     /// machine and another, per name (C49b).
     Sync(Sync),
@@ -401,6 +403,7 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
             }
             _ => hosts(rest).map(Command::Hosts),
         },
+        "token" => token(rest).map(Command::Token),
         "ssh" => ssh(rest).map(Command::Ssh),
         "terminfo" => terminfo(rest).map(Command::Terminfo),
         "watch" => watch(rest),
@@ -487,6 +490,50 @@ pub enum HostsCommand {
         name: String,
         addr: String,
     },
+}
+
+/// What `token` does to the token named `name` in the token file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenVerb {
+    /// A new token; the name must be free.
+    Create,
+    /// A new token in place of the old; the name must exist.
+    Rotate,
+    /// No token; the name must exist.
+    Revoke,
+}
+
+/// `token create|rotate|revoke NAME --file PATH` (#506, D237).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenCommand {
+    /// What to do.
+    pub verb: TokenVerb,
+    /// The token's name.
+    pub name: String,
+    /// The server's `--tokens` file.
+    pub file: String,
+}
+
+const TOKEN_USAGE: &str = "usage: token create|rotate|revoke NAME --file TOKENS";
+
+fn token(args: &[String]) -> Result<TokenCommand, String> {
+    let [verb, name, flag @ ..] = args else {
+        return Err(TOKEN_USAGE.into());
+    };
+    let verb = match verb.as_str() {
+        "create" => TokenVerb::Create,
+        "rotate" => TokenVerb::Rotate,
+        "revoke" => TokenVerb::Revoke,
+        _ => return Err(TOKEN_USAGE.into()),
+    };
+    match flags("token", flag, |_| false)?.as_slice() {
+        [("file", file)] => Ok(TokenCommand {
+            verb,
+            name: name.clone(),
+            file: (*file).to_owned(),
+        }),
+        _ => Err(TOKEN_USAGE.into()),
+    }
 }
 
 /// Which machine's `hosts.json` a sync writes.
@@ -1098,6 +1145,11 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
          \x20                  hosts add NAME --tls HOST:PORT --pin HEX|--pin-first-use |\n\
          \x20                  hosts remove NAME |\n\
          \x20                  hosts pull|push DEST [--replace] [--dry-run]",
+    ),
+    (
+        "token",
+        "Manage TLS listener tokens (the token is shown once):\n\
+         \x20                  token create|rotate|revoke NAME --file TOKENS",
     ),
     (
         "ssh",

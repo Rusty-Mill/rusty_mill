@@ -10,7 +10,7 @@
 //! power, as an entry in a login map is.
 //!
 //! The list has one entry per line, `uid:N` or `user:NAME`, or, for tailnet
-//! peers (C27), `ts:LOGIN` or `ts-node:NAME`; `#` starts a
+//! peers (C27), `ts:LOGIN` or `ts-node:NAME`, or, for TLS tokens (#506), `token:NAME`; `#` starts a
 //! comment and blank lines are skipped. There is no wildcard, so root is
 //! served only when an entry names it (`uid:0` or `user:root`). A file
 //! with no entries lets in the server's own user alone. A repeated user,
@@ -40,14 +40,17 @@ use rusty_tokio::sync::{Notify, mpsc::UnboundedReceiver};
 
 use crate::login::{Reload, read_checked};
 use crate::tailnet::{Whois, is_tailnet_addr};
+use crate::tls::{Tls, read_tokens};
 use crate::{Config, Peer, conn, state};
+use rusty_mux_script::token;
 
 /// Who a shared server serves besides its own user: uid to user name.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Allow {
     users: HashMap<u32, Option<String>>,
-    /// Tailnet principals by id (`ts:LOGIN`, `ts-node:NAME`).
-    tailnet: HashSet<String>,
+    /// Principals named by id: tailnet (`ts:LOGIN`, `ts-node:NAME`) and
+    /// token (`token:NAME`).
+    named: HashSet<String>,
 }
 
 impl Allow {
@@ -59,7 +62,7 @@ impl Allow {
         name: impl Fn(u32) -> Option<String>,
     ) -> Result<Self, String> {
         let mut users = HashMap::new();
-        let mut tailnet = HashSet::new();
+        let mut named = HashSet::new();
         for (n, line) in text.lines().enumerate() {
             let line = line.split('#').next().unwrap_or_default().trim();
             if line.is_empty() {
@@ -68,7 +71,14 @@ impl Allow {
             let at = |why: String| format!("line {}: {why}", n + 1);
             let uid = match line.split_once(':') {
                 Some(("ts" | "ts-node", name)) if !name.is_empty() => {
-                    if !tailnet.insert(line.to_string()) {
+                    if !named.insert(line.to_string()) {
+                        return Err(at(format!("{line} is listed already")));
+                    }
+                    continue;
+                }
+                Some(("token", name)) => {
+                    token::check_name(name).map_err(&at)?;
+                    if !named.insert(line.to_string()) {
                         return Err(at(format!("{line} is listed already")));
                     }
                     continue;
@@ -79,7 +89,7 @@ impl Allow {
                 }
                 _ => {
                     return Err(at(format!(
-                        "{line:?} is not `uid:N`, `user:NAME`, `ts:LOGIN` or `ts-node:NAME` (there is no wildcard)"
+                        "{line:?} is not `uid:N`, `user:NAME`, `ts:LOGIN`, `ts-node:NAME` or `token:NAME` (there is no wildcard)"
                     )));
                 }
             };
@@ -87,7 +97,7 @@ impl Allow {
                 return Err(at(format!("uid {uid} is listed already")));
             }
         }
-        Ok(Self { users, tailnet })
+        Ok(Self { users, named })
     }
 
     /// The principal of the listed `uid`, or `None` if it is not listed.
@@ -100,7 +110,7 @@ impl Allow {
 
     /// Whether `principal` is still listed.
     pub(crate) fn names(&self, principal: &Principal) -> bool {
-        self.tailnet.contains(principal.id())
+        self.named.contains(principal.id())
             || self
                 .users
                 .keys()
@@ -132,12 +142,34 @@ pub(crate) struct Guests {
     listed: Rc<RefCell<Option<Allow>>>,
     /// The tailnet listener, until the server takes it to serve.
     tailnet: Rc<RefCell<Option<Tailnet>>>,
+    /// The TLS listener, until the server takes it to serve.
+    tls: Rc<RefCell<Option<Tls>>>,
 }
 
 impl Guests {
     /// Takes the tailnet listener, if there is one and it was not taken.
     pub(crate) fn take_tailnet(&self) -> Option<Tailnet> {
         self.tailnet.borrow_mut().take()
+    }
+
+    /// Takes the TLS listener, if there is one and it was not taken.
+    pub(crate) fn take_tls(&self) -> Option<Tls> {
+        self.tls.borrow_mut().take()
+    }
+
+    /// Closes every connection of the tokens `names`: rotated or revoked.
+    pub(crate) fn revoke_tokens(&self, names: &[&str]) {
+        let gone: Vec<String> = names.iter().map(|n| format!("token:{n}")).collect();
+        self.open.borrow_mut().retain(|(principal, cancel)| {
+            let Some(cancel) = cancel.upgrade() else {
+                return false;
+            };
+            let revoked = gone.iter().any(|id| id == principal.id());
+            if revoked {
+                cancel.notify_one();
+            }
+            !revoked
+        });
     }
 
     /// Remembers a connection of `principal`; `cancel` closes it. A
@@ -320,6 +352,8 @@ pub struct Sharing {
     pub allow: PathBuf,
     /// A listener for tailnet peers, if any.
     pub tailnet: Option<Tailnet>,
+    /// A TLS listener for peers with a token, if any.
+    pub tls: Option<Tls>,
 }
 
 /// Reads the list at `path` on a thread of its own: a file on a hung file
@@ -350,6 +384,24 @@ fn read(path: &std::path::Path) -> io::Result<Allow> {
     })
 }
 
+/// Reads the token file again, if there is one. A bad file is refused and
+/// keeps the old tokens; a good one closes only the connections of tokens it
+/// rotated or revoked.
+fn reload_tokens(
+    tokens: &Option<(PathBuf, Rc<RefCell<rusty_mux_script::token::Tokens>>)>,
+    guests: &Guests,
+) -> io::Result<()> {
+    let Some((file, kept)) = tokens else {
+        return Ok(());
+    };
+    let fresh = read_tokens(file).inspect_err(|err| {
+        eprintln!("rusty-mux-server: tls: keeping the old tokens: {err}");
+    })?;
+    guests.revoke_tokens(&kept.borrow().changed(&fresh));
+    *kept.borrow_mut() = fresh;
+    Ok(())
+}
+
 /// [`crate::serve_until`] for a shared server: serves its own user and the
 /// users `sharing.allow` lists, until `stop` resolves. A bad list stops it
 /// before it serves anyone. Each [`Reload`] on `reloads` reads the list
@@ -366,8 +418,16 @@ pub async fn serve_shared(
         tailnet.allow = allow.clone();
         tailnet
     });
+    let tls = sharing.tls.map(|mut tls| {
+        tls.allow = allow.clone();
+        tls
+    });
+    let tokens = tls
+        .as_ref()
+        .map(|tls| (tls.tokens_file.clone(), tls.tokens.clone()));
     let guests = Guests::default();
     *guests.tailnet.borrow_mut() = tailnet;
+    *guests.tls.borrow_mut() = tls;
     guests.revoke_unlisted(&allow.borrow());
     let owner = rusty_libc::process::geteuid();
     let admitting = allow.clone();
@@ -386,7 +446,8 @@ pub async fn serve_shared(
                 guests.revoke_unlisted(fresh);
                 *allow.borrow_mut() = fresh.clone();
             }
-            let _ = answer.send(result.map(|_| ()));
+            let result = result.and_then(|_| reload_tokens(&tokens, &guests));
+            let _ = answer.send(result);
         }
         std::future::pending::<()>().await;
     };

@@ -219,3 +219,14 @@ fn a_peer_tailscaled_cannot_name_is_closed_before_it_says_anything() {
         assert_eq!(closed.expect("read"), 0, "the connection stayed open");
     });
 }
+
+#[test]
+fn token_principals_are_listed_by_id_and_bad_names_refuse_the_file() {
+    let allow = lookups("token:laptop\n").expect("parses");
+    let named = |id: &str| allow.names(&Principal::new(id, "").expect("principal"));
+    assert!(named("token:laptop"));
+    assert!(!named("token:phone"));
+    for bad in ["token:\n", "token:a b\n", "token:a\ntoken:a\n"] {
+        assert!(lookups(bad).is_err(), "{bad:?}");
+    }
+}

@@ -567,3 +567,30 @@ fn bridge_takes_only_the_socket() {
     assert_eq!(parsed.socket, Some("/tmp/s".into()));
     assert!(parse(&args("bridge now")).is_err());
 }
+
+#[test]
+fn token_takes_a_verb_a_name_and_a_file() {
+    let token = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Token(command)) => Ok(command),
+        Ok(other) => panic!("expected token, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    assert_eq!(
+        token("token rotate laptop --file /t"),
+        Ok(TokenCommand {
+            verb: TokenVerb::Rotate,
+            name: "laptop".into(),
+            file: "/t".into()
+        })
+    );
+    for bad in [
+        "token",
+        "token create",
+        "token create a",
+        "token make a --file /t",
+        "token create a --file /t --file /u",
+        "token create a --path /t",
+    ] {
+        assert!(token(bad).is_err(), "{bad}");
+    }
+}
