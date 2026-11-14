@@ -20,6 +20,9 @@ PATH_JOB_PREFIXES = {
     "dashboard": "crates/apps/rusty_meshed/data-mesh-monitor/",
     "term_web": "crates/libs/ui/rusty_term/web/",
     "key_desktop": "crates/apps/rusty_key/desktop/",
+    # Standalone Tauri workspace, outside the root package graph: path-triggered here, and by the
+    # ai_env_* packages below, which it path-depends on.
+    "ai_env_gui": "crates/apps/ai_env_manager/gui/",
     "tick": "crates/apps/rusty_tick/",
     "fair_play": "crates/apps/rusty_fair_play/",
     "agui": "crates/libs/protocol/rusty_agui/",
@@ -46,6 +49,7 @@ RLEVAL_IMAGE_INPUTS = tuple(
 PACKAGE_JOB_PREFIXES = {
     "dashboard": ("rusty-meshed-",),
     "key_desktop": ("rk-",),
+    "ai_env_gui": ("ai_env_",),
 }
 
 PACKAGE_JOB_NAMES = {
