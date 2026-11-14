@@ -151,6 +151,10 @@ pub(crate) struct ScheduledIo {
     writable: AtomicUsize,
     read_waker: Mutex<Option<Waker>>,
     write_waker: Mutex<Option<Waker>>,
+    /// Windows only: told when a direction is cleared after `WouldBlock`,
+    /// so the AFD poll can watch that direction again (see `windows.rs`).
+    #[cfg(windows)]
+    on_clear: std::sync::OnceLock<Box<dyn Fn(Interest) + Send + Sync>>,
 }
 
 /// The ready bit of a [`ScheduledIo`] direction word.
@@ -241,6 +245,8 @@ impl ScheduledIo {
             }),
             read_waker: Mutex::new(None),
             write_waker: Mutex::new(None),
+            #[cfg(windows)]
+            on_clear: std::sync::OnceLock::new(),
         }
     }
 
@@ -289,14 +295,28 @@ impl ScheduledIo {
     /// steps the reactor could bump the counter and set the bit between
     /// them and the store would still wipe it.
     fn clear_if_unchanged(&self, interest: Interest, token: ReadyToken) -> bool {
-        self.word(interest)
+        let cleared = self
+            .word(interest)
             .compare_exchange(
                 token.0,
                 token.0 & !READY,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .is_ok()
+            .is_ok();
+        #[cfg(windows)]
+        if cleared {
+            if let Some(hook) = self.on_clear.get() {
+                hook(interest);
+            }
+        }
+        cleared
+    }
+
+    /// Whether `interest` is currently marked ready.
+    #[cfg(windows)]
+    fn is_ready(&self, interest: Interest) -> bool {
+        self.word(interest).load(Ordering::Acquire) & READY != 0
     }
 
     /// Called by a backend's event loop when it observes `interest` is
