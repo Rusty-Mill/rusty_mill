@@ -638,22 +638,26 @@ fn account_dir(dir: &Path, account: &Account) -> io::Result<()> {
     }
 }
 
-/// How long a silent UDP association lasts on an account's server. It skips
-/// the map, a reload and the caps once up, so a user removed from the map
-/// keeps it no longer than this (Nano, 2026-11-14: one hour).
-const ACCOUNT_UDP_IDLE: &str = "3600";
+/// How long a UDP association lasts on an account's server, silent or not.
+/// Once up it skips the map, a reload and the caps, and a client that keeps
+/// talking is never silent, so only a hard end bounds how long a user
+/// removed from the map keeps it (Nano, 2026-11-14: one hour). The client
+/// then asks again, which goes through the front door and the map.
+const ACCOUNT_UDP_LIFE: Duration = Duration::from_secs(3600);
 
-/// `--udp RANGE --udp-idle` for an account's server, if the front door has
+/// `--udp RANGE` with an hour's idle and lifetime for an account's server, if the front door has
 /// ports to give.
 fn udp_args(udp: Option<crate::UdpPorts>) -> Vec<String> {
     udp.map_or_else(Vec::new, |ports| {
-        [
+        let secs = ACCOUNT_UDP_LIFE.as_secs().to_string();
+        vec![
             "--udp".into(),
             ports.to_string(),
             "--udp-idle".into(),
-            ACCOUNT_UDP_IDLE.into(),
+            secs.clone(),
+            "--udp-lifetime".into(),
+            secs,
         ]
-        .into()
     })
 }
 
@@ -987,7 +991,14 @@ mod tests {
         let ports = "127.0.0.1:2000-2009".parse().unwrap();
         assert_eq!(
             udp_args(Some(ports)),
-            ["--udp", "127.0.0.1:2000-2009", "--udp-idle", "3600"]
+            [
+                "--udp",
+                "127.0.0.1:2000-2009",
+                "--udp-idle",
+                "3600",
+                "--udp-lifetime",
+                "3600"
+            ]
         );
     }
 }

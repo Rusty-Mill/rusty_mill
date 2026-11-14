@@ -1,5 +1,5 @@
-//! `rusty-mux-server [--udp ADDR[:PORT|:LO-HI]] [--udp-idle SECS] [--config FILE]
-//! [<socket>]`: serves rusty_mux on a Unix socket: the one named, else
+//! `rusty-mux-server [--udp ADDR[:PORT|:LO-HI]] [--udp-idle SECS] [--udp-lifetime SECS]
+//! [--config FILE] [<socket>]`: serves rusty_mux on a Unix socket: the one named, else
 //! `$RUSTY_MUX_SOCKET`, else the default, `$XDG_RUNTIME_DIR/rusty_mux/default.sock`
 //! (`%LOCALAPPDATA%\rusty_mux\default.sock` on Windows), whose directory
 //! the server makes private to the user (C69). A server never removes a
@@ -80,8 +80,8 @@ use rusty_tokio::io::UnixListener;
 use rusty_tokio::{Builder, LocalOptions};
 
 const USAGE: &str =
-    "usage: rusty-mux-server [--udp ADDR[:PORT|:LO-HI]] [--udp-idle SECS] [--config FILE]
-                        [--state DIR | --no-state] [--idle-exit SECS] [<socket>]
+    "usage: rusty-mux-server [--udp ADDR[:PORT|:LO-HI]] [--udp-idle SECS] [--udp-lifetime SECS]
+                        [--config FILE] [--state DIR | --no-state] [--idle-exit SECS] [<socket>]
        rusty-mux-server --login MAP [--runtime DIR] [--udp-ports ADDR:LO-HI]
                         [--tailnet ADDR:PORT] <socket>
        rusty-mux-server --shared ALLOW [--tailnet ADDR:PORT] [--config FILE]
@@ -99,6 +99,8 @@ struct Args {
     socket: Option<PathBuf>,
     udp: Option<UdpPorts>,
     idle: Duration,
+    /// `--udp-lifetime`, if given.
+    life: Option<Duration>,
     /// `--config`, if given.
     config: Option<PathBuf>,
     state: StateDir,
@@ -176,6 +178,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let (mut socket, mut udp, mut idle, mut config) = (None, None, UDP_IDLE, None);
     let (mut login, mut runtime, mut forwarded_by) = (None, None, None);
     let mut udp_ports = None;
+    let mut life = None;
     let mut shared = None;
     let mut tailnet = None;
     let (mut tls, mut tls_cert, mut tls_key, mut tokens) = (None, None, None, None);
@@ -189,7 +192,14 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         };
         match arg.to_str() {
             Some("--udp") => udp = Some(ports("--udp", &value("--udp")?)?),
-            Some("--udp-ports") => udp_ports = Some(ports("--udp-ports", &value("--udp-ports")?)?),
+            Some("--udp-ports") => {
+                let text = value("--udp-ports")?;
+                udp_ports =
+                    Some(UdpPorts::range(&text).map_err(|why| format!("--udp-ports {why}"))?);
+            }
+            Some("--udp-lifetime") => {
+                life = Some(seconds("--udp-lifetime", &value("--udp-lifetime")?)?)
+            }
             Some("--config") => config = Some(PathBuf::from(value("--config")?)),
             Some("--state") | Some("--no-state") if state != StateDir::Default => {
                 return Err("one of --state and --no-state, once".into());
@@ -243,6 +253,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             socket,
             udp,
             idle,
+            life,
             config,
             state,
             mode: Mode::Shared(allow, tailnet, tls),
@@ -291,6 +302,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         socket,
         udp,
         idle,
+        life,
         config,
         state,
         mode,
@@ -352,14 +364,18 @@ fn tailnet_addr(_text: &str) -> Result<SocketAddr, String> {
 async fn bind_udp(
     ports: Option<UdpPorts>,
     idle: Duration,
+    life: Option<Duration>,
     forwarded: bool,
 ) -> std::io::Result<Option<Udp>> {
     let Some(ports) = ports else {
         return Ok(None);
     };
     match ports.bind().await {
-        Ok(socket) => Ok(Some(Udp { socket, idle })),
-        Err(e) if forwarded && e.kind() == std::io::ErrorKind::AddrInUse => {
+        Ok(socket) => Ok(Some(Udp { socket, idle, life })),
+        // UDP is optional on an account's server: whatever stops it binding
+        // (a busy range, an address not on this host yet) must not stop the
+        // server, or the account could not log in at all.
+        Err(e) if forwarded => {
             eprintln!("rusty-mux-server: {e}; serving without UDP");
             Ok(None)
         }
@@ -422,7 +438,13 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
         platform_windows::fs::restrict_to_owner(&socket).map_err(|e| {
             std::io::Error::other(format!("restricting {}: {e:?}", socket.display()))
         })?;
-        let udp = bind_udp(args.udp, args.idle, matches!(args.mode, Mode::Forwarded(_))).await?;
+        let udp = bind_udp(
+            args.udp,
+            args.idle,
+            args.life,
+            matches!(args.mode, Mode::Forwarded(_)),
+        )
+        .await?;
         match args.mode {
             #[cfg(target_os = "linux")]
             Mode::Forwarded(uid) => {
@@ -860,6 +882,24 @@ mod tests {
         ] {
             assert!(parse_str(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn an_account_server_serves_without_udp_when_it_cannot_bind() {
+        // 192.0.2.1 (TEST-NET-1) is on no interface here.
+        let ports: UdpPorts = "192.0.2.1:2000-2001".parse().unwrap();
+        let idle = Duration::from_secs(60);
+        let runtime = Builder::new_current_thread()
+            .build_local(&LocalOptions::default())
+            .unwrap();
+        let (account, own) = runtime.block_on(async {
+            (
+                bind_udp(Some(ports), idle, None, true).await,
+                bind_udp(Some(ports), idle, None, false).await,
+            )
+        });
+        assert!(matches!(account, Ok(None)));
+        assert!(own.is_err());
     }
 
     #[test]

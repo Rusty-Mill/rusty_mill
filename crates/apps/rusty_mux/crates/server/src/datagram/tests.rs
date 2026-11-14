@@ -50,6 +50,17 @@ async fn server_with(
     idle: Duration,
     silence: Duration,
 ) -> (Shared, Registry, SocketAddr) {
+    server_life(bind, program, idle, silence, None).await
+}
+
+/// [`server_with`] whose associations also end `life` after they began.
+async fn server_life(
+    bind: &str,
+    program: Config,
+    idle: Duration,
+    silence: Duration,
+    life: Option<Duration>,
+) -> (Shared, Registry, SocketAddr) {
     let state = State::shared(program, None);
     let socket = UdpSocket::bind(bind).await.expect("bind");
     let addr = socket.local_addr().expect("addr");
@@ -67,6 +78,7 @@ async fn server_with(
         state.clone(),
         idle,
         silence,
+        life,
     );
     rusty_tokio::task::spawn_local(async move {
         udp.await.expect("udp side");
@@ -408,6 +420,40 @@ fn silence_past_idle_ends_the_association_and_its_connections() {
 }
 
 #[test]
+fn a_hard_lifetime_ends_an_association_that_keeps_being_heard() {
+    runtime().block_on(async {
+        let life = Duration::from_millis(900);
+        let program = Config {
+            program: "unused".into(),
+            args: Vec::new(),
+            cwd: "/".into(),
+            console_host: ConsoleHost::default(),
+            state_dir: None,
+            grapheme_clustering: false,
+            config_file: None,
+        };
+        let (state, registry, addr) =
+            server_life("127.0.0.1:0", program, PATIENCE, LEASE_SILENCE, Some(life)).await;
+        let mut peer = Peer::new(&registry, addr).await;
+        let born = Instant::now();
+        peer.probe().await;
+        let (_, client) = peer.connect(Features::DATAGRAM).await;
+        // Heard again and again, it is never silent for long.
+        while born.elapsed() < life / 2 {
+            peer.probe().await;
+            rusty_tokio::time::sleep(TICK).await;
+        }
+        assert_eq!(registry.live(), 1);
+        assert!(state.borrow().has_client(client));
+
+        // Past its life it ends, though silence alone would take PATIENCE.
+        rusty_tokio::time::sleep(life).await;
+        assert_eq!(registry.live(), 0);
+        assert!(!state.borrow().has_client(client));
+    });
+}
+
+#[test]
 fn closing_a_stream_ends_its_connection_only() {
     runtime().block_on(async {
         let (state, registry, addr) = server(PATIENCE).await;
@@ -476,6 +522,7 @@ async fn bare_link(peer: &mut Peer, server: Rc<UdpSocket>, registry: Registry) -
     let timers = Timers {
         idle: PATIENCE,
         silence: LEASE_SILENCE,
+        life: None,
     };
     let driver = drive(link.clone(), server.clone(), registry, state, timers);
     rusty_tokio::task::spawn_local(driver);

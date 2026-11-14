@@ -150,6 +150,10 @@ pub struct Udp {
     pub socket: UdpSocket,
     /// How long an association, and the clients on it, outlive silence.
     pub idle: Duration,
+    /// A hard end for every association, however much it is heard, so a
+    /// peer whose admission was withdrawn cannot keep one alive by
+    /// talking. The client asks again, through whatever admitted it.
+    pub life: Option<Duration>,
 }
 
 /// Accepts clients on `listener` until accepting fails, then stops as
@@ -454,7 +458,7 @@ async fn serve_clients(
     let socket = std::rc::Rc::new(udp.socket);
     rusty_tokio::select! {
         result = accept(listener, state.clone(), allowed, owner, guests) => result,
-        result = datagram::serve(socket, registry, state, udp.idle, datagram::LEASE_SILENCE) => result,
+        result = datagram::serve(socket, registry, state, udp.idle, datagram::LEASE_SILENCE, udp.life) => result,
     }
 }
 

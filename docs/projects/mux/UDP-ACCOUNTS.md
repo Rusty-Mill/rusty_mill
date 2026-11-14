@@ -32,23 +32,33 @@ resolves the host itself (UDP-TRANSPORT.md, Bootstrap 3-4).
    guest has no UDP).
 5. **Shared mode, the tailnet and TLS listeners stay without UDP.** Only login-mode accounts.
 6. **Windows unchanged:** UDP is Unix-only (C79).
-7. **Idle bound.** An account server started with `--udp` by the front door gets `--udp-idle
-   3600`, not the 24 h default (see Risks, 1).
+7. **A hard hour.** An account server started with `--udp` by the front door gets `--udp-idle
+   3600` and `--udp-lifetime 3600`: every association ends an hour after it began, however
+   much it is heard (an idle bound alone would never fire for a client the 3 s keepalive keeps
+   talking). The client then asks again, through the front door and the map (see Risks, 1).
+   `--udp-lifetime SECS` is a new flag of `rusty-mux-server` and is off unless given.
+8. **Optional UDP.** On an account server, any failure to bind (range taken, an address not
+   on the host yet) is logged once and the server serves without UDP. `--udp-ports` takes only
+   `ADDR:LO-HI` with `LO` 1024 or more; IPv6 needs its brackets.
 
 ## Risks
 
 1. **Admission is checked once.** After an association is up, its streams skip the front
    door: the map, a SIGHUP reload, PAM (D266) and the per-uid caps. A principal removed from
-   the map keeps its UDP clients until `--udp-idle`. Default: 1 h for account servers and
-   documented. Open (Q66): drop associations on a reload instead, which needs the front door
-   to tell the account server.
-2. **Posture.** `ADDR` is what the host exposes; it is explicit, never a default, and a range
+   the map keeps its UDP clients until the association's hard end, one hour after it began. Built
+   so after review: an idle bound alone never fired for a client that kept talking. Later
+   option: drop associations on a reload, which needs the front door to tell the account
+   server.
+2. **Squatting.** Any local user can bind a port in the range first. That denies UDP to an
+   account (it stays on SSH) and nothing more: the client learns the port from its own
+   authenticated `Datagram` reply and every datagram is sealed under the association's key.
+3. **Posture.** `ADDR` is what the host exposes; it is explicit, never a default, and a range
    of N ports is N accounts at most with UDP. Past that, clients fall back to SSH and the
    client says so once.
-3. **Guessing.** An association has a 32-byte key and an 8-byte id; an unauthenticated
+4. **Guessing.** An association has a 32-byte key and an 8-byte id; an unauthenticated
    datagram gets no reply, so no amplification (UDP-TRANSPORT.md). Account servers are
    separate processes with separate sockets, so one account cannot reach another's.
-4. **Tests and docs.** The `--udp` refusals in `main.rs` tests, its doc comment and USAGE
+5. **Tests and docs.** The `--udp` refusals in `main.rs` tests, its doc comment and USAGE
    change; SHARED-MODE.md and CAPABILITIES C26 lose "UDP for account servers".
 
 ## Tests when built

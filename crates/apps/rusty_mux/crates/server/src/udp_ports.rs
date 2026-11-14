@@ -2,7 +2,7 @@
 //! behind the login front door, which binds the first free one.
 
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
 use rusty_tokio::io::UdpSocket;
@@ -48,6 +48,21 @@ impl UdpPorts {
     }
 }
 
+impl UdpPorts {
+    /// Only the `ADDR:LO-HI` form: what the front door hands every account
+    /// server, so one port or none would leave all but the first without.
+    pub fn range(text: &str) -> Result<Self, String> {
+        let ports: Self = text.parse()?;
+        if ports.lo == ports.hi && !text.contains('-') {
+            return Err(format!("{text}: not a range, ADDR:LO-HI"));
+        }
+        if ports.lo < RANGE_FLOOR {
+            return Err(format!("{text}: a range starts at {RANGE_FLOOR} or above"));
+        }
+        Ok(ports)
+    }
+}
+
 impl FromStr for UdpPorts {
     type Err = String;
 
@@ -62,11 +77,15 @@ impl FromStr for UdpPorts {
             return Ok(Self::single(SocketAddr::new(ip, DEFAULT_PORT)));
         }
         let (host, ports) = text.rsplit_once(':').ok_or_else(bad)?;
-        let ip = host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<IpAddr>()
-            .map_err(|_| bad())?;
+        // IPv6 only in a matched pair of brackets, IPv4 bare.
+        let ip = match host.strip_prefix('[') {
+            Some(inner) => inner
+                .strip_suffix(']')
+                .and_then(|v6| v6.parse::<Ipv6Addr>().ok())
+                .map(IpAddr::V6),
+            None => host.parse::<Ipv4Addr>().ok().map(IpAddr::V4),
+        }
+        .ok_or_else(bad)?;
         let (lo, hi) = ports.split_once('-').ok_or_else(bad)?;
         let (lo, hi): (u16, u16) = (
             lo.parse().map_err(|_| bad())?,
@@ -123,6 +142,34 @@ mod tests {
         }
         let range = parse("127.0.0.1:2000-2009").unwrap();
         assert_eq!((range.lo, range.hi), (2000, 2009));
+    }
+
+    #[test]
+    fn the_front_door_takes_only_a_real_range_above_the_floor() {
+        assert!(UdpPorts::range("10.0.0.1:2000-2009").is_ok());
+        for text in [
+            "10.0.0.1",
+            "10.0.0.1:2000",
+            "10.0.0.1:80",
+            "10.0.0.1:0",
+            "[::1]:80",
+            "10.0.0.1:80-90",
+        ] {
+            assert!(UdpPorts::range(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_ipv6_address_needs_its_brackets_matched() {
+        for text in [
+            "::1:2000-2009",
+            "[::1:2000-2009",
+            "[[::1]]:2000-2009",
+            "::1]:2000-2009",
+        ] {
+            assert!(parse(text).is_err(), "{text}");
+        }
+        assert!(parse("[::1]:2000-2009").is_ok());
     }
 
     #[test]
