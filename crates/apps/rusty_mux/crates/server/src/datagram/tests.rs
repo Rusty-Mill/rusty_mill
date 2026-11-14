@@ -68,6 +68,7 @@ async fn server_life(
     let lifetimes = crate::state::Lifetimes {
         idle,
         lease: silence,
+        life,
     };
     state
         .borrow_mut()
@@ -454,6 +455,48 @@ fn a_hard_lifetime_ends_an_association_that_keeps_being_heard() {
 }
 
 #[test]
+fn a_hard_lifetime_cannot_be_renewed_over_udp() {
+    runtime().block_on(async {
+        let life = Duration::from_secs(60);
+        let program = Config {
+            program: "unused".into(),
+            args: Vec::new(),
+            cwd: "/".into(),
+            console_host: ConsoleHost::default(),
+            state_dir: None,
+            grapheme_clustering: false,
+            config_file: None,
+        };
+        let (_, registry, addr) =
+            server_life("127.0.0.1:0", program, PATIENCE, LEASE_SILENCE, Some(life)).await;
+        let mut peer = Peer::new(&registry, addr).await;
+        peer.probe().await;
+        let (stream, _) = peer.connect(Features::DATAGRAM).await;
+        peer.send(stream, &Message::OpenDatagram { req: 5 }).await;
+        assert!(matches!(
+            peer.reply(stream).await,
+            Message::Failed { req: 5, .. }
+        ));
+        assert_eq!(registry.live(), 1, "no second association");
+    });
+}
+
+#[test]
+fn without_a_lifetime_a_udp_client_may_ask_for_another_association() {
+    runtime().block_on(async {
+        let (_, registry, addr) = server(PATIENCE).await;
+        let mut peer = Peer::new(&registry, addr).await;
+        peer.probe().await;
+        let (stream, _) = peer.connect(Features::DATAGRAM).await;
+        peer.send(stream, &Message::OpenDatagram { req: 6 }).await;
+        assert!(matches!(
+            peer.reply(stream).await,
+            Message::Datagram { req: 6, .. }
+        ));
+    });
+}
+
+#[test]
 fn closing_a_stream_ends_its_connection_only() {
     runtime().block_on(async {
         let (state, registry, addr) = server(PATIENCE).await;
@@ -831,6 +874,7 @@ fn going_stale_mid_silence_keeps_the_silence_deadline() {
         let lifetimes = crate::state::Lifetimes {
             idle: PATIENCE * 6,
             lease: PATIENCE * 3,
+            life: None,
         };
         state.borrow_mut().test_lifetimes(lifetimes);
         let features = Features::DATAGRAM
@@ -892,9 +936,11 @@ fn a_stale_orphan_goes_after_idle_even_before_its_lease_time() {
 #[cfg(unix)]
 async fn stale_orphan_goes_after_idle(lease: Duration, idle: Duration) {
     let (state, registry, addr) = server_with("127.0.0.1:0", shell(), PATIENCE, lease).await;
-    state
-        .borrow_mut()
-        .test_lifetimes(crate::state::Lifetimes { idle, lease });
+    state.borrow_mut().test_lifetimes(crate::state::Lifetimes {
+        idle,
+        lease,
+        life: None,
+    });
     let features = Features::DATAGRAM
         .union(Features::TAKEOVER)
         .union(Features::CHECKPOINT_V6);

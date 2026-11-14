@@ -451,6 +451,7 @@ async fn serve_clients(
     let lifetimes = state::Lifetimes {
         idle: udp.idle,
         lease: datagram::LEASE_SILENCE,
+        life: udp.life,
     };
     state
         .borrow_mut()

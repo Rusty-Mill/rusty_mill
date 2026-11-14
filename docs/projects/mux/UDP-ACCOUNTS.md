@@ -36,7 +36,10 @@ resolves the host itself (UDP-TRANSPORT.md, Bootstrap 3-4).
    3600` and `--udp-lifetime 3600`: every association ends an hour after it began, however
    much it is heard (an idle bound alone would never fire for a client the 3 s keepalive keeps
    talking). The client then asks again, through the front door and the map (see Risks, 1).
-   `--udp-lifetime SECS` is a new flag of `rusty-mux-server` and is off unless given.
+   `--udp-lifetime SECS` is a new flag of `rusty-mux-server` and is off unless given. With it
+   set, `OpenDatagram` is refused to a client already on UDP, so a new association can be asked
+   for only over a socket connection (an account server's is the front door's relay): an
+   association cannot renew its own hour past the map.
 8. **Optional UDP.** On an account server, any failure to bind (range taken, an address not
    on the host yet) is logged once and the server serves without UDP. `--udp-ports` takes only
    `ADDR:LO-HI` with `LO` 1024 or more; IPv6 needs its brackets.
