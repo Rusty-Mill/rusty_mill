@@ -1,6 +1,15 @@
 // No logic here: render what the backend says, send the user's click back.
 // Text is always set with textContent, never as HTML.
 const { invoke } = window.__TAURI__.core;
+
+// Theme: follow the system until the user picks one; the pick is remembered.
+const media = window.matchMedia("(prefers-color-scheme: light)");
+const theme = () => localStorage.getItem("theme") ?? (media.matches ? "light" : "dark");
+function applyTheme() {
+  const t = theme();
+  document.documentElement.dataset.theme = t;
+  $("theme").textContent = t === "light" ? "Dark theme" : "Light theme";
+}
 const $ = (id) => document.getElementById(id);
 const LABEL = { absent: "not enabled", enabled: "enabled", stale: "stale", edited: "edited", foreign: "foreign" };
 let lastView = { rows: [], tools: [], skipped: [] };
@@ -43,9 +52,19 @@ function stateCell(state) {
 }
 
 // One button per row: Enable when nothing is enabled, else Disable.
+const isOn = (row) => row.cells.some((c) => c.state === "enabled");
+const needsLook = (row) => row.cells.some((c) => ["stale", "edited", "foreign"].includes(c.state));
+const FILTERS = [
+  ["all", "All", () => true],
+  ["on", "Enabled", isOn],
+  ["off", "Not enabled", (r) => !isOn(r)],
+  ["look", "Needs a look", needsLook],
+];
+let filter = "all";
+
 function actionFor(row) {
-  const any = row.cells.some((c) => c.state === "enabled");
-  const btn = el("button", "", any ? "Disable…" : "Enable…");
+  const any = isOn(row);
+  const btn = el("button", any ? "" : "primary", any ? "Disable…" : "Enable…");
   btn.addEventListener("click", () => preview(row.id, !any));
   return btn;
 }
@@ -54,7 +73,18 @@ function actionFor(row) {
 function render() {
   const view = lastView;
   const q = $("q").value.trim().toLowerCase();
-  const rows = view.rows.filter((r) => `${r.id} ${r.source}`.toLowerCase().includes(q));
+  const pick = FILTERS.find((f) => f[0] === filter)[2];
+  const rows = view.rows.filter((r) => pick(r) && `${r.id} ${r.source}`.toLowerCase().includes(q));
+  const chips = $("chips");
+  chips.replaceChildren();
+  for (const [key, label, test] of FILTERS) {
+    const b = el("button", "chip");
+    b.setAttribute("aria-pressed", String(key === filter));
+    b.appendChild(document.createTextNode(label));
+    b.appendChild(el("b", "", String(view.rows.filter(test).length)));
+    b.addEventListener("click", () => { filter = key; render(); });
+    chips.appendChild(b);
+  }
   const head = $("grid").tHead;
   head.replaceChildren();
   const hr = head.insertRow();
@@ -77,7 +107,7 @@ function render() {
   }
   $("grid").hidden = rows.length === 0;
   $("empty").hidden = rows.length !== 0;
-  $("count").textContent = q ? `${rows.length} of ${view.rows.length}` : `${view.rows.length}`;
+  $("sub").textContent = `${view.rows.length} skills across ${view.tools.join(", ")}`;
   const skipped = view.skipped.map((s) => `${s.path}: ${s.reason}`);
   $("skipped").textContent = skipped.length ? `Skipped: ${skipped.join("; ")}` : "";
   $("skipped").hidden = skipped.length === 0;
@@ -120,6 +150,9 @@ async function preview(entry, enable) {
 }
 
 $("q").addEventListener("input", render);
+$("clear").addEventListener("click", () => { $("q").value = ""; filter = "all"; render(); });
+$("theme").addEventListener("click", () => { localStorage.setItem("theme", theme() === "light" ? "dark" : "light"); applyTheme(); });
+media.addEventListener("change", applyTheme);
 $("plan-cancel").addEventListener("click", () => $("plan").close());
 $("plan-apply").addEventListener("click", async () => {
   const { entry, enable } = pending;
@@ -132,4 +165,5 @@ $("plan-apply").addEventListener("click", async () => {
   refresh();
 });
 
+applyTheme();
 refresh();
