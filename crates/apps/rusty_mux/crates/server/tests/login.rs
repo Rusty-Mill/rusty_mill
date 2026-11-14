@@ -831,14 +831,19 @@ fn a_root_front_door_refuses_a_socket_the_account_does_not_serve() {
 
 /// A `tailscaled` LocalAPI that names every peer `login` (a peer it does
 /// not know when `login` is empty), on a socket in `dir`; its own address
-/// is `100.64.0.1`. It answers for the life of the test process.
-fn fake_tailscaled(dir: &Path, login: &str) -> PathBuf {
+/// is `own` (empty: it has none). It answers for the life of the test process.
+fn fake_tailscaled(dir: &Path, login: &str, own: &str) -> PathBuf {
     use std::io::Read;
     let path = dir.join("tailscaled.sock");
     let listener = std::os::unix::net::UnixListener::bind(&path).expect("tailscaled");
     let whois =
         format!(r#"{{"Node":{{"Name":"lap.t.ts.net."}},"UserProfile":{{"LoginName":"{login}"}}}}"#);
-    let status = r#"{"BackendState":"Running","TailscaleIPs":["100.64.0.1"]}"#;
+    let ips = if own.is_empty() {
+        String::new()
+    } else {
+        format!(r#""{own}""#)
+    };
+    let status = format!(r#"{{"BackendState":"Running","TailscaleIPs":[{ips}]}}"#);
     let respond = |code: &str, body: &str| {
         format!(
             "HTTP/1.1 {code}\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
@@ -850,7 +855,7 @@ fn fake_tailscaled(dir: &Path, login: &str) -> PathBuf {
     } else {
         respond("200 OK", &whois)
     };
-    let status = respond("200 OK", status);
+    let status = respond("200 OK", &status);
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let (mut stream, whois, status) = (stream, whois.clone(), status.clone());
@@ -915,7 +920,7 @@ fn a_tailnet_peer_the_map_names_reaches_its_account_as_its_principal() {
     let _reap = Reap(dir.clone());
     let (_, user) = me();
     write_map(&dir, &format!("ts:carol@example.com {user}\n"));
-    let whois = fake_tailscaled(&dir, "carol@example.com");
+    let whois = fake_tailscaled(&dir, "carol@example.com", "100.64.0.1");
     let (front, addr) = Front::with_tailnet(&dir, "login.sock", login(&dir), Some(whois));
     let door = bridge(&dir, addr.expect("tailnet address"));
 
@@ -945,7 +950,7 @@ fn a_tailnet_peer_the_map_does_not_name_is_closed_even_with_a_star_rule() {
         &dir,
         &format!("ts:dave@example.com {user}\nuid:{uid} {user}\n* {user}\n"),
     );
-    let whois = fake_tailscaled(&dir, "carol@example.com");
+    let whois = fake_tailscaled(&dir, "carol@example.com", "100.64.0.1");
     let (front, addr) = Front::with_tailnet(&dir, "login.sock", login(&dir), Some(whois));
     let door = bridge(&dir, addr.expect("tailnet address"));
     assert!(closed_unheard(&door), "an unlisted tailnet peer was served");
@@ -961,7 +966,7 @@ fn a_tailnet_peer_tailscaled_does_not_know_is_closed() {
     let _reap = Reap(dir.clone());
     let (_, user) = me();
     write_map(&dir, &format!("ts:carol@example.com {user}\n"));
-    let whois = fake_tailscaled(&dir, "");
+    let whois = fake_tailscaled(&dir, "", "100.64.0.1");
     let (front, addr) = Front::with_tailnet(&dir, "login.sock", login(&dir), Some(whois));
     let door = bridge(&dir, addr.expect("tailnet address"));
     assert!(closed_unheard(&door), "an unknown tailnet peer was served");
@@ -979,7 +984,7 @@ fn one_tailnet_principal_cannot_hold_more_than_its_share() {
         &dir,
         &format!("ts:carol@example.com {user}\nuid:{uid} {user}\n"),
     );
-    let whois = fake_tailscaled(&dir, "carol@example.com");
+    let whois = fake_tailscaled(&dir, "carol@example.com", "100.64.0.1");
     let limits = Limits {
         total: 8,
         per_peer: 1,
@@ -1004,4 +1009,25 @@ fn one_tailnet_principal_cannot_hold_more_than_its_share() {
     assert_eq!(whoami(&mut local).0, format!("uid:{uid}"));
     assert_eq!(whoami(&mut first).0, "ts:carol@example.com");
     front.stop();
+}
+
+/// A peer at the node's own address, or a node that reports none, is a
+/// local process (or cannot be told from one): closed, though the map names
+/// the login `tailscaled` gives it.
+#[test]
+fn a_tailnet_peer_at_the_nodes_own_address_is_closed() {
+    for own in ["127.0.0.1", ""] {
+        let dir = scratch();
+        let _reap = Reap(dir.clone());
+        let (_, user) = me();
+        write_map(&dir, &format!("ts:carol@example.com {user}\n"));
+        let whois = fake_tailscaled(&dir, "carol@example.com", own);
+        let (front, addr) = Front::with_tailnet(&dir, "login.sock", login(&dir), Some(whois));
+        let door = bridge(&dir, addr.expect("tailnet address"));
+        assert!(
+            closed_unheard(&door),
+            "a local process got in (own `{own}`)"
+        );
+        front.stop();
+    }
 }
