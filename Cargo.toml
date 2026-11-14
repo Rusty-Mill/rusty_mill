@@ -248,6 +248,7 @@ members = [
     "crates/libs/net/ts-types",
     "crates/apps/rusty_tailscale/crates/ts-key",
     "crates/apps/rusty_tailscale/crates/ts-control",
+    "crates/apps/rusty_tailscale/crates/ts-hub",
     "crates/apps/rusty_tailscale/crates/ts-derp",
     "crates/apps/rusty_tailscale/crates/ts-stun",
     "crates/apps/rusty_tailscale/crates/ts-disco",
@@ -743,6 +744,7 @@ tiny_http = "0.12"
 ts-types = { path = "crates/libs/net/ts-types" }
 ts-key = { path = "crates/apps/rusty_tailscale/crates/ts-key" }
 ts-control = { path = "crates/apps/rusty_tailscale/crates/ts-control" }
+ts-hub = { path = "crates/apps/rusty_tailscale/crates/ts-hub" }
 ts-derp = { path = "crates/apps/rusty_tailscale/crates/ts-derp" }
 ts-stun = { path = "crates/apps/rusty_tailscale/crates/ts-stun" }
 ts-disco = { path = "crates/apps/rusty_tailscale/crates/ts-disco" }

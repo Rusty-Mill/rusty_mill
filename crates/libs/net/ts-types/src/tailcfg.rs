@@ -70,7 +70,7 @@ pub struct RegisterRequest {
 }
 
 /// `POST /machine/register` response (`tailcfg.RegisterResponse`).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct RegisterResponse {
     pub node_key_expired: bool,
@@ -107,7 +107,7 @@ pub struct MapRequest {
 /// Delta semantics: a `None`/absent field means "unchanged"; an empty
 /// collection means "explicitly empty". `Peers` is a full replacement;
 /// `PeersChanged`/`PeersRemoved` are incremental.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct MapResponse {
     /// Heartbeat frame: no other fields are meaningful when true.
