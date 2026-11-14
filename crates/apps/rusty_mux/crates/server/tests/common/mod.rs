@@ -647,3 +647,43 @@ fn number_after(out: &[u8], key: &str) -> Option<u32> {
             std::str::from_utf8(&tail[..digits]).ok()?.parse().ok()
         })
 }
+
+/// A Unix socket in `dir` whose every connection is relayed to the TCP
+/// `addr`, so the blocking test client can speak to the tailnet listener.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn bridge(dir: &Path, addr: std::net::SocketAddr) -> PathBuf {
+    use std::io::Read;
+    use std::net::TcpStream;
+    let path = dir.join("bridge.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).expect("bridge");
+    std::thread::spawn(move || {
+        for local in listener.incoming().flatten() {
+            let Ok(remote) = TcpStream::connect(addr) else {
+                continue;
+            };
+            // Each direction, then the end of the stream passed on.
+            let (mut local_in, mut local_out) = (local.try_clone().expect("clone"), local);
+            let (mut remote_in, mut remote_out) = (remote.try_clone().expect("clone"), remote);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                while let Ok(n @ 1..) = local_in.read(&mut buf) {
+                    if remote_out.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+                let _ = remote_out.shutdown(std::net::Shutdown::Both);
+            });
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                while let Ok(n @ 1..) = remote_in.read(&mut buf) {
+                    if local_out.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+                let _ = local_out.shutdown(std::net::Shutdown::Both);
+            });
+        }
+    });
+    path
+}

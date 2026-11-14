@@ -180,6 +180,7 @@ pub struct Tailnet {
     listener: TcpListener,
     whois: Whois,
     allow: Rc<RefCell<Allow>>,
+    status_every: std::time::Duration,
 }
 
 impl Tailnet {
@@ -198,6 +199,7 @@ impl Tailnet {
             listener,
             whois,
             allow: Rc::default(),
+            status_every: STATUS_EVERY,
         })
     }
 }
@@ -211,7 +213,17 @@ impl Tailnet {
             listener,
             whois,
             allow: Rc::default(),
+            status_every: STATUS_EVERY,
         }
+    }
+
+    /// Asks `tailscaled` for the node's status every `every` instead of
+    /// [`STATUS_EVERY`], so a test need not wait seconds.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn status_every(mut self, every: std::time::Duration) -> Self {
+        self.status_every = every;
+        self
     }
 
     /// The listener and the `tailscaled` client, for a front door (C27)
@@ -259,7 +271,11 @@ pub(crate) async fn accept_tailnet(
     state: state::Shared,
     guests: Guests,
 ) -> io::Result<()> {
-    rusty_tokio::task::spawn_local(watch_status(tailnet.whois.clone(), state.clone()));
+    rusty_tokio::task::spawn_local(watch_status(
+        tailnet.whois.clone(),
+        state.clone(),
+        tailnet.status_every,
+    ));
     let looking = Lookups::default();
     let mut dropped = 0u64;
     loop {
@@ -324,7 +340,7 @@ const STATUS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 /// no name, so clients learn it went away without one lost poll flapping
 /// the state. The failure is logged once, as it starts, and again when it
 /// ends. Runs until the server stops.
-async fn watch_status(whois: Whois, state: state::Shared) {
+async fn watch_status(whois: Whois, state: state::Shared, every: std::time::Duration) {
     let mut last = None;
     let mut failures = 0u32;
     loop {
@@ -348,7 +364,7 @@ async fn watch_status(whois: Whois, state: state::Shared) {
             state.borrow_mut().tailscale_status(now.0, now.1.clone());
             last = Some(now);
         }
-        rusty_tokio::time::sleep(STATUS_EVERY).await;
+        rusty_tokio::time::sleep(every).await;
     }
 }
 

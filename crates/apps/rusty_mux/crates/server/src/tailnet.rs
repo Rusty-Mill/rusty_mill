@@ -85,25 +85,25 @@ impl Whois {
     /// Where this node stands: `tailscaled`'s backend state, and the node's
     /// own name when it has one. Fails after [`DEADLINE`] like a lookup.
     pub async fn status(&self) -> io::Result<(TailscaleState, Option<String>)> {
-        let target = "/localapi/v0/status?peers=false".to_owned();
-        let body = rusty_tokio::time::timeout(DEADLINE, self.get(target, "status"))
+        let status = rusty_tokio::time::timeout(DEADLINE, self.fetch_status())
             .await
             .map_err(|_| {
                 io::Error::new(io::ErrorKind::TimedOut, "tailscaled status timed out")
             })??;
-        let status: Status =
-            serde_json::from_slice(&body).map_err(|e| invalid(format!("status reply: {e}")))?;
         Ok(state_of(&status))
     }
 
     /// This node's own tailnet addresses, from `tailscaled`'s status.
     async fn own_addrs(&self) -> io::Result<Vec<std::net::IpAddr>> {
+        Ok(self.fetch_status().await?.tailscale_ips)
+    }
+
+    /// `tailscaled`'s status without its peers.
+    async fn fetch_status(&self) -> io::Result<Status> {
         let body = self
             .get("/localapi/v0/status?peers=false".to_owned(), "status")
             .await?;
-        let status: ts_types::Status =
-            serde_json::from_slice(&body).map_err(|e| invalid(format!("status reply: {e}")))?;
-        Ok(status.tailscale_ips)
+        serde_json::from_slice(&body).map_err(|e| invalid(format!("status reply: {e}")))
     }
 
     async fn get(&self, target: String, what: &str) -> io::Result<Vec<u8>> {
