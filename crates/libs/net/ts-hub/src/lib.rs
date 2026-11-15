@@ -14,6 +14,8 @@
 mod derp;
 mod file_store;
 mod keys;
+#[cfg(unix)]
+pub mod launch;
 mod limits;
 mod policy;
 mod store;

@@ -49,6 +49,8 @@ rusty_http = { workspace = true, features = ["rusty-tokio"] }
 rusty_tls = { workspace = true, features = ["rusty-tokio"] }
 serde_json = { workspace = true }
 ts-types = { workspace = true }
+# `--hub`: the first-party mesh hub's launcher (docs/projects/mux/MESH.md, D245).
+ts-hub = { workspace = true }
 platform-linux = { workspace = true }
 rusty_libc = { workspace = true }
 

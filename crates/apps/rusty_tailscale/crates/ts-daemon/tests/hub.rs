@@ -58,7 +58,7 @@ fn start(dir: PathBuf, keys: &str) -> Running {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Some(addr) = line.strip_prefix("ts-daemon hub: listening on ") {
+            if let Some(addr) = line.strip_prefix("hub: listening on ") {
                 tx.send(addr.to_string()).ok();
             }
         }

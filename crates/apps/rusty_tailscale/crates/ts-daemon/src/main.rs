@@ -6,7 +6,7 @@
 //! over the relay — no direct paths (Phase 5), no TUN/root (Phase 4).
 //!
 //! `ts-daemon hub ...` runs the first-party coordination server instead (see
-//! `hub.rs`).
+//! `ts_hub::launch`).
 //!
 //! Usage:
 //!   ts-daemon --login-server http://127.0.0.1:8080 --authkey <KEY> \
@@ -133,7 +133,7 @@ options:
             .init();
 
         if std::env::args().nth(1).as_deref() == Some("hub") {
-            return crate::hub::main(std::env::args().skip(2)).await;
+            return ts_hub::launch::main("ts-daemon hub", std::env::args().skip(2)).await;
         }
 
         let args = match parse_args() {
@@ -256,8 +256,6 @@ options:
 
 #[cfg(target_os = "linux")]
 mod backend;
-#[cfg(target_os = "linux")]
-mod hub;
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {

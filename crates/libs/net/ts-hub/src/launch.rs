@@ -1,7 +1,8 @@
-//! `ts-daemon hub`: runs the first-party coordination server (`ts-hub`).
+//! The hub launcher, shared by `ts-daemon hub` and `rusty-mux-server --hub`:
+//! runs the first-party coordination server from flags and two files.
 //!
 //! ```text
-//! ts-daemon hub --listen ADDR:PORT [--tls-cert PEM --tls-key PEM]
+//! <prog> --listen ADDR:PORT [--tls-cert PEM --tls-key PEM]
 //!               [--stun ADDR:PORT] [--state-dir DIR] [--node-ttl SECS]
 //!               [--keys FILE] [--policy FILE] [--advertise HOST]
 //! ```
@@ -14,12 +15,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use crate::{FileStore, Hub, Limits, Policy};
 use rusty_tokio::net::{TcpListener, UdpSocket};
-use ts_hub::{FileStore, Hub, Limits, Policy};
 use ts_key::NodeState;
 
 const USAGE: &str = "\
-usage: ts-daemon hub --listen <addr:port> [options]
+--listen <addr:port> [options]
 
 required:
   --listen <addr:port>   serve /key, the control protocol and DERP here
@@ -93,15 +94,17 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
     })
 }
 
-/// Runs the hub until SIGTERM or Ctrl-C.
-pub async fn main(args: impl Iterator<Item = String>) -> ExitCode {
+/// Runs the hub until SIGTERM or Ctrl-C. `prog` is how the user ran it
+/// (`"ts-daemon hub"`), for the usage and error lines; `args` are the flags
+/// after it.
+pub async fn main(prog: &str, args: impl Iterator<Item = String>) -> ExitCode {
     let args = match parse_args(args) {
         Ok(a) => a,
         Err(msg) => {
             if !msg.is_empty() {
-                eprintln!("ts-daemon hub: {msg}\n");
+                eprintln!("{prog}: {msg}\n");
             }
-            eprintln!("{USAGE}");
+            eprintln!("usage: {prog} {USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -128,7 +131,7 @@ async fn run(args: Args) -> Result<(), BoxError> {
     }
 
     let acceptor = match &args.tls {
-        Some((cert, key)) => Some(ts_hub::tls_acceptor(
+        Some((cert, key)) => Some(crate::tls_acceptor(
             &std::fs::read_to_string(cert)?,
             &std::fs::read_to_string(key)?,
         )?),
@@ -141,7 +144,7 @@ async fn run(args: Args) -> Result<(), BoxError> {
             let socket = UdpSocket::bind(addr).await?;
             let port = socket.local_addr()?.port();
             rusty_tokio::spawn(async move {
-                if let Err(e) = ts_hub::stun::serve(socket).await {
+                if let Err(e) = crate::stun::serve(socket).await {
                     rusty_log::error!("stun: {e}");
                 }
             });
@@ -161,8 +164,8 @@ async fn run(args: Args) -> Result<(), BoxError> {
         "hub: serving {scheme} on {local}, stun port {stun_port}, key {}",
         hub.public_key()
     );
-    // Scripts and tests wait for this line.
-    println!("ts-daemon hub: listening on {local}");
+    // Scripts and tests wait for this line; its last word is the address.
+    println!("hub: listening on {local}");
 
     let serving = match acceptor {
         Some(acceptor) => rusty_tokio::spawn(hub.clone().serve_tls(listener, acceptor)),
