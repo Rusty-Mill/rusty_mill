@@ -93,8 +93,9 @@ pub(crate) fn spawn(
 
 struct Conn {
     handle: SocketHandle,
-    /// net → app data.
-    to_app: mpsc::Sender<Vec<u8>>,
+    /// net → app data. Dropped (`None`) once the peer has finished sending
+    /// and everything it sent is delivered, so the reader sees EOF.
+    to_app: Option<mpsc::Sender<Vec<u8>>>,
     /// A chunk already taken from smoltcp's receive buffer that the app
     /// queue had no room for; retried first, never dropped.
     pending_rx: Option<Vec<u8>>,
@@ -273,7 +274,7 @@ impl Stack {
             id,
             Conn {
                 handle,
-                to_app,
+                to_app: Some(to_app),
                 pending_rx: None,
                 held: held.clone(),
                 out: Vec::new(),
@@ -496,8 +497,11 @@ impl Stack {
             };
             // Raised before the send so a reader that drains the queue right
             // after a `Full` still sees it and pokes.
+            let Some(to_app) = conn.to_app.as_ref() else {
+                break;
+            };
             conn.held.store(true, Ordering::Release);
-            match conn.to_app.try_send(chunk) {
+            match to_app.try_send(chunk) {
                 Ok(()) => conn.held.store(false, Ordering::Release),
                 // Already out of smoltcp's buffer: keep it for the next pass.
                 Err(mpsc::error::TrySendError::Full(chunk)) => {
@@ -510,6 +514,21 @@ impl Stack {
                     break;
                 }
             }
+        }
+
+        // The peer sent its FIN and every byte it sent has been delivered:
+        // drop the channel so the reader's `read` returns EOF now, not only
+        // once our side closes too (#1466).
+        let peer_finished = matches!(
+            sock.state(),
+            tcp::State::CloseWait
+                | tcp::State::LastAck
+                | tcp::State::Closing
+                | tcp::State::TimeWait
+                | tcp::State::Closed
+        );
+        if peer_finished && !sock.can_recv() && conn.pending_rx.is_none() {
+            conn.to_app = None;
         }
 
         // Reap fully-closed connections.
@@ -1092,5 +1111,128 @@ mod tests {
         out_len.store(0, Ordering::Release);
         let poll = Pin::new(&mut stream).poll_write(&mut cx, b"more");
         assert!(matches!(poll, Poll::Ready(Ok(4))));
+    }
+
+    /// Two stacks wired back to back: what each sends, the other receives.
+    fn linked_stacks() -> (
+        mpsc::UnboundedSender<Request>,
+        mpsc::UnboundedSender<Request>,
+    ) {
+        let mk = || {
+            let (inbound_tx, inbound_rx) = mpsc::channel(64);
+            let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            let (req_tx, req_rx) = mpsc::unbounded_channel();
+            let stack = Stack::new(req_tx.clone(), inbound_rx, req_rx, outbound_tx);
+            rusty_tokio::spawn(stack.run());
+            (req_tx, inbound_tx, outbound_rx)
+        };
+        let (a, a_in, mut a_out) = mk();
+        let (b, b_in, mut b_out) = mk();
+        rusty_tokio::spawn(async move {
+            while let Some(p) = a_out.recv().await {
+                if b_in.send(p).await.is_err() {
+                    break;
+                }
+            }
+        });
+        rusty_tokio::spawn(async move {
+            while let Some(p) = b_out.recv().await {
+                if a_in.send(p).await.is_err() {
+                    break;
+                }
+            }
+        });
+        a.send(Request::SetAddr(Ipv4Addr::new(100, 64, 0, 1)))
+            .unwrap();
+        b.send(Request::SetAddr(Ipv4Addr::new(100, 64, 0, 2)))
+            .unwrap();
+        (a, b)
+    }
+
+    /// #1466: a writer that shuts down its write half after `write_all` must
+    /// deliver every byte and then give the reader EOF, so `read_to_end`
+    /// returns the whole transfer.
+    #[rusty_tokio::test]
+    async fn write_all_then_shutdown_delivers_everything_and_the_reader_sees_eof() {
+        use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (a, b) = linked_stacks();
+        let (reply, rx) = oneshot::channel();
+        b.send(Request::Bind { port: 9000, reply }).unwrap();
+        let mut accept_rx = rx.await.unwrap();
+        let (reply, rx) = oneshot::channel();
+        a.send(Request::Connect {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2)), 9000),
+            reply,
+        })
+        .unwrap();
+        let mut writer = rx.await.unwrap().unwrap();
+        let mut reader = accept_rx.recv().await.unwrap();
+
+        let data: Vec<u8> = (0..4u32 << 20)
+            .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
+            .collect();
+        let outgoing = data.clone();
+        rusty_tokio::spawn(async move {
+            writer.write_all(&outgoing).await.unwrap();
+            writer.shutdown().await.unwrap();
+            // Keep the stream alive: EOF must come from the shutdown, not a drop.
+            rusty_tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        let mut got = Vec::new();
+        rusty_tokio::time::timeout(Duration::from_secs(30), reader.read_to_end(&mut got))
+            .await
+            .expect("read_to_end reaches EOF")
+            .unwrap();
+        assert!(
+            got == data,
+            "{} of {} bytes, or they differ",
+            got.len(),
+            data.len()
+        );
+    }
+
+    /// A writer that finishes and goes away while the reader has not read
+    /// anything yet: everything it sent is still delivered, then EOF (#1466).
+    /// Not covered: a chunk held in `pending_rx` when the socket reaches
+    /// `Closed` (we shut down first, the peer replies at length, the reader is
+    /// slow); that can truncate and is a known follow-up.
+    #[rusty_tokio::test]
+    async fn a_closed_connection_keeps_unread_data_until_the_reader_has_it() {
+        use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (a, b) = linked_stacks();
+        let (reply, rx) = oneshot::channel();
+        b.send(Request::Bind { port: 9001, reply }).unwrap();
+        let mut accept_rx = rx.await.unwrap();
+        let (reply, rx) = oneshot::channel();
+        a.send(Request::Connect {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2)), 9001),
+            reply,
+        })
+        .unwrap();
+        let mut writer = rx.await.unwrap().unwrap();
+        let mut reader = accept_rx.recv().await.unwrap();
+
+        let data: Vec<u8> = (0..1u32 << 20).map(|i| (i % 251) as u8).collect();
+        let outgoing = data.clone();
+        let done = rusty_tokio::spawn(async move {
+            writer.write_all(&outgoing).await.unwrap();
+            drop(writer);
+        });
+        done.await.unwrap();
+        // Let both stacks finish the close before anyone reads.
+        rusty_tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let mut got = Vec::new();
+        rusty_tokio::time::timeout(Duration::from_secs(30), reader.read_to_end(&mut got))
+            .await
+            .expect("read_to_end reaches EOF")
+            .unwrap();
+        assert!(
+            got == data,
+            "{} of {} bytes, or they differ",
+            got.len(),
+            data.len()
+        );
     }
 }
