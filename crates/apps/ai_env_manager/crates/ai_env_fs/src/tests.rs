@@ -480,3 +480,82 @@ fn a_failed_stage_leaves_no_temp_file() {
     assert!(edit::stage_for_test(&gone, b"x", &meta).is_err());
     assert_eq!(fs::read_dir(&e.source).unwrap().count(), 2);
 }
+
+/// A marked copy of the fixture whose files equal the source's again after an edit.
+fn copy_edited_to_match(t: &Tmp) -> (Entry, PathBuf) {
+    let (e, tool) = fixture(t);
+    enable(&e, &tool, LinkMethod::Copy).unwrap();
+    let copy = tool.target(&e);
+    fs::write(copy.join("SKILL.md"), "changed").unwrap();
+    fs::write(e.source.join("SKILL.md"), "changed").unwrap();
+    (e, copy)
+}
+
+#[test]
+fn remark_refreshes_the_marker_only_when_the_trees_match() {
+    let tmp = Tmp::new();
+    let (e, copy) = copy_edited_to_match(&tmp);
+    assert!(remark_if_equal(&e, &copy).unwrap());
+    let tool = Tool {
+        id: "claude-code".parse().unwrap(),
+        skills_dir: tmp.0.join("home/skills"),
+    };
+    assert_eq!(observe(&e, &tool).unwrap(), Observed::ManagedCurrent);
+    assert!(
+        !copy.join(format!("{MARKER}.tmp")).exists(),
+        "staging file gone"
+    );
+    fs::write(copy.join("refs/a.md"), "edited again").unwrap();
+    assert!(!remark_if_equal(&e, &copy).unwrap());
+    assert_eq!(observe(&e, &tool).unwrap(), Observed::ManagedModified);
+}
+
+#[test]
+fn remark_refuses_a_folder_without_our_marker() {
+    let tmp = Tmp::new();
+    let (e, copy) = copy_edited_to_match(&tmp);
+    fs::remove_file(copy.join(MARKER)).unwrap();
+    assert!(matches!(
+        remark_if_equal(&e, &copy),
+        Err(Error::NotManaged(_))
+    ));
+}
+
+#[test]
+fn remark_clears_a_staging_file_left_by_a_crash() {
+    let tmp = Tmp::new();
+    let (e, copy) = copy_edited_to_match(&tmp);
+    fs::write(copy.join(format!("{MARKER}.tmp")), "half written").unwrap();
+    assert!(remark_if_equal(&e, &copy).unwrap());
+    assert!(!copy.join(format!("{MARKER}.tmp")).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn remark_follows_no_link() {
+    use std::os::unix::fs::symlink;
+    // The copy itself is a link to a real marked folder.
+    let tmp = Tmp::new();
+    let (e, copy) = copy_edited_to_match(&tmp);
+    let alias = tmp.0.join("alias");
+    symlink(&copy, &alias).unwrap();
+    assert!(matches!(remark_if_equal(&e, &alias), Err(Error::Link(_))));
+
+    // The marker is a link to a file elsewhere.
+    let marker = fs::read_to_string(copy.join(MARKER)).unwrap();
+    let elsewhere = tmp.0.join("elsewhere");
+    fs::write(&elsewhere, &marker).unwrap();
+    fs::remove_file(copy.join(MARKER)).unwrap();
+    symlink(&elsewhere, copy.join(MARKER)).unwrap();
+    assert!(matches!(remark_if_equal(&e, &copy), Err(Error::Link(_))));
+    assert_eq!(fs::read_to_string(&elsewhere).unwrap(), marker, "untouched");
+    fs::remove_file(copy.join(MARKER)).unwrap();
+    fs::write(copy.join(MARKER), &marker).unwrap();
+
+    // A link planted at the staging path is not written through.
+    let victim = tmp.0.join("victim");
+    fs::write(&victim, "keep").unwrap();
+    symlink(&victim, copy.join(format!("{MARKER}.tmp"))).unwrap();
+    assert!(matches!(remark_if_equal(&e, &copy), Err(Error::Link(_))));
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+}
