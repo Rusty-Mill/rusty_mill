@@ -21,8 +21,8 @@ usage: aienv list --skills DIR... [--tool ID]...
                 $EDITOR. It shows the diff and writes only on --yes (or a typed y after the
                 editor). Without --tool the skill's source is edited, else that tool's copy.
 
-exit status: 0 done, 1 a path was refused (nothing changed there), 2 usage (or the editor
-with no terminal to confirm on), 3 error";
+exit status: 0 done, 1 a link plan held a refusal (nothing changed there), 2 usage (or the
+editor with no terminal to confirm on), 3 error (including an edit or push that was refused)";
 
 /// One entry to change, and whether to apply the plan.
 #[derive(Debug, Clone, PartialEq, Eq)]

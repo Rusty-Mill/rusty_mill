@@ -426,3 +426,32 @@ fn edit_with_tool_changes_that_tools_copy_only() {
     assert!(matches!(r, Ok(Outcome::Done)));
     assert_eq!(fs::read_to_string(skill_md(&t)).unwrap(), "via link");
 }
+
+#[cfg(unix)]
+#[test]
+fn the_editor_temp_folder_is_private_and_never_reused() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let skills = t.skills();
+    // The editor reports the mode of its own folder, then edits the file.
+    let ed = t.0.join("ed.sh");
+    let seen = t.0.join("seen");
+    let where_ = t.0.join("where");
+    fs::write(
+        &ed,
+        format!(
+            "#!/bin/sh\nstat -c %a \"$(dirname \"$1\")\" > {}\ndirname \"$1\" > {}\necho x > \"$1\"\n",
+            seen.display(),
+            where_.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&ed, fs::Permissions::from_mode(0o755)).unwrap();
+    let l = line("edit code-review", &skills, "SKILL.md --yes");
+    let (r, _, err) = run_with(&l, &t.home(), "", false, Some(ed.to_str().unwrap()));
+    assert!(matches!(r, Ok(Outcome::Done)), "{err}");
+    assert_eq!(fs::read_to_string(&seen).unwrap().trim(), "700");
+    assert!(err.is_empty(), "{err}");
+    let dir = fs::read_to_string(&where_).unwrap();
+    assert!(!Path::new(dir.trim()).exists(), "temp folder removed");
+}
