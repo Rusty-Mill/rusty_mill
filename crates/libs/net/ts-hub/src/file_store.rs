@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use ts_types::tailcfg::MapResponse;
 use ts_types::{DiscoPublic, MachinePublic, NodePublic};
 
-use crate::store::{KeyPolicy, MemoryStore, NodeStore, RegisterError};
+use crate::store::{KeyPolicy, MemoryStore, NodeStore, RegisterError, Revocation};
 
 /// Why a node table file could not be opened.
 #[derive(Debug, thiserror::Error)]
@@ -62,18 +62,53 @@ impl FileStore {
         let json = self.inner.to_json().map_err(|e| storage(&e))?;
         let tmp = self.path.with_extension("tmp");
         write_private(&tmp, &json).map_err(|e| storage(&e))?;
-        fs::rename(&tmp, &self.path).map_err(|e| storage(&e))
+        fs::rename(&tmp, &self.path).map_err(|e| storage(&e))?;
+        sync_parent(&self.path).map_err(|e| storage(&e))
+    }
+
+    /// Runs `change`; if the new table cannot be saved, puts the old one
+    /// back, so a refused write never leaves a node admitted in memory only.
+    fn saved<T>(
+        &mut self,
+        change: impl FnOnce(&mut MemoryStore) -> Result<T, RegisterError>,
+    ) -> Result<T, RegisterError> {
+        let before = self.inner.clone();
+        let out = change(&mut self.inner)?;
+        if let Err(e) = self.flush() {
+            self.inner = before;
+            return Err(e);
+        }
+        Ok(out)
     }
 }
 
+/// Writes `bytes` to a new file at `path` (`0600`), replacing a stale one so
+/// its old mode cannot carry over.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options.open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
+}
+
+/// Makes the rename durable.
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> std::io::Result<()> {
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+    fs::File::open(dir.unwrap_or(Path::new(".")))?.sync_all()
+}
+
+/// Windows cannot open a directory to sync it.
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 impl NodeStore for FileStore {
@@ -84,8 +119,7 @@ impl NodeStore for FileStore {
         policy: KeyPolicy,
         now: u64,
     ) -> Result<(), RegisterError> {
-        self.inner.add_preauth(key, login, policy, now)?;
-        self.flush()
+        self.saved(|s| s.add_preauth(key, login, policy, now))
     }
 
     fn register(
@@ -96,15 +130,15 @@ impl NodeStore for FileStore {
         auth_key: &str,
         now: u64,
     ) -> Result<(), RegisterError> {
-        self.inner
-            .register(machine, node_key, hostname, auth_key, now)?;
-        self.flush()
+        self.saved(|s| s.register(machine, node_key, hostname, auth_key, now))
     }
 
-    fn revoke(&mut self, machine: &MachinePublic) -> Result<Option<NodePublic>, RegisterError> {
-        let revoked = self.inner.revoke(machine)?;
-        self.flush()?;
-        Ok(revoked)
+    fn revoke(&mut self, machine: &MachinePublic) -> Revocation {
+        // Never rolled back: a revoke that could not be saved still holds
+        // for this run, and the caller is told it is not durable.
+        let mut out = self.inner.revoke(machine);
+        out.saved = self.flush();
+        out
     }
 
     fn has_node_key(&self, key: &NodePublic, now: u64) -> bool {

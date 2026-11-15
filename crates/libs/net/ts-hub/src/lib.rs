@@ -38,7 +38,7 @@ use ts_types::{DiscoPublic, MachinePublic, NodePublic};
 pub use derp::DerpRefusal;
 pub use file_store::{FileStore, StoreError};
 pub use limits::Limits;
-pub use store::{KeyPolicy, MemoryStore, NodeRec, NodeStore, RegisterError};
+pub use store::{KeyPolicy, MemoryStore, NodeRec, NodeStore, RegisterError, Revocation};
 
 use limits::{Counter, Keyed};
 
@@ -116,15 +116,19 @@ impl<S: NodeStore> Hub<S> {
         self.locked(|s| s.add_preauth(key, login, policy, unix_now()))
     }
 
-    /// Removes a node: it drops out of every netmap, its map streams end and
-    /// its relay session is closed. `false` if the machine was not registered.
+    /// Removes a node and bans its machine key: it drops out of every
+    /// netmap, its map streams end, its relay session is closed, and it can
+    /// never register again (a reusable pre-auth key does not bring it back).
+    /// `false` if the machine was not registered. If saving the table fails
+    /// the revoke still takes effect, and the error says it is not durable.
     pub fn revoke(&self, machine: &MachinePublic) -> Result<bool, RegisterError> {
-        let Some(node_key) = self.locked(|s| s.revoke(machine))? else {
-            return Ok(false);
-        };
-        self.relay.kick(&node_key);
-        self.bump();
-        Ok(true)
+        let revoked = self.locked(|s| s.revoke(machine));
+        if let Some(node_key) = &revoked.node_key {
+            self.relay.kick(node_key);
+            self.bump();
+        }
+        revoked.saved?;
+        Ok(revoked.node_key.is_some())
     }
 
     /// Advertises this hub's relay and STUN responder to nodes as a single

@@ -166,7 +166,7 @@ impl NodeStore for Racy {
         self.inner
             .register(machine, node_key, hostname, auth_key, now)
     }
-    fn revoke(&mut self, machine: &MachinePublic) -> Result<Option<NodePublic>, RegisterError> {
+    fn revoke(&mut self, machine: &MachinePublic) -> Revocation {
         self.inner.revoke(machine)
     }
     fn has_node_key(&self, key: &NodePublic, now: u64) -> bool {
@@ -494,12 +494,20 @@ fn a_restarted_hub_keeps_its_nodes_and_spent_keys() {
         Err(RegisterError::BadAuthKey),
         "the spent key stayed spent"
     );
-    store.revoke(&MachinePublic([1; 32])).unwrap();
+    assert_eq!(store.revoke(&MachinePublic([1; 32])).saved, Ok(()));
     drop(store);
-    let store = FileStore::open(&path, None).unwrap();
+    let mut store = FileStore::open(&path, None).unwrap();
     assert!(
         !store.has_node_key(&NodePublic([1; 32]), 0),
         "revoke survived"
+    );
+    store
+        .add_preauth("again", "alice", KeyPolicy::REUSABLE, 0)
+        .unwrap();
+    assert_eq!(
+        store.register(MachinePublic([1; 32]), NodePublic([1; 32]), "a", "again", 0),
+        Err(RegisterError::Revoked),
+        "the ban survived the restart"
     );
     #[cfg(unix)]
     {
@@ -575,4 +583,47 @@ async fn one_machine_cannot_hold_more_netmap_streams_than_its_cap() {
         .poll_netmap(node, disco, vec![], |_| ControlFlow::Break(()))
         .await;
     assert!(refused.is_err(), "a second stream was served over the cap");
+}
+
+#[test]
+fn a_write_that_fails_leaves_no_node_admitted_in_memory() {
+    let path = temp_table("unwritable");
+    let _ = std::fs::remove_file(&path);
+    let mut store = FileStore::open(&path, None).unwrap();
+    store
+        .add_preauth("k", "alice", KeyPolicy::REUSABLE, 0)
+        .unwrap();
+    // The directory vanishes under the store: every save now fails.
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+
+    let refused = store.register(MachinePublic([1; 32]), NodePublic([1; 32]), "a", "k", 0);
+    assert!(
+        matches!(refused, Err(RegisterError::Storage(_))),
+        "{refused:?}"
+    );
+    assert!(
+        !store.has_node_key(&NodePublic([1; 32]), 0),
+        "admitted anyway"
+    );
+
+    // A revoke still holds in memory, and says it is not durable.
+    let revoked = store.revoke(&MachinePublic([2; 32]));
+    assert!(matches!(revoked.saved, Err(RegisterError::Storage(_))));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stale_temp_file_does_not_keep_its_loose_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = temp_table("stale");
+    let _ = std::fs::remove_file(&path);
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, b"old").unwrap();
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mut store = FileStore::open(&path, None).unwrap();
+    store
+        .add_preauth("k", "alice", KeyPolicy::REUSABLE, 0)
+        .unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o077, 0, "the saved table is group/world readable");
 }

@@ -61,6 +61,8 @@ pub enum RegisterError {
     BadAuthKey,
     #[error("pre-auth key has expired")]
     ExpiredAuthKey,
+    #[error("this machine was revoked")]
+    Revoked,
     #[error("the node table is full")]
     Full,
     #[error("could not save the node table: {0}")]
@@ -90,9 +92,11 @@ pub trait NodeStore: Send + 'static {
         now: u64,
     ) -> Result<(), RegisterError>;
 
-    /// Removes the machine from the table; returns its node key so the
-    /// caller can close the relay session. `None` if it was not registered.
-    fn revoke(&mut self, machine: &MachinePublic) -> Result<Option<NodePublic>, RegisterError>;
+    /// Removes the machine from the table and bans it: it cannot register
+    /// again, whatever key it holds. The outcome carries the node key so the
+    /// caller can close the relay session even when saving failed (the
+    /// revoke stands in memory regardless).
+    fn revoke(&mut self, machine: &MachinePublic) -> Revocation;
 
     /// Whether `key` belongs to a registered, unexpired node (the relay
     /// admits only these).
@@ -112,6 +116,15 @@ pub trait NodeStore: Send + 'static {
     fn netmap(&self, machine: &MachinePublic, omit_peers: bool, now: u64) -> Option<MapResponse>;
 }
 
+/// What [`NodeStore::revoke`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Revocation {
+    /// The revoked node's key, if the machine was registered.
+    pub node_key: Option<NodePublic>,
+    /// Whether the new table was saved.
+    pub saved: Result<(), RegisterError>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PreauthRec {
     login: String,
@@ -122,10 +135,13 @@ struct PreauthRec {
 }
 
 /// Pre-auth keys and registered nodes, held in memory.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemoryStore {
     preauth: HashMap<String, PreauthRec>,
     nodes: Vec<NodeRec>,
+    /// Machines that may never register again.
+    #[serde(default)]
+    revoked: HashSet<MachinePublic>,
     /// Ids are never reused, even after a revoke.
     next_id: i64,
     /// How long a registration lasts; set by the operator, not saved.
@@ -160,6 +176,9 @@ impl MemoryStore {
         machine: &MachinePublic,
         now: u64,
     ) -> Result<String, RegisterError> {
+        if self.revoked.contains(machine) {
+            return Err(RegisterError::Revoked);
+        }
         let rec = self.preauth.get(key).ok_or(RegisterError::BadAuthKey)?;
         if rec.expires.is_some_and(|t| now >= t) {
             return Err(RegisterError::ExpiredAuthKey);
@@ -280,11 +299,17 @@ impl NodeStore for MemoryStore {
         Ok(())
     }
 
-    fn revoke(&mut self, machine: &MachinePublic) -> Result<Option<NodePublic>, RegisterError> {
-        let Some(i) = self.nodes.iter().position(|n| n.machine == *machine) else {
-            return Ok(None);
-        };
-        Ok(Some(self.nodes.remove(i).node_key))
+    fn revoke(&mut self, machine: &MachinePublic) -> Revocation {
+        self.revoked.insert(*machine);
+        let node_key = self
+            .nodes
+            .iter()
+            .position(|n| n.machine == *machine)
+            .map(|i| self.nodes.remove(i).node_key);
+        Revocation {
+            node_key,
+            saved: Ok(()),
+        }
     }
 
     fn has_node_key(&self, key: &NodePublic, now: u64) -> bool {
@@ -531,8 +556,8 @@ mod tests {
         keyed(&mut s, KeyPolicy::REUSABLE);
         s.register(m(1), k(1), "a", "k", 0).unwrap();
         s.register(m(2), k(2), "b", "k", 0).unwrap();
-        assert_eq!(s.revoke(&m(1)), Ok(Some(k(1))));
-        assert_eq!(s.revoke(&m(1)), Ok(None));
+        assert_eq!(s.revoke(&m(1)).node_key, Some(k(1)));
+        assert_eq!(s.revoke(&m(1)).node_key, None);
         assert!(!s.has_node_key(&k(1), 0));
         s.register(m(3), k(3), "c", "k", 0).unwrap();
         assert_eq!(ip_of(&s, 3), 1, "the lowest free host");
@@ -564,5 +589,20 @@ mod tests {
             s.netmap(&m(1), true, 0).unwrap().node.unwrap().name,
             "dev-box.mesh."
         );
+    }
+
+    #[test]
+    fn a_revoked_machine_cannot_register_again_with_any_key() {
+        let mut s = MemoryStore::default();
+        keyed(&mut s, KeyPolicy::REUSABLE);
+        s.register(m(1), k(1), "a", "k", 0).unwrap();
+        s.revoke(&m(1));
+        assert_eq!(
+            s.register(m(1), k(1), "a", "k", 0),
+            Err(RegisterError::Revoked)
+        );
+        assert!(!s.has_node_key(&k(1), 0));
+        // Other machines are unaffected.
+        s.register(m(2), k(2), "b", "k", 0).unwrap();
     }
 }
