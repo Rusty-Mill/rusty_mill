@@ -194,13 +194,22 @@ const EDIT_NOTE = {
   foreign: "Not ours: read-only.",
 };
 
+// One source file serves every tool linked to it, so a save reaches all of them.
+const sharedNote = () => (ed.ownership === "source" && ed.users.length > 1 ? ` Used by ${ed.users.join(", ")}: one save changes all of them.` : "");
+const FOOT = "Nothing is written until you confirm the diff.";
+function edFoot(text = FOOT) {
+  $("ed-foot").textContent = text;
+}
+
 function edError(e) {
   $("ed-error").textContent = e ? String(e) : "";
   $("ed-error").hidden = !e;
 }
 
 function openEditor(row) {
-  ed = { entry: row.id, files: [], path: null, mode: "view" };
+  ed = { entry: row.id, files: [], path: null, mode: "view", users: row.cells.filter((c) => c.state === "enabled").map((c) => c.tool) };
+  closeWarn();
+  edFoot();
   $("ed-title").textContent = row.id;
   const sel = $("ed-place");
   sel.replaceChildren();
@@ -232,7 +241,7 @@ async function loadFiles() {
 }
 
 async function openFile(path) {
-  if (ed.mode !== "view" && ed.text !== undefined && !confirmDiscard()) return;
+  closeWarn();
   edError(null);
   try {
     const v = await invoke("file", { entry: ed.entry, tool: edTool(), path });
@@ -244,8 +253,26 @@ async function openFile(path) {
   edShow();
 }
 
-// Slice 5 replaces this with a proper prompt; until then edits are never dropped silently.
-const confirmDiscard = () => ed.mode === "view" || $("ed-text").value === ed.text;
+// Unsaved text is never dropped silently: anything that would lose it asks first.
+const dirty = () => ed.mode !== "view" && $("ed-text").value !== ed.text;
+let afterDrop = null;
+function guard(action, what) {
+  if (!dirty()) return action();
+  afterDrop = action;
+  $("ed-warn-text").textContent = `You have unsaved changes. ${what} would discard them.`;
+  $("ed-warn").hidden = false;
+  $("ed-drop").focus();
+}
+function closeWarn() {
+  afterDrop = null;
+  $("ed-warn").hidden = true;
+}
+$("ed-keep").addEventListener("click", closeWarn);
+$("ed-drop").addEventListener("click", () => {
+  const go = afterDrop;
+  closeWarn();
+  if (go) go();
+});
 
 function edShow() {
   const list = $("ed-files");
@@ -253,7 +280,7 @@ function edShow() {
   for (const f of ed.files) {
     const b = el("button", f.editable ? "" : "ro", f.path);
     if (f.path === ed.path) b.setAttribute("aria-current", "true");
-    b.addEventListener("click", () => openFile(f.path));
+    b.addEventListener("click", () => guard(() => openFile(f.path), "Opening another file"));
     list.appendChild(el("li")).appendChild(b);
   }
   const open = ed.path !== null;
@@ -264,21 +291,26 @@ function edShow() {
   if (open && m === "view") $("ed-view").textContent = ed.text;
   $("ed-note").textContent = !open
     ? ed.files.length ? "Pick a file." : ""
-    : `${ed.path}. ${EDIT_NOTE[ed.ownership] ?? ""}${ed.editable ? "" : " Read-only."}`;
+    : `${ed.path}. ${EDIT_NOTE[ed.ownership] ?? ""}${ed.editable ? sharedNote() : " Read-only."}`;
   $("ed-edit").hidden = !(open && m === "view" && ed.editable);
+  $("ed-reload").hidden = m === "view";
   $("ed-back").hidden = m !== "review";
   $("ed-review").hidden = m !== "edit";
   $("ed-save").hidden = m !== "review";
   $("ed-place").disabled = m !== "view";
 }
 
-$("ed-place").addEventListener("change", loadFiles);
-$("ed-close").addEventListener("click", () => {
-  if (confirmDiscard()) $("editor").close();
+$("ed-place").addEventListener("change", loadFiles); // the select is disabled while editing
+$("ed-close").addEventListener("click", () => guard(() => $("editor").close(), "Closing"));
+$("editor").addEventListener("cancel", (e) => {
+  if (!dirty()) return;
+  e.preventDefault();
+  guard(() => $("editor").close(), "Closing");
 });
-$("editor").addEventListener("cancel", (e) => { if (!confirmDiscard()) e.preventDefault(); });
+$("ed-reload").addEventListener("click", () => openFile(ed.path)); // also the way out of "changed on disk"
 $("ed-edit").addEventListener("click", () => {
   ed.mode = "edit";
+  edFoot();
   $("ed-text").value = ed.text;
   edShow();
   $("ed-text").focus();
@@ -286,7 +318,7 @@ $("ed-edit").addEventListener("click", () => {
 $("ed-back").addEventListener("click", () => {
   ed.mode = "edit";
   ed.reviewed = null;
-  $("ed-foot").textContent = "Nothing is written until you confirm the diff.";
+  edFoot();
   edShow();
 });
 // What the diff showed is exactly what Confirm saves: the review takes a snapshot, and the
@@ -304,7 +336,7 @@ $("ed-review").addEventListener("click", async () => {
     const changed = p.diff.filter((d) => d.kind !== "same").length;
     $("ed-foot").textContent = changed === 0
       ? "No changes."
-      : p.marks_edited ? "Saving marks this copy edited. Nothing is written until you confirm." : "Nothing is written until you confirm.";
+      : `${p.marks_edited ? "Saving marks this copy edited. " : ""}Nothing is written until you confirm.${sharedNote()}`;
     $("ed-save").disabled = changed === 0;
     ed.reviewed = snap;
     ed.mode = "review";
