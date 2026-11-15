@@ -268,3 +268,215 @@ fn discovery_finds_skill_folders_and_reports_bad_names() {
     assert!(found.skipped[0].path.ends_with("Bad_Name"));
     assert!(discover_skills(&tmp.0.join("missing")).is_err());
 }
+
+// --- editor (edit.rs) ---
+
+use ai_env_core::{plan_edit, EditPlan, EditRefusal, Ownership, RelPath};
+
+fn rel(s: &str) -> RelPath {
+    RelPath::parse(s).unwrap()
+}
+
+/// A plan to replace `file` under `e`'s source with `new`, from a fresh read.
+fn edit_plan(e: &Entry, file: &str, own: Ownership, new: &str) -> EditPlan {
+    let read = read_file(&e.source, &rel(file)).unwrap();
+    plan_edit(
+        e.id.clone(),
+        rel(file),
+        own,
+        read.hash,
+        &read.text,
+        new.into(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn lists_regular_files_without_the_marker() {
+    let tmp = Tmp::new();
+    let (e, _) = fixture(&tmp);
+    fs::write(e.source.join(MARKER), "x").unwrap();
+    let names: Vec<_> = list_files(&e.source).unwrap();
+    assert_eq!(names, [rel("SKILL.md"), rel("refs/a.md")]);
+}
+
+#[test]
+fn read_returns_text_and_a_hash_that_follows_the_bytes() {
+    let tmp = Tmp::new();
+    let (e, _) = fixture(&tmp);
+    let a = read_file(&e.source, &rel("SKILL.md")).unwrap();
+    assert_eq!(a.text, "hello");
+    assert_eq!(a.hash, read_file(&e.source, &rel("SKILL.md")).unwrap().hash);
+    fs::write(e.source.join("SKILL.md"), "hellp").unwrap();
+    assert_ne!(a.hash, read_file(&e.source, &rel("SKILL.md")).unwrap().hash);
+}
+
+#[test]
+fn read_refuses_binary_oversize_missing_and_directories() {
+    let tmp = Tmp::new();
+    let (e, _) = fixture(&tmp);
+    fs::write(e.source.join("bin"), [0xff, 0x00]).unwrap();
+    fs::write(
+        e.source.join("big"),
+        vec![b'a'; ai_env_core::MAX_EDIT_BYTES + 1],
+    )
+    .unwrap();
+    assert!(matches!(
+        read_file(&e.source, &rel("bin")),
+        Err(Error::Edit(EditRefusal::NotText))
+    ));
+    assert!(matches!(
+        read_file(&e.source, &rel("big")),
+        Err(Error::Edit(EditRefusal::TooLarge(_)))
+    ));
+    assert!(matches!(
+        read_file(&e.source, &rel("nope")),
+        Err(Error::Io(..))
+    ));
+    assert!(matches!(
+        read_file(&e.source, &rel("refs")),
+        Err(Error::NotFile(_))
+    ));
+}
+
+#[test]
+fn write_replaces_the_text_and_keeps_the_mode() {
+    let tmp = Tmp::new();
+    let (e, _) = fixture(&tmp);
+    let file = e.source.join("SKILL.md");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+    }
+    write_file(
+        &e.source,
+        &edit_plan(&e, "SKILL.md", Ownership::Source, "new\n"),
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "new\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
+    let leftovers = fs::read_dir(&e.source).unwrap().count();
+    assert_eq!(leftovers, 2, "no temp file left behind");
+}
+
+#[test]
+fn write_refuses_a_file_changed_since_it_was_read() {
+    let tmp = Tmp::new();
+    let (e, _) = fixture(&tmp);
+    let plan = edit_plan(&e, "SKILL.md", Ownership::Source, "mine");
+    fs::write(e.source.join("SKILL.md"), "theirs").unwrap();
+    assert!(matches!(
+        write_file(&e.source, &plan),
+        Err(Error::Changed(_))
+    ));
+    assert_eq!(
+        fs::read_to_string(e.source.join("SKILL.md")).unwrap(),
+        "theirs"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn links_inside_the_entry_are_never_followed() {
+    let tmp = Tmp::new();
+    let (e, _) = fixture(&tmp);
+    let outside = tmp.0.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret"), "s").unwrap();
+    std::os::unix::fs::symlink(outside.join("secret"), e.source.join("leak")).unwrap();
+    std::os::unix::fs::symlink(&outside, e.source.join("dir")).unwrap();
+    assert!(matches!(
+        read_file(&e.source, &rel("leak")),
+        Err(Error::Link(_))
+    ));
+    assert!(matches!(
+        read_file(&e.source, &rel("dir/secret")),
+        Err(Error::Link(_))
+    ));
+    assert_eq!(fs::read_to_string(outside.join("secret")).unwrap(), "s");
+}
+
+#[cfg(unix)]
+#[test]
+fn locate_tells_source_copy_and_foreign_apart() {
+    let tmp = Tmp::new();
+    let (e, t) = fixture(&tmp);
+    assert_eq!(locate(&e, &t).unwrap(), None);
+    enable(&e, &t, LinkMethod::Symlink).unwrap();
+    assert_eq!(
+        locate(&e, &t).unwrap(),
+        Some((e.source.clone(), Ownership::Source))
+    );
+    disable(&e, &t).unwrap();
+    enable(&e, &t, LinkMethod::Copy).unwrap();
+    assert_eq!(
+        locate(&e, &t).unwrap(),
+        Some((t.target(&e), Ownership::MarkedCopy))
+    );
+    disable(&e, &t).unwrap();
+    fs::create_dir_all(t.target(&e)).unwrap();
+    assert_eq!(
+        locate(&e, &t).unwrap(),
+        Some((t.target(&e), Ownership::Unmanaged))
+    );
+}
+
+#[test]
+fn editing_a_marked_copy_makes_it_edited() {
+    let tmp = Tmp::new();
+    let (e, t) = fixture(&tmp);
+    enable(&e, &t, LinkMethod::Copy).unwrap();
+    let root = t.target(&e);
+    let read = read_file(&root, &rel("SKILL.md")).unwrap();
+    let plan = plan_edit(
+        e.id.clone(),
+        rel("SKILL.md"),
+        Ownership::MarkedCopy,
+        read.hash,
+        &read.text,
+        "x".into(),
+    )
+    .unwrap();
+    write_file(&root, &plan).unwrap();
+    assert_eq!(observe(&e, &t).unwrap(), Observed::ManagedModified);
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_text_is_never_more_readable_than_the_original() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let tmp = Tmp::new();
+    let (e, _) = fixture(&tmp);
+    let file = e.source.join("SKILL.md");
+    for orig in [0o600, 0o640] {
+        fs::set_permissions(&file, fs::Permissions::from_mode(orig)).unwrap();
+        let before = fs::metadata(&file).unwrap();
+        let staged = edit::stage_for_test(&file, b"secret", &before).unwrap();
+        // Staged, not yet published: the original text is still in place, and
+        // the staged file has the same mode, owner and group.
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hello");
+        let s = fs::metadata(&staged).unwrap();
+        assert_eq!(s.permissions().mode() & 0o777, orig);
+        assert_eq!((s.uid(), s.gid()), (before.uid(), before.gid()));
+        fs::remove_file(staged).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_stage_leaves_no_temp_file() {
+    let tmp = Tmp::new();
+    let (e, _) = fixture(&tmp);
+    let gone = e.source.join("no-such-dir/x.md");
+    let meta = fs::metadata(&e.source).unwrap();
+    assert!(edit::stage_for_test(&gone, b"x", &meta).is_err());
+    assert_eq!(fs::read_dir(&e.source).unwrap().count(), 2);
+}

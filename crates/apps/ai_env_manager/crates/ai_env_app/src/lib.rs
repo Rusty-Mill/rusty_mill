@@ -8,15 +8,18 @@
 //! and got consent (D6).
 
 use ai_env_core::{
-    parse_catalog, plan_disable, plan_enable, CatalogError, Entry, EntryId, LinkMethod, Observed,
-    Plan, Restricted, Tool, ToolId, BUILTIN_TOOLS,
+    parse_catalog, plan_disable, plan_edit, plan_enable, CatalogError, EditRefusal, Entry, EntryId,
+    LinkMethod, Observed, Ownership, Plan, RelPath, Restricted, Tool, ToolId, BUILTIN_TOOLS,
 };
 use std::env;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
+mod diff;
+
 pub use ai_env_fs::Skipped;
+pub use diff::{diff_lines, DiffLine};
 
 /// Where to look: skill folders to scan and the tools to act on (empty means
 /// every tool in the catalog).
@@ -43,6 +46,9 @@ pub enum Error {
     /// A skills folder could not be read.
     Folder(PathBuf, io::Error),
     Fs(ai_env_fs::Error),
+    /// The tool has no copy or link of the entry to edit.
+    NotEnabled(String),
+    Edit(EditRefusal),
     Io(io::Error),
 }
 
@@ -59,6 +65,8 @@ impl fmt::Display for Error {
             }
             Error::Folder(p, e) => write!(f, "{}: {e}", p.display()),
             Error::Fs(e) => e.fmt(f),
+            Error::NotEnabled(t) => write!(f, "the skill is not enabled in {t}"),
+            Error::Edit(e) => e.fmt(f),
             Error::Io(e) => e.fmt(f),
         }
     }
@@ -75,6 +83,12 @@ impl From<CatalogError> for Error {
 impl From<ai_env_fs::Error> for Error {
     fn from(e: ai_env_fs::Error) -> Self {
         Error::Fs(e)
+    }
+}
+
+impl From<EditRefusal> for Error {
+    fn from(e: EditRefusal) -> Self {
+        Error::Edit(e)
     }
 }
 
@@ -166,3 +180,148 @@ pub fn plan(entry: &Entry, tool: &Tool, op: Op) -> Result<Plan, Error> {
 pub fn apply(plan: &Plan) -> Result<(), Error> {
     Ok(ai_env_fs::apply(plan)?)
 }
+
+/// Which copy of an entry's files to work on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    /// The entry's source folder, where links come from.
+    Source,
+    /// What this tool has: the source if it links to it, else its marked copy.
+    Tool(ToolId),
+}
+
+/// A file the editor can name, and whether it may be changed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FileInfo {
+    pub path: RelPath,
+    pub editable: bool,
+}
+
+/// The files in a [`Place`] and who owns them.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Listing {
+    pub ownership: Ownership,
+    pub files: Vec<FileInfo>,
+}
+
+/// A file as read: text and the hash to pass back when saving.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Opened {
+    pub ownership: Ownership,
+    pub text: String,
+    pub hash: String,
+}
+
+/// What saving would change; nothing is written to get one.
+#[derive(Debug, PartialEq, Eq)]
+pub struct EditPreview {
+    pub ownership: Ownership,
+    pub diff: Vec<DiffLine>,
+    /// True when saving leaves a marked copy in the "edited" state.
+    pub marks_edited: bool,
+}
+
+/// The folder to work in and who owns it. Looked up afresh on every call, so
+/// a change since the last one is seen.
+fn resolve(entry: &Entry, place: &Place, tools: &[Tool]) -> Result<(PathBuf, Ownership), Error> {
+    let Place::Tool(id) = place else {
+        return Ok((entry.source.clone(), Ownership::Source));
+    };
+    let tool = tools
+        .iter()
+        .find(|t| &t.id == id)
+        .ok_or_else(|| Error::UnknownTool(id.to_string()))?;
+    ai_env_fs::locate(entry, tool)?.ok_or_else(|| Error::NotEnabled(id.to_string()))
+}
+
+/// The files in `place`, each flagged editable or read-only.
+pub fn list_files(entry: &Entry, place: &Place, tools: &[Tool]) -> Result<Listing, Error> {
+    let (root, ownership) = resolve(entry, place, tools)?;
+    let files = ai_env_fs::list_files(&root)?
+        .into_iter()
+        .map(|path| FileInfo {
+            editable: ai_env_core::check_editable(&path, ownership).is_ok(),
+            path,
+        })
+        .collect();
+    Ok(Listing { ownership, files })
+}
+
+/// The text of `path` in `place`.
+pub fn read_file(
+    entry: &Entry,
+    place: &Place,
+    tools: &[Tool],
+    path: &str,
+) -> Result<Opened, Error> {
+    let (root, ownership) = resolve(entry, place, tools)?;
+    let read = ai_env_fs::read_file(&root, &RelPath::parse(path)?)?;
+    Ok(Opened {
+        ownership,
+        text: read.text,
+        hash: read.hash,
+    })
+}
+
+/// Checks an edit against every rule and the file as it is now. `hash` is
+/// the one [`read_file`] gave. Reads the disk, writes nothing.
+fn check_edit(
+    entry: &Entry,
+    place: &Place,
+    tools: &[Tool],
+    path: &str,
+    new_text: String,
+    hash: &str,
+) -> Result<(PathBuf, ai_env_core::EditPlan, String), Error> {
+    let (root, ownership) = resolve(entry, place, tools)?;
+    let path = RelPath::parse(path)?;
+    let now = ai_env_fs::read_file(&root, &path)?;
+    if now.hash != hash {
+        return Err(ai_env_fs::Error::Changed(path.under(&root)).into());
+    }
+    let plan = plan_edit(
+        entry.id.clone(),
+        path,
+        ownership,
+        hash.to_owned(),
+        &now.text,
+        new_text,
+    )?;
+    Ok((root, plan, now.text))
+}
+
+/// The diff `new_text` would make to `path`. Writes nothing.
+pub fn edit_preview(
+    entry: &Entry,
+    place: &Place,
+    tools: &[Tool],
+    path: &str,
+    new_text: String,
+    hash: &str,
+) -> Result<EditPreview, Error> {
+    let (_, plan, old) = check_edit(entry, place, tools, path, new_text, hash)?;
+    Ok(EditPreview {
+        ownership: plan.ownership(),
+        diff: diff_lines(&old, plan.new_text()),
+        marks_edited: plan.marks_edited(),
+    })
+}
+
+/// Saves `new_text` over `path`. The front end calls this only after it
+/// showed [`edit_preview`] and got consent (D6, D8). Every rule is checked
+/// again here, so a file that changed or lost its owner since the preview is
+/// refused; nothing from the preview is trusted.
+pub fn edit_apply(
+    entry: &Entry,
+    place: &Place,
+    tools: &[Tool],
+    path: &str,
+    new_text: String,
+    hash: &str,
+) -> Result<(), Error> {
+    let (root, plan, _) = check_edit(entry, place, tools, path, new_text, hash)?;
+    Ok(ai_env_fs::write_file(&root, &plan)?)
+}
+
+#[cfg(test)]
+mod tests;

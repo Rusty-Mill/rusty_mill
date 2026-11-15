@@ -6,10 +6,12 @@
 //! removes only a symlink/junction or a folder holding our marker.
 
 mod discover;
+mod edit;
 mod marker;
 
-use ai_env_core::{Action, Entry, LinkMethod, Observed, Os, Plan, Tool};
+use ai_env_core::{Action, EditRefusal, Entry, LinkMethod, Observed, Os, Plan, Tool};
 pub use discover::{discover_skills, Discovered, Skipped};
+pub use edit::{list_files, locate, read_file, write_file, FileRead};
 use marker::{copy_marked, read_marker, tree_hash};
 use std::fmt;
 use std::fs;
@@ -28,6 +30,14 @@ pub enum Error {
     Modified(PathBuf),
     /// Every link method in the fallback chain failed; the last error.
     Io(PathBuf, io::Error),
+    /// The editor's rules refused the file or its text.
+    Edit(EditRefusal),
+    /// A path inside the entry is a link, which could lead outside it.
+    Link(PathBuf),
+    /// The path is not a regular file.
+    NotFile(PathBuf),
+    /// The file no longer matches the hash it was read with.
+    Changed(PathBuf),
 }
 
 impl fmt::Display for Error {
@@ -37,11 +47,21 @@ impl fmt::Display for Error {
             Error::NotManaged(p) => write!(f, "{} is not managed; not removing it", p.display()),
             Error::Modified(p) => write!(f, "{} was edited; not removing it", p.display()),
             Error::Io(p, e) => write!(f, "{}: {e}", p.display()),
+            Error::Edit(e) => e.fmt(f),
+            Error::Link(p) => write!(f, "{} is a link; not following it", p.display()),
+            Error::NotFile(p) => write!(f, "{} is not a regular file", p.display()),
+            Error::Changed(p) => write!(f, "{} changed since it was read; reload it", p.display()),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+impl From<EditRefusal> for Error {
+    fn from(e: EditRefusal) -> Self {
+        Error::Edit(e)
+    }
+}
 
 /// The host family this binary runs on.
 pub const HOST: Os = if cfg!(windows) { Os::Windows } else { Os::Unix };
