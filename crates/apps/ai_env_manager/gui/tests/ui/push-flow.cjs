@@ -16,6 +16,8 @@ const assert = require("assert");
       if (cmd === "list") return { tools: ["claude"], skipped: [], rows: [{ id: "demo", source: "/s", cells: [{ tool: "claude", state: window.__state }] }] };
       if (cmd === "files") return { ownership: a.tool ? "copy" : "source", files: [{ path: "SKILL.md", editable: true }] };
       if (cmd === "file") return { ownership: "copy", text: "x", hash: "h" };
+      if (cmd === "preview_edit") return { ownership: "copy", marks_edited: true, diff: [{ kind: "added", text: a.text }] };
+      if (cmd === "apply_edit") return null;
       if (cmd === "preview_push") return { files: [{ path: "SKILL.md", source_hash: "s1", copy_hash: "c1", diff: [{ kind: "removed", text: "old" }, { kind: "added", text: "new" }] }], left: [{ path: "n.md", why: "only in the copy" }] };
       if (cmd === "apply_push") { window.__state = "enabled"; return { written: ["SKILL.md"], remarked: true, left: [] }; }
     } } };
@@ -42,6 +44,28 @@ const assert = require("assert");
   assert.ok((await page.textContent("#ed-foot")).includes("matches the source again"));
   await page.click("#ed-files >> text=SKILL.md");
   assert.ok(!(await visible("#ed-push")), "no push once the copy is current");
+
+  // Leaving a push review for an edit: Confirm must save the edit, not repeat the push.
+  {
+    await page.reload(); // the mock starts "edited" again
+    await page.evaluate(() => { window.__calls.length = 0; });
+    await page.click("text=Files…");
+    await page.selectOption("#ed-place", "claude");
+    await page.click("#ed-files >> text=SKILL.md");
+    await page.click("#ed-push");
+    await page.click("#ed-files >> text=SKILL.md"); // switch away from the push review
+    await page.click("#ed-edit");
+    await page.fill("#ed-text", "mine");
+    await page.click("#ed-review");
+    await page.click("#ed-save");
+    const names = await page.evaluate(() => window.__calls.map((c) => c[0]));
+    assert.ok(names.includes("apply_edit") && !names.includes("apply_push"), `edit saved, push not repeated: ${names}`);
+  }
+  // With no file open there is nothing to push.
+  await page.click("#ed-close");
+  await page.click("text=Files…");
+  await page.selectOption("#ed-place", "claude");
+  assert.ok(!(await visible("#ed-push")), "no push without an open file");
 
   await browser.close();
   console.log("push-flow ok");

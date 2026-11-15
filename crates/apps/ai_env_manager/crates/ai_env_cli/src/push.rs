@@ -39,6 +39,10 @@ pub(crate) fn push(
         show_diff(&f.diff, out)?;
     }
     list_left(&preview.left, out)?;
+    if preview.files.is_empty() {
+        writeln!(out, "nothing to push: no file differs and can be pushed")?;
+        return Ok(Outcome::Done);
+    }
     writeln!(
         out,
         "note: the source is overwritten, including changes made there since the copy was taken"

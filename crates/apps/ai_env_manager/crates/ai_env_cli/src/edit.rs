@@ -59,16 +59,51 @@ fn other(msg: impl Into<String>) -> Error {
     Error::Io(io::Error::other(msg.into()))
 }
 
-/// Runs the editor on a private temp file holding `old`, returns the result.
-fn from_editor(cmd: &str, name: &str, old: &str) -> Result<String, Error> {
+/// A new, empty folder only this user can enter. The name is not guessable
+/// and an existing path is never reused, so nobody can plant a link there.
+fn private_dir() -> io::Result<PathBuf> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    for _ in 0..16 {
+        let dir = std::env::temp_dir().join(format!(
+            "aienv-edit-{}-{nanos:x}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not create a fresh temporary folder",
+    ))
+}
+
+/// Runs the editor on a file in a private temp folder holding `old`, returns
+/// the result. A folder that cannot be removed afterwards is reported on `err`.
+fn from_editor(cmd: &str, name: &str, old: &str, err: &mut impl Write) -> Result<String, Error> {
     let mut words = cmd.split_whitespace();
     let prog = words.next().ok_or_else(|| other("empty editor command"))?;
     let ext = Path::new(name).extension().and_then(|e| e.to_str());
-    let dir = std::env::temp_dir().join(format!("aienv-edit-{}", std::process::id()));
-    fs::create_dir_all(&dir)?;
+    let dir = private_dir()?;
     let file: PathBuf = dir.join(format!("edit.{}", ext.unwrap_or("txt")));
     let run = || -> Result<String, Error> {
-        fs::write(&file, old)?;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&file)?;
+        f.write_all(old.as_bytes())?;
+        drop(f);
         let status = Command::new(prog).args(words).arg(&file).status()?;
         if !status.success() {
             return Err(other(format!("editor {prog:?} exited with {status}")));
@@ -76,11 +111,18 @@ fn from_editor(cmd: &str, name: &str, old: &str) -> Result<String, Error> {
         Ok(fs::read_to_string(&file)?)
     };
     let result = run();
-    let _ = fs::remove_dir_all(&dir);
+    if let Err(e) = fs::remove_dir_all(&dir) {
+        writeln!(err, "aienv: could not remove {}: {e}", dir.display())?;
+    }
     result
 }
 
-fn new_text(c: &EditFile, old: &str, s: &mut Session) -> Result<String, Error> {
+fn new_text(
+    c: &EditFile,
+    old: &str,
+    s: &mut Session,
+    err: &mut impl Write,
+) -> Result<String, Error> {
     match &c.text {
         NewText::File(p) => Ok(fs::read_to_string(p)?),
         NewText::Stdin => {
@@ -92,7 +134,7 @@ fn new_text(c: &EditFile, old: &str, s: &mut Session) -> Result<String, Error> {
             let cmd = s.editor.clone().ok_or_else(|| {
                 other("no editor: set $VISUAL or $EDITOR, or pass --from PATH (or - for stdin)")
             })?;
-            from_editor(&cmd, &c.file, old)
+            from_editor(&cmd, &c.file, old, err)
         }
     }
 }
@@ -135,7 +177,7 @@ pub(crate) fn edit(
         )?;
         return Ok(Outcome::NeedsTerminal);
     }
-    let text = new_text(c, &opened.text, s)?;
+    let text = new_text(c, &opened.text, s, err)?;
     let preview = match edit_preview(entry, &place, &tools, &c.file, text.clone(), &opened.hash) {
         Ok(p) => p,
         Err(Error::Edit(ai_env_core::EditRefusal::NoChange)) => {
