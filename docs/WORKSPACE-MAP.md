@@ -175,6 +175,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | ts-disco | ts-disco | Disco NAT-traversal message codec: ping/pong/call-me-maybe over NaCl box |
 | libs | ts-engine | ts-engine | Orchestration: control -&gt; magicsock -&gt; wg -&gt; tun, behind ports-and-adapters traits |
 | libs | ts-filter | ts-filter | Netmap packet-filter (ACL) enforcement |
+| libs | ts-hub | ts-hub | First-party ts2021 coordination server: register by pre-auth key and a netmap long-poll |
 | libs | ts-key | ts-key | Node, disco, and machine key generation, persistence, and rotation |
 | libs | ts-magicsock | ts-magicsock | Path multiplexer: direct UDP and DERP, path upgrade and live migration |
 | libs | ts-net | ts-net | Embeddable node: smoltcp userspace netstack, no TUN, no root |

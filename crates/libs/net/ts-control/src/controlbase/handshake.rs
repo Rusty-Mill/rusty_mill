@@ -31,6 +31,9 @@ const TAG_LEN: usize = 16;
 pub enum HandshakeError {
     #[error("server handshake payload failed to authenticate")]
     BadServerTag,
+    /// The initiation is malformed or does not authenticate against our key.
+    #[error("client initiation rejected")]
+    BadInitiation,
 }
 
 /// Keys and identity of an established session.
@@ -88,6 +91,70 @@ pub fn client_initiation(
         ephemeral,
     };
     (msg, hs)
+}
+
+/// A client initiation the server accepted.
+pub struct Accepted {
+    /// The client's machine public key, proven by the handshake.
+    pub machine_public: [u8; 32],
+    /// The 48-byte response payload to send back (after its 3-byte header).
+    pub response: [u8; RESPONSE_PAYLOAD_LEN],
+    /// Transport keys, oriented for the server: `tx` is server-to-client.
+    pub keys: SessionKeys,
+}
+
+/// Responds to a client initiation (`-> e, es, s, ss` then `<- e, ee, se`).
+/// The mirror of [`client_initiation`]; the protocol version is taken from
+/// the message itself, as Go's `controlbase.Server` does.
+pub fn server_respond(
+    control_key: &MachinePrivate,
+    init: &[u8; INITIATION_LEN],
+) -> Result<Accepted, HandshakeError> {
+    let protocol_version = u16::from_be_bytes([init[0], init[1]]);
+    let payload_len = u16::from_be_bytes([init[3], init[4]]) as usize;
+    if init[2] != MSG_TYPE_INITIATION || payload_len != INITIATION_LEN - 5 {
+        return Err(HandshakeError::BadInitiation);
+    }
+    let control_pub = control_key.public().0;
+    let mut s = SymmetricState::new();
+    let mut prologue = Vec::with_capacity(PROLOGUE_PREFIX.len() + 5);
+    prologue.extend_from_slice(PROLOGUE_PREFIX);
+    prologue.extend_from_slice(protocol_version.to_string().as_bytes());
+    s.mix_hash(&prologue);
+    s.mix_hash(&control_pub);
+
+    let mut client_eph = [0u8; 32];
+    client_eph.copy_from_slice(&init[5..37]);
+    s.mix_hash(&client_eph);
+    let k = s.mix_dh(control_key.shared_secret(&client_eph)); // es
+    let machine_pt = s
+        .decrypt_and_hash(&k, &init[37..85])
+        .map_err(|_| HandshakeError::BadInitiation)?;
+    let machine_public: [u8; 32] = machine_pt
+        .try_into()
+        .map_err(|_| HandshakeError::BadInitiation)?;
+    let k = s.mix_dh(control_key.shared_secret(&machine_public)); // ss
+    s.decrypt_and_hash(&k, &init[85..101])
+        .map_err(|_| HandshakeError::BadInitiation)?;
+
+    let server_eph = MachinePrivate::generate();
+    let mut response = [0u8; RESPONSE_PAYLOAD_LEN];
+    response[..32].copy_from_slice(&server_eph.public().0);
+    s.mix_hash(&server_eph.public().0);
+    let _ = s.mix_dh(server_eph.shared_secret(&client_eph)); // ee
+    let k = s.mix_dh(server_eph.shared_secret(&machine_public)); // se
+    let tag = s.encrypt_and_hash(&k, &[]);
+    response[32..].copy_from_slice(&tag);
+    let (c1, c2) = s.split();
+    Ok(Accepted {
+        machine_public,
+        response,
+        keys: SessionKeys {
+            tx: c2,
+            rx: c1,
+            handshake_hash: s.h,
+        },
+    })
 }
 
 /// The client's in-flight handshake state between sending the initiation
@@ -276,6 +343,31 @@ mod tests {
         assert_eq!(keys.tx, c1, "client tx == server c1");
         assert_eq!(keys.rx, c2, "client rx == server c2");
         assert_eq!(keys.handshake_hash, server_hash);
+    }
+
+    #[test]
+    fn server_respond_completes_a_client_handshake() {
+        let machine = MachinePrivate::generate();
+        let control = MachinePrivate::generate();
+        let (init, client) = client_initiation(&machine, &control.public().0, 123);
+        let accepted = server_respond(&control, &init).expect("accepts");
+        assert_eq!(accepted.machine_public, machine.public().0);
+        let keys = client.finish(&accepted.response).expect("client accepts");
+        assert_eq!(keys.tx, accepted.keys.rx, "client tx is server rx");
+        assert_eq!(keys.rx, accepted.keys.tx, "client rx is server tx");
+        assert_eq!(keys.handshake_hash, accepted.keys.handshake_hash);
+    }
+
+    #[test]
+    fn server_rejects_an_initiation_for_another_control_key() {
+        let machine = MachinePrivate::generate();
+        let control = MachinePrivate::generate();
+        let other = MachinePrivate::generate();
+        let (init, _) = client_initiation(&machine, &other.public().0, 123);
+        assert!(matches!(
+            server_respond(&control, &init),
+            Err(HandshakeError::BadInitiation)
+        ));
     }
 
     #[test]

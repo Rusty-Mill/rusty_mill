@@ -248,6 +248,7 @@ members = [
     "crates/libs/net/ts-types",
     "crates/libs/net/ts-key",
     "crates/libs/net/ts-control",
+    "crates/libs/net/ts-hub",
     "crates/libs/net/ts-derp",
     "crates/libs/net/ts-stun",
     "crates/libs/net/ts-disco",
@@ -743,6 +744,7 @@ tiny_http = "0.12"
 ts-types = { path = "crates/libs/net/ts-types" }
 ts-key = { path = "crates/libs/net/ts-key" }
 ts-control = { path = "crates/libs/net/ts-control" }
+ts-hub = { path = "crates/libs/net/ts-hub" }
 ts-derp = { path = "crates/libs/net/ts-derp" }
 ts-stun = { path = "crates/libs/net/ts-stun" }
 ts-disco = { path = "crates/libs/net/ts-disco" }
