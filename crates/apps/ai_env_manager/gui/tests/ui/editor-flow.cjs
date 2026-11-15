@@ -28,8 +28,10 @@ const assert = require("assert");
   const visible = (sel) => page.isVisible(sel);
 
   await page.click("text=Files…");
+  assert.ok(!(await visible("#ed-warn")), "no prompt on open");
   await page.click("#ed-files >> text=SKILL.md");
-  assert.ok((await page.textContent("#ed-note")).includes("Used by claude, codex"), "shared-file note");
+  assert.ok((await page.textContent("#ed-note")).includes("Enabled for claude, codex: linked ones change"), "shared-file note");
+  assert.ok(!(await visible("#ed-warn")), "no prompt just from opening a file");
 
   // Unsaved text: switching files, Close and Esc all ask first; Keep editing keeps the text.
   await page.click("#ed-edit");
@@ -38,6 +40,7 @@ const assert = require("assert");
   await page.click("#ed-files >> text=b.md");
   assert.ok(await visible("#ed-warn"), "prompt on file switch");
   await page.click("#ed-keep");
+  assert.ok(!(await visible("#ed-warn")), "Keep editing hides the prompt");
   assert.strictEqual(await page.inputValue("#ed-text"), "mine\n", "keep editing keeps the text");
   await page.click("#ed-close");
   assert.ok(await visible("#ed-warn"), "prompt on close");
@@ -54,6 +57,7 @@ const assert = require("assert");
   assert.strictEqual(await page.inputValue("#ed-text"), "mine\n", "text kept after a failed save");
   await page.click("#ed-reload");
   assert.strictEqual(await page.textContent("#ed-view"), "other\n", "reload shows the disk text");
+  assert.ok(!(await visible("#ed-warn")), "no prompt after reload");
 
   // Save, then the footer does not carry "Saved." into the next edit.
   await page.click("#ed-edit");

@@ -89,6 +89,7 @@ textarea.ed-text:focus{outline:2px solid var(--focus);outline-offset:2px}
 .diff .added{background:var(--accent-bg);color:var(--text)}
 .diff .removed{background:var(--warn-bg);color:var(--warn-text)}
 .warn{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:12px 28px 0;padding:12px 16px;border:1px solid var(--warn-line);border-radius:10px;background:var(--warn-bg);color:var(--warn-text)}
+.warn[hidden]{display:none}
 .warn p{flex:1 1 240px;margin:0}
 #ed-error{margin:12px 28px 0}
 select{min-height:36px;padding:0 8px;border:1px solid var(--btn-line);border-radius:8px;background:var(--btn);color:var(--text);font:inherit}

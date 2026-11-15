@@ -194,8 +194,9 @@ const EDIT_NOTE = {
   foreign: "Not ours: read-only.",
 };
 
-// One source file serves every tool linked to it, so a save reaches all of them.
-const sharedNote = () => (ed.ownership === "source" && ed.users.length > 1 ? ` Used by ${ed.users.join(", ")}: one save changes all of them.` : "");
+// The list does not say how a tool was installed: linked ones change with a source save, copied
+// ones go stale until the next apply. The wording is true either way.
+const sharedNote = () => (ed.ownership === "source" && ed.users.length > 1 ? ` Enabled for ${ed.users.join(", ")}: linked ones change with this save, copied ones go stale until you apply.` : "");
 const FOOT = "Nothing is written until you confirm the diff.";
 function edFoot(text = FOOT) {
   $("ed-foot").textContent = text;
