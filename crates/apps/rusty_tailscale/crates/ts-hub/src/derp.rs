@@ -9,8 +9,7 @@ use std::sync::Mutex;
 
 use crypto_box::aead::{Aead, AeadCore, OsRng};
 use crypto_box::{PublicKey, SalsaBox, SecretKey};
-use rusty_tokio::io::AsyncRead;
-use rusty_tokio::net::tcp::OwnedWriteHalf;
+use rusty_tokio::io::{AsyncRead, AsyncWrite};
 use rusty_tokio::sync::mpsc;
 use ts_derp::frame::{self, FrameType, MAGIC, MAX_FRAME_SIZE};
 use ts_key::NodePrivate;
@@ -62,14 +61,15 @@ impl Relay {
 
     /// Runs one session over an upgraded stream: handshake, then relay until
     /// either side closes. `admit` decides whether a node key may connect.
-    pub async fn session<R>(
+    pub async fn session<R, W>(
         &self,
         mut read: R,
-        mut write: OwnedWriteHalf,
+        mut write: W,
         admit: impl FnOnce(&NodePublic) -> bool,
     ) -> Result<(), DerpRefusal>
     where
         R: AsyncRead + Unpin + Send,
+        W: AsyncWrite + Unpin + Send + 'static,
     {
         let mut greeting = MAGIC.to_vec();
         greeting.extend_from_slice(&self.public_key().0);
@@ -174,7 +174,7 @@ impl Relay {
     }
 }
 
-async fn write_loop(mut write: OwnedWriteHalf, mut rx: mpsc::Receiver<Out>) {
+async fn write_loop<W: AsyncWrite + Unpin + Send>(mut write: W, mut rx: mpsc::Receiver<Out>) {
     while let Some((ft, payload)) = rx.recv().await {
         if frame::write_frame(&mut write, ft, &payload).await.is_err() {
             return;

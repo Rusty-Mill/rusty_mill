@@ -68,15 +68,15 @@ impl Hub {
     }
 
     /// Advertises this hub's relay and STUN responder to nodes as a single
-    /// DERP region at `host`. The relay shares the control port, spoken
-    /// over plain HTTP (`ForceHTTP`), which suits a private spike.
-    pub fn advertise(&self, host: &str, port: u16, stun_port: u16) {
+    /// DERP region at `host`. Stock clients speak TLS to `derp_port` (see
+    /// [`Hub::serve_derp_tls`]) and skip verification (`InsecureForTests`).
+    pub fn advertise(&self, host: &str, derp_port: u16, stun_port: u16) {
         let map = serde_json::json!({"Regions": {"1": {
             "RegionID": 1, "RegionCode": "hub", "RegionName": "hub",
             "Nodes": [{
                 "Name": "1a", "RegionID": 1, "HostName": host,
-                "DERPPort": port, "STUNPort": stun_port,
-                "InsecureForTests": true, "ForceHTTP": true,
+                "DERPPort": derp_port, "STUNPort": stun_port,
+                "InsecureForTests": true,
             }],
         }}});
         *self.derp_map.lock().unwrap_or_else(|e| e.into_inner()) = Some(map);
@@ -118,6 +118,55 @@ impl Hub {
                 }
             });
         }
+    }
+
+    /// Serves DERP over TLS on `listener`: what stock Tailscale clients
+    /// speak. The certificate may be self-signed, as the DERPMap tells
+    /// clients not to verify it.
+    pub async fn serve_derp_tls(
+        self: Arc<Self>,
+        listener: TcpListener,
+        acceptor: rusty_tls::TlsAcceptor,
+    ) -> std::io::Result<()> {
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let (hub, acceptor) = (self.clone(), acceptor.clone());
+            rusty_tokio::spawn(async move {
+                if let Err(e) = hub.handle_tls(stream, acceptor).await {
+                    eprintln!("hub: tls derp connection ended: {e}");
+                }
+            });
+        }
+    }
+
+    async fn handle_tls(
+        &self,
+        stream: TcpStream,
+        acceptor: rusty_tls::TlsAcceptor,
+    ) -> Result<(), HubError> {
+        let mut tls = acceptor
+            .accept_async(stream)
+            .map_err(|e| HubError::Bad(format!("tls: {e}")))?;
+        tls.complete_handshake()
+            .await
+            .map_err(|e| HubError::Bad(format!("tls handshake: {e}")))?;
+        let mut transport = AsyncTransport::new(tls);
+        let head = transport.read_request_head(MAX_HEAD_LEN).await?;
+        if (&head.method, head.target.as_str()) != (&Method::Get, "/derp") {
+            return Err(HubError::Bad("only /derp is served over TLS".into()));
+        }
+        let fast = head.headers.get("Derp-Fast-Start") == Some("1");
+        if !fast {
+            write_upgrade(&mut transport).await?;
+        }
+        let (tls, leftover) = transport.into_parts();
+        let (read, write) = rusty_tokio::io::split(tls);
+        self.relay
+            .session(Replay::new(leftover, read), write, |k| {
+                self.with_state(|s| s.has_node_key(k))
+            })
+            .await
+            .map_err(|e| HubError::Bad(e.to_string()))
     }
 
     async fn handle(self: Arc<Self>, stream: TcpStream) -> Result<(), HubError> {
@@ -167,17 +216,7 @@ impl Hub {
         fast_start: bool,
     ) -> Result<(), HubError> {
         if !fast_start {
-            let mut headers = HeaderMap::new();
-            headers.insert("Upgrade", "DERP")?;
-            headers.insert("Connection", "Upgrade")?;
-            transport
-                .write_response_head(&ResponseHead {
-                    status: StatusCode::SWITCHING_PROTOCOLS,
-                    reason: "Switching Protocols".into(),
-                    version: Version::Http11,
-                    headers,
-                })
-                .await?;
+            write_upgrade(&mut transport).await?;
         }
         let (stream, leftover) = transport.into_parts();
         let (read, write) = stream.into_split();
@@ -386,6 +425,25 @@ impl From<rusty_http::Error> for HubError {
     fn from(e: rusty_http::Error) -> Self {
         Self::Bad(e.to_string())
     }
+}
+
+/// The `101 Switching Protocols` answer to a DERP upgrade.
+async fn write_upgrade<T>(transport: &mut AsyncTransport<T>) -> Result<(), HubError>
+where
+    T: rusty_tokio::io::AsyncRead + rusty_tokio::io::AsyncWrite + Unpin + Send,
+{
+    let mut headers = HeaderMap::new();
+    headers.insert("Upgrade", "DERP")?;
+    headers.insert("Connection", "Upgrade")?;
+    transport
+        .write_response_head(&ResponseHead {
+            status: StatusCode::SWITCHING_PROTOCOLS,
+            reason: "Switching Protocols".into(),
+            version: Version::Http11,
+            headers,
+        })
+        .await?;
+    Ok(())
 }
 
 fn decode_initiation(value: Option<&str>) -> Result<[u8; INITIATION_LEN], HubError> {
