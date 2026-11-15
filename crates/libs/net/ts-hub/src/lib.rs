@@ -3,11 +3,17 @@
 //! Noise IK), then HTTP/2 over the Noise channel serving `/machine/register`
 //! and the `/machine/map` long-poll.
 //!
-//! Scope: registration by pre-auth key and a netmap carrying each node's
-//! disco key and endpoints. The relay, STUN, ACLs, persistence and a TLS
-//! story are separate slices (docs/projects/mux/MESH.md).
+//! Scope: registration by pre-auth key, a netmap carrying each node's disco
+//! key and endpoints, the DERP relay (`GET /derp`) that admits only
+//! registered node keys, and a STUN responder ([`stun::serve`]). Every
+//! connection, stream and relayed byte count is bounded by [`Limits`].
+//! ACLs, persistence and a TLS story are separate slices
+//! (docs/projects/mux/MESH.md).
 
+mod derp;
+mod limits;
 mod store;
+pub mod stun;
 mod zstd;
 
 use std::sync::{Arc, Mutex};
@@ -28,7 +34,10 @@ use ts_types::tailcfg::{
 };
 use ts_types::{DiscoPublic, MachinePublic, NodePublic};
 
+pub use limits::Limits;
 pub use store::{MemoryStore, NodeRec, NodeStore, RegisterError};
+
+use limits::Counter;
 
 const MAX_HEAD_LEN: usize = 16 * 1024;
 const MAX_BODY_LEN: usize = 1 << 20;
@@ -39,6 +48,12 @@ const KEEPALIVE: Duration = Duration::from_secs(60);
 pub struct Hub<S: NodeStore = MemoryStore> {
     key: MachinePrivate,
     store: Mutex<S>,
+    limits: Limits,
+    relay: derp::Relay,
+    /// The `DERPMap` every netmap carries, once the hub knows its address.
+    derp_map: Mutex<Option<serde_json::Value>>,
+    conns: Counter,
+    streams: Counter,
     /// Bumped whenever the node table changes; map streams wait on it.
     changed: watch::Sender<u64>,
     /// Kept so streams can clone a fresh receiver.
@@ -53,12 +68,22 @@ impl Hub {
 }
 
 impl<S: NodeStore> Hub<S> {
-    /// A hub with a fresh Noise identity over `store`.
+    /// A hub with a fresh Noise identity over `store`, default limits.
     pub fn with_store(store: S) -> Arc<Self> {
+        Self::with_limits(store, Limits::default())
+    }
+
+    /// A hub with a fresh Noise identity over `store`.
+    pub fn with_limits(store: S, limits: Limits) -> Arc<Self> {
         let (changed, changes) = watch::channel(0);
         Arc::new(Self {
             key: MachinePrivate::generate(),
             store: Mutex::new(store),
+            limits,
+            relay: derp::Relay::new(),
+            derp_map: Mutex::new(None),
+            conns: Counter::default(),
+            streams: Counter::default(),
             changed,
             changes,
         })
@@ -69,6 +94,26 @@ impl<S: NodeStore> Hub<S> {
         self.locked(|s| s.add_preauth(key, login));
     }
 
+    /// Advertises this hub's relay and STUN responder to nodes as a single
+    /// DERP region at `host`. Stock clients speak TLS to `derp_port`, which
+    /// is a separate slice; the embedded node speaks plain `GET /derp` on
+    /// the hub's own port.
+    pub fn advertise(&self, host: &str, derp_port: u16, stun_port: u16) {
+        let map = serde_json::json!({"Regions": {"1": {
+            "RegionID": 1, "RegionCode": "hub", "RegionName": "hub",
+            "Nodes": [{
+                "Name": "1a", "RegionID": 1, "HostName": host,
+                "DERPPort": derp_port, "STUNPort": stun_port,
+            }],
+        }}});
+        *self.derp_map.lock().unwrap_or_else(|e| e.into_inner()) = Some(map);
+    }
+
+    /// The relay's node key, as sent in the DERP `ServerKey` frame.
+    pub fn derp_public_key(&self) -> NodePublic {
+        self.relay.public_key()
+    }
+
     /// The hub's Noise public key, as served on `GET /key`.
     pub fn public_key(&self) -> MachinePublic {
         self.key.public()
@@ -77,6 +122,11 @@ impl<S: NodeStore> Hub<S> {
     fn netmap(&self, machine: &MachinePublic, omit_peers: bool) -> Option<MapResponse> {
         let mut map = self.locked(|s| s.netmap(machine, omit_peers))?;
         map.packet_filter = Some(allow_all());
+        map.derp_map = self
+            .derp_map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         Some(map)
     }
 
@@ -107,8 +157,13 @@ impl<S: NodeStore> Hub<S> {
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
         loop {
             let (stream, peer) = listener.accept().await?;
+            let Some(slot) = self.conns.acquire(self.limits.max_connections) else {
+                rusty_log::warn!("hub: at the connection limit, closing {peer}");
+                continue;
+            };
             let hub = self.clone();
             rusty_tokio::spawn(async move {
+                let _slot = slot;
                 if let Err(e) = hub.handle(stream).await {
                     rusty_log::warn!("hub: connection from {peer} ended: {e}");
                 }
@@ -118,10 +173,17 @@ impl<S: NodeStore> Hub<S> {
 
     async fn handle(self: Arc<Self>, stream: TcpStream) -> Result<(), HubError> {
         let mut transport = AsyncTransport::new(stream);
-        let head = transport.read_request_head(MAX_HEAD_LEN).await?;
+        let head = within(self.limits.head_timeout, "request head", async {
+            Ok(transport.read_request_head(MAX_HEAD_LEN).await?)
+        })
+        .await?;
         let path = head.target.split('?').next().unwrap_or("");
         match (&head.method, path) {
             (Method::Get, "/key") => self.serve_key(transport).await,
+            (Method::Get, "/derp") => {
+                let fast = head.headers.get("Derp-Fast-Start") == Some("1");
+                self.serve_derp(transport, fast).await
+            }
             (Method::Post, "/ts2021") => {
                 let init = decode_initiation(head.headers.get("X-Tailscale-Handshake"))?;
                 self.upgrade(transport, &init).await
@@ -151,6 +213,29 @@ impl<S: NodeStore> Hub<S> {
         write_all(&mut transport, &body).await
     }
 
+    /// With `Derp-Fast-Start: 1` the client expects no HTTP response at all:
+    /// the stream goes straight to DERP frames.
+    async fn serve_derp(
+        &self,
+        mut transport: AsyncTransport<TcpStream>,
+        fast_start: bool,
+    ) -> Result<(), HubError> {
+        if !fast_start {
+            write_upgrade(&mut transport).await?;
+        }
+        let (stream, leftover) = transport.into_parts();
+        let (read, write) = stream.into_split();
+        self.relay
+            .session(
+                Replay::new(leftover, read),
+                write,
+                |k| self.locked(|s| s.has_node_key(k)),
+                &self.limits,
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn upgrade(
         self: Arc<Self>,
         mut transport: AsyncTransport<TcpStream>,
@@ -168,8 +253,13 @@ impl<S: NodeStore> Hub<S> {
             })
             .await?;
         let (stream, leftover) = transport.into_parts();
-        let (conn, machine) =
-            controlbase::accept_deferred(Replay::new(leftover, stream), &self.key, init).await?;
+        let (conn, machine) = within(self.limits.handshake_timeout, "Noise handshake", async {
+            Ok(
+                controlbase::accept_deferred(Replay::new(leftover, stream), &self.key, init)
+                    .await?,
+            )
+        })
+        .await?;
         let machine = MachinePublic(machine);
 
         let (mut acceptor, connection) = driver::server(conn, H2Builder::new());
@@ -197,7 +287,12 @@ impl<S: NodeStore> Hub<S> {
         respond: Respond,
     ) -> Result<(), HubError> {
         let path = header(&request.headers, ":path");
-        let body = read_body(&mut request).await?;
+        let body = within(
+            self.limits.head_timeout,
+            "request body",
+            read_body(&mut request),
+        )
+        .await?;
         match path.as_str() {
             "/machine/register" => self.register(machine, &body, respond).await,
             "/machine/map" => self.map(machine, &body, respond).await,
@@ -254,6 +349,9 @@ impl<S: NodeStore> Hub<S> {
         if !req.stream {
             return send_frame_body(respond, &first, zstd).await;
         }
+        let Some(_slot) = self.streams.acquire(self.limits.max_map_streams) else {
+            return send_status(respond, 503).await;
+        };
         let mut stream = respond
             .send_response(ok_json_headers(), false)
             .await
@@ -336,6 +434,10 @@ pub enum HubError {
     Bad(String),
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("DERP: {0}")]
+    Derp(#[from] derp::DerpRefusal),
+    #[error("timed out reading the {0}")]
+    Timeout(&'static str),
 }
 
 impl From<rusty_h2::driver::Error> for HubError {
@@ -364,6 +466,36 @@ fn allow_all() -> Vec<FilterRule> {
         }],
         ip_proto: Vec::new(),
     }]
+}
+
+/// Runs `work` with a deadline; a slow peer ends its own connection.
+async fn within<T>(
+    limit: Duration,
+    what: &'static str,
+    work: impl std::future::Future<Output = Result<T, HubError>>,
+) -> Result<T, HubError> {
+    rusty_tokio::time::timeout(limit, work)
+        .await
+        .map_err(|_| HubError::Timeout(what))?
+}
+
+/// The `101 Switching Protocols` answer to a DERP upgrade.
+async fn write_upgrade<T>(transport: &mut AsyncTransport<T>) -> Result<(), HubError>
+where
+    T: rusty_tokio::io::AsyncRead + rusty_tokio::io::AsyncWrite + Unpin + Send,
+{
+    let mut headers = HeaderMap::new();
+    headers.insert("Upgrade", "DERP")?;
+    headers.insert("Connection", "Upgrade")?;
+    transport
+        .write_response_head(&ResponseHead {
+            status: StatusCode::SWITCHING_PROTOCOLS,
+            reason: "Switching Protocols".into(),
+            version: Version::Http11,
+            headers,
+        })
+        .await?;
+    Ok(())
 }
 
 fn decode_initiation(value: Option<&str>) -> Result<[u8; INITIATION_LEN], HubError> {

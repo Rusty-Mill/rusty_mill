@@ -51,6 +51,10 @@ pub trait NodeStore: Send + 'static {
         auth_key: &str,
     ) -> Result<(), RegisterError>;
 
+    /// Whether `key` belongs to a registered node (the relay admits only
+    /// these).
+    fn has_node_key(&self, key: &NodePublic) -> bool;
+
     /// Records a node's disco key and endpoints; returns whether anything
     /// changed (so the caller can wake the netmap streams).
     fn update(
@@ -110,6 +114,10 @@ impl NodeStore for MemoryStore {
             ip: Ipv4Addr::new(100, 64, 0, host),
         });
         Ok(())
+    }
+
+    fn has_node_key(&self, key: &NodePublic) -> bool {
+        self.nodes.iter().any(|n| &n.node_key == key)
     }
 
     fn update(
