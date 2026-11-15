@@ -87,6 +87,7 @@ impl Hub {
     /// The netmap for `machine` with the advertised `DERPMap` attached.
     fn netmap(&self, machine: &MachinePublic, omit_peers: bool) -> Option<MapResponse> {
         let mut map = self.with_state(|s| s.netmap(machine, omit_peers))?;
+        map.packet_filter = Some(allow_all());
         map.derp_map = self
             .derp_map
             .lock()

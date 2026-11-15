@@ -184,3 +184,19 @@ async fn derp_fast_start_skips_the_http_response() {
     s.read_exact(&mut head).await.unwrap();
     assert_eq!(head[0], 0x01, "first byte is the ServerKey frame, not HTTP");
 }
+
+#[test]
+fn every_netmap_carries_a_filter_that_admits_all_traffic() {
+    let hub = Hub::new();
+    hub.add_preauth("k1", "alice");
+    let machine = MachinePublic([1; 32]);
+    hub.with_state(|s| {
+        s.register(machine, NodePublic([2; 32]), "a", "k1")
+            .map(|_| ())
+    })
+    .unwrap();
+    let map = hub.netmap(&machine, false).unwrap();
+    let rules = map.packet_filter.expect("a filter is present");
+    assert_eq!(rules[0].src_ips, ["*"]);
+    assert_eq!(rules[0].dst_ports[0].ports.last, u16::MAX);
+}
