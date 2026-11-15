@@ -212,6 +212,13 @@ impl Relay {
         }
     }
 
+    /// Closes the node's live session, if it has one (a revoked node must
+    /// not keep relaying).
+    pub fn kick(&self, client: &NodePublic) {
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        clients.remove(client);
+    }
+
     fn queue_of(&self, key: &NodePublic) -> Option<mpsc::Sender<Out>> {
         let clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         clients.get(key).map(|e| e.tx.clone())

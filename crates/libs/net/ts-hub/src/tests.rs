@@ -25,7 +25,7 @@ async fn start() -> (Arc<Hub>, String) {
 
 async fn start_with(limits: Limits) -> (Arc<Hub>, String) {
     let hub = Hub::with_limits(MemoryStore::default(), limits);
-    hub.add_preauth("k1", "alice");
+    hub.add_preauth("k1", "alice", KeyPolicy::REUSABLE).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     rusty_tokio::spawn(hub.clone().serve(listener));
@@ -128,9 +128,9 @@ async fn two_nodes_see_each_other_with_disco_keys_and_endpoints() {
 #[test]
 fn every_netmap_carries_a_filter_that_admits_all_traffic() {
     let hub = Hub::new();
-    hub.add_preauth("k1", "alice");
+    hub.add_preauth("k1", "alice", KeyPolicy::REUSABLE).unwrap();
     let machine = MachinePublic([1; 32]);
-    hub.locked(|s| s.register(machine, NodePublic([2; 32]), "a", "k1"))
+    hub.locked(|s| s.register(machine, NodePublic([2; 32]), "a", "k1", 0))
         .unwrap();
     let map = hub.netmap(&machine, false).unwrap();
     let rules = map.packet_filter.expect("a filter is present");
@@ -146,8 +146,14 @@ struct Racy {
 }
 
 impl NodeStore for Racy {
-    fn add_preauth(&mut self, key: &str, login: &str) {
-        self.inner.add_preauth(key, login);
+    fn add_preauth(
+        &mut self,
+        key: &str,
+        login: &str,
+        policy: KeyPolicy,
+        now: u64,
+    ) -> Result<(), RegisterError> {
+        self.inner.add_preauth(key, login, policy, now)
     }
     fn register(
         &mut self,
@@ -155,17 +161,22 @@ impl NodeStore for Racy {
         node_key: NodePublic,
         hostname: &str,
         auth_key: &str,
+        now: u64,
     ) -> Result<(), RegisterError> {
-        self.inner.register(machine, node_key, hostname, auth_key)
+        self.inner
+            .register(machine, node_key, hostname, auth_key, now)
     }
-    fn has_node_key(&self, key: &NodePublic) -> bool {
-        self.inner.has_node_key(key)
+    fn revoke(&mut self, machine: &MachinePublic) -> Revocation {
+        self.inner.revoke(machine)
+    }
+    fn has_node_key(&self, key: &NodePublic, now: u64) -> bool {
+        self.inner.has_node_key(key, now)
     }
     fn update(&mut self, m: &MachinePublic, d: DiscoPublic, e: Vec<SocketAddr>) -> bool {
         self.inner.update(m, d, e)
     }
-    fn netmap(&self, machine: &MachinePublic, omit_peers: bool) -> Option<MapResponse> {
-        let map = self.inner.netmap(machine, omit_peers);
+    fn netmap(&self, machine: &MachinePublic, omit_peers: bool, now: u64) -> Option<MapResponse> {
+        let map = self.inner.netmap(machine, omit_peers, now);
         if let Some(hook) = RACE.lock().unwrap().take() {
             hook();
         }
@@ -178,9 +189,9 @@ static RACE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
 #[rusty_tokio::test]
 async fn a_change_after_the_first_snapshot_still_wakes_the_stream() {
     let hub = Hub::with_store(Racy::default());
-    hub.add_preauth("k1", "alice");
+    hub.add_preauth("k1", "alice", KeyPolicy::REUSABLE).unwrap();
     let machine = MachinePublic([1; 32]);
-    hub.locked(|s| s.register(machine, NodePublic([2; 32]), "a", "k1"))
+    hub.locked(|s| s.register(machine, NodePublic([2; 32]), "a", "k1", 0))
         .unwrap();
     let racing = hub.clone();
     *RACE.lock().unwrap() = Some(Box::new(move || racing.bump()));
@@ -401,9 +412,9 @@ async fn a_sender_over_its_rate_loses_packets_not_the_session() {
 #[test]
 fn an_advertised_region_rides_in_every_netmap() {
     let hub = Hub::new();
-    hub.add_preauth("k1", "alice");
+    hub.add_preauth("k1", "alice", KeyPolicy::REUSABLE).unwrap();
     let machine = MachinePublic([1; 32]);
-    hub.locked(|s| s.register(machine, NodePublic([2; 32]), "a", "k1"))
+    hub.locked(|s| s.register(machine, NodePublic([2; 32]), "a", "k1", 0))
         .unwrap();
     assert!(hub.netmap(&machine, false).unwrap().derp_map.is_none());
     hub.advertise("hub.example", 3340, 3478);
@@ -455,4 +466,164 @@ async fn http2_streams_per_noise_connection_are_capped() {
         !matches!(served, Ok(Ok(_))),
         "a stream was served over the cap"
     );
+}
+
+fn temp_table(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ts-hub-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("nodes.json")
+}
+
+#[test]
+fn a_restarted_hub_keeps_its_nodes_and_spent_keys() {
+    let path = temp_table("restart");
+    let _ = std::fs::remove_file(&path);
+    let mut store = FileStore::open(&path, None).unwrap();
+    store
+        .add_preauth("once", "alice", KeyPolicy::default(), 0)
+        .unwrap();
+    store
+        .register(MachinePublic([1; 32]), NodePublic([1; 32]), "a", "once", 0)
+        .unwrap();
+    drop(store);
+
+    let mut store = FileStore::open(&path, None).unwrap();
+    assert!(store.has_node_key(&NodePublic([1; 32]), 0), "node survived");
+    assert_eq!(
+        store.register(MachinePublic([2; 32]), NodePublic([2; 32]), "b", "once", 0),
+        Err(RegisterError::BadAuthKey),
+        "the spent key stayed spent"
+    );
+    assert_eq!(store.revoke(&MachinePublic([1; 32])).saved, Ok(()));
+    drop(store);
+    let mut store = FileStore::open(&path, None).unwrap();
+    assert!(
+        !store.has_node_key(&NodePublic([1; 32]), 0),
+        "revoke survived"
+    );
+    store
+        .add_preauth("again", "alice", KeyPolicy::REUSABLE, 0)
+        .unwrap();
+    assert_eq!(
+        store.register(MachinePublic([1; 32]), NodePublic([1; 32]), "a", "again", 0),
+        Err(RegisterError::Revoked),
+        "the ban survived the restart"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "the table holds secrets");
+    }
+}
+
+#[test]
+fn a_corrupt_table_is_an_error_not_an_empty_hub() {
+    let path = temp_table("corrupt");
+    std::fs::write(&path, b"{not json").unwrap();
+    assert!(matches!(
+        FileStore::open(&path, None),
+        Err(StoreError::Corrupt { .. })
+    ));
+}
+
+#[rusty_tokio::test]
+async fn revoking_a_node_closes_its_relay_session_and_refuses_it_again() {
+    use ts_derp::DerpClient;
+    let (hub, url) = start().await;
+    let machine_key = MachinePrivate::generate();
+    let machine = machine_key.public();
+    let node = NodePrivate::generate();
+    let client = ControlClient::connect(&url, machine_key, Hostinfo::default())
+        .await
+        .unwrap();
+    client.register(node.public(), "k1").await.unwrap();
+    let mut relay = DerpClient::connect(&url, &node).await.unwrap();
+
+    assert!(hub.revoke(&machine).unwrap());
+    let ended = rusty_tokio::time::timeout(Duration::from_secs(5), relay.recv())
+        .await
+        .expect("the session is closed");
+    assert!(ended.is_none(), "a revoked node kept relaying");
+    assert!(DerpClient::connect(&url, &node).await.is_err());
+    assert!(!hub.revoke(&machine).unwrap(), "already gone");
+}
+
+#[rusty_tokio::test]
+async fn one_machine_cannot_hold_more_netmap_streams_than_its_cap() {
+    let (_hub, url) = start_with(Limits {
+        max_map_streams_per_machine: 1,
+        ..Limits::default()
+    })
+    .await;
+    let machine = MachinePrivate::generate().to_bytes();
+    let connect = || async {
+        ControlClient::connect(
+            &url,
+            MachinePrivate::from_bytes(machine),
+            Hostinfo::default(),
+        )
+        .await
+        .unwrap()
+    };
+    let (first, second) = (connect().await, connect().await);
+    let (node, disco) = (
+        NodePrivate::generate().public(),
+        DiscoPrivate::generate().public(),
+    );
+    first.register(node, "k1").await.unwrap();
+    // Holds the one stream open.
+    rusty_tokio::spawn(async move {
+        let _ = first
+            .poll_netmap(node, disco, vec![], |_| ControlFlow::Continue(()))
+            .await;
+    });
+    rusty_tokio::time::sleep(Duration::from_millis(300)).await;
+    let refused = second
+        .poll_netmap(node, disco, vec![], |_| ControlFlow::Break(()))
+        .await;
+    assert!(refused.is_err(), "a second stream was served over the cap");
+}
+
+#[test]
+fn a_write_that_fails_leaves_no_node_admitted_in_memory() {
+    let path = temp_table("unwritable");
+    let _ = std::fs::remove_file(&path);
+    let mut store = FileStore::open(&path, None).unwrap();
+    store
+        .add_preauth("k", "alice", KeyPolicy::REUSABLE, 0)
+        .unwrap();
+    // The directory vanishes under the store: every save now fails.
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+
+    let refused = store.register(MachinePublic([1; 32]), NodePublic([1; 32]), "a", "k", 0);
+    assert!(
+        matches!(refused, Err(RegisterError::Storage(_))),
+        "{refused:?}"
+    );
+    assert!(
+        !store.has_node_key(&NodePublic([1; 32]), 0),
+        "admitted anyway"
+    );
+
+    // A revoke still holds in memory, and says it is not durable.
+    let revoked = store.revoke(&MachinePublic([2; 32]));
+    assert!(matches!(revoked.saved, Err(RegisterError::Storage(_))));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stale_temp_file_does_not_keep_its_loose_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = temp_table("stale");
+    let _ = std::fs::remove_file(&path);
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, b"old").unwrap();
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mut store = FileStore::open(&path, None).unwrap();
+    store
+        .add_preauth("k", "alice", KeyPolicy::REUSABLE, 0)
+        .unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o077, 0, "the saved table is group/world readable");
 }
