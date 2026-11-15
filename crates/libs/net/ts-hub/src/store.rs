@@ -314,6 +314,20 @@ impl NodeStore for MemoryStore {
         policy: KeyPolicy,
         now: u64,
     ) -> Result<(), RegisterError> {
+        // A key that is already here keeps its spent mark: re-adding it (a
+        // restart reading the same keys file) must not make it usable again.
+        if let Some(have) = self.preauth.get(key) {
+            let same = have.login == login
+                && have.reusable == policy.reusable
+                && have.tagged == policy.tagged;
+            return if same {
+                Ok(())
+            } else {
+                Err(RegisterError::InvalidKey(
+                    "the key exists with other settings; remove it first".into(),
+                ))
+            };
+        }
         self.check_new_key(login, &policy)?;
         self.preauth.insert(
             key.to_string(),

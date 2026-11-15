@@ -13,6 +13,7 @@
 
 mod derp;
 mod file_store;
+mod keys;
 mod limits;
 mod policy;
 mod store;
@@ -41,6 +42,7 @@ use ts_types::{DiscoPublic, MachinePublic, NodePublic};
 
 pub use derp::DerpRefusal;
 pub use file_store::{FileStore, StoreError};
+pub use keys::{KeysError, parse_keys};
 pub use limits::Limits;
 pub use policy::{Grant, Policy, PolicyError, Selector, principal_of};
 pub use store::{KeyPolicy, MemoryStore, NodeRec, NodeStore, RegisterError, Revocation};
@@ -70,6 +72,8 @@ pub struct Hub<S: NodeStore = MemoryStore> {
     limits: Limits,
     /// Who may reach whom; closed until set.
     policy: Mutex<Arc<Policy>>,
+    /// Keys that came from the keys file, so a reload can drop the ones removed.
+    file_keys: Mutex<std::collections::HashSet<String>>,
     relay: derp::Relay,
     /// The `DERPMap` every netmap carries, once the hub knows its address.
     derp_map: Mutex<Option<serde_json::Value>>,
@@ -109,6 +113,7 @@ impl<S: NodeStore> Hub<S> {
             store: Mutex::new(store),
             limits,
             policy: Mutex::new(Arc::new(Policy::default())),
+            file_keys: Mutex::default(),
             relay: derp::Relay::new(),
             derp_map: Mutex::new(None),
             conns: Counter::default(),
@@ -134,6 +139,25 @@ impl<S: NodeStore> Hub<S> {
     pub fn set_policy(&self, policy: Policy) {
         *self.policy.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(policy);
         self.bump();
+    }
+
+    /// Makes the keys in `text` (see [`parse_keys`]) the hub's file keys: new
+    /// ones are added, ones no longer listed are removed (nodes already
+    /// registered stay), and ones already known keep their spent mark. Keys
+    /// added with [`add_preauth`](Self::add_preauth) are not touched. The
+    /// whole file is checked before anything changes.
+    pub fn load_keys(&self, text: &str) -> Result<(), LoadKeysError> {
+        let keys = parse_keys(text)?;
+        let mut held = self.file_keys.lock().unwrap_or_else(|e| e.into_inner());
+        let listed: std::collections::HashSet<_> = keys.iter().map(|(k, ..)| k.clone()).collect();
+        for gone in held.difference(&listed) {
+            self.remove_preauth(gone)?;
+        }
+        for (key, login, policy) in keys {
+            self.add_preauth(&key, &login, policy)?;
+        }
+        *held = listed;
+        Ok(())
     }
 
     /// Forgets a pre-auth key (see [`NodeStore::remove_preauth`]).
@@ -586,6 +610,15 @@ impl From<rusty_http::Error> for HubError {
     fn from(e: rusty_http::Error) -> Self {
         Self::Bad(e.to_string())
     }
+}
+
+/// Why a keys file could not be loaded.
+#[derive(Debug, thiserror::Error)]
+pub enum LoadKeysError {
+    #[error(transparent)]
+    Parse(#[from] KeysError),
+    #[error("a key was refused: {0:?}")]
+    Refused(#[from] RegisterError),
 }
 
 /// The only policy until ACLs land: every node may reach every port of every

@@ -897,3 +897,71 @@ async fn a_stalled_tls_handshake_holds_a_connection_slot() {
     let mut second = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
     assert!(closes_within(&mut second, Duration::from_secs(2)).await);
 }
+
+// ---- keys file ----
+
+#[test]
+fn a_keys_file_reads_login_reusable_and_name() {
+    let keys = parse_keys("# c\nk1 alice reusable\n\nk2 ci name=build1 # server\n").unwrap();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], ("k1".into(), "alice".into(), KeyPolicy::REUSABLE));
+    assert_eq!(keys[1].2.tagged.as_deref(), Some("build1"));
+    assert!(!keys[1].2.reusable);
+}
+
+#[test]
+fn keys_file_errors_name_the_line_not_the_key() {
+    for (text, line) in [("k1\n", 1), ("k1 a\nk2 b nope\n", 2), ("k1 a\nk1 b\n", 2)] {
+        let e = parse_keys(text).unwrap_err();
+        assert_eq!(e.line, line, "{text}");
+        assert!(!e.to_string().contains("k1"), "{e}");
+    }
+}
+
+#[test]
+fn reloading_keys_adds_new_drops_removed_and_keeps_spent_marks() {
+    let hub = Hub::new();
+    hub.load_keys("k1 alice\nk2 bob reusable\n").unwrap();
+    hub.add_preauth("manual", "carol", KeyPolicy::REUSABLE)
+        .unwrap();
+    let m1 = MachinePublic([1; 32]);
+    let m2 = MachinePublic([2; 32]);
+    let node = |b: u8| NodePublic([b; 32]);
+    hub.locked(|s| s.register(m1, node(1), "a", "k1", 0))
+        .unwrap();
+    // Reading the same file again must not unspend k1 for another machine.
+    hub.load_keys("k1 alice\nk3 dave\n").unwrap();
+    assert!(
+        hub.locked(|s| s.register(m2, node(2), "b", "k1", 0))
+            .is_err()
+    );
+    assert!(
+        hub.locked(|s| s.register(m2, node(2), "b", "k2", 0))
+            .is_err()
+    );
+    hub.locked(|s| s.register(m2, node(2), "b", "k3", 0))
+        .unwrap();
+    hub.locked(|s| s.register(MachinePublic([3; 32]), node(3), "c", "manual", 0))
+        .unwrap();
+}
+
+#[test]
+fn a_keys_file_that_does_not_parse_changes_nothing() {
+    let hub = Hub::new();
+    hub.load_keys("k1 alice\n").unwrap();
+    assert!(hub.load_keys("k2 bob\nbroken\n").is_err());
+    let m = MachinePublic([1; 32]);
+    let n = NodePublic([1; 32]);
+    assert!(hub.locked(|s| s.register(m, n, "a", "k2", 0)).is_err());
+    hub.locked(|s| s.register(m, n, "a", "k1", 0)).unwrap();
+}
+
+#[test]
+fn re_adding_a_key_with_other_settings_is_refused() {
+    let hub = Hub::new();
+    hub.add_preauth("k", "alice", KeyPolicy::default()).unwrap();
+    assert!(matches!(
+        hub.add_preauth("k", "alice", KeyPolicy::REUSABLE),
+        Err(RegisterError::InvalidKey(_))
+    ));
+}

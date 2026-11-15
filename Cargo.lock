@@ -14390,7 +14390,10 @@ version = "0.0.1"
 dependencies = [
  "rusty_log",
  "rusty_tokio",
+ "ts-control",
+ "ts-derp",
  "ts-engine",
+ "ts-hub",
  "ts-key",
  "ts-localapi",
  "ts-types",

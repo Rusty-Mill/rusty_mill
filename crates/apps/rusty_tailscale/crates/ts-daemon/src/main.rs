@@ -5,6 +5,9 @@
 //! daemons on the same tailnet can ping each other's `100.64.x.y` entirely
 //! over the relay — no direct paths (Phase 5), no TUN/root (Phase 4).
 //!
+//! `ts-daemon hub ...` runs the first-party coordination server instead (see
+//! `hub.rs`).
+//!
 //! Usage:
 //!   ts-daemon --login-server http://127.0.0.1:8080 --authkey <KEY> \
 //!             [--derp-server URL] [--state-dir DIR] [--hostname NAME] \
@@ -129,6 +132,10 @@ options:
             .with_target(false)
             .init();
 
+        if std::env::args().nth(1).as_deref() == Some("hub") {
+            return crate::hub::main(std::env::args().skip(2)).await;
+        }
+
         let args = match parse_args() {
             Ok(a) => a,
             Err(msg) => {
@@ -249,6 +256,8 @@ options:
 
 #[cfg(target_os = "linux")]
 mod backend;
+#[cfg(target_os = "linux")]
+mod hub;
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
