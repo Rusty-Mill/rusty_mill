@@ -28,3 +28,5 @@ thiserror.workspace = true
 parking_lot = "0.12"
 
 [dev-dependencies]
+# The in-process hub the transfer test joins (`tests/hub_transfer.rs`).
+ts-hub.workspace = true
