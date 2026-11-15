@@ -73,6 +73,15 @@ const FILTERS = [
 let filter = "all";
 
 function actionFor(row) {
+  const box = el("span", "btns");
+  const files = el("button", "", "Files…");
+  files.addEventListener("click", () => openEditor(row));
+  box.appendChild(files);
+  box.appendChild(toggleFor(row));
+  return box;
+}
+
+function toggleFor(row) {
   const any = isOn(row);
   const btn = el("button", any ? "" : "primary", any ? "Disable…" : "Enable…");
   btn.addEventListener("click", () => preview(row.id, !any));
@@ -172,6 +181,144 @@ $("plan-apply").addEventListener("click", async () => {
   } catch (e) {
     showError(e);
   }
+  refresh();
+});
+
+// ---- Editor: the backend decides what is editable and what a save does. ----
+// ed = { entry, tools, tool, files, path, hash, text, ownership, editable, mode }; mode is view | edit | review.
+let ed = null;
+const edTool = () => ($("ed-place").value === "" ? null : $("ed-place").value);
+const EDIT_NOTE = {
+  source: "This is the source folder. A save changes the original.",
+  copy: "This is a copy we made. A save marks it edited, and it is never replaced afterwards.",
+  foreign: "Not ours: read-only.",
+};
+
+function edError(e) {
+  $("ed-error").textContent = e ? String(e) : "";
+  $("ed-error").hidden = !e;
+}
+
+function openEditor(row) {
+  ed = { entry: row.id, files: [], path: null, mode: "view" };
+  $("ed-title").textContent = row.id;
+  const sel = $("ed-place");
+  sel.replaceChildren();
+  const src = el("option", "", "source folder");
+  src.value = "";
+  sel.appendChild(src);
+  for (const t of lastView.tools) {
+    const o = el("option", "", t);
+    o.value = t;
+    sel.appendChild(o);
+  }
+  edShow();
+  $("editor").showModal();
+  loadFiles();
+}
+
+async function loadFiles() {
+  edError(null);
+  ed.path = null;
+  try {
+    const v = await invoke("files", { entry: ed.entry, tool: edTool() });
+    ed.files = v.files;
+    ed.ownership = v.ownership;
+  } catch (e) {
+    ed.files = [];
+    edError(e);
+  }
+  edShow();
+}
+
+async function openFile(path) {
+  if (ed.mode !== "view" && ed.text !== undefined && !confirmDiscard()) return;
+  edError(null);
+  try {
+    const v = await invoke("file", { entry: ed.entry, tool: edTool(), path });
+    Object.assign(ed, { path, text: v.text, hash: v.hash, ownership: v.ownership, mode: "view" });
+    ed.editable = (ed.files.find((f) => f.path === path) ?? {}).editable === true;
+  } catch (e) {
+    edError(e);
+  }
+  edShow();
+}
+
+// Slice 5 replaces this with a proper prompt; until then edits are never dropped silently.
+const confirmDiscard = () => ed.mode === "view" || $("ed-text").value === ed.text;
+
+function edShow() {
+  const list = $("ed-files");
+  list.replaceChildren();
+  for (const f of ed.files) {
+    const b = el("button", f.editable ? "" : "ro", f.path);
+    if (f.path === ed.path) b.setAttribute("aria-current", "true");
+    b.addEventListener("click", () => openFile(f.path));
+    list.appendChild(el("li")).appendChild(b);
+  }
+  const open = ed.path !== null;
+  const m = ed.mode;
+  $("ed-view").hidden = !(open && m === "view");
+  $("ed-text").hidden = m !== "edit";
+  $("ed-diff").hidden = m !== "review";
+  if (open && m === "view") $("ed-view").textContent = ed.text;
+  $("ed-note").textContent = !open
+    ? ed.files.length ? "Pick a file." : ""
+    : `${ed.path}. ${EDIT_NOTE[ed.ownership] ?? ""}${ed.editable ? "" : " Read-only."}`;
+  $("ed-edit").hidden = !(open && m === "view" && ed.editable);
+  $("ed-back").hidden = m !== "review";
+  $("ed-review").hidden = m !== "edit";
+  $("ed-save").hidden = m !== "review";
+  $("ed-place").disabled = m !== "view";
+}
+
+$("ed-place").addEventListener("change", loadFiles);
+$("ed-close").addEventListener("click", () => {
+  if (confirmDiscard()) $("editor").close();
+});
+$("editor").addEventListener("cancel", (e) => { if (!confirmDiscard()) e.preventDefault(); });
+$("ed-edit").addEventListener("click", () => {
+  ed.mode = "edit";
+  $("ed-text").value = ed.text;
+  edShow();
+  $("ed-text").focus();
+});
+$("ed-back").addEventListener("click", () => {
+  ed.mode = "edit";
+  $("ed-foot").textContent = "Nothing is written until you confirm the diff.";
+  edShow();
+});
+$("ed-review").addEventListener("click", async () => {
+  edError(null);
+  try {
+    const p = await invoke("preview_edit", { entry: ed.entry, tool: edTool(), path: ed.path, text: $("ed-text").value, hash: ed.hash });
+    const box = $("ed-diff");
+    box.replaceChildren();
+    for (const d of p.diff) box.appendChild(el("div", d.kind, `${{ added: "+ ", removed: "- ", same: "  " }[d.kind]}${d.text}`));
+    const changed = p.diff.filter((d) => d.kind !== "same").length;
+    $("ed-foot").textContent = changed === 0
+      ? "No changes."
+      : p.marks_edited ? "Saving marks this copy edited. Nothing is written until you confirm." : "Nothing is written until you confirm.";
+    $("ed-save").disabled = changed === 0;
+    ed.mode = "review";
+    edShow();
+  } catch (e) {
+    edError(e);
+  }
+});
+$("ed-save").addEventListener("click", async () => {
+  edError(null);
+  try {
+    // The text stays in the box until the backend says it was saved.
+    await invoke("apply_edit", { entry: ed.entry, tool: edTool(), path: ed.path, text: $("ed-text").value, hash: ed.hash });
+  } catch (e) {
+    edError(e);
+    return;
+  }
+  const path = ed.path;
+  ed.mode = "view";
+  $("ed-foot").textContent = "Saved.";
+  await openFile(path);
   refresh();
 });
 

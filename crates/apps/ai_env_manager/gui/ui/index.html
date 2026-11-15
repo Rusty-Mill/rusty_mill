@@ -41,6 +41,26 @@
     <button id="plan-cancel">Cancel</button><button id="plan-apply" class="primary">Apply</button>
   </div>
 </dialog>
+<dialog id="editor" aria-labelledby="ed-title">
+  <div class="dlg-head">
+    <h2 id="ed-title"></h2>
+    <label class="dim">Files in <select id="ed-place" aria-label="Which copy to open"></select></label>
+  </div>
+  <p id="ed-error" class="error" role="alert" hidden></p>
+  <div class="ed-body">
+    <ul id="ed-files" class="ed-files" aria-label="Files"></ul>
+    <div class="ed-pane">
+      <p id="ed-note" class="dim"></p>
+      <pre id="ed-view" class="ed-text" tabindex="0" hidden></pre>
+      <textarea id="ed-text" class="ed-text" spellcheck="false" aria-label="File text" hidden></textarea>
+      <div id="ed-diff" class="ed-text diff" tabindex="0" hidden></div>
+    </div>
+  </div>
+  <div class="dlg-foot">
+    <p class="dim" id="ed-foot">Nothing is written until you confirm the diff.</p>
+    <button id="ed-close">Close</button><button id="ed-edit">Edit</button><button id="ed-back" hidden>Back to editing</button><button id="ed-review" class="primary" hidden>Review changes</button><button id="ed-save" class="primary" hidden>Confirm and save</button>
+  </div>
+</dialog>
 <script src="app.js"></script>
 </body>
 </html>
