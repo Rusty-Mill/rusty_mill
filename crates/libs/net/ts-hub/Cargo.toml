@@ -26,4 +26,5 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+ts-filter.workspace = true
 ts-stun.workspace = true

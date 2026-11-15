@@ -15,16 +15,24 @@ use ts_types::{
 
 /// The all-zero time Tailscale uses for "never expires".
 const ZERO_TIME: &str = "0001-01-01T00:00:00Z";
+/// The login of the user every tagged node belongs to.
+pub(crate) const TAGGED_LOGIN: &str = "tagged-devices";
+/// The one tag the hub gives tagged nodes.
+const TAG: &str = "tag:mesh";
 /// Longest DNS label.
 const MAX_LABEL: usize = 63;
 
 /// How a pre-auth key may be used.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyPolicy {
     /// Seconds from creation until the key stops working; `None` never.
     pub ttl: Option<u64>,
     /// Whether more than one machine may register with the key.
     pub reusable: bool,
+    /// A server's name, for a tagged key: the one machine that registers with
+    /// it is `NAME.mesh`, principal `ts-node:NAME.mesh`, and nobody else can
+    /// take the name. `None` makes a person's device, principal `ts:LOGIN`.
+    pub tagged: Option<String>,
 }
 
 impl KeyPolicy {
@@ -32,6 +40,7 @@ impl KeyPolicy {
     pub const REUSABLE: Self = Self {
         ttl: None,
         reusable: true,
+        tagged: None,
     };
 }
 
@@ -49,6 +58,9 @@ pub struct NodeRec {
     #[serde(skip)]
     pub endpoints: Vec<SocketAddr>,
     pub ip: Ipv4Addr,
+    /// Registered with a tagged key.
+    #[serde(default)]
+    pub tagged: bool,
     /// Unix seconds after which the node must register again; `None` never.
     #[serde(default)]
     pub expires: Option<u64>,
@@ -63,6 +75,10 @@ pub enum RegisterError {
     ExpiredAuthKey,
     #[error("this machine was revoked")]
     Revoked,
+    #[error("invalid pre-auth key: {0}")]
+    InvalidKey(String),
+    #[error("the name `{0}` is taken")]
+    NameTaken(String),
     #[error("the node table is full")]
     Full,
     #[error("could not save the node table: {0}")]
@@ -91,6 +107,11 @@ pub trait NodeStore: Send + 'static {
         auth_key: &str,
         now: u64,
     ) -> Result<(), RegisterError>;
+
+    /// Forgets a pre-auth key, so nobody can register with it again. Nodes
+    /// already registered with it stay; revoke their machines to remove
+    /// them. `false` if there was no such key.
+    fn remove_preauth(&mut self, key: &str) -> Result<bool, RegisterError>;
 
     /// Removes the machine from the table and bans it: it cannot register
     /// again, whatever key it holds. The outcome carries the node key so the
@@ -130,6 +151,8 @@ struct PreauthRec {
     login: String,
     expires: Option<u64>,
     reusable: bool,
+    #[serde(default)]
+    tagged: Option<String>,
     /// The machine that spent a single-use key.
     used_by: Option<MachinePublic>,
 }
@@ -169,13 +192,13 @@ impl MemoryStore {
         Ok(store)
     }
 
-    /// The login `key` admits `machine` as, if the key may be used now.
+    /// The login and server name (if tagged) `key` admits `machine` as, if the key may be used now.
     fn check_key(
         &self,
         key: &str,
         machine: &MachinePublic,
         now: u64,
-    ) -> Result<String, RegisterError> {
+    ) -> Result<(String, Option<String>), RegisterError> {
         if self.revoked.contains(machine) {
             return Err(RegisterError::Revoked);
         }
@@ -187,7 +210,7 @@ impl MemoryStore {
             Some(spent_by) if !rec.reusable && spent_by != *machine => {
                 Err(RegisterError::BadAuthKey)
             }
-            _ => Ok(rec.login.clone()),
+            _ => Ok((rec.login.clone(), rec.tagged.clone())),
         }
     }
 
@@ -197,15 +220,56 @@ impl MemoryStore {
         (1..=u8::MAX).find(|h| !taken.contains(h))
     }
 
+    /// Refuses a key whose login or server name could not be written in a
+    /// policy rule, or would collide with another identity.
+    fn check_new_key(&self, login: &str, policy: &KeyPolicy) -> Result<(), RegisterError> {
+        let bad = |why: &str| Err(RegisterError::InvalidKey(why.to_string()));
+        if login.is_empty() || login.contains(|c: char| c.is_whitespace() || c == '#') {
+            return bad("a login must be non-empty, with no whitespace or `#`");
+        }
+        if login == TAGGED_LOGIN {
+            return bad("`tagged-devices` is reserved for tagged nodes");
+        }
+        // Two logins that hash to one wire user id would share a principal.
+        let id = user_id(login);
+        if self
+            .preauth
+            .values()
+            .any(|k| k.login != login && user_id(&k.login) == id)
+        {
+            return bad("the login collides with another login's user id");
+        }
+        match &policy.tagged {
+            Some(name) if sanitize_label(name) != *name => {
+                bad("a server name must be a lowercase DNS label")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The server name `name` for `machine`, unless another machine holds it.
+    fn claim_name(&self, name: &str, machine: &MachinePublic) -> Result<String, RegisterError> {
+        if self
+            .nodes
+            .iter()
+            .any(|n| n.hostname == name && n.machine != *machine)
+        {
+            return Err(RegisterError::NameTaken(name.to_string()));
+        }
+        Ok(name.to_string())
+    }
+
     /// `want` as a DNS label no other machine's node holds.
     fn unique_label(&self, want: &str, machine: &MachinePublic) -> String {
         let base = sanitize_label(want);
-        let held: HashSet<&str> = self
+        let mut held: HashSet<&str> = self
             .nodes
             .iter()
             .filter(|n| n.machine != *machine)
             .map(|n| n.hostname.as_str())
             .collect();
+        // A name a tagged key reserves is never handed to a device.
+        held.extend(self.preauth.values().filter_map(|k| k.tagged.as_deref()));
         if !held.contains(base.as_str()) {
             return base;
         }
@@ -250,12 +314,14 @@ impl NodeStore for MemoryStore {
         policy: KeyPolicy,
         now: u64,
     ) -> Result<(), RegisterError> {
+        self.check_new_key(login, &policy)?;
         self.preauth.insert(
             key.to_string(),
             PreauthRec {
                 login: login.to_string(),
                 expires: policy.ttl.map(|t| now.saturating_add(t)),
                 reusable: policy.reusable,
+                tagged: policy.tagged,
                 used_by: None,
             },
         );
@@ -270,12 +336,17 @@ impl NodeStore for MemoryStore {
         auth_key: &str,
         now: u64,
     ) -> Result<(), RegisterError> {
-        let login = self.check_key(auth_key, &machine, now)?;
-        let hostname = self.unique_label(hostname, &machine);
+        let (login, tagged) = self.check_key(auth_key, &machine, now)?;
+        let hostname = match &tagged {
+            Some(name) => self.claim_name(name, &machine)?,
+            None => self.unique_label(hostname, &machine),
+        };
+        let tagged = tagged.is_some();
         let expires = self.node_ttl.map(|t| now.saturating_add(t));
         if let Some(n) = self.nodes.iter_mut().find(|n| n.machine == machine) {
             n.node_key = node_key;
             n.login = login;
+            n.tagged = tagged;
             n.hostname = hostname;
             n.expires = expires;
         } else {
@@ -290,6 +361,7 @@ impl NodeStore for MemoryStore {
                 disco: None,
                 endpoints: Vec::new(),
                 ip: Ipv4Addr::new(100, 64, 0, host),
+                tagged,
                 expires,
             });
         }
@@ -297,6 +369,10 @@ impl NodeStore for MemoryStore {
             rec.used_by = Some(machine);
         }
         Ok(())
+    }
+
+    fn remove_preauth(&mut self, key: &str) -> Result<bool, RegisterError> {
+        Ok(self.preauth.remove(key).is_some())
     }
 
     fn revoke(&mut self, machine: &MachinePublic) -> Revocation {
@@ -361,7 +437,7 @@ impl NodeStore for MemoryStore {
 
 impl MemoryStore {
     fn profiles(&self) -> Vec<UserProfile> {
-        let mut logins: Vec<&str> = self.nodes.iter().map(|n| n.login.as_str()).collect();
+        let mut logins: Vec<&str> = self.nodes.iter().map(wire_login).collect();
         logins.sort_unstable();
         logins.dedup();
         logins
@@ -386,6 +462,12 @@ fn user_id(login: &str) -> UserID {
     )
 }
 
+/// The login a node's wire user carries: tagged nodes belong to the special
+/// tagged-devices user, as in Tailscale.
+fn wire_login(n: &NodeRec) -> &str {
+    if n.tagged { TAGGED_LOGIN } else { &n.login }
+}
+
 fn wire_node(n: &NodeRec) -> Node {
     let addr = IpPrefix {
         addr: IpAddr::V4(n.ip),
@@ -395,7 +477,12 @@ fn wire_node(n: &NodeRec) -> Node {
         id: NodeID(n.id),
         stable_id: StableNodeID(format!("n{}", n.id)),
         name: format!("{}.mesh.", n.hostname),
-        user: user_id(&n.login),
+        user: user_id(wire_login(n)),
+        tags: if n.tagged {
+            vec![TAG.to_string()]
+        } else {
+            Vec::new()
+        },
         key: Some(n.node_key),
         key_expiry: Rfc3339(ZERO_TIME.to_string()),
         machine: Some(n.machine),
@@ -411,7 +498,6 @@ fn wire_node(n: &NodeRec) -> Node {
             ..Default::default()
         }),
         created: Rfc3339(ZERO_TIME.to_string()),
-        ..Default::default()
     }
 }
 
@@ -528,6 +614,7 @@ mod tests {
             KeyPolicy {
                 ttl: Some(60),
                 reusable: true,
+                tagged: None,
             },
         );
         s.register(m(1), k(1), "a", "k", 159).unwrap();
@@ -604,5 +691,98 @@ mod tests {
         assert!(!s.has_node_key(&k(1), 0));
         // Other machines are unaffected.
         s.register(m(2), k(2), "b", "k", 0).unwrap();
+    }
+
+    fn tagged(name: &str) -> KeyPolicy {
+        KeyPolicy {
+            tagged: Some(name.to_string()),
+            ..KeyPolicy::REUSABLE
+        }
+    }
+
+    #[test]
+    fn a_tagged_key_fixes_the_servers_name_and_refuses_a_second_holder() {
+        let mut s = MemoryStore::default();
+        s.add_preauth("t", "ops", tagged("mux"), 0).unwrap();
+        // The node's own hostname is ignored.
+        s.register(m(1), k(1), "whatever", "t", 0).unwrap();
+        let node = s.netmap(&m(1), true, 0).unwrap().node.unwrap();
+        assert_eq!(node.name, "mux.mesh.");
+        assert_eq!(node.tags, ["tag:mesh"]);
+        // Another machine with the same key cannot take the name...
+        assert_eq!(
+            s.register(m(2), k(2), "mux", "t", 0),
+            Err(RegisterError::NameTaken("mux".into()))
+        );
+        // ...but the holder may register again (a rotated node key).
+        s.register(m(1), k(9), "mux", "t", 0).unwrap();
+        // Once revoked, the name is free for the key's next holder.
+        s.revoke(&m(1));
+        s.register(m(2), k(2), "mux", "t", 0).unwrap();
+    }
+
+    #[test]
+    fn a_device_cannot_squat_a_name_a_tagged_key_reserves() {
+        let mut s = MemoryStore::default();
+        s.add_preauth("t", "ops", tagged("mux"), 0).unwrap();
+        s.add_preauth("d", "alice", KeyPolicy::REUSABLE, 0).unwrap();
+        // The device registers first and asks for the server's name.
+        s.register(m(1), k(1), "mux", "d", 0).unwrap();
+        let device = s.netmap(&m(1), true, 0).unwrap().node.unwrap();
+        assert_eq!(device.name, "mux-1.mesh.");
+        assert!(device.tags.is_empty());
+        // The real server still gets its name.
+        s.register(m(2), k(2), "x", "t", 0).unwrap();
+        assert_eq!(
+            s.netmap(&m(2), true, 0).unwrap().node.unwrap().name,
+            "mux.mesh."
+        );
+    }
+
+    #[test]
+    fn keys_that_could_not_be_written_in_a_rule_or_that_collide_are_refused() {
+        let mut s = MemoryStore::default();
+        let refused = |s: &mut MemoryStore, login: &str, policy: KeyPolicy| {
+            matches!(
+                s.add_preauth("k", login, policy, 0),
+                Err(RegisterError::InvalidKey(_))
+            )
+        };
+        for login in ["", "a b", "a#b", "tagged-devices"] {
+            assert!(refused(&mut s, login, KeyPolicy::REUSABLE), "{login:?}");
+        }
+        for name in ["", "Mux", "a b", "a.b"] {
+            assert!(refused(&mut s, "ops", tagged(name)), "{name:?}");
+        }
+        // "Aa" and "BB" hash to the same user id (31 * 65 + 97 == 31 * 66 + 66).
+        s.add_preauth("1", "Aa", KeyPolicy::REUSABLE, 0).unwrap();
+        assert!(
+            refused(&mut s, "BB", KeyPolicy::REUSABLE),
+            "colliding login"
+        );
+        // The same login may have more than one key.
+        s.add_preauth("2", "Aa", KeyPolicy::REUSABLE, 0).unwrap();
+    }
+
+    #[test]
+    fn re_registering_under_a_tagged_key_cannot_rename_the_node() {
+        let mut s = MemoryStore::default();
+        s.add_preauth("t", "ops", tagged("mux"), 0).unwrap();
+        s.register(m(1), k(1), "mux", "t", 0).unwrap();
+        s.register(m(1), k(2), "renamed", "t", 0).unwrap();
+        let node = s.netmap(&m(1), true, 0).unwrap().node.unwrap();
+        assert_eq!(node.name, "mux.mesh.");
+        assert_eq!(node.key, Some(k(2)), "the new node key took effect");
+    }
+
+    #[test]
+    fn a_table_saved_before_tagged_keys_still_loads() {
+        let old = br#"{"preauth":{"k":{"login":"alice","expires":null,"reusable":true,"used_by":null}},
+            "nodes":[{"id":1,"login":"alice","hostname":"a","machine":"mkey:0101010101010101010101010101010101010101010101010101010101010101",
+            "node_key":"nodekey:0202020202020202020202020202020202020202020202020202020202020202","ip":"100.64.0.1"}],
+            "next_id":1}"#;
+        let mut s = MemoryStore::from_json(old, None).expect("an old table loads");
+        assert!(s.has_node_key(&NodePublic([2; 32]), 0));
+        s.register(m(2), k(3), "b", "k", 0).unwrap();
     }
 }

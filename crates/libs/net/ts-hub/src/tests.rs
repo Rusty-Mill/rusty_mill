@@ -1,7 +1,7 @@
 //! End to end: the existing `ts-control` client against the hub, over real
 //! TCP, Noise and HTTP/2.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +25,7 @@ async fn start() -> (Arc<Hub>, String) {
 
 async fn start_with(limits: Limits) -> (Arc<Hub>, String) {
     let hub = Hub::with_limits(MemoryStore::default(), limits);
+    hub.set_policy(Policy::allow_all());
     hub.add_preauth("k1", "alice", KeyPolicy::REUSABLE).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -125,19 +126,6 @@ async fn two_nodes_see_each_other_with_disco_keys_and_endpoints() {
     result.expect("no timeout").expect("poll ends cleanly");
 }
 
-#[test]
-fn every_netmap_carries_a_filter_that_admits_all_traffic() {
-    let hub = Hub::new();
-    hub.add_preauth("k1", "alice", KeyPolicy::REUSABLE).unwrap();
-    let machine = MachinePublic([1; 32]);
-    hub.locked(|s| s.register(machine, NodePublic([2; 32]), "a", "k1", 0))
-        .unwrap();
-    let map = hub.netmap(&machine, false).unwrap();
-    let rules = map.packet_filter.expect("a filter is present");
-    assert_eq!(rules[0].src_ips, ["*"]);
-    assert_eq!(rules[0].dst_ports[0].ports.last, u16::MAX);
-}
-
 /// A store that runs `RACE` right after it builds a netmap: a change that
 /// lands between the snapshot and the first frame.
 #[derive(Default)]
@@ -165,6 +153,9 @@ impl NodeStore for Racy {
     ) -> Result<(), RegisterError> {
         self.inner
             .register(machine, node_key, hostname, auth_key, now)
+    }
+    fn remove_preauth(&mut self, key: &str) -> Result<bool, RegisterError> {
+        self.inner.remove_preauth(key)
     }
     fn revoke(&mut self, machine: &MachinePublic) -> Revocation {
         self.inner.revoke(machine)
@@ -412,6 +403,7 @@ async fn a_sender_over_its_rate_loses_packets_not_the_session() {
 #[test]
 fn an_advertised_region_rides_in_every_netmap() {
     let hub = Hub::new();
+    hub.set_policy(Policy::allow_all());
     hub.add_preauth("k1", "alice", KeyPolicy::REUSABLE).unwrap();
     let machine = MachinePublic([1; 32]);
     hub.locked(|s| s.register(machine, NodePublic([2; 32]), "a", "k1", 0))
@@ -626,4 +618,145 @@ fn a_stale_temp_file_does_not_keep_its_loose_mode() {
         .unwrap();
     let mode = std::fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o077, 0, "the saved table is group/world readable");
+}
+
+/// A hub with alice's laptop, bob's laptop and a tagged server `srv`.
+fn three_nodes() -> (Arc<Hub>, [MachinePublic; 3]) {
+    let hub = Hub::new();
+    hub.add_preauth("alice", "alice@x.io", KeyPolicy::REUSABLE)
+        .unwrap();
+    hub.add_preauth("bob", "bob@x.io", KeyPolicy::REUSABLE)
+        .unwrap();
+    hub.add_preauth(
+        "srv",
+        "ops@x.io",
+        KeyPolicy {
+            tagged: Some("srv".into()),
+            ..KeyPolicy::REUSABLE
+        },
+    )
+    .unwrap();
+    let machines = [1u8, 2, 3].map(|b| MachinePublic([b; 32]));
+    for ((m, name), key) in machines
+        .iter()
+        .zip(["a", "b", "srv"])
+        .zip(["alice", "bob", "srv"])
+    {
+        hub.locked(|s| s.register(*m, NodePublic([m.0[0]; 32]), name, key, 0))
+            .unwrap();
+    }
+    (hub, machines)
+}
+
+fn ip_of_node(map: &MapResponse) -> IpAddr {
+    map.node.as_ref().unwrap().addresses[0].addr
+}
+
+fn peer_names(map: &MapResponse) -> Vec<String> {
+    let mut names: Vec<String> = map.peers.iter().flatten().map(|p| p.name.clone()).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_hub_with_no_policy_shows_no_peers_and_admits_nothing() {
+    let (hub, [a, ..]) = three_nodes();
+    let map = hub.netmap(&a, false).unwrap();
+    assert!(peer_names(&map).is_empty());
+    assert_eq!(
+        map.packet_filter,
+        Some(Vec::new()),
+        "an empty filter drops all"
+    );
+}
+
+#[test]
+fn a_rule_shows_only_the_peers_it_names_and_admits_only_them() {
+    let (hub, [a, b, srv]) = three_nodes();
+    hub.set_policy(Policy::parse("ts:alice@x.io -> ts-node:srv.mesh").unwrap());
+    let (map_a, map_b, map_s) = (
+        hub.netmap(&a, false).unwrap(),
+        hub.netmap(&b, false).unwrap(),
+        hub.netmap(&srv, false).unwrap(),
+    );
+    assert_eq!(peer_names(&map_a), ["srv.mesh."]);
+    assert!(peer_names(&map_b).is_empty(), "bob has no rule with anyone");
+    assert_eq!(peer_names(&map_s), ["a.mesh."]);
+
+    // The server's filter lets alice in and nobody else; alice's lets nothing in.
+    let (alice_ip, bob_ip, srv_ip) = (ip_of_node(&map_a), ip_of_node(&map_b), ip_of_node(&map_s));
+    let at_srv = ts_filter::Filter::new(map_s.packet_filter.as_deref().unwrap());
+    assert!(
+        at_srv.allows(alice_ip, srv_ip, 6, 7000),
+        "alice reaches srv"
+    );
+    assert!(!at_srv.allows(bob_ip, srv_ip, 6, 7000), "bob does not");
+    let at_alice = ts_filter::Filter::new(map_a.packet_filter.as_deref().unwrap());
+    assert!(
+        !at_alice.allows(srv_ip, alice_ip, 6, 7000),
+        "the rule is one way"
+    );
+}
+
+#[test]
+fn a_wildcard_source_admits_everyone_the_hub_shows() {
+    let (hub, [a, b, srv]) = three_nodes();
+    hub.set_policy(Policy::parse("* -> ts-node:srv.mesh").unwrap());
+    let map_s = hub.netmap(&srv, false).unwrap();
+    assert_eq!(peer_names(&map_s), ["a.mesh.", "b.mesh."]);
+    let at_srv = ts_filter::Filter::new(map_s.packet_filter.as_deref().unwrap());
+    let srv_ip = ip_of_node(&map_s);
+    for m in [a, b] {
+        assert!(at_srv.allows(ip_of_node(&hub.netmap(&m, false).unwrap()), srv_ip, 6, 1));
+    }
+    // Laptops do not see each other.
+    assert_eq!(peer_names(&hub.netmap(&a, false).unwrap()), ["srv.mesh."]);
+}
+
+#[test]
+fn omitting_peers_still_computes_the_filter_from_them() {
+    let (hub, [_, _, srv]) = three_nodes();
+    hub.set_policy(Policy::parse("ts:alice@x.io -> ts-node:srv.mesh").unwrap());
+    let map = hub.netmap(&srv, true).unwrap();
+    assert!(map.peers.is_none());
+    assert_eq!(map.packet_filter.unwrap().len(), 1);
+}
+
+#[test]
+fn principals_follow_the_mux_rule_tagged_node_by_name_else_login() {
+    let (hub, [a, _, srv]) = three_nodes();
+    hub.set_policy(Policy::allow_all());
+    for (machine, want) in [(a, "ts:alice@x.io"), (srv, "ts-node:srv.mesh")] {
+        let map = hub.netmap(&machine, false).unwrap();
+        let profiles = map.user_profiles.clone().unwrap();
+        assert_eq!(
+            principal_of(map.node.as_ref().unwrap(), &profiles).as_deref(),
+            Some(want)
+        );
+    }
+}
+
+#[rusty_tokio::test]
+async fn changing_the_policy_wakes_the_netmap_streams() {
+    let (hub, _) = three_nodes();
+    let mut rx = hub.changes.clone();
+    rx.borrow_and_update();
+    hub.set_policy(Policy::allow_all());
+    let woke = rusty_tokio::time::timeout(Duration::from_secs(5), rx.changed()).await;
+    assert!(woke.is_ok(), "streams were not told about the new rules");
+}
+
+#[test]
+fn a_removed_pre_auth_key_registers_no_one_but_keeps_its_nodes() {
+    let (hub, [a, ..]) = three_nodes();
+    assert_eq!(hub.remove_preauth("alice"), Ok(true));
+    assert_eq!(hub.remove_preauth("alice"), Ok(false));
+    let again =
+        hub.locked(|s| s.register(MachinePublic([9; 32]), NodePublic([9; 32]), "x", "alice", 0));
+    assert_eq!(again, Err(RegisterError::BadAuthKey));
+    assert!(
+        hub.locked(|s| s.has_node_key(&NodePublic([1; 32]), 0)),
+        "its node stays"
+    );
+    assert_eq!(hub.revoke(&a), Ok(true));
 }
