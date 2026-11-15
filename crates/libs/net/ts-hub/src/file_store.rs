@@ -137,6 +137,14 @@ impl NodeStore for FileStore {
         self.saved(|s| s.remove_preauth(key))
     }
 
+    fn set_file_keys(
+        &mut self,
+        keys: Vec<(String, String, KeyPolicy)>,
+        now: u64,
+    ) -> Result<(), RegisterError> {
+        self.saved(|s| s.set_file_keys(keys, now))
+    }
+
     fn revoke(&mut self, machine: &MachinePublic) -> Revocation {
         // Never rolled back: a revoke that could not be saved still holds
         // for this run, and the caller is told it is not durable.

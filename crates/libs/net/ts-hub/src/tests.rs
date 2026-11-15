@@ -157,6 +157,13 @@ impl NodeStore for Racy {
     fn remove_preauth(&mut self, key: &str) -> Result<bool, RegisterError> {
         self.inner.remove_preauth(key)
     }
+    fn set_file_keys(
+        &mut self,
+        keys: Vec<(String, String, KeyPolicy)>,
+        now: u64,
+    ) -> Result<(), RegisterError> {
+        self.inner.set_file_keys(keys, now)
+    }
     fn revoke(&mut self, machine: &MachinePublic) -> Revocation {
         self.inner.revoke(machine)
     }
@@ -896,4 +903,120 @@ async fn a_stalled_tls_handshake_holds_a_connection_slot() {
     rusty_tokio::time::sleep(Duration::from_millis(100)).await;
     let mut second = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
     assert!(closes_within(&mut second, Duration::from_secs(2)).await);
+}
+
+// ---- keys file ----
+
+#[test]
+fn a_keys_file_reads_login_reusable_and_name() {
+    let keys = parse_keys("# c\nk1 alice reusable\n\nk2 ci name=build1 # server\n").unwrap();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], ("k1".into(), "alice".into(), KeyPolicy::REUSABLE));
+    assert_eq!(keys[1].2.tagged.as_deref(), Some("build1"));
+    assert!(!keys[1].2.reusable);
+}
+
+#[test]
+fn keys_file_errors_name_the_line_not_the_key() {
+    for (text, line) in [("k1\n", 1), ("k1 a\nk2 b nope\n", 2), ("k1 a\nk1 b\n", 2)] {
+        let e = parse_keys(text).unwrap_err();
+        assert_eq!(e.line, line, "{text}");
+        assert!(!e.to_string().contains("k1"), "{e}");
+    }
+}
+
+#[test]
+fn reloading_keys_adds_new_drops_removed_and_keeps_spent_marks() {
+    let hub = Hub::new();
+    hub.load_keys("k1 alice\nk2 bob reusable\n").unwrap();
+    hub.add_preauth("manual", "carol", KeyPolicy::REUSABLE)
+        .unwrap();
+    let m1 = MachinePublic([1; 32]);
+    let m2 = MachinePublic([2; 32]);
+    let node = |b: u8| NodePublic([b; 32]);
+    hub.locked(|s| s.register(m1, node(1), "a", "k1", 0))
+        .unwrap();
+    // Reading the same file again must not unspend k1 for another machine.
+    hub.load_keys("k1 alice\nk3 dave\n").unwrap();
+    assert!(
+        hub.locked(|s| s.register(m2, node(2), "b", "k1", 0))
+            .is_err()
+    );
+    assert!(
+        hub.locked(|s| s.register(m2, node(2), "b", "k2", 0))
+            .is_err()
+    );
+    hub.locked(|s| s.register(m2, node(2), "b", "k3", 0))
+        .unwrap();
+    hub.locked(|s| s.register(MachinePublic([3; 32]), node(3), "c", "manual", 0))
+        .unwrap();
+}
+
+#[test]
+fn a_keys_file_that_does_not_parse_changes_nothing() {
+    let hub = Hub::new();
+    hub.load_keys("k1 alice\n").unwrap();
+    assert!(hub.load_keys("k2 bob\nbroken\n").is_err());
+    let m = MachinePublic([1; 32]);
+    let n = NodePublic([1; 32]);
+    assert!(hub.locked(|s| s.register(m, n, "a", "k2", 0)).is_err());
+    hub.locked(|s| s.register(m, n, "a", "k1", 0)).unwrap();
+}
+
+#[test]
+fn re_adding_a_key_with_other_settings_is_refused() {
+    let hub = Hub::new();
+    hub.add_preauth("k", "alice", KeyPolicy::default()).unwrap();
+    assert!(matches!(
+        hub.add_preauth("k", "alice", KeyPolicy::REUSABLE),
+        Err(RegisterError::InvalidKey(_))
+    ));
+}
+
+#[test]
+fn a_key_dropped_while_the_hub_was_down_is_refused_after_the_restart() {
+    let path = temp_table("dropped");
+    let m = |b| MachinePublic([b; 32]);
+    let n = |b| NodePublic([b; 32]);
+    {
+        let hub = Hub::with_store(FileStore::open(&path, None).unwrap());
+        hub.load_keys("k1 alice reusable\nk2 bob reusable\n")
+            .unwrap();
+        hub.locked(|s| s.register(m(1), n(1), "a", "k1", 0))
+            .unwrap();
+    }
+    let hub = Hub::with_store(FileStore::open(&path, None).unwrap());
+    hub.load_keys("k2 bob reusable\n").unwrap();
+    assert!(
+        hub.locked(|s| s.register(m(2), n(2), "b", "k1", 0))
+            .is_err()
+    );
+    hub.locked(|s| s.register(m(2), n(2), "b", "k2", 0))
+        .unwrap();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn a_keys_file_with_a_refused_key_changes_nothing() {
+    let path = temp_table("atomic");
+    let hub = Hub::with_store(FileStore::open(&path, None).unwrap());
+    hub.load_keys("k1 alice reusable\n").unwrap();
+    // k2 is fine, the second line's login is reserved: the load is refused whole.
+    let e = hub.load_keys("k2 bob reusable\nk3 tagged-devices\n");
+    assert!(matches!(e, Err(LoadKeysError::Refused(_))));
+    let m = |b| MachinePublic([b; 32]);
+    assert!(
+        hub.locked(|s| s.register(m(2), NodePublic([2; 32]), "b", "k2", 0))
+            .is_err()
+    );
+    hub.locked(|s| s.register(m(1), NodePublic([1; 32]), "a", "k1", 0))
+        .unwrap();
+    // A key dropped by a refused load is still there, also after a restart.
+    let e = hub.load_keys("k3 tagged-devices\n");
+    assert!(e.is_err());
+    drop(hub);
+    let hub = Hub::with_store(FileStore::open(&path, None).unwrap());
+    hub.locked(|s| s.register(m(1), NodePublic([1; 32]), "a", "k1", 0))
+        .unwrap();
+    std::fs::remove_file(&path).ok();
 }

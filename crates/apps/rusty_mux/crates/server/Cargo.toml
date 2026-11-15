@@ -39,6 +39,10 @@ rusty_multimodal_db_engine = { workspace = true }
 serde = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+# `rusty-mux-server --hub` (Linux): runs the mesh hub instead of a server.
+hub = ["dep:ts-hub"]
+
 # Linux and Windows (ConPTY or rusty_conhost, over AF_UNIX); other targets
 # build a stub.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -49,6 +53,10 @@ rusty_http = { workspace = true, features = ["rusty-tokio"] }
 rusty_tls = { workspace = true, features = ["rusty-tokio"] }
 serde_json = { workspace = true }
 ts-types = { workspace = true }
+# `--hub`, behind the `hub` feature: the first-party mesh hub's launcher
+# (docs/projects/mux/MESH.md, D245). Off by default: it brings the DERP and
+# control crypto (crypto_box and the dalek crates) into the server's build.
+ts-hub = { workspace = true, optional = true }
 platform-linux = { workspace = true }
 rusty_libc = { workspace = true }
 

@@ -13,6 +13,9 @@
 
 mod derp;
 mod file_store;
+mod keys;
+#[cfg(unix)]
+pub mod launch;
 mod limits;
 mod policy;
 mod store;
@@ -41,6 +44,7 @@ use ts_types::{DiscoPublic, MachinePublic, NodePublic};
 
 pub use derp::DerpRefusal;
 pub use file_store::{FileStore, StoreError};
+pub use keys::{KeysError, parse_keys};
 pub use limits::Limits;
 pub use policy::{Grant, Policy, PolicyError, Selector, principal_of};
 pub use store::{KeyPolicy, MemoryStore, NodeRec, NodeStore, RegisterError, Revocation};
@@ -134,6 +138,19 @@ impl<S: NodeStore> Hub<S> {
     pub fn set_policy(&self, policy: Policy) {
         *self.policy.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(policy);
         self.bump();
+    }
+
+    /// Makes the keys in `text` (see [`parse_keys`]) the hub's file keys, all
+    /// or nothing (see [`NodeStore::set_file_keys`]): new ones are added, ones
+    /// no longer listed are removed (nodes already registered stay), ones
+    /// already known keep their spent mark. A file key dropped while the hub
+    /// was down goes at the next load. Keys added with
+    /// [`add_preauth`](Self::add_preauth) are not touched. To change a listed
+    /// key's settings, drop it, load, then list it again and load.
+    pub fn load_keys(&self, text: &str) -> Result<(), LoadKeysError> {
+        let keys = parse_keys(text)?;
+        self.locked(|s| s.set_file_keys(keys, unix_now()))?;
+        Ok(())
     }
 
     /// Forgets a pre-auth key (see [`NodeStore::remove_preauth`]).
@@ -586,6 +603,15 @@ impl From<rusty_http::Error> for HubError {
     fn from(e: rusty_http::Error) -> Self {
         Self::Bad(e.to_string())
     }
+}
+
+/// Why a keys file could not be loaded.
+#[derive(Debug, thiserror::Error)]
+pub enum LoadKeysError {
+    #[error(transparent)]
+    Parse(#[from] KeysError),
+    #[error("a key was refused: {0:?}")]
+    Refused(#[from] RegisterError),
 }
 
 /// The only policy until ACLs land: every node may reach every port of every

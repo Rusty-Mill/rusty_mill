@@ -37,6 +37,11 @@
 //! (C26 shared mode); its socket is open to every local user, and the list
 //! decides. SIGHUP reads the list again. See `shared.rs`.
 //!
+//! `rusty-mux-server --hub --listen ADDR:PORT [...]` runs the mesh hub
+//! (coordination, DERP relay and STUN) instead of a mux server: no sessions,
+//! no socket. The flags are `ts_hub::launch`'s (`--hub --help` lists them);
+//! SIGHUP reads its keys and policy files again (docs/projects/mux/MESH.md).
+//!
 //! `rusty-mux-server --login MAP [--runtime DIR] [--udp-ports ADDR:LO-HI] [--tailnet ADDR:PORT]
 //! <socket>` runs login
 //! mode's front door instead (Linux, normally as root): any local user may
@@ -84,6 +89,7 @@ const USAGE: &str =
                         [--config FILE] [--state DIR | --no-state] [--idle-exit SECS] [<socket>]
        rusty-mux-server --login MAP [--runtime DIR] [--udp-ports ADDR:LO-HI]
                         [--tailnet ADDR:PORT] [--pam[=SERVICE]] <socket>
+       rusty-mux-server --hub --listen ADDR:PORT [more hub flags; `--hub --help` lists them]
        rusty-mux-server --shared ALLOW [--tailnet ADDR:PORT] [--config FILE]
                         [--tls ADDR:PORT --tls-cert PEM --tls-key PEM --tokens FILE]
                         [--state DIR | --no-state] <socket>";
@@ -156,6 +162,9 @@ struct TlsArgs {
 }
 
 fn main() -> ExitCode {
+    if std::env::args_os().nth(1).is_some_and(|a| a == "--hub") {
+        return hub();
+    }
     let args = match parse(std::env::args_os().skip(1)) {
         Ok(args) => args,
         Err(err) => {
@@ -177,6 +186,40 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `rusty-mux-server --hub ...`: runs the mesh hub (coordination, relay and
+/// STUN) instead of a mux server, with the flags `ts_hub::launch` takes.
+#[cfg(all(target_os = "linux", feature = "hub"))]
+fn hub() -> ExitCode {
+    let flags: Result<Vec<String>, _> = std::env::args_os()
+        .skip(2)
+        .map(|a| a.into_string())
+        .collect();
+    let flags = match flags {
+        Ok(flags) => flags,
+        Err(arg) => {
+            eprintln!("rusty-mux-server: --hub: {arg:?} is not UTF-8");
+            return ExitCode::from(2);
+        }
+    };
+    let runtime = match Builder::new_current_thread().build_local(&LocalOptions::default()) {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("rusty-mux-server: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(ts_hub::launch::main(
+        "rusty-mux-server --hub",
+        flags.into_iter(),
+    ))
+}
+
+#[cfg(not(all(target_os = "linux", feature = "hub")))]
+fn hub() -> ExitCode {
+    eprintln!("rusty-mux-server: --hub needs Linux and a build with `--features hub`");
+    ExitCode::from(2)
 }
 
 fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {

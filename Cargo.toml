@@ -751,6 +751,7 @@ ts-magicsock = { path = "crates/libs/net/ts-magicsock" }
 ts-wg = { path = "crates/libs/net/ts-wg" }
 ts-tun = { path = "crates/libs/net/ts-tun" }
 ts-filter = { path = "crates/libs/net/ts-filter" }
+ts-hub = { path = "crates/libs/net/ts-hub" }
 ts-engine = { path = "crates/libs/net/ts-engine" }
 ts-localapi = { path = "crates/apps/rusty_tailscale/crates/ts-localapi" }
 ts-net = { path = "crates/libs/net/ts-net" }

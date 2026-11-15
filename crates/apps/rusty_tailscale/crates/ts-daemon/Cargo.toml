@@ -12,8 +12,13 @@ layer = "apps"
 
 [dependencies]
 ts-key.workspace = true
+ts-hub.workspace = true
 rusty_tokio.workspace = true
 ts-engine.workspace = true
 ts-localapi.workspace = true
 ts-types.workspace = true
 rusty_log = { workspace = true, features = ["subscriber"] }
+
+[dev-dependencies]
+ts-control.workspace = true
+ts-derp.workspace = true
