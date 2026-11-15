@@ -631,7 +631,7 @@ fn three_nodes() -> (Arc<Hub>, [MachinePublic; 3]) {
         "srv",
         "ops@x.io",
         KeyPolicy {
-            tagged: true,
+            tagged: Some("srv".into()),
             ..KeyPolicy::REUSABLE
         },
     )

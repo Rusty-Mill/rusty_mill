@@ -8,7 +8,8 @@
 //! ```
 //!
 //! A node's principal is `ts:LOGIN`, or `ts-node:NAME` when it registered
-//! with a tagged key (see [`principal_of`]). No rule means no traffic: a
+//! with a tagged key (see [`principal_of`]); a tagged key names its server,
+//! so `ts-node:mux.mesh` can only be the machine that holds that key. No rule means no traffic: a
 //! hub starts closed. A rule opens every port from the source to the
 //! destination, one way. Each node's netmap lists only the peers it has a
 //! rule with, in either direction, and its packet filter admits only the
