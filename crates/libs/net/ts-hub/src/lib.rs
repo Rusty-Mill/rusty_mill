@@ -11,6 +11,7 @@
 //! (docs/projects/mux/MESH.md).
 
 mod derp;
+mod file_store;
 mod limits;
 mod store;
 pub mod stun;
@@ -35,13 +36,20 @@ use ts_types::tailcfg::{
 use ts_types::{DiscoPublic, MachinePublic, NodePublic};
 
 pub use derp::DerpRefusal;
+pub use file_store::{FileStore, StoreError};
 pub use limits::Limits;
-pub use store::{MemoryStore, NodeRec, NodeStore, RegisterError};
+pub use store::{KeyPolicy, MemoryStore, NodeRec, NodeStore, RegisterError};
 
-use limits::Counter;
+use limits::{Counter, Keyed};
 
 const MAX_HEAD_LEN: usize = 16 * 1024;
 const MAX_BODY_LEN: usize = 1 << 20;
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// A heartbeat frame this often keeps idle map streams from being reaped.
 const KEEPALIVE: Duration = Duration::from_secs(60);
 
@@ -55,6 +63,7 @@ pub struct Hub<S: NodeStore = MemoryStore> {
     derp_map: Mutex<Option<serde_json::Value>>,
     conns: Counter,
     streams: Counter,
+    machine_streams: Keyed<MachinePublic>,
     /// Bumped whenever the node table changes; map streams wait on it.
     changed: watch::Sender<u64>,
     /// Kept so streams can clone a fresh receiver.
@@ -76,23 +85,46 @@ impl<S: NodeStore> Hub<S> {
 
     /// A hub with a fresh Noise identity over `store`.
     pub fn with_limits(store: S, limits: Limits) -> Arc<Self> {
+        Self::with_identity(store, limits, MachinePrivate::generate())
+    }
+
+    /// A hub with the given Noise identity, so a restarted hub keeps the key
+    /// its nodes already trust (`ts_key::NodeState` can save one).
+    pub fn with_identity(store: S, limits: Limits, key: MachinePrivate) -> Arc<Self> {
         let (changed, changes) = watch::channel(0);
         Arc::new(Self {
-            key: MachinePrivate::generate(),
+            key,
             store: Mutex::new(store),
             limits,
             relay: derp::Relay::new(),
             derp_map: Mutex::new(None),
             conns: Counter::default(),
             streams: Counter::default(),
+            machine_streams: Keyed::default(),
             changed,
             changes,
         })
     }
 
-    /// Admits `login` for nodes that register with `key`.
-    pub fn add_preauth(&self, key: &str, login: &str) {
-        self.locked(|s| s.add_preauth(key, login));
+    /// Admits `login` for nodes that register with `key`, under `policy`.
+    pub fn add_preauth(
+        &self,
+        key: &str,
+        login: &str,
+        policy: KeyPolicy,
+    ) -> Result<(), RegisterError> {
+        self.locked(|s| s.add_preauth(key, login, policy, unix_now()))
+    }
+
+    /// Removes a node: it drops out of every netmap, its map streams end and
+    /// its relay session is closed. `false` if the machine was not registered.
+    pub fn revoke(&self, machine: &MachinePublic) -> Result<bool, RegisterError> {
+        let Some(node_key) = self.locked(|s| s.revoke(machine))? else {
+            return Ok(false);
+        };
+        self.relay.kick(&node_key);
+        self.bump();
+        Ok(true)
     }
 
     /// Advertises this hub's relay and STUN responder to nodes as a single
@@ -121,7 +153,7 @@ impl<S: NodeStore> Hub<S> {
     }
 
     fn netmap(&self, machine: &MachinePublic, omit_peers: bool) -> Option<MapResponse> {
-        let mut map = self.locked(|s| s.netmap(machine, omit_peers))?;
+        let mut map = self.locked(|s| s.netmap(machine, omit_peers, unix_now()))?;
         map.packet_filter = Some(allow_all());
         map.derp_map = self
             .derp_map
@@ -230,7 +262,7 @@ impl<S: NodeStore> Hub<S> {
             .session(
                 Replay::new(leftover, read),
                 write,
-                |k| self.locked(|s| s.has_node_key(k)),
+                |k| self.locked(|s| s.has_node_key(k, unix_now())),
                 &self.limits,
             )
             .await?;
@@ -311,8 +343,15 @@ impl<S: NodeStore> Hub<S> {
     ) -> Result<(), HubError> {
         let req: RegisterReq = serde_json::from_slice(body)?;
         let auth_key = req.auth.map(|a| a.auth_key).unwrap_or_default();
-        let outcome =
-            self.locked(|s| s.register(machine, req.node_key, &req.hostinfo.hostname, &auth_key));
+        let outcome = self.locked(|s| {
+            s.register(
+                machine,
+                req.node_key,
+                &req.hostinfo.hostname,
+                &auth_key,
+                unix_now(),
+            )
+        });
         let resp = match outcome {
             Ok(()) => {
                 self.bump();
@@ -355,6 +394,12 @@ impl<S: NodeStore> Hub<S> {
         let Some(_slot) = self.streams.acquire(self.limits.max_map_streams) else {
             return send_status(respond, 503).await;
         };
+        let Some(_own) = self
+            .machine_streams
+            .acquire(&machine, self.limits.max_map_streams_per_machine)
+        else {
+            return send_status(respond, 503).await;
+        };
         let mut stream = respond
             .send_response(ok_json_headers(), false)
             .await
@@ -369,6 +414,7 @@ impl<S: NodeStore> Hub<S> {
                     frame(&map, zstd)?
                 }
                 Ok(Err(_)) => return Ok(()),
+                Err(_) if self.netmap(&machine, true).is_none() => return Ok(()),
                 Err(_) => keepalive_frame(zstd)?,
             };
             // A send error means the node went away.

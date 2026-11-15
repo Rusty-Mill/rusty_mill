@@ -1,10 +1,13 @@
 //! The hub's node table: who registered, their keys and endpoints, and the
-//! netmap built from them. Pure data, no I/O. [`NodeStore`] is the seam a
-//! persistent table plugs into; [`MemoryStore`] is the in-memory one.
+//! netmap built from them. Pure data and an explicit clock (`now`, Unix
+//! seconds), no I/O. [`NodeStore`] is the seam a persistent table plugs into;
+//! [`MemoryStore`] is the in-memory one and [`FileStore`](crate::FileStore)
+//! saves it to disk.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use serde::{Deserialize, Serialize};
 use ts_types::tailcfg::{Hostinfo, MapResponse, Node, NodeID};
 use ts_types::{
     DiscoPublic, IpPrefix, MachinePublic, NodePublic, Rfc3339, StableNodeID, UserID, UserProfile,
@@ -12,48 +15,88 @@ use ts_types::{
 
 /// The all-zero time Tailscale uses for "never expires".
 const ZERO_TIME: &str = "0001-01-01T00:00:00Z";
+/// Longest DNS label.
+const MAX_LABEL: usize = 63;
+
+/// How a pre-auth key may be used.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeyPolicy {
+    /// Seconds from creation until the key stops working; `None` never.
+    pub ttl: Option<u64>,
+    /// Whether more than one machine may register with the key.
+    pub reusable: bool,
+}
+
+impl KeyPolicy {
+    /// A key any number of machines may use, forever.
+    pub const REUSABLE: Self = Self {
+        ttl: None,
+        reusable: true,
+    };
+}
 
 /// One registered node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeRec {
     pub id: i64,
     pub login: String,
     pub hostname: String,
     pub machine: MachinePublic,
     pub node_key: NodePublic,
+    /// Re-sent with the node's next map poll, so not saved.
+    #[serde(skip)]
     pub disco: Option<DiscoPublic>,
+    #[serde(skip)]
     pub endpoints: Vec<SocketAddr>,
     pub ip: Ipv4Addr,
+    /// Unix seconds after which the node must register again; `None` never.
+    #[serde(default)]
+    pub expires: Option<u64>,
 }
 
-/// Why a registration was refused.
+/// Why a store operation was refused.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RegisterError {
     #[error("unknown or empty pre-auth key")]
     BadAuthKey,
+    #[error("pre-auth key has expired")]
+    ExpiredAuthKey,
     #[error("the node table is full")]
     Full,
+    #[error("could not save the node table: {0}")]
+    Storage(String),
 }
 
 /// What the hub needs from a node table.
 pub trait NodeStore: Send + 'static {
-    /// Admits `login` for a node that registers with `key`.
-    fn add_preauth(&mut self, key: &str, login: &str);
+    /// Admits `login` for a node that registers with `key`, under `policy`.
+    fn add_preauth(
+        &mut self,
+        key: &str,
+        login: &str,
+        policy: KeyPolicy,
+        now: u64,
+    ) -> Result<(), RegisterError>;
 
     /// Registers (or re-registers) the machine, assigning a tailnet IPv4
-    /// address on first sight. Keys are reusable, as `headscale preauthkeys
-    /// create --reusable`.
+    /// address on first sight. The hostname is made a unique DNS label. A
+    /// single-use key is spent by its first machine and refused to others.
     fn register(
         &mut self,
         machine: MachinePublic,
         node_key: NodePublic,
         hostname: &str,
         auth_key: &str,
+        now: u64,
     ) -> Result<(), RegisterError>;
 
-    /// Whether `key` belongs to a registered node (the relay admits only
-    /// these).
-    fn has_node_key(&self, key: &NodePublic) -> bool;
+    /// Removes the machine from the table; returns its node key so the
+    /// caller can close the relay session. `None` if it was not registered.
+    fn revoke(&mut self, machine: &MachinePublic) -> Result<Option<NodePublic>, RegisterError>;
+
+    /// Whether `key` belongs to a registered, unexpired node (the relay
+    /// admits only these).
+    fn has_node_key(&self, key: &NodePublic, now: u64) -> bool;
 
     /// Records a node's disco key and endpoints; returns whether anything
     /// changed (so the caller can wake the netmap streams).
@@ -64,22 +107,140 @@ pub trait NodeStore: Send + 'static {
         endpoints: Vec<SocketAddr>,
     ) -> bool;
 
-    /// The full netmap for `machine`: itself plus every other node, or
-    /// `None` if the machine never registered.
-    fn netmap(&self, machine: &MachinePublic, omit_peers: bool) -> Option<MapResponse>;
+    /// The full netmap for `machine`: itself plus every other unexpired
+    /// node, or `None` if the machine is not registered or has expired.
+    fn netmap(&self, machine: &MachinePublic, omit_peers: bool, now: u64) -> Option<MapResponse>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PreauthRec {
+    login: String,
+    expires: Option<u64>,
+    reusable: bool,
+    /// The machine that spent a single-use key.
+    used_by: Option<MachinePublic>,
 }
 
 /// Pre-auth keys and registered nodes, held in memory.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MemoryStore {
-    /// Pre-auth key to the login name it admits.
-    preauth: HashMap<String, String>,
+    preauth: HashMap<String, PreauthRec>,
     nodes: Vec<NodeRec>,
+    /// Ids are never reused, even after a revoke.
+    next_id: i64,
+    /// How long a registration lasts; set by the operator, not saved.
+    #[serde(skip)]
+    node_ttl: Option<u64>,
+}
+
+impl MemoryStore {
+    /// Registrations expire `secs` seconds after they are made.
+    pub fn with_node_ttl(mut self, secs: u64) -> Self {
+        self.node_ttl = Some(secs);
+        self
+    }
+
+    pub(crate) fn to_json(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec_pretty(self)
+    }
+
+    pub(crate) fn from_json(
+        bytes: &[u8],
+        node_ttl: Option<u64>,
+    ) -> Result<Self, serde_json::Error> {
+        let mut store: Self = serde_json::from_slice(bytes)?;
+        store.node_ttl = node_ttl;
+        Ok(store)
+    }
+
+    /// The login `key` admits `machine` as, if the key may be used now.
+    fn check_key(
+        &self,
+        key: &str,
+        machine: &MachinePublic,
+        now: u64,
+    ) -> Result<String, RegisterError> {
+        let rec = self.preauth.get(key).ok_or(RegisterError::BadAuthKey)?;
+        if rec.expires.is_some_and(|t| now >= t) {
+            return Err(RegisterError::ExpiredAuthKey);
+        }
+        match rec.used_by {
+            Some(spent_by) if !rec.reusable && spent_by != *machine => {
+                Err(RegisterError::BadAuthKey)
+            }
+            _ => Ok(rec.login.clone()),
+        }
+    }
+
+    /// The lowest tailnet host id nobody holds.
+    fn free_host(&self) -> Option<u8> {
+        let taken: HashSet<u8> = self.nodes.iter().map(|n| n.ip.octets()[3]).collect();
+        (1..=u8::MAX).find(|h| !taken.contains(h))
+    }
+
+    /// `want` as a DNS label no other machine's node holds.
+    fn unique_label(&self, want: &str, machine: &MachinePublic) -> String {
+        let base = sanitize_label(want);
+        let held: HashSet<&str> = self
+            .nodes
+            .iter()
+            .filter(|n| n.machine != *machine)
+            .map(|n| n.hostname.as_str())
+            .collect();
+        if !held.contains(base.as_str()) {
+            return base;
+        }
+        (1u32..)
+            .map(|i| format!("{}-{i}", &base[..base.len().min(MAX_LABEL - 4)]))
+            .find(|c| !held.contains(c.as_str()))
+            .unwrap_or(base)
+    }
+}
+
+/// Lowercase letters, digits and inner hyphens, at most 63 long; `node` if
+/// nothing usable remains.
+fn sanitize_label(raw: &str) -> String {
+    let mapped: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .take(MAX_LABEL)
+        .collect();
+    let trimmed = mapped.trim_matches('-');
+    if trimmed.is_empty() {
+        "node".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn live(n: &NodeRec, now: u64) -> bool {
+    n.expires.is_none_or(|t| now < t)
 }
 
 impl NodeStore for MemoryStore {
-    fn add_preauth(&mut self, key: &str, login: &str) {
-        self.preauth.insert(key.to_string(), login.to_string());
+    fn add_preauth(
+        &mut self,
+        key: &str,
+        login: &str,
+        policy: KeyPolicy,
+        now: u64,
+    ) -> Result<(), RegisterError> {
+        self.preauth.insert(
+            key.to_string(),
+            PreauthRec {
+                login: login.to_string(),
+                expires: policy.ttl.map(|t| now.saturating_add(t)),
+                reusable: policy.reusable,
+                used_by: None,
+            },
+        );
+        Ok(())
     }
 
     fn register(
@@ -88,36 +249,48 @@ impl NodeStore for MemoryStore {
         node_key: NodePublic,
         hostname: &str,
         auth_key: &str,
+        now: u64,
     ) -> Result<(), RegisterError> {
-        let login = self
-            .preauth
-            .get(auth_key)
-            .cloned()
-            .ok_or(RegisterError::BadAuthKey)?;
-        if let Some(i) = self.nodes.iter().position(|n| n.machine == machine) {
-            let n = &mut self.nodes[i];
+        let login = self.check_key(auth_key, &machine, now)?;
+        let hostname = self.unique_label(hostname, &machine);
+        let expires = self.node_ttl.map(|t| now.saturating_add(t));
+        if let Some(n) = self.nodes.iter_mut().find(|n| n.machine == machine) {
             n.node_key = node_key;
             n.login = login;
-            n.hostname = hostname.to_string();
-            return Ok(());
+            n.hostname = hostname;
+            n.expires = expires;
+        } else {
+            let host = self.free_host().ok_or(RegisterError::Full)?;
+            self.next_id += 1;
+            self.nodes.push(NodeRec {
+                id: self.next_id,
+                login,
+                hostname,
+                machine,
+                node_key,
+                disco: None,
+                endpoints: Vec::new(),
+                ip: Ipv4Addr::new(100, 64, 0, host),
+                expires,
+            });
         }
-        let id = self.nodes.len() as i64 + 1;
-        let host = u8::try_from(id).map_err(|_| RegisterError::Full)?;
-        self.nodes.push(NodeRec {
-            id,
-            login,
-            hostname: hostname.to_string(),
-            machine,
-            node_key,
-            disco: None,
-            endpoints: Vec::new(),
-            ip: Ipv4Addr::new(100, 64, 0, host),
-        });
+        if let Some(rec) = self.preauth.get_mut(auth_key) {
+            rec.used_by = Some(machine);
+        }
         Ok(())
     }
 
-    fn has_node_key(&self, key: &NodePublic) -> bool {
-        self.nodes.iter().any(|n| &n.node_key == key)
+    fn revoke(&mut self, machine: &MachinePublic) -> Result<Option<NodePublic>, RegisterError> {
+        let Some(i) = self.nodes.iter().position(|n| n.machine == *machine) else {
+            return Ok(None);
+        };
+        Ok(Some(self.nodes.remove(i).node_key))
+    }
+
+    fn has_node_key(&self, key: &NodePublic, now: u64) -> bool {
+        self.nodes
+            .iter()
+            .any(|n| &n.node_key == key && live(n, now))
     }
 
     fn update(
@@ -135,15 +308,18 @@ impl NodeStore for MemoryStore {
         changed
     }
 
-    fn netmap(&self, machine: &MachinePublic, omit_peers: bool) -> Option<MapResponse> {
-        let me = self.nodes.iter().find(|n| &n.machine == machine)?;
+    fn netmap(&self, machine: &MachinePublic, omit_peers: bool, now: u64) -> Option<MapResponse> {
+        let me = self
+            .nodes
+            .iter()
+            .find(|n| &n.machine == machine && live(n, now))?;
         let peers = if omit_peers {
             None
         } else {
             Some(
                 self.nodes
                     .iter()
-                    .filter(|n| n.machine != me.machine)
+                    .filter(|n| n.machine != me.machine && live(n, now))
                     .map(wire_node)
                     .collect(),
             )
@@ -226,7 +402,7 @@ mod tests {
     }
 
     fn ip_of(s: &MemoryStore, b: u8) -> u8 {
-        let node = s.netmap(&m(b), true).unwrap().node.unwrap();
+        let node = s.netmap(&m(b), true, 0).unwrap().node.unwrap();
         match node.addresses[0].addr {
             IpAddr::V4(ip) => ip.octets()[3],
             IpAddr::V6(_) => unreachable!("the store hands out IPv4 only"),
@@ -236,64 +412,157 @@ mod tests {
     #[test]
     fn register_needs_a_known_key_and_assigns_addresses() {
         let mut s = MemoryStore::default();
-        s.add_preauth("k1", "alice");
+        s.add_preauth("k1", "alice", KeyPolicy::REUSABLE, 0)
+            .unwrap();
         assert_eq!(
-            s.register(m(1), k(1), "a", "nope").unwrap_err(),
+            s.register(m(1), k(1), "a", "nope", 0).unwrap_err(),
             RegisterError::BadAuthKey
         );
-        s.register(m(1), k(1), "a", "k1").unwrap();
-        s.register(m(2), k(2), "b", "k1").unwrap();
+        s.register(m(1), k(1), "a", "k1", 0).unwrap();
+        s.register(m(2), k(2), "b", "k1", 0).unwrap();
         assert_eq!(ip_of(&s, 1), 1);
         assert_eq!(ip_of(&s, 2), 2);
         // Registering again keeps the address.
-        s.register(m(1), k(9), "a", "k1").unwrap();
+        s.register(m(1), k(9), "a", "k1", 0).unwrap();
         assert_eq!(ip_of(&s, 1), 1);
     }
 
     #[test]
     fn netmap_lists_the_other_nodes_with_their_disco_keys() {
         let mut s = MemoryStore::default();
-        s.add_preauth("k1", "alice");
-        s.register(m(1), k(1), "a", "k1").unwrap();
-        s.register(m(2), k(2), "b", "k1").unwrap();
+        s.add_preauth("k1", "alice", KeyPolicy::REUSABLE, 0)
+            .unwrap();
+        s.register(m(1), k(1), "a", "k1", 0).unwrap();
+        s.register(m(2), k(2), "b", "k1", 0).unwrap();
         let ep: SocketAddr = "192.0.2.1:41641".parse().unwrap();
         assert!(s.update(&m(2), DiscoPublic([7; 32]), vec![ep]));
         assert!(
             !s.update(&m(2), DiscoPublic([7; 32]), vec![ep]),
             "unchanged"
         );
-        let map = s.netmap(&m(1), false).unwrap();
+        let map = s.netmap(&m(1), false, 0).unwrap();
         let peers = map.peers.unwrap();
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].disco_key, Some(DiscoPublic([7; 32])));
         assert_eq!(peers[0].endpoints, vec![ep]);
-        assert!(s.netmap(&m(1), true).unwrap().peers.is_none());
-        assert!(s.netmap(&m(9), false).is_none());
+        assert!(s.netmap(&m(1), true, 0).unwrap().peers.is_none());
+        assert!(s.netmap(&m(9), false, 0).is_none());
     }
 
     #[test]
     fn the_table_is_full_after_255_nodes() {
         let mut s = MemoryStore::default();
-        s.add_preauth("k1", "alice");
+        s.add_preauth("k1", "alice", KeyPolicy::REUSABLE, 0)
+            .unwrap();
         for b in 1..=255u8 {
-            s.register(MachinePublic([b; 32]), NodePublic([b; 32]), "n", "k1")
+            s.register(MachinePublic([b; 32]), NodePublic([b; 32]), "n", "k1", 0)
                 .unwrap_or_else(|e| panic!("node {b}: {e}"));
         }
-        let extra = s.register(MachinePublic([0; 32]), NodePublic([0; 32]), "n", "k1");
+        let extra = s.register(MachinePublic([0; 32]), NodePublic([0; 32]), "n", "k1", 0);
         assert_eq!(extra, Err(RegisterError::Full));
     }
 
     #[test]
     fn a_netmap_node_has_the_wire_shape_stock_clients_need() {
         let mut s = MemoryStore::default();
-        s.add_preauth("k1", "alice");
-        s.register(m(1), k(1), "a", "k1").unwrap();
-        let node = s.netmap(&m(1), true).unwrap().node.unwrap();
+        s.add_preauth("k1", "alice", KeyPolicy::REUSABLE, 0)
+            .unwrap();
+        s.register(m(1), k(1), "a", "k1", 0).unwrap();
+        let node = s.netmap(&m(1), true, 0).unwrap().node.unwrap();
         let json = serde_json::to_value(&node).unwrap();
         assert_eq!(json["Name"], "a.mesh.");
         assert_eq!(json["Addresses"][0], "100.64.0.1/32");
         assert_eq!(json["MachineAuthorized"], true);
         assert_eq!(json["HomeDERP"], 1);
         assert_eq!(json["Hostinfo"]["Hostname"], "a");
+    }
+
+    fn keyed(s: &mut MemoryStore, policy: KeyPolicy) {
+        s.add_preauth("k", "alice", policy, 100).unwrap();
+    }
+
+    #[test]
+    fn a_single_use_key_is_spent_by_its_first_machine() {
+        let mut s = MemoryStore::default();
+        keyed(&mut s, KeyPolicy::default());
+        s.register(m(1), k(1), "a", "k", 100).unwrap();
+        assert_eq!(
+            s.register(m(2), k(2), "b", "k", 100),
+            Err(RegisterError::BadAuthKey)
+        );
+        // The same machine may register again (a rotated node key).
+        s.register(m(1), k(9), "a", "k", 100).unwrap();
+        assert!(s.has_node_key(&k(9), 100));
+    }
+
+    #[test]
+    fn a_key_stops_working_at_its_expiry() {
+        let mut s = MemoryStore::default();
+        keyed(
+            &mut s,
+            KeyPolicy {
+                ttl: Some(60),
+                reusable: true,
+            },
+        );
+        s.register(m(1), k(1), "a", "k", 159).unwrap();
+        assert_eq!(
+            s.register(m(2), k(2), "b", "k", 160),
+            Err(RegisterError::ExpiredAuthKey)
+        );
+    }
+
+    #[test]
+    fn an_expired_node_leaves_the_netmaps_and_the_relay() {
+        let mut s = MemoryStore::default().with_node_ttl(60);
+        keyed(&mut s, KeyPolicy::REUSABLE);
+        s.register(m(1), k(1), "a", "k", 100).unwrap();
+        s.register(m(2), k(2), "b", "k", 130).unwrap();
+        assert!(s.has_node_key(&k(1), 159));
+        assert!(!s.has_node_key(&k(1), 160));
+        assert!(s.netmap(&m(1), false, 160).is_none());
+        let seen = s.netmap(&m(2), false, 160).unwrap().peers.unwrap();
+        assert!(seen.is_empty(), "an expired peer is not listed");
+    }
+
+    #[test]
+    fn a_revoked_node_is_gone_and_its_address_is_reused_but_not_its_id() {
+        let mut s = MemoryStore::default();
+        keyed(&mut s, KeyPolicy::REUSABLE);
+        s.register(m(1), k(1), "a", "k", 0).unwrap();
+        s.register(m(2), k(2), "b", "k", 0).unwrap();
+        assert_eq!(s.revoke(&m(1)), Ok(Some(k(1))));
+        assert_eq!(s.revoke(&m(1)), Ok(None));
+        assert!(!s.has_node_key(&k(1), 0));
+        s.register(m(3), k(3), "c", "k", 0).unwrap();
+        assert_eq!(ip_of(&s, 3), 1, "the lowest free host");
+        let node = s.netmap(&m(3), true, 0).unwrap().node.unwrap();
+        assert_eq!(node.id.0, 3, "ids are never reused");
+    }
+
+    #[test]
+    fn hostnames_become_unique_dns_labels() {
+        assert_eq!(sanitize_label("My Laptop_01!"), "my-laptop-01");
+        assert_eq!(sanitize_label("--"), "node");
+        assert_eq!(sanitize_label(&"x".repeat(80)).len(), 63);
+        let mut s = MemoryStore::default();
+        keyed(&mut s, KeyPolicy::REUSABLE);
+        for b in 1..=3u8 {
+            s.register(m(b), k(b), "Dev Box", "k", 0).unwrap();
+        }
+        let names: Vec<String> = [1u8, 2, 3]
+            .iter()
+            .map(|b| s.netmap(&m(*b), true, 0).unwrap().node.unwrap().name)
+            .collect();
+        assert_eq!(
+            names,
+            ["dev-box.mesh.", "dev-box-1.mesh.", "dev-box-2.mesh."]
+        );
+        // Registering again keeps a machine's own name.
+        s.register(m(1), k(1), "Dev Box", "k", 0).unwrap();
+        assert_eq!(
+            s.netmap(&m(1), true, 0).unwrap().node.unwrap().name,
+            "dev-box.mesh."
+        );
     }
 }

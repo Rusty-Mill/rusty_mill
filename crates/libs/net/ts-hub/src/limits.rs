@@ -2,8 +2,10 @@
 //! connections, and a per-sender relay rate. Defaults suit a small mesh on
 //! the open internet; tests shrink them.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The hub's resource limits.
@@ -18,6 +20,8 @@ pub struct Limits {
     pub max_connections: usize,
     /// Concurrent netmap streams; more get `503`.
     pub max_map_streams: usize,
+    /// Concurrent netmap streams one machine may hold; more get `503`.
+    pub max_map_streams_per_machine: usize,
     /// Concurrent HTTP/2 streams on one Noise connection.
     pub max_streams_per_connection: u32,
     /// Concurrent DERP sessions; more are refused.
@@ -35,6 +39,7 @@ impl Default for Limits {
             handshake_timeout: Duration::from_secs(10),
             max_connections: 4096,
             max_map_streams: 1024,
+            max_map_streams_per_machine: 2,
             max_streams_per_connection: 16,
             max_derp_sessions: 2048,
             derp_bytes_per_sec: 8 << 20,
@@ -67,6 +72,54 @@ impl Counter {
 impl Drop for Slot {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Counts of live things per key, each capped. Cloning shares the counts.
+#[derive(Debug)]
+pub struct Keyed<K>(Arc<Mutex<HashMap<K, usize>>>);
+
+impl<K> Default for Keyed<K> {
+    fn default() -> Self {
+        Self(Arc::default())
+    }
+}
+
+/// One slot of a [`Keyed`] counter; frees it on drop.
+#[derive(Debug)]
+pub struct KeySlot<K: Hash + Eq> {
+    counts: Arc<Mutex<HashMap<K, usize>>>,
+    key: K,
+}
+
+impl<K: Hash + Eq + Clone> Keyed<K> {
+    /// Takes a slot for `key` unless it already holds `limit`.
+    pub fn acquire(&self, key: &K, limit: usize) -> Option<KeySlot<K>> {
+        let mut counts = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let held = counts.entry(key.clone()).or_default();
+        if *held >= limit {
+            if *held == 0 {
+                counts.remove(key);
+            }
+            return None;
+        }
+        *held += 1;
+        Some(KeySlot {
+            counts: self.0.clone(),
+            key: key.clone(),
+        })
+    }
+}
+
+impl<K: Hash + Eq> Drop for KeySlot<K> {
+    fn drop(&mut self) {
+        let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(held) = counts.get_mut(&self.key) {
+            *held -= 1;
+            if *held == 0 {
+                counts.remove(&self.key);
+            }
+        }
     }
 }
 
