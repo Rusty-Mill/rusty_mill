@@ -25,7 +25,9 @@ use rusty_tokio::net::{TcpListener, TcpStream};
 use rusty_tokio::sync::watch;
 use ts_control::controlbase::{self, INITIATION_LEN};
 use ts_key::MachinePrivate;
-use ts_types::tailcfg::{Hostinfo, MapResponse, RegisterResponse};
+use ts_types::tailcfg::{
+    FilterRule, Hostinfo, MapResponse, NetPortRange, PortRange, RegisterResponse,
+};
 use ts_types::{DiscoPublic, MachinePublic, NodePublic};
 
 pub use state::{NodeRec, RegisterError, State};
@@ -425,6 +427,22 @@ impl From<rusty_http::Error> for HubError {
     fn from(e: rusty_http::Error) -> Self {
         Self::Bad(e.to_string())
     }
+}
+
+/// The spike's only policy: every node may reach every port of every node.
+/// Without a filter a stock client drops all inbound traffic.
+fn allow_all() -> Vec<FilterRule> {
+    vec![FilterRule {
+        src_ips: vec!["*".into()],
+        dst_ports: vec![NetPortRange {
+            ip: "*".into(),
+            ports: PortRange {
+                first: 0,
+                last: u16::MAX,
+            },
+        }],
+        ip_proto: Vec::new(),
+    }]
 }
 
 /// The `101 Switching Protocols` answer to a DERP upgrade.
