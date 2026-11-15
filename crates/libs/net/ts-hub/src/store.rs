@@ -763,4 +763,26 @@ mod tests {
         // The same login may have more than one key.
         s.add_preauth("2", "Aa", KeyPolicy::REUSABLE, 0).unwrap();
     }
+
+    #[test]
+    fn re_registering_under_a_tagged_key_cannot_rename_the_node() {
+        let mut s = MemoryStore::default();
+        s.add_preauth("t", "ops", tagged("mux"), 0).unwrap();
+        s.register(m(1), k(1), "mux", "t", 0).unwrap();
+        s.register(m(1), k(2), "renamed", "t", 0).unwrap();
+        let node = s.netmap(&m(1), true, 0).unwrap().node.unwrap();
+        assert_eq!(node.name, "mux.mesh.");
+        assert_eq!(node.key, Some(k(2)), "the new node key took effect");
+    }
+
+    #[test]
+    fn a_table_saved_before_tagged_keys_still_loads() {
+        let old = br#"{"preauth":{"k":{"login":"alice","expires":null,"reusable":true,"used_by":null}},
+            "nodes":[{"id":1,"login":"alice","hostname":"a","machine":"mkey:0101010101010101010101010101010101010101010101010101010101010101",
+            "node_key":"nodekey:0202020202020202020202020202020202020202020202020202020202020202","ip":"100.64.0.1"}],
+            "next_id":1}"#;
+        let mut s = MemoryStore::from_json(old, None).expect("an old table loads");
+        assert!(s.has_node_key(&NodePublic([2; 32]), 0));
+        s.register(m(2), k(3), "b", "k", 0).unwrap();
+    }
 }
