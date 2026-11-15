@@ -71,6 +71,9 @@ is computed in `ai_env_app` (line-based, std only), not in JavaScript.
   http://ipc.localhost`. A plain `<textarea>` editor needs no CSP relaxation. A code editor
   library (CodeMirror, Monaco) is a new JS dependency and workers/inline styles: ask-first (D12)
   and out of v1. `[default]` textarea with a monospace font, line numbers optional.
+- Confirm is enforced only in the page: any script in the webview could call `apply_edit`
+  without `preview_edit`. That is fine while the page loads only local assets under this CSP.
+  Do not loosen the CSP assuming the backend gates consent.
 - File content is rendered as text only (`textContent`), never as HTML; Markdown preview, if added
   later, goes through an escaping renderer with no inline script and no remote images.
 - Path handling in the backend: reject absolute paths, `..`, and any component that is a symlink

@@ -1,6 +1,6 @@
 //! Ai Env Manager desktop shell (pack D31, D32). A view over `ai_env_app`:
 //! typed commands (`list`, `plan`, `apply`, and the editor's `files`, `file`,
-//! `edit_preview`, `edit_apply`) and no file, shell or HTTP access for the page.
+//! `preview_edit`, `apply_edit`) and no file, shell or HTTP access for the page.
 //! The editor takes an entry id and a path relative to it, never an absolute
 //! path; every rule is enforced in `ai_env_app`. The skill folders and tools are fixed at launch from
 //! the command line (`--skills DIR`, `--tool ID`, like `aienv`), so the page
