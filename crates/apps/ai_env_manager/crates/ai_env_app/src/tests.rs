@@ -265,3 +265,140 @@ fn a_linked_tool_edits_the_one_source_file() {
         "via link"
     );
 }
+
+/// A marked copy whose SKILL.md was edited to `text`.
+fn edited_copy(e: &Entry, tools: &[Tool], text: &str) -> PathBuf {
+    enable_by_copy(e, tools);
+    let copy = tools[0].target(e);
+    fs::write(copy.join("SKILL.md"), text).unwrap();
+    copy
+}
+
+fn tool_id() -> ToolId {
+    "claude-code".parse().unwrap()
+}
+
+#[test]
+fn push_preview_diffs_source_to_copy_and_writes_nothing() {
+    let tmp = Tmp::new();
+    let (e, tools) = fixture(&tmp);
+    edited_copy(&e, &tools, "one\nTWO\n");
+    let p = push_preview(&e, &tool_id(), &tools, None).unwrap();
+    assert_eq!(p.files.len(), 1);
+    assert_eq!(p.files[0].base.path, "SKILL.md");
+    assert!(p.files[0].diff.contains(&DiffLine::Added("TWO".into())));
+    assert!(p.left.is_empty());
+    assert_eq!(
+        fs::read_to_string(e.source.join("SKILL.md")).unwrap(),
+        "one\ntwo\n"
+    );
+}
+
+#[test]
+fn push_apply_writes_the_source_and_the_copy_reads_enabled_again() {
+    let tmp = Tmp::new();
+    let (e, tools) = fixture(&tmp);
+    edited_copy(&e, &tools, "one\nTWO\n");
+    assert_eq!(observe(&e, &tools[0]).unwrap(), Observed::ManagedModified);
+    let p = push_preview(&e, &tool_id(), &tools, None).unwrap();
+    let bases: Vec<_> = p.files.iter().map(|f| f.base.clone()).collect();
+    let done = push_apply(&e, &tool_id(), &tools, &bases).unwrap();
+    assert!(done.remarked && done.left.is_empty());
+    assert_eq!(done.written, ["SKILL.md"]);
+    assert_eq!(
+        fs::read_to_string(e.source.join("SKILL.md")).unwrap(),
+        "one\nTWO\n"
+    );
+    assert_eq!(observe(&e, &tools[0]).unwrap(), Observed::ManagedCurrent);
+}
+
+#[test]
+fn a_partial_push_leaves_the_copy_edited() {
+    let tmp = Tmp::new();
+    let (e, tools) = fixture(&tmp);
+    let copy = edited_copy(&e, &tools, "one\nTWO\n");
+    fs::write(copy.join("refs/a.md"), "A").unwrap();
+    let p = push_preview(&e, &tool_id(), &tools, Some("SKILL.md")).unwrap();
+    assert_eq!(p.files.len(), 1);
+    assert_eq!(p.left[0].path, "refs/a.md");
+    let bases: Vec<_> = p.files.iter().map(|f| f.base.clone()).collect();
+    let done = push_apply(&e, &tool_id(), &tools, &bases).unwrap();
+    assert!(!done.remarked);
+    assert_eq!(done.left.len(), 1);
+    assert_eq!(observe(&e, &tools[0]).unwrap(), Observed::ManagedModified);
+    assert_eq!(fs::read_to_string(e.source.join("refs/a.md")).unwrap(), "a");
+}
+
+#[test]
+fn files_on_one_side_only_are_listed_and_never_pushed() {
+    let tmp = Tmp::new();
+    let (e, tools) = fixture(&tmp);
+    let copy = edited_copy(&e, &tools, "one\nTWO\n");
+    fs::write(copy.join("new.md"), "n").unwrap();
+    let p = push_preview(&e, &tool_id(), &tools, None).unwrap();
+    assert_eq!(p.left.len(), 1);
+    assert_eq!(p.left[0].delta, Delta::OnlyInCopy);
+    let bases: Vec<_> = p.files.iter().map(|f| f.base.clone()).collect();
+    let done = push_apply(&e, &tool_id(), &tools, &bases).unwrap();
+    assert!(!done.remarked);
+    assert!(!e.source.join("new.md").exists());
+}
+
+#[test]
+fn push_is_refused_unless_the_copy_is_edited() {
+    let tmp = Tmp::new();
+    let (e, tools) = fixture(&tmp);
+    assert!(matches!(
+        push_preview(&e, &tool_id(), &tools, None),
+        Err(Error::NotEnabled(_))
+    ));
+    enable_by_copy(&e, &tools);
+    assert!(matches!(
+        push_preview(&e, &tool_id(), &tools, None),
+        Err(Error::NotEdited(_))
+    ));
+    // A foreign folder is never read as ours.
+    fs::remove_dir_all(tools[0].target(&e)).unwrap();
+    fs::create_dir_all(tools[0].target(&e)).unwrap();
+    fs::write(tools[0].target(&e).join("SKILL.md"), "theirs").unwrap();
+    assert!(matches!(
+        push_preview(&e, &tool_id(), &tools, None),
+        Err(Error::NotEdited(_))
+    ));
+}
+
+#[test]
+fn push_apply_refuses_when_either_side_changed_since_the_preview() {
+    let tmp = Tmp::new();
+    let (e, tools) = fixture(&tmp);
+    let copy = edited_copy(&e, &tools, "one\nTWO\n");
+    let p = push_preview(&e, &tool_id(), &tools, None).unwrap();
+    let bases: Vec<_> = p.files.iter().map(|f| f.base.clone()).collect();
+    fs::write(e.source.join("SKILL.md"), "someone else\n").unwrap();
+    assert!(matches!(
+        push_apply(&e, &tool_id(), &tools, &bases),
+        Err(Error::Fs(ai_env_fs::Error::Changed(_)))
+    ));
+    assert_eq!(
+        fs::read_to_string(e.source.join("SKILL.md")).unwrap(),
+        "someone else\n"
+    );
+    fs::write(e.source.join("SKILL.md"), "one\ntwo\n").unwrap();
+    fs::write(copy.join("SKILL.md"), "one\nTHREE\n").unwrap();
+    assert!(push_apply(&e, &tool_id(), &tools, &bases).is_err());
+}
+
+#[test]
+fn pushing_a_file_that_does_not_differ_or_escapes_is_refused() {
+    let tmp = Tmp::new();
+    let (e, tools) = fixture(&tmp);
+    edited_copy(&e, &tools, "one\nTWO\n");
+    assert!(matches!(
+        push_preview(&e, &tool_id(), &tools, Some("refs/a.md")),
+        Err(Error::NothingToPush(_))
+    ));
+    assert!(matches!(
+        push_preview(&e, &tool_id(), &tools, Some("../x")),
+        Err(Error::Edit(EditRefusal::BadPath(_)))
+    ));
+}

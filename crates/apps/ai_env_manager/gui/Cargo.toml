@@ -30,4 +30,5 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+ai_env_fs = { path = "../crates/ai_env_fs" }
 serde_json = "1"

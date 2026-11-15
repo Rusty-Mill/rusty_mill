@@ -17,9 +17,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 mod diff;
+mod push;
 
-pub use ai_env_fs::Skipped;
+pub use ai_env_fs::{Delta, Difference, Skipped};
 pub use diff::{diff_lines, DiffLine};
+pub use push::{push_apply, push_preview, FileBase, PushFile, PushPreview, Pushed};
 
 /// Where to look: skill folders to scan and the tools to act on (empty means
 /// every tool in the catalog).
@@ -49,6 +51,10 @@ pub enum Error {
     /// The tool has no copy or link of the entry to edit.
     NotEnabled(String),
     Edit(EditRefusal),
+    /// The tool's copy has no edits to push (absent, linked, foreign or unchanged).
+    NotEdited(String),
+    /// The named file does not differ between the copy and the source.
+    NothingToPush(String),
     Io(io::Error),
 }
 
@@ -67,6 +73,8 @@ impl fmt::Display for Error {
             Error::Fs(e) => e.fmt(f),
             Error::NotEnabled(t) => write!(f, "the skill is not enabled in {t}"),
             Error::Edit(e) => e.fmt(f),
+            Error::NotEdited(t) => write!(f, "the copy in {t} has no edits to push"),
+            Error::NothingToPush(p) => write!(f, "{p} is the same in the copy and the source"),
             Error::Io(e) => e.fmt(f),
         }
     }

@@ -255,7 +255,7 @@ async function openFile(path) {
 }
 
 // Unsaved text is never dropped silently: anything that would lose it asks first.
-const dirty = () => ed.mode !== "view" && $("ed-text").value !== ed.text;
+const dirty = () => ed.mode !== "view" && !ed.pushing && $("ed-text").value !== ed.text;
 let afterDrop = null;
 function guard(action, what) {
   if (!dirty()) return action();
@@ -274,6 +274,13 @@ $("ed-drop").addEventListener("click", () => {
   closeWarn();
   if (go) go();
 });
+
+// Push is offered for a tool's copy the list reports as edited; the backend re-checks all of it.
+const canPush = () => {
+  const tool = edTool();
+  const row = lastView.rows.find((r) => r.id === ed.entry);
+  return tool !== null && ed.ownership === "copy" && (row?.cells.find((c) => c.tool === tool)?.state ?? "") === "edited";
+};
 
 function edShow() {
   const list = $("ed-files");
@@ -294,6 +301,7 @@ function edShow() {
     ? ed.files.length ? "Pick a file." : ""
     : `${ed.path}. ${EDIT_NOTE[ed.ownership] ?? ""}${ed.editable ? sharedNote() : " Read-only."}`;
   $("ed-edit").hidden = !(open && m === "view" && ed.editable);
+  $("ed-push").hidden = !(m === "view" && canPush());
   $("ed-reload").hidden = m === "view";
   $("ed-back").hidden = m !== "review";
   $("ed-review").hidden = m !== "edit";
@@ -317,8 +325,9 @@ $("ed-edit").addEventListener("click", () => {
   $("ed-text").focus();
 });
 $("ed-back").addEventListener("click", () => {
-  ed.mode = "edit";
+  ed.mode = ed.pushing ? "view" : "edit";
   ed.reviewed = null;
+  ed.pushing = null;
   edFoot();
   edShow();
 });
@@ -348,8 +357,50 @@ $("ed-review").addEventListener("click", async () => {
     $("ed-text").readOnly = false;
   }
 });
+// Push: copy a tool's edits back to the source. Like a save, the diff shown is what Confirm sends.
+$("ed-push").addEventListener("click", async () => {
+  edError(null);
+  const tool = edTool();
+  try {
+    const p = await invoke("preview_push", { entry: ed.entry, tool, path: null });
+    const box = $("ed-diff");
+    box.replaceChildren();
+    for (const f of p.files) {
+      box.appendChild(el("div", "same", `── ${f.path}`));
+      for (const d of f.diff) box.appendChild(el("div", d.kind, `${{ added: "+ ", removed: "- ", same: "  " }[d.kind]}${d.text}`));
+    }
+    for (const l of p.left) box.appendChild(el("div", "same", `left alone: ${l.path} (${l.why})`));
+    $("ed-foot").textContent = "Pushing overwrites the source, including changes made there since this copy was taken. Nothing is written until you confirm.";
+    $("ed-save").disabled = p.files.length === 0;
+    ed.pushing = { entry: ed.entry, tool, bases: p.files.map(({ path, source_hash, copy_hash }) => ({ path, source_hash, copy_hash })) };
+    ed.mode = "review";
+    edShow();
+  } catch (e) {
+    edError(e);
+  }
+});
+async function applyPush() {
+  const snap = ed.pushing;
+  $("ed-save").disabled = true;
+  let done;
+  try {
+    done = await invoke("apply_push", snap);
+  } catch (e) {
+    edError(e);
+    $("ed-save").disabled = false;
+    return;
+  }
+  ed.pushing = null;
+  ed.mode = "view";
+  $("ed-foot").textContent = done.remarked
+    ? "Pushed. The copy matches the source again."
+    : `Pushed. The copy is still edited: ${done.left.map((l) => l.path).join(", ")} differ.`;
+  await refresh();
+  await loadFiles();
+}
 $("ed-save").addEventListener("click", async () => {
   edError(null);
+  if (ed.pushing) return applyPush();
   const snap = ed.reviewed;
   if (!snap) return;
   $("ed-save").disabled = true;

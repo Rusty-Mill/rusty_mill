@@ -426,3 +426,52 @@ fn edit_with_tool_changes_that_tools_copy_only() {
     assert!(matches!(r, Ok(Outcome::Done)));
     assert_eq!(fs::read_to_string(skill_md(&t)).unwrap(), "via link");
 }
+
+/// Enables `code-review` for claude-code as a marked copy, then edits it.
+fn edited_copy(t: &Tmp, text: &str) {
+    use ai_env_core::{plan_enable, LinkMethod, Observed};
+    let skills = t.skills();
+    let home = t.home();
+    let loaded = ai_env_app::load_entries(&ai_env_app::Scope {
+        skills: vec![skills],
+        tools: vec![],
+    })
+    .unwrap();
+    let tools = ai_env_app::select_tools(
+        &ai_env_app::Scope {
+            skills: vec![],
+            tools: vec!["claude-code".parse().unwrap()],
+        },
+        &home,
+    )
+    .unwrap();
+    let entry = &loaded.entries[0];
+    let plan = plan_enable(entry, &tools[0], Observed::Absent, LinkMethod::Copy);
+    ai_env_fs::apply(&plan).unwrap();
+    fs::write(t.target(".claude", "code-review").join("SKILL.md"), text).unwrap();
+}
+
+#[test]
+fn push_shows_a_diff_then_copies_the_edit_back_with_yes() {
+    let t = Tmp::new();
+    let skills = t.skills();
+    edited_copy(&t, "pushed text");
+    let l = line("push code-review", &skills, "--tool claude-code");
+    let (r, out) = run_line(&l, &t.home());
+    assert!(matches!(r, Ok(Outcome::Done)));
+    assert!(
+        out.contains("+ pushed text") && out.contains("dry run"),
+        "{out}"
+    );
+    assert_eq!(fs::read_to_string(skill_md(&t)).unwrap(), "code-review");
+
+    let (r, out) = run_line(&format!("{l} --yes"), &t.home());
+    assert!(matches!(r, Ok(Outcome::Done)));
+    assert!(out.contains("matches the source again"), "{out}");
+    assert_eq!(fs::read_to_string(skill_md(&t)).unwrap(), "pushed text");
+    let (_, listed) = run_line(&line("list", &skills, ""), &t.home());
+    assert!(listed.contains("claude-code=enabled"), "{listed}");
+
+    let (r, _) = run_line(&format!("{l} --yes"), &t.home());
+    assert!(matches!(r, Err(Error::NotEdited(_))));
+}

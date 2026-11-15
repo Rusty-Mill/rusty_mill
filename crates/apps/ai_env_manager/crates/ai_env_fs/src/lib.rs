@@ -8,11 +8,13 @@
 mod discover;
 mod edit;
 mod marker;
+mod push;
 
 use ai_env_core::{Action, EditRefusal, Entry, LinkMethod, Observed, Os, Plan, Tool};
 pub use discover::{discover_skills, Discovered, Skipped};
 pub use edit::{list_files, locate, read_file, write_file, FileRead};
 use marker::{copy_marked, read_marker, tree_hash};
+pub use push::{differences, remark_if_equal, Delta, Difference};
 use std::fmt;
 use std::fs;
 use std::io;
