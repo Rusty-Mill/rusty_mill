@@ -44,7 +44,7 @@ pub use file_store::{FileStore, StoreError};
 pub use limits::Limits;
 pub use policy::{Grant, Policy, PolicyError, Selector, principal_of};
 pub use store::{KeyPolicy, MemoryStore, NodeRec, NodeStore, RegisterError, Revocation};
-pub use tls::tls_acceptor;
+pub use tls::{TlsConfigError, tls_acceptor};
 
 use limits::{Counter, Keyed};
 

@@ -855,15 +855,34 @@ async fn a_tls_handshake_that_stalls_is_closed_at_the_handshake_timeout() {
 }
 
 #[test]
-fn a_bad_certificate_or_key_is_an_error_that_names_the_file() {
+fn a_bad_certificate_or_key_is_a_typed_error_without_file_content() {
     let (cert, key, _) = localhost_cert();
     assert!(tls_acceptor(&cert, &key).is_ok());
-    let e = |r: Result<_, String>| r.err().unwrap_or_default();
-    assert!(e(tls_acceptor("", &key)).contains("certificate file"));
-    assert!(e(tls_acceptor(&cert, "")).contains("key file"));
-    assert!(e(tls_acceptor(&key, &key)).contains("certificate file"));
+    assert!(matches!(
+        tls_acceptor("", &key),
+        Err(TlsConfigError::NoCertificate)
+    ));
+    assert!(matches!(
+        tls_acceptor(&cert, ""),
+        Err(TlsConfigError::NoPkcs8Key)
+    ));
+    assert!(matches!(
+        tls_acceptor(&key, &key),
+        Err(TlsConfigError::NoCertificate)
+    ));
     let broken = "-----BEGIN CERTIFICATE-----\nAAAA\n";
-    assert!(e(tls_acceptor(broken, &key)).contains("not closed"));
+    assert!(matches!(
+        tls_acceptor(broken, &key),
+        Err(TlsConfigError::Pem {
+            file: "certificate",
+            ..
+        })
+    ));
+    // A bad character in the key is named by file, never echoed.
+    let bad_key = "-----BEGIN PRIVATE KEY-----\nS3CR*T\n-----END PRIVATE KEY-----\n";
+    let e = tls_acceptor(&cert, bad_key).err().unwrap();
+    assert!(matches!(e, TlsConfigError::Pem { file: "key", .. }));
+    assert!(!format!("{e} {e:?}").contains("S3CR"));
 }
 
 #[rusty_tokio::test]
