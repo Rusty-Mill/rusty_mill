@@ -85,12 +85,20 @@ pub fn remark_if_equal(entry: &Entry, copy: &Path) -> Result<bool, Error> {
     if read_marker(copy).is_none() {
         return Err(Error::NotManaged(copy.to_owned()));
     }
+    // A staging file left by a crash is ours to clear; a link there is not.
+    let tmp = copy.join(format!("{MARKER}.tmp"));
+    match fs::symlink_metadata(&tmp) {
+        Ok(m) if m.file_type().is_symlink() => return Err(Error::Link(tmp)),
+        Ok(m) if m.is_file() => fs::remove_file(&tmp).map_err(|e| Error::Io(tmp.clone(), e))?,
+        Ok(_) => return Err(Error::NotFile(tmp)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::Io(tmp, e)),
+    }
     let hash = tree_hash(copy).map_err(io_err)?;
     if tree_hash(&entry.source).map_err(io_err)? != hash {
         return Ok(false);
     }
     let source = crate::marker::marker_source(&entry.source).map_err(io_err)?;
-    let tmp = copy.join(format!("{MARKER}.tmp"));
     let text = format!("source={source}\nsha256={hash}\n");
     fs::OpenOptions::new()
         .write(true)

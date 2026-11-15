@@ -521,6 +521,15 @@ fn remark_refuses_a_folder_without_our_marker() {
     ));
 }
 
+#[test]
+fn remark_clears_a_staging_file_left_by_a_crash() {
+    let tmp = Tmp::new();
+    let (e, copy) = copy_edited_to_match(&tmp);
+    fs::write(copy.join(format!("{MARKER}.tmp")), "half written").unwrap();
+    assert!(remark_if_equal(&e, &copy).unwrap());
+    assert!(!copy.join(format!("{MARKER}.tmp")).exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn remark_follows_no_link() {
@@ -547,6 +556,6 @@ fn remark_follows_no_link() {
     let victim = tmp.0.join("victim");
     fs::write(&victim, "keep").unwrap();
     symlink(&victim, copy.join(format!("{MARKER}.tmp"))).unwrap();
-    assert!(remark_if_equal(&e, &copy).is_err());
+    assert!(matches!(remark_if_equal(&e, &copy), Err(Error::Link(_))));
     assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
 }
