@@ -230,6 +230,8 @@ function openEditor(row) {
 async function loadFiles() {
   edError(null);
   ed.path = null;
+  ed.pushing = null;
+  ed.reviewed = null;
   try {
     const v = await invoke("files", { entry: ed.entry, tool: edTool() });
     ed.files = v.files;
@@ -244,6 +246,8 @@ async function loadFiles() {
 async function openFile(path) {
   closeWarn();
   edError(null);
+  ed.pushing = null; // a review belongs to the screen it was made on
+  ed.reviewed = null;
   try {
     const v = await invoke("file", { entry: ed.entry, tool: edTool(), path });
     Object.assign(ed, { path, text: v.text, hash: v.hash, ownership: v.ownership, mode: "view" });
@@ -279,7 +283,7 @@ $("ed-drop").addEventListener("click", () => {
 const canPush = () => {
   const tool = edTool();
   const row = lastView.rows.find((r) => r.id === ed.entry);
-  return tool !== null && ed.ownership === "copy" && (row?.cells.find((c) => c.tool === tool)?.state ?? "") === "edited";
+  return ed.path !== null && tool !== null && ed.ownership === "copy" && (row?.cells.find((c) => c.tool === tool)?.state ?? "") === "edited";
 };
 
 function edShow() {
@@ -345,6 +349,8 @@ $("editor").addEventListener("cancel", (e) => {
 $("ed-reload").addEventListener("click", () => openFile(ed.path)); // also the way out of "changed on disk"
 $("ed-edit").addEventListener("click", () => {
   ed.mode = "edit";
+  ed.pushing = null;
+  ed.reviewed = null;
   edFoot();
   $("ed-text").value = ed.text;
   edShow();

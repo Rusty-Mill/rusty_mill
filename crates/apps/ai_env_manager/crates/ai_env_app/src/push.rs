@@ -6,7 +6,7 @@
 //! source file changed since the copy was taken is overwritten by the push,
 //! and the preview's diff (source to copy) is what shows that.
 
-use crate::{diff_lines, resolve, DiffLine, Error, Place, Tool};
+use crate::{diff_lines, observe, resolve, DiffLine, Error, Place, Tool};
 use ai_env_core::{plan_edit, Entry, Observed, Ownership, RelPath, ToolId};
 use ai_env_fs::{Delta, Difference};
 use std::path::{Path, PathBuf};
@@ -50,9 +50,11 @@ pub struct Pushed {
 /// The copy's folder, only if it holds our marker and was edited.
 fn edited_copy(entry: &Entry, tool: &ToolId, tools: &[Tool]) -> Result<PathBuf, Error> {
     let (copy, ownership) = resolve(entry, &Place::Tool(tool.clone()), tools)?;
-    let t = tools.iter().find(|t| &t.id == tool);
-    let edited =
-        t.is_some_and(|t| matches!(ai_env_fs::observe(entry, t), Ok(Observed::ManagedModified)));
+    let t = tools
+        .iter()
+        .find(|t| &t.id == tool)
+        .ok_or_else(|| Error::UnknownTool(tool.to_string()))?;
+    let edited = observe(entry, t)? == Observed::ManagedModified;
     if ownership != Ownership::MarkedCopy || !edited {
         return Err(Error::NotEdited(tool.to_string()));
     }
@@ -136,7 +138,12 @@ pub fn push_apply(
     for plan in &plans {
         ai_env_fs::write_file(&entry.source, plan)?;
     }
-    let remarked = ai_env_fs::remark_if_equal(entry, &copy)?;
+    // The source is already changed here, so a failure says so.
+    let remarked = ai_env_fs::remark_if_equal(entry, &copy).map_err(|e| {
+        Error::Io(std::io::Error::other(format!(
+            "the source was updated, but the copy could not be re-marked: {e}"
+        )))
+    })?;
     let left = ai_env_fs::differences(&entry.source, &copy)?;
     Ok(Pushed {
         written: bases.iter().map(|b| b.path.clone()).collect(),
