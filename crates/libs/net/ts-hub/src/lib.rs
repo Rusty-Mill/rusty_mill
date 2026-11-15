@@ -74,8 +74,6 @@ pub struct Hub<S: NodeStore = MemoryStore> {
     limits: Limits,
     /// Who may reach whom; closed until set.
     policy: Mutex<Arc<Policy>>,
-    /// Keys that came from the keys file, so a reload can drop the ones removed.
-    file_keys: Mutex<std::collections::HashSet<String>>,
     relay: derp::Relay,
     /// The `DERPMap` every netmap carries, once the hub knows its address.
     derp_map: Mutex<Option<serde_json::Value>>,
@@ -115,7 +113,6 @@ impl<S: NodeStore> Hub<S> {
             store: Mutex::new(store),
             limits,
             policy: Mutex::new(Arc::new(Policy::default())),
-            file_keys: Mutex::default(),
             relay: derp::Relay::new(),
             derp_map: Mutex::new(None),
             conns: Counter::default(),
@@ -143,22 +140,16 @@ impl<S: NodeStore> Hub<S> {
         self.bump();
     }
 
-    /// Makes the keys in `text` (see [`parse_keys`]) the hub's file keys: new
-    /// ones are added, ones no longer listed are removed (nodes already
-    /// registered stay), and ones already known keep their spent mark. Keys
-    /// added with [`add_preauth`](Self::add_preauth) are not touched. The
-    /// whole file is checked before anything changes.
+    /// Makes the keys in `text` (see [`parse_keys`]) the hub's file keys, all
+    /// or nothing (see [`NodeStore::set_file_keys`]): new ones are added, ones
+    /// no longer listed are removed (nodes already registered stay), ones
+    /// already known keep their spent mark. A file key dropped while the hub
+    /// was down goes at the next load. Keys added with
+    /// [`add_preauth`](Self::add_preauth) are not touched. To change a listed
+    /// key's settings, drop it, load, then list it again and load.
     pub fn load_keys(&self, text: &str) -> Result<(), LoadKeysError> {
         let keys = parse_keys(text)?;
-        let mut held = self.file_keys.lock().unwrap_or_else(|e| e.into_inner());
-        let listed: std::collections::HashSet<_> = keys.iter().map(|(k, ..)| k.clone()).collect();
-        for gone in held.difference(&listed) {
-            self.remove_preauth(gone)?;
-        }
-        for (key, login, policy) in keys {
-            self.add_preauth(&key, &login, policy)?;
-        }
-        *held = listed;
+        self.locked(|s| s.set_file_keys(keys, unix_now()))?;
         Ok(())
     }
 

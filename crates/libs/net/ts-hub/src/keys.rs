@@ -6,6 +6,10 @@
 //! k-77c1 ci name=build1
 //! ```
 //!
+//! The file owns the keys it lists: a key dropped from it stops working at the
+//! next load, also after a restart. To change a listed key's settings, drop it,
+//! load, then list it again and load.
+//!
 //! A key is single-use unless `reusable`. `name=` makes it a tagged key that
 //! pins a server name (`KeyPolicy::tagged`). Keys are secrets: errors name a
 //! line number, never the line.

@@ -186,3 +186,20 @@ fn a_bad_certificate_stops_the_hub_before_it_serves() {
     assert!(!out.status.success());
     assert!(!String::from_utf8_lossy(&out.stdout).contains("listening"));
 }
+
+#[rusty_tokio::test]
+async fn a_keys_file_that_does_not_parse_leaves_the_old_keys_working_after_sighup() {
+    let hub = start(temp_dir("badreload"), "k1 alice reusable\n");
+    write_private(&hub.dir.join("keys"), "k2 bob reusable\nbroken\n");
+    let pid = hub.child.id().to_string();
+    assert!(
+        Command::new("kill")
+            .args(["-HUP", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    rusty_tokio::time::sleep(Duration::from_millis(500)).await;
+    join(&hub.url, "a", "k1").await.unwrap();
+    assert!(join(&hub.url, "b", "k2").await.is_err(), "k2 was applied");
+}

@@ -96,6 +96,18 @@ pub trait NodeStore: Send + 'static {
         now: u64,
     ) -> Result<(), RegisterError>;
 
+    /// Makes `keys` the whole set of file keys, all or nothing: file keys not
+    /// listed are removed, listed ones are added (one already present with
+    /// the same settings is kept, spent mark and all). Keys added with
+    /// [`add_preauth`](Self::add_preauth) are left alone. The mark is saved
+    /// with the key, so a hub that restarts after the file dropped a key
+    /// still drops it. If any key is refused, nothing changes.
+    fn set_file_keys(
+        &mut self,
+        keys: Vec<(String, String, KeyPolicy)>,
+        now: u64,
+    ) -> Result<(), RegisterError>;
+
     /// Registers (or re-registers) the machine, assigning a tailnet IPv4
     /// address on first sight. The hostname is made a unique DNS label. A
     /// single-use key is spent by its first machine and refused to others.
@@ -155,6 +167,10 @@ struct PreauthRec {
     tagged: Option<String>,
     /// The machine that spent a single-use key.
     used_by: Option<MachinePublic>,
+    /// Put here by [`NodeStore::set_file_keys`]: the keys file owns it, so it
+    /// goes when the file drops it, including after a restart.
+    #[serde(default)]
+    from_file: bool,
 }
 
 /// Pre-auth keys and registered nodes, held in memory.
@@ -337,6 +353,7 @@ impl NodeStore for MemoryStore {
                 reusable: policy.reusable,
                 tagged: policy.tagged,
                 used_by: None,
+                from_file: false,
             },
         );
         Ok(())
@@ -387,6 +404,28 @@ impl NodeStore for MemoryStore {
 
     fn remove_preauth(&mut self, key: &str) -> Result<bool, RegisterError> {
         Ok(self.preauth.remove(key).is_some())
+    }
+
+    fn set_file_keys(
+        &mut self,
+        keys: Vec<(String, String, KeyPolicy)>,
+        now: u64,
+    ) -> Result<(), RegisterError> {
+        let before = self.preauth.clone();
+        let listed: HashSet<&str> = keys.iter().map(|(k, ..)| k.as_str()).collect();
+        self.preauth
+            .retain(|k, rec| !rec.from_file || listed.contains(k.as_str()));
+        for (key, login, policy) in &keys {
+            let added = self.add_preauth(key, login, policy.clone(), now);
+            if let Err(e) = added {
+                self.preauth = before;
+                return Err(e);
+            }
+            if let Some(rec) = self.preauth.get_mut(key) {
+                rec.from_file = true;
+            }
+        }
+        Ok(())
     }
 
     fn revoke(&mut self, machine: &MachinePublic) -> Revocation {

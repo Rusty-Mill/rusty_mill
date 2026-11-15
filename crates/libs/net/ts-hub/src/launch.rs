@@ -49,7 +49,14 @@ struct Args {
     advertise: Option<String>,
 }
 
-fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
+/// What the command line asked for.
+#[derive(Debug)]
+enum Cli {
+    Run(Box<Args>),
+    Help,
+}
+
+fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
     let (mut listen, mut cert, mut key, mut stun) = (None, None, None, None);
     let mut state_dir = PathBuf::from("ts-hub-state");
     let (mut node_ttl, mut keys, mut policy, mut advertise) = (None, None, None, None);
@@ -73,7 +80,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--keys" => keys = Some(PathBuf::from(next()?)),
             "--policy" => policy = Some(PathBuf::from(next()?)),
             "--advertise" => advertise = Some(next()?),
-            "-h" | "--help" => return Err(String::new()),
+            "-h" | "--help" => return Ok(Cli::Help),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -82,7 +89,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
         (None, None) => None,
         _ => return Err("--tls-cert and --tls-key go together".into()),
     };
-    Ok(Args {
+    Ok(Cli::Run(Box::new(Args {
         listen: listen.ok_or("--listen is required")?,
         tls,
         stun,
@@ -91,7 +98,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
         keys,
         policy,
         advertise,
-    })
+    })))
 }
 
 /// Runs the hub until SIGTERM or Ctrl-C. `prog` is how the user ran it
@@ -99,12 +106,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
 /// after it.
 pub async fn main(prog: &str, args: impl Iterator<Item = String>) -> ExitCode {
     let args = match parse_args(args) {
-        Ok(a) => a,
+        Ok(Cli::Run(a)) => *a,
+        Ok(Cli::Help) => {
+            println!("usage: {prog} {USAGE}");
+            return ExitCode::SUCCESS;
+        }
         Err(msg) => {
-            if !msg.is_empty() {
-                eprintln!("{prog}: {msg}\n");
-            }
-            eprintln!("usage: {prog} {USAGE}");
+            eprintln!("{prog}: {msg}\n\nusage: {prog} {USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -171,10 +179,21 @@ async fn run(args: Args) -> Result<(), BoxError> {
         Some(acceptor) => rusty_tokio::spawn(hub.clone().serve_tls(listener, acceptor)),
         None => rusty_tokio::spawn(hub.clone().serve(listener)),
     };
-    signals(&hub, &args).await;
-    serving.abort();
-    rusty_log::info!("hub: shutting down");
-    Ok(())
+    let mut serving = serving;
+    rusty_tokio::select! {
+        _ = signals(&hub, &args) => {
+            serving.abort();
+            rusty_log::info!("hub: shutting down");
+            Ok(())
+        }
+        // The accept loop only ends on a failure: say so and exit non-zero
+        // rather than sit there looking healthy.
+        ended = &mut serving => match ended {
+            Ok(Err(e)) => Err(format!("the listener failed: {e}").into()),
+            Ok(Ok(())) => Err("the listener stopped".into()),
+            Err(e) => Err(format!("the listener task failed: {e}").into()),
+        },
+    }
 }
 
 /// Reloads on SIGHUP; returns on SIGTERM or Ctrl-C.
@@ -200,30 +219,40 @@ async fn signals(hub: &Arc<Hub<FileStore>>, args: &Args) {
     }
 }
 
-/// Applies the policy file, then the keys file. Each is checked before it
-/// changes anything.
+/// Applies the keys file and the policy file. Both are read and checked
+/// first and the keys are applied all or nothing, so a bad file of either
+/// kind leaves the old rules whole.
 fn reload(
     hub: &Hub<FileStore>,
     keys: Option<&Path>,
     policy: Option<&Path>,
 ) -> Result<(), BoxError> {
-    if let Some(path) = policy {
-        hub.set_policy(Policy::parse(&std::fs::read_to_string(path)?)?);
-    }
+    let policy = match policy {
+        Some(path) => Some(Policy::parse(&std::fs::read_to_string(path)?)?),
+        None => None,
+    };
     if let Some(path) = keys {
         hub.load_keys(&read_secret(path)?)?;
+    }
+    if let Some(policy) = policy {
+        hub.set_policy(policy);
     }
     Ok(())
 }
 
 /// Reads a file of secrets, refusing one that group or others can read.
 fn read_secret(path: &Path) -> Result<String, BoxError> {
+    use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path)?.permissions().mode();
-    if mode & 0o077 != 0 {
+    // Open once and check that handle, so the file cannot be swapped between
+    // the check and the read.
+    let mut file = std::fs::File::open(path)?;
+    if file.metadata()?.permissions().mode() & 0o077 != 0 {
         return Err(format!("{} is readable by others (chmod 600)", path.display()).into());
     }
-    Ok(std::fs::read_to_string(path)?)
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -231,7 +260,10 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Args, String> {
-        parse_args(args.iter().map(|s| s.to_string()))
+        match parse_args(args.iter().map(|s| s.to_string()))? {
+            Cli::Run(a) => Ok(*a),
+            Cli::Help => Err("help".into()),
+        }
     }
 
     #[test]
@@ -241,6 +273,12 @@ mod tests {
         assert!(parse(&["--listen", "127.0.0.1:0", "--tls-cert", "c"]).is_err());
         let a = parse(&["--listen", "[::1]:443", "--tls-cert", "c", "--tls-key", "k"]).unwrap();
         assert!(a.tls.is_some());
+    }
+
+    #[test]
+    fn help_is_not_an_error() {
+        let cli = parse_args(["--help".to_string()].into_iter());
+        assert!(matches!(cli, Ok(Cli::Help)));
     }
 
     #[test]

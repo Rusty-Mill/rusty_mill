@@ -157,6 +157,13 @@ impl NodeStore for Racy {
     fn remove_preauth(&mut self, key: &str) -> Result<bool, RegisterError> {
         self.inner.remove_preauth(key)
     }
+    fn set_file_keys(
+        &mut self,
+        keys: Vec<(String, String, KeyPolicy)>,
+        now: u64,
+    ) -> Result<(), RegisterError> {
+        self.inner.set_file_keys(keys, now)
+    }
     fn revoke(&mut self, machine: &MachinePublic) -> Revocation {
         self.inner.revoke(machine)
     }
@@ -964,4 +971,52 @@ fn re_adding_a_key_with_other_settings_is_refused() {
         hub.add_preauth("k", "alice", KeyPolicy::REUSABLE),
         Err(RegisterError::InvalidKey(_))
     ));
+}
+
+#[test]
+fn a_key_dropped_while_the_hub_was_down_is_refused_after_the_restart() {
+    let path = temp_table("dropped");
+    let m = |b| MachinePublic([b; 32]);
+    let n = |b| NodePublic([b; 32]);
+    {
+        let hub = Hub::with_store(FileStore::open(&path, None).unwrap());
+        hub.load_keys("k1 alice reusable\nk2 bob reusable\n")
+            .unwrap();
+        hub.locked(|s| s.register(m(1), n(1), "a", "k1", 0))
+            .unwrap();
+    }
+    let hub = Hub::with_store(FileStore::open(&path, None).unwrap());
+    hub.load_keys("k2 bob reusable\n").unwrap();
+    assert!(
+        hub.locked(|s| s.register(m(2), n(2), "b", "k1", 0))
+            .is_err()
+    );
+    hub.locked(|s| s.register(m(2), n(2), "b", "k2", 0))
+        .unwrap();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn a_keys_file_with_a_refused_key_changes_nothing() {
+    let path = temp_table("atomic");
+    let hub = Hub::with_store(FileStore::open(&path, None).unwrap());
+    hub.load_keys("k1 alice reusable\n").unwrap();
+    // k2 is fine, the second line's login is reserved: the load is refused whole.
+    let e = hub.load_keys("k2 bob reusable\nk3 tagged-devices\n");
+    assert!(matches!(e, Err(LoadKeysError::Refused(_))));
+    let m = |b| MachinePublic([b; 32]);
+    assert!(
+        hub.locked(|s| s.register(m(2), NodePublic([2; 32]), "b", "k2", 0))
+            .is_err()
+    );
+    hub.locked(|s| s.register(m(1), NodePublic([1; 32]), "a", "k1", 0))
+        .unwrap();
+    // A key dropped by a refused load is still there, also after a restart.
+    let e = hub.load_keys("k3 tagged-devices\n");
+    assert!(e.is_err());
+    drop(hub);
+    let hub = Hub::with_store(FileStore::open(&path, None).unwrap());
+    hub.locked(|s| s.register(m(1), NodePublic([1; 32]), "a", "k1", 0))
+        .unwrap();
+    std::fs::remove_file(&path).ok();
 }

@@ -192,9 +192,17 @@ fn main() -> ExitCode {
 /// STUN) instead of a mux server, with the flags `ts_hub::launch` takes.
 #[cfg(all(target_os = "linux", feature = "hub"))]
 fn hub() -> ExitCode {
-    let flags = std::env::args_os()
+    let flags: Result<Vec<String>, _> = std::env::args_os()
         .skip(2)
-        .map(|a| a.into_string().unwrap_or_default());
+        .map(|a| a.into_string())
+        .collect();
+    let flags = match flags {
+        Ok(flags) => flags,
+        Err(arg) => {
+            eprintln!("rusty-mux-server: --hub: {arg:?} is not UTF-8");
+            return ExitCode::from(2);
+        }
+    };
     let runtime = match Builder::new_current_thread().build_local(&LocalOptions::default()) {
         Ok(runtime) => runtime,
         Err(err) => {
@@ -202,7 +210,10 @@ fn hub() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    runtime.block_on(ts_hub::launch::main("rusty-mux-server --hub", flags))
+    runtime.block_on(ts_hub::launch::main(
+        "rusty-mux-server --hub",
+        flags.into_iter(),
+    ))
 }
 
 #[cfg(not(all(target_os = "linux", feature = "hub")))]
