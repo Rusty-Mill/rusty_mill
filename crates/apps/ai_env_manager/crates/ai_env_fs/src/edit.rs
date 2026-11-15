@@ -11,10 +11,8 @@ use ai_env_core::{
 use rusty_sha2::{Hash, Sha256};
 use std::fs;
 use std::io;
-#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A file's text and the hash of its bytes, for [`write_file`] to re-check.
@@ -127,11 +125,46 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Windows: std cannot read or copy a file's ACL, and a new file would take
 /// the folder's inherited one, which can be wider. So the file is rewritten in
-/// place, which keeps its owner and ACL. The write is not crash-atomic there:
-/// a crash mid-write can leave a truncated file.
+/// place, which keeps its owner and ACL. It is not crash-atomic there: a crash
+/// mid-write can leave a partly written file. An error (disk full, I/O) does
+/// not: the old text is written back first (see [`rewrite_in_place`]).
 #[cfg(not(unix))]
 fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    fs::write(path, bytes)
+    rewrite_in_place(path, bytes, |f, b| f.write_all(b))
+}
+
+/// Overwrites `path` without truncating it first, so an error before the
+/// first byte is written leaves it untouched. After an error part-way, the
+/// original text is written back; if that also fails, the error says so.
+#[cfg_attr(unix, allow(dead_code))]
+fn rewrite_in_place(
+    path: &Path,
+    bytes: &[u8],
+    write: impl Fn(&mut fs::File, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let original = fs::read(path)?;
+    let mut file = fs::OpenOptions::new().write(true).open(path)?;
+    let put = |file: &mut fs::File,
+               data: &[u8],
+               write: &dyn Fn(&mut fs::File, &[u8]) -> io::Result<()>| {
+        file.seek(SeekFrom::Start(0))?;
+        write(file, data)?;
+        file.set_len(data.len() as u64)?;
+        file.sync_all()
+    };
+    let Err(err) = put(&mut file, bytes, &write) else {
+        return Ok(());
+    };
+    match put(&mut file, &original, &|f, b| f.write_all(b)) {
+        Ok(()) => Err(err),
+        Err(undo) => Err(io::Error::new(
+            err.kind(),
+            format!(
+                "{err}; putting the old text back also failed ({undo}); the file may be damaged"
+            ),
+        )),
+    }
 }
 
 /// Writes `bytes` to a new sibling of `path`: created owner-only, given the
@@ -174,4 +207,44 @@ fn stage(path: &Path, bytes: &[u8], original: &fs::Metadata) -> io::Result<PathB
 #[cfg(all(test, unix))]
 pub(crate) fn stage_for_test(p: &Path, b: &[u8], m: &fs::Metadata) -> io::Result<PathBuf> {
     stage(p, b, m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_with(text: &str) -> (PathBuf, impl Drop) {
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("aienv-inplace-{}-{n}", std::process::id()));
+        fs::write(&p, text).unwrap();
+        (p.clone(), Cleanup(p))
+    }
+
+    #[test]
+    fn in_place_rewrite_grows_and_shrinks_the_file() {
+        let (p, _g) = file_with("hello world");
+        rewrite_in_place(&p, b"hi", |f, b| f.write_all(b)).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"hi");
+        rewrite_in_place(&p, b"a much longer text", |f, b| f.write_all(b)).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"a much longer text");
+    }
+
+    #[test]
+    fn in_place_rewrite_puts_the_old_text_back_after_a_partial_write() {
+        let (p, _g) = file_with("original text, kept");
+        let half = |f: &mut fs::File, b: &[u8]| {
+            f.write_all(&b[..b.len() / 2])?;
+            Err(io::Error::other("disk full"))
+        };
+        let err = rewrite_in_place(&p, b"replacement that fails", half).unwrap_err();
+        assert!(err.to_string().contains("disk full"));
+        assert_eq!(fs::read(&p).unwrap(), b"original text, kept");
+    }
 }
