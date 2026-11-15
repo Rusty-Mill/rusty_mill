@@ -3,6 +3,7 @@
 
 use crate::args::{Change, Command, Scope, USAGE};
 use crate::edit::{edit, Session};
+use crate::push::push;
 use ai_env_app::{apply, find_entry, load_entries, observe, plan, select_tools, Op};
 use ai_env_core::{Action, Observed, Plan};
 use std::io::{self, Write};
@@ -132,5 +133,6 @@ pub fn run(
         Command::Enable(c) => change(c, Op::Enable, home, out, err),
         Command::Disable(c) => change(c, Op::Disable, home, out, err),
         Command::Edit(c) => edit(c, home, session, out, err),
+        Command::Push(c) => push(c, home, out, err),
     }
 }

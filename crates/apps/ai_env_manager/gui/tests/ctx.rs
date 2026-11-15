@@ -240,3 +240,63 @@ fn editor_wire_names_are_stable() {
     assert_eq!(view::ownership(Ownership::MarkedCopy), "copy");
     assert_eq!(view::ownership(Ownership::Unmanaged), "foreign");
 }
+
+/// Enables `one` for claude-code as a marked copy and edits its SKILL.md.
+fn edited_copy(t: &Tmp, text: &str) {
+    use ai_env_core::{plan_enable, LinkMethod, Observed};
+    let scope = parse_scope([
+        OsString::from("--skills"),
+        t.0.join("skills").into(),
+        OsString::from("--tool"),
+        OsString::from("claude-code"),
+    ])
+    .unwrap();
+    let home = t.0.join("home");
+    let loaded = ai_env_app::load_entries(&scope).unwrap();
+    let tool = ai_env_app::select_tools(&scope, &home).unwrap().remove(0);
+    let plan = plan_enable(
+        &loaded.entries[0],
+        &tool,
+        Observed::Absent,
+        LinkMethod::Copy,
+    );
+    ai_env_fs::apply(&plan).unwrap();
+    fs::write(tool.target(&loaded.entries[0]).join("SKILL.md"), text).unwrap();
+}
+
+#[test]
+fn push_previews_then_copies_an_edited_copy_back_to_the_source() {
+    use ai_env_gui_lib::view::BaseIn;
+    let t = Tmp::new();
+    let ctx = t.ctx(&["one"]);
+    edited_copy(&t, "pushed");
+    assert_eq!(ctx.list().unwrap().rows[0].cells[0].state, "edited");
+
+    let p = ctx.push_preview("one", "claude-code", None).unwrap();
+    assert_eq!(p.files.len(), 1);
+    assert!(p.left.is_empty());
+    let kinds: Vec<_> = p.files[0].diff.iter().map(|d| d.kind).collect();
+    assert_eq!(kinds, ["removed", "added"]);
+    // Previewing wrote nothing.
+    assert_eq!(ctx.file("one", None, "SKILL.md").unwrap().text, "one");
+
+    let f = &p.files[0];
+    let base = BaseIn {
+        path: f.path.clone(),
+        source_hash: f.source_hash.clone(),
+        copy_hash: f.copy_hash.clone(),
+    };
+    let stale = BaseIn {
+        source_hash: "0".into(),
+        ..base.clone()
+    };
+    assert!(ctx.push_apply("one", "claude-code", vec![stale]).is_err());
+    assert_eq!(ctx.file("one", None, "SKILL.md").unwrap().text, "one");
+
+    let done = ctx.push_apply("one", "claude-code", vec![base]).unwrap();
+    assert!(done.remarked && done.left.is_empty());
+    assert_eq!(ctx.file("one", None, "SKILL.md").unwrap().text, "pushed");
+    assert_eq!(ctx.list().unwrap().rows[0].cells[0].state, "enabled");
+    assert!(ctx.push_preview("one", "claude-code", None).is_err());
+    assert!(ctx.push_preview("one", "Bad Id", None).is_err());
+}

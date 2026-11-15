@@ -36,14 +36,19 @@ impl<'a> Session<'a> {
     }
 }
 
-fn show(preview: &EditPreview, out: &mut impl Write) -> io::Result<()> {
-    for line in &preview.diff {
+pub(crate) fn show_diff(diff: &[DiffLine], out: &mut impl Write) -> io::Result<()> {
+    for line in diff {
         match line {
             DiffLine::Same(t) => writeln!(out, "  {t}")?,
             DiffLine::Removed(t) => writeln!(out, "- {t}")?,
             DiffLine::Added(t) => writeln!(out, "+ {t}")?,
         }
     }
+    Ok(())
+}
+
+fn show(preview: &EditPreview, out: &mut impl Write) -> io::Result<()> {
+    show_diff(&preview.diff, out)?;
     if preview.marks_edited {
         writeln!(out, "note: this is a copy; saving leaves it \"edited\"")?;
     }

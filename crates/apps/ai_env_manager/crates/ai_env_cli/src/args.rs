@@ -12,6 +12,7 @@ usage: aienv list --skills DIR... [--tool ID]...
        aienv enable ID --skills DIR... [--tool ID]... [--yes]
        aienv disable ID --skills DIR... [--tool ID]... [--yes]
        aienv edit ID FILE --skills DIR... [--tool ID] [--from PATH|-] [--yes]
+       aienv push ID [FILE] --tool ID --skills DIR... [--yes]
 
   --skills DIR  a folder whose subfolders (each with a SKILL.md) are skills; repeatable
   --tool ID     limit to one tool from the catalog; repeatable (default: every tool)
@@ -20,6 +21,9 @@ usage: aienv list --skills DIR... [--tool ID]...
                 new text comes from --from (a file, or - for stdin), else from $VISUAL or
                 $EDITOR. It shows the diff and writes only on --yes (or a typed y after the
                 editor). Without --tool the skill's source is edited, else that tool's copy.
+  push          copy the edits made in a tool's copy back to the skill's source (one FILE, or
+                every changed file). It shows the diff and writes only on --yes. The source
+                is overwritten, including any change made there since the copy was taken.
 
 exit status: 0 done, 1 a link plan held a refusal (nothing changed there), 2 usage (or the
 editor with no terminal to confirm on), 3 error (including an edit or push that was refused)";
@@ -52,6 +56,16 @@ pub struct EditFile {
     pub yes: bool,
 }
 
+/// Copy a tool's edited copy back to the source: `file` alone, else all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Push {
+    pub entry: EntryId,
+    pub file: Option<String>,
+    pub tool: ToolId,
+    pub scope: Scope,
+    pub yes: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help,
@@ -59,6 +73,7 @@ pub enum Command {
     Enable(Change),
     Disable(Change),
     Edit(EditFile),
+    Push(Push),
 }
 
 /// A command line that could not be understood, with what to fix.
@@ -93,7 +108,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut it = args.iter();
     let verb = match it.next().map(String::as_str) {
         None | Some("help" | "--help" | "-h") => return Ok(Command::Help),
-        Some(v @ ("list" | "enable" | "disable" | "edit")) => v,
+        Some(v @ ("list" | "enable" | "disable" | "edit" | "push")) => v,
         Some(other) => return err(format!("unknown command {other:?}")),
     };
     let (mut skills, mut tools, mut yes, mut from) = (Vec::new(), Vec::new(), false, None);
@@ -135,8 +150,11 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     if let Some(extra) = words.next() {
         return err(format!("unexpected argument {extra:?}"));
     }
-    if verb != "edit" && (file.is_some() || from.is_some()) {
-        return err(format!("{verb} takes no file or --from"));
+    if !matches!(verb, "edit" | "push") && file.is_some() {
+        return err(format!("{verb} takes no file"));
+    }
+    if verb != "edit" && from.is_some() {
+        return err(format!("{verb} takes no --from"));
     }
     match (verb, entry) {
         ("list", None) if !yes => Ok(Command::List(scope)),
@@ -145,8 +163,27 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         (_, None) => err(format!("{verb} needs an entry id")),
         ("enable", Some(entry)) => Ok(Command::Enable(Change { entry, scope, yes })),
         ("edit", Some(entry)) => edit(entry, file, from, scope, yes),
+        ("push", Some(entry)) => push(entry, file, scope, yes),
         (_, Some(entry)) => Ok(Command::Disable(Change { entry, scope, yes })),
     }
+}
+
+fn push(
+    entry: EntryId,
+    file: Option<&String>,
+    scope: Scope,
+    yes: bool,
+) -> Result<Command, UsageError> {
+    let [tool] = scope.tools.as_slice() else {
+        return err("push needs exactly one --tool: the copy to push back");
+    };
+    Ok(Command::Push(Push {
+        entry,
+        file: file.cloned(),
+        tool: tool.clone(),
+        scope: scope.clone(),
+        yes,
+    }))
 }
 
 fn edit(
@@ -225,6 +262,26 @@ mod tests {
             panic!("not edit")
         };
         assert_eq!(e.text, NewText::Editor);
+    }
+
+    #[test]
+    fn parses_push() {
+        let Command::Push(c) = p("push x --skills a --tool codex").unwrap() else {
+            panic!("not push")
+        };
+        assert!(c.file.is_none() && !c.yes && c.tool.to_string() == "codex");
+        let Command::Push(c) = p("push x SKILL.md --skills a --tool codex --yes").unwrap() else {
+            panic!("not push")
+        };
+        assert_eq!(c.file.as_deref(), Some("SKILL.md"));
+        for bad in [
+            "push x --skills a",                                 // no tool
+            "push x --skills a --tool codex --tool claude-code", // two tools
+            "push x f g --skills a --tool codex",                // extra
+            "push x --skills a --tool codex --from f",           // --from
+        ] {
+            assert!(p(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

@@ -1,7 +1,10 @@
 //! What crosses the IPC boundary: serializable views of core types. Pure
 //! mapping, no I/O, so it is tested without a window.
 
-use ai_env_app::{DiffLine, EditPreview, FileInfo, Listing, Opened};
+use ai_env_app::{
+    Delta, DiffLine, EditPreview, FileBase, FileInfo, Listing, Opened, PushFile, PushPreview,
+    Pushed,
+};
 use ai_env_core::{Action, Entry, Observed, Ownership, Plan, Tool};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -218,24 +221,112 @@ pub struct PreviewView {
     pub diff: Vec<DiffItem>,
 }
 
+fn diff(lines: Vec<DiffLine>) -> Vec<DiffItem> {
+    lines
+        .into_iter()
+        .map(|l| match l {
+            DiffLine::Same(text) => DiffItem { kind: "same", text },
+            DiffLine::Added(text) => DiffItem {
+                kind: "added",
+                text,
+            },
+            DiffLine::Removed(text) => DiffItem {
+                kind: "removed",
+                text,
+            },
+        })
+        .collect()
+}
+
 pub fn preview(p: EditPreview) -> PreviewView {
     PreviewView {
         ownership: ownership(p.ownership),
         marks_edited: p.marks_edited,
-        diff: p
-            .diff
+        diff: diff(p.diff),
+    }
+}
+
+/// What the page sends back to push a file: the hashes it was shown.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BaseIn {
+    pub path: String,
+    pub source_hash: String,
+    pub copy_hash: String,
+}
+
+impl From<BaseIn> for FileBase {
+    fn from(b: BaseIn) -> Self {
+        FileBase {
+            path: b.path,
+            source_hash: b.source_hash,
+            copy_hash: b.copy_hash,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct PushFileView {
+    pub path: String,
+    pub source_hash: String,
+    pub copy_hash: String,
+    pub diff: Vec<DiffItem>,
+}
+
+/// A path a push leaves alone, and why.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LeftView {
+    pub path: String,
+    pub why: &'static str,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct PushPreviewView {
+    pub files: Vec<PushFileView>,
+    pub left: Vec<LeftView>,
+}
+
+fn left(d: Vec<ai_env_app::Difference>) -> Vec<LeftView> {
+    d.into_iter()
+        .map(|d| LeftView {
+            path: d.path,
+            why: match d.delta {
+                Delta::Differs => "differs, not selected",
+                Delta::OnlyInCopy => "only in the copy; a push never creates files",
+                Delta::OnlyInSource => "only in the source; a push never deletes files",
+                Delta::KindDiffers => "a file on one side and a folder on the other",
+            },
+        })
+        .collect()
+}
+
+pub fn push_preview(p: PushPreview) -> PushPreviewView {
+    PushPreviewView {
+        files: p
+            .files
             .into_iter()
-            .map(|l| match l {
-                DiffLine::Same(text) => DiffItem { kind: "same", text },
-                DiffLine::Added(text) => DiffItem {
-                    kind: "added",
-                    text,
-                },
-                DiffLine::Removed(text) => DiffItem {
-                    kind: "removed",
-                    text,
-                },
+            .map(|PushFile { base, diff: d }| PushFileView {
+                path: base.path,
+                source_hash: base.source_hash,
+                copy_hash: base.copy_hash,
+                diff: diff(d),
             })
             .collect(),
+        left: left(p.left),
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct PushedView {
+    pub written: Vec<String>,
+    /// True when the copy now matches the source and reads enabled again.
+    pub remarked: bool,
+    pub left: Vec<LeftView>,
+}
+
+pub fn pushed(p: Pushed) -> PushedView {
+    PushedView {
+        written: p.written,
+        remarked: p.remarked,
+        left: left(p.left),
     }
 }

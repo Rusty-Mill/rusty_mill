@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Invoke the seven app commands (list, plan_change, apply_change, files, file, preview_edit, apply_edit). No fs, shell, http or dialog plugin (pack D32).",
+  "description": "Invoke the nine app commands (list, plan_change, apply_change, files, file, preview_edit, apply_edit, preview_push, apply_push). No fs, shell, http or dialog plugin (pack D32).",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

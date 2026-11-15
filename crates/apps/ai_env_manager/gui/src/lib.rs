@@ -1,6 +1,6 @@
 //! Ai Env Manager desktop shell (pack D31, D32). A view over `ai_env_app`:
 //! typed commands (`list`, `plan`, `apply`, and the editor's `files`, `file`,
-//! `preview_edit`, `apply_edit`) and no file, shell or HTTP access for the page.
+//! `preview_edit`, `apply_edit`, `preview_push`, `apply_push`) and no file, shell or HTTP access for the page.
 //! The editor takes an entry id and a path relative to it, never an absolute
 //! path; every rule is enforced in `ai_env_app`. The skill folders and tools are fixed at launch from
 //! the command line (`--skills DIR`, `--tool ID`, like `aienv`), so the page
@@ -11,13 +11,14 @@ pub mod view;
 
 use ai_env_app::{
     apply, edit_apply, edit_preview, find_entry, home_dir, list_files, load_entries, observe, plan,
-    read_file, select_tools, Place, Scope,
+    push_apply, push_preview, read_file, select_tools, Place, Scope,
 };
 use ai_env_core::{EntryId, Tool, ToolId};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use view::{
-    FileView, FilesView, ListView, Outcome, PreviewView, Skipped, ToolPlan, ToolResult, Verb,
+    BaseIn, FileView, FilesView, ListView, Outcome, PreviewView, PushPreviewView, PushedView,
+    Skipped, ToolPlan, ToolResult, Verb,
 };
 
 /// Fixed at launch; what the commands act on.
@@ -196,6 +197,41 @@ impl Ctx {
         let (entry, tools) = (self.entry(entry)?, self.tools()?);
         edit_apply(&entry, &place(tool)?, &tools, path, text, hash).map_err(|e| e.to_string())
     }
+
+    /// Preview only: what pushing `tool`'s edited copy back to the source
+    /// would change (one `path`, else every changed file). Writes nothing.
+    pub fn push_preview(
+        &self,
+        entry: &str,
+        tool: &str,
+        path: Option<&str>,
+    ) -> Result<PushPreviewView, String> {
+        let (entry, tools) = (self.entry(entry)?, self.tools()?);
+        let tool = tool
+            .parse::<ToolId>()
+            .map_err(|e| format!("{tool:?}: {e}"))?;
+        push_preview(&entry, &tool, &tools, path)
+            .map(view::push_preview)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Pushes. Both sides are re-checked against the hashes the preview
+    /// showed, so a file changed since is refused.
+    pub fn push_apply(
+        &self,
+        entry: &str,
+        tool: &str,
+        bases: Vec<BaseIn>,
+    ) -> Result<PushedView, String> {
+        let (entry, tools) = (self.entry(entry)?, self.tools()?);
+        let tool = tool
+            .parse::<ToolId>()
+            .map_err(|e| format!("{tool:?}: {e}"))?;
+        let bases: Vec<_> = bases.into_iter().map(Into::into).collect();
+        push_apply(&entry, &tool, &tools, &bases)
+            .map(view::pushed)
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[tauri::command]
@@ -256,6 +292,26 @@ fn apply_edit(
     ctx.edit_apply(&entry, tool.as_deref(), &path, text, &hash)
 }
 
+#[tauri::command]
+fn preview_push(
+    ctx: tauri::State<Ctx>,
+    entry: String,
+    tool: String,
+    path: Option<String>,
+) -> Result<PushPreviewView, String> {
+    ctx.push_preview(&entry, &tool, path.as_deref())
+}
+
+#[tauri::command]
+fn apply_push(
+    ctx: tauri::State<Ctx>,
+    entry: String,
+    tool: String,
+    bases: Vec<BaseIn>,
+) -> Result<PushedView, String> {
+    ctx.push_apply(&entry, &tool, bases)
+}
+
 /// Opens the window. `args` are the command-line arguments after the program.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     let scope = parse_scope(args)?;
@@ -270,7 +326,9 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
             files,
             file,
             preview_edit,
-            apply_edit
+            apply_edit,
+            preview_push,
+            apply_push
         ])
         .run(tauri::generate_context!())
         .map_err(|e| e.to_string())
