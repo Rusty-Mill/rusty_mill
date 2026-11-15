@@ -69,14 +69,14 @@ impl Hub {
 
     /// Advertises this hub's relay and STUN responder to nodes as a single
     /// DERP region at `host`. The relay shares the control port, spoken
-    /// over plain HTTP (`InsecureForTests`), which suits a private spike.
+    /// over plain HTTP (`ForceHTTP`), which suits a private spike.
     pub fn advertise(&self, host: &str, port: u16, stun_port: u16) {
         let map = serde_json::json!({"Regions": {"1": {
             "RegionID": 1, "RegionCode": "hub", "RegionName": "hub",
             "Nodes": [{
                 "Name": "1a", "RegionID": 1, "HostName": host,
                 "DERPPort": port, "STUNPort": stun_port,
-                "InsecureForTests": true,
+                "InsecureForTests": true, "ForceHTTP": true,
             }],
         }}});
         *self.derp_map.lock().unwrap_or_else(|e| e.into_inner()) = Some(map);
