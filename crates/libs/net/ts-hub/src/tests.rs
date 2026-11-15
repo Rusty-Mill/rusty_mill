@@ -413,3 +413,46 @@ fn an_advertised_region_rides_in_every_netmap() {
     assert_eq!(node["DERPPort"], 3340);
     assert_eq!(node["STUNPort"], 3478);
 }
+
+#[rusty_tokio::test]
+async fn a_reconnect_with_the_same_key_closes_the_old_session() {
+    use ts_derp::DerpClient;
+    let (_hub, url) = start().await;
+    let (ka, kb) = (registered(&url, "a").await, registered(&url, "b").await);
+    let mut old = DerpClient::connect(&url, &ka).await.unwrap();
+    let new = DerpClient::connect(&url, &ka).await.unwrap();
+    let mut b = DerpClient::connect(&url, &kb).await.unwrap();
+
+    let ended = rusty_tokio::time::timeout(Duration::from_secs(5), old.recv())
+        .await
+        .expect("the replaced session is closed");
+    assert!(ended.is_none(), "the replaced session stayed open");
+
+    // The replacement is the live session and still relays.
+    new.send(kb.public(), vec![7]).await.unwrap();
+    let got = rusty_tokio::time::timeout(Duration::from_secs(5), b.recv())
+        .await
+        .expect("relay delivers")
+        .expect("b stays up");
+    assert_eq!(got.peer, ka.public());
+}
+
+#[rusty_tokio::test]
+async fn http2_streams_per_noise_connection_are_capped() {
+    let (_hub, url) = start_with(Limits {
+        max_streams_per_connection: 0,
+        ..Limits::default()
+    })
+    .await;
+    let p = peer(&url, "a").await;
+    // A client with no stream budget either hangs or is refused; it is never served.
+    let served = rusty_tokio::time::timeout(
+        Duration::from_secs(2),
+        p.client.register(p.node.public(), "k1"),
+    )
+    .await;
+    assert!(
+        !matches!(served, Ok(Ok(_))),
+        "a stream was served over the cap"
+    );
+}

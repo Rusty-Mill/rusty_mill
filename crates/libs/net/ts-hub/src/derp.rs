@@ -11,7 +11,8 @@ use std::time::Instant;
 use crypto_box::aead::{Aead, AeadCore, OsRng};
 use crypto_box::{PublicKey, SalsaBox, SecretKey};
 use rusty_tokio::io::{AsyncRead, AsyncWrite};
-use rusty_tokio::sync::mpsc;
+use rusty_tokio::sync::{mpsc, oneshot};
+use rusty_tokio::task::JoinHandle;
 use ts_derp::frame::{self, FrameType, MAGIC, MAX_FRAME_SIZE};
 use ts_key::NodePrivate;
 use ts_types::NodePublic;
@@ -28,6 +29,32 @@ const QUEUE: usize = 256;
 const PEER_NOT_HERE: u8 = 0x01;
 
 type Out = (FrameType, Vec<u8>);
+
+/// A registered session. Dropping the entry drops `_cancel`, which ends the
+/// session's reader: a reconnect therefore closes the connection it replaces.
+struct Entry {
+    id: u64,
+    tx: mpsc::Sender<Out>,
+    _cancel: oneshot::Sender<()>,
+}
+
+/// Holds a session's slot in the relay and its writer task; both go when the
+/// session ends, however it ends (error, close, cancelled future, panic).
+struct Attached<'a> {
+    relay: &'a Relay,
+    client: NodePublic,
+    id: u64,
+    writer: Option<JoinHandle<()>>,
+}
+
+impl Drop for Attached<'_> {
+    fn drop(&mut self) {
+        self.relay.detach(&self.client, self.id);
+        if let Some(writer) = &self.writer {
+            writer.abort();
+        }
+    }
+}
 
 /// Why a DERP session ended before it started.
 #[derive(Debug, thiserror::Error)]
@@ -47,8 +74,8 @@ pub enum DerpRefusal {
 /// Connected nodes and the relay's own identity.
 pub struct Relay {
     key: NodePrivate,
-    /// Node key to its session id and outbound queue.
-    clients: Mutex<HashMap<NodePublic, (u64, mpsc::Sender<Out>)>>,
+    /// Node key to its live session.
+    clients: Mutex<HashMap<NodePublic, Entry>>,
     next_id: Mutex<u64>,
 }
 
@@ -84,6 +111,14 @@ impl Relay {
             .await
             .map_err(|_| DerpRefusal::Timeout)??;
 
+        let (tx, rx) = mpsc::channel::<Out>(QUEUE);
+        let (cancel, cancelled) = oneshot::channel::<()>();
+        // Claim the slot before answering, so a refused session gets no
+        // ServerInfo. `attached` frees it on every exit path.
+        let mut attached = self
+            .attach(client, tx.clone(), cancel, limits.max_derp_sessions)
+            .ok_or(DerpRefusal::Full)?;
+
         let reply_nonce = SalsaBox::generate_nonce(&mut OsRng);
         let sealed = salsa
             .encrypt(&reply_nonce, &br#"{"version":2}"#[..])
@@ -92,14 +127,11 @@ impl Relay {
         server_info.extend_from_slice(&sealed);
         frame::write_frame(&mut write, FrameType::ServerInfo, &server_info).await?;
 
-        let (tx, rx) = mpsc::channel::<Out>(QUEUE);
-        let id = self
-            .attach(client, tx.clone(), limits.max_derp_sessions)
-            .ok_or(DerpRefusal::Full)?;
-        let writer = rusty_tokio::spawn(write_loop(write, rx));
-        self.read_loop(&mut read, client, &tx, limits).await;
-        self.detach(&client, id);
-        writer.abort();
+        attached.writer = Some(rusty_tokio::spawn(write_loop(write, rx)));
+        rusty_tokio::select! {
+            _ = self.read_loop(&mut read, client, &tx, limits) => {}
+            _ = cancelled => rusty_log::debug!("derp: session replaced by a reconnect"),
+        }
         Ok(())
     }
 
@@ -140,9 +172,15 @@ impl Relay {
         Ok((client, salsa))
     }
 
-    /// Registers the session; a node that reconnects replaces its old
-    /// session. `None` when `max` other nodes are already connected.
-    fn attach(&self, client: NodePublic, tx: mpsc::Sender<Out>, max: usize) -> Option<u64> {
+    /// Registers the session; a node that reconnects replaces (and so
+    /// closes) its old session. `None` when `max` other nodes are connected.
+    fn attach(
+        &self,
+        client: NodePublic,
+        tx: mpsc::Sender<Out>,
+        cancel: oneshot::Sender<()>,
+        max: usize,
+    ) -> Option<Attached<'_>> {
         let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         if !clients.contains_key(&client) && clients.len() >= max {
             return None;
@@ -150,21 +188,33 @@ impl Relay {
         let mut next = self.next_id.lock().unwrap_or_else(|e| e.into_inner());
         *next += 1;
         let id = *next;
-        clients.insert(client, (id, tx));
-        Some(id)
+        clients.insert(
+            client,
+            Entry {
+                id,
+                tx,
+                _cancel: cancel,
+            },
+        );
+        Some(Attached {
+            relay: self,
+            client,
+            id,
+            writer: None,
+        })
     }
 
     /// Removes the session unless a newer one has replaced it.
     fn detach(&self, client: &NodePublic, id: u64) {
         let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
-        if clients.get(client).is_some_and(|(cur, _)| *cur == id) {
+        if clients.get(client).is_some_and(|e| e.id == id) {
             clients.remove(client);
         }
     }
 
     fn queue_of(&self, key: &NodePublic) -> Option<mpsc::Sender<Out>> {
         let clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
-        clients.get(key).map(|(_, tx)| tx.clone())
+        clients.get(key).map(|e| e.tx.clone())
     }
 
     async fn read_loop<R: AsyncRead + Unpin + Send>(

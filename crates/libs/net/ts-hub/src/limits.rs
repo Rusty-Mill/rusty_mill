@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 /// The hub's resource limits.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Limits {
     /// Longest to wait for an HTTP request head or a request body.
     pub head_timeout: Duration,
@@ -17,6 +18,8 @@ pub struct Limits {
     pub max_connections: usize,
     /// Concurrent netmap streams; more get `503`.
     pub max_map_streams: usize,
+    /// Concurrent HTTP/2 streams on one Noise connection.
+    pub max_streams_per_connection: u32,
     /// Concurrent DERP sessions; more are refused.
     pub max_derp_sessions: usize,
     /// Sustained relay rate per sending node, in bytes per second.
@@ -32,6 +35,7 @@ impl Default for Limits {
             handshake_timeout: Duration::from_secs(10),
             max_connections: 4096,
             max_map_streams: 1024,
+            max_streams_per_connection: 16,
             max_derp_sessions: 2048,
             derp_bytes_per_sec: 8 << 20,
             derp_burst: 2 << 20,

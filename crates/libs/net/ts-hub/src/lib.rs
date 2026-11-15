@@ -34,6 +34,7 @@ use ts_types::tailcfg::{
 };
 use ts_types::{DiscoPublic, MachinePublic, NodePublic};
 
+pub use derp::DerpRefusal;
 pub use limits::Limits;
 pub use store::{MemoryStore, NodeRec, NodeStore, RegisterError};
 
@@ -262,7 +263,9 @@ impl<S: NodeStore> Hub<S> {
         .await?;
         let machine = MachinePublic(machine);
 
-        let (mut acceptor, connection) = driver::server(conn, H2Builder::new());
+        let mut h2 = H2Builder::new();
+        h2.max_concurrent_streams(self.limits.max_streams_per_connection);
+        let (mut acceptor, connection) = driver::server(conn, h2);
         rusty_tokio::spawn(async move {
             if let Err(e) = connection.await {
                 rusty_log::debug!("hub: noise connection ended: {e}");

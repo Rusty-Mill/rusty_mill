@@ -43,11 +43,21 @@ pub fn respond(request: &[u8], from: SocketAddr) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Answers binding requests on `socket` until it fails.
+/// Answers binding requests on `socket` until it fails. A `ConnectionReset`
+/// is logged and skipped: on Windows an ICMP port-unreachable for an earlier reply
+/// surfaces as `ConnectionReset` on the next receive, and one bad packet must
+/// not stop the responder.
 pub async fn serve(socket: UdpSocket) -> std::io::Result<()> {
     let mut buf = [0u8; 1500];
     loop {
-        let (n, from) = socket.recv_from(&mut buf).await?;
+        let (n, from) = match socket.recv_from(&mut buf).await {
+            Ok(got) => got,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                rusty_log::debug!("stun: peer unreachable, continuing: {e}");
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         if let Some(reply) = respond(&buf[..n], from) {
             // A lost reply is a lost probe; the client retries.
             let _ = socket.send_to(&reply, from).await;
