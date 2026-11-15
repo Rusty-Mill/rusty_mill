@@ -91,9 +91,10 @@ pub fn read_file(root: &Path, rel: &RelPath) -> Result<FileRead, Error> {
 }
 
 /// Writes `plan` over its file under `root`, only if the file still has the
-/// hash it was read with. The text is never readable by anyone who could not
-/// read the original, and the owner and group are kept or the write is
-/// refused; see [`replace`] for how, per platform.
+/// hash it was read with. On Unix the text is not readable by anyone who could
+/// not read the original, and owner, group and mode are kept or the write is
+/// refused; POSIX extended ACLs are not carried over (a decided limit). See
+/// [`replace`] for the per-platform method and its guarantees.
 pub fn write_file(root: &Path, plan: &EditPlan) -> Result<(), Error> {
     let now = read_file(root, plan.path())?;
     let path = plan.path().under(root);
@@ -127,8 +128,9 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// Windows: std cannot read or copy a file's ACL, and a new file would take
 /// the folder's inherited one, which can be wider. So the file is rewritten in
 /// place, which keeps its owner and ACL. It is not crash-atomic there: a crash
-/// mid-write can leave a partly written file. An error (disk full, I/O) does
-/// not: the old text is written back first (see [`rewrite_in_place`]).
+/// mid-write can leave a partly written file. After an error (disk full, I/O)
+/// the old text is written back on a best-effort basis; if that fails too the
+/// file may be damaged, and the error says so (see [`rewrite_in_place`]).
 #[cfg(not(unix))]
 fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     rewrite_in_place(path, bytes, |f, b| f.write_all(b))
@@ -136,7 +138,8 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Overwrites `path` without truncating it first, so an error before the
 /// first byte is written leaves it untouched. After an error part-way, the
-/// original text is written back; if that also fails, the error says so.
+/// original text is written back, best effort: a persistent fault can make
+/// that fail too, and then the error says the file may be damaged.
 #[cfg_attr(unix, allow(dead_code))]
 fn rewrite_in_place(
     path: &Path,
@@ -157,7 +160,7 @@ fn rewrite_in_place(
     let Err(err) = put(&mut file, bytes, &write) else {
         return Ok(());
     };
-    match put(&mut file, &original, &|f, b| f.write_all(b)) {
+    match put(&mut file, &original, &write) {
         Ok(()) => Err(err),
         Err(undo) => Err(io::Error::new(
             err.kind(),
@@ -238,13 +241,33 @@ mod tests {
     }
 
     #[test]
-    fn in_place_rewrite_puts_the_old_text_back_after_a_partial_write() {
+    fn in_place_rewrite_says_so_when_the_old_text_cannot_be_put_back() {
         let (p, _g) = file_with("original text, kept");
-        let half = |f: &mut fs::File, b: &[u8]| {
+        // A persistent fault: every write lands half and then fails.
+        let always = |f: &mut fs::File, b: &[u8]| {
             f.write_all(&b[..b.len() / 2])?;
             Err(io::Error::other("disk full"))
         };
-        let err = rewrite_in_place(&p, b"replacement that fails", half).unwrap_err();
+        let err = rewrite_in_place(&p, b"replacement that fails", always).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("disk full"), "{msg}");
+        assert!(msg.contains("also failed"), "{msg}");
+        assert!(msg.contains("may be damaged"), "{msg}");
+    }
+
+    #[test]
+    fn in_place_rewrite_puts_the_old_text_back_after_a_partial_write() {
+        let (p, _g) = file_with("original text, kept");
+        let calls = std::cell::Cell::new(0);
+        let once = |f: &mut fs::File, b: &[u8]| {
+            calls.set(calls.get() + 1);
+            if calls.get() > 1 {
+                return f.write_all(b);
+            }
+            f.write_all(&b[..b.len() / 2])?;
+            Err(io::Error::other("disk full"))
+        };
+        let err = rewrite_in_place(&p, b"replacement that fails", once).unwrap_err();
         assert!(err.to_string().contains("disk full"));
         assert_eq!(fs::read(&p).unwrap(), b"original text, kept");
     }
