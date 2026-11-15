@@ -2,6 +2,7 @@
 //! result. Output goes to a writer so tests can read it.
 
 use crate::args::{Change, Command, Scope, USAGE};
+use crate::edit::{edit, Session};
 use ai_env_app::{apply, find_entry, load_entries, observe, plan, select_tools, Op};
 use ai_env_core::{Action, Observed, Plan};
 use std::io::{self, Write};
@@ -15,10 +16,15 @@ pub enum Outcome {
     Done,
     /// A plan held a refusal: nothing was changed for that tool.
     Refused,
+    /// A question needed a person and no terminal was there (exit 2).
+    NeedsTerminal,
 }
 
 /// Notes on skipped folders go to `err`.
-fn entries(scope: &Scope, err: &mut impl Write) -> Result<Vec<ai_env_core::Entry>, Error> {
+pub(crate) fn entries(
+    scope: &Scope,
+    err: &mut impl Write,
+) -> Result<Vec<ai_env_core::Entry>, Error> {
     let loaded = load_entries(scope)?;
     for s in loaded.skipped {
         writeln!(err, "skipped {}: {}", s.path.display(), s.reason)?;
@@ -105,13 +111,15 @@ fn change(
     Ok(outcome)
 }
 
-/// Runs `cmd`. `home` expands `~/` in the tool catalog. Results go to `out`;
+/// Runs `cmd`. `home` expands `~/` in the tool catalog; `session` is how
+/// `edit` reaches the person (stdin, editor). Results go to `out`;
 /// notes about skipped folders go to `err`. Tools are applied one at a time and
 /// each says "applied" when done, so after a failure the output shows which
 /// tools had already changed.
 pub fn run(
     cmd: &Command,
     home: &Path,
+    session: &mut Session,
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> Result<Outcome, Error> {
@@ -123,5 +131,6 @@ pub fn run(
         Command::List(scope) => list(scope, home, out, err),
         Command::Enable(c) => change(c, Op::Enable, home, out, err),
         Command::Disable(c) => change(c, Op::Disable, home, out, err),
+        Command::Edit(c) => edit(c, home, session, out, err),
     }
 }

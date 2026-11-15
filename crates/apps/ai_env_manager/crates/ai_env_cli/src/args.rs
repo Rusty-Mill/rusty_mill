@@ -1,5 +1,5 @@
 //! Command line parsing: pure, no I/O. Illegal states are unrepresentable: only
-//! `enable` and `disable` carry an entry and `--yes`.
+//! `enable`, `disable` and `edit` carry an entry and `--yes`.
 
 pub use ai_env_app::Scope;
 use ai_env_core::{EntryId, ToolId};
@@ -11,12 +11,18 @@ pub const USAGE: &str = "\
 usage: aienv list --skills DIR... [--tool ID]...
        aienv enable ID --skills DIR... [--tool ID]... [--yes]
        aienv disable ID --skills DIR... [--tool ID]... [--yes]
+       aienv edit ID FILE --skills DIR... [--tool ID] [--from PATH|-] [--yes]
 
   --skills DIR  a folder whose subfolders (each with a SKILL.md) are skills; repeatable
   --tool ID     limit to one tool from the catalog; repeatable (default: every tool)
   --yes         apply the plan; without it enable and disable only show the plan
+  edit          change one text file of a skill (FILE is relative to the skill folder). The
+                new text comes from --from (a file, or - for stdin), else from $VISUAL or
+                $EDITOR. It shows the diff and writes only on --yes (or a typed y after the
+                editor). Without --tool the skill's source is edited, else that tool's copy.
 
-exit status: 0 done, 1 a path was refused (nothing changed there), 2 usage, 3 error";
+exit status: 0 done, 1 a path was refused (nothing changed there), 2 usage (or the editor
+with no terminal to confirm on), 3 error";
 
 /// One entry to change, and whether to apply the plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,12 +32,33 @@ pub struct Change {
     pub yes: bool,
 }
 
+/// Where the new text of an `edit` comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewText {
+    /// `$VISUAL` or `$EDITOR`, run on a temporary copy.
+    Editor,
+    Stdin,
+    File(PathBuf),
+}
+
+/// One file to edit. `scope.tools` holds at most one tool: without it the
+/// skill's source is edited, with it that tool's copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditFile {
+    pub entry: EntryId,
+    pub file: String,
+    pub scope: Scope,
+    pub text: NewText,
+    pub yes: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help,
     List(Scope),
     Enable(Change),
     Disable(Change),
+    Edit(EditFile),
 }
 
 /// A command line that could not be understood, with what to fix.
@@ -66,10 +93,11 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut it = args.iter();
     let verb = match it.next().map(String::as_str) {
         None | Some("help" | "--help" | "-h") => return Ok(Command::Help),
-        Some(v @ ("list" | "enable" | "disable")) => v,
+        Some(v @ ("list" | "enable" | "disable" | "edit")) => v,
         Some(other) => return err(format!("unknown command {other:?}")),
     };
-    let (mut skills, mut tools, mut yes, mut entry) = (Vec::new(), Vec::new(), false, None);
+    let (mut skills, mut tools, mut yes, mut from) = (Vec::new(), Vec::new(), false, None);
+    let mut positional = Vec::new();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--skills" => skills.push(PathBuf::from(value(&mut it, "--skills")?)),
@@ -83,25 +111,69 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
                 tools.push(id);
             }
             "--yes" => yes = true,
-            flag if flag.starts_with('-') => return err(format!("unknown option {flag:?}")),
-            id if entry.is_none() => {
-                entry = Some(id.parse().map_err(|e| UsageError(format!("{e}")))?);
+            "--from" => {
+                if from.is_some() {
+                    return err("--from given twice");
+                }
+                from = Some(value(&mut it, "--from")?);
             }
-            extra => return err(format!("unexpected argument {extra:?}")),
+            "-" => positional.push(arg),
+            flag if flag.starts_with('-') => return err(format!("unknown option {flag:?}")),
+            _ => positional.push(arg),
         }
     }
     if skills.is_empty() {
         return err("give at least one --skills DIR");
     }
     let scope = Scope { skills, tools };
+    let mut words = positional.into_iter();
+    let entry = words
+        .next()
+        .map(|id| id.parse().map_err(|e| UsageError(format!("{e}"))))
+        .transpose()?;
+    let file = words.next();
+    if let Some(extra) = words.next() {
+        return err(format!("unexpected argument {extra:?}"));
+    }
+    if verb != "edit" && (file.is_some() || from.is_some()) {
+        return err(format!("{verb} takes no file or --from"));
+    }
     match (verb, entry) {
         ("list", None) if !yes => Ok(Command::List(scope)),
         ("list", None) => err("list changes nothing, so --yes does not apply"),
         ("list", Some(_)) => err("list takes no entry id"),
         (_, None) => err(format!("{verb} needs an entry id")),
         ("enable", Some(entry)) => Ok(Command::Enable(Change { entry, scope, yes })),
+        ("edit", Some(entry)) => edit(entry, file, from, scope, yes),
         (_, Some(entry)) => Ok(Command::Disable(Change { entry, scope, yes })),
     }
+}
+
+fn edit(
+    entry: EntryId,
+    file: Option<&String>,
+    from: Option<&str>,
+    scope: Scope,
+    yes: bool,
+) -> Result<Command, UsageError> {
+    let Some(file) = file else {
+        return err("edit needs a file, relative to the skill folder (try SKILL.md)");
+    };
+    if scope.tools.len() > 1 {
+        return err("edit works on one copy: give --tool at most once");
+    }
+    let text = match from {
+        None => NewText::Editor,
+        Some("-") => NewText::Stdin,
+        Some(path) => NewText::File(PathBuf::from(path)),
+    };
+    Ok(Command::Edit(EditFile {
+        entry,
+        file: file.clone(),
+        scope,
+        text,
+        yes,
+    }))
 }
 
 fn value<'a>(it: &mut impl Iterator<Item = &'a String>, flag: &str) -> Result<&'a str, UsageError> {
@@ -135,6 +207,39 @@ mod tests {
             panic!("not disable")
         };
         assert!(!c.yes && c.entry.as_str() == "x");
+    }
+
+    #[test]
+    fn parses_edit() {
+        let Command::Edit(e) = p("edit x SKILL.md --skills a --from - --yes").unwrap() else {
+            panic!("not edit")
+        };
+        assert!(e.yes && e.text == NewText::Stdin && e.file == "SKILL.md");
+        let Command::Edit(e) = p("edit x a/b.md --skills a --tool codex --from n.md").unwrap()
+        else {
+            panic!("not edit")
+        };
+        assert_eq!(e.text, NewText::File(PathBuf::from("n.md")));
+        assert_eq!(e.scope.tools.len(), 1);
+        let Command::Edit(e) = p("edit x SKILL.md --skills a").unwrap() else {
+            panic!("not edit")
+        };
+        assert_eq!(e.text, NewText::Editor);
+    }
+
+    #[test]
+    fn rejects_bad_edit_lines() {
+        for bad in [
+            "edit x --skills a",                                   // no file
+            "edit x f --skills a --tool codex --tool claude-code", // two copies
+            "edit x f --skills a --from",                          // missing value
+            "edit x f --skills a --from a --from b",               // two sources
+            "enable x f --skills a",                               // file on enable
+            "enable x --skills a --from b",                        // --from on enable
+            "edit x f g --skills a",                               // extra
+        ] {
+            assert!(p(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[cfg(unix)]
