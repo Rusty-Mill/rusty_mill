@@ -7,7 +7,7 @@
 //! (`SetAddr`, `Bind`) and per-connection app→net traffic (`Data`, `Close`)
 //! travel the same queue, so there is never a second owner of a socket.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
@@ -96,10 +96,12 @@ struct Conn {
     /// net → app data. Dropped (`None`) once the peer has finished sending
     /// and everything it sent is delivered, so the reader sees EOF.
     to_app: Option<mpsc::Sender<Vec<u8>>>,
-    /// A chunk already taken from smoltcp's receive buffer that the app
-    /// queue had no room for; retried first, never dropped.
-    pending_rx: Option<Vec<u8>>,
-    /// Set while `pending_rx` is held; the reader clears it and pokes the
+    /// Chunks already taken from smoltcp's receive buffer that the app queue
+    /// had no room for, oldest first; retried first, never dropped. Holds at
+    /// most one chunk until the peer finishes, then the rest of the socket's
+    /// receive buffer too (smoltcp wipes it when TimeWait ends).
+    pending_rx: VecDeque<Vec<u8>>,
+    /// Set while `pending_rx` is non-empty; the reader clears it and pokes the
     /// stack, so a read wakes the stack only when something is waiting.
     held: Arc<AtomicBool>,
     /// app → net bytes not yet accepted by smoltcp.
@@ -275,7 +277,7 @@ impl Stack {
             Conn {
                 handle,
                 to_app: Some(to_app),
-                pending_rx: None,
+                pending_rx: VecDeque::new(),
                 held: held.clone(),
                 out: Vec::new(),
                 closing: false,
@@ -481,7 +483,7 @@ impl Stack {
         // net → app: drain smoltcp's receive buffer into the app channel until
         // it fills (then leave the rest to apply TCP backpressure).
         loop {
-            let chunk = match conn.pending_rx.take() {
+            let chunk = match conn.pending_rx.pop_front() {
                 Some(chunk) => chunk,
                 None if sock.can_recv() => {
                     let mut buf = vec![0u8; MTU];
@@ -502,23 +504,27 @@ impl Stack {
             };
             conn.held.store(true, Ordering::Release);
             match to_app.try_send(chunk) {
-                Ok(()) => conn.held.store(false, Ordering::Release),
+                Ok(()) => conn
+                    .held
+                    .store(!conn.pending_rx.is_empty(), Ordering::Release),
                 // Already out of smoltcp's buffer: keep it for the next pass.
                 Err(mpsc::error::TrySendError::Full(chunk)) => {
-                    conn.pending_rx = Some(chunk);
+                    conn.pending_rx.push_front(chunk);
                     break;
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     // App dropped the read half: tear the connection down.
+                    conn.pending_rx.clear();
                     sock.abort();
                     break;
                 }
             }
         }
 
-        // The peer sent its FIN and every byte it sent has been delivered:
-        // drop the channel so the reader's `read` returns EOF now, not only
-        // once our side closes too (#1466).
+        // Once the peer's FIN is in, nothing more can arrive, so what is left
+        // in smoltcp's receive buffer (at most `SOCKET_BUFFER`) moves to
+        // `pending_rx`: smoltcp discards that buffer when TimeWait ends, which
+        // must not truncate a slow reader.
         let peer_finished = matches!(
             sock.state(),
             tcp::State::CloseWait
@@ -527,14 +533,28 @@ impl Stack {
                 | tcp::State::TimeWait
                 | tcp::State::Closed
         );
-        if peer_finished && !sock.can_recv() && conn.pending_rx.is_none() {
+        while peer_finished && !conn.pending_rx.is_empty() && sock.can_recv() {
+            let mut buf = vec![0u8; MTU];
+            match sock.recv_slice(&mut buf) {
+                Ok(n) if n > 0 => {
+                    buf.truncate(n);
+                    conn.pending_rx.push_back(buf);
+                }
+                _ => break,
+            }
+        }
+
+        // Peer finished and everything it sent is delivered: drop the channel
+        // so the reader's `read` returns EOF now, not only once our side
+        // closes too (#1466).
+        if peer_finished && !sock.can_recv() && conn.pending_rx.is_empty() {
             conn.to_app = None;
         }
 
-        // Reap fully-closed connections.
-        let done =
+        // Reap fully-closed connections, but never with undelivered data.
+        let closed =
             matches!(sock.state(), tcp::State::Closed) || (!sock.is_open() && !sock.can_recv());
-        if done {
+        if closed && conn.pending_rx.is_empty() {
             self.reap(id);
         }
     }
@@ -1194,9 +1214,6 @@ mod tests {
 
     /// A writer that finishes and goes away while the reader has not read
     /// anything yet: everything it sent is still delivered, then EOF (#1466).
-    /// Not covered: a chunk held in `pending_rx` when the socket reaches
-    /// `Closed` (we shut down first, the peer replies at length, the reader is
-    /// slow); that can truncate and is a known follow-up.
     #[rusty_tokio::test]
     async fn a_closed_connection_keeps_unread_data_until_the_reader_has_it() {
         use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1225,6 +1242,54 @@ mod tests {
 
         let mut got = Vec::new();
         rusty_tokio::time::timeout(Duration::from_secs(30), reader.read_to_end(&mut got))
+            .await
+            .expect("read_to_end reaches EOF")
+            .unwrap();
+        assert!(
+            got == data,
+            "{} of {} bytes, or they differ",
+            got.len(),
+            data.len()
+        );
+    }
+    /// We shut down first, the peer replies at length and then finishes, and
+    /// our reader is slow: the connection sits in TimeWait with unread data
+    /// (some in smoltcp's buffer, one chunk held in `pending_rx`). TimeWait
+    /// ending must not reap it before the reader has everything.
+    #[rusty_tokio::test]
+    async fn a_reply_survives_time_wait_while_the_reader_is_slow() {
+        use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (a, b) = linked_stacks();
+        let (reply, rx) = oneshot::channel();
+        b.send(Request::Bind { port: 9002, reply }).unwrap();
+        let mut accept_rx = rx.await.unwrap();
+        let (reply, rx) = oneshot::channel();
+        a.send(Request::Connect {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2)), 9002),
+            reply,
+        })
+        .unwrap();
+        let mut us = rx.await.unwrap().unwrap();
+        let mut peer = accept_rx.recv().await.unwrap();
+
+        let data: Vec<u8> = (0..70_000u32).map(|i| (i % 249) as u8).collect();
+        let reply_bytes = data.clone();
+        rusty_tokio::spawn(async move {
+            // Wait for our FIN, then reply at length and finish.
+            let mut sink = Vec::new();
+            peer.read_to_end(&mut sink).await.unwrap();
+            peer.write_all(&reply_bytes).await.unwrap();
+            peer.shutdown().await.unwrap();
+            rusty_tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        us.shutdown().await.unwrap();
+        // Longer than smoltcp's TimeWait, so the socket reaches Closed while
+        // the reply is still unread.
+        rusty_tokio::time::sleep(Duration::from_secs(11)).await;
+
+        let mut got = Vec::new();
+        rusty_tokio::time::timeout(Duration::from_secs(30), us.read_to_end(&mut got))
             .await
             .expect("read_to_end reaches EOF")
             .unwrap();
