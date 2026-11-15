@@ -113,7 +113,9 @@ impl Hub {
             let (stream, _) = listener.accept().await?;
             let hub = self.clone();
             rusty_tokio::spawn(async move {
-                let _ = hub.handle(stream).await;
+                if let Err(e) = hub.handle(stream).await {
+                    eprintln!("hub: connection ended: {e}");
+                }
             });
         }
     }
