@@ -8,14 +8,14 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_tailscale"
 
 [package.metadata.rusty_mill]
-layer = "apps"
+layer = "libs"
 
 [dependencies]
 ts-types.workspace = true
 ts-key.workspace = true
 rusty_tokio.workspace = true
 # HTTP/2 over the Noise channel.
-rusty_h2 = { path = "../../../../libs/net/rusty_h2", features = ["rusty-tokio"] }
+rusty_h2 = { path = "../rusty_h2", features = ["rusty-tokio"] }
 chacha20poly1305.workspace = true
 blake2.workspace = true
 hkdf.workspace = true

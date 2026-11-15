@@ -19,7 +19,8 @@ use ts_key::MachinePrivate;
 const PROTOCOL_VERSION: u16 = 123;
 
 fn server_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../interop/noise-server-go")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../apps/rusty_tailscale/interop/noise-server-go")
 }
 
 async fn ensure_server_binary() -> Option<PathBuf> {

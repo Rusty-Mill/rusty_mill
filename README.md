@@ -214,19 +214,19 @@ repository's cloud session capture hook.
 | [`rk-app`](crates/apps/rusty_key/crates/app) | `crates/apps/rusty_key/crates/app` | `rusty-keys`: the harness binary wiring the four pillars around the kernel |
 | [`rk-agui`](crates/apps/rusty_key/crates/agui) | `crates/apps/rusty_key/crates/agui` | Rusty Keys over AG-UI: a `Session` per thread behind `rusty_agui`'s `Agent` trait, the approval gate and plan exits as frontend tool calls (ADR-0007 follow-ons step 10) |
 | [`rusty_llama`](crates/libs/ai/rusty_llama) | `crates/libs/ai/rusty_llama` | From-scratch Llama/GGUF inference engine (CPU SIMD, optional wgpu and CUDA backends, OpenAI-compatible server) |
-| [`ts-types`](crates/apps/rusty_tailscale/crates/ts-types) | `crates/apps/rusty_tailscale/crates/ts-types` | Tailscale wire types shared across the client: node keys, status, netmap |
-| [`ts-key`](crates/apps/rusty_tailscale/crates/ts-key) | `crates/apps/rusty_tailscale/crates/ts-key` | Key material for the Tailscale client: machine, node, and disco keypairs |
-| [`ts-control`](crates/apps/rusty_tailscale/crates/ts-control) | `crates/apps/rusty_tailscale/crates/ts-control` | ts2021 control-plane client: Noise (control base) handshake and the map session |
-| [`ts-derp`](crates/apps/rusty_tailscale/crates/ts-derp) | `crates/apps/rusty_tailscale/crates/ts-derp` | DERP relay client: the always-available fallback data path |
-| [`ts-stun`](crates/apps/rusty_tailscale/crates/ts-stun) | `crates/apps/rusty_tailscale/crates/ts-stun` | STUN client for discovering the server-reflexive endpoint |
-| [`ts-disco`](crates/apps/rusty_tailscale/crates/ts-disco) | `crates/apps/rusty_tailscale/crates/ts-disco` | Disco protocol: ping/pong/call-me-maybe path probing |
-| [`ts-magicsock`](crates/apps/rusty_tailscale/crates/ts-magicsock) | `crates/apps/rusty_tailscale/crates/ts-magicsock` | Path multiplexer: direct UDP and DERP, path upgrade and live migration |
-| [`ts-wg`](crates/apps/rusty_tailscale/crates/ts-wg) | `crates/apps/rusty_tailscale/crates/ts-wg` | WireGuard data plane over the magicsock transport |
-| [`ts-tun`](crates/apps/rusty_tailscale/crates/ts-tun) | `crates/apps/rusty_tailscale/crates/ts-tun` | TUN device, routes, and DNS platform adapters |
-| [`ts-filter`](crates/apps/rusty_tailscale/crates/ts-filter) | `crates/apps/rusty_tailscale/crates/ts-filter` | Packet filter evaluating the tailnet ACL rules the control plane hands down |
-| [`ts-engine`](crates/apps/rusty_tailscale/crates/ts-engine) | `crates/apps/rusty_tailscale/crates/ts-engine` | The node engine wiring control, magicsock, WireGuard, TUN and filter together |
+| [`ts-types`](crates/libs/net/ts-types) | `crates/libs/net/ts-types` | Tailscale wire types shared across the client: node keys, status, netmap |
+| [`ts-key`](crates/libs/net/ts-key) | `crates/libs/net/ts-key` | Key material for the Tailscale client: machine, node, and disco keypairs |
+| [`ts-control`](crates/libs/net/ts-control) | `crates/libs/net/ts-control` | ts2021 control-plane client: Noise (control base) handshake and the map session |
+| [`ts-derp`](crates/libs/net/ts-derp) | `crates/libs/net/ts-derp` | DERP relay client: the always-available fallback data path |
+| [`ts-stun`](crates/libs/net/ts-stun) | `crates/libs/net/ts-stun` | STUN client for discovering the server-reflexive endpoint |
+| [`ts-disco`](crates/libs/net/ts-disco) | `crates/libs/net/ts-disco` | Disco protocol: ping/pong/call-me-maybe path probing |
+| [`ts-magicsock`](crates/libs/net/ts-magicsock) | `crates/libs/net/ts-magicsock` | Path multiplexer: direct UDP and DERP, path upgrade and live migration |
+| [`ts-wg`](crates/libs/net/ts-wg) | `crates/libs/net/ts-wg` | WireGuard data plane over the magicsock transport |
+| [`ts-tun`](crates/libs/net/ts-tun) | `crates/libs/net/ts-tun` | TUN device, routes, and DNS platform adapters |
+| [`ts-filter`](crates/libs/net/ts-filter) | `crates/libs/net/ts-filter` | Packet filter evaluating the tailnet ACL rules the control plane hands down |
+| [`ts-engine`](crates/libs/net/ts-engine) | `crates/libs/net/ts-engine` | The node engine wiring control, magicsock, WireGuard, TUN and filter together |
 | [`ts-localapi`](crates/apps/rusty_tailscale/crates/ts-localapi) | `crates/apps/rusty_tailscale/crates/ts-localapi` | LocalAPI server: the daemon's Unix-socket control surface |
-| [`ts-net`](crates/apps/rusty_tailscale/crates/ts-net) | `crates/apps/rusty_tailscale/crates/ts-net` | Userspace TCP/IP stack (smoltcp) on the tailnet — a tailnet service with no TUN and no root |
+| [`ts-net`](crates/libs/net/ts-net) | `crates/libs/net/ts-net` | Userspace TCP/IP stack (smoltcp) on the tailnet — a tailnet service with no TUN and no root |
 | [`ts-daemon`](crates/apps/rusty_tailscale/crates/ts-daemon) | `crates/apps/rusty_tailscale/crates/ts-daemon` | `ts-daemon`: the long-running node daemon |
 | [`ts-cli`](crates/apps/rusty_tailscale/crates/ts-cli) | `crates/apps/rusty_tailscale/crates/ts-cli` | `ts-cli`: the LocalAPI-driven command line client |
 | [`xtask`](crates/apps/rusty_tailscale/xtask) | `crates/apps/rusty_tailscale/xtask` | `rusty_tailscale`'s integration harness: Headscale in a container, multi-node NAT simulation |

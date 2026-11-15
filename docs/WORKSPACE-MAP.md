@@ -170,7 +170,18 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | rusty_whisper | rusty-whisper | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) |
 | libs | rusty_wiremock | rusty_wiremock | A blocking std::net HTTP mock server that answers canned responses, for Rusty Mill test suites |
 | libs | rusty_worktree | rusty_worktree | Git worktrees that share one repository's object store, driven through the git CLI with hooks off and the git directory always named explicitly |
+| libs | ts-control | ts-control | ts2021 control-plane client: Noise IK channel, registration, netmap long-poll |
+| libs | ts-derp | ts-derp | DERP relay client: framing, keepalive, region selection |
+| libs | ts-disco | ts-disco | Disco NAT-traversal message codec: ping/pong/call-me-maybe over NaCl box |
+| libs | ts-engine | ts-engine | Orchestration: control -&gt; magicsock -&gt; wg -&gt; tun, behind ports-and-adapters traits |
+| libs | ts-filter | ts-filter | Netmap packet-filter (ACL) enforcement |
+| libs | ts-key | ts-key | Node, disco, and machine key generation, persistence, and rotation |
+| libs | ts-magicsock | ts-magicsock | Path multiplexer: direct UDP and DERP, path upgrade and live migration |
+| libs | ts-net | ts-net | Embeddable node: smoltcp userspace netstack, no TUN, no root |
+| libs | ts-stun | ts-stun | Minimal STUN (RFC 5389) binding requests for endpoint discovery |
+| libs | ts-tun | ts-tun | TUN device, routes, and DNS platform adapters |
 | libs | ts-types | ts-types | Core wire and API types: keys, node/peer status, netmap, DERP map (serde) |
+| libs | ts-wg | ts-wg | WireGuard data-plane adapter (boringtun; kernel-WG later) |
 | apps | ai_env_manager | ai_env_app | Ai Env Manager application layer: load entries, observe, plan and apply for any front end (CLI, GUI). No output formatting. |
 | apps | ai_env_manager | ai_env_cli | Ai Env Manager command line (aienv): list, enable and disable skills per tool, previewing a plan before applying it. |
 | apps | ai_env_manager | ai_env_core | Ai Env Manager core: entry model and link planner. Pure, no I/O, no dependencies. |
@@ -287,19 +298,8 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_skillopt | skillopt-envs |  |
 | apps | rusty_skillopt | skillopt-model |  |
 | apps | rusty_tailscale | ts-cli | CLI: status/up/down/ping over the tailscaled LocalAPI Unix socket |
-| apps | rusty_tailscale | ts-control | ts2021 control-plane client: Noise IK channel, registration, netmap long-poll |
 | apps | rusty_tailscale | ts-daemon | tailscaled-equivalent daemon binary |
-| apps | rusty_tailscale | ts-derp | DERP relay client: framing, keepalive, region selection |
-| apps | rusty_tailscale | ts-disco | Disco NAT-traversal message codec: ping/pong/call-me-maybe over NaCl box |
-| apps | rusty_tailscale | ts-engine | Orchestration: control -&gt; magicsock -&gt; wg -&gt; tun, behind ports-and-adapters traits |
-| apps | rusty_tailscale | ts-filter | Netmap packet-filter (ACL) enforcement |
-| apps | rusty_tailscale | ts-key | Node, disco, and machine key generation, persistence, and rotation |
 | apps | rusty_tailscale | ts-localapi | LocalAPI-compatible HTTP-over-UDS server subset |
-| apps | rusty_tailscale | ts-magicsock | Path multiplexer: direct UDP and DERP, path upgrade and live migration |
-| apps | rusty_tailscale | ts-net | Embeddable node: smoltcp userspace netstack, no TUN, no root |
-| apps | rusty_tailscale | ts-stun | Minimal STUN (RFC 5389) binding requests for endpoint discovery |
-| apps | rusty_tailscale | ts-tun | TUN device, routes, and DNS platform adapters |
-| apps | rusty_tailscale | ts-wg | WireGuard data-plane adapter (boringtun; kernel-WG later) |
 | apps | rusty_tailscale | xtask | Integration harness: Headscale in a container, multi-node NAT simulation |
 | apps | rusty_text | rusty_text | Pure Rust stream editing (sed) and pattern scanning/processing (awk) engines |
 | apps | rusty_tick | rusty_tick | Self-hosted task manager on rusty_multimodal_db_engine (spike) |

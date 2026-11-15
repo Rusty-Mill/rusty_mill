@@ -111,7 +111,7 @@ the family and its application part has none. Applied at this commit:
 | `rusty_search`, `rusty_db` | Keep intact in `libs/storage/`. | Library families with backend adapters; `rusty-db` has one external dependent (`rusty-hister-model`). |
 | `nexus` | Keep intact in `apps/`. | 42 crates, one product. `nexus-hashline` and `nexus-plugin-api` are `[workspace.dependencies]` entries but no crate outside nexus uses them at this commit. |
 | `rusty_meshed`, `rusty_key`, `rusty_yirp`, `rusty_provider`, `rusty_agent_gateway`, `rusty_hister`, `rusty_inventrory`, `rusty_skillopt`, `rusty_multimodal_db` | Keep intact in `apps/`. | Product families with binaries; no crate outside the family depends on any member. `rusty_provider`'s `rp-core`/`rp-providers` become a `libs/` move the day another family depends on them, which the Phase 0 check will flag as an app-to-app edge. |
-| `rusty_tailscale` (incl. `xtask`) | Split: `ts-types` moves to `libs/net/`; the other 13 crates stay in `apps/`. | The mux server's C27 identity mapping needs the peer and user types, so a crate outside the family now depends on `ts-types` (owner go, 2026-11-13, rusty_term D233). Its dependencies (`rusty_hex`, serde, serde_json, thiserror) are all lower layers, and the family's crates depend on it downward. |
+| `rusty_tailscale` (incl. `xtask`) | Split: `ts-types` and the embedded-node closure (`ts-net`, `ts-engine`, `ts-key`, `ts-control`, `ts-derp`, `ts-wg`, `ts-tun`, `ts-magicsock`, `ts-disco`, `ts-filter`, `ts-stun`) move to `libs/net/`; `ts-daemon`, `ts-cli`, `ts-localapi` and `xtask` stay in `apps/`. | The mux server's C27 identity mapping needs the peer and user types, so a crate outside the family now depends on `ts-types` (owner go, 2026-11-13, rusty_term D233). Its dependencies (`rusty_hex`, serde, serde_json, thiserror) are all lower layers, and the family's crates depend on it downward. |
 | `rusty_serde`, `rusty_json`, `rusty_err`, `rusty_tokio`, `rusty_term` | Keep intact (a library plus its derive/macro/side-channel crate). | Same reason: one library. |
 | `rusty_boot` | `tools/`. Its `src/main.rs` header calls it a "kernel-to-application demonstration binary" that exercises Level 0 to Level 3/4; it depends on 22 workspace crates including the shell `rush` (an app) and the terminal library `rusty_term`. It is an integration harness, not a product. | `crates/rusty_boot/src/main.rs` lines 1 to 3; `crates/rusty_boot/Cargo.toml` lines 13 to 38. |
 | `rusty_text`, `rusty_croc`, `rusty_voice`, `rusty_homelab_mcp`, `rusty_fedora_agent`, `rush`, `mill-term` | `apps/`. | Binaries; the only cross-family dependents are `mill-term` (shells out to `rsed`/`rawk`, not a Cargo edge) and `rusty_boot` (tools). |
@@ -615,20 +615,20 @@ skillopt-core	apps	crates/rusty_skillopt/crates/skillopt-core	crates/apps/rusty_
 skillopt-envs	apps	crates/rusty_skillopt/crates/skillopt-envs	crates/apps/rusty_skillopt/crates/skillopt-envs
 skillopt-model	apps	crates/rusty_skillopt/crates/skillopt-model	crates/apps/rusty_skillopt/crates/skillopt-model
 ts-cli	apps	crates/rusty_tailscale/crates/ts-cli	crates/apps/rusty_tailscale/crates/ts-cli
-ts-control	apps	crates/rusty_tailscale/crates/ts-control	crates/apps/rusty_tailscale/crates/ts-control
+ts-control	libs	crates/rusty_tailscale/crates/ts-control	crates/libs/net/ts-control
 ts-daemon	apps	crates/rusty_tailscale/crates/ts-daemon	crates/apps/rusty_tailscale/crates/ts-daemon
-ts-derp	apps	crates/rusty_tailscale/crates/ts-derp	crates/apps/rusty_tailscale/crates/ts-derp
-ts-disco	apps	crates/rusty_tailscale/crates/ts-disco	crates/apps/rusty_tailscale/crates/ts-disco
-ts-engine	apps	crates/rusty_tailscale/crates/ts-engine	crates/apps/rusty_tailscale/crates/ts-engine
-ts-filter	apps	crates/rusty_tailscale/crates/ts-filter	crates/apps/rusty_tailscale/crates/ts-filter
-ts-key	apps	crates/rusty_tailscale/crates/ts-key	crates/apps/rusty_tailscale/crates/ts-key
+ts-derp	libs	crates/rusty_tailscale/crates/ts-derp	crates/libs/net/ts-derp
+ts-disco	libs	crates/rusty_tailscale/crates/ts-disco	crates/libs/net/ts-disco
+ts-engine	libs	crates/rusty_tailscale/crates/ts-engine	crates/libs/net/ts-engine
+ts-filter	libs	crates/rusty_tailscale/crates/ts-filter	crates/libs/net/ts-filter
+ts-key	libs	crates/rusty_tailscale/crates/ts-key	crates/libs/net/ts-key
 ts-localapi	apps	crates/rusty_tailscale/crates/ts-localapi	crates/apps/rusty_tailscale/crates/ts-localapi
-ts-magicsock	apps	crates/rusty_tailscale/crates/ts-magicsock	crates/apps/rusty_tailscale/crates/ts-magicsock
-ts-net	apps	crates/rusty_tailscale/crates/ts-net	crates/apps/rusty_tailscale/crates/ts-net
-ts-stun	apps	crates/rusty_tailscale/crates/ts-stun	crates/apps/rusty_tailscale/crates/ts-stun
-ts-tun	apps	crates/rusty_tailscale/crates/ts-tun	crates/apps/rusty_tailscale/crates/ts-tun
+ts-magicsock	libs	crates/rusty_tailscale/crates/ts-magicsock	crates/libs/net/ts-magicsock
+ts-net	libs	crates/rusty_tailscale/crates/ts-net	crates/libs/net/ts-net
+ts-stun	libs	crates/rusty_tailscale/crates/ts-stun	crates/libs/net/ts-stun
+ts-tun	libs	crates/rusty_tailscale/crates/ts-tun	crates/libs/net/ts-tun
 ts-types	libs	crates/rusty_tailscale/crates/ts-types	crates/libs/net/ts-types
-ts-wg	apps	crates/rusty_tailscale/crates/ts-wg	crates/apps/rusty_tailscale/crates/ts-wg
+ts-wg	libs	crates/rusty_tailscale/crates/ts-wg	crates/libs/net/ts-wg
 xtask	apps	crates/rusty_tailscale/xtask	crates/apps/rusty_tailscale/xtask
 rusty_text	apps	crates/rusty_text	crates/apps/rusty_text
 rusty_voice	apps	crates/rusty_voice	crates/apps/rusty_voice
