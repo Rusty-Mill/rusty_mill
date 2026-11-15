@@ -1,0 +1,88 @@
+Spike C run output, retained as evidence for MESH.md ("Spike results"). Reproduce: build the
+release examples `hub` and `mesh_node` of crate ts-hub at the commit below, then run the script as root.
+Environment: Linux 6.18.44-fc-v470 x86_64, Ubuntu 24.04.5, iptables v1.8.10 (nf_tables), cloud container, root.
+The `recv` progress lines are omitted; the sender's `path=` lines show relay then direct.
+
+# cone: bd7d6794d39450f5e4e4a0578a110f006027590e 2026-11-15T01:52:49Z
+# cmd: crates/apps/rusty_tailscale/crates/ts-hub/spike-c/two-nat.sh cone 12000000   (root, Linux netns + iptables)
+mode=cone server tailnet ip=100.64.0.1
+sent 688128 path=relay
+sent 1343488 path=direct 10.0.2.2:46466
+sent 1998848 path=direct 10.0.2.2:46466
+sent 2654208 path=direct 10.0.2.2:46466
+sent 3309568 path=direct 10.0.2.2:46466
+sent 3964928 path=direct 10.0.2.2:46466
+sent 4620288 path=direct 10.0.2.2:46466
+sent 5275648 path=direct 10.0.2.2:46466
+sent 5931008 path=direct 10.0.2.2:46466
+sent 6586368 path=direct 10.0.2.2:46466
+sent 7241728 path=direct 10.0.2.2:46466
+sent 7897088 path=direct 10.0.2.2:46466
+sent 8552448 path=direct 10.0.2.2:46466
+sent 9207808 path=direct 10.0.2.2:46466
+sent 9863168 path=direct 10.0.2.2:46466
+sent 10518528 path=direct 10.0.2.2:46466
+sent 11173888 path=direct 10.0.2.2:46466
+sent 11829248 path=direct 10.0.2.2:46466
+DONE sent 12000000 sha256=912414ca3153efeb642061575b9ac4293a82dbb99a69bbbf17b41aa60e8ce542
+--- conntrack natA
+ipv4     2 udp      17 119 src=192.168.1.2 dst=10.0.2.2 sport=36833 dport=46466 src=10.0.2.2 dst=10.0.1.2 sport=46466 dport=36833 [ASSURED] mark=0 zone=0 use=2
+ipv4     2 udp      17 9 src=192.168.1.2 dst=10.0.0.2 sport=36833 dport=8080 src=10.0.0.2 dst=10.0.1.2 sport=8080 dport=36833 mark=0 zone=0 use=2
+ipv4     2 udp      17 29 src=192.168.1.2 dst=192.168.2.2 sport=36833 dport=46466 [UNREPLIED] src=192.168.2.2 dst=10.0.1.2 sport=46466 dport=36833 mark=0 zone=0 use=2
+--- conntrack natB
+ipv4     2 udp      17 9 src=192.168.2.2 dst=10.0.0.2 sport=46466 dport=8080 src=10.0.0.2 dst=10.0.2.2 sport=8080 dport=46466 mark=0 zone=0 use=2
+ipv4     2 udp      17 27 src=192.168.2.2 dst=192.168.1.2 sport=46466 dport=36833 [UNREPLIED] src=192.168.1.2 dst=10.0.2.2 sport=36833 dport=46466 mark=0 zone=0 use=2
+ipv4     2 udp      17 119 src=192.168.2.2 dst=10.0.1.2 sport=46466 dport=36833 src=10.0.1.2 dst=10.0.2.2 sport=36833 dport=46466 [ASSURED] mark=0 zone=0 use=2
+--- server
+READY 100.64.0.1
+DONE recv 12000000 sha256=912414ca3153efeb642061575b9ac4293a82dbb99a69bbbf17b41aa60e8ce542
+--- direct UDP seen on the wan (A to B, B to A)
+    8986 11597124            17   --  *      *       10.0.1.2             10.0.2.2            
+    2495   257580            17   --  *      *       10.0.2.2             10.0.1.2            
+--- hub
+hub on http://10.0.0.2:8080 (STUN udp/8080, TLS DERP tcp/8081)
+map: [ec, 4f, a9] endpoints [192.168.2.2:46466, 10.0.2.2:46466]
+map: [4d, f8, 4c] endpoints [192.168.1.2:36833, 10.0.1.2:36833]
+
+==========
+
+# symmetric: bd7d6794d39450f5e4e4a0578a110f006027590e 2026-11-15T01:53:19Z
+# cmd: crates/apps/rusty_tailscale/crates/ts-hub/spike-c/two-nat.sh symmetric 12000000   (root, Linux netns + iptables)
+mode=symmetric server tailnet ip=100.64.0.1
+sent 688128 path=relay
+sent 1343488 path=relay
+sent 1998848 path=relay
+sent 2654208 path=relay
+sent 3309568 path=relay
+sent 3964928 path=relay
+sent 4620288 path=relay
+sent 5275648 path=relay
+sent 5931008 path=relay
+sent 6586368 path=relay
+sent 7241728 path=relay
+sent 7897088 path=relay
+sent 8552448 path=relay
+sent 9207808 path=relay
+sent 9863168 path=relay
+sent 10518528 path=relay
+sent 11173888 path=relay
+sent 11829248 path=relay
+DONE sent 12000000 sha256=912414ca3153efeb642061575b9ac4293a82dbb99a69bbbf17b41aa60e8ce542
+--- conntrack natA
+ipv4     2 udp      17 9 src=192.168.1.2 dst=10.0.0.2 sport=52204 dport=8080 src=10.0.0.2 dst=10.0.1.2 sport=8080 dport=27464 mark=0 zone=0 use=2
+ipv4     2 udp      17 29 src=192.168.1.2 dst=192.168.2.2 sport=52204 dport=60750 [UNREPLIED] src=192.168.2.2 dst=10.0.1.2 sport=60750 dport=22278 mark=0 zone=0 use=2
+ipv4     2 udp      17 29 src=192.168.1.2 dst=10.0.2.2 sport=52204 dport=3418 [UNREPLIED] src=10.0.2.2 dst=10.0.1.2 sport=3418 dport=62328 mark=0 zone=0 use=2
+--- conntrack natB
+ipv4     2 udp      17 27 src=192.168.2.2 dst=192.168.1.2 sport=60750 dport=52204 [UNREPLIED] src=192.168.1.2 dst=10.0.2.2 sport=52204 dport=46429 mark=0 zone=0 use=2
+ipv4     2 udp      17 8 src=192.168.2.2 dst=10.0.0.2 sport=60750 dport=8080 src=10.0.0.2 dst=10.0.2.2 sport=8080 dport=3418 mark=0 zone=0 use=2
+ipv4     2 udp      17 27 src=192.168.2.2 dst=10.0.1.2 sport=60750 dport=27464 [UNREPLIED] src=10.0.1.2 dst=10.0.2.2 sport=27464 dport=47501 mark=0 zone=0 use=2
+--- server
+READY 100.64.0.1
+DONE recv 12000000 sha256=912414ca3153efeb642061575b9ac4293a82dbb99a69bbbf17b41aa60e8ce542
+--- direct UDP seen on the wan (A to B, B to A)
+     103    15656            17   --  *      *       10.0.1.2             10.0.2.2            
+     103    15656            17   --  *      *       10.0.2.2             10.0.1.2            
+--- hub
+hub on http://10.0.0.2:8080 (STUN udp/8080, TLS DERP tcp/8081)
+map: [b9, 98, 53] endpoints [192.168.2.2:60750, 10.0.2.2:3418]
+map: [b1, 97, 78] endpoints [192.168.1.2:52204, 10.0.1.2:27464]

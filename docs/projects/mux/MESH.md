@@ -171,16 +171,31 @@ the story with almost no new code.
 ## Spike results (2026-11-13 to 2026-11-15)
 
 All spikes ran on throwaway branches and are **not merged** (D248, D255). A, A-W and the dial
-path are recorded in the pack as D257; B and C are new here. Everything below is
-agent-observed; the branches are the evidence.
+path are recorded in the pack as D257; B and C are new here. Branches are pinned to the commit
+each result was observed at; later commits on `spike/mesh-hub` only add this evidence.
 
-| Spike | Result | Branch | Evidence |
+| Spike | Result | Commit | Evidence and status |
 |---|---|---|---|
-| **A** embedded node | **Pass** | `spike/mesh-a` | `rusty-mux-server --features mesh` joined Headscale; `ts:spike` read from the netmap; allowlist admit and refuse-before-`Hello`; 1 MiB SHA-256 match (D257) |
-| **A-W** Windows node | **Pass** | `spike/mesh-a-w` | `ts-net` node on Windows, no admin, no `tailscaled`, no TUN (D257) |
-| **Dial** client path | **Pass** | `spike/mesh-dial` | Windows `rusty-mux-ctl whoami ts:spike`, 1 MiB match, the real `rusty-mux` TUI attaches, revocation refused (D257) |
-| **B** first-party hub | **Pass** | `spike/mesh-hub` | Two unmodified `ts-net` nodes registered against the hub, saw each other, moved 4 MiB through its DERP with a SHA-256 match (4 s, release build). Stock `tailscaled` 1.86.2 (two instances, WSL2 on Beast, userspace) joined, pinged `via DERP(hub)` with direct paths forced off, and moved 5 MiB with a SHA-256 match. An unregistered node key is refused by the relay |
-| **C** direct path | **Pass** | `spike/mesh-hub` (`ts-hub/spike-c/two-nat.sh`) | Cone NAT: DERP to direct about 2 s after the transfer started, a 12 MB paced transfer survived the move with a SHA-256 match, about 11.7 MB went direct. Symmetric NAT: stayed on DERP, the same transfer completed with a SHA-256 match |
+| **A** embedded node | Pass | `spike/mesh-a` `ce9572d6` | Agent-reported on Beast (D257): `rusty-mux-server --features mesh` joined Headscale 0.26; `ts:spike` read from the netmap; allowlist admit and refuse-before-`Hello`; 1 MiB SHA-256 match |
+| **A-W** Windows node | Pass | `spike/mesh-a-w` `9da3e542` | Agent-reported on Beast (D257): `ts-net` node on Windows, no admin, no `tailscaled`, no TUN |
+| **Dial** client path | Pass | `spike/mesh-dial` `700df0ab` | Agent-reported on Beast (D257): Windows `rusty-mux-ctl whoami ts:spike`, 1 MiB match, the real `rusty-mux` TUI attaches, revocation refused |
+| **B** hub, embedded nodes | Pass | `spike/mesh-hub` `bd7d6794` | Reproducible: `cargo test --release -p ts-hub --test mesh` (two `ts-net` nodes, 4 MiB through the hub's DERP, SHA-256 compared in the test; 4 s). Run by the agent in the cloud container; not retained as a log |
+| **B** hub, stock client | Pass | `spike/mesh-hub` `009c97d8`, then `43d80f23` | **Agent-reported, not independently verified.** Stock `tailscaled` 1.86.2, two instances in WSL2 Fedora on Beast, userspace networking, `TS_DEBUG_ALWAYS_USE_DERP=1`, hub with a self-signed certificate on its TLS DERP port. Reported: `tailscale ping` `via DERP(hub)`; 9000 B and 5 242 880 B moved through `tailscale serve` + `tailscale nc` to a Python receiver, sent and received SHA-256 `2e85481a...58cd` equal for the 5 MiB file; hub stderr showed no drops. The Beast session's command output was not saved to the repository |
+| **C** direct path | Pass | `spike/mesh-hub` `bd7d6794` | Retained: [`evidence/mesh-spike-c-2026-11-15.txt`](evidence/mesh-spike-c-2026-11-15.txt), a rerun at the pinned commit. Cone: `path=relay` for the first second, then `path=direct` for the rest, 12 000 000 B, sender and receiver SHA-256 `912414ca...2542` equal, 11.6 MB counted on the direct wan path. Symmetric: 18 of 18 progress lines `path=relay`, no direct, same transfer completes, same SHA-256 |
+
+Commands. Spike C (as root, Linux, `iproute2` and `iptables` installed; the script builds
+nothing, so build first):
+
+```sh
+git checkout bd7d6794
+cargo build --release -p ts-hub --example hub --example mesh_node
+# the hub needs a PKCS#8 PEM certificate and key, e.g. openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj /CN=hub -keyout /tmp/hubtls/k.pem -out /tmp/hubtls/c.pem
+crates/apps/rusty_tailscale/crates/ts-hub/spike-c/two-nat.sh cone 12000000
+crates/apps/rusty_tailscale/crates/ts-hub/spike-c/two-nat.sh symmetric 12000000
+```
+
+The script is at that full path in `Rusty-Mill/rusty_mill`, branch `spike/mesh-hub`; a shorter
+path such as `ts-hub/spike-c/two-nat.sh` does not exist.
 
 ### What spike B taught about the hub
 
