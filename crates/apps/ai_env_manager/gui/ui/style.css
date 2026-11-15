@@ -94,11 +94,13 @@ textarea.ed-text:focus{outline:2px solid var(--focus);outline-offset:2px}
 .ed-stack{position:relative;min-width:0;height:100%}
 .ed-stack .ed-text{position:absolute;inset:0;width:100%}
 .ed-hl{overflow:hidden;pointer-events:none;padding-right:32px;padding-bottom:32px}
-textarea.ed-text{background:transparent;color:transparent;caret-color:var(--text)}
-textarea.ed-text::selection{background:#4c8dff66;color:transparent}
+/* Colour only (no bold or italic), so glyph widths match and the caret stays on the text. The textarea
+   is see-through only while the colour layer is live; otherwise it is an ordinary opaque textarea. */
+.ed-code.live textarea.ed-text{background:transparent;color:transparent;caret-color:var(--text)}
+.ed-code.live textarea.ed-text::selection{background:#4c8dff66;color:transparent}
 .ed-code textarea.ed-text:focus{outline-offset:-2px}
-.tok-head{color:var(--accent);font-weight:600}.tok-key{color:var(--tok-key)}.tok-meta,.tok-mark{color:var(--accent)}
-.tok-code,.tok-fence{color:var(--tok-code)}.tok-quote{color:var(--faint);font-style:italic}.tok-bold{font-weight:600}
+.tok-head{color:var(--accent)}.tok-key{color:var(--tok-key)}.tok-meta,.tok-mark{color:var(--accent)}
+.tok-code,.tok-fence{color:var(--tok-code)}.tok-quote{color:var(--faint)}.tok-bold{color:var(--warn-text)}
 .diff{padding:0;white-space:normal}
 .diff div{padding:0 12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .diff .added{background:var(--accent-bg);color:var(--text)}

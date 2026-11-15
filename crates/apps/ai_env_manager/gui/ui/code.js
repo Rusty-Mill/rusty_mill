@@ -3,6 +3,7 @@
 // `tokenize` is pure and also loads under Node for tests.
 (function () {
   const MAX_LINES = 4000; // past this a file is shown plain: colouring must never slow typing
+  const MAX_CHARS = 300000; // past this the editor drops its colour layer and types into a plain textarea
 
   const MD = /\.(md|markdown)$/i;
   const KEY = /^([A-Za-z0-9_-]+)(:)(.*)$/;
@@ -25,9 +26,15 @@
   function tokenize(text, path) {
     const lines = text.split("\n");
     if (!MD.test(path ?? "") || lines.length > MAX_LINES) return lines.map((l) => (l ? [["", l]] : []));
-    let front = lines[0] === "---" ? "open" : "none"; // frontmatter: open, then done
+    let front = lines[0].replace(/\r$/, "") === "---" ? "open" : "none"; // frontmatter: open, then done
     let fence = false;
-    return lines.map((l, i) => {
+    return lines.map((raw, i) => {
+      const cr = raw.endsWith("\r"); // CRLF files: colour the line, keep the \r as plain text
+      const l = cr ? raw.slice(0, -1) : raw;
+      const parts = line(l, i);
+      return cr ? [...parts, ["", "\r"]] : parts;
+    });
+    function line(l, i) {
       if (front === "open") {
         if (i > 0 && l === "---") { front = "done"; return [["tok-meta", l]]; }
         if (i === 0) return [["tok-meta", l]];
@@ -42,7 +49,7 @@
       const list = /^(\s*(?:[-*+]|\d+[.)])\s)(.*)$/.exec(l);
       if (list) return [["tok-mark", list[1]], ...inline(list[2])];
       return inline(l);
-    });
+    }
   }
 
   // Fills `layer` with coloured spans, one text node per line break, so its textContent is `text`.
@@ -71,7 +78,7 @@
     gutter.className = `ed-gutter d${Math.min(String(n).length, 6)}`;
   }
 
-  const api = { tokenize, paint, number, MAX_LINES };
+  const api = { tokenize, paint, number, MAX_LINES, MAX_CHARS };
   if (typeof module !== "undefined") module.exports = api;
   else window.Code = api;
 })();

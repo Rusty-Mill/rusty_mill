@@ -22,6 +22,9 @@ assert.deepStrictEqual(classes("---\nname: x\n"), [["tok-meta"], ["tok-key", "to
 const big = "# x\n".repeat(Code.MAX_LINES + 1);
 assert.deepStrictEqual(classes(big).flat(), [], "a huge file is plain");
 assert.strictEqual(joined(""), "", "empty text");
+const crlf = "---\r\nname: x\r\n---\r\n# T\r\n";
+assert.strictEqual(joined(crlf), crlf, "CRLF round trips");
+assert.deepStrictEqual(classes(crlf).slice(0, 4), [["tok-meta"], ["tok-key", "tok-meta"], ["tok-meta"], ["tok-head"]], "CRLF keeps frontmatter and headings");
 
 (async () => {
   const browser = await chromium.launch();
@@ -64,6 +67,11 @@ assert.strictEqual(joined(""), "", "empty text");
     return [ta.top - hl.top, ta.left - hl.left, ta.width - hl.width];
   });
   assert.deepStrictEqual(ys, [0, 0, 0], "layers overlap exactly");
+  assert.ok(await page.evaluate(() => document.getElementById("ed-code").classList.contains("live")), "colour layer live");
+  // A huge file falls back to a plain opaque textarea: no colour layer to rebuild.
+  await page.evaluate((n) => { const t = document.getElementById("ed-text"); t.value = "x".repeat(n); t.dispatchEvent(new Event("input")); }, Code.MAX_CHARS + 1);
+  await page.waitForFunction(() => !document.getElementById("ed-code").classList.contains("live"));
+  assert.ok(await page.isHidden("#ed-hl"), "colour layer hidden for a huge file");
   const inline = await page.evaluate(() => document.querySelectorAll("#editor [style]").length);
   assert.strictEqual(inline, 0, "no inline style attributes");
 

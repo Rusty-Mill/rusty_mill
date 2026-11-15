@@ -246,6 +246,7 @@ async function loadFiles() {
 async function openFile(path) {
   closeWarn();
   edError(null);
+  $("ed-gutter").scrollTop = 0;
   ed.pushing = null; // a review belongs to the screen it was made on
   ed.reviewed = null;
   try {
@@ -300,7 +301,7 @@ function edShow() {
   $("ed-code").hidden = !(open && (m === "view" || m === "edit"));
   $("ed-view").hidden = !(open && m === "view");
   $("ed-text").hidden = m !== "edit";
-  $("ed-hl").hidden = m !== "edit";
+  if (m !== "edit") $("ed-code").classList.remove("live");
   $("ed-diff").hidden = m !== "review";
   if (open && m === "view") {
     Code.paint($("ed-view"), ed.text, ed.path);
@@ -321,7 +322,10 @@ function edShow() {
 // Code view: the textarea (or the read-only view) is the scroller; the colour layer and the gutter follow it.
 function codeSync() {
   const t = $("ed-text").value;
-  Code.paint($("ed-hl"), `${t}\n`, ed.path);
+  const live = t.length <= Code.MAX_CHARS;
+  $("ed-code").classList.toggle("live", live);
+  $("ed-hl").hidden = !live;
+  if (live) Code.paint($("ed-hl"), `${t}\n`, ed.path);
   Code.number($("ed-gutter"), t);
   follow($("ed-text"));
 }
