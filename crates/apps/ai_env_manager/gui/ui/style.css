@@ -3,8 +3,8 @@
 --accent:#6ca8ff;--on-accent:#0d1014;--accent-bg:#152238;--btn:#1a2028;--btn-line:#343d4a;--focus:#9cc4ff;
 --warn:#f2b45a;--warn-text:#f5d9a6;--warn-bg:#1b160d;--warn-line:#6b5220;--warn-line2:#3a2e14;
 --err:#ff8a80;--err-bg:#2a1215;--err-line:#6b2b2e;--scrim:#080a0dcc;
---mono:ui-monospace,"IBM Plex Mono","Cascadia Mono",Consolas,monospace;--ease:160ms cubic-bezier(.2,.8,.2,1)}
-:root[data-theme=light]{color-scheme:light;--bg:#f5f6f8;--panel:#fff;--hover:#f1f4f8;--line:#dde2ea;--line2:#e8ecf2;--text:#161b22;--dim:#475163;--faint:#667084;
+--tok-key:#7fd1b9;--tok-code:#d2a8ff;--mono:ui-monospace,"IBM Plex Mono","Cascadia Mono",Consolas,monospace;--ease:160ms cubic-bezier(.2,.8,.2,1)}
+:root[data-theme=light]{color-scheme:light;--tok-key:#0f766e;--tok-code:#7e3ab8;--bg:#f5f6f8;--panel:#fff;--hover:#f1f4f8;--line:#dde2ea;--line2:#e8ecf2;--text:#161b22;--dim:#475163;--faint:#667084;
 --accent:#1a64d8;--on-accent:#fff;--accent-bg:#e8f0fc;--btn:#f1f3f7;--btn-line:#cdd4df;--focus:#1a64d8;
 --warn:#a35f00;--warn-text:#5e3b00;--warn-bg:#fff7e6;--warn-line:#e6c27f;--warn-line2:#f0dcb0;
 --err:#b3261e;--err-bg:#fdecea;--err-line:#f1b8b3;--scrim:#161b2266}
@@ -82,8 +82,23 @@ dialog::backdrop{background:var(--scrim)}
 .ed-files .ro{color:var(--faint)}
 .ed-pane{display:flex;flex-direction:column;gap:8px;padding:14px 20px;min-width:0}
 .ed-pane p{margin:0;font-size:13px}
-.ed-text{flex:1;min-height:320px;max-height:55vh;margin:0;padding:12px;overflow:auto;resize:none;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text);font:12px/1.5 var(--mono);white-space:pre;tab-size:4}
+.ed-text{flex:1;min-height:320px;max-height:55vh;margin:0;padding:12px;overflow:auto;resize:none;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text);font:12px/18px var(--mono);white-space:pre;tab-size:4}
 textarea.ed-text:focus{outline:2px solid var(--focus);outline-offset:2px}
+/* Code view: gutter + one scroller. The editor is a transparent textarea over a coloured copy of its
+   text; both use the same font, padding and line height so the lines match. */
+.ed-code{flex:none;display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:minmax(0,1fr);height:min(55vh,520px);min-height:320px;border:1px solid var(--line);border-radius:10px;background:var(--bg);overflow:hidden}
+.ed-code[hidden]{display:none}
+.ed-code .ed-text{min-height:0;max-height:none;height:100%;border:0;border-radius:0}
+.ed-gutter{margin:0;padding:12px 10px 12px 12px;overflow:hidden;text-align:right;font:12px/18px var(--mono);color:var(--faint);background:var(--panel);border-right:1px solid var(--line2);user-select:none}
+.ed-gutter.d1,.ed-gutter.d2,.ed-gutter.d3{min-width:calc(3ch + 22px)}.ed-gutter.d4{min-width:calc(4ch + 22px)}.ed-gutter.d5{min-width:calc(5ch + 22px)}.ed-gutter.d6{min-width:calc(6ch + 22px)}
+.ed-stack{position:relative;min-width:0;height:100%}
+.ed-stack .ed-text{position:absolute;inset:0;width:100%}
+.ed-hl{overflow:hidden;pointer-events:none;padding-right:32px;padding-bottom:32px}
+textarea.ed-text{background:transparent;color:transparent;caret-color:var(--text)}
+textarea.ed-text::selection{background:#4c8dff66;color:transparent}
+.ed-code textarea.ed-text:focus{outline-offset:-2px}
+.tok-head{color:var(--accent);font-weight:600}.tok-key{color:var(--tok-key)}.tok-meta,.tok-mark{color:var(--accent)}
+.tok-code,.tok-fence{color:var(--tok-code)}.tok-quote{color:var(--faint);font-style:italic}.tok-bold{font-weight:600}
 .diff{padding:0;white-space:normal}
 .diff div{padding:0 12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .diff .added{background:var(--accent-bg);color:var(--text)}

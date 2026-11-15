@@ -293,10 +293,15 @@ function edShow() {
   }
   const open = ed.path !== null;
   const m = ed.mode;
+  $("ed-code").hidden = !(open && (m === "view" || m === "edit"));
   $("ed-view").hidden = !(open && m === "view");
   $("ed-text").hidden = m !== "edit";
+  $("ed-hl").hidden = m !== "edit";
   $("ed-diff").hidden = m !== "review";
-  if (open && m === "view") $("ed-view").textContent = ed.text;
+  if (open && m === "view") {
+    Code.paint($("ed-view"), ed.text, ed.path);
+    Code.number($("ed-gutter"), ed.text);
+  }
   $("ed-note").textContent = !open
     ? ed.files.length ? "Pick a file." : ""
     : `${ed.path}. ${EDIT_NOTE[ed.ownership] ?? ""}${ed.editable ? sharedNote() : " Read-only."}`;
@@ -308,6 +313,27 @@ function edShow() {
   $("ed-save").hidden = m !== "review";
   $("ed-place").disabled = m !== "view";
 }
+
+// Code view: the textarea (or the read-only view) is the scroller; the colour layer and the gutter follow it.
+function codeSync() {
+  const t = $("ed-text").value;
+  Code.paint($("ed-hl"), `${t}\n`, ed.path);
+  Code.number($("ed-gutter"), t);
+  follow($("ed-text"));
+}
+function follow(from) {
+  $("ed-hl").scrollTop = from.scrollTop;
+  $("ed-hl").scrollLeft = from.scrollLeft;
+  $("ed-gutter").scrollTop = from.scrollTop;
+}
+let queued = false;
+$("ed-text").addEventListener("input", () => {
+  if (queued) return;
+  queued = true;
+  requestAnimationFrame(() => { queued = false; codeSync(); });
+});
+$("ed-text").addEventListener("scroll", (e) => follow(e.target));
+$("ed-view").addEventListener("scroll", (e) => follow(e.target));
 
 $("ed-place").addEventListener("change", loadFiles); // the select is disabled while editing
 $("ed-close").addEventListener("click", () => guard(() => $("editor").close(), "Closing"));
@@ -322,6 +348,7 @@ $("ed-edit").addEventListener("click", () => {
   edFoot();
   $("ed-text").value = ed.text;
   edShow();
+  codeSync();
   $("ed-text").focus();
 });
 $("ed-back").addEventListener("click", () => {
