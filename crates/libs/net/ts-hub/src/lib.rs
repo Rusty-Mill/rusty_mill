@@ -80,6 +80,19 @@ impl<S: NodeStore> Hub<S> {
         Some(map)
     }
 
+    /// A netmap and a change cursor that is current *before* the netmap is
+    /// read, so a change landing after the read is never marked seen: the
+    /// stream either has it in this frame or wakes for it.
+    fn snapshot(
+        &self,
+        machine: &MachinePublic,
+        omit_peers: bool,
+    ) -> Option<(MapResponse, watch::Receiver<u64>)> {
+        let mut rx = self.changes.clone();
+        rx.borrow_and_update();
+        Some((self.netmap(machine, omit_peers)?, rx))
+    }
+
     fn locked<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
         let mut guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
@@ -235,7 +248,7 @@ impl<S: NodeStore> Hub<S> {
             self.bump();
         }
         let zstd = req.compress == "zstd";
-        let Some(first) = self.netmap(&machine, req.omit_peers) else {
+        let Some((first, mut rx)) = self.snapshot(&machine, req.omit_peers) else {
             return send_status(respond, 404).await;
         };
         if !req.stream {
@@ -245,8 +258,6 @@ impl<S: NodeStore> Hub<S> {
             .send_response(ok_json_headers(), false)
             .await
             .map_err(HubError::H2)?;
-        let mut rx = self.changes.clone();
-        rx.borrow_and_update();
         stream.send_data(frame(&first, zstd)?, false).await?;
         loop {
             let frame_bytes = match rusty_tokio::time::timeout(KEEPALIVE, rx.changed()).await {

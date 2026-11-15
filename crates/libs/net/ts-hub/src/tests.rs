@@ -133,3 +133,56 @@ fn every_netmap_carries_a_filter_that_admits_all_traffic() {
     assert_eq!(rules[0].src_ips, ["*"]);
     assert_eq!(rules[0].dst_ports[0].ports.last, u16::MAX);
 }
+
+/// A store that runs `RACE` right after it builds a netmap: a change that
+/// lands between the snapshot and the first frame.
+#[derive(Default)]
+struct Racy {
+    inner: MemoryStore,
+}
+
+impl NodeStore for Racy {
+    fn add_preauth(&mut self, key: &str, login: &str) {
+        self.inner.add_preauth(key, login);
+    }
+    fn register(
+        &mut self,
+        machine: MachinePublic,
+        node_key: NodePublic,
+        hostname: &str,
+        auth_key: &str,
+    ) -> Result<(), RegisterError> {
+        self.inner.register(machine, node_key, hostname, auth_key)
+    }
+    fn update(&mut self, m: &MachinePublic, d: DiscoPublic, e: Vec<SocketAddr>) -> bool {
+        self.inner.update(m, d, e)
+    }
+    fn netmap(&self, machine: &MachinePublic, omit_peers: bool) -> Option<MapResponse> {
+        let map = self.inner.netmap(machine, omit_peers);
+        if let Some(hook) = RACE.lock().unwrap().take() {
+            hook();
+        }
+        map
+    }
+}
+
+static RACE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
+#[rusty_tokio::test]
+async fn a_change_after_the_first_snapshot_still_wakes_the_stream() {
+    let hub = Hub::with_store(Racy::default());
+    hub.add_preauth("k1", "alice");
+    let machine = MachinePublic([1; 32]);
+    hub.locked(|s| s.register(machine, NodePublic([2; 32]), "a", "k1"))
+        .unwrap();
+    let racing = hub.clone();
+    *RACE.lock().unwrap() = Some(Box::new(move || racing.bump()));
+
+    let (_first, mut rx) = hub.snapshot(&machine, false).unwrap();
+
+    let woke = rusty_tokio::time::timeout(Duration::from_secs(5), rx.changed()).await;
+    assert!(
+        woke.is_ok(),
+        "the change was marked seen without being sent"
+    );
+}
