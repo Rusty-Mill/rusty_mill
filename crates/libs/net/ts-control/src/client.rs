@@ -521,7 +521,7 @@ mod tests {
     /// toolchain and no prebuilt binary. A failed build is an `Err`.
     async fn go_h2c_server() -> Result<Option<std::path::PathBuf>, String> {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../interop/h2c-server-go");
+            .join("../../../apps/rusty_tailscale/interop/h2c-server-go");
         let bin = dir.join("h2c-server-go");
         if bin.exists() {
             return Ok(Some(bin));
