@@ -15,6 +15,10 @@ use ts_types::{
 
 /// The all-zero time Tailscale uses for "never expires".
 const ZERO_TIME: &str = "0001-01-01T00:00:00Z";
+/// The login of the user every tagged node belongs to.
+pub(crate) const TAGGED_LOGIN: &str = "tagged-devices";
+/// The one tag the hub gives tagged nodes.
+const TAG: &str = "tag:mesh";
 /// Longest DNS label.
 const MAX_LABEL: usize = 63;
 
@@ -25,6 +29,9 @@ pub struct KeyPolicy {
     pub ttl: Option<u64>,
     /// Whether more than one machine may register with the key.
     pub reusable: bool,
+    /// Whether nodes that register with the key are tagged (servers, not a
+    /// person's devices): their principal is `ts-node:NAME`, not `ts:LOGIN`.
+    pub tagged: bool,
 }
 
 impl KeyPolicy {
@@ -32,6 +39,7 @@ impl KeyPolicy {
     pub const REUSABLE: Self = Self {
         ttl: None,
         reusable: true,
+        tagged: false,
     };
 }
 
@@ -49,6 +57,9 @@ pub struct NodeRec {
     #[serde(skip)]
     pub endpoints: Vec<SocketAddr>,
     pub ip: Ipv4Addr,
+    /// Registered with a tagged key.
+    #[serde(default)]
+    pub tagged: bool,
     /// Unix seconds after which the node must register again; `None` never.
     #[serde(default)]
     pub expires: Option<u64>,
@@ -92,6 +103,11 @@ pub trait NodeStore: Send + 'static {
         now: u64,
     ) -> Result<(), RegisterError>;
 
+    /// Forgets a pre-auth key, so nobody can register with it again. Nodes
+    /// already registered with it stay; revoke their machines to remove
+    /// them. `false` if there was no such key.
+    fn remove_preauth(&mut self, key: &str) -> Result<bool, RegisterError>;
+
     /// Removes the machine from the table and bans it: it cannot register
     /// again, whatever key it holds. The outcome carries the node key so the
     /// caller can close the relay session even when saving failed (the
@@ -130,6 +146,8 @@ struct PreauthRec {
     login: String,
     expires: Option<u64>,
     reusable: bool,
+    #[serde(default)]
+    tagged: bool,
     /// The machine that spent a single-use key.
     used_by: Option<MachinePublic>,
 }
@@ -169,13 +187,13 @@ impl MemoryStore {
         Ok(store)
     }
 
-    /// The login `key` admits `machine` as, if the key may be used now.
+    /// The login (and whether tagged) `key` admits `machine` as, if the key may be used now.
     fn check_key(
         &self,
         key: &str,
         machine: &MachinePublic,
         now: u64,
-    ) -> Result<String, RegisterError> {
+    ) -> Result<(String, bool), RegisterError> {
         if self.revoked.contains(machine) {
             return Err(RegisterError::Revoked);
         }
@@ -187,7 +205,7 @@ impl MemoryStore {
             Some(spent_by) if !rec.reusable && spent_by != *machine => {
                 Err(RegisterError::BadAuthKey)
             }
-            _ => Ok(rec.login.clone()),
+            _ => Ok((rec.login.clone(), rec.tagged)),
         }
     }
 
@@ -256,6 +274,7 @@ impl NodeStore for MemoryStore {
                 login: login.to_string(),
                 expires: policy.ttl.map(|t| now.saturating_add(t)),
                 reusable: policy.reusable,
+                tagged: policy.tagged,
                 used_by: None,
             },
         );
@@ -270,12 +289,13 @@ impl NodeStore for MemoryStore {
         auth_key: &str,
         now: u64,
     ) -> Result<(), RegisterError> {
-        let login = self.check_key(auth_key, &machine, now)?;
+        let (login, tagged) = self.check_key(auth_key, &machine, now)?;
         let hostname = self.unique_label(hostname, &machine);
         let expires = self.node_ttl.map(|t| now.saturating_add(t));
         if let Some(n) = self.nodes.iter_mut().find(|n| n.machine == machine) {
             n.node_key = node_key;
             n.login = login;
+            n.tagged = tagged;
             n.hostname = hostname;
             n.expires = expires;
         } else {
@@ -290,6 +310,7 @@ impl NodeStore for MemoryStore {
                 disco: None,
                 endpoints: Vec::new(),
                 ip: Ipv4Addr::new(100, 64, 0, host),
+                tagged,
                 expires,
             });
         }
@@ -297,6 +318,10 @@ impl NodeStore for MemoryStore {
             rec.used_by = Some(machine);
         }
         Ok(())
+    }
+
+    fn remove_preauth(&mut self, key: &str) -> Result<bool, RegisterError> {
+        Ok(self.preauth.remove(key).is_some())
     }
 
     fn revoke(&mut self, machine: &MachinePublic) -> Revocation {
@@ -361,7 +386,7 @@ impl NodeStore for MemoryStore {
 
 impl MemoryStore {
     fn profiles(&self) -> Vec<UserProfile> {
-        let mut logins: Vec<&str> = self.nodes.iter().map(|n| n.login.as_str()).collect();
+        let mut logins: Vec<&str> = self.nodes.iter().map(wire_login).collect();
         logins.sort_unstable();
         logins.dedup();
         logins
@@ -386,6 +411,12 @@ fn user_id(login: &str) -> UserID {
     )
 }
 
+/// The login a node's wire user carries: tagged nodes belong to the special
+/// tagged-devices user, as in Tailscale.
+fn wire_login(n: &NodeRec) -> &str {
+    if n.tagged { TAGGED_LOGIN } else { &n.login }
+}
+
 fn wire_node(n: &NodeRec) -> Node {
     let addr = IpPrefix {
         addr: IpAddr::V4(n.ip),
@@ -395,7 +426,12 @@ fn wire_node(n: &NodeRec) -> Node {
         id: NodeID(n.id),
         stable_id: StableNodeID(format!("n{}", n.id)),
         name: format!("{}.mesh.", n.hostname),
-        user: user_id(&n.login),
+        user: user_id(wire_login(n)),
+        tags: if n.tagged {
+            vec![TAG.to_string()]
+        } else {
+            Vec::new()
+        },
         key: Some(n.node_key),
         key_expiry: Rfc3339(ZERO_TIME.to_string()),
         machine: Some(n.machine),
@@ -411,7 +447,6 @@ fn wire_node(n: &NodeRec) -> Node {
             ..Default::default()
         }),
         created: Rfc3339(ZERO_TIME.to_string()),
-        ..Default::default()
     }
 }
 
@@ -528,6 +563,7 @@ mod tests {
             KeyPolicy {
                 ttl: Some(60),
                 reusable: true,
+                tagged: false,
             },
         );
         s.register(m(1), k(1), "a", "k", 159).unwrap();

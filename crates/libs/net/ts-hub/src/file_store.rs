@@ -133,6 +133,10 @@ impl NodeStore for FileStore {
         self.saved(|s| s.register(machine, node_key, hostname, auth_key, now))
     }
 
+    fn remove_preauth(&mut self, key: &str) -> Result<bool, RegisterError> {
+        self.saved(|s| s.remove_preauth(key))
+    }
+
     fn revoke(&mut self, machine: &MachinePublic) -> Revocation {
         // Never rolled back: a revoke that could not be saved still holds
         // for this run, and the caller is told it is not durable.

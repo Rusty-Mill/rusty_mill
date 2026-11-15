@@ -13,6 +13,7 @@
 mod derp;
 mod file_store;
 mod limits;
+mod policy;
 mod store;
 pub mod stun;
 mod zstd;
@@ -30,14 +31,13 @@ use rusty_tokio::net::{TcpListener, TcpStream};
 use rusty_tokio::sync::watch;
 use ts_control::controlbase::{self, INITIATION_LEN};
 use ts_key::MachinePrivate;
-use ts_types::tailcfg::{
-    FilterRule, Hostinfo, MapResponse, NetPortRange, PortRange, RegisterResponse,
-};
+use ts_types::tailcfg::{Hostinfo, MapResponse, RegisterResponse};
 use ts_types::{DiscoPublic, MachinePublic, NodePublic};
 
 pub use derp::DerpRefusal;
 pub use file_store::{FileStore, StoreError};
 pub use limits::Limits;
+pub use policy::{Grant, Policy, PolicyError, Selector, principal_of};
 pub use store::{KeyPolicy, MemoryStore, NodeRec, NodeStore, RegisterError, Revocation};
 
 use limits::{Counter, Keyed};
@@ -58,6 +58,8 @@ pub struct Hub<S: NodeStore = MemoryStore> {
     key: MachinePrivate,
     store: Mutex<S>,
     limits: Limits,
+    /// Who may reach whom; closed until set.
+    policy: Mutex<Arc<Policy>>,
     relay: derp::Relay,
     /// The `DERPMap` every netmap carries, once the hub knows its address.
     derp_map: Mutex<Option<serde_json::Value>>,
@@ -96,6 +98,7 @@ impl<S: NodeStore> Hub<S> {
             key,
             store: Mutex::new(store),
             limits,
+            policy: Mutex::new(Arc::new(Policy::default())),
             relay: derp::Relay::new(),
             derp_map: Mutex::new(None),
             conns: Counter::default(),
@@ -116,10 +119,23 @@ impl<S: NodeStore> Hub<S> {
         self.locked(|s| s.add_preauth(key, login, policy, unix_now()))
     }
 
+    /// Replaces the rules; every netmap stream is woken to receive its new
+    /// peer list and packet filter. A hub with no policy lets nothing through.
+    pub fn set_policy(&self, policy: Policy) {
+        *self.policy.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(policy);
+        self.bump();
+    }
+
+    /// Forgets a pre-auth key (see [`NodeStore::remove_preauth`]).
+    pub fn remove_preauth(&self, key: &str) -> Result<bool, RegisterError> {
+        self.locked(|s| s.remove_preauth(key))
+    }
+
     /// Removes a node and bans its machine key: it drops out of every
     /// netmap, its map streams end, its relay session is closed, and it can
     /// never register again (a reusable pre-auth key does not bring it back).
-    /// `false` if the machine was not registered. If saving the table fails
+    /// `false` if the machine was not registered (it is banned all the same,
+    /// so a revoke can be issued ahead of a registration). If saving the table fails
     /// the revoke still takes effect, and the error says it is not durable.
     pub fn revoke(&self, machine: &MachinePublic) -> Result<bool, RegisterError> {
         let revoked = self.locked(|s| s.revoke(machine));
@@ -157,8 +173,17 @@ impl<S: NodeStore> Hub<S> {
     }
 
     fn netmap(&self, machine: &MachinePublic, omit_peers: bool) -> Option<MapResponse> {
-        let mut map = self.locked(|s| s.netmap(machine, omit_peers, unix_now()))?;
-        map.packet_filter = Some(allow_all());
+        // The policy needs every peer to work out sources, so ask for the
+        // full map and drop the peers afterwards when the node did not want them.
+        let mut map = self.locked(|s| s.netmap(machine, false, unix_now()))?;
+        self.policy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .apply(&mut map);
+        if omit_peers {
+            map.peers = None;
+        }
         map.derp_map = self
             .derp_map
             .lock()
@@ -507,20 +532,6 @@ impl From<rusty_http::Error> for HubError {
 
 /// The only policy until ACLs land: every node may reach every port of every
 /// node. Without a filter a stock client drops all inbound traffic.
-fn allow_all() -> Vec<FilterRule> {
-    vec![FilterRule {
-        src_ips: vec!["*".into()],
-        dst_ports: vec![NetPortRange {
-            ip: "*".into(),
-            ports: PortRange {
-                first: 0,
-                last: u16::MAX,
-            },
-        }],
-        ip_proto: Vec::new(),
-    }]
-}
-
 /// Runs `work` with a deadline; a slow peer ends its own connection.
 async fn within<T>(
     limit: Duration,
