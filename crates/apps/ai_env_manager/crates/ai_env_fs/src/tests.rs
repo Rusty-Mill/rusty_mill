@@ -448,3 +448,35 @@ fn editing_a_marked_copy_makes_it_edited() {
     write_file(&root, &plan).unwrap();
     assert_eq!(observe(&e, &t).unwrap(), Observed::ManagedModified);
 }
+
+#[cfg(unix)]
+#[test]
+fn staged_text_is_never_more_readable_than_the_original() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = Tmp::new();
+    let (e, _) = fixture(&tmp);
+    let file = e.source.join("SKILL.md");
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    for orig in [0o600, 0o640] {
+        fs::set_permissions(&file, fs::Permissions::from_mode(orig)).unwrap();
+        let staged =
+            edit::stage_for_test(&file, b"secret", fs::metadata(&file).unwrap().permissions())
+                .unwrap();
+        // Staged, not yet published: original text, and the staged file has no
+        // wider mode than the original.
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hello");
+        assert_eq!(mode(&staged), orig);
+        fs::remove_file(staged).unwrap();
+    }
+}
+
+#[test]
+fn a_failed_stage_leaves_no_temp_file() {
+    let tmp = Tmp::new();
+    let (e, _) = fixture(&tmp);
+    let gone = e.source.join("no-such-dir/x.md");
+    assert!(
+        edit::stage_for_test(&gone, b"x", fs::metadata(&e.source).unwrap().permissions()).is_err()
+    );
+    assert_eq!(fs::read_dir(&e.source).unwrap().count(), 2);
+}
