@@ -10,8 +10,11 @@ use ai_env_core::{
 };
 use rusty_sha2::{Hash, Sha256};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A file's text and the hash of its bytes, for [`write_file`] to re-check.
@@ -89,30 +92,54 @@ pub fn read_file(root: &Path, rel: &RelPath) -> Result<FileRead, Error> {
 }
 
 /// Writes `plan` over its file under `root`, only if the file still has the
-/// hash it was read with. The new text is staged in a sibling file that is
-/// private until it holds the file's own permissions, then renamed over it, so
-/// the text is never readable by more users than could read the original. A
-/// failure before the rename leaves the original; a failure syncing the folder
-/// afterwards is reported although the new text is already in place.
+/// hash it was read with. The text is never readable by anyone who could not
+/// read the original, and the owner and group are kept or the write is
+/// refused; see [`replace`] for how, per platform.
 pub fn write_file(root: &Path, plan: &EditPlan) -> Result<(), Error> {
     let now = read_file(root, plan.path())?;
     let path = plan.path().under(root);
     if now.hash != plan.base_hash() {
         return Err(Error::Changed(path));
     }
-    let io_err = |e| Error::Io(path.clone(), e);
-    let perms = fs::metadata(&path).map_err(io_err)?.permissions();
-    let staged = stage(&path, plan.new_text().as_bytes(), perms).map_err(io_err)?;
-    fs::rename(&staged, &path).map_err(|e| {
-        let _ = fs::remove_file(&staged);
-        io_err(e)
-    })?;
-    sync_dir(&path).map_err(io_err)
+    replace(&path, plan.new_text().as_bytes()).map_err(|e| Error::Io(path, e))
 }
 
-/// Writes `bytes` to a new file beside `path`, created owner-only, synced and
-/// given `perms` last. Removes it again if any step fails.
-fn stage(path: &Path, bytes: &[u8], perms: fs::Permissions) -> io::Result<PathBuf> {
+/// Unix: stages the text in a sibling file that is owner-only until it has the
+/// original's group and mode, then renames it over the original, so a failure
+/// before the rename leaves the original. The file's owner and group must come
+/// out the same as before, else nothing is published. A failure syncing the
+/// folder afterwards is reported although the new text is already in place.
+/// Not carried over: POSIX extended ACLs and other extended attributes.
+#[cfg(unix)]
+fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let original = fs::metadata(path)?;
+    let staged = stage(path, bytes, &original)?;
+    fs::rename(&staged, path).inspect_err(|_| {
+        let _ = fs::remove_file(&staged);
+    })?;
+    fs::File::open(
+        path.parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?
+    .sync_all()
+}
+
+/// Windows: std cannot read or copy a file's ACL, and a new file would take
+/// the folder's inherited one, which can be wider. So the file is rewritten in
+/// place, which keeps its owner and ACL. The write is not crash-atomic there:
+/// a crash mid-write can leave a truncated file.
+#[cfg(not(unix))]
+fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    fs::write(path, bytes)
+}
+
+/// Writes `bytes` to a new sibling of `path`: created owner-only, given the
+/// `original`'s group (refusing if owner or group still differ), synced, and
+/// only then given its mode. Removes it again if any step fails.
+#[cfg(unix)]
+fn stage(path: &Path, bytes: &[u8], original: &fs::Metadata) -> io::Result<PathBuf> {
+    use std::os::unix::fs::{fchown, MetadataExt, OpenOptionsExt};
     static N: AtomicU64 = AtomicU64::new(0);
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let tmp = path.with_file_name(format!(
@@ -120,35 +147,31 @@ fn stage(path: &Path, bytes: &[u8], perms: fs::Permissions) -> io::Result<PathBu
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
-    let mut open = fs::OpenOptions::new();
-    open.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
-    let mut file = open.open(&tmp)?;
-    let done = file
-        .write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| file.set_permissions(perms));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    let done = (|| {
+        fchown(&file, None, Some(original.gid()))?;
+        let made = file.metadata()?;
+        if (made.uid(), made.gid()) != (original.uid(), original.gid()) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "cannot keep the file's owner and group, so it is not replaced",
+            ));
+        }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        file.set_permissions(original.permissions())
+    })();
     drop(file);
     done.map(|()| tmp.clone()).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
     })
 }
 
-/// Makes the rename durable (Unix); Windows has no folder to sync.
-#[cfg(unix)]
-fn sync_dir(path: &Path) -> io::Result<()> {
-    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
-    fs::File::open(dir.unwrap_or(Path::new(".")))?.sync_all()
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-fn sync_dir(_: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(test)]
-pub(crate) fn stage_for_test(p: &Path, b: &[u8], m: fs::Permissions) -> io::Result<PathBuf> {
+#[cfg(all(test, unix))]
+pub(crate) fn stage_for_test(p: &Path, b: &[u8], m: &fs::Metadata) -> io::Result<PathBuf> {
     stage(p, b, m)
 }
