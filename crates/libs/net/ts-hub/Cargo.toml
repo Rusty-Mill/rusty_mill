@@ -21,6 +21,7 @@ rusty_h2 = { path = "../rusty_h2", features = ["rusty-tokio"] }
 rusty_http = { workspace = true, features = ["rusty-tokio"] }
 rusty_base64.workspace = true
 rusty_log.workspace = true
+rusty_tls = { workspace = true, features = ["rusty-tokio"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -28,3 +29,5 @@ thiserror.workspace = true
 [dev-dependencies]
 ts-filter.workspace = true
 ts-stun.workspace = true
+# Throwaway certificates for the TLS tests; already used by rusty_tls's own tests.
+rcgen = "0.13"

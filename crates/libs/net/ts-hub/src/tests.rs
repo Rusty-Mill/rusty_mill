@@ -760,3 +760,121 @@ fn a_removed_pre_auth_key_registers_no_one_but_keeps_its_nodes() {
     );
     assert_eq!(hub.revoke(&a), Ok(true));
 }
+
+// ---- TLS ----
+
+use rusty_tls::{AsyncTlsStream, TrustPolicy};
+use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// A throwaway certificate for `localhost`: its PEMs and its DER.
+fn localhost_cert() -> (String, String, Vec<u8>) {
+    let rcgen::CertifiedKey { cert, key_pair } =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    (cert.pem(), key_pair.serialize_pem(), cert.der().to_vec())
+}
+
+async fn start_tls(limits: Limits) -> (Arc<Hub>, SocketAddr, Vec<u8>) {
+    let (cert, key, der) = localhost_cert();
+    let acceptor = tls_acceptor(&cert, &key).unwrap();
+    let hub = Hub::with_limits(MemoryStore::default(), limits);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    rusty_tokio::spawn(hub.clone().serve_tls(listener, acceptor));
+    (hub, addr, der)
+}
+
+async fn tls_connect(addr: SocketAddr, root: &[u8]) -> AsyncTlsStream<rusty_tokio::net::TcpStream> {
+    let tcp = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
+    let policy = TrustPolicy::PinnedAnchors(vec![root.to_vec().into()]);
+    AsyncTlsStream::new(tcp, "localhost", &policy).unwrap()
+}
+
+#[rusty_tokio::test]
+async fn the_key_endpoint_is_served_over_verified_tls() {
+    let (hub, addr, der) = start_tls(Limits::default()).await;
+    let mut tls = tls_connect(addr, &der).await;
+    tls.write_all(b"GET /key HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut body = Vec::new();
+    tls.read_to_end(&mut body).await.ok();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert!(text.contains(&format!("{}", serde_json::json!(hub.public_key()))));
+}
+
+#[rusty_tokio::test]
+async fn derp_fast_start_runs_over_tls() {
+    let (_hub, addr, der) = start_tls(Limits::default()).await;
+    let mut tls = tls_connect(addr, &der).await;
+    tls.write_all(
+        b"GET /derp HTTP/1.1\r\nHost: localhost\r\nUpgrade: DERP\r\nConnection: Upgrade\r\nDerp-Fast-Start: 1\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    let mut head = [0u8; 5];
+    tls.read_exact(&mut head).await.unwrap();
+    assert_eq!(head[0], 0x01, "first byte is the ServerKey frame, not HTTP");
+}
+
+#[rusty_tokio::test]
+async fn a_client_that_does_not_trust_the_certificate_is_refused() {
+    let (_hub, addr, _der) = start_tls(Limits::default()).await;
+    let (_, _, other) = localhost_cert();
+    let mut tls = tls_connect(addr, &other).await;
+    let sent = tls.write_all(b"GET /key HTTP/1.1\r\n\r\n").await;
+    let mut sink = Vec::new();
+    let read = tls.read_to_end(&mut sink).await;
+    assert!(sent.is_err() || read.is_err(), "handshake should fail");
+}
+
+#[rusty_tokio::test]
+async fn plain_http_on_the_tls_port_gets_no_answer() {
+    let (_hub, addr, _der) = start_tls(Limits::default()).await;
+    let mut s = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(b"GET /key HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut got = Vec::new();
+    let _ = rusty_tokio::time::timeout(Duration::from_secs(2), s.read_to_end(&mut got)).await;
+    assert!(
+        !String::from_utf8_lossy(&got).contains("legacyPublicKey"),
+        "the key was served in the clear"
+    );
+}
+
+#[rusty_tokio::test]
+async fn a_tls_handshake_that_stalls_is_closed_at_the_handshake_timeout() {
+    let limits = Limits {
+        handshake_timeout: Duration::from_millis(200),
+        ..Limits::default()
+    };
+    let (_hub, addr, _der) = start_tls(limits).await;
+    let mut s = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert!(closes_within(&mut s, Duration::from_secs(3)).await);
+}
+
+#[test]
+fn a_bad_certificate_or_key_is_an_error_that_names_the_file() {
+    let (cert, key, _) = localhost_cert();
+    assert!(tls_acceptor(&cert, &key).is_ok());
+    let e = |r: Result<_, String>| r.err().unwrap_or_default();
+    assert!(e(tls_acceptor("", &key)).contains("certificate file"));
+    assert!(e(tls_acceptor(&cert, "")).contains("key file"));
+    assert!(e(tls_acceptor(&key, &key)).contains("certificate file"));
+    let broken = "-----BEGIN CERTIFICATE-----\nAAAA\n";
+    assert!(e(tls_acceptor(broken, &key)).contains("not closed"));
+}
+
+#[rusty_tokio::test]
+async fn a_stalled_tls_handshake_holds_a_connection_slot() {
+    let limits = Limits {
+        max_connections: 1,
+        ..Limits::default()
+    };
+    let (_hub, addr, _der) = start_tls(limits).await;
+    let _stalled = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
+    rusty_tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut second = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert!(closes_within(&mut second, Duration::from_secs(2)).await);
+}

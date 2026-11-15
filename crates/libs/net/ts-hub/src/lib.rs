@@ -7,7 +7,8 @@
 //! key and endpoints, the DERP relay (`GET /derp`) that admits only
 //! registered node keys, and a STUN responder ([`stun::serve`]). Every
 //! connection, stream and relayed byte count is bounded by [`Limits`].
-//! ACLs, persistence and a TLS story are separate slices
+//! [`Hub::serve_tls`] puts the same endpoints behind TLS from an
+//! operator-supplied certificate; ACME is a separate slice
 //! (docs/projects/mux/MESH.md).
 
 mod derp;
@@ -16,8 +17,10 @@ mod limits;
 mod policy;
 mod store;
 pub mod stun;
+mod tls;
 mod zstd;
 
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,6 +30,8 @@ use rusty_h2::server::builder::Builder as H2Builder;
 use rusty_http::async_tokio::{AsyncTransport, Replay};
 use rusty_http::head::ResponseHead;
 use rusty_http::{HeaderMap, Method, StatusCode, Version};
+use rusty_tls::TlsAcceptor;
+use rusty_tokio::io::{AsyncRead, AsyncWrite};
 use rusty_tokio::net::{TcpListener, TcpStream};
 use rusty_tokio::sync::watch;
 use ts_control::controlbase::{self, INITIATION_LEN};
@@ -39,8 +44,13 @@ pub use file_store::{FileStore, StoreError};
 pub use limits::Limits;
 pub use policy::{Grant, Policy, PolicyError, Selector, principal_of};
 pub use store::{KeyPolicy, MemoryStore, NodeRec, NodeStore, RegisterError, Revocation};
+pub use tls::tls_acceptor;
 
 use limits::{Counter, Keyed};
+
+/// What a connection runs over: a socket, or TLS on one.
+trait Io: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Io for T {}
 
 const MAX_HEAD_LEN: usize = 16 * 1024;
 const MAX_BODY_LEN: usize = 1 << 20;
@@ -214,9 +224,50 @@ impl<S: NodeStore> Hub<S> {
         self.changed.send_modify(|v| *v += 1);
     }
 
-    /// Serves connections from `listener` until it fails. A connection that
-    /// ends in an error is logged and does not stop the hub.
+    /// Serves plain-HTTP connections from `listener` until it fails. A
+    /// connection that ends in an error is logged and does not stop the hub.
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
+        self.accept_loop(listener, |stream| async move { Ok(stream) })
+            .await
+    }
+
+    /// Like [`serve`](Self::serve), but every connection first completes a TLS
+    /// handshake with `acceptor` (see [`tls_acceptor`]): the same endpoints,
+    /// no plaintext. This is the port stock clients reach, so `/key`, the
+    /// Noise upgrade and DERP are all covered. A connection holds its slot
+    /// from accept, so a stalled handshake counts against the cap and ends at
+    /// [`Limits::handshake_timeout`].
+    pub async fn serve_tls(
+        self: Arc<Self>,
+        listener: TcpListener,
+        acceptor: TlsAcceptor,
+    ) -> std::io::Result<()> {
+        let timeout = self.limits.handshake_timeout;
+        self.accept_loop(listener, move |stream| {
+            let acceptor = acceptor.clone();
+            async move {
+                within(timeout, "TLS handshake", async {
+                    let mut tls = acceptor.accept_async(stream)?;
+                    tls.complete_handshake().await?;
+                    Ok(tls)
+                })
+                .await
+            }
+        })
+        .await
+    }
+
+    /// Accepts connections, takes a slot for each, then lets `wrap` turn the
+    /// socket into the stream the protocol runs over (itself, or TLS on it).
+    async fn accept_loop<T, Fut>(
+        self: Arc<Self>,
+        listener: TcpListener,
+        wrap: impl Fn(TcpStream) -> Fut,
+    ) -> std::io::Result<()>
+    where
+        T: Io,
+        Fut: Future<Output = Result<T, HubError>> + Send + 'static,
+    {
         loop {
             let (stream, peer) = listener.accept().await?;
             let Some(slot) = self.conns.acquire(self.limits.max_connections) else {
@@ -224,16 +275,21 @@ impl<S: NodeStore> Hub<S> {
                 continue;
             };
             let hub = self.clone();
+            let wrapped = wrap(stream);
             rusty_tokio::spawn(async move {
                 let _slot = slot;
-                if let Err(e) = hub.handle(stream).await {
+                let result = match wrapped.await {
+                    Ok(stream) => hub.handle(stream).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = result {
                     rusty_log::warn!("hub: connection from {peer} ended: {e}");
                 }
             });
         }
     }
 
-    async fn handle(self: Arc<Self>, stream: TcpStream) -> Result<(), HubError> {
+    async fn handle<T: Io>(self: Arc<Self>, stream: T) -> Result<(), HubError> {
         let mut transport = AsyncTransport::new(stream);
         let head = within(self.limits.head_timeout, "request head", async {
             Ok(transport.read_request_head(MAX_HEAD_LEN).await?)
@@ -254,7 +310,7 @@ impl<S: NodeStore> Hub<S> {
         }
     }
 
-    async fn serve_key(&self, mut transport: AsyncTransport<TcpStream>) -> Result<(), HubError> {
+    async fn serve_key<T: Io>(&self, mut transport: AsyncTransport<T>) -> Result<(), HubError> {
         let key = self.public_key();
         let body = serde_json::to_vec(&serde_json::json!({
             "legacyPublicKey": key,
@@ -277,16 +333,16 @@ impl<S: NodeStore> Hub<S> {
 
     /// With `Derp-Fast-Start: 1` the client expects no HTTP response at all:
     /// the stream goes straight to DERP frames.
-    async fn serve_derp(
+    async fn serve_derp<T: Io>(
         &self,
-        mut transport: AsyncTransport<TcpStream>,
+        mut transport: AsyncTransport<T>,
         fast_start: bool,
     ) -> Result<(), HubError> {
         if !fast_start {
             write_upgrade(&mut transport).await?;
         }
         let (stream, leftover) = transport.into_parts();
-        let (read, write) = stream.into_split();
+        let (read, write) = rusty_tokio::io::split(stream);
         self.relay
             .session(
                 Replay::new(leftover, read),
@@ -298,9 +354,9 @@ impl<S: NodeStore> Hub<S> {
         Ok(())
     }
 
-    async fn upgrade(
+    async fn upgrade<T: Io>(
         self: Arc<Self>,
-        mut transport: AsyncTransport<TcpStream>,
+        mut transport: AsyncTransport<T>,
         init: &[u8; INITIATION_LEN],
     ) -> Result<(), HubError> {
         let mut headers = HeaderMap::new();
@@ -514,6 +570,8 @@ pub enum HubError {
     Json(#[from] serde_json::Error),
     #[error("DERP: {0}")]
     Derp(#[from] derp::DerpRefusal),
+    #[error("TLS: {0}")]
+    Tls(#[from] rusty_tls::Error),
     #[error("timed out reading the {0}")]
     Timeout(&'static str),
 }
@@ -544,10 +602,7 @@ async fn within<T>(
 }
 
 /// The `101 Switching Protocols` answer to a DERP upgrade.
-async fn write_upgrade<T>(transport: &mut AsyncTransport<T>) -> Result<(), HubError>
-where
-    T: rusty_tokio::io::AsyncRead + rusty_tokio::io::AsyncWrite + Unpin + Send,
-{
+async fn write_upgrade<T: Io>(transport: &mut AsyncTransport<T>) -> Result<(), HubError> {
     let mut headers = HeaderMap::new();
     headers.insert("Upgrade", "DERP")?;
     headers.insert("Connection", "Upgrade")?;
@@ -570,15 +625,15 @@ fn decode_initiation(value: Option<&str>) -> Result<[u8; INITIATION_LEN], HubErr
         .ok_or_else(|| HubError::Bad("bad X-Tailscale-Handshake".into()))
 }
 
-async fn write_all(t: &mut AsyncTransport<TcpStream>, data: &[u8]) -> Result<(), HubError> {
+async fn write_all<T: Io>(t: &mut AsyncTransport<T>, data: &[u8]) -> Result<(), HubError> {
     use rusty_tokio::io::AsyncWriteExt;
     t.get_mut().write_all(data).await?;
     t.get_mut().flush().await?;
     Ok(())
 }
 
-async fn respond_plain(
-    mut transport: AsyncTransport<TcpStream>,
+async fn respond_plain<T: Io>(
+    mut transport: AsyncTransport<T>,
     status: u16,
 ) -> Result<(), HubError> {
     let mut headers = HeaderMap::new();
