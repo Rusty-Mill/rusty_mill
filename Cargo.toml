@@ -248,6 +248,7 @@ members = [
     "crates/libs/net/ts-types",
     "crates/libs/net/ts-key",
     "crates/libs/net/ts-control",
+    "crates/libs/net/ts-hub",
     "crates/libs/net/ts-derp",
     "crates/libs/net/ts-stun",
     "crates/libs/net/ts-disco",

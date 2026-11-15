@@ -1,0 +1,24 @@
+[package]
+name = "ts-hub"
+description = "First-party ts2021 coordination server: register by pre-auth key and a netmap long-poll"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_tailscale"
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+ts-control.workspace = true
+ts-types.workspace = true
+ts-key.workspace = true
+rusty_tokio.workspace = true
+rusty_h2 = { path = "../rusty_h2", features = ["rusty-tokio"] }
+rusty_http = { workspace = true, features = ["rusty-tokio"] }
+rusty_base64.workspace = true
+rusty_log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

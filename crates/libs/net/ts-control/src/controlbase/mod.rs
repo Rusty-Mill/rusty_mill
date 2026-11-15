@@ -8,7 +8,7 @@ mod io;
 
 pub use conn::Conn;
 pub use handshake::{
-    ClientHandshake, HandshakeError, INITIATION_LEN, MSG_TYPE_ERROR, MSG_TYPE_RESPONSE,
-    RESPONSE_PAYLOAD_LEN, SessionKeys, client_initiation,
+    Accepted, ClientHandshake, HandshakeError, INITIATION_LEN, MSG_TYPE_ERROR, MSG_TYPE_RESPONSE,
+    RESPONSE_PAYLOAD_LEN, SessionKeys, client_initiation, server_respond,
 };
-pub use io::{ConnectError, connect, connect_deferred};
+pub use io::{ConnectError, accept, accept_deferred, connect, connect_deferred};
