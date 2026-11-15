@@ -168,6 +168,80 @@ Three timeboxed spikes, each with a pass/fail test, none merged as product code.
 Spike A is also the cheapest answer to "is this worth doing": it removes `tailscaled` from
 the story with almost no new code.
 
+## Spike results (2026-11-13 to 2026-11-15)
+
+All spikes ran on throwaway branches and are **not merged** (D248, D255). A, A-W and the dial
+path are recorded in the pack as D257; B and C are new here. Everything below is
+agent-observed; the branches are the evidence.
+
+| Spike | Result | Branch | Evidence |
+|---|---|---|---|
+| **A** embedded node | **Pass** | `spike/mesh-a` | `rusty-mux-server --features mesh` joined Headscale; `ts:spike` read from the netmap; allowlist admit and refuse-before-`Hello`; 1 MiB SHA-256 match (D257) |
+| **A-W** Windows node | **Pass** | `spike/mesh-a-w` | `ts-net` node on Windows, no admin, no `tailscaled`, no TUN (D257) |
+| **Dial** client path | **Pass** | `spike/mesh-dial` | Windows `rusty-mux-ctl whoami ts:spike`, 1 MiB match, the real `rusty-mux` TUI attaches, revocation refused (D257) |
+| **B** first-party hub | **Pass** | `spike/mesh-hub` | Two unmodified `ts-net` nodes registered against the hub, saw each other, moved 4 MiB through its DERP with a SHA-256 match (4 s, release build). Stock `tailscaled` 1.86.2 (two instances, WSL2 on Beast, userspace) joined, pinged `via DERP(hub)` with direct paths forced off, and moved 5 MiB with a SHA-256 match. An unregistered node key is refused by the relay |
+| **C** direct path | **Pass** | `spike/mesh-hub` (`ts-hub/spike-c/two-nat.sh`) | Cone NAT: DERP to direct about 2 s after the transfer started, a 12 MB paced transfer survived the move with a SHA-256 match, about 11.7 MB went direct. Symmetric NAT: stayed on DERP, the same transfer completed with a SHA-256 match |
+
+### What spike B taught about the hub
+
+The hub crate is about 1.2k lines including its unit tests, on top of crates that already exist (`ts-control` gained the Noise
+responder, `ts-derp` is reused for framing). A stock client needs more than the embedded node
+does, and each item below was found by running stock `tailscaled` against the hub:
+
+- **Map frames:** a stock client asks for `Compress: "zstd"` and decodes every frame. A zstd
+  frame of stored (raw) blocks is valid, so the hub needs no compressor.
+- **Node fields:** `MachineAuthorized` must be true on every node or the client sits in
+  `NeedsMachineAuth`; `HomeDERP` and a hostname make the netmap complete.
+- **Packet filter:** with no `PacketFilter` the client drops all inbound traffic. The spike
+  sends allow-all; a real policy (ACLs) is product work.
+- **DERP:** the client sends `Derp-Fast-Start: 1` and expects no HTTP response. Stock 1.86.2
+  opens DERP over **TLS** even with `InsecureForTests`, and does not honour `ForceHTTP`, so the
+  hub needs a TLS listener for `/derp` (the spike uses a self-signed certificate; the client
+  skips verification). Embedded nodes speak plain HTTP DERP on the control port.
+- **Ping and discovery:** direct UDP discovery works against the hub as is.
+
+One test trap worth recording: a 9000-byte transfer that stalled at about 8400 bytes was the
+`ncat` receiver, not the relay. A Python receiver got every byte.
+
+### What spike C taught about the NAT harness
+
+The harness is one script: a hub on a public segment and one node behind each of two Linux
+NATs (`iptables` MASQUERADE; `--random` for symmetric). It needs root, not Beast, so it can
+run in CI. Two traps:
+
+- An unsolicited inbound UDP packet to a Linux NAT leaves a conntrack entry that takes the
+  tuple the node's own next outbound packet needs, so the NAT picks a new external port: an
+  accidental symmetric NAT, and direct paths never form. The script drops those packets in
+  `INPUT` so no entry is confirmed.
+- STUN works unchanged against the hub: both nodes advertised their mapped endpoint.
+
+Not run: Windows nodes behind NAT, full-cone mode (in the script, untested), mixed pairs such
+as cone against symmetric.
+
+### Bugs the spikes found
+
+Fixed on main: `ts-net` dropped a chunk when the application queue was full, and
+`ts-magicsock` answered every disco ping with a ping (#1693); `rusty_tokio`'s Windows reactor
+spun one core on an idle UDP socket (#1697). Open, with no card yet:
+
+- `ts-net`'s `TcpStream::shutdown` sends a full close that appears to discard buffered data:
+  `write_all`, `shutdown`, `read_to_end` never reaches EOF. Reading an exact byte count works.
+- AF_UNIX path limit (107 bytes) on Windows, and the ctl `--data` limit of about 32 KB on
+  Windows command lines (D257).
+- The Winsock 10055 flake in `many_concurrent_unix_connections` predates the reactor change
+  (6 of 10 runs fail on main).
+
+### Effect on the plan
+
+- Stage 2 (hub) is smaller than estimated: the protocol work was days, not weeks. What stays is
+  product work: a real certificate story for the DERP TLS port, ACLs, persistence of the node
+  table and pre-auth keys, key expiry, and the `--hub` launcher.
+- Stage 3 (direct paths) needs no new code in the node. What remains is keeping the NAT
+  harness as a test.
+- No spike needed a patched client crate, so D244 (Tailscale-compatible subset) holds.
+- Gates are unchanged: the hub crate (`ts-hub`), the 13-crate move (Q60), and any product code
+  still need Nano's go (D248, D255).
+
 ## Effort
 
 | Stage | Size | Mostly |
