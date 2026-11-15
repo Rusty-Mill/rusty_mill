@@ -41,7 +41,7 @@ L1, L7 and L8 are answered (2026-11-12) and L2 (2026-11-13); see DECISIONS.md le
 
 | # | Question | Recommendation |
 | --- | --- | --- |
-| R1 | Approve this order: (1) stop decisions and preferences going dormant, (2) storage behind one port plus a SQLite benchmark, (3) refinement as a background worker? | Yes. |
+| R1 | Approve this order: (1) stop decisions and preferences going dormant, (2) storage behind one port plus a SQLite benchmark, (3) refinement as a background worker? Partly answered 2026-11-15: step 2 comes before any store change (DECISIONS.md remind-me-order). Step 3 is still open. | Yes. |
 | R2 | Which stores go in the benchmark? | The current engine, plain SQLite and Ledger's evidence store. Leave Kuzu and DuckDB out unless SQLite falls short. |
 | R3 | Is multimodal DB a product or a research vehicle? | A project in its own right. It returns as remind-me's store only if it wins the benchmark. |
 | R4 | Keep capturing full conversations, or gate what is stored? | Keep full capture, kept out of ranking. The originals are the evidence. |
