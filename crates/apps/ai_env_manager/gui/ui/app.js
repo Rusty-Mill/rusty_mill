@@ -297,7 +297,7 @@ $("ed-review").addEventListener("click", async () => {
   $("ed-text").readOnly = true;
   try {
     const p = await invoke("preview_edit", snap);
-    if (ed.mode !== "edit" || ed.path !== snap.path) return; // the user moved on meanwhile
+    if (ed.mode !== "edit" || ed.entry !== snap.entry || edTool() !== snap.tool || ed.path !== snap.path) return; // the user moved on meanwhile
     const box = $("ed-diff");
     box.replaceChildren();
     for (const d of p.diff) box.appendChild(el("div", d.kind, `${{ added: "+ ", removed: "- ", same: "  " }[d.kind]}${d.text}`));
