@@ -328,6 +328,13 @@ impl Hub {
             _ => false,
         });
         if changed {
+            if std::env::var_os("HUB_TRACE").is_some() {
+                eprintln!(
+                    "map: {:02x?} endpoints {:?}",
+                    &machine.0[..3],
+                    req.endpoints
+                );
+            }
             self.bump();
         }
         let zstd = req.compress == "zstd";
