@@ -124,7 +124,10 @@ impl Hub {
         let path = head.target.split('?').next().unwrap_or("");
         match (&head.method, path) {
             (Method::Get, "/key") => self.serve_key(transport).await,
-            (Method::Get, "/derp") => self.serve_derp(transport).await,
+            (Method::Get, "/derp") => {
+                let fast = head.headers.get("Derp-Fast-Start") == Some("1");
+                self.serve_derp(transport, fast).await
+            }
             (Method::Post, "/ts2021") => {
                 let init = decode_initiation(head.headers.get("X-Tailscale-Handshake"))?;
                 self.upgrade(transport, &init).await
@@ -154,18 +157,26 @@ impl Hub {
         write_all(&mut transport, &body).await
     }
 
-    async fn serve_derp(&self, mut transport: AsyncTransport<TcpStream>) -> Result<(), HubError> {
-        let mut headers = HeaderMap::new();
-        headers.insert("Upgrade", "DERP")?;
-        headers.insert("Connection", "Upgrade")?;
-        transport
-            .write_response_head(&ResponseHead {
-                status: StatusCode::SWITCHING_PROTOCOLS,
-                reason: "Switching Protocols".into(),
-                version: Version::Http11,
-                headers,
-            })
-            .await?;
+    /// With `Derp-Fast-Start: 1` the client expects no HTTP response at all:
+    /// the stream goes straight to DERP frames.
+    async fn serve_derp(
+        &self,
+        mut transport: AsyncTransport<TcpStream>,
+        fast_start: bool,
+    ) -> Result<(), HubError> {
+        if !fast_start {
+            let mut headers = HeaderMap::new();
+            headers.insert("Upgrade", "DERP")?;
+            headers.insert("Connection", "Upgrade")?;
+            transport
+                .write_response_head(&ResponseHead {
+                    status: StatusCode::SWITCHING_PROTOCOLS,
+                    reason: "Switching Protocols".into(),
+                    version: Version::Http11,
+                    headers,
+                })
+                .await?;
+        }
         let (stream, leftover) = transport.into_parts();
         let (read, write) = stream.into_split();
         self.relay

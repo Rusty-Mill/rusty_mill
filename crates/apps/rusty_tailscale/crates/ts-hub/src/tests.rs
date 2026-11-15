@@ -169,3 +169,18 @@ async fn an_unregistered_node_key_is_refused_by_the_derp_relay() {
     let result = DerpClient::connect(&url, &stranger).await;
     assert!(result.is_err(), "relay admitted a stranger");
 }
+
+#[rusty_tokio::test]
+async fn derp_fast_start_skips_the_http_response() {
+    use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (_hub, url) = start().await;
+    let addr = url.trim_start_matches("http://");
+    let mut s = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "GET /derp HTTP/1.1\r\nHost: {addr}\r\nUpgrade: DERP\r\nConnection: Upgrade\r\nDerp-Fast-Start: 1\r\n\r\n"
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut head = [0u8; 5];
+    s.read_exact(&mut head).await.unwrap();
+    assert_eq!(head[0], 0x01, "first byte is the ServerKey frame, not HTTP");
+}

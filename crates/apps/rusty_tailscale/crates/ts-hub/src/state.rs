@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use ts_types::tailcfg::{MapResponse, Node, NodeID};
+use ts_types::tailcfg::{Hostinfo, MapResponse, Node, NodeID};
 use ts_types::{
     DiscoPublic, IpPrefix, MachinePublic, NodePublic, Rfc3339, StableNodeID, UserID, UserProfile,
 };
@@ -179,6 +179,12 @@ fn wire_node(n: &NodeRec) -> Node {
         allowed_ips: vec![addr],
         endpoints: n.endpoints.clone(),
         online: Some(true),
+        machine_authorized: true,
+        home_derp: 1,
+        hostinfo: Some(Hostinfo {
+            hostname: n.hostname.clone(),
+            ..Default::default()
+        }),
         created: Rfc3339(ZERO_TIME.to_string()),
         ..Default::default()
     }

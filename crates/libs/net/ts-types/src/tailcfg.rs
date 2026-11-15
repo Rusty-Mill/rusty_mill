@@ -192,6 +192,9 @@ pub struct Node {
     #[serde(rename = "HomeDERP")]
     pub home_derp: i64,
     pub online: Option<bool>,
+    /// Whether the control server approved this machine; stock clients stay
+    /// in `NeedsMachineAuth` until it is true.
+    pub machine_authorized: bool,
     pub created: Rfc3339,
     /// ACL tags; a tagged node belongs to its tags, not to a user.
     #[serde(deserialize_with = "crate::null_default")]
