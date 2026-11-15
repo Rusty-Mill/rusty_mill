@@ -26,6 +26,16 @@ const PEER_NOT_HERE: u8 = 0x01;
 
 type Out = (FrameType, Vec<u8>);
 
+/// Spike aid: `HUB_TRACE=1` prints every relayed frame and every drop.
+fn trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HUB_TRACE").is_some())
+}
+
+fn short(k: &NodePublic) -> String {
+    k.0[..3].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Why a DERP session ended before it started.
 #[derive(Debug, thiserror::Error)]
 pub enum DerpRefusal {
@@ -141,7 +151,16 @@ impl Relay {
         from: NodePublic,
         own: &mpsc::Sender<Out>,
     ) {
-        while let Ok((ft, payload)) = frame::read_frame(read, MAX_FRAME_SIZE).await {
+        loop {
+            let (ft, payload) = match frame::read_frame(read, MAX_FRAME_SIZE).await {
+                Ok(f) => f,
+                Err(e) => {
+                    if trace() {
+                        eprintln!("derp reader {} ended: {e}", short(&from));
+                    }
+                    return;
+                }
+            };
             match ft {
                 FrameType::SendPacket if payload.len() >= KEY_LEN => {
                     self.forward(&from, &payload, own);
@@ -162,7 +181,18 @@ impl Relay {
         let mut dst_key = [0u8; KEY_LEN];
         dst_key.copy_from_slice(dst);
         let dst_key = NodePublic(dst_key);
+        if trace() {
+            eprintln!(
+                "derp {} -> {} {} bytes",
+                short(from),
+                short(&dst_key),
+                data.len()
+            );
+        }
         let Some(queue) = self.queue_of(&dst_key) else {
+            if trace() {
+                eprintln!("derp drop: {} not connected", short(&dst_key));
+            }
             let mut gone = dst_key.0.to_vec();
             gone.push(PEER_NOT_HERE);
             let _ = own.try_send((FrameType::PeerGone, gone));
@@ -170,13 +200,18 @@ impl Relay {
         };
         let mut recv = from.0.to_vec();
         recv.extend_from_slice(data);
-        let _ = queue.try_send((FrameType::RecvPacket, recv));
+        if queue.try_send((FrameType::RecvPacket, recv)).is_err() && trace() {
+            eprintln!("derp drop: queue to {} full or closed", short(&dst_key));
+        }
     }
 }
 
 async fn write_loop<W: AsyncWrite + Unpin + Send>(mut write: W, mut rx: mpsc::Receiver<Out>) {
     while let Some((ft, payload)) = rx.recv().await {
-        if frame::write_frame(&mut write, ft, &payload).await.is_err() {
+        if let Err(e) = frame::write_frame(&mut write, ft, &payload).await {
+            if trace() {
+                eprintln!("derp writer ended: {e}");
+            }
             return;
         }
     }

@@ -96,6 +96,11 @@ impl Hub {
         Some(map)
     }
 
+    /// The relay's node key, as sent in the DERP `ServerKey` frame.
+    pub fn derp_public_key(&self) -> NodePublic {
+        self.relay.public_key()
+    }
+
     /// The hub's Noise public key, as served on `GET /key`.
     pub fn public_key(&self) -> MachinePublic {
         self.key.public()
