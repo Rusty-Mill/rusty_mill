@@ -10,6 +10,7 @@
 mod derp;
 mod state;
 pub mod stun;
+mod zstd;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -269,11 +270,12 @@ impl Hub {
         if changed {
             self.bump();
         }
+        let zstd = req.compress == "zstd";
         let Some(first) = self.netmap(&machine, req.omit_peers) else {
             return send_status(respond, 404).await;
         };
         if !req.stream {
-            return send_frame_body(respond, &first).await;
+            return send_frame_body(respond, &first, zstd).await;
         }
         let mut stream = respond
             .send_response(ok_json_headers(), false)
@@ -281,17 +283,17 @@ impl Hub {
             .map_err(HubError::H2)?;
         let mut rx = self.changes.clone();
         rx.borrow_and_update();
-        stream.send_data(frame(&first)?, false).await?;
+        stream.send_data(frame(&first, zstd)?, false).await?;
         loop {
             let frame_bytes = match rusty_tokio::time::timeout(KEEPALIVE, rx.changed()).await {
                 Ok(Ok(())) => {
                     let Some(map) = self.netmap(&machine, req.omit_peers) else {
                         return Ok(());
                     };
-                    frame(&map)?
+                    frame(&map, zstd)?
                 }
                 Ok(Err(_)) => return Ok(()),
-                Err(_) => keepalive_frame()?,
+                Err(_) => keepalive_frame(zstd)?,
             };
             // A send error means the node went away.
             if stream.send_data(frame_bytes, false).await.is_err() {
@@ -331,6 +333,9 @@ struct MapReq {
     stream: bool,
     #[serde(default)]
     omit_peers: bool,
+    /// `"zstd"` when the node expects each map frame zstd-compressed.
+    #[serde(default)]
+    compress: String,
 }
 
 fn null_to_default<'de, D, T>(d: D) -> Result<T, D::Error>
@@ -445,27 +450,34 @@ async fn send_json(respond: Respond, body: &[u8]) -> Result<(), HubError> {
 }
 
 /// One length-prefixed (4 bytes, little endian) JSON `MapResponse` frame.
-fn frame(map: &ts_types::tailcfg::MapResponse) -> Result<Vec<u8>, HubError> {
-    let json = serde_json::to_vec(map)?;
+fn frame(map: &ts_types::tailcfg::MapResponse, compress: bool) -> Result<Vec<u8>, HubError> {
+    let mut json = serde_json::to_vec(map)?;
+    if compress {
+        json = zstd::frame(&json);
+    }
     let mut out = Vec::with_capacity(4 + json.len());
     out.extend_from_slice(&(json.len() as u32).to_le_bytes());
     out.extend_from_slice(&json);
     Ok(out)
 }
 
-fn keepalive_frame() -> Result<Vec<u8>, HubError> {
-    frame(&ts_types::tailcfg::MapResponse {
-        keep_alive: true,
-        ..Default::default()
-    })
+fn keepalive_frame(compress: bool) -> Result<Vec<u8>, HubError> {
+    frame(
+        &ts_types::tailcfg::MapResponse {
+            keep_alive: true,
+            ..Default::default()
+        },
+        compress,
+    )
 }
 
 async fn send_frame_body(
     respond: Respond,
     map: &ts_types::tailcfg::MapResponse,
+    compress: bool,
 ) -> Result<(), HubError> {
     let mut stream = respond.send_response(ok_json_headers(), false).await?;
-    stream.send_data(frame(map)?, true).await?;
+    stream.send_data(frame(map, compress)?, true).await?;
     Ok(())
 }
 
