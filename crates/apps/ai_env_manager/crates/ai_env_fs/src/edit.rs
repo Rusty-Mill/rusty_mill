@@ -13,6 +13,7 @@ use std::fs;
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(any(unix, test))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A file's text and the hash of its bytes, for [`write_file`] to re-check.
