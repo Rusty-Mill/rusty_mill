@@ -285,13 +285,19 @@ $("ed-edit").addEventListener("click", () => {
 });
 $("ed-back").addEventListener("click", () => {
   ed.mode = "edit";
+  ed.reviewed = null;
   $("ed-foot").textContent = "Nothing is written until you confirm the diff.";
   edShow();
 });
+// What the diff showed is exactly what Confirm saves: the review takes a snapshot, and the
+// snapshot is what apply_edit gets. The box is frozen while a request is out.
 $("ed-review").addEventListener("click", async () => {
   edError(null);
+  const snap = { entry: ed.entry, tool: edTool(), path: ed.path, text: $("ed-text").value, hash: ed.hash };
+  $("ed-text").readOnly = true;
   try {
-    const p = await invoke("preview_edit", { entry: ed.entry, tool: edTool(), path: ed.path, text: $("ed-text").value, hash: ed.hash });
+    const p = await invoke("preview_edit", snap);
+    if (ed.mode !== "edit" || ed.path !== snap.path) return; // the user moved on meanwhile
     const box = $("ed-diff");
     box.replaceChildren();
     for (const d of p.diff) box.appendChild(el("div", d.kind, `${{ added: "+ ", removed: "- ", same: "  " }[d.kind]}${d.text}`));
@@ -300,25 +306,32 @@ $("ed-review").addEventListener("click", async () => {
       ? "No changes."
       : p.marks_edited ? "Saving marks this copy edited. Nothing is written until you confirm." : "Nothing is written until you confirm.";
     $("ed-save").disabled = changed === 0;
+    ed.reviewed = snap;
     ed.mode = "review";
     edShow();
   } catch (e) {
     edError(e);
+  } finally {
+    $("ed-text").readOnly = false;
   }
 });
 $("ed-save").addEventListener("click", async () => {
   edError(null);
+  const snap = ed.reviewed;
+  if (!snap) return;
+  $("ed-save").disabled = true;
   try {
     // The text stays in the box until the backend says it was saved.
-    await invoke("apply_edit", { entry: ed.entry, tool: edTool(), path: ed.path, text: $("ed-text").value, hash: ed.hash });
+    await invoke("apply_edit", snap);
   } catch (e) {
     edError(e);
+    $("ed-save").disabled = false;
     return;
   }
-  const path = ed.path;
+  ed.reviewed = null;
   ed.mode = "view";
   $("ed-foot").textContent = "Saved.";
-  await openFile(path);
+  await openFile(snap.path);
   refresh();
 });
 
