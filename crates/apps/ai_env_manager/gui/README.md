@@ -16,7 +16,7 @@ cargo run -- --skills DIR --skills DIR2 --tool codex # fixed at launch
 
 - `src/lib.rs`: seven typed commands: `list`, `plan_change`, `apply_change`, and the editor's `files`, `file`, `preview_edit`, `apply_edit`. `apply_change` plans again and never trusts a plan from the page; `apply_edit` re-checks every rule from the same inputs as `preview_edit`. The editor takes an entry id, an optional tool id and a path relative to the entry, never an absolute path.
 - `src/view.rs`: the serializable views that cross the boundary (pure mapping).
-- `ui/`: plain HTML, CSS and JS, including the editor dialog (file list, viewer, textarea, diff, Confirm). No npm toolchain, strict CSP, text set with `textContent` only.
+- `ui/`: plain HTML, CSS and JS, including the editor dialog (file list, viewer, textarea, diff, Confirm, unsaved-change prompt). `tests/ui/*.cjs` are standalone Playwright checks against a mocked backend; CI does not run them. No npm toolchain, strict CSP, text set with `textContent` only.
 - `capabilities/default.json`: `core:default` only; no fs, shell, http or dialog plugin.
 
 ## Test
