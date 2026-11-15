@@ -190,7 +190,7 @@ fn main() -> ExitCode {
 
 /// `rusty-mux-server --hub ...`: runs the mesh hub (coordination, relay and
 /// STUN) instead of a mux server, with the flags `ts_hub::launch` takes.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "hub"))]
 fn hub() -> ExitCode {
     let flags = std::env::args_os()
         .skip(2)
@@ -205,9 +205,9 @@ fn hub() -> ExitCode {
     runtime.block_on(ts_hub::launch::main("rusty-mux-server --hub", flags))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "hub")))]
 fn hub() -> ExitCode {
-    eprintln!("rusty-mux-server: --hub runs on Linux only");
+    eprintln!("rusty-mux-server: --hub needs Linux and a build with `--features hub`");
     ExitCode::from(2)
 }
 

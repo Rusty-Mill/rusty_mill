@@ -1,6 +1,6 @@
 //! `rusty-mux-server --hub`: the binary starts the mesh hub instead of a mux
 //! server, and `GET /key` answers with the hub's Noise key.
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "hub"))]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
