@@ -1193,9 +1193,10 @@ mod tests {
     }
 
     /// A writer that finishes and goes away while the reader has not read
-    /// anything yet: the stack holds a chunk the app queue had no room for,
-    /// and the connection must not be reaped with that chunk (or the queue)
-    /// undelivered (#1466).
+    /// anything yet: everything it sent is still delivered, then EOF (#1466).
+    /// Not covered: a chunk held in `pending_rx` when the socket reaches
+    /// `Closed` (we shut down first, the peer replies at length, the reader is
+    /// slow); that can truncate and is a known follow-up.
     #[rusty_tokio::test]
     async fn a_closed_connection_keeps_unread_data_until_the_reader_has_it() {
         use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
