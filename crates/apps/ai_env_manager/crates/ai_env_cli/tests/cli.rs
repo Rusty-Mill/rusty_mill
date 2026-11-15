@@ -1,7 +1,7 @@
 //! End to end on real temp folders: a fake home, a skills folder, the real
 //! built-in catalog (claude-code and codex).
 
-use ai_env_cli::{args, run, Error, Outcome};
+use ai_env_cli::{args, run, Error, Outcome, Session};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,10 +48,23 @@ impl Drop for Tmp {
 
 /// Result, stdout and stderr of one command line.
 fn run_full(line: &str, home: &Path) -> (Result<Outcome, Error>, String, String) {
+    run_with(line, home, "", false, None)
+}
+
+/// As [`run_full`], with stdin text, whether it is a terminal, and an editor.
+fn run_with(
+    line: &str,
+    home: &Path,
+    stdin: &str,
+    tty: bool,
+    editor: Option<&str>,
+) -> (Result<Outcome, Error>, String, String) {
     let argv: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
     let cmd = args::parse(&argv).unwrap();
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let result = run(&cmd, home, &mut out, &mut err);
+    let mut input = stdin.as_bytes();
+    let mut session = Session::new(&mut input, tty, editor.map(str::to_owned));
+    let result = run(&cmd, home, &mut session, &mut out, &mut err);
     (
         result,
         String::from_utf8(out).unwrap(),
@@ -300,4 +313,145 @@ fn a_non_utf8_argument_exits_2_instead_of_panicking() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("not valid UTF-8"));
+}
+
+fn skill_md(t: &Tmp) -> PathBuf {
+    t.0.join("skills").join("code-review").join("SKILL.md")
+}
+
+#[test]
+fn edit_from_a_file_is_a_dry_run_without_yes() {
+    let t = Tmp::new();
+    let skills = t.skills();
+    let new = t.0.join("new.md");
+    fs::write(&new, "better").unwrap();
+    let extra = format!("SKILL.md --from {}", new.display());
+    let (r, out) = run_line(&line("edit code-review", &skills, &extra), &t.home());
+    assert!(matches!(r, Ok(Outcome::Done)));
+    assert!(
+        out.contains("- code-review") && out.contains("+ better"),
+        "{out}"
+    );
+    assert!(out.contains("dry run"), "{out}");
+    assert_eq!(fs::read_to_string(skill_md(&t)).unwrap(), "code-review");
+
+    let (r, out) = run_line(
+        &line("edit code-review", &skills, &format!("{extra} --yes")),
+        &t.home(),
+    );
+    assert!(matches!(r, Ok(Outcome::Done)));
+    assert!(out.contains("saved SKILL.md"), "{out}");
+    assert_eq!(fs::read_to_string(skill_md(&t)).unwrap(), "better");
+}
+
+#[test]
+fn edit_from_stdin_and_no_change() {
+    let t = Tmp::new();
+    let skills = t.skills();
+    let l = line("edit code-review", &skills, "SKILL.md --from - --yes");
+    let (r, out, _) = run_with(&l, &t.home(), "from stdin", false, None);
+    assert!(matches!(r, Ok(Outcome::Done)), "{out}");
+    assert_eq!(fs::read_to_string(skill_md(&t)).unwrap(), "from stdin");
+    let (_, out, _) = run_with(&l, &t.home(), "from stdin", false, None);
+    assert_eq!(out, "nothing changed\n");
+}
+
+#[test]
+fn edit_refuses_a_path_outside_the_skill() {
+    let t = Tmp::new();
+    let l = line(
+        "edit code-review",
+        &t.skills(),
+        "../notes-helper/SKILL.md --from - --yes",
+    );
+    let (r, _, _) = run_with(&l, &t.home(), "x", false, None);
+    assert!(r.is_err());
+    assert_eq!(
+        fs::read_to_string(t.0.join("skills/notes-helper/SKILL.md")).unwrap(),
+        "notes-helper"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_editor_needs_a_terminal_or_yes() {
+    let t = Tmp::new();
+    let skills = t.skills();
+    let l = line("edit code-review", &skills, "SKILL.md");
+    let (r, _, err) = run_with(&l, &t.home(), "", false, Some("true"));
+    assert!(matches!(r, Ok(Outcome::NeedsTerminal)));
+    assert!(err.contains("terminal"), "{err}");
+    let (r, _, err) = run_with(&l, &t.home(), "", true, None);
+    assert!(r.is_err() && err.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_editor_result_is_saved_after_y_and_dropped_otherwise() {
+    let t = Tmp::new();
+    let skills = t.skills();
+    let ed = t.0.join("ed.sh");
+    fs::write(&ed, "#!/bin/sh\necho edited > \"$1\"\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&ed, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let l = line("edit code-review", &skills, "SKILL.md");
+    let ed = ed.to_str().unwrap();
+    let (_, out, _) = run_with(&l, &t.home(), "n\n", true, Some(ed));
+    assert!(out.contains("+ edited"), "{out}");
+    assert_eq!(fs::read_to_string(skill_md(&t)).unwrap(), "code-review");
+    let (r, out, _) = run_with(&l, &t.home(), "y\n", true, Some(ed));
+    assert!(matches!(r, Ok(Outcome::Done)));
+    assert!(out.contains("saved"), "{out}");
+    assert_eq!(fs::read_to_string(skill_md(&t)).unwrap(), "edited\n");
+}
+
+#[test]
+fn edit_with_tool_changes_that_tools_copy_only() {
+    let t = Tmp::new();
+    let skills = t.skills();
+    // Linked, so the tool's folder is the source and the edit lands there.
+    let (r, _) = run_line(
+        &line("enable code-review --yes --tool claude-code", &skills, ""),
+        &t.home(),
+    );
+    assert!(matches!(r, Ok(Outcome::Done)));
+    let l = line(
+        "edit code-review",
+        &skills,
+        "SKILL.md --tool claude-code --from - --yes",
+    );
+    let (r, _, _) = run_with(&l, &t.home(), "via link", false, None);
+    assert!(matches!(r, Ok(Outcome::Done)));
+    assert_eq!(fs::read_to_string(skill_md(&t)).unwrap(), "via link");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_editor_temp_folder_is_private_and_never_reused() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let skills = t.skills();
+    // The editor reports the mode of its own folder, then edits the file.
+    let ed = t.0.join("ed.sh");
+    let seen = t.0.join("seen");
+    let where_ = t.0.join("where");
+    fs::write(
+        &ed,
+        format!(
+            "#!/bin/sh\nstat -c %a \"$(dirname \"$1\")\" > {}\ndirname \"$1\" > {}\necho x > \"$1\"\n",
+            seen.display(),
+            where_.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&ed, fs::Permissions::from_mode(0o755)).unwrap();
+    let l = line("edit code-review", &skills, "SKILL.md --yes");
+    let (r, _, err) = run_with(&l, &t.home(), "", false, Some(ed.to_str().unwrap()));
+    assert!(matches!(r, Ok(Outcome::Done)), "{err}");
+    assert_eq!(fs::read_to_string(&seen).unwrap().trim(), "700");
+    assert!(err.is_empty(), "{err}");
+    let dir = fs::read_to_string(&where_).unwrap();
+    assert!(!Path::new(dir.trim()).exists(), "temp folder removed");
 }
