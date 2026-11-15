@@ -117,7 +117,7 @@ impl Pam {
     /// `pam_start` then `pam_end` for `service`: a probe of the library and
     /// the service, not of any account.
     fn start_ok(&self, service: &str) -> Result<(), String> {
-        self.session(service, "root", |_| Ok(()))
+        self.session(service, "root", |_| (PAM_SUCCESS, Ok(())))
     }
 
     fn load() -> Result<Pam, String> {
@@ -172,20 +172,23 @@ impl Pam {
                 // SAFETY: `h` is a live handle; `r` is a valid C string that
                 // `pam_set_item` copies.
                 let rc = unsafe { (self.set_item)(h, PAM_RUSER, r.as_ptr().cast()) };
-                self.ok(h, rc)?;
+                if rc != PAM_SUCCESS {
+                    return (rc, self.ok(h, rc));
+                }
             }
             // SAFETY: `h` is a live handle.
             let rc = unsafe { (self.acct_mgmt)(h, PAM_SILENT) };
-            self.ok(h, rc)
+            (rc, self.ok(h, rc))
         })
     }
 
-    /// `pam_start`, then `body` with the handle, then `pam_end`.
+    /// `pam_start`, then `body` with the handle, then `pam_end` with the status
+    /// of the last PAM call `body` made (which modules see when they clean up).
     fn session(
         &self,
         service: &str,
         account: &str,
-        body: impl FnOnce(*mut c::c_void) -> Result<(), String>,
+        body: impl FnOnce(*mut c::c_void) -> (c::c_int, Result<(), String>),
     ) -> Result<(), String> {
         let service = CString::new(service).map_err(|_| "the service holds a NUL".to_owned())?;
         let account = CString::new(account).map_err(|_| "the account holds a NUL".to_owned())?;
@@ -200,9 +203,9 @@ impl Pam {
         if rc != PAM_SUCCESS || h.is_null() {
             return Err(format!("pam_start failed ({rc})"));
         }
-        let result = body(h);
+        let (status, result) = body(h);
         // SAFETY: `h` came from a successful `pam_start` and is ended once.
-        unsafe { (self.end)(h, rc) };
+        unsafe { (self.end)(h, status) };
         result
     }
 
@@ -277,6 +280,7 @@ mod tests {
 
     /// What the fake `pam_acct_mgmt` returns, and what it saw.
     static VERDICT: AtomicI32 = AtomicI32::new(0);
+    static END_STATUS: AtomicI32 = AtomicI32::new(0);
     static RUSERS: AtomicUsize = AtomicUsize::new(0);
     static STARTS: AtomicUsize = AtomicUsize::new(0);
     static ENDS: AtomicUsize = AtomicUsize::new(0);
@@ -314,8 +318,9 @@ mod tests {
         assert_eq!(f, PAM_SILENT);
         VERDICT.load(Ordering::SeqCst)
     }
-    unsafe extern "C" fn end(_h: *mut c::c_void, _s: c::c_int) -> c::c_int {
+    unsafe extern "C" fn end(_h: *mut c::c_void, s: c::c_int) -> c::c_int {
         ENDS.fetch_add(1, Ordering::SeqCst);
+        END_STATUS.store(s, Ordering::SeqCst);
         PAM_SUCCESS
     }
     unsafe extern "C" fn strerror(_h: *mut c::c_void, _e: c::c_int) -> *const c::c_char {
@@ -342,6 +347,8 @@ mod tests {
             VERDICT.store(rc, Ordering::SeqCst);
             let e = fake().check("rusty-mux", "alice", None).unwrap_err();
             assert_eq!(e, format!("fake failure ({rc})"));
+            // `pam_end` gets the status of the last call, not `pam_start`'s.
+            assert_eq!(END_STATUS.load(Ordering::SeqCst), rc);
         }
     }
 
