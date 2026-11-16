@@ -256,39 +256,17 @@ impl Policy {
         !link.origin.is_empty() && self.trusted.insert(link.origin.clone())
     }
 
-    /// Everything trusted here or in `other` (a save merges what another
-    /// window wrote meanwhile).
-    pub(crate) fn union(mut self, other: &Policy) -> Self {
-        self.trusted.extend(other.trusted.iter().cloned());
-        self
-    }
-
-    /// The trusted origins, sorted, for saving.
+    /// The trusted origins, sorted (tests compare what was loaded).
+    #[cfg(test)]
     pub(crate) fn origins(&self) -> impl Iterator<Item = &str> {
         self.trusted.iter().map(String::as_str)
     }
+}
 
-    /// The file text: `origins = ["https://a.com", ...]`.
-    pub(crate) fn to_toml(&self) -> String {
-        let items: Vec<String> = self.origins().map(|o| format!("\"{o}\"")).collect();
-        format!("origins = [{}]\n", items.join(", "))
-    }
-
-    /// Read [`Policy::to_toml`]'s text. Entries that are not a normalised
-    /// http(s) origin are dropped, so a hand-edited or damaged file can
-    /// only ever trust fewer things, never a malformed one.
-    pub(crate) fn from_toml(text: &str) -> Self {
-        let Some((_, list)) = text.split_once('=') else {
-            return Self::default();
-        };
-        let list = list.trim().trim_start_matches('[').trim_end_matches(']');
-        let valid = list.split(',').filter_map(|item| {
-            let o = item.trim().strip_prefix('"')?.strip_suffix('"')?;
-            let l = parse(o).ok()?;
-            (l.origin == o).then(|| o.to_owned())
-        });
-        Self::new(valid)
-    }
+/// `s` if it is exactly a normalised http(s) origin (what [`parse`] makes of
+/// a web URL), else `None`: how stored origins are checked on load.
+pub(crate) fn valid_origin(s: &str) -> Option<&str> {
+    parse(s).ok().filter(|l| l.origin == s).map(|_| s)
 }
 
 #[cfg(test)]
@@ -447,13 +425,22 @@ mod tests {
     }
 
     #[test]
-    fn a_save_keeps_what_another_window_trusted() {
-        let mine = Policy::new(["https://a.com".to_owned()]);
-        let theirs = Policy::new(["https://b.com".to_owned()]);
+    fn only_normalised_web_origins_are_valid_origins() {
+        assert_eq!(valid_origin("https://ok.com"), Some("https://ok.com"));
         assert_eq!(
-            mine.union(&theirs).origins().collect::<Vec<_>>(),
-            ["https://a.com", "https://b.com"]
+            valid_origin("http://ok.com:8080"),
+            Some("http://ok.com:8080")
         );
+        for o in [
+            "https://x.com/path",
+            "javascript:1",
+            "https://Up.com",
+            "ftp://h",
+            "",
+            "file:///a",
+        ] {
+            assert_eq!(valid_origin(o), None, "{o}");
+        }
     }
 
     #[test]
@@ -482,21 +469,6 @@ mod tests {
             assert_eq!(p.verdict(&l), Verdict::Ask { can_trust: false }, "{u}");
         }
         assert_eq!(p.origins().count(), 0);
-    }
-
-    #[test]
-    fn the_file_round_trips_and_drops_bad_entries() {
-        let mut p = Policy::default();
-        p.trust(&link("https://a.com/"));
-        p.trust(&link("http://b.com:8080/"));
-        assert_eq!(Policy::from_toml(&p.to_toml()), p);
-        let hand = r#"origins = ["https://ok.com", "https://x.com/path", "javascript:1", "https://Up.com", "ftp://h"]"#;
-        assert_eq!(
-            Policy::from_toml(hand),
-            Policy::new(["https://ok.com".to_owned()])
-        );
-        assert_eq!(Policy::from_toml("garbage"), Policy::default());
-        assert_eq!(Policy::from_toml(""), Policy::default());
     }
 
     #[test]

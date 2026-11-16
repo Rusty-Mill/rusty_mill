@@ -5222,16 +5222,15 @@ impl WindowState<'_> {
             Subject::Link(link) => {
                 // Button 2 is "Always trust": remember the origin, but only in
                 // memory once the file is saved, so what the notice says holds.
-                if n == confirm::ALWAYS {
-                    let mut next = self.links.clone();
-                    if next.trust(&link) {
-                        match save_trust(&next) {
-                            Ok(saved) => self.links = saved,
-                            Err(_) => self.show_notice(Some(super::source::Notice {
-                                title: "Could not save trusted sites".to_owned(),
-                                detail: "This link opens once. The site will ask again.".to_owned(),
-                            })),
+                if n == confirm::ALWAYS && !link.origin.is_empty() {
+                    match save_trust(&link.origin) {
+                        Ok(()) => {
+                            self.links.trust(&link);
                         }
+                        Err(_) => self.show_notice(Some(super::source::Notice {
+                            title: "Could not save trusted sites".to_owned(),
+                            detail: "This link opens once. The site will ask again.".to_owned(),
+                        })),
                     }
                 }
                 self.launch_link(&link);
@@ -6578,18 +6577,18 @@ fn open_link(link: &link_policy::Link) -> bool {
     spawned.is_ok()
 }
 
-/// At start an unreadable file trusts nothing: every site asks.
+/// At start an unreadable directory trusts nothing: every site asks.
 fn load_trust() -> link_policy::Policy {
-    link_trust::default_path()
-        .and_then(|p| link_trust::read(&p).ok())
+    link_trust::default_dir()
+        .and_then(|d| link_trust::read(&d).ok())
         .unwrap_or_default()
 }
 
-/// Save `policy` merged with the file (see [`link_trust::save`]).
-fn save_trust(policy: &link_policy::Policy) -> std::io::Result<link_policy::Policy> {
-    let path =
-        link_trust::default_path().ok_or_else(|| std::io::Error::other("no config directory"))?;
-    link_trust::save(&path, policy)
+/// Remember `origin` on disk (see [`link_trust::add`]).
+fn save_trust(origin: &str) -> std::io::Result<()> {
+    let dir =
+        link_trust::default_dir().ok_or_else(|| std::io::Error::other("no config directory"))?;
+    link_trust::add(&dir, origin)
 }
 
 /// Map an OSC 22-requested pointer shape — a CSS `cursor` keyword, the

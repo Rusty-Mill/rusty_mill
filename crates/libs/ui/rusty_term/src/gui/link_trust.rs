@@ -1,106 +1,109 @@
-//! The trusted-origins file (C63, gui-design D72): read it, and save to it
-//! safely when several windows or processes may save at once.
+//! The trusted origins on disk (C63, gui-design D72): one small file per
+//! origin in a directory beside `config.toml`.
 //!
-//! A save is one transaction: take a lock file, read what is on disk, merge,
-//! write a temp file of its own, rename it over the file, drop the lock. So
-//! two saves never lose each other's additions and never share a temp file.
+//! Trusting is one `create_new` of a file named from the origin's hash: no
+//! read-merge-write, so two windows or processes never lose each other's
+//! additions; no lock, so there is nothing to go stale or to wait on; no
+//! temp file to share. Reading lists the directory and keeps only entries
+//! that are exactly a normalised http(s) origin. Removing a site is deleting
+//! its file.
 
-use super::link_policy::Policy;
-use std::io::{Error, ErrorKind, Result};
+use super::link_policy::{Policy, valid_origin};
+use std::io::{Error, ErrorKind, Result, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
 
-/// How long a save waits for the lock, and how old a lock must be to be a
-/// crashed writer's leftover.
-const WAIT: Duration = Duration::from_secs(5);
-const STALE: Duration = Duration::from_secs(30);
-const POLL: Duration = Duration::from_millis(10);
+/// The file name's extension, and how many same-hash origins one hash may
+/// hold (a 64-bit collision, in practice never).
+const EXT: &str = "origin";
+const SLOTS: u32 = 8;
+/// An origin file longer than this is not one of ours.
+const MAX_FILE: u64 = 4096;
 
-/// Where the file lives: beside `config.toml`, so a run-time write never
-/// rewrites the user's hand-edited config.
-pub(crate) fn default_path() -> Option<PathBuf> {
+/// The directory: beside `config.toml`, so a run-time write never touches
+/// the user's hand-edited config.
+pub(crate) fn default_dir() -> Option<PathBuf> {
     Some(
         rusty_dirs::config_root()?
             .join("rusty_term")
-            .join("trusted_origins.toml"),
+            .join("trusted_origins"),
     )
 }
 
-/// The saved origins. A missing file is an empty list; any other read error
-/// is an error, so a save never overwrites what it could not read.
-pub(crate) fn read(path: &Path) -> Result<Policy> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Policy::from_toml(&text)),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Policy::default()),
-        Err(e) => Err(e),
-    }
-}
-
-/// Save `policy` merged with the file's current content. Returns what was
-/// saved.
-pub(crate) fn save(path: &Path, policy: &Policy) -> Result<Policy> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let _lock = Lock::take(&path.with_extension("toml.lock"))?;
-    let merged = read(path)?.union(policy);
-    static N: AtomicU64 = AtomicU64::new(0);
-    let tmp = path.with_extension(format!(
-        "toml.{}.{}.tmp",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::write(&tmp, merged.to_toml())?;
-    std::fs::rename(&tmp, path).inspect_err(|_| drop(std::fs::remove_file(&tmp)))?;
-    Ok(merged)
-}
-
-/// A lock file made with `create_new` (atomic on every platform); removed
-/// on drop.
-struct Lock(PathBuf);
-
-impl Lock {
-    fn take(path: &Path) -> Result<Self> {
-        let start = Instant::now();
-        loop {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-            {
-                Ok(_) => return Ok(Self(path.to_owned())),
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
-            }
-            if is_stale(path) {
-                // Another waiter may remove it first; either way, retry.
-                drop(std::fs::remove_file(path));
-                continue;
-            }
-            if start.elapsed() > WAIT {
-                return Err(Error::new(
-                    ErrorKind::TimedOut,
-                    "the trusted sites file is locked",
-                ));
-            }
-            std::thread::sleep(POLL);
+/// The saved origins. A missing directory is an empty list; anything else
+/// that cannot be read is an error. Entries that are not a valid origin
+/// (damaged, hand-made, half-written) are skipped, so the directory can only
+/// ever trust fewer things than it holds.
+pub(crate) fn read(dir: &Path) -> Result<Policy> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Policy::default()),
+        Err(e) => return Err(e),
+    };
+    let mut origins = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != EXT) {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() > MAX_FILE {
+            continue;
+        }
+        if let Some(o) = std::fs::read_to_string(&path)
+            .ok()
+            .as_deref()
+            .and_then(valid_origin)
+        {
+            origins.push(o.to_owned());
         }
     }
+    Ok(Policy::new(origins))
 }
 
-impl Drop for Lock {
-    fn drop(&mut self) {
-        drop(std::fs::remove_file(&self.0));
+/// Trust `origin` (already checked with [`valid_origin`]). Idempotent and
+/// safe to run at once from any number of windows and processes.
+pub(crate) fn add(dir: &Path, origin: &str) -> Result<()> {
+    if valid_origin(origin).is_none() {
+        return Err(Error::new(ErrorKind::InvalidInput, "not a web origin"));
     }
+    std::fs::create_dir_all(dir)?;
+    let hash = fnv1a(origin.as_bytes());
+    for slot in 0..SLOTS {
+        let name = match slot {
+            0 => format!("{hash:016x}.{EXT}"),
+            n => format!("{hash:016x}-{n}.{EXT}"),
+        };
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                return f
+                    .write_all(origin.as_bytes())
+                    .inspect_err(|_| drop(std::fs::remove_file(&path)));
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                // Ours already (or a hash collision: try the next slot).
+                if std::fs::read_to_string(&path).is_ok_and(|t| t == origin) {
+                    return Ok(());
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(Error::other("too many origins share a hash"))
 }
 
-fn is_stale(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age > STALE)
+/// FNV-1a, 64 bit: a stable file name, not a security boundary (the file's
+/// content is what is trusted, and it is checked on load).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 #[cfg(test)]
@@ -113,86 +116,96 @@ mod tests {
         d
     }
 
-    fn one(origin: &str) -> Policy {
-        Policy::new([origin.to_owned()])
+    fn origins(p: &Policy) -> Vec<&str> {
+        p.origins().collect()
     }
 
     #[test]
-    fn a_missing_file_is_empty_and_a_save_creates_it() {
-        let path = dir("new").join("sub").join("trusted_origins.toml");
-        assert_eq!(read(&path).unwrap(), Policy::default());
-        let saved = save(&path, &one("https://a.com")).unwrap();
-        assert_eq!(read(&path).unwrap(), saved);
-        assert!(
-            !path.with_extension("toml.lock").exists(),
-            "the lock is gone"
+    fn a_missing_directory_is_empty_and_adding_creates_it() {
+        let d = dir("new").join("sub");
+        assert_eq!(read(&d).unwrap(), Policy::default());
+        add(&d, "https://a.com").unwrap();
+        add(&d, "http://b.com:8080").unwrap();
+        assert_eq!(
+            origins(&read(&d).unwrap()),
+            ["http://b.com:8080", "https://a.com"]
         );
     }
 
     #[test]
-    fn overlapping_saves_keep_every_addition() {
-        let path = dir("race").join("trusted_origins.toml");
-        let origins: Vec<String> = (0..24)
-            .map(|i| format!("https://site{i}.example"))
-            .collect();
-        let handles: Vec<_> = origins
-            .iter()
-            .map(|o| {
-                let (path, o) = (path.clone(), o.clone());
-                std::thread::spawn(move || save(&path, &one(&o)).expect("saved"))
+    fn adding_twice_makes_one_entry() {
+        let d = dir("twice");
+        add(&d, "https://a.com").unwrap();
+        add(&d, "https://a.com").unwrap();
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn overlapping_adds_from_many_threads_keep_every_origin() {
+        let d = dir("race");
+        let handles: Vec<_> = (0..48)
+            .map(|i| {
+                let d = d.clone();
+                // Two threads per origin: the same one added at once.
+                std::thread::spawn(move || add(&d, &format!("https://site{}.example", i / 2)))
             })
             .collect();
         for h in handles {
-            h.join().expect("no panic");
+            h.join().expect("no panic").expect("added");
         }
-        let got = read(&path).unwrap();
-        for o in &origins {
-            assert!(got.origins().any(|g| g == o), "{o} survived");
+        let got = read(&d).unwrap();
+        assert_eq!(got.origins().count(), 24);
+        for i in 0..24 {
+            assert!(
+                got.origins()
+                    .any(|g| g == format!("https://site{i}.example"))
+            );
         }
-        let leftovers = std::fs::read_dir(path.parent().unwrap())
-            .unwrap()
-            .filter(|e| e.as_ref().unwrap().file_name() != "trusted_origins.toml")
-            .count();
-        assert_eq!(leftovers, 0, "no temp or lock file left behind");
     }
 
     #[test]
-    fn an_unreadable_file_is_never_overwritten() {
-        let path = dir("unreadable").join("trusted_origins.toml");
-        // A directory where the file should be: reading it fails, not NotFound.
-        std::fs::create_dir_all(&path).unwrap();
-        assert!(read(&path).is_err());
-        assert!(save(&path, &one("https://a.com")).is_err());
-        assert!(path.is_dir(), "left as it was");
+    fn a_same_hash_origin_takes_the_next_slot() {
+        let d = dir("collide");
+        std::fs::create_dir_all(&d).unwrap();
+        let hash = fnv1a(b"https://a.com");
+        std::fs::write(d.join(format!("{hash:016x}.{EXT}")), "https://other.com").unwrap();
+        add(&d, "https://a.com").unwrap();
+        assert_eq!(
+            origins(&read(&d).unwrap()),
+            ["https://a.com", "https://other.com"]
+        );
     }
 
     #[test]
-    fn a_crashed_writers_old_lock_is_cleared_but_a_fresh_one_waits() {
-        let path = dir("stale").join("trusted_origins.toml");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let lock = path.with_extension("toml.lock");
-        std::fs::write(&lock, b"").unwrap();
-        let old = std::time::SystemTime::now() - Duration::from_secs(120);
-        std::fs::File::options()
-            .write(true)
-            .open(&lock)
-            .unwrap()
-            .set_modified(old)
-            .unwrap();
-        assert!(
-            save(&path, &one("https://a.com")).is_ok(),
-            "stale lock cleared"
-        );
-        // While one holder has the lock, nobody else can create it.
-        let held = Lock::take(&lock).unwrap();
-        assert!(
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock)
-                .is_err()
-        );
-        drop(held);
-        assert!(!lock.exists());
+    fn damaged_and_foreign_entries_are_skipped() {
+        let d = dir("damaged");
+        add(&d, "https://ok.com").unwrap();
+        for (name, body) in [
+            ("a.origin", "https://x.com/path"),
+            ("b.origin", "javascript:alert(1)"),
+            ("c.origin", ""),
+            ("d.origin", "https://Up.com"),
+            ("e.txt", "https://txt.com"),
+        ] {
+            std::fs::write(d.join(name), body).unwrap();
+        }
+        std::fs::write(d.join("big.origin"), "x".repeat(10_000)).unwrap();
+        std::fs::create_dir(d.join("dir.origin")).unwrap();
+        assert_eq!(origins(&read(&d).unwrap()), ["https://ok.com"]);
+    }
+
+    #[test]
+    fn only_a_valid_origin_is_added_and_a_bad_directory_errors() {
+        let d = dir("bad");
+        for o in ["https://a.com/path", "mailto:a@b.c", "", "file:///x"] {
+            assert!(add(&d, o).is_err(), "{o}");
+        }
+        assert!(!d.exists(), "nothing was created");
+        // A file where the directory should be: neither read nor add works.
+        std::fs::create_dir_all(d.parent().unwrap()).unwrap();
+        std::fs::write(&d, "").unwrap();
+        assert!(read(&d).is_err());
+        assert!(add(&d, "https://a.com").is_err());
+        drop(std::fs::remove_file(&d));
     }
 }
