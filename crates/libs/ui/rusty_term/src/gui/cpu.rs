@@ -480,7 +480,10 @@ pub(crate) fn draw_grid(
             continue;
         }
         let swapped = !on_status && (block_cursor(col, row) || inverted(col, row));
-        let (base_fg, under_bg) = if swapped {
+        // Same resolution order as the glyph pass: cursor, selection, search.
+        let (base_fg, under_bg) = if !on_status && block_cursor(col, row) {
+            (cell.bg, grid.cursor_color)
+        } else if swapped {
             (cell.bg, cell.fg)
         } else if !on_status && let Some(cur) = search_hl(col, row) {
             let (bg, fg) = search.pair(cur);
@@ -1217,6 +1220,21 @@ mod tests {
                 assert_eq!(ratio >= 4.5, lifted, "{bytes:?} min {min}: {ink:06x}");
             }
         }
+    }
+
+    #[test]
+    fn block_cursor_decorations_contrast_against_the_cursor_colour() {
+        // Black cell, white block cursor, 7:1: the stripe is the cell bg
+        // (black) on the white cursor and must stay readable, not be lifted
+        // toward white against a background that isn't painted.
+        let mut g = Grid::new(1, 1);
+        g.min_contrast = 7.0;
+        g.cursor_color = 0xFFFFFF;
+        AnsiParser::new().advance(&mut g, b"\x1b[2 q\x1b[4m \x1b[H"); // steady block, cursor back home
+        let (w, h) = (4usize, 8usize);
+        let mut buf = vec![0u32; w * h];
+        render(&g, &[], &mut MockFont, &mut buf, w, h, true);
+        assert_eq!(buf[6 * w], 0x000000, "underline on the white cursor");
     }
 
     /// A 4x8 render of a 1x1 grid after `bytes`.
