@@ -47,14 +47,14 @@ const MAX_BYTES: u64 = 64 * 1024;
 /// file cannot stall a reload.
 fn read_capped(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     std::fs::File::open(path)?
         .take(MAX_BYTES + 1)
-        .read_to_string(&mut text)?;
-    if text.len() as u64 > MAX_BYTES {
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
         return Err(std::io::Error::other("file too large (over 64 KiB)"));
     }
-    Ok(text)
+    String::from_utf8(bytes).map_err(|_| std::io::Error::other("not valid UTF-8"))
 }
 
 /// A usable file stem: no path separators, no leading dot.

@@ -2881,6 +2881,9 @@ impl WindowState<'_> {
         };
         let args = vec!["--config".to_string(), path.to_string_lossy().into_owned()];
         let (mut new, mut warnings) = crate::config::Config::load(&args);
+        // A theme key that no longer resolves keeps its old value (D73); a
+        // `--profile` theme still applies over it.
+        new.keep_failed_themes(&self.config, self.theme);
         if let Some(name) = &self.profile_override
             && let Some(w) = new.apply_profile(name)
         {
@@ -2889,8 +2892,6 @@ impl WindowState<'_> {
         for w in &warnings {
             eprintln!("rusty_term: {w}");
         }
-        // A theme key that no longer resolves keeps its old value (D73).
-        new.keep_failed_themes(&self.config, self.theme);
         for tab in &self.tabs {
             for p in &tab.panes {
                 let mut g = p.grid.lock();

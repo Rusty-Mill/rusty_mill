@@ -641,10 +641,10 @@ fn header_name(line: &str) -> Option<String> {
 /// A change-sensitive snapshot of a file or directory: one (name, mtime, len)
 /// per entry, sorted by name, so edits, adds, removes and renames all differ.
 /// A file is a single entry with an empty name.
+type Stamp = Vec<(std::ffi::OsString, std::time::SystemTime, u64)>;
+
 /// Directory entries a [`stamp`] looks at.
 const STAMP_MAX_ENTRIES: usize = 1024;
-
-type Stamp = Vec<(std::ffi::OsString, std::time::SystemTime, u64)>;
 
 fn stamp(p: &std::path::Path) -> Option<Stamp> {
     let m = std::fs::metadata(p).ok()?;
@@ -655,12 +655,13 @@ fn stamp(p: &std::path::Path) -> Option<Stamp> {
     let mut out: Stamp = std::fs::read_dir(p)
         .ok()?
         .take(STAMP_MAX_ENTRIES)
-        .map(|e| {
+        .filter_map(|e| {
+            // An unreadable entry drops out; it must not hide the others.
             let e = e.ok()?;
             let em = e.metadata().ok()?;
             Some((e.file_name(), em.modified().ok()?, em.len()))
         })
-        .collect::<Option<_>>()?;
+        .collect();
     out.sort();
     Some(out)
 }
@@ -707,6 +708,7 @@ fn named_theme(cfg: &Config, name: &str) -> Result<Theme, String> {
 
 /// [`named_theme`] for a top-level key, recording a failure against `slot`.
 fn slot_theme(cfg: &mut Config, slot: ThemeSlot, name: &str) -> Result<Theme, String> {
+    cfg.theme_failed.retain(|&s| s != slot);
     named_theme(cfg, name).inspect_err(|_| cfg.theme_failed.push(slot))
 }
 
@@ -1256,7 +1258,6 @@ pub fn preset(name: &str) -> Option<Theme> {
 }
 
 impl Config {
-    /// The named profile, if defined (case-insensitive).
     /// After a reload, put back the values of the theme keys that failed to
     /// resolve (D73: a bad file keeps the previous theme). `old` is the config
     /// that was live, `old_theme` the colours on screen.
@@ -1273,6 +1274,7 @@ impl Config {
         }
     }
 
+    /// The named profile, if defined (case-insensitive).
     pub fn profile(&self, name: &str) -> Option<&Profile> {
         self.profiles
             .iter()
@@ -1904,6 +1906,12 @@ color15 = "ffffff"
         assert_eq!(warns.len(), 1);
         assert_eq!(cfg.theme_failed, [ThemeSlot::Theme]);
         assert!(parse("theme = \"nord\"\n").0.theme_failed.is_empty());
+    }
+
+    #[test]
+    fn a_later_valid_theme_key_clears_an_earlier_failure() {
+        let (cfg, _) = parse("theme = \"bad\"\ntheme = \"nord\"\n");
+        assert!(cfg.theme_failed.is_empty());
     }
 
     #[test]

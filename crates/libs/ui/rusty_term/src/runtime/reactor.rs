@@ -313,10 +313,12 @@ fn watch_config(parser: Arc<Mutex<AnsiParser>>, grid: Arc<Mutex<Grid>>, frame: A
     let reload = move || {
         let (parser, grid, frame) = (&parser2, &grid2, &frame2);
         let (mut new, mut warnings) = crate::config::Config::load(&reload_args);
-        if let Some(name) = &profile
-            && let Some(w) = new.apply_profile(name)
-        {
-            warnings.push(w);
+        let mut profiled = false;
+        if let Some(name) = &profile {
+            profiled = new.profile(name).is_some_and(|p| p.theme.is_some());
+            if let Some(w) = new.apply_profile(name) {
+                warnings.push(w);
+            }
         }
         let mut g = grid.lock();
         if !warnings.is_empty() {
@@ -326,7 +328,7 @@ fn watch_config(parser: Arc<Mutex<AnsiParser>>, grid: Arc<Mutex<Grid>>, frame: A
             g.force_full_repaint();
         }
         // A theme that no longer resolves keeps the one on screen (D73).
-        if !new.theme_failed.contains(&crate::config::ThemeSlot::Theme) {
+        if profiled || !new.theme_failed.contains(&crate::config::ThemeSlot::Theme) {
             let old = parser.lock().retheme(new.theme);
             if old != new.theme {
                 g.retheme(&old, &new.theme);
