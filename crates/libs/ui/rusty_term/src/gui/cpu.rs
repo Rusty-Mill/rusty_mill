@@ -1230,7 +1230,7 @@ mod tests {
         let mut g = Grid::new(1, 1);
         g.min_contrast = 7.0;
         g.cursor_color = 0xFFFFFF;
-        AnsiParser::new().advance(&mut g, b"\x1b[2 q\x1b[4m \x1b[H"); // steady block, cursor back home
+        AnsiParser::new().advance(&mut g, b"\x1b[2 q\x1b[30m\x1b[4m \x1b[H"); // steady block, cursor back home
         let (w, h) = (4usize, 8usize);
         let mut buf = vec![0u32; w * h];
         render(&g, &[], &mut MockFont, &mut buf, w, h, true);
