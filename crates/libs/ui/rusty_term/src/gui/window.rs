@@ -5839,7 +5839,7 @@ impl WindowState<'_> {
                 }
                 // An open confirm owns the wheel: it scrolls a long URL.
                 if let Some(confirm) = &mut self.confirm {
-                    confirm.scroll_by(-(lines as isize));
+                    confirm.scroll_by(-lines);
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
