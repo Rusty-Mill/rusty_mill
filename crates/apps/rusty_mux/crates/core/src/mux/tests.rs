@@ -1864,6 +1864,7 @@ fn a_share_skips_blocks_its_sharer_may_not_grant() {
         mux.block(block).is_some_and(|b| b.grants().is_empty()),
         "another client's owned block stays its owner's to grant"
     );
+}
 
 #[test]
 fn on_a_shared_server_a_client_is_renamed_only_by_its_principal_or_the_account() {
