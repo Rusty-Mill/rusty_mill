@@ -400,20 +400,7 @@ async fn http_upgrade(
 /// Parses `http://host:port[/path]` or `https://host:port[/path]` into
 /// (is TLS, `host:port`, host-header value).
 fn parse_url(url: &str) -> Result<(bool, String, String), DerpError> {
-    let (tls, rest) = ts_dial::scheme(url).ok_or_else(|| DerpError::BadUrl(url.to_string()))?;
-    let authority = rest.split(['/', '?']).next().unwrap_or(rest);
-    if authority.is_empty() {
-        return Err(DerpError::BadUrl(url.to_string()));
-    }
-    let has_port = authority
-        .rsplit_once(':')
-        .is_some_and(|(_, p)| !p.contains(']'));
-    let dial = match (has_port, tls) {
-        (true, _) => authority.to_string(),
-        (false, true) => format!("{authority}:443"),
-        (false, false) => format!("{authority}:80"),
-    };
-    Ok((tls, dial, authority.to_string()))
+    ts_dial::split(url).ok_or_else(|| DerpError::BadUrl(url.to_string()))
 }
 
 #[cfg(test)]

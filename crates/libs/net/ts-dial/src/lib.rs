@@ -27,6 +27,27 @@ pub fn scheme(url: &str) -> Option<(bool, &str)> {
         .or_else(|| url.strip_prefix("http://").map(|rest| (false, rest)))
 }
 
+/// Splits `http://host[:port][/path]` or `https://...` into (is TLS, the
+/// `host:port` to dial, the authority as written, for a `Host` header). An
+/// omitted port follows the scheme (443 or 80). `None` for another scheme or
+/// an empty host.
+pub fn split(url: &str) -> Option<(bool, String, String)> {
+    let (tls, rest) = scheme(url)?;
+    let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+    if authority.is_empty() {
+        return None;
+    }
+    let has_port = authority
+        .rsplit_once(':')
+        .is_some_and(|(_, p)| !p.contains(']'));
+    let dial = match (has_port, tls) {
+        (true, _) => authority.to_string(),
+        (false, true) => format!("{authority}:443"),
+        (false, false) => format!("{authority}:80"),
+    };
+    Some((tls, dial, authority.to_string()))
+}
+
 /// `host` of a `host`, `host:port` or `[v6]:port` authority: the name TLS
 /// checks the certificate against.
 pub fn server_name(authority: &str) -> &str {

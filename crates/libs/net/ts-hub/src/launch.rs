@@ -5,6 +5,9 @@
 //! <prog> --listen ADDR:PORT [--tls-cert PEM --tls-key PEM]
 //!               [--stun ADDR:PORT] [--state-dir DIR] [--node-ttl SECS]
 //!               [--keys FILE] [--policy FILE] [--advertise HOST]
+//!               [--replica-secret FILE]
+//! <prog> --standby URL --replica-secret FILE [--tls-ca PEM] [--state-dir DIR]
+//! <prog> --listen ADDR:PORT --promote URL [--force] [--state-dir DIR] ...
 //! ```
 //!
 //! SIGHUP re-reads the keys and policy files. Logs carry addresses and
@@ -35,11 +38,22 @@ options:
                          per line; must not be readable by group or others
   --policy <file>        `FROM -> TO` rules (default: none, nobody reaches anyone)
   --advertise <host>     DERP/STUN host to put in every netmap
+  --replica-secret <f>   let a standby that presents this secret (random, 16+ characters,
+                         e.g. `openssl rand -hex 32`; file mode 600) copy the hub's state; needs TLS unless
+                         --listen is a loopback address
+
+failover (docs/projects/mux/MESH.md, stage 4):
+  --standby <url>        do not serve: follow the active hub at <url> and keep
+                         its state in --state-dir (needs --replica-secret;
+                         <url> is https:// or loopback; --tls-ca pins its CA)
+  --promote <url>        serve from the copy a standby made, as the new active
+                         hub. Refuses while the hub at <url> still answers,
+                         unless --force. Never automatic.
 SIGHUP re-reads --keys and --policy.";
 
 #[derive(Debug)]
 struct Args {
-    listen: SocketAddr,
+    listen: Option<SocketAddr>,
     tls: Option<(PathBuf, PathBuf)>,
     stun: Option<SocketAddr>,
     state_dir: PathBuf,
@@ -47,6 +61,11 @@ struct Args {
     keys: Option<PathBuf>,
     policy: Option<PathBuf>,
     advertise: Option<String>,
+    replica_secret: Option<PathBuf>,
+    standby: Option<String>,
+    promote: Option<String>,
+    force: bool,
+    tls_ca: Option<PathBuf>,
 }
 
 /// What the command line asked for.
@@ -60,6 +79,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
     let (mut listen, mut cert, mut key, mut stun) = (None, None, None, None);
     let mut state_dir = PathBuf::from("ts-hub-state");
     let (mut node_ttl, mut keys, mut policy, mut advertise) = (None, None, None, None);
+    let (mut replica_secret, mut standby, mut promote, mut tls_ca) = (None, None, None, None);
+    let mut force = false;
     let mut it = args;
     while let Some(arg) = it.next() {
         let mut next = || it.next().ok_or_else(|| format!("{arg} requires a value"));
@@ -80,6 +101,11 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             "--keys" => keys = Some(PathBuf::from(next()?)),
             "--policy" => policy = Some(PathBuf::from(next()?)),
             "--advertise" => advertise = Some(next()?),
+            "--replica-secret" => replica_secret = Some(PathBuf::from(next()?)),
+            "--standby" => standby = Some(next()?),
+            "--promote" => promote = Some(next()?),
+            "--force" => force = true,
+            "--tls-ca" => tls_ca = Some(PathBuf::from(next()?)),
             "-h" | "--help" => return Ok(Cli::Help),
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -89,8 +115,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
         (None, None) => None,
         _ => return Err("--tls-cert and --tls-key go together".into()),
     };
-    Ok(Cli::Run(Box::new(Args {
-        listen: listen.ok_or("--listen is required")?,
+    let args = Args {
+        listen,
         tls,
         stun,
         state_dir,
@@ -98,7 +124,68 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
         keys,
         policy,
         advertise,
-    })))
+        replica_secret,
+        standby,
+        promote,
+        force,
+        tls_ca,
+    };
+    args.check()?;
+    Ok(Cli::Run(Box::new(args)))
+}
+
+impl Args {
+    /// Flag combinations that make no sense or would be unsafe.
+    fn check(&self) -> Result<(), String> {
+        if let Some(url) = &self.standby {
+            if self.promote.is_some() {
+                return Err("--standby and --promote are different roles".into());
+            }
+            if self.listen.is_some() {
+                return Err(
+                    "a standby does not serve: drop --listen (use --promote to serve)".into(),
+                );
+            }
+            if self.replica_secret.is_none() {
+                return Err("--standby needs --replica-secret".into());
+            }
+            return needs_secure_link(url, "--standby");
+        }
+        if self.listen.is_none() {
+            return Err("--listen is required".into());
+        }
+        if self.force && self.promote.is_none() {
+            return Err("--force goes with --promote".into());
+        }
+        if self.tls_ca.is_some() {
+            return Err("--tls-ca goes with --standby".into());
+        }
+        if let Some(url) = &self.promote {
+            needs_secure_link(url, "--promote")?;
+        }
+        // The secret rides in a header: never over plain HTTP off this host.
+        let loopback = self.listen.is_some_and(|a| a.ip().is_loopback());
+        if self.replica_secret.is_some() && self.tls.is_none() && !loopback {
+            return Err(
+                "--replica-secret needs --tls-cert/--tls-key, or a loopback --listen".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// `https://`, or `http://` only to this host.
+fn needs_secure_link(url: &str, flag: &str) -> Result<(), String> {
+    let Some((tls, _, authority)) = ts_dial::split(url) else {
+        return Err(format!("{flag}: bad URL {url:?}"));
+    };
+    let host = ts_dial::server_name(&authority);
+    if tls || matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        return Ok(());
+    }
+    Err(format!(
+        "{flag}: {url} is plain HTTP; use https:// (the link carries pre-auth keys)"
+    ))
 }
 
 /// Runs the hub until SIGTERM or Ctrl-C. `prog` is how the user ran it
@@ -128,10 +215,100 @@ pub async fn main(prog: &str, args: impl Iterator<Item = String>) -> ExitCode {
 type BoxError = Box<dyn std::error::Error>;
 
 async fn run(args: Args) -> Result<(), BoxError> {
+    match (args.standby.clone(), args.listen) {
+        (Some(url), _) => standby(&args, &url).await,
+        (None, Some(listen)) => serve(args, listen).await,
+        (None, None) => Err("--listen is required".into()),
+    }
+}
+
+/// The trust for a link to the active hub: its CA when given, else the
+/// system's.
+fn link_trust(args: &Args) -> Result<ts_dial::Trust, BoxError> {
+    match &args.tls_ca {
+        None => Ok(ts_dial::Trust::System),
+        Some(path) => Ok(ts_dial::trust_from_pem(&std::fs::read_to_string(path)?)?),
+    }
+}
+
+/// Follows the active hub and serves nobody, until stopped.
+async fn standby(args: &Args, url: &str) -> Result<(), BoxError> {
+    let secret = secret_of(args)?.ok_or("--standby needs --replica-secret")?;
+    let trust = link_trust(args)?;
+    std::fs::create_dir_all(&args.state_dir)?;
+    rusty_log::info!(
+        "standby: following {url}, keeping state in {}",
+        args.state_dir.display()
+    );
+    println!("standby: following {url}");
+    rusty_tokio::select! {
+        ended = crate::replica::follow(url, &secret, &args.state_dir, &trust) => {
+            match ended {
+                Err(e) => Err(format!("standby stopped: {e}").into()),
+                Ok(never) => match never {},
+            }
+        }
+        _ = stop() => {
+            rusty_log::info!("standby: stopping");
+            Ok(())
+        }
+    }
+}
+
+/// The replication secret from its file, if one was given.
+fn secret_of(args: &Args) -> Result<Option<String>, BoxError> {
+    let Some(path) = &args.replica_secret else {
+        return Ok(None);
+    };
+    Ok(Some(read_secret(path)?.trim().to_string()))
+}
+
+/// Returns on SIGTERM or Ctrl-C.
+async fn stop() {
+    use rusty_tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut term) => {
+            rusty_tokio::select! {
+                _ = rusty_tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+        }
+        Err(_) => {
+            rusty_tokio::signal::ctrl_c().await.ok();
+        }
+    }
+}
+
+/// Refuses to promote a standby that never copied anything (it would start a
+/// new hub with a new key) or one whose active hub still answers.
+async fn check_promotion(args: &Args, url: &str) -> Result<(), BoxError> {
+    if !args.state_dir.join("nodes.json").exists() {
+        return Err(format!(
+            "{} has no copy of a hub's state: run a --standby first",
+            args.state_dir.display()
+        )
+        .into());
+    }
+    if !args.force {
+        crate::replica::is_down(url)
+            .await
+            .map_err(|why| format!("{why}; stop it first (or --force)"))?;
+    }
+    Ok(())
+}
+
+async fn serve(args: Args, listen: SocketAddr) -> Result<(), BoxError> {
+    if let Some(url) = &args.promote {
+        check_promotion(&args, url).await?;
+        rusty_log::warn!("hub: promoted from a standby copy; the old active must stay down");
+    }
     std::fs::create_dir_all(&args.state_dir)?;
     let identity = NodeState::load_or_generate(&args.state_dir)?.machine;
     let store = FileStore::open(args.state_dir.join("nodes.json"), args.node_ttl)?;
     let hub = Hub::with_identity(store, Limits::default(), identity);
+    if let Some(secret) = secret_of(&args)? {
+        hub.enable_replication(&secret)?;
+    }
     // A bad file stops the hub before it serves anyone.
     reload(&hub, args.keys.as_deref(), args.policy.as_deref())?;
     if args.policy.is_none() {
@@ -145,7 +322,7 @@ async fn run(args: Args) -> Result<(), BoxError> {
         )?),
         None => None,
     };
-    let listener = TcpListener::bind(args.listen).await?;
+    let listener = TcpListener::bind(listen).await?;
     let local = listener.local_addr()?;
     let stun_port = match args.stun {
         Some(addr) => {
@@ -273,6 +450,90 @@ mod tests {
         assert!(parse(&["--listen", "127.0.0.1:0", "--tls-cert", "c"]).is_err());
         let a = parse(&["--listen", "[::1]:443", "--tls-cert", "c", "--tls-key", "k"]).unwrap();
         assert!(a.tls.is_some());
+    }
+
+    #[test]
+    fn failover_flags_go_together_and_refuse_a_plain_link() {
+        let run = |a: &[&str]| parse(a).map(drop);
+        // A standby serves nothing and needs the secret and a safe link.
+        assert!(run(&["--standby", "https://hub:1", "--replica-secret", "s"]).is_ok());
+        assert!(run(&["--standby", "http://127.0.0.1:1", "--replica-secret", "s"]).is_ok());
+        assert!(run(&["--standby", "http://hub.example:1", "--replica-secret", "s"]).is_err());
+        assert!(run(&["--standby", "https://hub:1"]).is_err());
+        assert!(
+            run(&[
+                "--standby",
+                "https://hub:1",
+                "--replica-secret",
+                "s",
+                "--listen",
+                "127.0.0.1:0"
+            ])
+            .is_err()
+        );
+        // Promotion serves, so it needs --listen; --force only goes with it.
+        assert!(run(&["--promote", "https://hub:1"]).is_err());
+        assert!(
+            run(&[
+                "--listen",
+                "127.0.0.1:0",
+                "--promote",
+                "https://hub:1",
+                "--force"
+            ])
+            .is_ok()
+        );
+        assert!(run(&["--listen", "127.0.0.1:0", "--force"]).is_err());
+        assert!(
+            run(&[
+                "--listen",
+                "127.0.0.1:0",
+                "--standby",
+                "https://h:1",
+                "--promote",
+                "https://h:1"
+            ])
+            .is_err()
+        );
+        // Promotion does not talk TLS to the old active, so a CA would be ignored.
+        assert!(
+            run(&[
+                "--listen",
+                "127.0.0.1:0",
+                "--promote",
+                "https://hub:1",
+                "--tls-ca",
+                "ca"
+            ])
+            .is_err()
+        );
+        assert!(
+            run(&[
+                "--standby",
+                "https://hub:1",
+                "--replica-secret",
+                "s",
+                "--tls-ca",
+                "ca"
+            ])
+            .is_ok()
+        );
+        // The secret never goes over plain HTTP off this host.
+        assert!(run(&["--listen", "0.0.0.0:80", "--replica-secret", "s"]).is_err());
+        assert!(run(&["--listen", "127.0.0.1:80", "--replica-secret", "s"]).is_ok());
+        assert!(
+            run(&[
+                "--listen",
+                "0.0.0.0:443",
+                "--tls-cert",
+                "c",
+                "--tls-key",
+                "k",
+                "--replica-secret",
+                "s"
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

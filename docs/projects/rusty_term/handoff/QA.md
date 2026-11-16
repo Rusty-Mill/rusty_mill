@@ -91,3 +91,7 @@ Source: D266; D267; D233; D39; mux `RISKS.md` R17; `REX-DELTA.md` R8/D9; `crates
 ## Does UDP work for login-mode account servers?
 Not yet; it is a go (D268) with a design note first (PR #1689). The front door only passes `--udp ADDR:LO-HI`; each account server binds the first free port itself and starts without UDP when the range is full. Tailnet principals are refused `OpenDatagram`; account servers use `--udp-idle 3600`; no wire change (D269, Q66).
 Source: D268; D269; D45; mux `UDP-ACCOUNTS.md`, `SHARED-MODE.md`; `crates/apps/rusty_mux/crates/server/src/main.rs` (250-258).
+
+## How should hub failover (H8) promote and advertise standbys?
+Asked 2026-11-16. Manual promotion by restarting the standby with `--promote`, refused while the active still answers unless `--force`; an extra MapResponse field lists standby URLs, set by `--advertise-standby`; the test kills the active mid-transfer and checks existing pair, new join and a still-revoked machine. The replication channel is a shared secret over `/replicate` with the Noise key in the snapshot (Q67, D275).
+Source: D274; D275; MESH.md stage 4; hub-build-plan.md H8.

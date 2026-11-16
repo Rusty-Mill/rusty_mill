@@ -21,6 +21,7 @@ rusty_tokio.workspace = true
 rusty_h2 = { path = "../rusty_h2", features = ["rusty-tokio"] }
 rusty_http = { workspace = true, features = ["rusty-tokio"] }
 rusty_base64.workspace = true
+rusty_crypto_key.workspace = true
 rusty_log.workspace = true
 rusty_tls = { workspace = true, features = ["rusty-tokio"] }
 serde.workspace = true

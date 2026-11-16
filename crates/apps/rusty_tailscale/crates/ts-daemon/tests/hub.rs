@@ -41,6 +41,11 @@ fn write_private(path: &Path, text: &str) {
 }
 
 fn start(dir: PathBuf, keys: &str) -> Running {
+    start_with(dir, keys, &[])
+}
+
+/// Like [`start`], with more flags for the hub.
+fn start_with(dir: PathBuf, keys: &str, extra: &[&std::ffi::OsStr]) -> Running {
     write_private(&dir.join("keys"), keys);
     std::fs::write(dir.join("policy"), "* -> *\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ts-daemon"))
@@ -50,6 +55,7 @@ fn start(dir: PathBuf, keys: &str) -> Running {
         .arg(dir.join("keys"))
         .arg("--policy")
         .arg(dir.join("policy"))
+        .args(extra)
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
@@ -246,4 +252,110 @@ async fn a_keys_file_that_does_not_parse_leaves_the_old_keys_working_after_sighu
     rusty_tokio::time::sleep(Duration::from_millis(500)).await;
     join(&hub.url, "a", "k1").await.unwrap();
     assert!(join(&hub.url, "b", "k2").await.is_err(), "k2 was applied");
+}
+
+async fn control_key(url: &str) -> ts_types::MachinePublic {
+    let hostinfo = Hostinfo::default();
+    ControlClient::connect(url, MachinePrivate::generate(), hostinfo)
+        .await
+        .unwrap()
+        .control_key()
+}
+
+#[rusty_tokio::test]
+async fn a_standby_promoted_after_the_active_is_killed_serves_the_same_hub() {
+    use std::ffi::OsStr;
+    let dir = temp_dir("failover");
+    let secret = dir.join("secret");
+    write_private(&secret, "0123456789abcdef0123456789abcdef\n");
+    std::fs::create_dir_all(dir.join("active")).unwrap();
+    let mut active = start_with(
+        dir.join("active"),
+        "ka alice reusable\n",
+        &[OsStr::new("--replica-secret"), secret.as_os_str()],
+    );
+    let active_key = control_key(&active.url).await;
+    join(&active.url, "a", "ka").await.unwrap();
+
+    let standby_state = dir.join("standby");
+    let mut standby = Command::new(env!("CARGO_BIN_EXE_ts-daemon"))
+        .args(["hub", "--standby", &active.url, "--replica-secret"])
+        .arg(&secret)
+        .arg("--state-dir")
+        .arg(&standby_state)
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let copy = standby_state.join("nodes.json");
+    let mut copied = false;
+    for _ in 0..100 {
+        let text = std::fs::read_to_string(&copy).unwrap_or_default();
+        if text.contains("\"hostname\": \"a\"") {
+            copied = true;
+            break;
+        }
+        rusty_tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(copied, "the standby copies the node table");
+
+    // Promotion is refused while the active hub answers.
+    let refused = Command::new(env!("CARGO_BIN_EXE_ts-daemon"))
+        .args([
+            "hub",
+            "--listen",
+            "127.0.0.1:0",
+            "--promote",
+            &active.url,
+            "--state-dir",
+        ])
+        .arg(&standby_state)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+
+    // Kill both, then promote the copy.
+    active.child.kill().unwrap();
+    active.child.wait().unwrap();
+    standby.kill().unwrap();
+    standby.wait().unwrap();
+    std::fs::copy(active.dir.join("keys"), dir.join("keys")).unwrap();
+    std::fs::copy(active.dir.join("policy"), dir.join("policy")).unwrap();
+    let promoted = Command::new(env!("CARGO_BIN_EXE_ts-daemon"))
+        .args([
+            "hub",
+            "--listen",
+            "127.0.0.1:0",
+            "--promote",
+            &active.url,
+            "--state-dir",
+        ])
+        .arg(&standby_state)
+        .arg("--keys")
+        .arg(dir.join("keys"))
+        .arg("--policy")
+        .arg(dir.join("policy"))
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut promoted = Running {
+        child: promoted,
+        dir: dir.clone(),
+        url: String::new(),
+    };
+    let stdout = promoted.child.stdout.take().unwrap();
+    let addr = BufReader::new(stdout)
+        .lines()
+        .map_while(Result::ok)
+        .find_map(|l| l.strip_prefix("hub: listening on ").map(str::to_string))
+        .expect("the promoted hub reports its address");
+    promoted.url = format!("http://{addr}");
+
+    assert_eq!(
+        control_key(&promoted.url).await,
+        active_key,
+        "nodes pin this key"
+    );
+    join(&promoted.url, "c", "ka")
+        .await
+        .expect("a new node joins the promoted hub");
 }

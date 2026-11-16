@@ -1020,3 +1020,195 @@ fn a_keys_file_with_a_refused_key_changes_nothing() {
         .unwrap();
     std::fs::remove_file(&path).ok();
 }
+
+async fn join_as(
+    url: &str,
+    key: MachinePrivate,
+    name: &str,
+    auth: &str,
+) -> Result<NodePrivate, ClientError> {
+    let hostinfo = Hostinfo {
+        hostname: name.into(),
+        os: "linux".into(),
+        ..Default::default()
+    };
+    let client = ControlClient::connect(url, key, hostinfo).await.unwrap();
+    let node = NodePrivate::generate();
+    client.register(node.public(), auth).await?;
+    Ok(node)
+}
+
+#[rusty_tokio::test]
+async fn a_standby_promoted_after_the_active_dies_keeps_the_key_the_nodes_and_the_revokes() {
+    let root = std::env::temp_dir().join(format!("ts-hub-failover-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+    let (active_dir, standby_dir) = (root.join("active"), root.join("standby"));
+    std::fs::create_dir_all(&active_dir).unwrap();
+    let secret = "0123456789abcdef0123456789abcdef";
+
+    let identity = ts_key::NodeState::load_or_generate(&active_dir)
+        .unwrap()
+        .machine;
+    let store = FileStore::open(active_dir.join("nodes.json"), None).unwrap();
+    let active = Hub::with_identity(store, Limits::default(), identity);
+    active.set_policy(Policy::allow_all());
+    active
+        .add_preauth("k1", "alice", KeyPolicy::REUSABLE)
+        .unwrap();
+    active.enable_replication(secret).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let serving = rusty_tokio::spawn(active.clone().serve(listener));
+
+    let (key_a, key_b) = (MachinePrivate::generate(), MachinePrivate::generate());
+    let node_a = join_as(&url, key_a.clone(), "a", "k1").await.unwrap();
+    join_as(&url, key_b.clone(), "b", "k1").await.unwrap();
+    assert!(active.revoke(&key_b.public()).unwrap());
+
+    // The wrong secret gets nothing.
+    let trust = ts_dial::Trust::System;
+    let refused = replica::fetch(&url, "wrong-wrong-wrong-wrong", None, &trust).await;
+    assert!(
+        matches!(refused, Err(replica::ReplicaError::Status(401))),
+        "{refused:?}"
+    );
+
+    let follower = {
+        let (url, dir) = (url.clone(), standby_dir.clone());
+        rusty_tokio::spawn(async move {
+            replica::follow(&url, secret, &dir, &ts_dial::Trust::System).await
+        })
+    };
+    let want: serde_json::Value =
+        serde_json::from_slice(&active.locked(|s| s.export()).unwrap()).unwrap();
+    let copied = async {
+        loop {
+            let have = std::fs::read(standby_dir.join("nodes.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+            if have.as_ref() == Some(&want) {
+                return;
+            }
+            rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    rusty_tokio::time::timeout(Duration::from_secs(10), copied)
+        .await
+        .expect("the standby copies the table");
+
+    // The active dies; the standby's hub opens the copy.
+    serving.abort();
+    follower.abort();
+    let identity = ts_key::NodeState::load_or_generate(&standby_dir)
+        .unwrap()
+        .machine;
+    let store = FileStore::open(standby_dir.join("nodes.json"), None).unwrap();
+    let promoted = Hub::with_identity(store, Limits::default(), identity);
+    promoted.set_policy(Policy::allow_all());
+    assert_eq!(
+        promoted.public_key(),
+        active.public_key(),
+        "nodes pin this key"
+    );
+    assert!(promoted.locked(|s| s.has_node_key(&node_a.public(), unix_now())));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    rusty_tokio::spawn(promoted.clone().serve(listener));
+
+    join_as(&url, MachinePrivate::generate(), "c", "k1")
+        .await
+        .expect("a new node joins");
+    let revoked = join_as(&url, key_b, "b", "k1").await;
+    assert!(
+        matches!(revoked, Err(ClientError::RegisterRejected(_))),
+        "revoked stays revoked: {revoked:?}"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[rusty_tokio::test]
+async fn replication_is_off_until_enabled_and_needs_a_long_enough_secret() {
+    let (hub, url) = start().await;
+    let off = replica::fetch(&url, "0123456789abcdef", None, &ts_dial::Trust::System).await;
+    assert!(
+        matches!(off, Err(replica::ReplicaError::Status(404))),
+        "{off:?}"
+    );
+    assert!(matches!(
+        hub.enable_replication("short"),
+        Err(replica::ReplicaError::WeakSecret)
+    ));
+}
+
+async fn replicating_hub() -> (Arc<Hub>, String) {
+    let hub = Hub::new();
+    hub.enable_replication("0123456789abcdef0123456789abcdef")
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    rusty_tokio::spawn(hub.clone().serve(listener));
+    (hub, url)
+}
+
+const SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+#[rusty_tokio::test]
+async fn a_table_over_one_mib_is_copied() {
+    let (hub, url) = replicating_hub().await;
+    for i in 0..10_000 {
+        hub.add_preauth(
+            &format!("key-{i:08}-padding-padding"),
+            "alice",
+            KeyPolicy::REUSABLE,
+        )
+        .unwrap();
+    }
+    let snapshot = replica::fetch(&url, SECRET, None, &ts_dial::Trust::System)
+        .await
+        .expect("a big table is not refused");
+    assert!(serde_json::to_vec(&snapshot.table).unwrap().len() > 1 << 20);
+}
+
+#[rusty_tokio::test]
+async fn a_restarted_active_is_copied_even_when_its_counter_matches() {
+    let (_, url) = replicating_hub().await;
+    let trust = ts_dial::Trust::System;
+    let held = replica::fetch(&url, SECRET, None, &trust).await.unwrap();
+
+    // The same run with the same version has nothing new: the request waits.
+    let waits = rusty_tokio::time::timeout(
+        Duration::from_millis(400),
+        replica::fetch(&url, SECRET, Some((held.epoch, held.version)), &trust),
+    )
+    .await;
+    assert!(waits.is_err(), "nothing changed, so the active waits");
+
+    // A different run (a restart) with the same version answers at once.
+    let restarted = rusty_tokio::time::timeout(
+        Duration::from_secs(5),
+        replica::fetch(&url, SECRET, Some((held.epoch + 1, held.version)), &trust),
+    )
+    .await;
+    assert!(restarted.expect("answers at once").is_ok());
+}
+
+#[rusty_tokio::test]
+async fn only_a_refused_connection_counts_as_a_hub_being_down() {
+    let (_hub, url) = replicating_hub().await;
+    assert!(
+        replica::is_down(&url).await.is_err(),
+        "it accepts connections"
+    );
+
+    let gone = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", gone.local_addr().unwrap());
+    drop(gone);
+    assert!(
+        replica::is_down(&url).await.is_ok(),
+        "nothing listens there"
+    );
+    assert!(
+        replica::is_down("ftp://x").await.is_err(),
+        "a bad URL is not 'down'"
+    );
+}

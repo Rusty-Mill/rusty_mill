@@ -147,6 +147,14 @@ pub trait NodeStore: Send + 'static {
     /// The full netmap for `machine`: itself plus every other unexpired
     /// node, or `None` if the machine is not registered or has expired.
     fn netmap(&self, machine: &MachinePublic, omit_peers: bool, now: u64) -> Option<MapResponse>;
+
+    /// The table as saved bytes, for a standby to copy. A store that cannot
+    /// be copied says so and the hub refuses to replicate.
+    fn export(&self) -> Result<Vec<u8>, RegisterError> {
+        Err(RegisterError::Storage(
+            "this store cannot be replicated".into(),
+        ))
+    }
 }
 
 /// What [`NodeStore::revoke`] did.
@@ -460,6 +468,11 @@ impl NodeStore for MemoryStore {
         n.disco = Some(disco);
         n.endpoints = endpoints;
         changed
+    }
+
+    fn export(&self) -> Result<Vec<u8>, RegisterError> {
+        self.to_json()
+            .map_err(|e| RegisterError::Storage(e.to_string()))
     }
 
     fn netmap(&self, machine: &MachinePublic, omit_peers: bool, now: u64) -> Option<MapResponse> {
