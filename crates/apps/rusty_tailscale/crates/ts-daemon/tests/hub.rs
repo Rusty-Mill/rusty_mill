@@ -48,14 +48,20 @@ fn start(dir: PathBuf, keys: &str) -> Running {
 fn start_with(dir: PathBuf, keys: &str, extra: &[&std::ffi::OsStr]) -> Running {
     write_private(&dir.join("keys"), keys);
     std::fs::write(dir.join("policy"), "* -> *\n").unwrap();
+    let mut args: Vec<std::ffi::OsString> = ["hub", "--listen", "127.0.0.1:0", "--state-dir"]
+        .map(Into::into)
+        .into();
+    args.push(dir.join("state").into());
+    args.extend(["--keys".into(), dir.join("keys").into()]);
+    args.extend(["--policy".into(), dir.join("policy").into()]);
+    args.extend(extra.iter().map(Into::into));
+    spawn_hub(dir, &args)
+}
+
+/// Runs `ts-daemon args...` and waits for the hub to report its address.
+fn spawn_hub(dir: PathBuf, args: &[std::ffi::OsString]) -> Running {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ts-daemon"))
-        .args(["hub", "--listen", "127.0.0.1:0", "--state-dir"])
-        .arg(dir.join("state"))
-        .arg("--keys")
-        .arg(dir.join("keys"))
-        .arg("--policy")
-        .arg(dir.join("policy"))
-        .args(extra)
+        .args(args)
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
@@ -356,6 +362,140 @@ async fn a_standby_promoted_after_the_active_is_killed_serves_the_same_hub() {
         "nodes pin this key"
     );
     join(&promoted.url, "c", "ka")
+        .await
+        .expect("a new node joins the promoted hub");
+}
+
+/// Two real nodes stream through the active hub; it is killed mid-transfer and
+/// the standby is promoted on the address the nodes were told about. The
+/// stream must finish byte for byte, and a new node must join afterwards.
+#[rusty_tokio::test]
+async fn nodes_ride_out_the_active_hub_dying_and_a_standby_taking_over() {
+    use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use std::ffi::{OsStr, OsString};
+
+    const PORT: u16 = 7000;
+    const LEN: usize = 2 << 20;
+    let dir = temp_dir("takeover");
+    let secret = dir.join("secret");
+    write_private(&secret, "0123456789abcdef0123456789abcdef\n");
+    let standby_addr = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap()
+    };
+    let standby_url = format!("http://{standby_addr}");
+
+    std::fs::create_dir_all(dir.join("active")).unwrap();
+    let mut active = start_with(
+        dir.join("active"),
+        "ka alice reusable\n",
+        &[
+            OsStr::new("--replica-secret"),
+            secret.as_os_str(),
+            OsStr::new("--advertise-standby"),
+            OsStr::new(&standby_url),
+        ],
+    );
+    let node = |name: &str, url: &str| {
+        let cfg = ts_net::NodeConfig {
+            control_url: url.to_owned(),
+            derp_url: None,
+            authkey: "ka".into(),
+            hostname: name.to_owned(),
+            state_dir: dir.join(name),
+            enable_direct: false,
+            stun_server: None,
+            trust: ts_net::Trust::System,
+        };
+        async move { ts_net::Node::new(cfg).await.expect("node joins") }
+    };
+    let a = node("a", &active.url).await;
+    let b = node("b", &active.url).await;
+    let a_ip = a.wait_ip().await.expect("a has an address");
+    b.wait_ip().await.expect("b has an address");
+    let mut listener = a.bind(PORT).await.expect("bind");
+
+    let want: Vec<u8> = (0..LEN)
+        .map(|i| (i.wrapping_mul(31) ^ (i >> 8)) as u8)
+        .collect();
+    let sender = rusty_tokio::spawn({
+        let want = want.clone();
+        async move {
+            let mut s = b.connect((a_ip, PORT).into()).await.expect("connect");
+            for chunk in want.chunks(32 << 10) {
+                s.write_all(chunk).await.expect("write");
+                rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            s.shutdown().await.expect("shutdown");
+            (s, b)
+        }
+    });
+
+    let standby_state = dir.join("standby");
+    let standby = Command::new(env!("CARGO_BIN_EXE_ts-daemon"))
+        .args(["hub", "--standby", &active.url, "--replica-secret"])
+        .arg(&secret)
+        .arg("--state-dir")
+        .arg(&standby_state)
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut standby = Running {
+        child: standby,
+        dir: dir.clone(),
+        url: String::new(),
+    };
+
+    let mut conn = listener.accept().await.expect("accept");
+    let mut got = Vec::with_capacity(LEN);
+    let mut buf = vec![0u8; 64 << 10];
+    let mut promoted = None;
+    let finished = rusty_tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let n = conn.read(&mut buf).await.expect("read");
+            if n == 0 {
+                return;
+            }
+            got.extend_from_slice(&buf[..n]);
+            if promoted.is_none() && got.len() > LEN / 4 {
+                // The copy must have arrived before the active dies.
+                let copy = standby_state.join("nodes.json");
+                assert!(
+                    std::fs::read_to_string(&copy).is_ok_and(|t| t.contains("\"hostname\": \"b\"")),
+                    "the standby has the node table"
+                );
+                active.child.kill().unwrap();
+                active.child.wait().unwrap();
+                standby.child.kill().unwrap();
+                standby.child.wait().unwrap();
+                std::fs::copy(active.dir.join("keys"), dir.join("keys")).unwrap();
+                std::fs::copy(active.dir.join("policy"), dir.join("policy")).unwrap();
+                let args: Vec<OsString> = [
+                    "hub".into(),
+                    "--listen".into(),
+                    standby_addr.to_string().into(),
+                    "--promote".into(),
+                    active.url.clone().into(),
+                    "--state-dir".into(),
+                    standby_state.clone().into(),
+                    "--keys".into(),
+                    dir.join("keys").into(),
+                    "--policy".into(),
+                    dir.join("policy").into(),
+                ]
+                .into();
+                promoted = Some(spawn_hub(dir.clone(), &args));
+            }
+        }
+    })
+    .await;
+    assert!(finished.is_ok(), "the stream finishes after the takeover");
+    assert_eq!(got.len(), want.len(), "length");
+    assert!(got == want, "bytes differ");
+    drop(sender.await);
+
+    let c = node("c", &standby_url).await;
+    c.wait_ip()
         .await
         .expect("a new node joins the promoted hub");
 }

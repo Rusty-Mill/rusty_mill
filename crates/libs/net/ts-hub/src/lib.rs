@@ -82,6 +82,8 @@ pub struct Hub<S: NodeStore = MemoryStore> {
     epoch: u64,
     /// The `DERPMap` every netmap carries, once the hub knows its address.
     derp_map: Mutex<Option<serde_json::Value>>,
+    /// Standby base URLs every netmap carries (see [`Hub::advertise_standbys`]).
+    standbys: Mutex<Vec<String>>,
     conns: Counter,
     streams: Counter,
     machine_streams: Keyed<MachinePublic>,
@@ -124,6 +126,7 @@ impl<S: NodeStore> Hub<S> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos() as u64),
             derp_map: Mutex::new(None),
+            standbys: Mutex::new(Vec::new()),
             conns: Counter::default(),
             streams: Counter::default(),
             machine_streams: Keyed::default(),
@@ -198,6 +201,14 @@ impl<S: NodeStore> Hub<S> {
         *self.derp_map.lock().unwrap_or_else(|e| e.into_inner()) = Some(map);
     }
 
+    /// Puts the standby coordinators' base URLs in every netmap, so nodes can
+    /// reconnect to one when this hub goes away. A standby serves control and
+    /// DERP on the same URL once it is promoted.
+    pub fn advertise_standbys(&self, urls: Vec<String>) {
+        *self.standbys.lock().unwrap_or_else(|e| e.into_inner()) = urls;
+        self.bump();
+    }
+
     /// The relay's node key, as sent in the DERP `ServerKey` frame.
     pub fn derp_public_key(&self) -> NodePublic {
         self.relay.public_key()
@@ -225,6 +236,8 @@ impl<S: NodeStore> Hub<S> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let standbys = self.standbys.lock().unwrap_or_else(|e| e.into_inner());
+        map.standby_urls = (!standbys.is_empty()).then(|| standbys.clone());
         Some(map)
     }
 

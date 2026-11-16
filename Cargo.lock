@@ -14399,6 +14399,7 @@ dependencies = [
  "ts-hub",
  "ts-key",
  "ts-localapi",
+ "ts-net",
  "ts-types",
 ]
 

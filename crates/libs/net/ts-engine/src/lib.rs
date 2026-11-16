@@ -11,6 +11,7 @@
 //! `ts_magicsock::MagicSock`, `ts_wg::WgPeer`, `ts_tun::Tun`) so the domain
 //! logic stays testable and the adapters are swappable.
 
+mod failover;
 pub mod icmp;
 mod l4;
 
@@ -300,6 +301,9 @@ pub struct Engine {
     our_ips: Vec<Ipv4Addr>,
     derp: DerpClient,
     derp_tx: DerpSender,
+    derp_url: String,
+    trust: Trust,
+    standbys: failover::Standbys,
     sessions: HashMap<NodePublic, BoringWgPeer>,
     /// Everything netmap-derived that is keyed by peer (design review 4).
     index: PeerIndex,
@@ -360,7 +364,7 @@ impl Engine {
         let control = ControlClient::connect_with(
             &config.control_url,
             state.machine.clone(),
-            hostinfo,
+            hostinfo.clone(),
             config.trust.clone(),
         )
         .await?;
@@ -418,20 +422,20 @@ impl Engine {
         // Stream the netmap into an unbounded channel (the poll handler is
         // sync; unbounded send never blocks it).
         let (netmap_tx, netmap_rx) = mpsc::unbounded_channel();
-        rusty_tokio::spawn(async move {
-            let r = control
-                .poll_netmap(node_key, disco_key, endpoints, move |resp| {
-                    if netmap_tx.send(resp).is_err() {
-                        std::ops::ControlFlow::Break(())
-                    } else {
-                        std::ops::ControlFlow::Continue(())
-                    }
-                })
-                .await;
-            if let Err(e) = r {
-                rusty_log::warn!("engine: netmap poll ended: {e}");
-            }
-        });
+        let standbys = failover::Standbys::default();
+        let link = failover::ControlLink {
+            primary: config.control_url.clone(),
+            authkey: config.authkey.clone(),
+            hostinfo,
+            trust: config.trust.clone(),
+            machine: state.machine.clone(),
+            node_key,
+            disco_key,
+            endpoints,
+            standbys: standbys.clone(),
+            netmap_tx,
+        };
+        rusty_tokio::spawn(link.run(control));
 
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let engine = Engine {
@@ -439,6 +443,9 @@ impl Engine {
             our_ips: Vec::new(),
             derp,
             derp_tx,
+            derp_url: config.derp_url,
+            trust: config.trust,
+            standbys,
             sessions: HashMap::new(),
             index: PeerIndex::default(),
             next_index: 1,
@@ -460,7 +467,11 @@ impl Engine {
             stack_tx: config.stack_io.as_ref().map(|s| s.inbound.clone()),
             stack_rx: config.stack_io.map(|s| s.outbound),
         };
-        rusty_tokio::spawn(engine.run());
+        rusty_tokio::spawn(async move {
+            let standbys = engine.standbys.clone();
+            engine.run().await;
+            standbys.stop();
+        });
         Ok(EngineHandle { cmd_tx })
     }
 
@@ -478,8 +489,10 @@ impl Engine {
                 maybe_pkt = self.derp.recv() => match maybe_pkt {
                     Some(pkt) => self.on_derp_packet(pkt.peer, pkt.payload).await,
                     None => {
-                        rusty_log::warn!("engine: DERP connection closed; stopping");
-                        break;
+                        rusty_log::warn!("engine: DERP connection closed; reconnecting");
+                        if !self.reconnect_derp().await {
+                            break;
+                        }
                     }
                 },
                 Some(cmd) = self.cmd_rx.recv() => self.on_command(cmd).await,
@@ -498,6 +511,23 @@ impl Engine {
                 else => break,
             }
         }
+    }
+
+    /// Replaces the lost DERP connection (primary, then standbys). False once
+    /// the engine's handle is gone, so the loop can stop.
+    async fn reconnect_derp(&mut self) -> bool {
+        let Some(derp) =
+            failover::reconnect_derp(&self.derp_url, &self.standbys, &self.state, &self.trust)
+                .await
+        else {
+            return false;
+        };
+        self.derp_tx = derp.sender();
+        if let Some(ms) = &mut self.magicsock {
+            ms.set_derp(derp.sender());
+        }
+        self.derp = derp;
+        true
     }
 
     /// Handles an inbound UDP datagram: magicsock dispatches disco itself and

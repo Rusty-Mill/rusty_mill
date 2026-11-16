@@ -117,6 +117,12 @@ pub struct MagicSock {
 }
 
 impl MagicSock {
+    /// Sends relayed disco and WireGuard through `derp` from now on: the
+    /// engine reconnected to a relay, and the old sender is dead.
+    pub fn set_derp(&mut self, derp: DerpSender) {
+        self.derp = derp;
+    }
+
     /// Binds the UDP socket (IPv4, `0.0.0.0:0` unless `port` is set) and
     /// builds the mux.
     pub async fn new(port: u16, disco: DiscoPrivate, derp: DerpSender) -> std::io::Result<Self> {

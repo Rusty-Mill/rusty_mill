@@ -124,7 +124,10 @@ copy of the same mechanism. Mesh peers use TCP streams; C13 stays for the SSH pa
    Built in two parts. Part 1 (`ts-daemon hub --standby URL`, `--promote URL`): `GET /replicate`
    behind a shared secret copies the node table and the hub's Noise key, so a promoted standby
    presents the key every node pinned. Lag means a revoke made just before the active dies can be
-   lost. Part 2: the standby address list in the netmap and the client fallback.
+   lost. Part 2 (`--advertise-standby URL`): the hub lists its standbys in every netmap
+   (`StandbyURLs`); a node that loses its relay or control connection retries the URL it was given,
+   then each standby, and re-registers with the same key. A node that starts while the active is
+   down has no list yet, so it needs the standby's URL given to it.
 
 "Identity and relay first, direct paths later" is therefore stages 1-2 then 3, in the same
 order `rusty_tailscale` was built (DERP-only data plane before NAT traversal).

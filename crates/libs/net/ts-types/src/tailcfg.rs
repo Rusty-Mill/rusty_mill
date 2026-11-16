@@ -122,6 +122,11 @@ pub struct MapResponse {
     pub domain: String,
     #[serde(rename = "DERPMap")]
     pub derp_map: Option<serde_json::Value>,
+    /// Base URLs of standby coordinators, tried in order when the one a node
+    /// is on goes away (our hub's extension; stock servers never send it and
+    /// stock clients ignore it). `None` means unchanged.
+    #[serde(rename = "StandbyURLs")]
+    pub standby_urls: Option<Vec<String>>,
     #[serde(rename = "DNSConfig")]
     pub dns_config: Option<serde_json::Value>,
     /// Legacy flat packet filter (`tailcfg.MapResponse.PacketFilter`). Older
