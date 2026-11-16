@@ -375,6 +375,18 @@ impl NodeStore for MemoryStore {
         auth_key: &str,
         now: u64,
     ) -> Result<(), RegisterError> {
+        // A node that already holds this machine and node key may register
+        // again with no key (a restarted client does). Nothing changes: the
+        // address, login and expiry stay, so this never extends a node's life.
+        if auth_key.is_empty()
+            && !self.revoked.contains(&machine)
+            && self
+                .nodes
+                .iter()
+                .any(|n| n.machine == machine && n.node_key == node_key && live(n, now))
+        {
+            return Ok(());
+        }
         let (login, tagged) = self.check_key(auth_key, &machine, now)?;
         let hostname = match &tagged {
             Some(name) => self.claim_name(name, &machine)?,
@@ -602,6 +614,38 @@ mod tests {
         // Registering again keeps the address.
         s.register(m(1), k(9), "a", "k1", 0).unwrap();
         assert_eq!(ip_of(&s, 1), 1);
+    }
+
+    #[test]
+    fn a_known_node_registers_again_without_a_key() {
+        let mut s = MemoryStore::default().with_node_ttl(100);
+        s.add_preauth("k1", "alice", KeyPolicy::REUSABLE, 0)
+            .unwrap();
+        s.register(m(1), k(1), "a", "k1", 0).unwrap();
+        // Same machine, same node key, no pre-auth key: accepted, nothing moves.
+        s.register(m(1), k(1), "a", "", 50).unwrap();
+        assert_eq!(ip_of(&s, 1), 1);
+        assert_eq!(s.nodes[0].expires, Some(100), "expiry is not extended");
+        // A new node key, or an unknown machine, still needs a key.
+        assert_eq!(
+            s.register(m(1), k(2), "a", "", 50).unwrap_err(),
+            RegisterError::BadAuthKey
+        );
+        assert_eq!(
+            s.register(m(2), k(1), "b", "", 50).unwrap_err(),
+            RegisterError::BadAuthKey
+        );
+        // An expired node must present a key again.
+        assert_eq!(
+            s.register(m(1), k(1), "a", "", 100).unwrap_err(),
+            RegisterError::BadAuthKey
+        );
+        // A revoked machine never comes back.
+        s.revoke(&m(1));
+        assert_eq!(
+            s.register(m(1), k(1), "a", "", 10).unwrap_err(),
+            RegisterError::Revoked
+        );
     }
 
     #[test]
