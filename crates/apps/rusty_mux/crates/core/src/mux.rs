@@ -1542,16 +1542,21 @@ impl Mux {
         }
     }
 
-    /// Ends every grant `client` holds: it is gone.
+    /// Ends every grant `client` holds, and every share it holds or made
+    /// (a share ends with its sharer, C14): it is gone.
     fn end_grants_of(&mut self, client: ClientId) {
-        let shared: Vec<SessionId> = self
+        let shared: Vec<(SessionId, ClientId)> = self
             .sessions
             .values()
-            .filter(|s| s.shares.contains_key(&client))
-            .map(|s| s.id)
+            .flat_map(|s| {
+                s.shares
+                    .iter()
+                    .filter(|(watcher, share)| **watcher == client || share.by == client)
+                    .map(|(watcher, _)| (s.id, *watcher))
+            })
             .collect();
-        for session in shared {
-            self.end_share(session, client);
+        for (session, watcher) in shared {
+            self.end_share(session, watcher);
         }
         let granted: Vec<BlockId> = self
             .blocks

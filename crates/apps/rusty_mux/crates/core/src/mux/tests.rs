@@ -1853,6 +1853,17 @@ fn a_watcher_that_disconnects_ends_its_share() {
     assert!(mux.block(block).is_some_and(|b| b.grants().is_empty()));
 }
 
+/// A share ends when its sharer disconnects (C14, Nano 2026-11-16).
+#[test]
+fn a_sharer_that_disconnects_ends_its_shares() {
+    let (mut mux, session, block, creator, guest) = sharing();
+    mux.share(creator, session, guest, NOW + 60_000, NOW)
+        .expect("share");
+    mux.disconnect(creator).expect("gone");
+    assert!(mux.session(session).is_some_and(|s| s.shares().is_empty()));
+    assert!(mux.block(block).is_some_and(|b| !b.is_watching(guest)));
+}
+
 #[test]
 fn a_share_skips_blocks_its_sharer_may_not_grant() {
     let (mut mux, session, block, creator, guest) = sharing();

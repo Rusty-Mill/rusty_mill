@@ -1650,7 +1650,14 @@ impl State {
                 return Ok(Outcome::Done(None));
             }
             "terminal.modes" => terminal::modes(&rt.grid),
-            "terminal.report-status" => return self.report_status(block, &named),
+            "terminal.report-status" => {
+                // It writes the block's status, so a watch-only grant (C14)
+                // may not; a client without the lease still may (agent hooks).
+                if self.mux.block(block).is_some_and(|b| b.is_watching(client)) {
+                    return Err(rusty_mux_core::Error::NoLease { client, block }.into());
+                }
+                return self.report_status(block, &named);
+            }
             "terminal.shell" => {
                 // A held or restored block's program is gone (C78), and so
                 // is one whose child was just reaped, whichever is seen.
@@ -3325,6 +3332,49 @@ mod regression {
             std::thread::sleep(std::time::Duration::from_millis(80));
             state.output(block, b"too late");
             assert!(!state.attached(block).contains(&guest));
+        });
+    }
+
+    /// A watch-only client may read a block but not write its status (C14).
+    #[test]
+    fn a_watcher_may_not_report_status() {
+        runtime().block_on(async {
+            let (shared, account, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let features = Features::CHECKPOINT_V6
+                .union(Features::BLOCK_CALL)
+                .union(Features::AGENT_STATUS);
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _guest_inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            let session = state.mux.sessions().next().unwrap().id();
+            let now = now_ms();
+            state
+                .mux
+                .share(account, session, guest, now + 60_000, now)
+                .unwrap();
+            let refused = state
+                .block_call(
+                    guest,
+                    1,
+                    block,
+                    "terminal.report-status",
+                    vec![("state".into(), Value::Text("idle".into()))],
+                )
+                .err()
+                .map(|r| r.reason);
+            assert!(
+                refused.as_deref().is_some_and(|r| r.contains("lease")),
+                "{refused:?}"
+            );
         });
     }
 

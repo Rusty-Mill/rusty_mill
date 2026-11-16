@@ -46,6 +46,9 @@ when its lease is refused.
   disconnect. Each ends the watch grants, takes the watcher off any block it had only the watch
   right to, and sends `ShareChanged{until: None}` and the per-block `GrantChanged`. Unshare is
   immediate. A watcher that also has a full grant, or is the creator, owner or account, stays.
+  A share ends when its sharer disconnects (Nano, 2026-11-16), unlike a C77 grant. Setting an
+  owner revalidates it against the sharer's authority (`by`).
+  A watch-only grant may not write: `terminal.report-status` is refused to it.
 - **On time.** The server expires grants and shares before it sends each chunk of PTY output and on
   its periodic check, not only on a request, so a silent watcher sees nothing after `until`.
 - **Later blocks.** A block made later gets the watch grants its sharer could have granted. The
