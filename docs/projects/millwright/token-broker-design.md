@@ -17,7 +17,7 @@ narrowed to that role. No session holds an App key.
 ### Where it runs and how sessions reach it
 - **A separate process from Mill Board.** Fault isolation is the forcing function: the board
   has a web UI and keeps agent keys in clear; the broker holds signing keys and nothing else.
-- **Host: BaileyAi** (recommended; no recorded decision covers it, see ask-first 1).
+- **Host: BaileyAi** for now (Nano, 2026-11-16).
 - **Reached as an MCP connector**, like Mill Board and remind-me. Sessions already reach
   connectors, so no environment network allowlist change and no shared secret. One tool:
   `token_mint {role, repo}` returns `{token, expires_at, permissions, repos}`.
@@ -101,8 +101,8 @@ v0 = policy + signer + github + audit + a bearer-token identity for one local te
 against a throwaway App. v1 = board identity adapter. v2 = task binding, `gh_proxy`.
 
 ## Ask-first items for Nano
-Five tracked gates; item 2 is decided, the rest are open. This note authorises none of them.
-1. **Host**: BaileyAi (recommended) or elsewhere. No decision covers it.
+Five tracked gates; items 1 and 2 are decided, the rest are open. This note authorises none of them.
+1. **Host** (**decided, Nano 2026-11-16: "yes BaileyAi for now"**): BaileyAi, revisit later.
 2. **Signing dependency** (**decided, Nano 2026-11-16, decision card: openssl shell-out**): rusty_rsa only verifies. Options: (a) shell out to `openssl dgst
    -sign` behind the `signer` port, no new dependency, recommended for v0; (b) the `rsa`
    crate, already in Cargo.lock; (c) write private-key signing in `rusty_rsa` (needs
