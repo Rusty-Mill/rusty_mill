@@ -57,7 +57,7 @@ Factory `lens.json` + `lenses/{architect,research,adversary,operator}.md`; deplo
 ## Open
 - Expert-Agents and Factory are outside this session's scope: the Architect source and Factory layout are unread. Recommended: write prompts from the D-records now, reconcile the Architect one later.
 - Card says "3 blind proposers + the rebel"; D34, code and QA give three candidates total (two proposers + rebel). [default] keep three; four would change the scheduler (new design, D127).
-- Unverified: llama-swap model ids and port on BaileyAi, Claude/Codex model pins, whether the host rejects `evidence_kind: executed` from a lens (check `post.rs` before merge).
+- Unverified: llama-swap model ids and port on BaileyAi, Claude/Codex model pins, whether the BBP host rejects `evidence_kind: executed` from a lens. Checked in orch: `post.rs` `parse` accepts `executed` (strength 1, must cite an artifact or message), so only the prompt (shared rule 4) and any host-side check keep lenses from posting it. Settled for orch; the host side is checked when #1123's fixture lands, with a test that `parse` accepts only cited posts from a prompted lens.
 
 ## Drift
 Card cites "design revision 2" at `/mnt/project-files/.../594-lens-runner-design.md`; that file is absent and the repo contract is ADR-0021 (rev 3). `STARTER` uses `baileyai` as host name; the fixture uses loopback.
