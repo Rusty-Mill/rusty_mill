@@ -140,6 +140,7 @@ Precise contracts used by this guide:
 | D130 | M1 design steps approved as one batch of runbooks and config (changes D25 for M1) | [stated] 2026-11-12 (general, M1) |
 | D131 | Deploy on BaileyAi authorised for M1 (protocol host, orch, Mill Board inbox); BaileyAi confirmed as host; #1092 released | [stated] 2026-11-13 (general, M1) |
 | D132 | #1092: Mill Board runs as `orch-runner` on BaileyAi for the inbox | [stated] 2026-11-16 (1092, M1) |
+| D133 | Lens, domain and skill packs load lazily; a role is defined by its lens; the project expert becomes a domain knowledge pack (direction; design is post-first-run) | [stated] 2026-11-16 (general, #723) |
 
 ## D1. Lenses, not stages
 
@@ -1290,3 +1291,18 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_056ed8754777410b9abf716a13542a80
 **Key.** lel:1092:board-runs-as-orch-runner
 **Source.** Nano, tapped "a) orch-runner" on a decision card, 2026-11-16T16:15:00Z, Millwright project thread `cmsg_01632CBKCXsWe6RyFWvE9dovKYDoFmtvXi6TAYDxoS9Gmq`, card `cmsg_01632CBKCXsWe6RyFWvE9dovUsbPrkpu7L7hajGhXCVDa8`, question "Which user should run Mill Board on BaileyAi for the inbox?". Design in `1092-deploy-layout.md` (PR #1744). Within D130 (design batch) and D131 (deploy authorised). Numbered D132 after D130 on this branch; D131 is on `main` and not yet merged here.
+
+## D133. Packs load lazily; a role is defined by its lens; the project expert becomes a domain knowledge pack
+
+**Decision.** Nano's direction, in his words: lens packs, skill packs and the rest are lazy-loaded. A role is defined by its lens. The project expert goes away and a project domain knowledge pack replaces it. Skill packs decide which packs load for a role: its domain pack, its lens pack, and skill packs matched to its traits, such as Rust. Ai Env Manager catalogs the packs. He gave no timing, format, location or build order, so this is direction, not a build instruction.
+**Reading (the caller's and the expert's, not Nano's words).**
+1. It is the design basis for #723 (role + overlay + knowledge composition). Under D127 that design waits until after the first run, and nothing is built from this yet.
+2. #1123 (v0 flat lens prompts, `1123-lens-prompts.md`) does not change for M1. Each `lenses/<id>.md` is a flat file orch injects verbatim (ADR-0021), and it stays valid as a future "lens pack" once a catalog exists. orch needs no resolver for M1. The factory `roles/_protocol.md` § Loading context (protocol, role, overlay, then only listed knowledge) is a precedent for lazy loading, but its roles are workflow roles, not lenses. How the two relate is #723 design.
+3. "Project expert replaced by a domain pack" does not retire `let-em-loose-expert` or the CLAUDE.md experts table now. The expert stays the answerer until a domain pack exists and Nano confirms the swap (open Q47). This is the expert's reading.
+4. It extends, and does not conflict with, the 2026-11-16 morning voice decision that skill packs are lazy-loaded, with a manifest and thin loader (remind-me `mem_7634e492a3cf428b8fd9732c87deba65`, `mem_362db0e220974f16b808cf1fa20530d5`). The new part is that the lens defines the role and a domain pack replaces the expert.
+5. Touchpoint for Ai Env Manager (its design belongs to its own expert): it catalogs the packs, and its manifest generation would have to say which lens, domain and trait packs a role loads. Where the pack files live is open (Q46).
+**Why.** It keeps the board model (roles as lenses, D8-style critic lenses) as the one definition of a role, and replaces a hand-written expert agent with data that a loader can attach on demand.
+**Rejected.** Reading it as a request to change #1123 or start #723 now (D127). Reading it as retiring the expert today.
+**Tag.** [stated] for the quoted direction; items 1-5 are readings · remind-me: mem_e0d4d0e7937a4adbaeaab4a7788e5f50
+**Key.** lel:general:packs-lazy-loaded-lens-defines-role
+**Source.** Nano, Millwright project thread message `cmsg_01632CBKCXsWe6RyFWvE9dovG75zPmnNVZB8k4NUGqW9h4`, 2026-11-16T16:53:53Z, verbatim: "So Lens, etc, Skill packs should be Lazy-loaded. A role is defined by the lens. The project expert goes away and is replaced by a project domain knowledge pack. Skill packs determines which packs load: its domain pack, lens pack, plus skill packs matched to its traits, such as Rust. Ai Env Manager catalogs the packs." Relates to D127, D130, #723, #1123, D19 (Factory is source of truth). Numbered D133 after D132.
