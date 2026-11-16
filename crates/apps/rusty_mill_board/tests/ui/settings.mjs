@@ -38,7 +38,7 @@ await dialog.locator(".secret code").waitFor();
 const token = await dialog.locator(".secret code").innerText();
 check(token.length === 48, "adding an agent shows its token");
 check((await api(token, "board_whoami")).body.actor === "claude-code", "and the token works at once");
-await dialog.getByRole("button", { name: "Repositories" }).click();
+await dialog.getByRole("button", { name: "Repositories", exact: true }).click();
 await dialog.getByRole("button", { name: "Agents" }).click();
 check((await dialog.locator(".secret").count()) === 0, "the token is gone once you leave the tab");
 check((await dialog.locator("table tr").count()) === 3, "the agent is listed");
@@ -54,11 +54,15 @@ await page.waitForFunction(() => document.querySelector("#settings .err")?.textC
 check(true, "a duplicate agent is refused with the reason");
 
 // Repositories and projects.
-await dialog.getByRole("button", { name: "Repositories" }).click();
+await dialog.getByRole("button", { name: "Repositories", exact: true }).click();
 await dialog.locator("input[placeholder='new repository name']").fill("rusty_mill");
 await dialog.getByRole("button", { name: "+ repository" }).click();
-await dialog.getByRole("button", { name: "+ project" }).last().click();
-await dialog.locator("input[placeholder='project name']").fill("rocket_league");
+// Projects are made and linked on their own tab; the draft carries over from Repositories.
+await dialog.getByRole("button", { name: "Projects", exact: true }).click();
+await dialog.locator("input[placeholder='new project name']").fill("rocket_league");
+await dialog.getByRole("button", { name: "+ project" }).click();
+await dialog.getByLabel("link rocket_league to a repository").selectOption("rusty_mill");
+await dialog.getByRole("button", { name: "Link repository" }).click();
 await dialog.locator("textarea").fill("crates/apps/rocket_league");
 // A save redraws the sheet from fresh settings; wait for that before touching it again.
 const saved = () => Promise.all([page.waitForResponse((r) => r.url().includes("/api/settings_get")), dialog.getByRole("button", { name: "Save repositories and projects" }).click()]).then(() => page.waitForTimeout(300));
@@ -68,12 +72,14 @@ const listed = (await api(rotated, "board_projects")).body.repos;
 check(listed.rusty_mill?.rocket_league?.[0] === "crates/apps/rocket_league", "a repository with a project is saved");
 
 // The same project name under a second repository makes it span both; the first stays its default.
+await dialog.getByRole("button", { name: "Repositories", exact: true }).click();
 await dialog.locator("input[placeholder='new repository name']").fill("tools");
 await dialog.getByRole("button", { name: "+ repository" }).click();
-await dialog.getByRole("button", { name: "+ project" }).last().click();
-await dialog.locator("input[placeholder='project name']").last().fill("rocket_league");
-await dialog.locator("textarea").last().fill("ci");
 await dialog.locator("input[aria-label='tools GitHub repository']").fill("rusty-mill/tools");
+await dialog.getByRole("button", { name: "Projects", exact: true }).click();
+await dialog.getByLabel("link rocket_league to a repository").selectOption("tools");
+await dialog.getByRole("button", { name: "Link repository" }).click();
+await dialog.locator("textarea").last().fill("ci");
 await saved();
 await page.waitForFunction(() => !document.querySelector("#settings .err")?.textContent);
 const spanning = (await api(rotated, "board_projects")).body.projects.rocket_league;

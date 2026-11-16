@@ -5,7 +5,7 @@
 //! What a column *does* comes from its [`Kind`], not its id, so an admin can add, rename,
 //! reorder and remove columns without code changes. Three kinds are anchors with fixed ids
 //! that storage relies on ([`Column::BACKLOG`], [`Column::DONE`], [`Column::BLOCKED`]); they
-//! may be relabelled and reordered but not removed.
+//! may be relabelled and reordered but not removed. A fourth, [`Column::DEFERRED`], is optional.
 
 use std::collections::BTreeSet;
 
@@ -34,6 +34,9 @@ pub enum Kind {
     Done,
     /// Stuck; needs a human. Any open card may move here. Exactly one, id `blocked`.
     Blocked,
+    /// Parked on purpose, outside active work: not blocked, just not now. Moves in and out
+    /// are listed like any other. At most one, id `deferred`; a workflow may have none.
+    Deferred,
 }
 
 impl Kind {
@@ -43,6 +46,7 @@ impl Kind {
             Self::Backlog => Some(Column::BACKLOG),
             Self::Done => Some(Column::DONE),
             Self::Blocked => Some(Column::BLOCKED),
+            Self::Deferred => Some(Column::DEFERRED),
             Self::Queue | Self::Work => None,
         }
     }
@@ -128,6 +132,7 @@ impl Default for Workflow {
                 col(Column::REVIEW, "Review", Kind::Work),
                 col(Column::DONE, "Done", Kind::Done),
                 col(Column::BLOCKED, "Blocked", Kind::Blocked),
+                col(Column::DEFERRED, "Deferred", Kind::Deferred),
             ],
             transitions: vec![
                 mv(Column::BACKLOG, Column::READY, Triage),
@@ -140,6 +145,10 @@ impl Default for Workflow {
                 mv(Column::REVIEW, Column::DONE, Merge),
                 mv(Column::BUILDING, Column::DONE, Close),
                 mv(Column::QA, Column::DONE, Close),
+                mv(Column::BACKLOG, Column::DEFERRED, Triage),
+                mv(Column::READY, Column::DEFERRED, Triage),
+                mv(Column::DEFERRED, Column::BACKLOG, Triage),
+                mv(Column::DEFERRED, Column::READY, Triage),
             ],
         }
     }
@@ -241,20 +250,17 @@ impl Workflow {
     /// the beginning: it crosses every gate up to `to`. Used with movement rules off, so that
     /// skipping columns is no way around a human approval.
     pub fn gates_crossed(&self, from: &Column, to: &Column) -> Vec<&Transition> {
+        let parked = |id: &Column| matches!(self.kind(id), Some(Kind::Blocked | Kind::Deferred));
         let rank = |id: &Column| {
             self.columns
                 .iter()
-                .filter(|c| c.kind != Kind::Blocked)
+                .filter(|c| !matches!(c.kind, Kind::Blocked | Kind::Deferred))
                 .position(|c| c.id == *id)
         };
         let Some(dest) = rank(to) else {
             return Vec::new();
         };
-        let start = if self.kind(from) == Some(Kind::Blocked) {
-            Some(0)
-        } else {
-            rank(from)
-        };
+        let start = if parked(from) { Some(0) } else { rank(from) };
         let Some(start) = start else {
             return Vec::new();
         };
@@ -323,7 +329,13 @@ fn check_columns(columns: &[ColumnDef]) -> Result<(), String> {
         if !seen.insert(&c.id) {
             return Err(format!("column {} appears twice", c.id));
         }
-        let anchor_id = [Column::BACKLOG, Column::DONE, Column::BLOCKED].contains(&c.id);
+        let anchor_id = [
+            Column::BACKLOG,
+            Column::DONE,
+            Column::BLOCKED,
+            Column::DEFERRED,
+        ]
+        .contains(&c.id);
         match c.kind.anchor() {
             Some(id) if id != c.id => {
                 return Err(format!("only column {id} may be of kind {:?}", c.kind));
@@ -525,6 +537,64 @@ mod tests {
             mv("backlog", "done", Capability::Close),
         ];
         assert!(refused(anchors(), dup).contains("twice"));
+    }
+
+    #[test]
+    fn deferred_is_optional_parked_and_outside_the_gate_order() {
+        use Capability::*;
+        // Optional: the three anchors alone are a valid workflow.
+        assert!(Workflow::new(anchors(), vec![]).is_ok());
+        // Fixed id, one kind: another id cannot be Deferred, nor can Deferred's id be another kind.
+        let mut cols = anchors();
+        cols.push(col("later", Kind::Deferred));
+        assert!(
+            Workflow::new(cols, vec![])
+                .expect_err("id")
+                .contains("only column deferred")
+        );
+        let mut cols = anchors();
+        cols.push(col("deferred", Kind::Work));
+        assert!(
+            Workflow::new(cols, vec![])
+                .expect_err("kind")
+                .contains("own kind")
+        );
+        // Default: parked and returned by Triage, handed out to nobody.
+        let f = Workflow::default();
+        let cap = |a: &Column, b: &Column| f.transition(a, b).map(|t| t.map(|t| t[0].cap));
+        assert_eq!(cap(&Column::BACKLOG, &Column::DEFERRED), Ok(Some(Triage)));
+        assert_eq!(cap(&Column::DEFERRED, &Column::READY), Ok(Some(Triage)));
+        assert!(matches!(
+            cap(&Column::DEFERRED, &Column::BUILDING),
+            Err(BoardError::NoSuchMove { .. })
+        ));
+        assert!(!f.work_queues().contains(&Column::DEFERRED));
+        // A gate on Ready -> Building is crossed leaving Deferred for Building, as from the start,
+        // and parking skips none.
+        let cols = Workflow::default().columns().to_vec();
+        let gated = Workflow::new(
+            cols,
+            f.transitions()
+                .iter()
+                .cloned()
+                .map(|t| Transition {
+                    gate: t.from == Column::READY && t.to == Column::BUILDING,
+                    ..t
+                })
+                .collect(),
+        )
+        .expect("valid");
+        assert_eq!(
+            gated
+                .gates_crossed(&Column::DEFERRED, &Column::BUILDING)
+                .len(),
+            1
+        );
+        assert!(
+            gated
+                .gates_crossed(&Column::READY, &Column::DEFERRED)
+                .is_empty()
+        );
     }
 
     #[test]

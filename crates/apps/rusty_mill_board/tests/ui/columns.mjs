@@ -29,7 +29,7 @@ other.on("pageerror", (e) => errors.push(String(e)));
 await other.goto(`${BASE}/#token=${TOKEN}`);
 await other.waitForSelector("#board .col");
 const otherShows = (pred) => other.waitForFunction(pred, null, { timeout: 10000 }).then(() => true, () => false);
-check((await headings()).join(",") === "Backlog,Ready,Building,QA,Review,Done,Blocked", "the board shows the default columns by label");
+check((await headings()).join(",") === "Backlog,Ready,Building,QA,Review,Done,Blocked,Deferred", "the board shows the default columns by label");
 
 // The gear works once the page has read who you are; until then a click may be lost.
 const openColumns = async () => {
@@ -55,7 +55,7 @@ await last.getByLabel("capability").selectOption("build");
 await dialog.getByRole("button", { name: "Save columns" }).click();
 await page.waitForFunction(() => [...document.querySelectorAll("#board .col h2 .label")].some((h) => h.textContent === "Design"));
 const heads = await headings();
-check(heads.join(",") === "Backlog,Approved,Building,QA,Review,Design,Done,Blocked", `new column before Done, Ready relabelled (${heads})`);
+check(heads.join(",") === "Backlog,Approved,Building,QA,Review,Design,Done,Blocked,Deferred", `new column before Done, Ready relabelled (${heads})`);
 const flow = (await api("board_columns")).body;
 check(flow.transitions.some((t) => t.from === "backlog" && t.to === "design" && t.cap === "build"), "the new move is saved");
 
