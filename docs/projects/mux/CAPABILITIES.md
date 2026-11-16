@@ -85,7 +85,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C60 | Config migration from tmux, zellij, WezTerm, kitty, Alacritty, Ghostty, iTerm2 and herdr | 4 | `rusty_mux_ctl`, `rusty_mux_script` | not-started | [Rex app check](REX-APP.md) G6. Reading other tools' files and writing ours are outside-the-repo access and need the owner's approval |
 | C61 | Client themes, theme import, contrast correction, materials, fonts and shaders | 4 | `rusty_mux` clients | not-started | [Rex app check](REX-APP.md) I5–I8 |
 | C62 | Pane focus and gestures: focus follows mouse, fading inactive panes, focus highlight, gestures | 4 | `rusty_mux` clients | done | `rusty-mux-gui`: `[window] focus_follows_mouse` and `dim_inactive_panes` (off, on), pinch to zoom on macOS (gui-design D65-D68, handoff D285). Swipe and an animated highlight not built. [Rex app check](REX-APP.md) I9 |
-| C63 | Link safety: links that open other apps ask first; trusted origins | 4 | `rusty_mux` clients | not-started | [Rex app check](REX-APP.md) I10 |
+| C63 | Link safety: links that open other apps ask first; trusted origins | 4 | `rusty_mux` clients | done | [Rex app check](REX-APP.md) I10 |
 | C64 | Sessions across client windows: move a session, open it in every window | 4 | `rusty_mux` clients | not-started | [Rex app check](REX-APP.md) B5 |
 | C65 | Named layouts: a layout library and a text diagram of a layout | 4 | `rusty_mux_core`, `rusty_mux_script` | not-started | [Rex app check](REX-APP.md) B4; after C41 |
 | C66 | Block plugins: block types as separate processes, with a block SDK and type discovery | 5 | new crate | not-started | [Rex app check](REX-APP.md) D1–D4. A new crate and its name need the owner |

@@ -44,7 +44,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, 
 
 use super::blocks::{self, BodyState};
 use super::chrome::{Chrome, Marks};
-use super::confirm::{self, Answer, Confirm, ConfirmKey};
+use super::confirm::{self, Answer, Confirm, ConfirmKey, Subject};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::motion;
@@ -56,6 +56,7 @@ use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use super::source::{Act, Feed, PaneIo, Remote, Source, Tree};
 use super::strip::{self, Spot, StripState};
+use super::{link_policy, link_trust};
 use crate::backend::BackendHandle;
 use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
@@ -635,6 +636,8 @@ struct WindowState<'a> {
     popover: Popover,
     /// An attached window's open take-over confirm (gui-design F3, D64).
     confirm: Option<Confirm>,
+    /// The trusted link origins (C63, D69-D72).
+    links: link_policy::Policy,
     /// The effective config; refreshed on live reload so new tabs follow it.
     config: Config,
     /// The config file in effect, for the open shortcut + reload re-reads.
@@ -1204,10 +1207,14 @@ impl WindowState<'_> {
         let places = self.places(self.active);
         self.repaint_body(&places);
         let scale = self.scale_factor as f32;
+        let view = self.window.as_ref().map_or((f32::MAX, f32::MAX), |w| {
+            let size = w.inner_size();
+            (size.width as f32, size.height as f32)
+        });
         let popover = &mut self.popover;
         popover.repaint(tokens, scale);
         if let Some(confirm) = &mut self.confirm {
-            confirm.repaint(tokens, scale);
+            confirm.repaint(tokens, scale, view);
         }
         let oy = self.grid_oy();
         // The command dock renders as one more (synthetic, unfocused) pane
@@ -2700,10 +2707,10 @@ impl WindowState<'_> {
         true
     }
 
-    /// If an OSC 8 hyperlink covers the cell under the pointer, open it with the
-    /// OS handler. Returns whether a link was opened, so a Ctrl+click can
+    /// If a link covers the cell under the pointer, follow it under the link
+    /// policy (C63). Returns whether a link was there, so a Ctrl+click can
     /// suppress the normal selection / mouse-report path.
-    fn open_link_under_pointer(&self) -> bool {
+    fn open_link_under_pointer(&mut self) -> bool {
         let Some(p) = self.pane() else { return false };
         let (col, row) = self.cell_in_focused(self.mouse_pos.0, self.mouse_pos.1);
         let url = {
@@ -2715,7 +2722,64 @@ impl WindowState<'_> {
                 .map(str::to_owned)
                 .or_else(|| g.url_at(col, row))
         };
-        url.is_some_and(|u| open_url(&u))
+        let Some(url) = url else { return false };
+        self.follow_link(&url);
+        true
+    }
+
+    /// Follow `url` under the link policy (C63): trusted web origins open,
+    /// other http(s) and other apps ask, everything else is refused with a
+    /// notice. The one way a link reaches [`open_link`].
+    fn follow_link(&mut self, url: &str) {
+        let link = match link_policy::parse(url) {
+            Ok(link) => link,
+            Err(why) => return self.refuse_link(why),
+        };
+        match self.links.verdict(&link) {
+            link_policy::Verdict::Open => self.launch_link(&link),
+            link_policy::Verdict::Ask { can_trust } => self.ask_link(link, can_trust),
+        }
+    }
+
+    fn refuse_link(&mut self, why: link_policy::Deny) {
+        use link_policy::Deny;
+        let detail = match why {
+            Deny::Malformed => {
+                "The link is empty, too long, or holds spaces or control characters."
+            }
+            Deny::Scheme => "Only web, mail, ftp and file links open from here.",
+            Deny::Host => "The link's address is missing, disguised or not plain ASCII.",
+            Deny::File => "That file link points to another computer or to a program.",
+        };
+        self.show_notice(Some(super::source::Notice {
+            title: "Link not opened".to_owned(),
+            detail: detail.to_owned(),
+        }));
+    }
+
+    /// Open the link prompt under the pointer, Cancel focused (D70).
+    fn ask_link(&mut self, link: link_policy::Link, can_trust: bool) {
+        let s = self.scale_factor as f32;
+        let width = self
+            .window
+            .as_ref()
+            .map_or(f32::MAX, |w| w.inner_size().width as f32);
+        let right = (self.mouse_pos.0 as f32 + confirm::LINK_WIDTH * s / 2.0)
+            .min(width)
+            .max(confirm::LINK_WIDTH * s);
+        let top = self.mouse_pos.1 as f32 + 12.0 * s;
+        self.confirm = Confirm::new(
+            Subject::Link(link.clone()),
+            confirm::link_copy(&link),
+            confirm::link_buttons(can_trust),
+            (1, 0, confirm::LINK_WIDTH),
+            right,
+            top,
+            s,
+        );
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     /// Recompute `hover_link` for the pointer's current position: only set
@@ -3312,7 +3376,8 @@ impl WindowState<'_> {
     fn menu_pick(&mut self, kind: MenuKind) {
         match kind {
             MenuKind::OpenUrl(url) => {
-                open_url(&url);
+                self.overlay = None;
+                self.follow_link(&url);
             }
             MenuKind::Settings => self.open_settings(),
             MenuKind::EditConfig => {
@@ -5216,7 +5281,7 @@ impl WindowState<'_> {
         let s = self.scale_factor as f32;
         let header_bottom = button.y + button.h / 2.0 + blocks::HEADER_HALF * s;
         let top = self.chrome_h() as f32 + header_bottom + confirm::DROP * s;
-        self.confirm = Confirm::new(
+        self.confirm = Confirm::take_over(
             key,
             confirm::copy(&program, &owner),
             button.x + button.w,
@@ -5234,6 +5299,10 @@ impl WindowState<'_> {
             Key::Named(NamedKey::Tab) => ConfirmKey::Tab,
             Key::Named(NamedKey::Enter) => ConfirmKey::Enter,
             Key::Named(NamedKey::Escape) => ConfirmKey::Escape,
+            Key::Named(NamedKey::ArrowUp) => ConfirmKey::Up,
+            Key::Named(NamedKey::ArrowDown) => ConfirmKey::Down,
+            Key::Named(NamedKey::PageUp) => ConfirmKey::PageUp,
+            Key::Named(NamedKey::PageDown) => ConfirmKey::PageDown,
             _ => return,
         };
         let answer = match &mut self.confirm {
@@ -5243,22 +5312,54 @@ impl WindowState<'_> {
         self.confirm_answer(answer);
     }
 
-    /// Carry out the confirm's `answer`: take its block over, or close.
+    /// Carry out the confirm's `answer`: take its block over, open or trust
+    /// its link, or close.
     fn confirm_answer(&mut self, answer: Answer) {
-        let key = match answer {
-            Answer::Stay => None,
-            Answer::Cancel => {
-                self.confirm = None;
-                None
+        match answer {
+            Answer::Stay => {}
+            Answer::Cancel => self.confirm = None,
+            Answer::Pick(n) => {
+                if let Some(c) = self.confirm.take() {
+                    self.confirm_pick(c.subject, n);
+                }
             }
-            Answer::TakeOver => self.confirm.take().map(|c| c.key),
-        };
-        if let Some(key) = key {
-            self.source.act(Act::TakeOver(key));
         }
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    fn confirm_pick(&mut self, subject: Subject, n: usize) {
+        match subject {
+            Subject::Block(key) => self.source.act(Act::TakeOver(key)),
+            Subject::Link(link) => {
+                // Button 2 is "Always trust": remember the origin, but only in
+                // memory once the file is saved, so what the notice says holds.
+                if n == confirm::ALWAYS && !link.origin.is_empty() {
+                    match save_trust(&link.origin) {
+                        Ok(()) => {
+                            self.links.trust(&link);
+                        }
+                        Err(_) => self.show_notice(Some(super::source::Notice {
+                            title: "Could not save trusted sites".to_owned(),
+                            detail: "This link opens once. The site will ask again.".to_owned(),
+                        })),
+                    }
+                }
+                self.launch_link(&link);
+            }
+        }
+    }
+
+    /// Open `link`, or say it could not be.
+    fn launch_link(&mut self, link: &link_policy::Link) {
+        if open_link(link) {
+            return;
+        }
+        self.show_notice(Some(super::source::Notice {
+            title: "Link not opened".to_owned(),
+            detail: "The system could not start a program for it.".to_owned(),
+        }));
     }
 
     /// Note where taking pane `key`'s block over stands (D64).
@@ -5860,6 +5961,14 @@ impl WindowState<'_> {
                 if lines == 0 {
                     return;
                 }
+                // An open confirm owns the wheel: it scrolls a long URL.
+                if let Some(confirm) = &mut self.confirm {
+                    confirm.scroll_by(-lines);
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // The settings overlay owns the wheel while it's up: scroll
                 // its list (wheel-up = toward the top, like the scrollback).
                 if let Some(Overlay::Settings(s)) = &mut self.overlay {
@@ -5982,6 +6091,7 @@ impl<'a> App<'a> {
             body: BodyState::new().ok_or("the interface font failed to parse")?,
             popover: Popover::new().ok_or("the interface font failed to parse")?,
             confirm: None,
+            links: load_trust(),
             config: self.config.clone(),
             config_path: self.config_path.clone(),
             profile_override: self.profile_override.clone(),
@@ -6558,17 +6668,24 @@ fn shell_quote(path: &str) -> String {
     }
 }
 
-/// Open `url` with the OS default handler when its scheme is one we allow
-/// (see [`is_openable_url`]). Ctrl+click on an OSC 8 hyperlink routes here.
-/// Returns whether a handler was launched.
-fn open_url(url: &str) -> bool {
-    if !is_openable_url(url) {
-        return false;
-    }
+/// Hand `link` to the OS default handler. Only a parsed [`link_policy::Link`]
+/// gets here, and only after [`WindowState::follow_link`] let it through (C63).
+/// No shell parses the URL: Windows goes through `rundll32`, not `cmd /C start`
+/// (whose `&` would run a second command).
+fn open_link(link: &link_policy::Link) -> bool {
+    let url = link.url.as_str();
     #[cfg(target_os = "windows")]
-    let spawned = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn();
+    let spawned = std::process::Command::new(
+        std::env::var_os("SystemRoot")
+            .map(|r| {
+                std::path::PathBuf::from(r)
+                    .join("System32")
+                    .join("rundll32.exe")
+            })
+            .unwrap_or_else(|| "rundll32".into()),
+    )
+    .args(["url.dll,FileProtocolHandler", url])
+    .spawn();
     #[cfg(target_os = "macos")]
     let spawned = std::process::Command::new("open").arg(url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -6576,15 +6693,18 @@ fn open_url(url: &str) -> bool {
     spawned.is_ok()
 }
 
-/// Whether `url`'s scheme is one we're willing to hand to the OS opener.
-/// Restricting it keeps arbitrary or custom-scheme URIs from terminal output
-/// from reaching the shell's URL handler. The scheme match is case-insensitive.
-fn is_openable_url(url: &str) -> bool {
-    const ALLOWED: [&str; 5] = ["http://", "https://", "ftp://", "file://", "mailto:"];
-    let b = url.as_bytes();
-    ALLOWED
-        .iter()
-        .any(|p| b.len() > p.len() && b[..p.len()].eq_ignore_ascii_case(p.as_bytes()))
+/// At start an unreadable directory trusts nothing: every site asks.
+fn load_trust() -> link_policy::Policy {
+    link_trust::default_dir()
+        .and_then(|d| link_trust::read(&d).ok())
+        .unwrap_or_default()
+}
+
+/// Remember `origin` on disk (see [`link_trust::add`]).
+fn save_trust(origin: &str) -> std::io::Result<()> {
+    let dir =
+        link_trust::default_dir().ok_or_else(|| std::io::Error::other("no config directory"))?;
+    link_trust::add(&dir, origin)
 }
 
 /// Map an OSC 22-requested pointer shape — a CSS `cursor` keyword, the
@@ -6794,8 +6914,8 @@ mod tests {
         SETTINGS_FOOTER_H, SETTINGS_ROW_H, SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SelectionDrag,
         SettingsHit, UI_FONT_PX, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text,
         drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
-        ime_cursor_area_origin, is_openable_url, menu_items, osc52_reply, pane_pixel_point,
-        physical_px, pressed_after_focus, put_text, read_git_branch, release_input, route_key_down,
+        ime_cursor_area_origin, menu_items, osc52_reply, pane_pixel_point, physical_px,
+        pressed_after_focus, put_text, read_git_branch, release_input, route_key_down,
         settings_hit, settings_value_end, settings_visible, widget_text, zoom_px,
     };
     use crate::core::Cell;
@@ -7395,18 +7515,6 @@ mod tests {
         // UTF-8 continuation/lead bytes (>= 0x80) are never mistaken for the
         // ASCII control bytes the filter strips.
         assert_eq!(encode_paste("héllo→wörld", false), "héllo→wörld".as_bytes());
-    }
-
-    #[test]
-    fn only_known_url_schemes_are_openable() {
-        assert!(is_openable_url("https://example.com"));
-        assert!(is_openable_url("HTTP://Example.COM")); // scheme is case-insensitive
-        assert!(is_openable_url("mailto:a@b.com"));
-        assert!(is_openable_url("file:///etc/hosts"));
-        assert!(!is_openable_url("javascript:alert(1)"));
-        assert!(!is_openable_url("data:text/html,x"));
-        assert!(!is_openable_url("https://")); // nothing after the scheme
-        assert!(!is_openable_url("notaurl"));
     }
 
     #[test]
