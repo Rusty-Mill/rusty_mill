@@ -53,8 +53,11 @@ fn the_lease_holder_is_asked_and_its_answer_reaches_the_program() {
     });
     // The program's terminal echoes what it was sent: "hi" in base64.
     holder.wait_for(block, "52;c;aGk=");
-    // The viewer was never asked: it sees the program's output only.
-    viewer.wait_for(block, "52;c;aGk=");
+    // The viewer was never asked: a read would arrive before the output
+    // holding the query, so none may come before the answer's echo.
+    while !viewer.saw(block, "52;c;aGk=") {
+        assert!(!matches!(viewer.recv(), Message::ClipboardRead { .. }));
+    }
 }
 
 #[test]
@@ -124,4 +127,25 @@ fn a_holder_without_the_feature_is_not_asked() {
     while !holder.saw(block, "DONE_2") {
         assert!(!matches!(holder.recv(), Message::ClipboardRead { .. }));
     }
+}
+
+#[test]
+fn a_reply_after_the_lease_moved_is_refused() {
+    let path = start_server();
+    let mut holder = Client::connect_with(&path, READS, None);
+    let block = block_for(&mut holder);
+    ask(&mut holder, block);
+    next_read(&mut holder, block);
+    holder.request(|req| Message::ReleaseLease { req, block });
+
+    let answer = holder.answer(|req| Message::ClipboardReply {
+        req,
+        block,
+        selection: Selection::Clipboard,
+        data: Some(b"late".to_vec()),
+    });
+    assert!(
+        matches!(answer.last(), Some(Message::Failed { reason, .. }) if reason.contains("does not hold the input lease")),
+        "{answer:?}"
+    );
 }
