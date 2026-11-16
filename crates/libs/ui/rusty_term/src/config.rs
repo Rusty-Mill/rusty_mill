@@ -1739,6 +1739,48 @@ color15 = "ffffff"
         }
     }
 
+    /// Contrast audit of the built-in presets (card #690 T3, gui-design D76).
+    /// The palettes are published ones, so low pairs are recorded, not edited:
+    /// `minimum_contrast` is what lifts them, and the second half proves it
+    /// does on every surface a glyph can sit on.
+    #[test]
+    fn preset_contrast_audit() {
+        use crate::core::{contrast_ratio, ensure_contrast};
+        // Known sub-4.5 default text and sub-3 cursors (published palettes).
+        let low_text = ["solarized-light"];
+        let low_cursor = ["catppuccin-latte"];
+        for &name in PRESETS {
+            let t = preset(name).expect("preset");
+            let text = contrast_ratio(t.fg, t.bg);
+            assert!(
+                text >= 4.5 || low_text.contains(&name),
+                "{name}: fg on bg {text:.2}"
+            );
+            assert!(
+                text >= 4.0,
+                "{name}: fg on bg {text:.2} fell below the floor"
+            );
+            let cursor = contrast_ratio(t.cursor, t.bg);
+            assert!(
+                cursor >= 3.0 || low_cursor.contains(&name),
+                "{name}: cursor on bg {cursor:.2}"
+            );
+            // Every colour on every theme surface, the cursor block included.
+            let inks: Vec<u32> = t.palette16.iter().copied().chain([t.fg, t.bg]).collect();
+            let surfaces = inks.iter().copied().chain([t.cursor]);
+            for bg in surfaces {
+                for &fg in &inks {
+                    let got = ensure_contrast(fg, bg, 4.5);
+                    let best = contrast_ratio(0xFFFFFF, bg).max(contrast_ratio(0x000000, bg));
+                    assert!(
+                        contrast_ratio(got, bg) >= 4.5f32.min(best) - 0.01,
+                        "{name}: {fg:06x} on {bg:06x} -> {got:06x}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn status_bar_key_parses() {
         let (cfg, warns) = parse("[window]\nstatus_bar = false\n");
