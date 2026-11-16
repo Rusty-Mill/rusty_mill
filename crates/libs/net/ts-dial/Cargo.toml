@@ -1,0 +1,17 @@
+[package]
+name = "ts-dial"
+description = "Outbound stream for the ts2021 and DERP clients: TCP, optionally TLS, behind one boxed type"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_tailscale"
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+rusty_tokio.workspace = true
+rusty_tls = { workspace = true, features = ["rusty-tokio"] }
+rusty_base64.workspace = true
+thiserror.workspace = true

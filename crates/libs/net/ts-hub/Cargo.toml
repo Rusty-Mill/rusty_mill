@@ -15,6 +15,7 @@ ts-control.workspace = true
 ts-types.workspace = true
 ts-key.workspace = true
 ts-derp.workspace = true
+ts-dial.workspace = true
 crypto_box.workspace = true
 rusty_tokio.workspace = true
 rusty_h2 = { path = "../rusty_h2", features = ["rusty-tokio"] }

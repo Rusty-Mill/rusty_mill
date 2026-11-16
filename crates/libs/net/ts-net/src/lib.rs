@@ -17,6 +17,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use rusty_tokio::sync::{mpsc, oneshot};
+pub use ts_engine::Trust;
 use ts_engine::{Engine, EngineConfig, EngineHandle, StackIo};
 use ts_key::NodeState;
 
@@ -48,6 +49,8 @@ pub struct NodeConfig {
     pub enable_direct: bool,
     /// Optional `host:port` STUN server for reflexive-endpoint discovery.
     pub stun_server: Option<String>,
+    /// Which certificates an `https://` control or DERP server may present.
+    pub trust: Trust,
 }
 
 /// A running embeddable tailnet node with a userspace TCP/IP stack.
@@ -79,6 +82,7 @@ impl Node {
             magic_dns_hosts: None,
             enable_direct: config.enable_direct,
             stun_server: config.stun_server,
+            trust: config.trust,
             stack_io: Some(StackIo {
                 inbound: inbound_tx,
                 outbound: outbound_rx,

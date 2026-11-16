@@ -249,6 +249,7 @@ members = [
     "crates/libs/net/ts-key",
     "crates/libs/net/ts-control",
     "crates/libs/net/ts-hub",
+    "crates/libs/net/ts-dial",
     "crates/libs/net/ts-derp",
     "crates/libs/net/ts-stun",
     "crates/libs/net/ts-disco",
@@ -752,6 +753,7 @@ ts-wg = { path = "crates/libs/net/ts-wg" }
 ts-tun = { path = "crates/libs/net/ts-tun" }
 ts-filter = { path = "crates/libs/net/ts-filter" }
 ts-hub = { path = "crates/libs/net/ts-hub" }
+ts-dial = { path = "crates/libs/net/ts-dial" }
 ts-engine = { path = "crates/libs/net/ts-engine" }
 ts-localapi = { path = "crates/apps/rusty_tailscale/crates/ts-localapi" }
 ts-net = { path = "crates/libs/net/ts-net" }

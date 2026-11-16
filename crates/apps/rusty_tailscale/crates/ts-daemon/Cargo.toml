@@ -13,6 +13,7 @@ layer = "apps"
 [dependencies]
 ts-key.workspace = true
 ts-hub.workspace = true
+ts-dial.workspace = true
 rusty_tokio.workspace = true
 ts-engine.workspace = true
 ts-localapi.workspace = true

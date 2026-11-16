@@ -172,6 +172,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | rusty_worktree | rusty_worktree | Git worktrees that share one repository's object store, driven through the git CLI with hooks off and the git directory always named explicitly |
 | libs | ts-control | ts-control | ts2021 control-plane client: Noise IK channel, registration, netmap long-poll |
 | libs | ts-derp | ts-derp | DERP relay client: framing, keepalive, region selection |
+| libs | ts-dial | ts-dial | Outbound stream for the ts2021 and DERP clients: TCP, optionally TLS, behind one boxed type |
 | libs | ts-disco | ts-disco | Disco NAT-traversal message codec: ping/pong/call-me-maybe over NaCl box |
 | libs | ts-engine | ts-engine | Orchestration: control -&gt; magicsock -&gt; wg -&gt; tun, behind ports-and-adapters traits |
 | libs | ts-filter | ts-filter | Netmap packet-filter (ACL) enforcement |
