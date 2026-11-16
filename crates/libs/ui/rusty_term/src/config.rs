@@ -787,6 +787,10 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
                 Value::Int(i) => i as f32,
                 _ => return Err(format!("{key}: expected a number")),
             };
+            // NaN would pass `clamp` and force every glyph to black or white.
+            if !ratio.is_finite() {
+                return Err(format!("{key}: expected a finite number"));
+            }
             cfg.minimum_contrast = Some(ratio.clamp(1.0, 21.0));
         }
         ("window", "cols") => cfg.cols = Some(expect_dim(key, value)?),
@@ -1385,6 +1389,12 @@ color15 = "ffffff"
         // Out-of-range contrast clamps; integers accepted.
         let (cfg3, _) = parse("minimum_contrast = 99\n");
         assert_eq!(cfg3.minimum_contrast, Some(21.0));
+        // Non-finite values are refused with a warning, not clamped.
+        for bad in ["nan", "inf", "-inf"] {
+            let (cfg, warns) = parse(&format!("minimum_contrast = {bad}\n"));
+            assert_eq!(cfg.minimum_contrast, None, "{bad}");
+            assert_eq!(warns.len(), 1, "{bad}: {warns:?}");
+        }
     }
 
     #[test]
