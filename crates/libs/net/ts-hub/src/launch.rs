@@ -38,8 +38,8 @@ options:
                          per line; must not be readable by group or others
   --policy <file>        `FROM -> TO` rules (default: none, nobody reaches anyone)
   --advertise <host>     DERP/STUN host to put in every netmap
-  --replica-secret <f>   let a standby that presents this secret (16+ characters,
-                         file mode 600) copy the hub's state; needs TLS unless
+  --replica-secret <f>   let a standby that presents this secret (random, 16+ characters,
+                         e.g. `openssl rand -hex 32`; file mode 600) copy the hub's state; needs TLS unless
                          --listen is a loopback address
 
 failover (docs/projects/mux/MESH.md, stage 4):
@@ -289,8 +289,10 @@ async fn check_promotion(args: &Args, url: &str) -> Result<(), BoxError> {
         )
         .into());
     }
-    if !args.force && crate::replica::answers(url, &link_trust(args)?).await {
-        return Err(format!("the hub at {url} still answers; stop it first (or --force)").into());
+    if !args.force {
+        crate::replica::is_down(url)
+            .await
+            .map_err(|why| format!("{why}; stop it first (or --force)"))?;
     }
     Ok(())
 }

@@ -77,7 +77,9 @@ pub struct Hub<S: NodeStore = MemoryStore> {
     policy: Mutex<Arc<Policy>>,
     relay: derp::Relay,
     /// Shared secret a standby presents to copy the state; `None` is off.
-    replica_secret: Mutex<Option<String>>,
+    replica_secret: std::sync::OnceLock<String>,
+    /// Names this run: the change counter restarts at 0 with every start.
+    epoch: u64,
     /// The `DERPMap` every netmap carries, once the hub knows its address.
     derp_map: Mutex<Option<serde_json::Value>>,
     conns: Counter,
@@ -117,7 +119,10 @@ impl<S: NodeStore> Hub<S> {
             limits,
             policy: Mutex::new(Arc::new(Policy::default())),
             relay: derp::Relay::new(),
-            replica_secret: Mutex::new(None),
+            replica_secret: std::sync::OnceLock::new(),
+            epoch: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as u64),
             derp_map: Mutex::new(None),
             conns: Counter::default(),
             streams: Counter::default(),

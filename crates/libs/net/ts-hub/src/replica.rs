@@ -34,12 +34,15 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(40);
 /// Pause between requests, and the longest backoff after failures.
 const PAUSE: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
-const MAX_SNAPSHOT: usize = 64 << 20;
+const MAX_SNAPSHOT: u64 = 64 << 20;
 const TABLE_FILE: &str = "nodes.json";
 
 /// What the active hub sends.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// Which run of the active hub this is: the change counter starts again
+    /// at 0 on every start, so a version only means something within a run.
+    pub epoch: u64,
     /// The active hub's change counter when this was taken.
     pub version: u64,
     /// The hub's Noise key, in `NodeState` form.
@@ -51,6 +54,8 @@ pub struct Snapshot {
 /// Why replication failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ReplicaError {
+    #[error("replication is already enabled on this hub")]
+    AlreadyOn,
     #[error("bad URL {0:?}")]
     BadUrl(String),
     #[error("the replication secret is too short (at least {MIN_SECRET} characters)")]
@@ -59,7 +64,7 @@ pub enum ReplicaError {
     Dial(#[from] ts_dial::DialError),
     #[error("HTTP: {0}")]
     Http(String),
-    #[error("the active hub answered {0}")]
+    #[error("the active hub answered {0} (401: wrong secret; 404: replication is off there)")]
     Status(u16),
     #[error("timed out")]
     Timeout,
@@ -75,15 +80,13 @@ impl<S: NodeStore> Hub<S> {
         if secret.len() < MIN_SECRET {
             return Err(ReplicaError::WeakSecret);
         }
-        *self
-            .replica_secret
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(secret.to_string());
-        Ok(())
+        self.replica_secret
+            .set(secret.to_string())
+            .map_err(|_| ReplicaError::AlreadyOn)
     }
 
-    /// `GET /replicate[?after=N]`: waits (up to [`WAIT`]) while the standby
-    /// already has version `N`, then sends the state. Answers 404 when
+    /// `GET /replicate[?epoch=E&after=N]`: waits (up to [`WAIT`]) while the
+    /// standby already has version `N` of run `E`, then sends the state. Answers 404 when
     /// replication is off, so the endpoint does not show itself.
     pub(crate) async fn serve_replicate<T: Io>(
         &self,
@@ -91,12 +94,7 @@ impl<S: NodeStore> Hub<S> {
         target: &str,
         authorization: Option<&str>,
     ) -> Result<(), HubError> {
-        let secret = self
-            .replica_secret
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let Some(secret) = secret else {
+        let Some(secret) = self.replica_secret.get() else {
             return crate::respond_plain(transport, 404).await;
         };
         let given = authorization
@@ -105,12 +103,17 @@ impl<S: NodeStore> Hub<S> {
         if !rusty_crypto_key::constant_time_eq(given.as_bytes(), secret.as_bytes()) {
             return crate::respond_plain(transport, 401).await;
         }
-        let after = target
-            .split_once("after=")
-            .and_then(|(_, v)| v.split('&').next()?.parse::<u64>().ok());
+        let query = |key: &str| {
+            let (_, q) = target.split_once('?')?;
+            q.split('&')
+                .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))?
+                .parse::<u64>()
+                .ok()
+        };
         let mut rx = self.changes.clone();
         let version = *rx.borrow_and_update();
-        if after == Some(version) {
+        // Wait only for a standby that already holds this run's latest.
+        if query("epoch") == Some(self.epoch) && query("after") == Some(version) {
             // Nothing new: wait for a change or the heartbeat.
             rusty_tokio::time::timeout(WAIT, rx.changed()).await.ok();
         }
@@ -123,6 +126,7 @@ impl<S: NodeStore> Hub<S> {
             .locked(|s| s.export())
             .map_err(|e| HubError::Bad(e.to_string()))?;
         Ok(serde_json::to_vec(&Snapshot {
+            epoch: self.epoch,
             version,
             machine_key: self.key.to_state_string(),
             table: serde_json::from_slice(&table)?,
@@ -134,21 +138,43 @@ impl<S: NodeStore> Hub<S> {
 pub async fn fetch(
     url: &str,
     secret: &str,
-    after: Option<u64>,
+    after: Option<(u64, u64)>,
     trust: &Trust,
 ) -> Result<Snapshot, ReplicaError> {
     let target = match after {
-        Some(v) => format!("{}?after={v}", crate::replica::PATH),
-        None => crate::replica::PATH.to_string(),
+        Some((epoch, version)) => format!("{PATH}?epoch={epoch}&after={version}"),
+        None => PATH.to_string(),
     };
     let body = get(url, &target, Some(secret), trust).await?;
     serde_json::from_slice(&body).map_err(|e| ReplicaError::Snapshot(e.to_string()))
 }
 
-/// Whether the hub at `url` still answers `GET /key`: a standby must not be
-/// promoted while it does.
-pub async fn answers(url: &str, trust: &Trust) -> bool {
-    get(url, "/key", None, trust).await.is_ok()
+/// Whether the hub at `url` is clearly down: nothing accepts a TCP
+/// connection there (refused, unreachable, or no answer in 5 s). `Err` says
+/// why it is not clear, and a promotion must not go ahead: a certificate
+/// problem or a bad answer does not mean the hub is gone, and a second hub
+/// handing out different data is the split brain manual promotion avoids.
+pub async fn is_down(url: &str) -> Result<(), String> {
+    use std::io::ErrorKind::{ConnectionRefused, HostUnreachable, NetworkUnreachable, TimedOut};
+    let (_, dial, _) = ts_dial::split(url).ok_or_else(|| format!("bad URL {url:?}"))?;
+    match rusty_tokio::time::timeout(
+        Duration::from_secs(5),
+        rusty_tokio::net::TcpStream::connect(&dial),
+    )
+    .await
+    {
+        Err(_) => Ok(()),
+        Ok(Ok(_)) => Err(format!("something at {url} accepts connections")),
+        Ok(Err(e))
+            if matches!(
+                e.kind(),
+                ConnectionRefused | HostUnreachable | NetworkUnreachable | TimedOut
+            ) =>
+        {
+            Ok(())
+        }
+        Ok(Err(e)) => Err(format!("cannot tell whether {url} is down: {e}")),
+    }
 }
 
 pub(crate) const PATH: &str = "/replicate";
@@ -194,11 +220,10 @@ async fn get(
         }
         let framing = rusty_http::body::response_framing(&head.headers, &Method::Get, head.status)
             .map_err(|e| http(&e))?;
-        let body = transport.read_body(framing).await.map_err(|e| http(&e))?;
-        if body.len() > MAX_SNAPSHOT {
-            return Err(ReplicaError::Snapshot("too large".into()));
-        }
-        Ok(body)
+        transport
+            .read_body_with_limit(framing, MAX_SNAPSHOT)
+            .await
+            .map_err(|e| http(&e))
     };
     rusty_tokio::time::timeout(REQUEST_TIMEOUT, work)
         .await
@@ -237,16 +262,18 @@ pub async fn follow(
     loop {
         match fetch(url, secret, after, trust).await {
             Ok(snapshot) => {
-                if after != Some(snapshot.version) {
+                let held = Some((snapshot.epoch, snapshot.version));
+                if after != held {
                     apply(state_dir, &snapshot)?;
                     rusty_log::info!("standby: copied version {}", snapshot.version);
                 }
-                after = Some(snapshot.version);
+                after = held;
                 backoff = PAUSE;
             }
-            // A wrong secret will not get better by asking again.
-            Err(ReplicaError::Status(401 | 404)) => {
-                return Err(ReplicaError::Status(401));
+            // A wrong secret, or replication off there, will not get better
+            // by asking again.
+            Err(ReplicaError::Status(code @ (401 | 404))) => {
+                return Err(ReplicaError::Status(code));
             }
             Err(e) => {
                 rusty_log::warn!("standby: {e}; retrying in {}s", backoff.as_secs());

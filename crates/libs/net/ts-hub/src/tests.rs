@@ -1139,3 +1139,76 @@ async fn replication_is_off_until_enabled_and_needs_a_long_enough_secret() {
         Err(replica::ReplicaError::WeakSecret)
     ));
 }
+
+async fn replicating_hub() -> (Arc<Hub>, String) {
+    let hub = Hub::new();
+    hub.enable_replication("0123456789abcdef0123456789abcdef")
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    rusty_tokio::spawn(hub.clone().serve(listener));
+    (hub, url)
+}
+
+const SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+#[rusty_tokio::test]
+async fn a_table_over_one_mib_is_copied() {
+    let (hub, url) = replicating_hub().await;
+    for i in 0..10_000 {
+        hub.add_preauth(
+            &format!("key-{i:08}-padding-padding"),
+            "alice",
+            KeyPolicy::REUSABLE,
+        )
+        .unwrap();
+    }
+    let snapshot = replica::fetch(&url, SECRET, None, &ts_dial::Trust::System)
+        .await
+        .expect("a big table is not refused");
+    assert!(serde_json::to_vec(&snapshot.table).unwrap().len() > 1 << 20);
+}
+
+#[rusty_tokio::test]
+async fn a_restarted_active_is_copied_even_when_its_counter_matches() {
+    let (_, url) = replicating_hub().await;
+    let trust = ts_dial::Trust::System;
+    let held = replica::fetch(&url, SECRET, None, &trust).await.unwrap();
+
+    // The same run with the same version has nothing new: the request waits.
+    let waits = rusty_tokio::time::timeout(
+        Duration::from_millis(400),
+        replica::fetch(&url, SECRET, Some((held.epoch, held.version)), &trust),
+    )
+    .await;
+    assert!(waits.is_err(), "nothing changed, so the active waits");
+
+    // A different run (a restart) with the same version answers at once.
+    let restarted = rusty_tokio::time::timeout(
+        Duration::from_secs(5),
+        replica::fetch(&url, SECRET, Some((held.epoch + 1, held.version)), &trust),
+    )
+    .await;
+    assert!(restarted.expect("answers at once").is_ok());
+}
+
+#[rusty_tokio::test]
+async fn only_a_refused_connection_counts_as_a_hub_being_down() {
+    let (_hub, url) = replicating_hub().await;
+    assert!(
+        replica::is_down(&url).await.is_err(),
+        "it accepts connections"
+    );
+
+    let gone = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", gone.local_addr().unwrap());
+    drop(gone);
+    assert!(
+        replica::is_down(&url).await.is_ok(),
+        "nothing listens there"
+    );
+    assert!(
+        replica::is_down("ftp://x").await.is_err(),
+        "a bad URL is not 'down'"
+    );
+}
