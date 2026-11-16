@@ -83,8 +83,9 @@ removed while it is still this server's (Linux), and connections close last.
 ## Close-out check (card #289)
 
 The Rex level is met by what (a) and (b) already do plus C69 and C45; no new
-code is needed. Each step has a test, and the whole run was checked by hand on
-Linux on 2026-11-16 (Windows not run; see below).
+code is needed. Steps 2 to 5 below each have a test; step 1 (the old server keeping its binary)
+has none and was checked by hand with the whole run on Linux on 2026-11-16
+(Windows not run; see below).
 
 | Step | Held by |
 |---|---|
@@ -94,7 +95,8 @@ Linux on 2026-11-16 (Windows not run; see below).
 | A client with no server starts one (`--idle-exit 60`) | `client/src/autostart.rs` tests, C69 |
 | No older-server notice when client and server match | `ctl/tests/ctl.rs` `ok()` asserts no "It lacks" |
 
-Manual check (Linux), with `rusty-mux-server` and `rusty-mux-ctl` built:
+Manual check (Linux), with `rusty-mux-server` and `rusty-mux-ctl` built. Set
+`RUSTY_MUX_SOCKET=SOCK` for the whole run, so ctl never reaches the default server:
 
 1. Start `rusty-mux-server --state STATE SOCK`; `rusty-mux-ctl create-session --name kept`.
 2. Replace the server binary on disk (`mv` a new build over it).
