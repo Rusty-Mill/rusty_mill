@@ -29,7 +29,14 @@ Three layers, weakest first; the honest limit is stated below.
 1. **Connector sign-in** says what is connecting (cloud Claude). Not a role.
 2. **Board agent identity.** The session calls `agent_register` ([agent-register-design.md])
    and passes `agent_id` + `agent_key` to the broker. The broker asks Mill Board to verify
-   them and return the agent's role. The role is the board's, not the session's claim.
+   them and return the agent's **role and projects** (the grant in `registered_agent_set`).
+   Both are the board's, not the session's claim. The broker maps the agent's projects to
+   repos and grants the **intersection** of that set, the role's repo allowlist and the
+   requested repo. Two builders with different project grants therefore get different repos.
+   Test: a role-valid but project-disallowed repo is denied.
+   Boundary: a repo-scoped token cannot enforce board path-level restrictions inside a repo.
+   A deployment that needs them requires a narrower proxy (`gh_proxy`) or an explicitly
+   accepted boundary.
    A self-narrowed role can never exceed the connector's, so with the connector at
    `builder` a session cannot become `reviewer` (no `review` capability). The reviewer
    lane gets `reviewer` only through an admin grant (`settings_registered_agent_set`),
@@ -38,9 +45,14 @@ Three layers, weakest first; the honest limit is stated below.
    claimed by the requester; builder tokens only for a claimed Work-column card. A leaked
    key without a live claim gets nothing.
 
-Limit: a prompt-injected session can leak its own `agent_key`; blast radius is one agent
-id, one role, one repo at a time, revocable alone. Same accepted tradeoff as `agent_register`.
-Not isolation between hostile sessions.
+Limit: a prompt-injected session can leak its own `agent_key`. Blast radius is one agent id
+and one role, but successive mints can cover **every repo in the agent's effective scope**,
+not one repo in aggregate. Revoking the key on the board stops *later* mints only. Tokens
+already issued stay valid until they expire (up to 1 hour); that exposure is accepted in v0.
+If it is not acceptable, v2 can hold issued tokens in memory and call GitHub's
+[installation-token revocation](https://docs.github.com/en/rest/apps/installations#revoke-an-installation-access-token)
+on key revoke. Same accepted tradeoff as `agent_register`. Not isolation between hostile sessions.
+
 
 ### Role to App mapping and scope (config, not code)
 `role -> {app_id, installation_id, key_file, permissions, repos}`. Requests may only
@@ -54,12 +66,12 @@ many-to-one so either works; Nano picks which App serves which role.
 ### Key storage
 PEM files, mode 0600, owned by a dedicated service user, delivered by systemd
 `LoadCredential=`. Never in a repo, env var, log or chat. Loaded once; `Debug` redacted.
-Non-secret IDs in a config file. Rotation: GitHub allows two keys per App; add, restart,
-delete old. Nano installs keys himself.
+Non-secret IDs in a config file. Rotation: GitHub allows up to 25 private keys per App; add the new one, restart, delete the old. Nano installs keys himself.
 
 ### Expiry
-GitHub fixes installation tokens at 1 hour. The broker mints per request (limit 5000/h per
-installation is ample), no cache in v0, and returns `expires_at`. Per-agent rate limit.
+GitHub fixes installation tokens at 1 hour. The broker mints per request, no cache in v0, and returns `expires_at`. The 5,000/hour
+installation limit is a REST request budget, not a mint guarantee: on 403/429 the broker honours
+`Retry-After`/reset headers with bounded backoff, then returns `rate_limited`. Per-agent rate limit.
 
 ### Audit
 Append-only JSONL (0600) plus `rusty_log`: time, agent id, role asked, role resolved, repo,
@@ -89,6 +101,7 @@ v0 = policy + signer + github + audit + a bearer-token identity for one local te
 against a throwaway App. v1 = board identity adapter. v2 = task binding, `gh_proxy`.
 
 ## Ask-first items for Nano
+Five tracked gates; item 2 is decided, the rest are open. This note authorises none of them.
 1. **Host**: BaileyAi (recommended) or elsewhere. No decision covers it.
 2. **Signing dependency** (**decided, Nano 2026-11-16, decision card: openssl shell-out**): rusty_rsa only verifies. Options: (a) shell out to `openssl dgst
    -sign` behind the `signer` port, no new dependency, recommended for v0; (b) the `rsa`
@@ -96,7 +109,7 @@ against a throwaway App. v1 = board identity adapter. v2 = task binding, `gh_pro
    blinding; most work and risk).
 3. **Mill Board verify tool** (read-only: `agent_id`+`key` -> role). A public API change
    queued behind Mill Board's in-flight change (one-change-per-system). v0 avoids it.
-4. **Role table** (g1-roles-proposal.md, approved 2026-11-15) and **which App serves which
+4. **Role table** (approved 2026-11-15, remind-me `mem_6d5d9c2e307743598c46fa521f1e509f`; the proposal file `g1-roles-proposal.md` lives in the project Library, not this repo) and **which App serves which
    role**; Apps exist, roles unmapped.
 5. **Option a vs b**: building this is the move from a to b for builder work.
 
