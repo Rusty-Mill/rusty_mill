@@ -18,6 +18,7 @@ mod keys;
 pub mod launch;
 mod limits;
 mod policy;
+pub mod replica;
 mod store;
 pub mod stun;
 mod tls;
@@ -75,6 +76,8 @@ pub struct Hub<S: NodeStore = MemoryStore> {
     /// Who may reach whom; closed until set.
     policy: Mutex<Arc<Policy>>,
     relay: derp::Relay,
+    /// Shared secret a standby presents to copy the state; `None` is off.
+    replica_secret: Mutex<Option<String>>,
     /// The `DERPMap` every netmap carries, once the hub knows its address.
     derp_map: Mutex<Option<serde_json::Value>>,
     conns: Counter,
@@ -114,6 +117,7 @@ impl<S: NodeStore> Hub<S> {
             limits,
             policy: Mutex::new(Arc::new(Policy::default())),
             relay: derp::Relay::new(),
+            replica_secret: Mutex::new(None),
             derp_map: Mutex::new(None),
             conns: Counter::default(),
             streams: Counter::default(),
@@ -315,6 +319,11 @@ impl<S: NodeStore> Hub<S> {
         let path = head.target.split('?').next().unwrap_or("");
         match (&head.method, path) {
             (Method::Get, "/key") => self.serve_key(transport).await,
+            (Method::Get, replica::PATH) => {
+                let auth = head.headers.get("Authorization").map(str::to_owned);
+                self.serve_replicate(transport, &head.target, auth.as_deref())
+                    .await
+            }
             (Method::Get, "/derp") => {
                 let fast = head.headers.get("Derp-Fast-Start") == Some("1");
                 self.serve_derp(transport, fast).await
@@ -327,25 +336,13 @@ impl<S: NodeStore> Hub<S> {
         }
     }
 
-    async fn serve_key<T: Io>(&self, mut transport: AsyncTransport<T>) -> Result<(), HubError> {
+    async fn serve_key<T: Io>(&self, transport: AsyncTransport<T>) -> Result<(), HubError> {
         let key = self.public_key();
         let body = serde_json::to_vec(&serde_json::json!({
             "legacyPublicKey": key,
             "publicKey": key,
         }))?;
-        let mut headers = HeaderMap::new();
-        headers.insert("Content-Type", "application/json")?;
-        headers.insert("Content-Length", &body.len().to_string())?;
-        headers.insert("Connection", "close")?;
-        transport
-            .write_response_head(&ResponseHead {
-                status: StatusCode::OK,
-                reason: "OK".into(),
-                version: Version::Http11,
-                headers,
-            })
-            .await?;
-        write_all(&mut transport, &body).await
+        respond_body(transport, 200, &body).await
     }
 
     /// With `Derp-Fast-Start: 1` the client expects no HTTP response at all:
@@ -674,6 +671,27 @@ async fn respond_plain<T: Io>(
         })
         .await?;
     write_all(&mut transport, &[]).await
+}
+
+/// A complete JSON response, then the connection closes.
+async fn respond_body<T: Io>(
+    mut transport: AsyncTransport<T>,
+    status: u16,
+    body: &[u8],
+) -> Result<(), HubError> {
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", "application/json")?;
+    headers.insert("Content-Length", &body.len().to_string())?;
+    headers.insert("Connection", "close")?;
+    transport
+        .write_response_head(&ResponseHead {
+            status: StatusCode::from_u16(status),
+            reason: String::new(),
+            version: Version::Http11,
+            headers,
+        })
+        .await?;
+    write_all(&mut transport, body).await
 }
 
 fn header(fields: &[HeaderField], name: &str) -> String {

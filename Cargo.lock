@@ -14469,6 +14469,7 @@ dependencies = [
  "crypto_box",
  "rcgen",
  "rusty_base64",
+ "rusty_crypto_key",
  "rusty_h2",
  "rusty_http",
  "rusty_log",

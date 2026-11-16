@@ -58,12 +58,11 @@ impl FileStore {
     }
 
     fn flush(&self) -> Result<(), RegisterError> {
-        let storage = |e: &dyn std::fmt::Display| RegisterError::Storage(e.to_string());
-        let json = self.inner.to_json().map_err(|e| storage(&e))?;
-        let tmp = self.path.with_extension("tmp");
-        write_private(&tmp, &json).map_err(|e| storage(&e))?;
-        fs::rename(&tmp, &self.path).map_err(|e| storage(&e))?;
-        sync_parent(&self.path).map_err(|e| storage(&e))
+        let json = self
+            .inner
+            .to_json()
+            .map_err(|e| RegisterError::Storage(e.to_string()))?;
+        save_table(&self.path, &json).map_err(|e| RegisterError::Storage(e.to_string()))
     }
 
     /// Runs `change`; if the new table cannot be saved, puts the old one
@@ -80,6 +79,22 @@ impl FileStore {
         }
         Ok(out)
     }
+}
+
+/// Saves a table file the way every change does: a private temporary file
+/// renamed over the old one, so a crash leaves the old table or the new one.
+/// A standby uses it to store what the active hub sent, after checking with
+/// [`check_table`] that it parses.
+pub(crate) fn save_table(path: &Path, json: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    write_private(&tmp, json)?;
+    fs::rename(&tmp, path)?;
+    sync_parent(path)
+}
+
+/// Whether `json` is a node table this hub can open.
+pub(crate) fn check_table(json: &[u8]) -> Result<(), serde_json::Error> {
+    MemoryStore::from_json(json, None).map(drop)
 }
 
 /// Writes `bytes` to a new file at `path` (`0600`), replacing a stale one so
@@ -168,5 +183,9 @@ impl NodeStore for FileStore {
 
     fn netmap(&self, machine: &MachinePublic, omit_peers: bool, now: u64) -> Option<MapResponse> {
         self.inner.netmap(machine, omit_peers, now)
+    }
+
+    fn export(&self) -> Result<Vec<u8>, RegisterError> {
+        self.inner.export()
     }
 }

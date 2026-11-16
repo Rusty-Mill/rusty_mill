@@ -121,6 +121,11 @@ copy of the same mechanism. Mesh peers use TCP streams; C13 stays for the SSH pa
    even after, a dead coordinator is a soft outage: existing WireGuard sessions keep working;
    only new joins, key changes and revocations wait.
 
+   Built in two parts. Part 1 (`ts-daemon hub --standby URL`, `--promote URL`): `GET /replicate`
+   behind a shared secret copies the node table and the hub's Noise key, so a promoted standby
+   presents the key every node pinned. Lag means a revoke made just before the active dies can be
+   lost. Part 2: the standby address list in the netmap and the client fallback.
+
 "Identity and relay first, direct paths later" is therefore stages 1-2 then 3, in the same
 order `rusty_tailscale` was built (DERP-only data plane before NAT traversal).
 
