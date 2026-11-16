@@ -48,14 +48,20 @@ fn start(dir: PathBuf, keys: &str) -> Running {
 fn start_with(dir: PathBuf, keys: &str, extra: &[&std::ffi::OsStr]) -> Running {
     write_private(&dir.join("keys"), keys);
     std::fs::write(dir.join("policy"), "* -> *\n").unwrap();
+    let mut args: Vec<std::ffi::OsString> = ["hub", "--listen", "127.0.0.1:0", "--state-dir"]
+        .map(Into::into)
+        .into();
+    args.push(dir.join("state").into());
+    args.extend(["--keys".into(), dir.join("keys").into()]);
+    args.extend(["--policy".into(), dir.join("policy").into()]);
+    args.extend(extra.iter().map(Into::into));
+    spawn_hub(dir, &args)
+}
+
+/// Runs `ts-daemon args...` and waits for the hub to report its address.
+fn spawn_hub(dir: PathBuf, args: &[std::ffi::OsString]) -> Running {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ts-daemon"))
-        .args(["hub", "--listen", "127.0.0.1:0", "--state-dir"])
-        .arg(dir.join("state"))
-        .arg("--keys")
-        .arg(dir.join("keys"))
-        .arg("--policy")
-        .arg(dir.join("policy"))
-        .args(extra)
+        .args(args)
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
@@ -358,4 +364,277 @@ async fn a_standby_promoted_after_the_active_is_killed_serves_the_same_hub() {
     join(&promoted.url, "c", "ka")
         .await
         .expect("a new node joins the promoted hub");
+}
+
+/// Two real nodes stream through the active hub; it is killed mid-transfer and
+/// the standby is promoted on the address the nodes were told about. The
+/// stream must finish byte for byte, and a new node must join afterwards.
+#[rusty_tokio::test]
+async fn nodes_ride_out_the_active_hub_dying_and_a_standby_taking_over() {
+    use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use std::ffi::{OsStr, OsString};
+
+    const PORT: u16 = 7000;
+    const LEN: usize = 2 << 20;
+    let dir = temp_dir("takeover");
+    let secret = dir.join("secret");
+    write_private(&secret, "0123456789abcdef0123456789abcdef\n");
+    let standby_addr = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap()
+    };
+    let standby_url = format!("http://{standby_addr}");
+
+    std::fs::create_dir_all(dir.join("active")).unwrap();
+    let mut active = start_with(
+        dir.join("active"),
+        "ka alice reusable\n",
+        &[
+            OsStr::new("--replica-secret"),
+            secret.as_os_str(),
+            OsStr::new("--advertise-standby"),
+            OsStr::new(&standby_url),
+        ],
+    );
+    let node = |name: &str, url: &str, key: &str| {
+        let cfg = ts_net::NodeConfig {
+            control_url: url.to_owned(),
+            derp_url: None,
+            authkey: key.into(),
+            hostname: name.to_owned(),
+            state_dir: dir.join(name),
+            enable_direct: false,
+            stun_server: None,
+            trust: ts_net::Trust::System,
+        };
+        async move { ts_net::Node::new(cfg).await.expect("node joins") }
+    };
+    let a = node("a", &active.url, "ka").await;
+    let b = node("b", &active.url, "ka").await;
+    let a_ip = a.wait_ip().await.expect("a has an address");
+    b.wait_ip().await.expect("b has an address");
+    let mut listener = a.bind(PORT).await.expect("bind");
+
+    let want: Vec<u8> = (0..LEN)
+        .map(|i| (i.wrapping_mul(31) ^ (i >> 8)) as u8)
+        .collect();
+    let sender = rusty_tokio::spawn({
+        let want = want.clone();
+        async move {
+            let mut s = b.connect((a_ip, PORT).into()).await.expect("connect");
+            for chunk in want.chunks(32 << 10) {
+                s.write_all(chunk).await.expect("write");
+                rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            s.shutdown().await.expect("shutdown");
+            (s, b)
+        }
+    });
+
+    let standby_state = dir.join("standby");
+    let standby = Command::new(env!("CARGO_BIN_EXE_ts-daemon"))
+        .args(["hub", "--standby", &active.url, "--replica-secret"])
+        .arg(&secret)
+        .arg("--state-dir")
+        .arg(&standby_state)
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut standby = Running {
+        child: standby,
+        dir: dir.clone(),
+        url: String::new(),
+    };
+
+    let mut conn = listener.accept().await.expect("accept");
+    let mut got = Vec::with_capacity(LEN);
+    let mut buf = vec![0u8; 64 << 10];
+    let mut promoted = None;
+    let finished = rusty_tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let n = conn.read(&mut buf).await.expect("read");
+            if n == 0 {
+                return;
+            }
+            got.extend_from_slice(&buf[..n]);
+            if promoted.is_none() && got.len() > LEN / 4 {
+                // The copy must have arrived before the active dies.
+                let copy = standby_state.join("nodes.json");
+                assert!(
+                    std::fs::read_to_string(&copy).is_ok_and(|t| t.contains("\"hostname\": \"b\"")),
+                    "the standby has the node table"
+                );
+                active.child.kill().unwrap();
+                active.child.wait().unwrap();
+                standby.child.kill().unwrap();
+                standby.child.wait().unwrap();
+                // The key the nodes joined with is gone from the standby's list
+                // (rotated out): they are known machines and must not need it.
+                write_private(&dir.join("keys"), "kz alice reusable\n");
+                std::fs::copy(active.dir.join("policy"), dir.join("policy")).unwrap();
+                let args: Vec<OsString> = [
+                    "hub".into(),
+                    "--listen".into(),
+                    standby_addr.to_string().into(),
+                    "--promote".into(),
+                    active.url.clone().into(),
+                    "--state-dir".into(),
+                    standby_state.clone().into(),
+                    "--keys".into(),
+                    dir.join("keys").into(),
+                    "--policy".into(),
+                    dir.join("policy").into(),
+                ]
+                .into();
+                promoted = Some(spawn_hub(dir.clone(), &args));
+            }
+        }
+    })
+    .await;
+    assert!(finished.is_ok(), "the stream finishes after the takeover");
+    assert_eq!(got.len(), want.len(), "length");
+    assert!(got == want, "bytes differ");
+    let _kept = sender.await; // keeps b's node alive
+
+    let c = node("c", &standby_url, "kz").await;
+    let c_ip = c
+        .wait_ip()
+        .await
+        .expect("a new node joins the promoted hub");
+
+    // The old nodes hear of it only if their control link followed the
+    // promotion (the stream above rode on what they already knew).
+    let mut listener = c.bind(PORT + 1).await.expect("bind on c");
+    let reached = rusty_tokio::time::timeout(Duration::from_secs(30), async {
+        let mut s = a.connect((c_ip, PORT + 1).into()).await.expect("connect");
+        s.write_all(b"hello").await.expect("write");
+        let mut conn = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 5];
+        conn.read_exact(&mut buf).await.expect("read");
+        buf
+    })
+    .await
+    .expect("an old node learns of the new one through the promoted hub");
+    assert_eq!(&reached, b"hello");
+}
+
+/// A different hub on an advertised standby address is not the hub the node
+/// joined: it must never see the node's pre-auth key.
+#[rusty_tokio::test]
+async fn a_node_will_not_follow_a_hub_with_a_different_key() {
+    use std::ffi::OsStr;
+
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let other_addr = probe.local_addr().unwrap();
+    drop(probe);
+    let other_url = format!("http://{other_addr}");
+
+    let mut active = start_with(
+        temp_dir("imposter-active"),
+        "ka alice reusable\n",
+        &[OsStr::new("--advertise-standby"), OsStr::new(&other_url)],
+    );
+    let dir = temp_dir("imposter-node");
+    let node = ts_net::Node::new(ts_net::NodeConfig {
+        control_url: active.url.clone(),
+        derp_url: None,
+        authkey: "ka".into(),
+        hostname: "wanderer".into(),
+        state_dir: dir.join("node"),
+        enable_direct: false,
+        stun_server: None,
+        trust: ts_net::Trust::System,
+    })
+    .await
+    .expect("node joins");
+    node.wait_ip().await.expect("address");
+
+    // A stranger: its own key, same pre-auth key, on the advertised address.
+    let args: Vec<std::ffi::OsString> = [
+        "hub".into(),
+        "--listen".into(),
+        other_addr.to_string().into(),
+        "--state-dir".into(),
+        dir.join("other").into(),
+        "--keys".into(),
+        dir.join("keys").into(),
+    ]
+    .into();
+    write_private(&dir.join("keys"), "ka mallory reusable\n");
+    let _other = spawn_hub(dir.clone(), &args);
+    active.child.kill().unwrap();
+    active.child.wait().unwrap();
+
+    rusty_tokio::time::sleep(Duration::from_secs(5)).await;
+    let table = std::fs::read_to_string(dir.join("other").join("nodes.json")).unwrap_or_default();
+    assert!(
+        !table.contains("wanderer"),
+        "the node registered with a hub it never joined: {table}"
+    );
+}
+
+/// A dropped node must not leave retry loops behind when its hub dies.
+#[rusty_tokio::test]
+async fn a_dropped_node_stops_retrying_when_its_hub_dies() {
+    let mut hub = start(temp_dir("dropped"), "ka alice reusable\n");
+    let addr = hub.url.trim_start_matches("http://").to_owned();
+    let node = ts_net::Node::new(ts_net::NodeConfig {
+        control_url: hub.url.clone(),
+        derp_url: None,
+        authkey: "ka".into(),
+        hostname: "leaver".into(),
+        state_dir: hub.dir.join("node"),
+        enable_direct: false,
+        stun_server: None,
+        trust: ts_net::Trust::System,
+    })
+    .await
+    .expect("node joins");
+    node.wait_ip().await.expect("address");
+    drop(node);
+    hub.child.kill().unwrap();
+    hub.child.wait().unwrap();
+
+    // Whatever still dials the old address shows up here.
+    let probe = std::net::TcpListener::bind(&addr).expect("the address is free again");
+    probe.set_nonblocking(true).unwrap();
+    rusty_tokio::time::sleep(Duration::from_secs(8)).await;
+    assert!(
+        probe.accept().is_err(),
+        "something still retries the dead hub"
+    );
+}
+
+/// The same, when the hub dies first and the last handle goes while the node
+/// is already retrying.
+#[rusty_tokio::test]
+async fn a_node_dropped_while_retrying_stops_retrying() {
+    let mut hub = start(temp_dir("dropped-late"), "ka alice reusable\n");
+    let addr = hub.url.trim_start_matches("http://").to_owned();
+    let node = ts_net::Node::new(ts_net::NodeConfig {
+        control_url: hub.url.clone(),
+        derp_url: None,
+        authkey: "ka".into(),
+        hostname: "latecomer".into(),
+        state_dir: hub.dir.join("node"),
+        enable_direct: false,
+        stun_server: None,
+        trust: ts_net::Trust::System,
+    })
+    .await
+    .expect("node joins");
+    node.wait_ip().await.expect("address");
+    hub.child.kill().unwrap();
+    hub.child.wait().unwrap();
+    // Let it notice and start retrying against the dead address.
+    rusty_tokio::time::sleep(Duration::from_secs(2)).await;
+    drop(node);
+
+    let probe = std::net::TcpListener::bind(&addr).expect("the address is free again");
+    probe.set_nonblocking(true).unwrap();
+    rusty_tokio::time::sleep(Duration::from_secs(8)).await;
+    assert!(
+        probe.accept().is_err(),
+        "something still retries the dead hub"
+    );
 }

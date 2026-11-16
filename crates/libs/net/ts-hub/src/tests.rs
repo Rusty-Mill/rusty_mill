@@ -1212,3 +1212,31 @@ async fn only_a_refused_connection_counts_as_a_hub_being_down() {
         "a bad URL is not 'down'"
     );
 }
+
+#[rusty_tokio::test]
+async fn every_netmap_lists_the_advertised_standbys() {
+    let (hub, url) = start().await;
+    hub.add_preauth("k1", "alice", KeyPolicy::REUSABLE).unwrap();
+    hub.set_policy(Policy::allow_all());
+    let a = peer(&url, "a").await;
+    a.client.register(a.node.public(), "k1").await.unwrap();
+
+    let standbys = vec!["http://10.0.0.2:8443".to_string()];
+    hub.advertise_standbys(standbys.clone());
+    let mut got = None;
+    rusty_tokio::time::timeout(
+        Duration::from_secs(10),
+        a.client
+            .poll_netmap(a.node.public(), a.disco.public(), vec![], |map| {
+                if map.peers.is_none() {
+                    return ControlFlow::Continue(());
+                }
+                got = map.standby_urls;
+                ControlFlow::Break(())
+            }),
+    )
+    .await
+    .expect("a netmap arrives")
+    .unwrap();
+    assert_eq!(got, Some(standbys));
+}

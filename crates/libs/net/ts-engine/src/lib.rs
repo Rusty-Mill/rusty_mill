@@ -11,6 +11,7 @@
 //! `ts_magicsock::MagicSock`, `ts_wg::WgPeer`, `ts_tun::Tun`) so the domain
 //! logic stays testable and the adapters are swappable.
 
+mod failover;
 pub mod icmp;
 mod l4;
 
@@ -298,8 +299,14 @@ impl PeerIndex {
 pub struct Engine {
     state: NodeState,
     our_ips: Vec<Ipv4Addr>,
-    derp: DerpClient,
+    /// `None` while a background task reconnects it.
+    derp: Option<DerpClient>,
     derp_tx: DerpSender,
+    derp_ready: mpsc::UnboundedReceiver<DerpClient>,
+    derp_ready_tx: mpsc::UnboundedSender<DerpClient>,
+    derp_url: String,
+    trust: Trust,
+    standbys: failover::Standbys,
     sessions: HashMap<NodePublic, BoringWgPeer>,
     /// Everything netmap-derived that is keyed by peer (design review 4).
     index: PeerIndex,
@@ -360,7 +367,7 @@ impl Engine {
         let control = ControlClient::connect_with(
             &config.control_url,
             state.machine.clone(),
-            hostinfo,
+            hostinfo.clone(),
             config.trust.clone(),
         )
         .await?;
@@ -418,27 +425,34 @@ impl Engine {
         // Stream the netmap into an unbounded channel (the poll handler is
         // sync; unbounded send never blocks it).
         let (netmap_tx, netmap_rx) = mpsc::unbounded_channel();
-        rusty_tokio::spawn(async move {
-            let r = control
-                .poll_netmap(node_key, disco_key, endpoints, move |resp| {
-                    if netmap_tx.send(resp).is_err() {
-                        std::ops::ControlFlow::Break(())
-                    } else {
-                        std::ops::ControlFlow::Continue(())
-                    }
-                })
-                .await;
-            if let Err(e) = r {
-                rusty_log::warn!("engine: netmap poll ended: {e}");
-            }
-        });
+        let standbys = failover::Standbys::default();
+        let link = failover::ControlLink {
+            primary: config.control_url.clone(),
+            authkey: config.authkey.clone(),
+            hostinfo,
+            trust: config.trust.clone(),
+            machine: state.machine.clone(),
+            pinned: control.control_key(),
+            node_key,
+            disco_key,
+            endpoints,
+            standbys: standbys.clone(),
+            netmap_tx,
+        };
+        rusty_tokio::spawn(link.run(control));
 
+        let (derp_ready_tx, derp_ready) = mpsc::unbounded_channel();
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let engine = Engine {
             state,
             our_ips: Vec::new(),
-            derp,
+            derp: Some(derp),
             derp_tx,
+            derp_ready,
+            derp_ready_tx,
+            derp_url: config.derp_url,
+            trust: config.trust,
+            standbys,
             sessions: HashMap::new(),
             index: PeerIndex::default(),
             next_index: 1,
@@ -460,14 +474,25 @@ impl Engine {
             stack_tx: config.stack_io.as_ref().map(|s| s.inbound.clone()),
             stack_rx: config.stack_io.map(|s| s.outbound),
         };
-        rusty_tokio::spawn(engine.run());
+        rusty_tokio::spawn(async move {
+            let standbys = engine.standbys.clone();
+            engine.run().await;
+            standbys.stop();
+        });
         Ok(EngineHandle { cmd_tx })
     }
 
     async fn run(mut self) {
         let mut tick = rusty_tokio::time::interval(TICK_INTERVAL);
         tick.set_missed_tick_behavior(rusty_tokio::time::MissedTickBehavior::Delay);
+        let mut handles_gone = false;
         loop {
+            // No one can ask for anything and no relay is up: whichever of
+            // the two happened last, nothing is left to wait for.
+            if handles_gone && self.derp.is_none() {
+                rusty_log::warn!("engine: no handles and no relay; stopping");
+                break;
+            }
             // Clone the TUN handle and UDP socket (cheap Arc, or None) so the
             // read futures borrow locals rather than `self`, leaving the other
             // branches free to take `&mut self`.
@@ -475,14 +500,22 @@ impl Engine {
             let udp = self.magicsock.as_ref().map(|m| m.udp());
             rusty_tokio::select! {
                 Some(resp) = self.netmap_rx.recv() => self.apply_netmap(resp).await,
-                maybe_pkt = self.derp.recv() => match maybe_pkt {
+                maybe_pkt = recv_derp(&mut self.derp), if self.derp.is_some() => match maybe_pkt {
                     Some(pkt) => self.on_derp_packet(pkt.peer, pkt.payload).await,
-                    None => {
+                    None if handles_gone => {
                         rusty_log::warn!("engine: DERP connection closed; stopping");
                         break;
                     }
+                    None => self.lose_derp(),
                 },
-                Some(cmd) = self.cmd_rx.recv() => self.on_command(cmd).await,
+                Some(derp) = self.derp_ready.recv() => self.set_derp(derp),
+                cmd = self.cmd_rx.recv(), if !handles_gone => match cmd {
+                    Some(cmd) => self.on_command(cmd).await,
+                    // Every handle is gone. Streams of a dropped node may
+                    // still be draining, so keep going; but a lost relay
+                    // then ends the engine instead of being retried.
+                    None => handles_gone = true,
+                },
                 _ = tick.tick() => self.on_tick().await,
                 res = recv_tun(&tun), if tun.is_some() => match res {
                     Some(Ok(pkt)) => self.on_tun_packet(pkt).await,
@@ -498,6 +531,29 @@ impl Engine {
                 else => break,
             }
         }
+    }
+
+    /// The relay dropped us. A background task finds one again (primary,
+    /// then standbys) while direct paths, commands and netmaps keep flowing.
+    fn lose_derp(&mut self) {
+        rusty_log::warn!("engine: DERP connection closed; reconnecting");
+        self.derp = None;
+        let (url, standbys) = (self.derp_url.clone(), self.standbys.clone());
+        let (node, trust) = (self.state.node.clone(), self.trust.clone());
+        let ready = self.derp_ready_tx.clone();
+        rusty_tokio::spawn(async move {
+            if let Some(derp) = failover::reconnect_derp(&url, &standbys, &node, &trust).await {
+                let _ = ready.send(derp);
+            }
+        });
+    }
+
+    fn set_derp(&mut self, derp: DerpClient) {
+        self.derp_tx = derp.sender();
+        if let Some(ms) = &mut self.magicsock {
+            ms.set_derp(derp.sender());
+        }
+        self.derp = Some(derp);
     }
 
     /// Handles an inbound UDP datagram: magicsock dispatches disco itself and
@@ -1067,6 +1123,10 @@ impl Engine {
 
 /// Awaits the next UDP datagram from the magicsock socket, or never resolves
 /// when direct paths are disabled.
+async fn recv_derp(derp: &mut Option<DerpClient>) -> Option<ts_derp::RelayedPacket> {
+    derp.as_mut()?.recv().await
+}
+
 async fn recv_udp(udp: &Option<Arc<MagicUdp>>) -> Option<std::io::Result<(Vec<u8>, SocketAddr)>> {
     match udp {
         Some(sock) => {

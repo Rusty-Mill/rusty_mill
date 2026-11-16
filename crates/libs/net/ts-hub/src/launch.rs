@@ -5,7 +5,7 @@
 //! <prog> --listen ADDR:PORT [--tls-cert PEM --tls-key PEM]
 //!               [--stun ADDR:PORT] [--state-dir DIR] [--node-ttl SECS]
 //!               [--keys FILE] [--policy FILE] [--advertise HOST]
-//!               [--replica-secret FILE]
+//!               [--replica-secret FILE] [--advertise-standby URL]...
 //! <prog> --standby URL --replica-secret FILE [--tls-ca PEM] [--state-dir DIR]
 //! <prog> --listen ADDR:PORT --promote URL [--force] [--state-dir DIR] ...
 //! ```
@@ -42,6 +42,11 @@ options:
                          e.g. `openssl rand -hex 32`; file mode 600) copy the hub's state; needs TLS unless
                          --listen is a loopback address
 
+  --advertise-standby <url>
+                         tell nodes this standby's base URL (repeatable), so they
+                         reconnect to it after a promotion; it must serve control
+                         and DERP on that URL
+
 failover (docs/projects/mux/MESH.md, stage 4):
   --standby <url>        do not serve: follow the active hub at <url> and keep
                          its state in --state-dir (needs --replica-secret;
@@ -61,6 +66,7 @@ struct Args {
     keys: Option<PathBuf>,
     policy: Option<PathBuf>,
     advertise: Option<String>,
+    standbys: Vec<String>,
     replica_secret: Option<PathBuf>,
     standby: Option<String>,
     promote: Option<String>,
@@ -81,6 +87,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
     let (mut node_ttl, mut keys, mut policy, mut advertise) = (None, None, None, None);
     let (mut replica_secret, mut standby, mut promote, mut tls_ca) = (None, None, None, None);
     let mut force = false;
+    let mut standbys = Vec::new();
     let mut it = args;
     while let Some(arg) = it.next() {
         let mut next = || it.next().ok_or_else(|| format!("{arg} requires a value"));
@@ -105,6 +112,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             "--standby" => standby = Some(next()?),
             "--promote" => promote = Some(next()?),
             "--force" => force = true,
+            "--advertise-standby" => standbys.push(next()?),
             "--tls-ca" => tls_ca = Some(PathBuf::from(next()?)),
             "-h" | "--help" => return Ok(Cli::Help),
             other => return Err(format!("unknown argument {other:?}")),
@@ -124,6 +132,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
         keys,
         policy,
         advertise,
+        standbys,
         replica_secret,
         standby,
         promote,
@@ -159,6 +168,10 @@ impl Args {
         }
         if self.tls_ca.is_some() {
             return Err("--tls-ca goes with --standby".into());
+        }
+        // Nodes send their pre-auth key to these on every reconnect.
+        for url in &self.standbys {
+            needs_secure_link(url, "--advertise-standby")?;
         }
         if let Some(url) = &self.promote {
             needs_secure_link(url, "--promote")?;
@@ -337,6 +350,9 @@ async fn serve(args: Args, listen: SocketAddr) -> Result<(), BoxError> {
         }
         None => 0,
     };
+    if !args.standbys.is_empty() {
+        hub.advertise_standbys(args.standbys.clone());
+    }
     if let Some(host) = &args.advertise {
         hub.advertise(host, local.port(), stun_port);
     }
@@ -484,6 +500,11 @@ mod tests {
             .is_ok()
         );
         assert!(run(&["--listen", "127.0.0.1:0", "--force"]).is_err());
+        // Nodes send their pre-auth key to advertised standbys.
+        let adv = |u: &'static str| run(&["--listen", "127.0.0.1:0", "--advertise-standby", u]);
+        assert!(adv("https://standby.example:8443").is_ok());
+        assert!(adv("http://127.0.0.1:9").is_ok());
+        assert!(adv("http://standby.example:9").is_err());
         assert!(
             run(&[
                 "--listen",

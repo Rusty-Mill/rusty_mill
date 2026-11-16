@@ -23,3 +23,4 @@ rusty_log = { workspace = true, features = ["subscriber"] }
 [dev-dependencies]
 ts-control.workspace = true
 ts-derp.workspace = true
+ts-net.workspace = true
