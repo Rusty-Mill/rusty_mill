@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use rusty_mux_client::style::Style;
 use rusty_mux_core::{BlockId, Rect, Size};
-use rusty_term_core::{ATTR_UNDERLINE, AnsiParser, Cell, Grid, WIDE_TRAILER};
+use rusty_term_core::{ATTR_REVERSE, ATTR_UNDERLINE, AnsiParser, Cell, Grid, WIDE_TRAILER};
 
 use crate::keys::Dir;
 use crate::predict::Overlay;
@@ -72,6 +72,42 @@ impl Frame {
         &self.cells[start..start + usize::from(self.area.cols())]
     }
 
+    /// Marks `len` cells of `rect`'s row `y` from column `x` as a find
+    /// match: reversed, and underlined too when it is the active one.
+    pub fn mark(&mut self, rect: Rect, (x, y): (usize, usize), len: usize, active: bool) {
+        let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
+        if y >= rows {
+            return;
+        }
+        for dx in x..(x + len).min(cols) {
+            // Both fit in u16: they are below the rect's size.
+            let i = self.index(rect.x + dx as u16, rect.y + y as u16);
+            let attrs = &mut self.cells[i].style.attrs;
+            *attrs |= ATTR_REVERSE | if active { ATTR_UNDERLINE } else { 0 };
+        }
+    }
+
+    /// Draws `text` reversed over the last row of `rect`, which the block
+    /// shows beneath it; the cursor goes there.
+    pub fn bar(&mut self, rect: Rect, text: &str) {
+        let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
+        if rows == 0 {
+            return;
+        }
+        let y = rect.y + (rows - 1) as u16;
+        let mut chars = text.chars();
+        for dx in 0..cols {
+            let ch = chars.next().unwrap_or(' ');
+            let mut glyph = Glyph::plain(ch, Style::of(&Cell::blank()));
+            glyph.style.attrs |= ATTR_REVERSE;
+            // Both fit in u16: they are below the rect's size.
+            let i = self.index(rect.x + dx as u16, y);
+            self.cells[i] = glyph;
+        }
+        let end = text.chars().count().min(cols.saturating_sub(1));
+        self.cursor = Some((rect.x + end as u16, y));
+    }
+
     /// The cursor colour this frame gave the terminal, if any.
     pub fn cursor_colour(&self) -> Option<u32> {
         self.cursor_colour
@@ -113,8 +149,9 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
         }
         if let Some(grid) = view.grid {
             draw(&mut frame, view.rect, grid);
-            let ahead =
-                (view.overlay.as_ref()).and_then(|o| predict(&mut frame, view.rect, grid, o));
+            // A prediction sits at the live cursor: never over history.
+            let overlay = view.overlay.as_ref().filter(|_| grid.view_offset == 0);
+            let ahead = overlay.and_then(|o| predict(&mut frame, view.rect, grid, o));
             if view.block == focused {
                 // Shown only where the grid shows it, after the predictions.
                 let shown = cursor(view.rect, grid);
@@ -136,14 +173,16 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
 fn draw(frame: &mut Frame, rect: Rect, grid: &Grid) {
     let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
     for y in 0..rows.min(grid.rows) {
-        let cells: Vec<Cell> = grid.row_cells(y).take(cols).collect();
+        // Scrolled into history, the viewport shows it above the live rows.
+        let all: Vec<Cell> = match grid.view_offset {
+            0 => grid.row_cells(y).collect(),
+            _ => (0..grid.cols).map(|x| grid.viewport_cell(x, y)).collect(),
+        };
+        let cells = &all[..all.len().min(cols)];
         for (x, cell) in cells.iter().enumerate() {
             let wide_cut = x + 1 == cols
                 && cells.len() == cols
-                && grid
-                    .row_cells(y)
-                    .nth(cols)
-                    .is_some_and(|c| c.flags & WIDE_TRAILER != 0);
+                && all.get(cols).is_some_and(|c| c.flags & WIDE_TRAILER != 0);
             let glyph = match wide_cut {
                 true => Glyph::plain(' ', Style::of(cell)),
                 false => Glyph {
@@ -201,7 +240,8 @@ fn cursor(rect: Rect, grid: &Grid) -> Option<(u16, u16)> {
     let (cx, cy) = grid.cursor;
     let inside = cx < usize::from(rect.size.cols()) && cy < usize::from(rect.size.rows());
     // Both fit in u16: they are below the rect's size.
-    (grid.cursor_visible && inside).then(|| (rect.x + cx as u16, rect.y + cy as u16))
+    (grid.cursor_visible && grid.view_offset == 0 && inside)
+        .then(|| (rect.x + cx as u16, rect.y + cy as u16))
 }
 
 /// Box-drawing lines over every cell no view covers, joined where they
@@ -502,6 +542,84 @@ mod tests {
         let focused = frame.row(1)[4].style.fg;
         assert_eq!(focused, FOCUS);
         assert_ne!(frame.row(4)[4].style.fg, FOCUS);
+    }
+
+    #[test]
+    fn a_block_scrolled_to_a_prompt_shows_its_history_and_no_cursor() {
+        let mut g = Grid::new(4, 2);
+        let input = "\x1b]133;A\x07one\r\n\x1b]133;A\x07two\r\n\x1b]133;A\x07tri";
+        AnsiParser::new().advance(&mut g, input.as_bytes());
+        assert!(g.scroll_to_prev_prompt());
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            size: size(4, 2),
+        };
+        let views = [View {
+            block: id(1),
+            rect,
+            grid: Some(&g),
+            overlay: None,
+        }];
+        let frame = compose(size(4, 2), &views, id(1));
+        assert_eq!(text(&frame, 0), "one ");
+        assert_eq!(text(&frame, 1), "two ");
+        assert_eq!(frame.cursor, None);
+    }
+
+    #[test]
+    fn no_prediction_is_drawn_over_history() {
+        let mut g = Grid::new(4, 2);
+        let input = "\x1b]133;A\x07one\r\n\x1b]133;A\x07two\r\n\x1b]133;A\x07tri";
+        AnsiParser::new().advance(&mut g, input.as_bytes());
+        let drawn = |g: &Grid| {
+            let views = [View {
+                block: id(1),
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    size: size(4, 2),
+                },
+                grid: Some(g),
+                overlay: Some(Overlay {
+                    row: 0,
+                    cells: vec![(1, Some('X')), (2, Some('Y'))],
+                    cursor: 3,
+                }),
+            }];
+            compose(size(4, 2), &views, id(1))
+        };
+        assert!(g.scroll_to_prev_prompt());
+        let frame = drawn(&g);
+        assert_eq!(text(&frame, 0), "one ");
+        assert_eq!(frame.cursor, None);
+        // Back on the live screen the same overlay draws again.
+        g.reset_view();
+        assert_eq!(text(&drawn(&g), 0), "tXY ");
+    }
+
+    #[test]
+    fn a_find_bar_and_marks_are_drawn_over_the_block() {
+        let g = grid(6, 3, "one\r\ntwo\r\nsix");
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            size: size(6, 3),
+        };
+        let views = [View {
+            block: id(1),
+            rect,
+            grid: Some(&g),
+            overlay: None,
+        }];
+        let mut frame = compose(size(6, 3), &views, id(1));
+        frame.mark(rect, (1, 0), 2, true);
+        frame.bar(rect, "/n  1/1");
+        let reversed = |x: usize, y: u16| frame.row(y)[x].style.attrs & ATTR_REVERSE != 0;
+        assert!(!reversed(0, 0) && reversed(1, 0) && reversed(2, 0) && !reversed(3, 0));
+        assert_eq!(text(&frame, 2), "/n  1/");
+        assert!(reversed(0, 2));
+        assert_eq!(frame.cursor, Some((5, 2)));
     }
 
     #[test]

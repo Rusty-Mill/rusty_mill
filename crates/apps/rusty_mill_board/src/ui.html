@@ -1532,10 +1532,7 @@ async function loadMeta(){
 }
 (async()=>{
   $("actor").value=pref("actor")||"";
-  await loadMeta();
-  const r=pref("repo"),p=pref("project"),ps=pref("pstatus");
-  if(ps!==null&&(ps===""||STATUSES.includes(ps)))statusSel=ps;
-  if(r in repos&&(!p||repos[r].includes(p)))sel={repo:r,project:p||"",agent:""};
+  // Wire the controls first: loadMeta sets the actor field, and a click after that must not hit a dead button.
   $("actor").onchange=()=>pref("actor",$("actor").value);$("role").onchange=()=>pref("role",$("role").value);
   $("gear").onclick=openSettings;
   $("view").onclick=()=>setView(view==="roadmap"?"board":"roadmap");
@@ -1547,6 +1544,10 @@ async function loadMeta(){
   // New cards go to the chosen project, else to the chosen repository's own project.
   $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project||sel.repo;if(!t){$("title").focus();return}$("title").value="";act("card_add",{title:t,...(project&&{project})})};
   $("title").onkeydown=e=>{if(e.key==="Enter")$("add").click()};
+  await loadMeta();
+  const r=pref("repo"),p=pref("project"),ps=pref("pstatus");
+  if(ps!==null&&(ps===""||STATUSES.includes(ps)))statusSel=ps;
+  if(r in repos&&(!p||repos[r].includes(p)))sel={repo:r,project:p||"",agent:""};
   try{await refresh()}catch(e){toast(e.message)}
   poll();
 })();

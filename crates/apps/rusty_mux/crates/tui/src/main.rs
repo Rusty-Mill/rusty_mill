@@ -124,6 +124,7 @@ mod client {
         Axis, BlockId, Event, Layout, Rect, SessionId, Share, Side, Size, Toward, WindowId,
     };
     use rusty_mux_proto::{Entry, Features, Launch, Message, Takeover};
+    use rusty_mux_tui::find::{Find, Step};
     use rusty_mux_tui::follow::Follow;
     use rusty_mux_tui::keys::{Action, Dir, Keys};
     use rusty_mux_tui::predict::{Gate, Overlay, Predictor};
@@ -1040,6 +1041,8 @@ mod client {
             keys: Keys::default(),
             area,
             shown: Shown::Nothing,
+            browsing: false,
+            finding: None,
             split: None,
             arriving: None,
             opened: 0,
@@ -1537,6 +1540,11 @@ mod client {
         keys: Keys,
         area: Size,
         shown: Shown,
+        /// The focused block's history is on screen (after a prompt jump),
+        /// so it is composed, never passed through.
+        browsing: bool,
+        /// Find is open on the focused block.
+        finding: Option<Find>,
         /// The pending split, whose new block takes the focus.
         split: Option<u64>,
         /// The split's new block, until the layout shows it.
@@ -1660,6 +1668,7 @@ mod client {
         fn take(&mut self, input: Input) {
             match input {
                 Input::Keys(bytes) if bytes.is_empty() => self.end(Ended::Detached),
+                Input::Keys(bytes) if self.finding.is_some() => self.found(&bytes),
                 Input::Keys(bytes) => {
                     for action in self.keys.feed(&bytes) {
                         self.typed(action);
@@ -2313,7 +2322,12 @@ mod client {
             if action.on_focused_block() && !self.shows(focus) {
                 return bell();
             }
+            if self.browsing && !matches!(action, Action::Prompt { .. } | Action::Find) {
+                self.live();
+            }
             match action {
+                Action::Prompt { next } => self.prompt(next),
+                Action::Find => self.find(),
                 Action::Input(data) => {
                     if let Some(pane) = self.panes.get_mut(&focus) {
                         pane.typed(data);
@@ -2361,6 +2375,67 @@ mod client {
                 }
                 Action::Unknown => bell(),
             }
+        }
+
+        /// Scrolls the focused block to the next or previous prompt; rings
+        /// when there is none or the block is a full-screen program's.
+        fn prompt(&mut self, next: bool) {
+            let focus = self.focus;
+            let moved = self
+                .panes
+                .get_mut(&focus)
+                .and_then(|pane| pane.term.as_mut())
+                .is_some_and(|(grid, _)| match next {
+                    true => grid.scroll_to_next_prompt(),
+                    false => grid.scroll_to_prev_prompt(),
+                });
+            if !moved {
+                return bell();
+            }
+            self.browsing = self.grid(focus).is_some_and(|grid| grid.view_offset > 0);
+            self.sync();
+            self.draw();
+        }
+
+        /// Opens find on the focused block, over its history.
+        fn find(&mut self) {
+            if self.grid(self.focus).is_none() {
+                return bell();
+            }
+            self.finding = Some(Find::default());
+            self.browsing = true;
+            self.sync();
+            self.draw();
+        }
+
+        /// Takes keyboard `bytes` for the open find bar.
+        fn found(&mut self, bytes: &[u8]) {
+            let focus = self.focus;
+            let Some((find, grid)) = self.finding.as_mut().zip(
+                self.panes
+                    .get_mut(&focus)
+                    .and_then(|pane| pane.term.as_mut())
+                    .map(|(grid, _)| grid),
+            ) else {
+                return self.live();
+            };
+            match find.keys(grid, bytes) {
+                Step::Leave => self.live(),
+                Step::Open => self.draw(),
+            }
+        }
+
+        /// Back to the live screen after browsing history.
+        fn live(&mut self) {
+            self.browsing = false;
+            self.finding = None;
+            for pane in self.panes.values_mut() {
+                if let Some((grid, _)) = pane.term.as_mut() {
+                    grid.reset_view();
+                }
+            }
+            self.sync();
+            self.draw();
         }
 
         /// Whether `block` is in the layout shown.
@@ -2650,8 +2725,12 @@ mod client {
             }
             self.lease();
             self.fit();
+            // Browsing ends when the focused block is back on its live screen
+            // (it closed, or the server changed the focus).
+            self.browsing =
+                self.browsing && self.grid(self.focus).is_some_and(|g| g.view_offset > 0);
             let shown = match visible.as_slice() {
-                [(only, _)] => Shown::Passing(*only),
+                [(only, _)] if !self.browsing => Shown::Passing(*only),
                 _ => Shown::Composed(None),
             };
             if shown != self.shown || matches!(shown, Shown::Composed(_)) {
@@ -2824,6 +2903,29 @@ mod client {
             pane.term.as_ref().map(|(grid, _)| grid)
         }
 
+        /// The open find bar's matches and prompt, drawn onto `frame`.
+        fn paint_find(&self, frame: &mut Frame, visible: &[(BlockId, Rect)]) {
+            let (Some(find), Some(grid)) = (&self.finding, self.grid(self.focus)) else {
+                return;
+            };
+            let Some((_, rect)) = visible.iter().find(|(block, _)| *block == self.focus) else {
+                return;
+            };
+            let top = grid.scrollback_len().saturating_sub(grid.view_offset);
+            let active = find.active();
+            for hit in find.hits() {
+                if let Some(row) = hit.abs.checked_sub(top) {
+                    frame.mark(*rect, (hit.col, row), hit.len, Some(*hit) == active);
+                }
+            }
+            let place = match find.position() {
+                Some((at, of)) => format!("  {at}/{of}"),
+                None if find.query().is_empty() => String::new(),
+                None => "  no matches".to_string(),
+            };
+            frame.bar(*rect, &format!("/{}{place}", find.query()));
+        }
+
         /// The predictions to draw over `block`: the focused block's, on a
         /// slow path.
         fn overlay(&self, block: BlockId) -> Option<Overlay> {
@@ -2861,6 +2963,14 @@ mod client {
 
         /// Redraws the composed screen where it changed.
         fn draw(&mut self) {
+            let focus = self.focus;
+            if let Some((find, (grid, _))) = self
+                .finding
+                .as_mut()
+                .zip(self.panes.get(&focus).and_then(|pane| pane.term.as_ref()))
+            {
+                find.follow(grid);
+            }
             if let Shown::Passing(block) = self.shown {
                 return self.pass_ahead(block);
             }
@@ -2877,7 +2987,8 @@ mod client {
                     overlay: self.overlay(*block),
                 })
                 .collect();
-            let frame = screen::compose(self.area, &views, self.focus);
+            let mut frame = screen::compose(self.area, &views, self.focus);
+            self.paint_find(&mut frame, &visible);
             let mut bytes = screen::render(last.as_ref(), &frame);
             // With no frame before (the layout or focus changed), `render`
             // takes the cursor to have the terminal's own colour; one the
@@ -3336,6 +3447,8 @@ mod client {
                 keys: Keys::default(),
                 area: Size::new(80, 24).expect("size"),
                 shown: Shown::Nothing,
+                browsing: false,
+                finding: None,
                 split: None,
                 arriving: None,
                 opened: 0,
