@@ -51,7 +51,7 @@ check((await titles()).join() === "rl card", `an experiment leaves the default v
 // A repository's own project (`meshed`) has a status control too; the Inbox (`default`) has none.
 await page.click("#gear");
 await page.waitForSelector("#settings[open]");
-await page.locator("#settings button", { hasText: /^Repositories/ }).first().click();
+await page.locator("#settings button", { hasText: /^Projects/ }).first().click();
 check((await page.locator('#settings select[aria-label="default status"]').count()) === 0, "the Inbox has no status control");
 await page.selectOption('#settings select[aria-label="meshed status"]', "paused");
 await page.waitForFunction(() => !document.querySelector("#settings .err")?.textContent);

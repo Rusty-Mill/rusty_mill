@@ -374,7 +374,7 @@ const $=id=>document.getElementById(id);
 let cards=[],cursor=null,loaded=false,dlg=null,repos={},sel={repo:"",project:"",agent:""};
 /* Project statuses (board_projects' `status`, unlisted = active) and which the board shows: active by default,
    "" for every status. A chosen project is shown whatever its status. */
-const STATUSES=["active","experiment","paused","archived"];
+const STATUSES=["active","experiment","paused","deferred","archived"];
 let pstatus={},statusSel="active";
 const statusOf=p=>Object.hasOwn(pstatus,p)?pstatus[p]:"active";
 const projects=()=>Object.values(repos).flat();
@@ -1209,13 +1209,13 @@ async function setting(op,args){return api(op,{...who(),...args})}
 async function openSettings(){
   try{cfg=await setting("settings_get")}
   catch(e){toast(e.status===403?"Settings need the admin capability.":e.message);return}
-  secret=null;reg=null;flowDraft=null;tab="agents";drawSettings();if(!$("settings").open)$("settings").showModal();
+  secret=null;flowDraft=null;tab="agents";drawSettings();if(!$("settings").open)$("settings").showModal();
 }
 /* Settings fill the page: sections down the left, the chosen one on the right with what it is for. */
 const SECTIONS=[
   ["agents","Agents","Who may use the board. Each agent signs in with its own token and acts with one role, in all projects or a chosen few. Agents on a shared connector register themselves and are listed below."],
-  ["repos","Repositories","The repositories this board serves, and the GitHub repository each mirrors."],
-  ["projects","Projects","The board's projects, and the repositories each is linked to. A project owns the repository paths listed under each link; link it to two repositories to make it span both."],
+  ["repos","Repositories","The repositories this board serves, with an optional GitHub slug. Each repository's own project owns the paths no other project of it claims. Link projects to repositories under Projects."],
+  ["projects","Projects","Each project, its status, and the repositories it is linked to with the paths it owns there. Link a project to a second repository to make it span both."],
   ["roles","Roles","A role is a set of capabilities. Tick what each role may do; hover a capability for what it allows."],
   ["columns","Columns","The board's columns, their order and kind, and the moves between them with the capability each needs."],
   ["rules","Rules","Whether card moves follow the Columns moves and each role's capabilities."],
@@ -1228,14 +1228,13 @@ function drawSettings(){
   tabs.append(el("div","Settings","stitle"));
   for(const [id,label] of SECTIONS){
     const b=el("button",label,tab===id?"on":"");b.type="button";b.setAttribute("aria-current",tab===id?"page":"false");
-    b.onclick=()=>{if(!["repos","projects"].includes(id)||!["repos","projects"].includes(tab))reg=null;   // the two tabs share one draft
-      tab=id;secret=null;flowDraft=null;drawSettings()};tabs.append(b)}
+    b.onclick=()=>{tab=id;secret=null;flowDraft=null;drawSettings()};tabs.append(b)}
   const close=el("button","Close","close");close.type="button";close.onclick=()=>d.close();tabs.append(close);
   const [,title,about]=SECTIONS.find(([id])=>id===tab),pane=el("div",null,"pane");
   pane.append(el("h2",title),el("p",about,"lead"),{agents:agentsTab,repos:reposTab,projects:projectsTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
   // Destructive actions read as such wherever a section puts them.
-  pane.querySelectorAll("button").forEach(b=>{if(/^(Remove|Revoke|Unlink|Turn sync off)/.test(b.textContent))b.classList.add("danger");
-    else if(/^(Save (roles|columns|repositories|and)|Add (agent|role|column)$)/.test(b.textContent))b.classList.add("primary")});
+  pane.querySelectorAll("button").forEach(b=>{if(/^(Remove|Revoke|Turn sync off)/.test(b.textContent))b.classList.add("danger");
+    else if(/^(Save (roles|columns)|Add (agent|role|column)$)/.test(b.textContent))b.classList.add("primary")});
   box.append(tabs,pane);
   d.replaceChildren(box);
 }
@@ -1309,103 +1308,71 @@ function registeredAgents(){
   return box;
 }
 
-/* The Repositories and Projects tabs edit one draft of the registry, so a link made on one shows on
-   the other. It survives redraws made while restructuring (add or remove a row) and is dropped once
-   saved or when leaving either tab. Shape: {repos: {name: github slug}, projects: [{name, links: [{repo, paths}]}]}.
-   A repository's own project is implied, so it is not in the draft. */
-let reg=null;
-const regDraft=()=>reg||=({
-  repos:Object.fromEntries(Object.keys(cfg.repos).map(r=>[r,(cfg.registry.repos[r]||{}).github||""])),
-  projects:Object.values(Object.entries(cfg.repos).reduce((acc,[r,ps])=>{
-    for(const [n,paths] of Object.entries(ps)){if(n===r)continue;(acc[n]||={name:n,links:[]}).links.push({repo:r,paths:paths.join("\n")})}
-    return acc},{}))});
-// The registry the server takes. A project linked to several repositories spans them; its default
-// repository is the one it had, else the first it is linked to.
-function regCollect(d){
-  const repos=Object.fromEntries(Object.entries(d.repos).map(([r,g])=>[r,g?{github:g}:{}])),projects={};
-  for(const p of d.projects){
-    if(!p.name)throw new Error("a project needs a name");
-    if(projects[p.name]||Object.hasOwn(d.repos,p.name))throw new Error("project "+p.name+": that name is already used");
-    if(!p.links.length)throw new Error("project "+p.name+": link it to a repository");
-    const e=projects[p.name]={repos:{}};
-    for(const l of p.links){
-      if(e.repos[l.repo])throw new Error("project "+p.name+": linked to "+l.repo+" twice");
-      e.repos[l.repo]=l.paths.split("\n").map(x=>x.trim()).filter(Boolean)}
-    const keys=Object.keys(e.repos);
-    if(keys.length>1){const was=(cfg.registry.projects[p.name]||{}).default_repo;e.default_repo=keys.includes(was)?was:keys[0]}
-  }
-  return {version:2,repos,projects}}
-// Status of a saved project applies at once, apart from the rest of the draft.
-function statusSelect(name,err){
-  const st=field("select",{});st.setAttribute("aria-label",name+" status");st.disabled=!cfg.files.project_status;
-  st.append(...STATUSES.map(x=>new Option(x,x)));const ps=cfg.project_status||{};st.value=Object.hasOwn(ps,name)?ps[name]:"active";
-  st.onchange=guard(err,()=>setting("settings_project_status_set",{project:name,status:st.value}));
-  return st;
-}
-function regSave(d,err){
-  const save=el("button","Save repositories and projects");save.type="button";
-  save.onclick=guard(err,async()=>{await setting("settings_projects_set",{registry:regCollect(d)});reg=null});
-  return save;
-}
+/* Repositories and Projects are two tabs over one registry (cfg.registry, the version 2 form). Each button
+   sends one change at once; the server validates the whole registry. */
+const registryWith=edit=>{const r=JSON.parse(JSON.stringify(cfg.registry));edit(r);return setting("settings_projects_set",{registry:r})};
 function reposTab(){
-  const t=el("div"),err=el("div",null,"err"),d=regDraft();
+  const t=el("div"),err=el("div",null,"err");
   if(!cfg.files.projects)t.append(unwritable("--projects FILE"));
-  const restructure=fn=>()=>{fn();drawSettings()};   // inputs write to the draft as you type; change the shape, redraw
-  for(const r of Object.keys(d.repos)){
+  for(const [r,info] of Object.entries(cfg.registry.repos)){
     const fs=el("fieldset");fs.append(el("legend",r));
-    const slug=field("input",{value:d.repos[r],size:26,placeholder:"owner/name on GitHub (optional)"});
-    slug.setAttribute("aria-label",r+" GitHub repository");slug.oninput=()=>{d.repos[r]=slug.value.trim()};
-    const ghrow=el("div",null,"row");ghrow.append(slug);fs.append(ghrow);
-    // A repository's own project: its status is set here (not the Inbox's).
-    if(r!==INBOX&&cfg.repos[r]&&Object.hasOwn(cfg.repos[r],r)){
-      const own=el("div",null,"row");own.append(el("span",r+" (repository project)"),statusSelect(r,err));fs.append(own);
-    }
-    const linked=d.projects.filter(p=>p.links.some(l=>l.repo===r)).map(p=>p.name||"(unnamed)");
-    fs.append(el("p",linked.length?"Linked projects: "+linked.join(", ")+". Change them on the Projects tab.":"No projects linked yet.","note"));
-    if(r!=="default"){   // `default` always exists
-      const rmr=el("button","Remove repository");rmr.type="button";
-      rmr.onclick=restructure(()=>{delete d.repos[r];d.projects.forEach(p=>{p.links=p.links.filter(l=>l.repo!==r)})});
-      fs.append(rmr)}
-    t.append(fs);
+    const slug=field("input",{value:info.github||"",size:26,placeholder:"owner/name on GitHub (optional)"}),
+          save=el("button","Save"),rm=el("button","Remove repository");
+    slug.setAttribute("aria-label",r+" GitHub repository");save.type=rm.type="button";
+    const linked=Object.entries(cfg.registry.projects).filter(([,p])=>r in p.repos).map(([n])=>n);
+    save.onclick=guard(err,()=>registryWith(x=>{const g=slug.value.trim();if(g)x.repos[r].github=g;else delete x.repos[r].github}));
+    rm.onclick=guard(err,()=>registryWith(x=>{delete x.repos[r]}));
+    const row=el("div",null,"row");row.append(slug,save);if(r!=="default")row.append(" ",rm);
+    fs.append(row,el("p",linked.length?"Linked projects: "+linked.join(", "):"No linked projects.","note"));t.append(fs);
   }
-  const newr=field("input",{placeholder:"new repository name",size:22}),addr=el("button","+ repository");
-  addr.type="button";
-  addr.onclick=restructure(()=>{const n=newr.value.trim();if(n&&!(n in d.repos))d.repos[n]=""});
-  const row=el("div",null,"row");row.append(newr,addr);
-  t.append(row,regSave(d,err),err);
+  const newr=field("input",{placeholder:"new repository name",size:22}),addr=el("button","+ repository");addr.type="button";
+  addr.onclick=guard(err,()=>registryWith(x=>{const n=newr.value.trim();if(n&&!(n in x.repos))x.repos[n]={}}));
+  const row=el("div",null,"row");row.append(newr,addr);t.append(row,err);
   return t;
 }
 function projectsTab(){
-  const t=el("div"),err=el("div",null,"err"),d=regDraft();
+  const t=el("div"),err=el("div",null,"err"),repos=Object.keys(cfg.registry.repos);
   if(!cfg.files.projects)t.append(unwritable("--projects FILE"));
-  const restructure=fn=>()=>{fn();drawSettings()};
-  for(const p of d.projects){
-    const fs=el("fieldset"),nm=field("input",{value:p.name,size:22,placeholder:"project name"});
-    nm.oninput=()=>{p.name=nm.value.trim()};
-    const head=el("div",null,"row"),rm=el("button","Remove project");rm.type="button";
-    rm.onclick=restructure(()=>{d.projects=d.projects.filter(x=>x!==p)});
-    head.append(nm,rm);
-    // A saved project's status applies at once.
-    if(Object.values(cfg.repos).some(ps=>Object.hasOwn(ps,p.name)))head.append(statusSelect(p.name,err));
-    fs.append(head);
-    for(const l of p.links){
-      const lr=el("div",null,"row"),paths=field("textarea",{value:l.paths,placeholder:"one repository path per line, e.g. crates/apps/rocket_league"}),un=el("button","Unlink");
-      un.type="button";paths.oninput=()=>{l.paths=paths.value};
-      un.onclick=restructure(()=>{p.links=p.links.filter(x=>x!==l)});
-      lr.append(el("span","repository "+l.repo),un);fs.append(lr,paths);
-    }
-    // Link to a repository it is not in yet; two or more links make it span them.
-    const free=Object.keys(d.repos).filter(r=>!p.links.some(l=>l.repo===r)),pick=field("select",{});
-    pick.setAttribute("aria-label","link "+(p.name||"project")+" to a repository");
-    pick.append(...free.map(r=>new Option(r,r)));
-    const link=el("button","Link repository");link.type="button";link.disabled=!free.length;
-    link.onclick=restructure(()=>{if(pick.value)p.links.push({repo:pick.value,paths:""})});
-    const lk=el("div",null,"row");lk.append(pick,link);fs.append(lk);t.append(fs);
+  const statusSelect=name=>{
+    const st=field("select",{});st.setAttribute("aria-label",name+" status");st.disabled=!cfg.files.project_status;
+    st.append(...STATUSES.map(x=>new Option(x,x)));const ps=cfg.project_status||{};st.value=Object.hasOwn(ps,name)?ps[name]:"active";
+    st.onchange=guard(err,()=>setting("settings_project_status_set",{project:name,status:st.value}));
+    return st;
+  };
+  const lines=v=>v.split("\n").map(x=>x.trim()).filter(Boolean);
+  // A repository's own project is implied: it has a status, and no links to edit (not the Inbox's).
+  for(const r of repos)if(r!==INBOX&&!(r in cfg.registry.projects)){
+    const row=el("div",null,"row");row.append(el("span",r+" (repository project)"),statusSelect(r));t.append(row);
   }
-  const newp=field("input",{placeholder:"new project name",size:22}),addp=el("button","+ project");addp.type="button";
-  addp.onclick=restructure(()=>{const n=newp.value.trim();if(n&&!d.projects.some(p=>p.name===n))d.projects.push({name:n,links:[]})});
-  const row=el("div",null,"row");row.append(newp,addp);
-  t.append(row,regSave(d,err),err,el("p","A project owns the repository paths listed under each repository it is linked to; each repository's own project owns the rest. Link one project to two repositories to make it span both.","note"));
+  for(const [name,p] of Object.entries(cfg.registry.projects)){
+    const fs=el("fieldset"),head=el("div",null,"row");fs.append(el("legend",name));head.append(statusSelect(name));
+    const rm=el("button","Remove project");rm.type="button";
+    rm.onclick=guard(err,()=>registryWith(x=>{delete x.projects[name]}));head.append(rm);fs.append(head);
+    const links=Object.keys(p.repos);
+    for(const r of links){
+      const row=el("div",null,"row"),paths=field("textarea",{value:p.repos[r].join("\n"),placeholder:"one repository path per line"});
+      paths.setAttribute("aria-label",name+" paths in "+r);
+      const save=el("button","Save paths"),un=el("button","Unlink");save.type=un.type="button";un.disabled=links.length<2;
+      un.title=links.length<2?"A project keeps at least one repository":"";
+      save.onclick=guard(err,()=>setting("settings_project_link",{project:name,repo:r,paths:lines(paths.value)}));
+      un.onclick=guard(err,()=>setting("settings_project_link",{project:name,repo:r,unlink:true}));
+      row.append(el("strong",r+(links.length>1&&p.default_repo===r?" (default)":"")),save," ",un);fs.append(row,paths);
+    }
+    const free=repos.filter(r=>!links.includes(r));
+    if(free.length){
+      const pick=field("select",{}),paths=field("textarea",{placeholder:"paths there, one per line (none: what no other project claims)"}),
+            link=el("button","Link repository");pick.setAttribute("aria-label",name+" repository to link");link.type="button";
+      pick.append(...free.map(r=>new Option(r,r)));
+      link.onclick=guard(err,()=>setting("settings_project_link",{project:name,repo:pick.value,paths:lines(paths.value)}));
+      const row=el("div",null,"row");row.append(pick,link);fs.append(row,paths);
+    }
+    t.append(fs);
+  }
+  const nm=field("input",{placeholder:"new project name",size:22}),pick=field("select",{}),
+        paths=field("textarea",{placeholder:"paths in that repository, one per line"}),add=el("button","+ project");
+  pick.setAttribute("aria-label","repository of the new project");add.type="button";pick.append(...repos.map(r=>new Option(r,r)));
+  add.onclick=guard(err,()=>registryWith(x=>{const n=nm.value.trim();if(n&&!(n in x.projects))x.projects[n]={repos:{[pick.value]:lines(paths.value)}}}));
+  const row=el("div",null,"row");row.append(nm,pick,add);t.append(row,paths,err);
   return t;
 }
 function rolesTab(){
