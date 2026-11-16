@@ -626,6 +626,29 @@ fn header_name(line: &str) -> Option<String> {
     (tail.is_empty() || tail.starts_with('#')).then(|| name.trim().to_ascii_lowercase())
 }
 
+/// A change-sensitive snapshot of a file or directory: one (name, mtime, len)
+/// per entry, sorted by name, so edits, adds, removes and renames all differ.
+/// A file is a single entry with an empty name.
+type Stamp = Vec<(std::ffi::OsString, std::time::SystemTime, u64)>;
+
+fn stamp(p: &std::path::Path) -> Option<Stamp> {
+    let m = std::fs::metadata(p).ok()?;
+    if !m.is_dir() {
+        return Some(vec![(Default::default(), m.modified().ok()?, m.len())]);
+    }
+    let mut out: Stamp = std::fs::read_dir(p)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let em = e.metadata().ok()?;
+            let mtime = em.modified().unwrap_or(std::time::UNIX_EPOCH);
+            Some((e.file_name(), mtime, em.len()))
+        })
+        .collect();
+    out.sort();
+    Some(out)
+}
+
 /// Watch `path` for changes from a daemon thread, invoking `on_change` after
 /// each observed modification. A simple 500ms mtime/length poll — editors
 /// vary wildly in how they save (rename-over, truncate+write, atomic temp
@@ -633,21 +656,6 @@ fn header_name(line: &str) -> Option<String> {
 /// half-second latency is imperceptible next to a manual save. Also fires
 /// when the file first appears.
 pub fn watch(path: PathBuf, on_change: impl Fn() + Send + 'static) {
-    // A directory (the themes dir) stamps as its newest entry plus the sum
-    // of entry sizes and the count, so adds, removes and edits all show.
-    fn stamp(p: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
-        let m = std::fs::metadata(p).ok()?;
-        if !m.is_dir() {
-            return Some((m.modified().ok()?, m.len()));
-        }
-        let mut stamp = (std::time::UNIX_EPOCH, 0);
-        for e in std::fs::read_dir(p).ok()?.flatten() {
-            let Ok(em) = e.metadata() else { continue };
-            stamp.0 = stamp.0.max(em.modified().unwrap_or(std::time::UNIX_EPOCH));
-            stamp.1 += em.len() + 1;
-        }
-        Some(stamp)
-    }
     std::thread::spawn(move || {
         let mut last = stamp(&path);
         loop {
@@ -1815,6 +1823,25 @@ color15 = "ffffff"
         assert_eq!(cfg.theme.bg, 0x000000, "explicit bg wins");
         assert_eq!(cfg.theme.fg, 0xf8f8f2, "dracula fg kept");
         assert_eq!(cfg.theme.palette16[4], 0xbd93f9, "dracula purple kept");
+    }
+
+    #[test]
+    fn a_directory_stamp_changes_on_rename_add_and_remove() {
+        let d = std::env::temp_dir().join(format!("rt-stamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("nord.toml"), "x").unwrap();
+        let before = stamp(&d);
+        // Same mtime, same length, same count: only the name differs.
+        std::fs::rename(d.join("nord.toml"), d.join("back.toml")).unwrap();
+        let renamed = stamp(&d);
+        assert_ne!(before, renamed, "rename must change the stamp");
+        std::fs::write(d.join("new.toml"), "y").unwrap();
+        assert_ne!(renamed, stamp(&d), "add");
+        std::fs::remove_file(d.join("new.toml")).unwrap();
+        assert_eq!(renamed, stamp(&d), "remove restores");
+        assert_eq!(stamp(&d.join("missing")), None);
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
