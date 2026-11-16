@@ -46,7 +46,7 @@ Drain, then flip: (1) no open tasks (`bbp inbox`; `rusty_orch run --cancel <reas
 
 ## Decision needed: which user runs Mill Board?
 The inbox runs `bbp human`, which writes the BBP log and needs `master` (owner-only for orch-runner). The shipped unit runs as `baileyrd` and cannot.
-- a) Run the board as `orch-runner` (recommended): fewest parts, reversible; board tokens become readable by harnesses, so use sandboxed pool members.
+- a) Run the board as `orch-runner` (recommended): fewest parts, reversible; board tokens (`RUSTY_TICK_TOKEN`, its agent tokens) become readable by anything running as `orch-runner`. Sandboxed pool members avoid that, but the Claude harness runs host-side as `orch-runner` and is not sandboxed from them. Nothing in this design keeps it away from the board's environment and files; pick a) only if that is acceptable, or prefer c).
 - b) Keep `baileyrd`, group-share `/srv/lel/bbp` incl. `master` 0640: needs a check that `bbp` accepts it; widens exposure of the secret.
 - c) Keep `baileyrd`, narrow `sudo -u orch-runner` fixed to `--dir /srv/lel/bbp`: drops the unit's `NoNewPrivileges=true`.
 
