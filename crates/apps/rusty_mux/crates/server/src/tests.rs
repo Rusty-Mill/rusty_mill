@@ -34,6 +34,7 @@ fn a_client_of_another_user_is_refused() {
                 None,
                 |s: &UnixStream| owned_by(s, other),
                 None,
+                None,
                 std::future::pending(),
             )
             .await

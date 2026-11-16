@@ -58,6 +58,7 @@ mod stop;
 mod sync;
 pub mod target;
 mod terminfo;
+mod token;
 mod wait;
 mod watch;
 
@@ -459,6 +460,12 @@ pub fn run_until(
                 Err((exit, reason)) => report(err, exit, &reason),
             };
         }
+        Command::Token(command) => {
+            return match token::run(&command, invocation.json, out) {
+                Ok(()) => Exit::Ok,
+                Err((exit, reason)) => report(err, exit, &reason),
+            };
+        }
         Command::Sync(sync) => {
             return match sync::run(&sync, env, invocation.json, out) {
                 Ok(()) => Exit::Ok,
@@ -768,6 +775,7 @@ fn execute(
         | Command::Config(_)
         | Command::Hosts(_)
         | Command::Sync(_)
+        | Command::Token(_)
         | Command::Ssh(_)
         | Command::Terminfo(_)
         | Command::Agent(_)
@@ -1205,7 +1213,8 @@ impl<S: io::Read + Write> Session<'_, S> {
             .union(Features::ACTIVE_WINDOW)
             .union(Features::CONFIG_RELOAD)
             .union(Features::LAYOUT_EDIT)
-            .union(Features::FOCUS);
+            .union(Features::FOCUS)
+            .union(Features::TAILSCALE_STATUS);
         let (features, start) = self.hello(wanted, after)?;
         if let Some((kind, _)) = needs.iter().find(|(_, need)| !features.contains(*need)) {
             return Err(Failure::Failed(format!(

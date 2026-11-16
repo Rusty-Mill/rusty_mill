@@ -10,7 +10,7 @@ daemon, `ts-net` provides a **fully userspace TCP/IP stack (smoltcp) on the
 tailnet — no TUN device and no root**. An application `bind`s a port on its
 tailnet IP and serves connections as ordinary `rusty_tokio` streams, so a plain
 `cargo run` becomes a tailnet service. Verified end-to-end: the
-[`serve_http` example](crates/ts-net/examples/serve_http.rs) serves a page
+[`serve_http` example](../../libs/net/ts-net/examples/serve_http.rs) serves a page
 that another node fetches with `curl`, entirely in userspace. The wire
 parsers gain randomized panic-free fuzz-smoke harnesses. See
 [DESIGN.md](DESIGN.md) for the phase plan and every decision, and
@@ -29,7 +29,7 @@ dependency table for the migration record.
 ## Layout
 
 Cargo workspace, one crate per subsystem under [`crates/`](crates/). Live:
-`ts-types` (wire/API types), `ts-key` (keys), `ts-control` (ts2021 Noise IK
+`ts-types` (wire/API types; now in `crates/libs/net/ts-types`, and the library crates `ts-key`, `ts-control`, `ts-derp`, `ts-stun`, `ts-disco`, `ts-magicsock`, `ts-wg`, `ts-tun`, `ts-filter`, `ts-engine` and `ts-net` live in `crates/libs/net/` too), `ts-key` (keys), `ts-control` (ts2021 Noise IK
 + register + netmap), `ts-derp` (DERP relay client), `ts-wg` (boringtun
 WireGuard adapter), `ts-tun` (TUN device + MagicDNS), `ts-stun` (STUN
 client), `ts-disco` (disco codec), `ts-magicsock` (direct/DERP path mux),
@@ -170,7 +170,7 @@ while let Some(mut stream) = listener.accept().await {
 }
 ```
 
-The [`serve_http` example](crates/ts-net/examples/serve_http.rs) is a complete
+The [`serve_http` example](../../libs/net/ts-net/examples/serve_http.rs) is a complete
 tailnet web server:
 
 ```console

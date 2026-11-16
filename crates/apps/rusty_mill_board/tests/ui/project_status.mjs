@@ -1,7 +1,7 @@
 // Browser check of project statuses: the board shows active projects by default, the status picker
-// shows the others, and Settings > Repositories sets a project's status at once.
+// shows the others, and Settings > Repositories sets a project's status at once, a repository's own project included.
 //
-//   D=$(mktemp -d); printf '%s' '{"rl": ["crates/apps/rocket_league"], "orch": ["crates/apps/rusty_orch"], "lab": ["lab"]}' > $D/projects.json
+//   D=$(mktemp -d); printf '%s' '{"repos": {"default": {"rl": ["crates/apps/rocket_league"], "orch": ["crates/apps/rusty_orch"], "lab": ["lab"]}, "meshed": {}}}' > $D/projects.json
 //   rusty_mill_board --settings-dir $D --http 127.0.0.1:8799 2>$D/log &
 //   node tests/ui/project_status.mjs "$(npm root -g)/playwright" http://127.0.0.1:8799 "$(cat $D/first-admin.token)"
 import { createRequire } from "node:module";
@@ -47,6 +47,16 @@ check((await api("board_projects")).status.lab === "experiment", "the status is 
 await page.keyboard.press("Escape");
 await page.waitForFunction(() => [...document.querySelectorAll(".card b")].every((b) => b.textContent !== "lab card"));
 check((await titles()).join() === "rl card", `an experiment leaves the default view (${await titles()})`);
+
+// A repository's own project (`meshed`) has a status control too; the Inbox (`default`) has none.
+await page.click("#gear");
+await page.waitForSelector("#settings[open]");
+await page.locator("#settings button", { hasText: /^Repositories/ }).first().click();
+check((await page.locator('#settings select[aria-label="default status"]').count()) === 0, "the Inbox has no status control");
+await page.selectOption('#settings select[aria-label="meshed status"]', "paused");
+await page.waitForFunction(() => !document.querySelector("#settings .err")?.textContent);
+check((await api("board_projects")).status.meshed === "paused", "a repository's own project can be paused");
+await page.keyboard.press("Escape");
 
 check(errors.length === 0, `no page errors (${errors.join("; ")})`);
 await browser.close();

@@ -18,7 +18,7 @@ use crate::cli::Shell;
 const GLOBAL: &[&str] = &["--socket", "--host", "--json"];
 
 /// Flags whose value is a path.
-const PATH_FLAGS: &[&str] = &["--socket", "--cwd", "--dir"];
+const PATH_FLAGS: &[&str] = &["--socket", "--cwd", "--dir", "--file"];
 
 /// The words of each command that is not a method: its verbs and flags.
 /// `help` and `api` also take a method's name, added in [`commands`].
@@ -37,10 +37,14 @@ const COMMAND_WORDS: &[(&str, &[&str])] = &[
             "--socket",
             "--ssh",
             "--udp-host",
+            "--tls",
+            "--pin",
+            "--pin-first-use",
             "--replace",
             "--dry-run",
         ],
     ),
+    ("token", &["create", "rotate", "revoke", "--file"]),
     (
         "ssh",
         &[

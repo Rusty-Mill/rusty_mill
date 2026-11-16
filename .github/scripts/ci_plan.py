@@ -20,6 +20,9 @@ PATH_JOB_PREFIXES = {
     "dashboard": "crates/apps/rusty_meshed/data-mesh-monitor/",
     "term_web": "crates/libs/ui/rusty_term/web/",
     "key_desktop": "crates/apps/rusty_key/desktop/",
+    # Standalone Tauri workspace, outside the root package graph: path-triggered here, and by the
+    # ai_env_* packages below, which it path-depends on.
+    "ai_env_gui": "crates/apps/ai_env_manager/gui/",
     "tick": "crates/apps/rusty_tick/",
     "fair_play": "crates/apps/rusty_fair_play/",
     "agui": "crates/libs/protocol/rusty_agui/",
@@ -29,6 +32,8 @@ PATH_JOB_PREFIXES = {
     "rleval_service": "crates/apps/rocket_league/rleval/service/",
     # The service image (and its Dockerfile.dockerignore): a release build, so only when it changes.
     "rleval_image": "crates/apps/rocket_league/rleval/Dockerfile",
+    # The two-NAT harness itself: no Cargo edge reaches a shell script.
+    "mesh_nat": "crates/apps/rusty_tailscale/interop/two_nat_test.sh",
 }
 
 # What the rleval image copies in besides the Dockerfile (PATH_JOB_PREFIXES["rleval_image"]).
@@ -46,6 +51,7 @@ RLEVAL_IMAGE_INPUTS = tuple(
 PACKAGE_JOB_PREFIXES = {
     "dashboard": ("rusty-meshed-",),
     "key_desktop": ("rk-",),
+    "ai_env_gui": ("ai_env_",),
 }
 
 PACKAGE_JOB_NAMES = {
@@ -71,6 +77,9 @@ PACKAGE_JOB_NAMES = {
     # rusty_rand's per-OS backends that no other job compiles or runs: macOS (the
     # Unix /dev/urandom path) and the Linux targets the default runner is not.
     "rand_platforms": frozenset({"rusty_rand"}),
+    # The mesh hub's direct-path test (two Linux NATs). Reverse dependents of
+    # ts-engine, ts-magicsock, ts-derp, ts-control and ts-dial all end in one of these.
+    "mesh_nat": frozenset({"ts-net", "ts-hub", "ts-daemon"}),
 }
 
 SPECIALIZED_JOB_NAMES = tuple(
@@ -318,6 +327,12 @@ def specialized_job_flags(
             ".github/scripts/test_ci_workflow.py",
         }
         for path in paths
+    )
+    # The two-NAT job runs a shell script and namespaces no other job touches,
+    # so an edit to the workflow or the planner runs it too (a skipped job
+    # reports success).
+    flags["mesh_nat"] |= any(
+        path in {".github/workflows/ci.yml", ".github/scripts/ci_plan.py"} for path in paths
     )
     # The native TLS engine's jobs are compiled only under a cfg no other job
     # sets, so an edit to the workflow or to the scripts they run would

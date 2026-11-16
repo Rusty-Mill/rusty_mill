@@ -14,6 +14,8 @@
 //! for CRL-based revocation checking. `new_with_client_identity` presents a
 //! client certificate (mTLS) to a server that requests one; `new_with_alpn`
 //! offers ALPN protocols (read back via `negotiated_alpn_protocol`).
+//! [`PinnedFingerprints`](TrustPolicy::PinnedFingerprints) trusts a server by
+//! its certificate's SHA-256 fingerprint (`fingerprint_sha256` computes one).
 //! [`TlsConnector`] builds a config once for reuse across many connections,
 //! the way real session resumption (`resumed_session`) needs. Behind the
 //! `rusty-tokio` feature, [`AsyncTlsStream`] is the same thing over
@@ -50,6 +52,7 @@ mod client;
 mod connector;
 mod danger;
 mod error;
+mod pin;
 mod provider;
 mod server;
 mod trust;
@@ -118,5 +121,6 @@ pub use async_server::AsyncTlsServerStream;
 pub use client::TlsStream;
 pub use connector::TlsConnector;
 pub use error::Error;
+pub use pin::fingerprint_sha256;
 pub use server::{TlsAcceptor, TlsServerStream};
 pub use trust::TrustPolicy;

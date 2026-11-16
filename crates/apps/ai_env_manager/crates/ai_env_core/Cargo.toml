@@ -1,0 +1,12 @@
+[package]
+name = "ai_env_core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Ai Env Manager core: entry model and link planner. Pure, no I/O, no dependencies."
+license = "MIT OR Apache-2.0"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]

@@ -1,0 +1,14 @@
+[package]
+name = "ai_env_app"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+description = "Ai Env Manager application layer: load entries, observe, plan and apply for any front end (CLI, GUI). No output formatting."
+license = "MIT OR Apache-2.0"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+ai_env_core = { path = "../ai_env_core" }
+ai_env_fs = { path = "../ai_env_fs" }

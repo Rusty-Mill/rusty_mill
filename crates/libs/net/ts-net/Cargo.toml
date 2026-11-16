@@ -1,0 +1,34 @@
+[package]
+name = "ts-net"
+description = "Embeddable node: smoltcp userspace netstack, no TUN, no root"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_tailscale"
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+ts-types.workspace = true
+ts-key.workspace = true
+ts-engine.workspace = true
+rusty_tokio.workspace = true
+smoltcp = { version = "0.13", default-features = false, features = [
+    "std",
+    "medium-ip",
+    "proto-ipv4",
+    "socket-tcp",
+] }
+rusty_log = { workspace = true }
+thiserror.workspace = true
+# The `write_waker` backpressure lock in `stack.rs` is always immediately
+# unwrapped; parking_lot avoids the poisoning-error boilerplate for that.
+parking_lot = "0.12"
+
+[dev-dependencies]
+# The in-process hub the transfer test joins (`tests/hub_transfer.rs`).
+ts-hub.workspace = true
+# Throwaway certificates for the TLS transfer test; ts-hub's own tests use it too.
+rcgen = "0.13"

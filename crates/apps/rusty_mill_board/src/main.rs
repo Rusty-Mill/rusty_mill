@@ -23,10 +23,13 @@ use std::time::Duration;
 
 use clap::Parser;
 use rusty_mcp_server::{HttpConfig, HttpHandler, serve_stdio};
+use rusty_mill_board::agents::Registry;
 use rusty_mill_board::api::Shared;
+use rusty_mill_board::backfill;
 use rusty_mill_board::bbp_cli::BbpCli;
 use rusty_mill_board::board::{Board, Roles, system_ms};
 use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
+use rusty_mill_board::github::{GITHUB_COM_API, GithubMerged};
 use rusty_mill_board::mcp;
 use rusty_mill_board::milestones::{MemMilestones, MilestoneStore};
 use rusty_mill_board::projects::Projects;
@@ -95,6 +98,28 @@ struct Cli {
     /// changed since the retag is left alone and reported.
     #[arg(long, value_name = "FILE", conflicts_with = "export_projects")]
     undo_retag: Option<PathBuf>,
+    /// Give Done cards without evidence the GitHub pull requests their body and comments
+    /// name, and exit. `REPO=OWNER/NAME,...` maps a board repository (from the projects file)
+    /// to GitHub, so a bare `PR #N` in its projects counts; URLs count everywhere. Prints the
+    /// plan as JSON; nothing is written without --backfill-record.
+    #[arg(long, value_name = "REPO=OWNER/NAME,...", conflicts_with_all = ["export_projects", "retag_columns", "undo_retag", "undo_backfill"])]
+    backfill_evidence: Option<String>,
+    /// With --backfill-evidence: a new file the plan is saved to before any card is written
+    /// (best with the board stopped; a card changed meanwhile is skipped and reported, and
+    /// running again needs a new file); it is what --undo-backfill reads.
+    #[arg(long, value_name = "FILE", requires = "backfill_evidence")]
+    backfill_record: Option<PathBuf>,
+    /// With --backfill-evidence: ask api.github.com (`GET /repos/O/N/pulls/N`, with
+    /// GITHUB_TOKEN) whether each named pull request merged, and keep only those. Dropped
+    /// links are listed on stderr, with the not-found count per repository (a token that
+    /// cannot see a repository gets 404s); a failed lookup (auth, rate limit) stops before
+    /// anything is written.
+    #[arg(long, requires = "backfill_evidence")]
+    check_merged: bool,
+    /// Clear the evidence a backfill wrote, from its --backfill-record FILE, and exit. A card
+    /// whose evidence has changed since is left alone and reported.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["export_projects", "retag_columns", "undo_retag"])]
+    undo_backfill: Option<PathBuf>,
     /// Keep the cards in this rusty_tick (e.g. `http://127.0.0.1:8788`): its tasks tagged
     /// `agent` are the board. Omit for an in-memory board. The token is read from the
     /// `RUSTY_TICK_TOKEN` environment variable only, never an argument (which process
@@ -213,6 +238,16 @@ fn default_oauth_state(settings_dir: Option<&Path>, identities: Option<&Path>) -
     Some(identities.with_file_name(format!("{stem}.{OAUTH_STATE}")))
 }
 
+/// Where registered agents are kept: `agents.json` in the settings directory, else
+/// `<identities stem>.agents.json` beside the identities file (as for grants).
+fn agents_file(cli: &Cli, files: &Files) -> Option<PathBuf> {
+    default_oauth_state(cli.settings_dir.as_deref(), files.identities.as_deref()).map(|p| {
+        p.with_file_name(p.file_name().map_or_else(String::new, |n| {
+            n.to_string_lossy().replace("oauth", "agents")
+        }))
+    })
+}
+
 /// A file named by its own flag must exist; one found through `--settings-dir` may be missing.
 fn required(flag: &Option<PathBuf>, name: &str) -> Result<(), String> {
     match flag {
@@ -311,7 +346,66 @@ fn run_retag(cli: &Cli, store: &dyn Store) -> Result<(), String> {
     Ok(())
 }
 
-/// Pretty JSON for the retag output.
+fn run_backfill(cli: &Cli, store: &dyn Store) -> Result<(), String> {
+    if let Some(path) = &cli.undo_backfill {
+        let fail = |e: String| format!("--undo-backfill {}: {e}", path.display());
+        let text = std::fs::read_to_string(path).map_err(|e| fail(e.to_string()))?;
+        let plan: Vec<backfill::Fill> =
+            serde_json::from_str(&text).map_err(|e| fail(e.to_string()))?;
+        let out = backfill::undo(store, &plan, system_ms()).map_err(|e| fail(e.to_string()))?;
+        println!("{}", json(&out)?);
+        return Ok(());
+    }
+    let Some(spec) = &cli.backfill_evidence else {
+        return Ok(());
+    };
+    let github = backfill::parse_repos(spec)?;
+    let projects = match &files(cli).projects {
+        Some(path) if path.exists() => Projects::load(path)?,
+        _ => Projects::default(),
+    };
+    let github_of = |c: &rusty_mill_board::domain::Card| {
+        projects
+            .repo_of(&c.project)
+            .and_then(|r| github.get(r).cloned())
+    };
+    let cards = store.list().map_err(|e| e.to_string())?;
+    let mut plan = backfill::plan(&cards, &github_of);
+    if cli.check_merged {
+        let token = cli
+            .github_token
+            .as_deref()
+            .ok_or("--check-merged needs GITHUB_TOKEN")?;
+        // Links are always github.com, so never --github-api (which may be an Enterprise host).
+        let forge = GithubMerged::new(GITHUB_COM_API, token)?;
+        let (kept, dropped) =
+            backfill::keep_merged(plan, &forge).map_err(|e| format!("--check-merged: {e}"))?;
+        eprintln!("{}", json(&dropped)?);
+        eprintln!(
+            "--check-merged: {} link(s) dropped; not found per repository: {}",
+            dropped.len(),
+            json(&backfill::not_found_per_repo(&dropped))?
+        );
+        plan = kept;
+    }
+    let Some(record) = &cli.backfill_record else {
+        println!("{}", json(&plan)?);
+        eprintln!(
+            "dry run: {} card(s) would get evidence; add --backfill-record FILE to write",
+            plan.len()
+        );
+        return Ok(());
+    };
+    let fail = |e: String| format!("--backfill-record {}: {e}", record.display());
+    backfill::save_record(record, &plan)
+        .map_err(|e| fail(format!("not saved, nothing written: {e}")))?;
+    let out = backfill::apply(store, &plan, system_ms())
+        .map_err(|e| fail(format!("{e}; undo what was written with --undo-backfill")))?;
+    println!("{}", json(&out)?);
+    Ok(())
+}
+
+/// Pretty JSON for the retag and backfill output.
 fn json<T: serde::Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string_pretty(value).map_err(|e| e.to_string())
 }
@@ -344,6 +438,9 @@ fn run(cli: Cli) -> Result<(), String> {
     if cli.retag_columns.is_some() || cli.undo_retag.is_some() {
         return run_retag(&cli, store.as_ref());
     }
+    if cli.backfill_evidence.is_some() || cli.undo_backfill.is_some() {
+        return run_backfill(&cli, store.as_ref());
+    }
     let files = files(&cli);
     required(&cli.projects, "--projects")?;
     required(&cli.roles, "--roles")?;
@@ -373,7 +470,12 @@ fn run(cli: Cli) -> Result<(), String> {
         .map(load_statuses)
         .transpose()?
         .unwrap_or_default();
+    let agents = match agents_file(&cli, &files) {
+        Some(path) => Registry::open(path)?,
+        None => Registry::default(),
+    };
     let mut board = Board::new(store, roles.clone())
+        .with_agents(agents)
         .with_projects(projects.clone())
         .with_statuses(statuses)
         .with_move_rules(rules)
@@ -423,8 +525,9 @@ fn run(cli: Cli) -> Result<(), String> {
     }
 
     let in_flight: Arc<InFlight> = Arc::default();
-    let server = mcp::server_with(board.clone(), in_flight.clone()).map_err(|e| e.to_string())?;
     let Some(addr) = cli.http else {
+        let server =
+            mcp::server_with(board.clone(), in_flight.clone(), None).map_err(|e| e.to_string())?;
         let _settings = Settings::new(board, files, None, syncer, github);
         return serve_stdio(server).map_err(|e| format!("stdio failed: {e}"));
     };
@@ -476,6 +579,8 @@ fn run(cli: Cli) -> Result<(), String> {
     let settings = Arc::new(
         Settings::new(board.clone(), files, creds, syncer, github).with_server(server_info),
     );
+    let server = mcp::server_with(board.clone(), in_flight.clone(), Some(settings.clone()))
+        .map_err(|e| e.to_string())?;
     let mut web = Web::new(
         board.clone(),
         HttpHandler::new(server, config),

@@ -281,7 +281,7 @@ read-only like any command block (D72). C70's spool, once merged, keeps its scro
 
 **As built (C78).** `Features::HOLD` is bit 43 and `Launch.hold` field 60. A block entry gains
 `exited` (field 61), true for any block without a program (held or restored), which `list`
-shows as `state=exited`. The entry is not re-sent when `exited` flips: a watcher learns of the exit from `program-exited`, as for any block. Release (C76) will reuse the same path once it lands.
+shows as `state=exited`. The entry is not re-sent when `exited` flips: a watcher learns of the exit from `program-exited`, as for any block. Release (C76) reuses the same path.
 
 ## C76. Signal and release
 
@@ -293,7 +293,7 @@ orch owns the end grace and kills through the cgroup.
 **Shape.** Behind `SIGNAL_RELEASE`, there are two new requests. Both are owner-only on an owned
 block, and both are refused on Windows (`unsupported`); orch runs on Linux.
 - **`SignalBlock{block, signal}`.**
-  - It signals the program's own process group through the existing pidfd-safe `kill_tree`.
+  - It signals the program's own process group through the existing `kill_tree`, a plain `kill(-pgid)`: safe because the group leader is not yet reaped, so its pid (the group id) cannot be reused.
   - `signal` is a closed set (`hup`, `int`, `term`, `kill`, `stop`, `cont`), so no arbitrary
     numbers.
   - If the program is gone, it answers `exited`.
@@ -311,6 +311,25 @@ block, and both are refused on Windows (`unsupported`); orch runs on Linux.
 - After `ReleaseBlock`, a program that ignores SIGHUP is still alive 2 s later. That shows there
   was no implicit kill.
 - A non-owner is refused on an owned block.
+
+**As built (C76).** `Features::SIGNAL_RELEASE` is bit 44, and the server offers it on Linux only, so
+a Windows server never grants it. `SignalBlock` is client type 0x28, with the signal in field 25
+(`SIGNAL`, shared with `program-exited`) as its Linux number; any number outside the set fails to
+decode. `ReleaseBlock` is 0x29. Once released, the block is read-only at once, even while its
+program still runs: `list` shows it `exited`, and input says its pty was released. `Process::release`
+moves the child out of `Process`, synchronously, into a `Released` waiter with no kill-on-drop,
+before any task is spawned. The waiter polls `try_wait` like `reap()` but never signals, so a
+waiter dropped unpolled, aborted, or cut short by a stopping server leaves the program running.
+A release also abandons any input write already under way on another connection: each write
+carries the block's `Revoke`, which the release fires, so the writer drops its hold on the master
+and no byte reaches the program afterwards. The bytes it had already taken are still reported
+(C77). Nothing reads the block again, so no key can be acked under `EchoAck`'s contract: the
+release drops every pending key and sends `EchoMode` `unknown` to each attached `ECHO_ACK` client,
+which resets its prediction; a write that records its keys after the release is dropped the same
+way. The hangup discards what the terminal had queued, so the program may read fewer bytes than
+the owner was told the terminal took. Both requests are refused on a block with no owner, for every client, so a block
+made without `own` behaves as before (D230); an orphaned block stays refused too.
+`rusty-mux-ctl own` takes `{"op":"signal","block":B,"signal":"term"}` and `{"op":"release","block":B}`.
 
 ## C77. Input gate
 

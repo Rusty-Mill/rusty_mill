@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ai Env Manager</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="wrap">
+  <header class="top">
+    <div class="brand">
+      <svg aria-hidden="true" width="28" height="28" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="2" width="8" height="8" rx="2"/><rect x="12" y="2" width="8" height="8" rx="2"/><rect x="2" y="12" width="8" height="8" rx="2"/><path d="M16 12v8M12 16h8"/></svg>
+      <div><h1>Ai Env Manager</h1><p class="sub" id="sub"></p></div>
+    </div>
+    <label class="search">
+      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+      <input id="q" type="search" aria-label="Search skills" placeholder="Search name or source" autocomplete="off">
+    </label>
+    <button id="theme" class="ghost" aria-label="Switch colour theme"></button>
+  </header>
+  <p id="error" class="error" role="alert" hidden></p>
+  <div id="chips" class="chips" role="group" aria-label="Filter by state"></div>
+  <div class="card">
+    <table id="grid"><thead></thead><tbody></tbody></table>
+    <div id="empty" class="empty" hidden><p>No skills match.</p><button id="clear">Clear search and filter</button></div>
+  </div>
+  <p id="skipped" class="dim" hidden></p>
+  <ul class="legend">
+    <li><span class="state enabled"><span class="dot"></span></span>Enabled: our link, current</li>
+    <li><span class="state stale"><span class="dot"></span></span>Stale: ours, points elsewhere, safe to replace</li>
+    <li><span class="state edited"><span class="dot"></span></span>Edited: changed by hand, never replaced</li>
+    <li><span class="state foreign"><span class="dot"></span></span>Foreign: not ours, never touched</li>
+  </ul>
+</main>
+<dialog id="plan" aria-labelledby="plan-title">
+  <div class="dlg-head"><h2 id="plan-title"></h2><p id="plan-summary" class="dim"></p></div>
+  <div id="plan-body" class="dlg-body"></div>
+  <div class="dlg-foot">
+    <p class="dim">Nothing is written until you apply. If files change first, the plan is recalculated and anything refused stays refused.</p>
+    <button id="plan-cancel">Cancel</button><button id="plan-apply" class="primary">Apply</button>
+  </div>
+</dialog>
+<dialog id="editor" aria-labelledby="ed-title">
+  <div class="dlg-head">
+    <h2 id="ed-title"></h2>
+    <label class="dim">Files in <select id="ed-place" aria-label="Which copy to open"></select></label>
+  </div>
+  <p id="ed-error" class="error" role="alert" hidden></p>
+  <div id="ed-warn" class="warn" role="alertdialog" aria-labelledby="ed-warn-text" hidden>
+    <p id="ed-warn-text">You have unsaved changes.</p>
+    <button id="ed-keep">Keep editing</button><button id="ed-drop" class="primary">Discard changes</button>
+  </div>
+  <div class="ed-body">
+    <ul id="ed-files" class="ed-files" aria-label="Files"></ul>
+    <div class="ed-pane">
+      <p id="ed-note" class="dim"></p>
+      <div id="ed-code" class="ed-code" hidden>
+        <pre id="ed-gutter" class="ed-gutter d1" aria-hidden="true">1</pre>
+        <div class="ed-stack">
+          <pre id="ed-hl" class="ed-text ed-hl" aria-hidden="true" hidden></pre>
+          <pre id="ed-view" class="ed-text" tabindex="0" hidden></pre>
+          <textarea id="ed-text" class="ed-text" wrap="off" spellcheck="false" aria-label="File text" hidden></textarea>
+        </div>
+      </div>
+      <div id="ed-diff" class="ed-text diff" tabindex="0" hidden></div>
+    </div>
+  </div>
+  <div class="dlg-foot">
+    <p class="dim" id="ed-foot">Nothing is written until you confirm the diff.</p>
+    <button id="ed-close">Close</button><button id="ed-edit">Edit</button><button id="ed-push" hidden>Push to source…</button><button id="ed-reload" hidden>Discard and reload</button><button id="ed-back" hidden>Back to editing</button><button id="ed-review" class="primary" hidden>Review changes</button><button id="ed-save" class="primary" hidden>Confirm and save</button>
+  </div>
+</dialog>
+<script src="code.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

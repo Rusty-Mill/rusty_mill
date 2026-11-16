@@ -17,11 +17,12 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common::{Client, PATIENCE, shell};
+use common::{Client, PATIENCE, bridge, shell};
 use rusty_mux_core::SessionId;
 use rusty_mux_proto::{Entry, Features, Message};
 use rusty_mux_server::{
-    Limits, Login, MAX_MAP, Reload, bind_front_door, serve_forwarded, serve_login,
+    Limits, Login, MAX_MAP, Reload, Tailnet, UdpPorts, bind_front_door, serve_forwarded,
+    serve_login_with, tailnet::Whois,
 };
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::sync::{mpsc, oneshot};
@@ -74,6 +75,8 @@ fn login(dir: &Path) -> Login {
         runtime: dir.join("run"),
         server: PathBuf::from(env!("CARGO_BIN_EXE_rusty-mux-server")),
         limits: Limits::default(),
+        udp: None,
+        pam: None,
     }
 }
 
@@ -83,10 +86,22 @@ impl Front {
     }
 
     fn with(dir: &Path, name: &str, login: Login) -> Self {
+        Self::with_tailnet(dir, name, login, None).0
+    }
+
+    /// The front door, also listening for tailnet peers on loopback (a
+    /// test cannot bind a tailnet address) with `tailscaled` at `whois`;
+    /// the address it listens on is returned.
+    fn with_tailnet(
+        dir: &Path,
+        name: &str,
+        login: Login,
+        whois: Option<PathBuf>,
+    ) -> (Self, Option<std::net::SocketAddr>) {
         let socket = dir.join(name);
         let (reload, reloads) = mpsc::unbounded_channel();
         let (stop, stopped) = oneshot::channel::<()>();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Option<std::net::SocketAddr>>();
         let (ended_tx, ended) = std::sync::mpsc::channel();
         let bind = socket.clone();
         std::thread::spawn(move || {
@@ -95,21 +110,35 @@ impl Front {
                 .expect("runtime");
             let result = runtime.block_on(async move {
                 let listener = UnixListener::bind(&bind).expect("bind");
-                ready_tx.send(()).expect("ready");
+                let (tailnet, addr) = match whois {
+                    None => (None, None),
+                    Some(socket) => {
+                        let tcp = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+                            .await
+                            .expect("bind tailnet");
+                        let addr = tcp.local_addr().expect("addr");
+                        (
+                            Some(Tailnet::unchecked(tcp, Whois::new(socket))),
+                            Some(addr),
+                        )
+                    }
+                };
+                ready_tx.send(addr).expect("ready");
                 rusty_tokio::select! {
-                    result = serve_login(listener, login, reloads) => result,
+                    result = serve_login_with(listener, login, tailnet, reloads) => result,
                     _ = stopped => Ok(()),
                 }
             });
             let _ = ended_tx.send(result);
         });
-        ready_rx.recv_timeout(PATIENCE).expect("front door bound");
-        Self {
+        let addr = ready_rx.recv_timeout(PATIENCE).expect("front door bound");
+        let front = Self {
             socket,
             reload,
             stop: Some(stop),
             ended,
-        }
+        };
+        (front, addr)
     }
 
     /// Reads the map again; whether it took.
@@ -450,7 +479,8 @@ fn a_runtime_directory_through_a_link_stops_the_front_door() {
         .block_on(async move {
             let listener = UnixListener::bind(&socket).expect("bind");
             let (_reload, reloads) = mpsc::unbounded_channel();
-            rusty_tokio::time::timeout(PATIENCE, serve_login(listener, login, reloads)).await
+            rusty_tokio::time::timeout(PATIENCE, serve_login_with(listener, login, None, reloads))
+                .await
         })
         .expect("ended before the deadline");
     assert!(ended.is_err(), "a runtime through a link was used");
@@ -725,7 +755,7 @@ fn start_forwarded(path: &Path, forwarder: u32) {
         runtime.block_on(async move {
             let listener = UnixListener::bind(&bind).expect("bind");
             ready_tx.send(()).expect("ready");
-            serve_forwarded(listener, shell(), forwarder, std::future::pending()).await
+            serve_forwarded(listener, shell(), forwarder, None, std::future::pending()).await
         })
     });
     ready_rx.recv_timeout(PATIENCE).expect("bound");
@@ -798,5 +828,352 @@ fn a_root_front_door_refuses_a_socket_the_account_does_not_serve() {
     std::fs::remove_file(account_dir.join("server.sock")).expect("unlink");
     std::os::unix::fs::symlink(&roots, account_dir.join("server.sock")).expect("link");
     assert!(closed_unheard(&front.socket), "relayed to root's server");
+    front.stop();
+}
+
+/// A `tailscaled` LocalAPI that names every peer `login` (a peer it does
+/// not know when `login` is empty), on a socket in `dir`; its own address
+/// is `own` (empty: it has none). It answers for the life of the test process.
+fn fake_tailscaled(dir: &Path, login: &str, own: &str) -> PathBuf {
+    use std::io::Read;
+    let path = dir.join("tailscaled.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).expect("tailscaled");
+    let whois =
+        format!(r#"{{"Node":{{"Name":"lap.t.ts.net."}},"UserProfile":{{"LoginName":"{login}"}}}}"#);
+    let ips = if own.is_empty() {
+        String::new()
+    } else {
+        format!(r#""{own}""#)
+    };
+    let status = format!(r#"{{"BackendState":"Running","TailscaleIPs":[{ips}]}}"#);
+    let respond = |code: &str, body: &str| {
+        format!(
+            "HTTP/1.1 {code}\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let whois = if login.is_empty() {
+        respond("404 Not Found", "no such peer")
+    } else {
+        respond("200 OK", &whois)
+    };
+    let status = respond("200 OK", &status);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let (mut stream, whois, status) = (stream, whois.clone(), status.clone());
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => seen.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let asks_status = seen.starts_with(b"GET /localapi/v0/status");
+                let _ = stream.write_all(if asks_status { &status } else { &whois }.as_bytes());
+            });
+        }
+    });
+    path
+}
+
+#[test]
+fn a_tailnet_peer_the_map_names_reaches_its_account_as_its_principal() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (_, user) = me();
+    write_map(&dir, &format!("ts:carol@example.com {user}\n"));
+    let whois = fake_tailscaled(&dir, "carol@example.com", "100.64.0.1");
+    let (front, addr) = Front::with_tailnet(&dir, "login.sock", login(&dir), Some(whois));
+    let door = bridge(&dir, addr.expect("tailnet address"));
+
+    let mut client = Client::connect_with(&door, IDENTITY, None);
+    // The account's server sees the tailnet principal: its id, no user.
+    assert_eq!(
+        whoami(&mut client),
+        ("ts:carol@example.com".into(), String::new())
+    );
+
+    // A reload that no longer names it closes the connection and lets
+    // nobody new in.
+    write_map(&dir, "");
+    front.reload().expect("an empty map");
+    client.wait_closed();
+    assert!(closed_unheard(&door));
+    front.stop();
+}
+
+#[test]
+fn a_tailnet_peer_the_map_does_not_name_is_closed_even_with_a_star_rule() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    // Someone else, then every local user and `*`: none of it is a way in.
+    write_map(
+        &dir,
+        &format!("ts:dave@example.com {user}\nuid:{uid} {user}\n* {user}\n"),
+    );
+    let whois = fake_tailscaled(&dir, "carol@example.com", "100.64.0.1");
+    let (front, addr) = Front::with_tailnet(&dir, "login.sock", login(&dir), Some(whois));
+    let door = bridge(&dir, addr.expect("tailnet address"));
+    assert!(closed_unheard(&door), "an unlisted tailnet peer was served");
+    // The local door still works.
+    let mut local = Client::connect_with(&front.socket, IDENTITY, None);
+    assert_eq!(whoami(&mut local).0, format!("uid:{uid}"));
+    front.stop();
+}
+
+#[test]
+fn a_tailnet_peer_tailscaled_does_not_know_is_closed() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (_, user) = me();
+    write_map(&dir, &format!("ts:carol@example.com {user}\n"));
+    let whois = fake_tailscaled(&dir, "", "100.64.0.1");
+    let (front, addr) = Front::with_tailnet(&dir, "login.sock", login(&dir), Some(whois));
+    let door = bridge(&dir, addr.expect("tailnet address"));
+    assert!(closed_unheard(&door), "an unknown tailnet peer was served");
+    front.stop();
+}
+
+/// The per-peer limit counts a tailnet peer by its principal, apart from
+/// the local uids.
+#[test]
+fn one_tailnet_principal_cannot_hold_more_than_its_share() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(
+        &dir,
+        &format!("ts:carol@example.com {user}\nuid:{uid} {user}\n"),
+    );
+    let whois = fake_tailscaled(&dir, "carol@example.com", "100.64.0.1");
+    let limits = Limits {
+        total: 8,
+        per_peer: 1,
+    };
+    let (front, addr) = Front::with_tailnet(
+        &dir,
+        "login.sock",
+        Login {
+            limits,
+            ..login(&dir)
+        },
+        Some(whois),
+    );
+    let door = bridge(&dir, addr.expect("tailnet address"));
+    let mut first = Client::connect_with(&door, IDENTITY, None);
+    assert!(
+        closed_unheard(&door),
+        "a second connection of one principal got in"
+    );
+    // A local user is counted on its own.
+    let mut local = Client::connect_with(&front.socket, IDENTITY, None);
+    assert_eq!(whoami(&mut local).0, format!("uid:{uid}"));
+    assert_eq!(whoami(&mut first).0, "ts:carol@example.com");
+    front.stop();
+}
+
+/// A peer at the node's own address, or a node that reports none, is a
+/// local process (or cannot be told from one): closed, though the map names
+/// the login `tailscaled` gives it.
+#[test]
+fn a_tailnet_peer_at_the_nodes_own_address_is_closed() {
+    for own in ["127.0.0.1", ""] {
+        let dir = scratch();
+        let _reap = Reap(dir.clone());
+        let (_, user) = me();
+        write_map(&dir, &format!("ts:carol@example.com {user}\n"));
+        let whois = fake_tailscaled(&dir, "carol@example.com", own);
+        let (front, addr) = Front::with_tailnet(&dir, "login.sock", login(&dir), Some(whois));
+        let door = bridge(&dir, addr.expect("tailnet address"));
+        assert!(
+            closed_unheard(&door),
+            "a local process got in (own `{own}`)"
+        );
+        front.stop();
+    }
+}
+
+/// The port a client's `OpenDatagram` is answered with, or why not.
+fn open_datagram(client: &mut Client) -> Result<u16, String> {
+    const REQ: u64 = 9_000;
+    client.send(&Message::OpenDatagram { req: REQ });
+    loop {
+        match client.recv() {
+            Message::Datagram { req: REQ, port, .. } => return Ok(port),
+            Message::Failed {
+                req: REQ, reason, ..
+            } => return Err(reason),
+            _ => {}
+        }
+    }
+}
+
+/// A run of three UDP ports on loopback, free when asked, and the first
+/// of them.
+fn udp_range() -> (UdpPorts, u16) {
+    let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe");
+    let lo = probe.local_addr().expect("addr").port();
+    drop(probe);
+    let ports = format!("127.0.0.1:{lo}-{}", lo + 2).parse().expect("range");
+    (ports, lo)
+}
+
+/// A front door that gives account servers `ports`, with this user's own
+/// account mapped from itself.
+fn front_with_udp(dir: &Path, ports: UdpPorts) -> Front {
+    let (uid, user) = me();
+    write_map(dir, &format!("uid:{uid} {user}\n"));
+    let udp = Some(ports);
+    Front::with(dir, "login.sock", Login { udp, ..login(dir) })
+}
+
+const WITH_UDP: Features = IDENTITY.union(Features::DATAGRAM);
+
+#[test]
+fn an_account_server_binds_the_first_free_port_of_the_range() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (ports, lo) = udp_range();
+    // Someone else holds the first port: the account takes the next.
+    let _held = std::net::UdpSocket::bind(("127.0.0.1", lo)).expect("hold");
+    let front = front_with_udp(&dir, ports);
+    let mut client = Client::connect_with(&front.socket, WITH_UDP, None);
+    assert_eq!(open_datagram(&mut client), Ok(lo + 1));
+    front.stop();
+}
+
+#[test]
+fn an_account_server_with_no_free_port_serves_without_udp() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (ports, lo) = udp_range();
+    let _held: Vec<_> = (lo..=lo + 2)
+        .map(|p| std::net::UdpSocket::bind(("127.0.0.1", p)).expect("hold"))
+        .collect();
+    let front = front_with_udp(&dir, ports);
+    let mut client = Client::connect_with(&front.socket, WITH_UDP, None);
+    // Still served, and still its own principal: only UDP is missing.
+    assert_eq!(whoami(&mut client).0, format!("uid:{}", me().0));
+    assert!(open_datagram(&mut client).is_err());
+    front.stop();
+}
+
+#[test]
+fn a_front_door_without_ports_offers_no_udp() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(&dir, &format!("uid:{uid} {user}\n"));
+    let front = Front::start(&dir, "login.sock");
+    let mut client = Client::connect_with(&front.socket, WITH_UDP, None);
+    assert!(open_datagram(&mut client).is_err());
+    front.stop();
+}
+
+#[test]
+fn a_tailnet_peer_is_refused_a_datagram_association() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (ports, lo) = udp_range();
+    let (uid, user) = me();
+    write_map(
+        &dir,
+        &format!("uid:{uid} {user}\nts:carol@example.com {user}\n"),
+    );
+    let whois = fake_tailscaled(&dir, "carol@example.com", "100.64.0.1");
+    let udp = Some(ports);
+    let login = Login { udp, ..login(&dir) };
+    let (front, addr) = Front::with_tailnet(&dir, "login.sock", login, Some(whois));
+    let door = bridge(&dir, addr.expect("tailnet address"));
+
+    let mut local = Client::connect_with(&front.socket, WITH_UDP, None);
+    assert_eq!(open_datagram(&mut local), Ok(lo));
+    let mut tailnet = Client::connect_with(&door, WITH_UDP, None);
+    assert_eq!(whoami(&mut tailnet).0, "ts:carol@example.com");
+    let why = open_datagram(&mut tailnet).expect_err("a tailnet peer has no UDP");
+    assert!(why.contains("tailnet"), "{why}");
+    front.stop();
+}
+
+/// What a test's PAM gate was asked: `(account, ruser)`.
+type Asked = std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+/// A PAM gate that answers `allow`, and what it was asked.
+fn gate(allow: bool) -> (rusty_mux_server::PamGate, Asked) {
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = asked.clone();
+    let gate = rusty_mux_server::PamGate::new(move |account, ruser| {
+        log.lock()
+            .unwrap()
+            .push((account.to_owned(), ruser.map(str::to_owned)));
+        if allow {
+            Ok(())
+        } else {
+            Err("account expired (13)".into())
+        }
+    });
+    (gate, asked)
+}
+
+#[test]
+fn pam_admits_an_account_it_allows_and_names_the_peer() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(&dir, &format!("uid:{uid} {user}\n"));
+    let (pam, asked) = gate(true);
+    let pam = Some(pam);
+    let front = Front::with(&dir, "login.sock", Login { pam, ..login(&dir) });
+    let mut client = Client::connect_with(&front.socket, IDENTITY, None);
+    assert_eq!(whoami(&mut client).0, format!("uid:{uid}"));
+    assert_eq!(*asked.lock().unwrap(), [(user.clone(), Some(user))]);
+    front.stop();
+}
+
+#[test]
+fn pam_closes_an_account_it_refuses_before_any_server_starts() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(&dir, &format!("uid:{uid} {user}\n"));
+    let (pam, asked) = gate(false);
+    let pam = Some(pam);
+    let front = Front::with(&dir, "login.sock", Login { pam, ..login(&dir) });
+    assert!(
+        closed_unheard(&front.socket),
+        "a refused account was served"
+    );
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    // No account server was started for it.
+    assert!(
+        !dir.join("run").join(&user).exists(),
+        "a server was started"
+    );
+    front.stop();
+}
+
+#[test]
+fn pam_gets_no_ruser_for_a_tailnet_peer() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(
+        &dir,
+        &format!("uid:{uid} {user}\nts:carol@example.com {user}\n"),
+    );
+    let whois = fake_tailscaled(&dir, "carol@example.com", "100.64.0.1");
+    let (pam, asked) = gate(true);
+    let login = Login {
+        pam: Some(pam),
+        ..login(&dir)
+    };
+    let (front, addr) = Front::with_tailnet(&dir, "login.sock", login, Some(whois));
+    let door = bridge(&dir, addr.expect("tailnet address"));
+    let mut tailnet = Client::connect_with(&door, IDENTITY, None);
+    assert_eq!(whoami(&mut tailnet).0, "ts:carol@example.com");
+    assert_eq!(*asked.lock().unwrap(), [(user, None)]);
     front.stop();
 }

@@ -564,6 +564,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai_env_app"
+version = "0.1.0"
+dependencies = [
+ "ai_env_core",
+ "ai_env_fs",
+]
+
+[[package]]
+name = "ai_env_cli"
+version = "0.1.0"
+dependencies = [
+ "ai_env_app",
+ "ai_env_core",
+ "ai_env_fs",
+]
+
+[[package]]
+name = "ai_env_core"
+version = "0.1.0"
+
+[[package]]
+name = "ai_env_fs"
+version = "0.1.0"
+dependencies = [
+ "ai_env_core",
+ "rusty_sha2",
+]
+
+[[package]]
 name = "aisdk"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -656,9 +685,9 @@ checksum = "e9d4ee0d472d1cd2e28c97dfa124b3d8d992e10eb0a035f33f5d12e3a177ba3b"
 
 [[package]]
 name = "ammonia"
-version = "4.1.8"
+version = "4.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f6660fb4ff692ef4937b1b4e74ab3d378653d8588389587d91f96a296907ea0"
+checksum = "935c841d86ee68ba89a983ea6e4255436f769ab1e2b701574653baf4b30739ce"
 dependencies = [
  "cssparser 0.37.0",
  "html5ever 0.39.0",
@@ -10918,8 +10947,11 @@ name = "rusty_mux_client"
 version = "0.1.0"
 dependencies = [
  "platform-windows",
+ "rusty_base64",
  "rusty_mux_core",
  "rusty_mux_proto",
+ "rusty_tls",
+ "rusty_tokio",
  "rusty_uuid",
 ]
 
@@ -10989,8 +11021,12 @@ dependencies = [
 name = "rusty_mux_script"
 version = "0.1.0"
 dependencies = [
+ "rusty_crypto_key",
+ "rusty_hex",
  "rusty_json",
  "rusty_mux_proto",
+ "rusty_rand",
+ "rusty_sha2",
 ]
 
 [[package]]
@@ -11000,8 +11036,10 @@ dependencies = [
  "platform",
  "platform-linux",
  "platform-windows",
+ "rusty_base64",
  "rusty_conhost",
  "rusty_crypto_key",
+ "rusty_http",
  "rusty_libc",
  "rusty_multimodal_db_engine",
  "rusty_mux_core",
@@ -11011,9 +11049,13 @@ dependencies = [
  "rusty_mux_transport",
  "rusty_rand",
  "rusty_term_core",
+ "rusty_tls",
  "rusty_tokio",
  "rusty_uuid",
  "serde",
+ "serde_json",
+ "ts-hub",
+ "ts-types",
  "uuid",
 ]
 
@@ -14339,6 +14381,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "ts-dial",
  "ts-key",
  "ts-types",
 ]
@@ -14349,9 +14392,14 @@ version = "0.0.1"
 dependencies = [
  "rusty_log",
  "rusty_tokio",
+ "ts-control",
+ "ts-derp",
+ "ts-dial",
  "ts-engine",
+ "ts-hub",
  "ts-key",
  "ts-localapi",
+ "ts-net",
  "ts-types",
 ]
 
@@ -14364,8 +14412,19 @@ dependencies = [
  "rusty_log",
  "rusty_tokio",
  "thiserror 1.0.69",
+ "ts-dial",
  "ts-key",
  "ts-types",
+]
+
+[[package]]
+name = "ts-dial"
+version = "0.0.1"
+dependencies = [
+ "rusty_base64",
+ "rusty_tls",
+ "rusty_tokio",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -14387,6 +14446,7 @@ dependencies = [
  "thiserror 1.0.69",
  "ts-control",
  "ts-derp",
+ "ts-dial",
  "ts-disco",
  "ts-filter",
  "ts-key",
@@ -14400,6 +14460,31 @@ dependencies = [
 name = "ts-filter"
 version = "0.0.1"
 dependencies = [
+ "ts-types",
+]
+
+[[package]]
+name = "ts-hub"
+version = "0.0.1"
+dependencies = [
+ "crypto_box",
+ "rcgen",
+ "rusty_base64",
+ "rusty_crypto_key",
+ "rusty_h2",
+ "rusty_http",
+ "rusty_log",
+ "rusty_tls",
+ "rusty_tokio",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "ts-control",
+ "ts-derp",
+ "ts-dial",
+ "ts-filter",
+ "ts-key",
+ "ts-stun",
  "ts-types",
 ]
 
@@ -14454,11 +14539,13 @@ name = "ts-net"
 version = "0.0.1"
 dependencies = [
  "parking_lot",
+ "rcgen",
  "rusty_log",
  "rusty_tokio",
  "smoltcp",
  "thiserror 1.0.69",
  "ts-engine",
+ "ts-hub",
  "ts-key",
  "ts-types",
 ]

@@ -82,6 +82,12 @@ pub enum Error {
     /// The block's owner is gone for good (C46): nobody may type into it
     /// or change it, and only the owner's principal may close it.
     Orphaned(BlockId),
+    /// On a shared server (D232), `client` is neither the server's account
+    /// nor of the principal that created the session, so it may not rename
+    /// or close what is in it.
+    NotCreator {
+        client: ClientId,
+    },
     /// The block already has an owner.
     Owned(BlockId),
     /// The block has no owner, so nobody grants its lease.
@@ -156,6 +162,11 @@ impl fmt::Display for Error {
             Self::NotOwner { client, block } => {
                 write!(f, "block {block} is owned by a client other than {client}")
             }
+            Self::NotCreator { client } => write!(
+                f,
+                "client {client} is not of the principal that created this session, \
+                 nor the server's own account"
+            ),
             Self::Orphaned(block) => write!(f, "block {block} is orphaned: its owner is gone"),
             Self::Owned(block) => write!(f, "block {block} already has an owner"),
             Self::Unowned(block) => write!(f, "block {block} has no owner to grant its lease"),

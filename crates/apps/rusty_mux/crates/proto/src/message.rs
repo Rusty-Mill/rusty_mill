@@ -2,7 +2,7 @@
 
 use rusty_mux_core::{
     Axis, BlockId, ClientId, EntityId, Event, ExitStatus, InputMode, Layout, Principal, Progress,
-    Selection, SessionId, Share, Side, Size, Toward, Transport, WindowId,
+    Selection, SessionId, Share, Side, Size, TailscaleState, Toward, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::{Reader, Writer};
@@ -219,6 +219,15 @@ impl Features {
     /// older decoders skip the field.
     pub const HOLD: Self = Self(1 << 43);
 
+    /// Signal and release (C76): [`Message::SignalBlock`] signals an owned
+    /// block's program group, and [`Message::ReleaseBlock`] closes its PTY
+    /// and waits for the program without ever killing it. Linux only: only a Linux server offers it.
+    pub const SIGNAL_RELEASE: Self = Self(1 << 44);
+
+    /// [`Event::TailscaleStatusChanged`] (C27), skipped for a client
+    /// without it: a server on a tailnet says when its node changes state.
+    pub const TAILSCALE_STATUS: Self = Self(1 << 45);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -308,6 +317,8 @@ const NAMES: &[(Features, &str)] = &[
     (Features::BACKGROUND_HISTORY, "background history"),
     (Features::AGENT_LAUNCH, "agent launch"),
     (Features::HOLD, "hold on exit"),
+    (Features::SIGNAL_RELEASE, "signal and release"),
+    (Features::TAILSCALE_STATUS, "tailscale status"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -388,6 +399,63 @@ pub struct Launch {
     /// Keep the block, read-only, once its program exits (C78).
     /// Negotiated with [`Features::HOLD`].
     pub hold: bool,
+}
+
+/// What [`Message::SignalBlock`] may send (C76): a closed set, so no
+/// arbitrary numbers. On the wire as its Linux number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockSignal {
+    Hup,
+    Int,
+    Kill,
+    Term,
+    Cont,
+    Stop,
+}
+
+impl BlockSignal {
+    pub const ALL: [Self; 6] = [
+        Self::Hup,
+        Self::Int,
+        Self::Kill,
+        Self::Term,
+        Self::Cont,
+        Self::Stop,
+    ];
+
+    /// Its Linux signal number.
+    pub const fn number(self) -> u8 {
+        match self {
+            Self::Hup => 1,
+            Self::Int => 2,
+            Self::Kill => 9,
+            Self::Term => 15,
+            Self::Cont => 18,
+            Self::Stop => 19,
+        }
+    }
+
+    /// Its name without `SIG`, lower case, such as `term`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Hup => "hup",
+            Self::Int => "int",
+            Self::Kill => "kill",
+            Self::Term => "term",
+            Self::Cont => "cont",
+            Self::Stop => "stop",
+        }
+    }
+
+    pub fn from_number(number: u64) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|s| u64::from(s.number()) == number)
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.name() == name)
+    }
 }
 
 /// Who controls an owned block, in its [`Entry::Block`] (C46).
@@ -710,6 +778,23 @@ pub enum Message {
     Shutdown {
         req: u64,
     },
+    /// Sends `signal` to the program group of owned `block` (C76). Refused
+    /// with `exited` once the program is gone, for anyone but the owner,
+    /// and on Windows. Negotiated with [`Features::SIGNAL_RELEASE`].
+    SignalBlock {
+        req: u64,
+        block: BlockId,
+        signal: BlockSignal,
+    },
+    /// Closes owned `block`'s PTY and waits for its program without ever
+    /// killing it (C76); the kernel's hang-up is all it gets. A held block
+    /// then stays read-only, any other closes once the program exits.
+    /// Refused as [`Message::SignalBlock`] is. Negotiated with
+    /// [`Features::SIGNAL_RELEASE`].
+    ReleaseBlock {
+        req: u64,
+        block: BlockId,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -933,8 +1018,10 @@ const FDS: u32 = 59;
 const HOLD: u32 = 60;
 /// A block entry's mark that its program has exited: 1, or absent (C78).
 const EXITED: u32 = 61;
-// IDs 1..=EXITED are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = EXITED as usize;
+/// A [`TailscaleState`]: 1 running, 2 needs login, 3 stopped, 4 other (C27).
+const TAILSCALE: u32 = 62;
+// IDs 1..=TAILSCALE are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = TAILSCALE as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -973,6 +1060,8 @@ mod ty {
     pub const REVOKE_LEASE: u8 = 0x22;
     pub const REQUEST_LEASE: u8 = 0x23;
     pub const SHUTDOWN: u8 = 0x24;
+    pub const SIGNAL_BLOCK: u8 = 0x28;
+    pub const RELEASE_BLOCK: u8 = 0x29;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -1122,6 +1211,11 @@ impl Message {
                 out.varint(REQ, *req);
                 ty::SHUTDOWN
             }
+            M::SignalBlock { req, block, signal } => {
+                out.varint(SIGNAL, signal.number().into());
+                req_block(out, *req, *block, ty::SIGNAL_BLOCK)
+            }
+            M::ReleaseBlock { req, block } => req_block(out, *req, *block, ty::RELEASE_BLOCK),
             M::ResizeSplit {
                 req,
                 block,
@@ -1426,6 +1520,16 @@ impl Message {
             },
             ty::SHUTDOWN => M::Shutdown {
                 req: f.varint(REQ)?,
+            },
+            ty::SIGNAL_BLOCK => M::SignalBlock {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                signal: BlockSignal::from_number(f.varint(SIGNAL)?)
+                    .ok_or_else(|| f.invalid(SIGNAL))?,
+            },
+            ty::RELEASE_BLOCK => M::ReleaseBlock {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
             },
             ty::RESIZE_SPLIT => M::ResizeSplit {
                 req: f.varint(REQ)?,
@@ -1856,6 +1960,7 @@ mod kind {
     pub const WINDOW_MOVED: u64 = 31;
     pub const FOCUS_CHANGED: u64 = 32;
     pub const GRANT_CHANGED: u64 = 33;
+    pub const TAILSCALE_STATUS_CHANGED: u64 = 34;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -2018,6 +2123,13 @@ fn put_event(out: &mut Out, event: &Event) {
         E::ConfigReloaded => {
             out.varint(KIND, kind::CONFIG_RELOADED);
         }
+        E::TailscaleStatusChanged { state, ref node } => {
+            out.varint(KIND, kind::TAILSCALE_STATUS_CHANGED)
+                .varint(TAILSCALE, tailscale_wire(state));
+            if let Some(node) = node {
+                out.bytes(NAME, node.as_bytes());
+            }
+        }
         E::ClipboardWritten { block, selection } => {
             out.varint(KIND, kind::CLIPBOARD_WRITTEN)
                 .uuid(BLOCK, block.uuid())
@@ -2065,6 +2177,16 @@ fn put_event(out: &mut Out, event: &Event) {
 
 fn renamed(out: &mut Out, kind: u64, target: EntityId, name: &str) {
     put_target(out.varint(KIND, kind), target).bytes(NAME, name.as_bytes());
+}
+
+/// The wire number of `state`, as [`TAILSCALE`] says.
+const fn tailscale_wire(state: TailscaleState) -> u64 {
+    match state {
+        TailscaleState::Running => 1,
+        TailscaleState::NeedsLogin => 2,
+        TailscaleState::Stopped => 3,
+        TailscaleState::Other => 4,
+    }
 }
 
 fn put_progress(out: &mut Out, progress: Progress) {
@@ -2166,6 +2288,16 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
             client: client(f, CLIENT)?,
         },
         kind::CONFIG_RELOADED => E::ConfigReloaded,
+        kind::TAILSCALE_STATUS_CHANGED => E::TailscaleStatusChanged {
+            state: match f.varint(TAILSCALE)? {
+                1 => TailscaleState::Running,
+                2 => TailscaleState::NeedsLogin,
+                3 => TailscaleState::Stopped,
+                // A state a newer server names is still "some other state".
+                _ => TailscaleState::Other,
+            },
+            node: f.opt(NAME, In::string)?,
+        },
         kind::CLIPBOARD_WRITTEN => E::ClipboardWritten {
             block: block(f, BLOCK)?,
             selection: selection(f)?,

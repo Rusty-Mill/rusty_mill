@@ -9,7 +9,7 @@ use platform::process::{Child, Signal};
 use platform::pty::PtyMaster;
 use platform_linux::{LinuxChild, LinuxPty, LinuxPtyMaster};
 use rusty_mux_core::{ExitStatus, Size};
-use rusty_mux_proto::Echo;
+use rusty_mux_proto::{BlockSignal, Echo};
 use rusty_tokio::io::AsyncFd;
 
 use super::{Env, GRACE, POLL, command, exit_status, to_io, win_size};
@@ -96,6 +96,23 @@ impl Process {
 }
 
 impl Process {
+    /// Sends `sig` to the program's process group (C76).
+    pub(crate) fn signal(&self, sig: BlockSignal) -> io::Result<()> {
+        // Gone already: say so rather than report a signal that went nowhere.
+        let child = self
+            .child
+            .as_ref()
+            .ok_or_else(|| io::Error::other("exited"))?;
+        child.kill_tree(platform_signal(sig)).map_err(to_io)
+    }
+
+    /// Hands the program over to a [`Released`] waiter, which never kills
+    /// it (C76). Synchronous, so the kill-on-drop is disarmed before any
+    /// future exists that could be dropped unpolled.
+    pub(crate) fn release(mut self) -> Option<Released> {
+        self.child.take().map(|child| Released { child })
+    }
+
     /// Hangs up the program's group and leaves it running, unreaped: a
     /// stopping server does this to an owned block, never killing it
     /// (D87). Whoever owns the block cleans up.
@@ -106,6 +123,40 @@ impl Process {
         if matches!(child.try_wait(), Ok(None)) {
             signal(&child, Signal::Hup);
         }
+    }
+}
+
+/// A released block's program (C76): waited for, never signalled. Dropping
+/// it, polled or not, leaves the program running for its owner to end.
+pub(crate) struct Released {
+    child: LinuxChild,
+}
+
+impl Released {
+    /// Waits for the program to exit. How it ended, or `None` if that
+    /// can't be known.
+    pub(crate) async fn wait(mut self) -> Option<ExitStatus> {
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return exit_status(status),
+                Ok(None) => rusty_tokio::time::sleep(POLL).await,
+                Err(err) => {
+                    eprintln!("rusty-mux-server: polling pid {}: {err:?}", self.child.id());
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+fn platform_signal(sig: BlockSignal) -> Signal {
+    match sig {
+        BlockSignal::Hup => Signal::Hup,
+        BlockSignal::Int => Signal::Int,
+        BlockSignal::Kill => Signal::Kill,
+        BlockSignal::Term => Signal::Term,
+        BlockSignal::Cont => Signal::Cont,
+        BlockSignal::Stop => Signal::Stop,
     }
 }
 
@@ -171,12 +222,26 @@ impl Pty {
         }
     }
 
-    pub(crate) async fn write_all(&self, mut data: &[u8]) -> io::Result<()> {
+    pub(crate) async fn write_all(&self, data: &[u8]) -> io::Result<()> {
+        self.write_counted(data, &std::cell::Cell::new(0)).await
+    }
+
+    /// [`Self::write_all`], adding to `written` as the program takes each
+    /// part, so a caller that abandons the write knows how much it got.
+    pub(crate) async fn write_counted(
+        &self,
+        mut data: &[u8],
+        written: &std::cell::Cell<usize>,
+    ) -> io::Result<()> {
         while !data.is_empty() {
             let mut ready = self.master.writable().await?;
             match ready.try_io(|fd| fd.get_ref().write(data).map_err(to_io)) {
                 Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Ok(result) => data = &data[result?..],
+                Ok(result) => {
+                    let n = result?;
+                    written.set(written.get() + n);
+                    data = &data[n..];
+                }
                 Err(_would_block) => continue,
             }
         }
@@ -226,6 +291,72 @@ mod regression {
     use super::*;
     use platform::process::Command;
     use rusty_tokio::{Builder, LocalOptions};
+
+    /// A HUP-ignoring program on a fresh PTY, its pid, and the master.
+    fn stubborn() -> (Process, u32, LinuxPtyMaster) {
+        let cmd = Command::new("/bin/sh", "/")
+            .arg("-c")
+            .arg("trap '' HUP; printf ready; while :; do sleep 0.05; done");
+        let (master, child) = LinuxPty
+            .spawn_concrete(&cmd, win_size(Size::new(80, 24).unwrap()))
+            .unwrap();
+        let mut buf = [0; 64];
+        assert!(master.read(&mut buf).unwrap() > 0);
+        let pid = child.id();
+        (Process { child: Some(child) }, pid, master)
+    }
+
+    fn alive(pid: u32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| stat.rsplit(')').next()?.trim().chars().next())
+            .is_some_and(|state| !matches!(state, 'Z' | 'X'))
+    }
+
+    /// Ends and reaps what a test left running.
+    fn finish(pid: u32) {
+        let pid = i32::try_from(pid).unwrap();
+        let _ = rusty_libc::process::kill(pid, rusty_libc::signal::SIGKILL);
+        let _ = rusty_libc::wait::waitpid(pid, 0);
+    }
+
+    #[test]
+    fn a_release_never_kills_however_its_waiter_ends() {
+        let rt = Builder::new_current_thread()
+            .build_local(&LocalOptions::default())
+            .unwrap();
+        rt.block_on(async {
+            // Dropped without ever being polled.
+            let (process, pid, master) = stubborn();
+            drop(process.release().expect("a child").wait());
+            drop(master);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(alive(pid), "an unpolled waiter killed {pid}");
+            finish(pid);
+
+            // Spawned and aborted before its first poll.
+            let (process, pid, master) = stubborn();
+            let released = process.release().expect("a child");
+            let task = rusty_tokio::task::spawn_local(released.wait());
+            task.abort();
+            let _ = task.await;
+            drop(master);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(alive(pid), "an aborted unpolled waiter killed {pid}");
+            finish(pid);
+
+            // Aborted after it has polled.
+            let (process, pid, master) = stubborn();
+            let task = rusty_tokio::task::spawn_local(process.release().expect("a child").wait());
+            rusty_tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            task.abort();
+            let _ = task.await;
+            drop(master);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(alive(pid), "an aborted waiter killed {pid}");
+            finish(pid);
+        });
+    }
 
     #[test]
     fn cancelled_reaper_keeps_child_ownership() {

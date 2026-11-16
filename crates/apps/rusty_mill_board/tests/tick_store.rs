@@ -275,6 +275,24 @@ fn a_close_with_a_reason_is_a_won_t_do_task_and_reads_back_from_tags_alone() {
 }
 
 #[test]
+fn evidence_lives_in_the_board_document_and_is_left_out_while_empty() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    assert!(
+        tick.doc("board", card.id)
+            .is_none_or(|d| d.get("evidence").is_none())
+    );
+    let pr = "https://github.com/o/r/pull/7".to_owned();
+    board
+        .add_evidence(card.id, std::slice::from_ref(&pr), &human)
+        .expect("evidence");
+    let doc = tick.doc("board", card.id).expect("doc");
+    assert_eq!(doc["evidence"], json!([pr]));
+    assert_eq!(board.get(card.id).expect("get").evidence, [pr]);
+}
+
+#[test]
 fn an_unreadable_closed_tag_reads_as_won_t_do_at_tick_s_close_time() {
     let (board, tick) = board();
     let human = board.roles().actor("nano", "human").expect("role");
@@ -353,6 +371,34 @@ fn the_default_project_is_the_inbox_and_a_project_is_a_list() {
     assert_eq!(moved.project, "orch");
     assert_ne!(tick.task(card.id)["listId"], inbox);
     assert_eq!(board.get(card.id).expect("get").project, "orch");
+}
+
+#[test]
+fn a_cards_repository_is_kept_in_its_board_document_and_read_back() {
+    let tick = FakeTick::default();
+    let projects = Projects::parse(
+        r#"{"version": 2, "repos": {"mill": {}, "py": {}},
+            "projects": {"tooling": {"repos": {"mill": [".github"], "py": ["ci"]},
+                                     "default_repo": "mill"}}}"#,
+    )
+    .expect("projects");
+    let board = Board::with_clock(TickStore::new(tick.clone()), Roles::default(), clock)
+        .with_projects(projects);
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board
+        .add_in(&human, "tooling", "a", "", vec![])
+        .expect("add");
+    assert_eq!(board.get(card.id).expect("get").repo, None);
+    let moved = board
+        .assign_in(card.id, "tooling", Some("py"), &human)
+        .expect("assign");
+    assert_eq!(moved.repo.as_deref(), Some("py"));
+    assert_eq!(board.get(card.id).expect("get").repo.as_deref(), Some("py"));
+    let back = board
+        .assign_in(card.id, "tooling", None, &human)
+        .expect("assign");
+    assert_eq!(back.repo, None);
+    assert_eq!(board.get(card.id).expect("get").repo, None);
 }
 
 #[test]

@@ -35,5 +35,6 @@ pub use pty::{LinuxPty, LinuxPtyMaster};
 pub use security::{LinuxCredentialStore, LinuxCsprng, LinuxSandbox, LinuxTrustAnchors};
 pub use signals::LinuxSignalSource;
 pub use sys::identity::{account, group_name, groups, user_name, Account};
+pub use sys::pam::Pam;
 pub use term::LinuxTerminal;
 pub use tun::{LinuxTun, LinuxTunDevice};

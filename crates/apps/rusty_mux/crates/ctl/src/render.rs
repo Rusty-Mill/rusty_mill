@@ -285,6 +285,13 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
             ],
         ),
         E::ConfigReloaded => ("config-reloaded", vec![]),
+        E::TailscaleStatusChanged { state, ref node } => (
+            "tailscale-status-changed",
+            vec![
+                ("state", Text(state.name().to_owned())),
+                ("node", node.clone().map_or(Field::Absent, Text)),
+            ],
+        ),
         E::FocusChanged { window, block } => (
             "focus-changed",
             vec![
@@ -681,6 +688,10 @@ mod tests {
                 id: "build".into(),
             },
             Event::ConfigReloaded,
+            Event::TailscaleStatusChanged {
+                state: rusty_mux_core::TailscaleState::Running,
+                node: Some("box.t.ts.net".into()),
+            },
         ];
         // The server's kinds, then ctl's own `hosts-changed`, which no
         // server sends.

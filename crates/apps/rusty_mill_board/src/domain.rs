@@ -118,15 +118,21 @@ pub enum Capability {
     /// outside the board's flow (the PR was reviewed and merged on the forge).
     /// Also archives and restores Done cards.
     Close,
+    /// `Close`, narrowed: record as Done a card whose work already merged, but only when the
+    /// card carries a GitHub pull request link as evidence. Never archives or restores.
+    Record,
     /// Add a project (never change or remove one).
     Project,
     /// Change the board's settings: agents and their credentials, repositories, projects, roles.
     Admin,
+    /// Mint credentials for itself (`agent_enrol`): at most [`crate::identities::MAX_CHILDREN`],
+    /// never wider than the minter's own role and projects, and never `enrol` or `admin`.
+    Enrol,
 }
 
 impl Capability {
     /// Every capability, in display order.
-    pub const ALL: [Capability; 10] = [
+    pub const ALL: [Capability; 12] = [
         Capability::Triage,
         Capability::Plan,
         Capability::Architect,
@@ -135,8 +141,10 @@ impl Capability {
         Capability::Review,
         Capability::Merge,
         Capability::Close,
+        Capability::Record,
         Capability::Project,
         Capability::Admin,
+        Capability::Enrol,
     ];
 
     /// What holding this lets a role do, for the settings view.
@@ -154,8 +162,14 @@ impl Capability {
             Capability::Close => {
                 "Move Building or QA cards whose PR already merged straight to Done, and archive or restore Done cards."
             }
+            Capability::Record => {
+                "Like Close for recording merged work, but only on a card with a GitHub pull request link as evidence. Cannot archive or restore."
+            }
             Capability::Project => "Add a project (never change or remove one).",
             Capability::Admin => "Change these settings: agents, projects, roles, GitHub, apps.",
+            Capability::Enrol => {
+                "Mint credentials for its own workers: no wider than its own role and projects."
+            }
         }
     }
 }
@@ -385,6 +399,64 @@ pub struct Comment {
     pub text: String,
 }
 
+/// Most evidence links a card keeps.
+pub const MAX_EVIDENCE: usize = 8;
+/// Longest evidence link, in bytes.
+pub const MAX_EVIDENCE_BYTES: usize = 512;
+
+/// Whether `link` is a plausible evidence link: `http://` or `https://` (any case) and a host,
+/// printable ASCII only (no spaces, control or invisible format characters; a non-ASCII
+/// address is given percent-encoded), at most [`MAX_EVIDENCE_BYTES`].
+fn evidence_link_ok(link: &str) -> bool {
+    if link.len() > MAX_EVIDENCE_BYTES || !link.bytes().all(|b| b.is_ascii_graphic()) {
+        return false;
+    }
+    let Some((scheme, rest)) = link.split_once("://") else {
+        return false;
+    };
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        && !host.is_empty()
+        && !host.starts_with(':')
+}
+
+/// Whether `link` names a GitHub pull request: `https://github.com/<owner>/<repo>/pull/<n>`,
+/// with `<n>` a positive number without leading zeros, optionally followed by one of `/files`,
+/// `/commits` or `/checks`, then a query or fragment. Anything else after the number, or a `.`
+/// or `..` segment, is refused, so the link cannot be walked to another page. A shape check
+/// only; it does not ask GitHub whether the pull request merged.
+pub fn is_pull_link(link: &str) -> bool {
+    let Some(rest) = link.strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let path = rest.split(['?', '#']).next().unwrap_or_default();
+    let plain = |s: &str| {
+        s != "."
+            && s != ".."
+            && !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    };
+    let number =
+        |n: &str| !n.starts_with('0') && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+    let mut seg = path.split('/');
+    let head = (seg.next(), seg.next(), seg.next(), seg.next());
+    let tail = seg.next();
+    let more = seg.next().is_some();
+    matches!(
+        head,
+        (Some(owner), Some(repo), Some("pull"), Some(n))
+            if plain(owner) && plain(repo) && number(n)
+    ) && !more
+        && matches!(tail, None | Some("files" | "commits" | "checks"))
+}
+
 /// Where a project stands. Absent means [`ProjectStatus::Active`].
 #[derive(
     Debug,
@@ -513,6 +585,10 @@ pub struct Card {
     /// The project (application) this card belongs to; see `projects`.
     #[serde(default = "default_project")]
     pub project: String,
+    /// The repository its work is in, when its project spans several and the card is not in
+    /// the project's `default_repo`; always one of the project's repositories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     /// Discussion, oldest first.
     pub comments: Vec<Comment>,
     /// Higher is taken first within a queue; one of [`PRIORITIES`].
@@ -567,6 +643,10 @@ pub struct Card {
     /// `done_ms`, and counts as dropped, never shipped. `None` for open and shipped cards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed: Option<Closure>,
+    /// Links showing the work shipped: a merged PR, or any page that shows it ([`Card::add_evidence`]).
+    /// A Done card counts as shipped only with one; without, it reports as a prototype.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
     /// When the card was archived, Unix ms: a Done card set aside from the board's default
     /// views. It is still Done, so roadmap, metrics and dependencies count it as before.
     #[serde(default)]
@@ -710,6 +790,8 @@ pub enum BoardError {
     },
     /// The actor lacks the capability for this move.
     Forbidden(Capability),
+    /// The actor holds none of these capabilities, any one of which would do.
+    ForbiddenAny(&'static [Capability]),
     /// Someone else holds the claim.
     Claimed(String),
     /// Claim needed to move out of a working column.
@@ -743,6 +825,7 @@ impl fmt::Display for BoardError {
             Self::Terminal => write!(f, "done cards cannot move"),
             Self::NoSuchMove { from, to } => write!(f, "no move {from} -> {to}"),
             Self::Forbidden(c) => write!(f, "requires capability {c:?}"),
+            Self::ForbiddenAny(cs) => write!(f, "requires one of the capabilities {cs:?}"),
             Self::Claimed(by) => write!(f, "claimed by {by}"),
             Self::NotClaimant => write!(f, "only the claim holder may move this card"),
             Self::Conflict => write!(f, "card changed concurrently; retry"),
@@ -773,7 +856,7 @@ pub enum EventKind {
     Claimed,
     /// Claim dropped.
     Released,
-    /// Title/body/tags edited.
+    /// Title, body, tags, prompt or evidence edited.
     Edited,
     /// Comment added.
     Commented,
@@ -899,6 +982,7 @@ impl Card {
             claim: None,
             tags,
             project: default_project(),
+            repo: None,
             comments: Vec::new(),
             priority: 0,
             deps: Vec::new(),
@@ -915,6 +999,7 @@ impl Card {
             updated_ms: now_ms,
             done_ms: None,
             closed: None,
+            evidence: Vec::new(),
             archived_ms: None,
             restored_ms: None,
             target_ms: None,
@@ -954,11 +1039,13 @@ impl Card {
         }
     }
 
-    /// Move the card to `project`, dropping any claim (the claimant may not be in scope there).
-    /// Only the project changes: the column stays, so a Done card is re-filed, never reopened.
-    pub fn assign(&self, project: &str, now_ms: i64) -> Self {
+    /// Move the card to `project` (and `repo` of it, if it spans several), dropping any claim
+    /// (the claimant may not be in scope there). Only the project and repository change: the
+    /// column stays, so a Done card is re-filed, never reopened.
+    pub fn assign(&self, project: &str, repo: Option<&str>, now_ms: i64) -> Self {
         Self {
             project: project.to_owned(),
+            repo: repo.map(str::to_owned),
             claim: None,
             ..self.next(now_ms)
         }
@@ -995,6 +1082,28 @@ impl Card {
         }
     }
 
+    /// Whether the card carries a GitHub pull request link as evidence.
+    pub fn has_pull_evidence(&self) -> bool {
+        self.evidence.iter().any(|l| is_pull_link(l))
+    }
+
+    /// `by`, counted as holding `Close` for a move to Done when it holds `Record` (and not
+    /// `Close`), this card carries a pull request link, and the card is in a work column:
+    /// recording merged work, narrowed. The flag says that this happened.
+    fn recorder<'a>(&self, flow: &Workflow, by: &'a Actor, to: &Column) -> (Cow<'a, Actor>, bool) {
+        let applies = *to == Column::DONE
+            && by.caps.contains(&Capability::Record)
+            && !by.caps.contains(&Capability::Close)
+            && flow.kind(&self.column) == Some(Kind::Work)
+            && self.has_pull_evidence();
+        if !applies {
+            return (Cow::Borrowed(by), false);
+        }
+        let mut closer = by.clone();
+        closer.caps.insert(Capability::Close);
+        (Cow::Owned(closer), true)
+    }
+
     /// Move to `to` along `flow`. The claim is cleared on arrival, so the next stage's
     /// worker claims it afresh. Leaving a worked column ([`Kind::Work`]) requires holding
     /// the claim, unless the actor holds `Triage` (the human override).
@@ -1009,6 +1118,8 @@ impl Card {
         by: &Actor,
         now_ms: i64,
     ) -> Result<Self, BoardError> {
+        let (by, _) = self.recorder(flow, by, to);
+        let by = &*by;
         if let Some(ts) = flow.transition(&self.column, to)? {
             check_any(&ts, by)?;
         }
@@ -1052,6 +1163,12 @@ impl Card {
         }
         if by.caps.is_empty() {
             return Err(BoardError::Invalid("moving a card needs some capability"));
+        }
+        let (by, recording) = self.recorder(flow, by, to);
+        let by = &*by;
+        // Recording merged work is the claim holder's move, even with the rules off.
+        if recording && self.claim.as_deref() != Some(&by.name) {
+            return Err(BoardError::NotClaimant);
         }
         // Gates hold with the rules off. A listed move with a gated way of making it needs one
         // of its ways (a gated merge, or the `close` beside it); a move that jumps over a gate
@@ -1112,6 +1229,55 @@ impl Card {
                 reason,
                 at_ms: now_ms,
             }),
+            ..self.next(now_ms)
+        })
+    }
+
+    /// Whether the card shipped: Done as shipped work ([`Card::done_ms`]) with evidence.
+    pub fn shipped(&self) -> bool {
+        self.done_ms.is_some() && !self.evidence.is_empty()
+    }
+
+    /// Whether the card is Done as shipped work but has no evidence: a prototype.
+    pub fn prototype(&self) -> bool {
+        self.done_ms.is_some() && self.evidence.is_empty()
+    }
+
+    /// Add evidence links (`http(s)://`, at most [`MAX_EVIDENCE_BYTES`] each, no whitespace),
+    /// keeping those already there. Unchanged if every link is already recorded.
+    ///
+    /// # Errors
+    /// [`BoardError::Invalid`] for no links, a malformed link, or more than [`MAX_EVIDENCE`] in all.
+    pub fn add_evidence(&self, links: &[String], now_ms: i64) -> Result<Self, BoardError> {
+        if links.is_empty() {
+            return Err(BoardError::Invalid("give at least one evidence link"));
+        }
+        if self.closed.is_some() {
+            return Err(BoardError::Invalid(
+                "a dropped card shipped nothing, so it takes no evidence",
+            ));
+        }
+        let mut all = self.evidence.clone();
+        for raw in links {
+            let link = raw.trim();
+            if !evidence_link_ok(link) {
+                return Err(BoardError::Invalid(
+                    "an evidence link is an http(s) URL with a host, of at most 512 printable \
+                     ASCII bytes",
+                ));
+            }
+            if !all.iter().any(|l| l == link) {
+                all.push(link.to_owned());
+            }
+        }
+        if all.len() > MAX_EVIDENCE {
+            return Err(BoardError::Invalid("a card keeps at most 8 evidence links"));
+        }
+        if all == self.evidence {
+            return Ok(self.clone());
+        }
+        Ok(Self {
+            evidence: all,
             ..self.next(now_ms)
         })
     }
@@ -1491,6 +1657,89 @@ mod tests {
     }
 
     #[test]
+    fn evidence_makes_a_done_card_shipped_and_without_it_a_prototype() {
+        let human = actor("nano", &[Capability::Triage, Capability::Merge]);
+        let done = card()
+            .move_freely(&flow(), &Column::DONE, &human, 7)
+            .expect("done");
+        assert!(done.prototype() && !done.shipped());
+        let pr = "https://github.com/o/r/pull/1".to_owned();
+        let shipped = done
+            .add_evidence(&[pr.clone(), format!(" {pr} ")], 8)
+            .expect("add");
+        assert_eq!(shipped.evidence, std::slice::from_ref(&pr));
+        assert!(shipped.shipped() && !shipped.prototype());
+        assert_eq!(
+            shipped.add_evidence(&[pr], 9).expect("same"),
+            shipped,
+            "idempotent"
+        );
+        let open = card()
+            .add_evidence(&["https://x.test/a".into()], 1)
+            .expect("open");
+        assert!(
+            !open.shipped() && !open.prototype(),
+            "evidence alone ships nothing"
+        );
+        let dropped = card()
+            .close(&flow(), CloseReason::WontDo, &human, 2)
+            .expect("close");
+        assert!(!dropped.prototype(), "dropped is neither");
+    }
+
+    #[test]
+    fn bad_or_too_many_evidence_links_are_refused() {
+        for bad in [
+            "",
+            "ftp://x",
+            "https://a b",
+            "https://",
+            "https:///path",
+            "https://user@/x",
+            "https://:443/x",
+            "https://x.test/\u{0}",
+            "https://x.test/a\u{200B}b",
+            "javascript://x.test/%0Aalert(1)x",
+            &format!("https://{}", "x".repeat(MAX_EVIDENCE_BYTES - 7)),
+        ] {
+            assert!(
+                matches!(
+                    card().add_evidence(&[bad.to_owned()], 1),
+                    Err(BoardError::Invalid(_))
+                ),
+                "{bad:?}"
+            );
+        }
+        for good in [
+            "HTTPS://X.test/pull/1",
+            "http://x.test",
+            "https://x.test?q=1",
+            "https://user@x.test:8443/p#f",
+            &format!("https://{}", "x".repeat(MAX_EVIDENCE_BYTES - 8)),
+        ] {
+            assert!(
+                card().add_evidence(&[good.to_owned()], 1).is_ok(),
+                "{good:?}"
+            );
+        }
+        let dropped = Card {
+            closed: Some(Closure {
+                reason: CloseReason::WontDo,
+                at_ms: 1,
+            }),
+            ..card()
+        };
+        assert!(
+            dropped.add_evidence(&["https://x.test".into()], 2).is_err(),
+            "a dropped card takes no evidence"
+        );
+        assert!(card().add_evidence(&[], 1).is_err());
+        let nine: Vec<String> = (0..9).map(|i| format!("https://x.test/{i}")).collect();
+        assert!(card().add_evidence(&nine, 1).is_err());
+        assert!(card().add_evidence(&nine[..8], 1).is_ok());
+    }
+
+    #[test]
     fn close_reasons_round_trip_their_names_and_closed_tags_are_reserved() {
         for r in CloseReason::ALL {
             assert_eq!(CloseReason::parse(r.as_str()), Some(r));
@@ -1616,6 +1865,129 @@ mod tests {
         );
         assert_eq!(c.release(&other, 2), Err(BoardError::Claimed("dev".into())));
         assert!(c.release(&dev, 2).expect("release").claim.is_none());
+    }
+
+    #[test]
+    fn only_a_github_pull_request_link_counts_as_pull_evidence() {
+        for ok in [
+            "https://github.com/Rusty-Mill/rusty_mill/pull/1648",
+            "https://github.com/a/b/pull/1/files",
+            "https://github.com/a/b/pull/1/commits?x=1",
+            "https://github.com/a/b/pull/1/checks",
+            "https://github.com/a.b/c_d/pull/7#issuecomment-1",
+            "https://github.com/a/b/pull/7?diff=split",
+        ] {
+            assert!(is_pull_link(ok), "{ok}");
+        }
+        for bad in [
+            "https://github.com/a/b/issues/1",
+            "https://github.com/a/b/pull/",
+            "https://github.com/a/b/pull/x1",
+            "https://github.com/a/b/pull/0",
+            "https://github.com/a/b/pull/007",
+            "https://github.com/a/b/pull/1/../../issues/5",
+            "https://github.com/a/b/pull/1/issues/5",
+            "https://github.com/a/b/pull/1/files/extra",
+            "https://github.com/./b/pull/1",
+            "https://github.com/a/../pull/1",
+            "https://github.com.evil.example/a/b/pull/1",
+            "https://evil.example/https://github.com/a/b/pull/1",
+            "http://github.com/a/b/pull/1",
+            "https://github.com/a/b",
+            "",
+        ] {
+            assert!(!is_pull_link(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn record_moves_to_done_only_with_a_pull_request_link() {
+        let rec = actor("rec", &[Capability::Build, Capability::Record]);
+        let pr = vec!["https://github.com/a/b/pull/9".to_owned()];
+        for from in [Column::BUILDING, Column::QA] {
+            let mut c = card();
+            c.column = from;
+            let c = c.claim(&rec, 1).expect("claim");
+            assert_eq!(
+                c.move_to(&flow(), &Column::DONE, &rec, 2),
+                Err(BoardError::Forbidden(Capability::Close)),
+                "no evidence"
+            );
+            let issue = c
+                .add_evidence(&["https://github.com/a/b/issues/9".to_owned()], 2)
+                .expect("evidence");
+            assert_eq!(
+                issue.move_to(&flow(), &Column::DONE, &rec, 3),
+                Err(BoardError::Forbidden(Capability::Close)),
+                "an issue link is not a pull request"
+            );
+            let with_pr = c.add_evidence(&pr, 2).expect("evidence");
+            assert_eq!(
+                with_pr
+                    .move_to(&flow(), &Column::DONE, &rec, 3)
+                    .expect("record")
+                    .column,
+                Column::DONE
+            );
+            assert_eq!(
+                with_pr
+                    .move_freely(&flow(), &Column::DONE, &rec, 3)
+                    .expect("record with the rules off")
+                    .column,
+                Column::DONE
+            );
+            let bystander = actor("x", &[Capability::Build]);
+            assert_eq!(
+                with_pr.move_to(&flow(), &Column::DONE, &bystander, 3),
+                Err(BoardError::Forbidden(Capability::Close)),
+                "the link alone grants nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn record_needs_a_work_column_and_the_claim() {
+        let rec = actor("rec", &[Capability::Build, Capability::Record]);
+        let other = actor("other", &[Capability::Build]);
+        let pr = vec!["https://github.com/a/b/pull/9".to_owned()];
+        // An admin-edited workflow that lists `close` on moves out of queue and blocked columns.
+        let mut raw = serde_json::to_value(flow()).expect("serialize");
+        for from in ["backlog", "ready", "blocked"] {
+            raw["transitions"]
+                .as_array_mut()
+                .expect("transitions")
+                .push(serde_json::json!({"from": from, "to": "done", "cap": "close"}));
+        }
+        let wide: Workflow = serde_json::from_value(raw).expect("workflow");
+        for from in [Column::BACKLOG, Column::READY, Column::BLOCKED] {
+            let mut c = card();
+            c.column = from;
+            let c = c.add_evidence(&pr, 1).expect("evidence");
+            assert_eq!(
+                c.move_to(&wide, &Column::DONE, &rec, 2),
+                Err(BoardError::Forbidden(Capability::Close)),
+                "record never closes a card outside a work column"
+            );
+        }
+        let mut c = card();
+        c.column = Column::BUILDING;
+        let held = c
+            .claim(&other, 1)
+            .expect("claim")
+            .add_evidence(&pr, 1)
+            .expect("evidence");
+        for rules_on in [true, false] {
+            let moved = if rules_on {
+                held.move_to(&flow(), &Column::DONE, &rec, 2)
+            } else {
+                held.move_freely(&flow(), &Column::DONE, &rec, 2)
+            };
+            assert_eq!(
+                moved,
+                Err(BoardError::NotClaimant),
+                "rules on: {rules_on}; another agent's claimed card"
+            );
+        }
     }
 
     #[test]

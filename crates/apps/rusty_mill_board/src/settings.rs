@@ -4,7 +4,9 @@
 //! server was pointed at (`--settings-dir`, or one flag per file). A change is validated, written
 //! atomically (secrets owner-only), and only then applied to the running board, so the UI and the
 //! files never disagree and every file stays human-readable. Each operation needs the `Admin`
-//! capability. They are not MCP tools: a model should not mint credentials.
+//! capability. They are not MCP tools: a model should not mint credentials. The one exception is
+//! `agent_enrol` (and `agent_enrol_revoke`), over `/api` only: it needs `Enrol`, mints only within
+//! the caller's own role and projects, and only for itself (`lead.label`, at most 8).
 //!
 //! Apps signed in through OAuth are listed and revoked here too; their grants live in OAuth's own
 //! state file. Nothing here ever returns a token except the one it just made, once.
@@ -19,6 +21,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
+use crate::agents::Grant;
 use crate::api::{CallError, Identity, Shared, Who, acting};
 use crate::board::{ProjectsSink, Roles};
 use crate::domain::{Actor, BoardError, Capability, MoveRules, ProjectStatus};
@@ -50,6 +53,8 @@ pub struct Files {
     pub workflow: Option<PathBuf>,
     /// Each project's status (active unless listed).
     pub project_status: Option<PathBuf>,
+    /// The append-only record of settings calls (one JSON object a line, never a secret).
+    pub audit: Option<PathBuf>,
 }
 
 impl Files {
@@ -63,6 +68,7 @@ impl Files {
             rules: Some(dir.join("rules.json")),
             workflow: Some(dir.join("workflow.json")),
             project_status: Some(dir.join("project-status.json")),
+            audit: Some(dir.join("settings-audit.jsonl")),
         }
     }
 }
@@ -287,6 +293,47 @@ struct AgentName {
     name: String,
 }
 
+/// `agent_enrol`: `agent_role` and `agent_projects`, because `role` already names the caller's.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Enrol {
+    label: String,
+    agent_role: String,
+    agent_projects: Option<Vec<String>>,
+    // The caller's own `actor` and `role` (see `Who`), read by `acting`; refused if they differ.
+    #[serde(rename = "actor")]
+    _actor: Option<String>,
+    #[serde(rename = "role")]
+    _role: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnrolLabel {
+    label: String,
+    #[serde(rename = "actor")]
+    _actor: Option<String>,
+    #[serde(rename = "role")]
+    _role: Option<String>,
+}
+
+/// A registered agent's own role, projects and nickname; anything left out is cleared (the agent
+/// acts as its connector again, with no nickname).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisteredAgentSet {
+    id: String,
+    agent_role: Option<String>,
+    agent_projects: Option<Vec<String>>,
+    nickname: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisteredAgentId {
+    id: String,
+}
+
 #[derive(Deserialize)]
 struct AppId {
     client_id: String,
@@ -294,7 +341,12 @@ struct AppId {
 
 #[derive(Deserialize)]
 struct ProjectsSet {
-    repos: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    /// The older listing: repository -> project -> paths (one repository per project).
+    #[serde(default)]
+    repos: Option<BTreeMap<String, BTreeMap<String, Vec<String>>>>,
+    /// The version 2 registry (see `Projects::parse`): repositories and spanning projects.
+    #[serde(default)]
+    registry: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -334,6 +386,138 @@ struct GithubSet {
 }
 
 type Res = Result<Value, BoardError>;
+
+/// A settings operation offered as an MCP tool.
+pub struct SettingsTool {
+    /// Tool name, the same as the `/api` operation.
+    pub name: &'static str,
+    /// Shown to agents.
+    pub description: &'static str,
+    /// JSON Schema of the arguments.
+    pub schema: Value,
+}
+
+/// The settings operations an agent may call over MCP: every one except those that hand out or
+/// take in a secret (`settings_agent_add`, `settings_agent_rotate` return a raw token;
+/// `settings_github_set` takes one), which stay HTTP-only, a person's act in Settings. Each needs
+/// the `admin` capability, and what it may grant is limited by the subset rule.
+pub fn tools() -> Vec<SettingsTool> {
+    let list = |item: Value| json!({"type": "array", "items": item});
+    let text = json!({"type": "string"});
+    let tool = |name, description, props: Value, required: &[&str]| {
+        let mut properties = crate::api::who_properties();
+        if let (Some(all), Some(mine)) = (properties.as_object_mut(), props.as_object()) {
+            all.extend(mine.clone());
+        }
+        SettingsTool {
+            name,
+            description,
+            schema: json!({"type": "object", "properties": properties, "required": required}),
+        }
+    };
+    vec![
+        tool(
+            "settings_get",
+            "Everything configurable (needs admin): agents, projects and repositories (`registry`), roles and capabilities, workflow, rules, project statuses, registered agents and files. Never a secret.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "settings_audit",
+            "Recent settings calls (needs admin), oldest first: who, operation, result (ok, refused, denied, failed) and why; never arguments.",
+            json!({"limit": {"type": "integer", "description": "How many of the newest records (1-500, default 50)."}}),
+            &[],
+        ),
+        tool(
+            "settings_registered_agent_set",
+            "Set a registered agent's own role, projects and nickname (needs admin). Anything left out is cleared, so it acts as its connector again. You can only give a role, capabilities and projects you hold; admin and enrol are never granted through a connector.",
+            json!({"id": text, "agent_role": text, "agent_projects": list(text.clone()), "nickname": text}),
+            &["id"],
+        ),
+        tool(
+            "settings_registered_agent_revoke",
+            "Forget a registered agent (needs admin): its key stops working at once; it can register again.",
+            json!({"id": text}),
+            &["id"],
+        ),
+        tool(
+            "settings_agent_update",
+            "Change a token credential's role or project limit (needs admin): `{agent: {name, role?, projects?}}`; `projects: null` lifts the limit. You can only give what you hold.",
+            json!({"agent": {"type": "object"}}),
+            &["agent"],
+        ),
+        tool(
+            "settings_agent_remove",
+            "Remove a token credential (needs admin): `{name}`. The last admin cannot be removed.",
+            json!({"name": text}),
+            &["name"],
+        ),
+        tool(
+            "settings_projects_set",
+            "Replace the projects registry (needs admin): either `repos` (repository -> project -> paths) or `registry` (the version 2 file: repositories with an optional `github` slug and projects spanning repositories). A project that cards still use cannot lose the repository they are in.",
+            json!({"repos": {"type": "object"}, "registry": {"type": "object"}}),
+            &[],
+        ),
+        tool(
+            "settings_roles_set",
+            "Replace the roles (needs admin): `{roles: {name: [capabilities]}}`. You can only add capabilities you hold; admin and enrol are never granted through a connector.",
+            json!({"roles": {"type": "object"}}),
+            &["roles"],
+        ),
+        tool(
+            "settings_role_rename",
+            "Rename a role, agents included (needs admin).",
+            json!({"from": text, "to": text}),
+            &["from", "to"],
+        ),
+        tool(
+            "settings_rules_set",
+            "Whether card moves follow the transition table (needs admin): `movement` is `enforced` or `open`.",
+            json!({"movement": {"type": "string", "enum": ["enforced", "open"]}}),
+            &["movement"],
+        ),
+        tool(
+            "settings_project_status_set",
+            "Set a project's status (needs admin), such as active or paused.",
+            json!({"project": text, "status": text}),
+            &["project", "status"],
+        ),
+        tool(
+            "settings_workflow_set",
+            "Replace the workflow, its columns and moves (needs admin): `{workflow}` as `board_columns` shows it.",
+            json!({"workflow": {"type": "object"}}),
+            &["workflow"],
+        ),
+        tool(
+            "settings_app_revoke",
+            "Sign an app out (needs admin): drop its registration and every token it holds.",
+            json!({"client_id": text}),
+            &["client_id"],
+        ),
+    ]
+}
+
+/// Who is changing settings: their authority, and whether they came through a shared connector.
+struct Caller {
+    actor: Actor,
+    via_connector: bool,
+}
+
+#[derive(Deserialize)]
+struct AuditRead {
+    /// How many of the newest records (1-500, default 50).
+    limit: Option<usize>,
+}
+
+/// Append `line` and a newline to `path`, creating it owner-only.
+fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    writeln!(options.open(path)?, "{line}")
+}
 
 fn refused(why: impl Into<String>) -> BoardError {
     BoardError::Refused(why.into())
@@ -401,52 +585,279 @@ impl Settings {
         identity: Option<&Identity>,
         args: Value,
     ) -> Option<Result<Value, CallError>> {
-        let run: fn(&Self, &Actor, Value) -> Res = match name {
+        if matches!(name, "agent_enrol" | "agent_enrol_revoke") {
+            return Some(self.enrolling(name, identity, args));
+        }
+        let run: fn(&Self, &Caller, Value) -> Res = match name {
             "settings_get" => |s, _, _| s.get(),
-            "settings_agent_add" => |s, _, a| s.agent_add(&parse::<WithAgent<AgentAdd>>(a)?.agent),
+            "settings_audit" => |s, _, a| s.audit_read(&parse(a)?),
+            "settings_agent_add" => {
+                |s, by, a| s.agent_add(by, &parse::<WithAgent<AgentAdd>>(a)?.agent)
+            }
             "settings_agent_update" => {
-                |s, _, a| s.agent_update(&parse::<WithAgent<AgentUpdate>>(a)?.agent)
+                |s, by, a| s.agent_update(by, &parse::<WithAgent<AgentUpdate>>(a)?.agent)
             }
             "settings_agent_remove" => |s, _, a| s.agent_remove(&parse(a)?),
-            "settings_agent_rotate" => |s, _, a| s.agent_rotate(&parse(a)?),
+            "settings_agent_rotate" => |s, by, a| s.agent_rotate(by, &parse(a)?),
             "settings_projects_set" => |s, _, a| s.projects_set(&parse(a)?),
-            "settings_roles_set" => |s, _, a| s.roles_set(&parse(a)?),
+            "settings_roles_set" => |s, by, a| s.roles_set(by, &parse(a)?),
             "settings_role_rename" => |s, _, a| s.role_rename(&parse(a)?),
             "settings_github_set" => |s, _, a| s.github_set(&parse(a)?),
             "settings_github_clear" => |s, _, _| s.github_clear(),
-            "settings_rules_set" => |s, by, a| s.rules_set(by, &parse(a)?),
-            "settings_project_status_set" => |s, by, a| s.project_status_set(by, &parse(a)?),
+            "settings_rules_set" => |s, by, a| s.rules_set(&by.actor, &parse(a)?),
+            "settings_project_status_set" => |s, by, a| s.project_status_set(&by.actor, &parse(a)?),
             "settings_workflow_set" => {
-                |s, by, a| s.workflow_set(by, parse::<WorkflowSet>(a)?.workflow)
+                |s, by, a| s.workflow_set(&by.actor, parse::<WorkflowSet>(a)?.workflow)
             }
+            "settings_registered_agent_set" => |s, by, a| s.registered_agent_set(by, &parse(a)?),
+            "settings_registered_agent_revoke" => |s, _, a| s.registered_agent_revoke(&parse(a)?),
             "settings_app_revoke" => |s, _, a| s.app_revoke(&parse(a)?),
             _ => return None,
         };
-        Some(self.admin(identity, args, run))
+        Some(self.admin(name, identity, args, run))
+    }
+
+    /// `agent_enrol` and `agent_enrol_revoke`: not admin settings, but gated by `Enrol` and bound
+    /// to the caller's own credential, which becomes the lead of whatever it mints.
+    fn enrolling(
+        &self,
+        name: &str,
+        identity: Option<&Identity>,
+        args: Value,
+    ) -> Result<Value, CallError> {
+        let Some(lead) = identity else {
+            return Err(refused("this needs an authenticated credential").into());
+        };
+        let who: Who =
+            serde_json::from_value(args.clone()).map_err(|e| CallError::BadArgs(e.to_string()))?;
+        let actor = acting(&self.board, identity, &who)?;
+        if !actor.caps.contains(&Capability::Enrol) {
+            return Err(BoardError::Forbidden(Capability::Enrol).into());
+        }
+        let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
+        let out = if name == "agent_enrol" {
+            self.enrol(&actor, &lead.actor, &parse(args)?)
+        } else {
+            self.enrol_revoke(&lead.actor, &parse(args)?)
+        };
+        out.map_err(CallError::Board)
+    }
+
+    /// Mint `lead.label` for the caller, no wider than the caller: a role whose capabilities are
+    /// a subset of the caller's and never `Enrol` or `Admin`, and projects within the caller's.
+    fn enrol(&self, caller: &Actor, lead: &str, a: &Enrol) -> Res {
+        let roles = self.board.roles();
+        let caps = roles
+            .0
+            .get(&a.agent_role)
+            .ok_or_else(|| refused(format!("there is no role {:?}", a.agent_role)))?;
+        if caps.contains(&Capability::Enrol) || caps.contains(&Capability::Admin) {
+            return Err(refused("a minted agent cannot hold enrol or admin"));
+        }
+        if let Some(extra) = caps.iter().find(|c| !caller.caps.contains(c)) {
+            return Err(refused(format!(
+                "you do not hold {extra:?}, so you cannot mint it"
+            )));
+        }
+        let projects = match (&caller.projects, &a.agent_projects) {
+            (Some(_), None) => {
+                return Err(refused(
+                    "you are limited to some projects: name agent_projects",
+                ));
+            }
+            (Some(own), Some(asked)) => {
+                if let Some(p) = asked.iter().find(|p| !own.contains(*p)) {
+                    return Err(refused(format!("you do not work in project {p:?}")));
+                }
+                a.agent_projects.clone()
+            }
+            (None, _) => a.agent_projects.clone(),
+        };
+        self.check_grant(&a.agent_role, projects.as_deref())?;
+        let token = self.change_creds(|c| {
+            c.add_child(lead, &a.label, a.agent_role.clone(), projects.clone())
+        })?;
+        rusty_log::warn!(lead = %lead, label = %a.label, role = %a.agent_role, projects = ?projects, "agent minted");
+        Ok(json!({ "token": token, "agent": format!("{lead}.{}", a.label) }))
+    }
+
+    /// Remove minted agents that no longer fit under their lead (after a lead or roles change).
+    fn prune_minted(&self) -> Result<Vec<String>, BoardError> {
+        let roles = self.board.roles();
+        let due = self.creds.as_ref().is_some_and(|c| {
+            !c.read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .exceeding(&roles)
+                .is_empty()
+        });
+        if !due {
+            return Ok(Vec::new());
+        }
+        let gone = self.change_creds(|c| Ok(c.prune_children(&roles)))?;
+        rusty_log::warn!(removed = ?gone, "minted agents removed: they exceeded their lead");
+        Ok(gone)
+    }
+
+    /// Remove one agent the caller minted, and nothing else.
+    fn enrol_revoke(&self, lead: &str, a: &EnrolLabel) -> Res {
+        let child = format!("{lead}.{}", a.label);
+        self.change_creds(|c| match c.parent_of(&child) {
+            Some(p) if p == lead => c.remove(&child),
+            _ => Err(format!("you did not mint {child:?}")),
+        })?;
+        rusty_log::warn!(lead = %lead, agent = %child, "minted agent revoked");
+        Ok(json!({ "ok": true }))
     }
 
     fn admin(
         &self,
+        op: &str,
         identity: Option<&Identity>,
         args: Value,
-        run: fn(&Self, &Actor, Value) -> Res,
+        run: fn(&Self, &Caller, Value) -> Res,
     ) -> Result<Value, CallError> {
         let who: Who =
             serde_json::from_value(args.clone()).map_err(|e| CallError::BadArgs(e.to_string()))?;
         let actor = acting(&self.board, identity, &who)?;
-        if !actor.caps.contains(&Capability::Admin) {
-            return Err(BoardError::Forbidden(Capability::Admin).into());
+        let caller = Caller {
+            actor,
+            via_connector: identity.is_some_and(|i| i.connector),
+        };
+        let op = op.to_owned();
+        if !caller.actor.caps.contains(&Capability::Admin) {
+            let denied = BoardError::Forbidden(Capability::Admin);
+            self.audit(&caller, &op, Err(&denied));
+            return Err(denied.into());
+        }
+        // The connector's registration proof is not an argument of the operation.
+        let mut args = args;
+        if let Some(m) = args.as_object_mut() {
+            m.remove("agent_id");
+            m.remove("agent_key");
         }
         let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
-        run(self, &actor, args).map_err(CallError::Board)
+        let out = run(self, &caller, args);
+        self.audit(&caller, &op, out.as_ref().map(|_| ()));
+        out.map_err(CallError::Board)
+    }
+
+    /// Record one settings call: who, which operation, how it ended. Never its arguments, which
+    /// may hold secrets. A record that cannot be written is logged, not hidden.
+    fn audit(&self, by: &Caller, op: &str, outcome: Result<(), &BoardError>) {
+        let (result, why) = match outcome {
+            Ok(()) => ("ok", None),
+            Err(
+                e @ (BoardError::Forbidden(_)
+                | BoardError::ForbiddenAny(_)
+                | BoardError::OutOfScope(_)),
+            ) => ("denied", Some(e.to_string())),
+            Err(e @ BoardError::Refused(_)) => ("refused", Some(e.to_string())),
+            Err(e) => ("failed", Some(e.to_string())),
+        };
+        let line = json!({
+            "at_ms": self.board.now_ms(),
+            "actor": by.actor.name,
+            "via_connector": by.via_connector,
+            "op": op,
+            "result": result,
+            "why": why,
+        });
+        rusty_log::warn!(actor = %by.actor.name, op = %op, result = result, "settings call");
+        let Some(path) = &self.files.audit else {
+            return;
+        };
+        if let Err(e) = append_line(path, &line.to_string()) {
+            rusty_log::warn!(error = %e, "could not write the settings audit record");
+        }
+    }
+
+    /// The newest `limit` audit records, oldest first.
+    fn audit_read(&self, a: &AuditRead) -> Res {
+        let path = self.file(&self.files.audit)?;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(refused(format!("{}: {e}", path.display()))),
+        };
+        let limit = a.limit.unwrap_or(50).clamp(1, 500);
+        let mut records: Vec<Value> = text
+            .lines()
+            .rev()
+            .take(limit)
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        records.reverse();
+        Ok(json!({ "records": records }))
+    }
+
+    /// What `by` may hand out: only capabilities and projects it holds itself, so no actor can
+    /// raise itself, directly or through another agent; and `admin` or `enrol` only from a
+    /// person's own token in Settings, never through a shared connector.
+    fn may_grant(
+        &self,
+        by: &Caller,
+        role: Option<&str>,
+        projects: Option<&[String]>,
+    ) -> Result<(), BoardError> {
+        if let Some(role) = role {
+            let roles = self.board.roles();
+            let caps = roles
+                .0
+                .get(role)
+                .ok_or_else(|| refused(format!("there is no role {role:?}")))?;
+            self.may_add(by, caps.iter().copied())?;
+        }
+        if let (Some(own), granted) = (&by.actor.projects, projects) {
+            let ok = granted.is_some_and(|g| g.iter().all(|p| own.contains(p)));
+            if !ok {
+                return Err(refused(
+                    "you are limited to some projects: grant only projects you work in",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `caps` may be given by `by`: `admin` and `enrol` only by a person's own token (the caller
+    /// is an admin already), never through a shared connector; any other capability only if
+    /// `by` holds it.
+    fn may_add(
+        &self,
+        by: &Caller,
+        caps: impl Iterator<Item = Capability>,
+    ) -> Result<(), BoardError> {
+        let caps: Vec<Capability> = caps.collect();
+        let privileged = |c: &&Capability| matches!(c, Capability::Admin | Capability::Enrol);
+        if by.via_connector && caps.iter().any(|c| privileged(&c)) {
+            return Err(refused(
+                "admin and enrol are granted by a person in Settings with their own token, not through a shared connector",
+            ));
+        }
+        for cap in caps {
+            if !matches!(cap, Capability::Admin | Capability::Enrol)
+                && !by.actor.caps.contains(&cap)
+            {
+                return Err(refused(format!(
+                    "you do not hold {cap:?}, so you cannot grant it"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn get(&self) -> Res {
         let agents: Vec<Value> = self.creds.as_ref().map_or_else(Vec::new, |c| {
-            c.read()
-                .unwrap_or_else(PoisonError::into_inner)
+            let creds = c.read().unwrap_or_else(PoisonError::into_inner);
+            creds
                 .list()
-                .map(|i| json!({ "actor": i.actor, "role": i.role, "projects": i.projects }))
+                .map(|i| {
+                    let mut agent =
+                        json!({ "actor": i.actor, "role": i.role, "projects": i.projects });
+                    if let Some(lead) = creds.parent_of(&i.actor) {
+                        agent["parent"] = json!(lead);
+                    }
+                    agent
+                })
                 .collect()
         });
         let github = self.github.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|g| {
@@ -465,6 +876,7 @@ impl Settings {
             },
             "agents": agents,
             "repos": self.board.projects(),
+            "registry": self.board.projects().registry_value().map_err(refused)?,
             "roles": self.board.roles(),
             "capabilities": Capability::ALL,
             "capability_about": Capability::ALL.map(|c| (c, c.about())).into_iter().collect::<BTreeMap<_, _>>(),
@@ -473,6 +885,7 @@ impl Settings {
             "workflow": self.board.workflow(),
             "project_status": self.board.statuses(),
             "apps": self.oauth.get().map(|p| p.store().list_clients()),
+            "registered_agents": self.board.agent_list(),
             "server": self.server,
             "paths": {
                 "agents": self.files.identities,
@@ -484,6 +897,60 @@ impl Settings {
                 "project_status": self.files.project_status,
             },
         }))
+    }
+
+    /// Give a registered agent its own role and projects (an admin may widen as well as narrow);
+    /// with neither, it acts as its connector again.
+    fn registered_agent_set(&self, by: &Caller, a: &RegisteredAgentSet) -> Res {
+        let grant = Grant {
+            role: a.agent_role.clone(),
+            projects: a.agent_projects.clone(),
+        };
+        self.board.check_agent_grant(&grant, None)?;
+        if grant == Grant::default() {
+            // A reset hands back the connector's whole role and every project it works in.
+            let (role, projects) = self.connector_grant_of(&a.id)?;
+            self.may_grant(by, Some(&role), projects.as_deref())?;
+        } else {
+            self.may_grant(by, a.agent_role.as_deref(), a.agent_projects.as_deref())?;
+        }
+        // The nickname first: a bad one then changes nothing.
+        let known = self.board.set_agent_nickname(&a.id, a.nickname.clone())?;
+        if known && self.board.set_agent_grant(&a.id, grant)? {
+            rusty_log::warn!(agent = %a.id, role = ?a.agent_role, projects = ?a.agent_projects, "registered agent regranted");
+            Ok(json!({"id": a.id, "agent_role": a.agent_role, "agent_projects": a.agent_projects}))
+        } else {
+            Err(refused(format!("no registered agent {:?}", a.id)))
+        }
+    }
+
+    /// The role and project limit an agent falls back to: its connector's.
+    fn connector_grant_of(&self, id: &str) -> Result<(String, Option<Vec<String>>), BoardError> {
+        let agent = self
+            .board
+            .agent_list()
+            .into_iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| refused(format!("no registered agent {id:?}")))?;
+        let creds = self.creds.as_ref().ok_or_else(|| {
+            refused(
+                "the connector's role is not known here, so a reset cannot be checked".to_owned(),
+            )
+        })?;
+        let creds = creds.read().unwrap_or_else(PoisonError::into_inner);
+        let i = creds
+            .by_actor(&agent.connector)
+            .ok_or_else(|| refused(format!("no connector {:?}", agent.connector)))?;
+        Ok((i.role.clone(), i.projects.clone()))
+    }
+
+    /// Forget a registered agent: its key stops working at once; it can register again.
+    fn registered_agent_revoke(&self, a: &RegisteredAgentId) -> Res {
+        if self.board.revoke_agent(&a.id)? {
+            Ok(json!({"revoked": a.id}))
+        } else {
+            Err(refused(format!("no registered agent {:?}", a.id)))
+        }
     }
 
     /// Sign an app out: drop its registration and every token it holds. It can sign in again.
@@ -550,18 +1017,20 @@ impl Settings {
             .ok_or_else(|| refused("that would leave no agent able to change settings"))
     }
 
-    fn agent_add(&self, a: &AgentAdd) -> Res {
+    fn agent_add(&self, by: &Caller, a: &AgentAdd) -> Res {
         self.check_grant(&a.role, a.projects.as_deref())?;
+        self.may_grant(by, Some(&a.role), a.projects.as_deref())?;
         let identity = Identity {
             actor: a.name.clone(),
             role: a.role.clone(),
             projects: a.projects.clone(),
+            connector: false,
         };
         let token = self.change_creds(|c| c.add(identity.clone()))?;
         Ok(json!({ "token": token, "agent": identity }))
     }
 
-    fn agent_update(&self, a: &AgentUpdate) -> Res {
+    fn agent_update(&self, by: &Caller, a: &AgentUpdate) -> Res {
         let current_role = self
             .creds
             .as_ref()
@@ -575,8 +1044,14 @@ impl Settings {
             .ok_or_else(|| refused(format!("no agent {:?}", a.name)))?;
         let role = a.role.clone().unwrap_or(current_role);
         self.check_grant(&role, a.projects.as_ref().and_then(Option::as_deref))?;
+        self.may_grant(
+            by,
+            Some(&role),
+            a.projects.as_ref().and_then(Option::as_deref),
+        )?;
         self.change_creds(|c| c.update(&a.name, Some(role), a.projects.clone()))?;
-        Ok(json!({ "ok": true }))
+        let pruned = self.prune_minted()?;
+        Ok(json!({ "ok": true, "removed": pruned }))
     }
 
     fn agent_remove(&self, a: &AgentName) -> Res {
@@ -584,7 +1059,14 @@ impl Settings {
         Ok(json!({ "ok": true }))
     }
 
-    fn agent_rotate(&self, a: &AgentName) -> Res {
+    fn agent_rotate(&self, by: &Caller, a: &AgentName) -> Res {
+        // A new raw token is a person's act in Settings: through a connector it would hand out
+        // (and lock out) any credential, an admin's included.
+        if by.via_connector {
+            return Err(refused(
+                "tokens are rotated by a person in Settings with their own token, not through a shared connector".to_owned(),
+            ));
+        }
         let token = self.change_creds(|c| c.rotate(&a.name))?;
         Ok(json!({ "token": token }))
     }
@@ -596,7 +1078,17 @@ impl Settings {
 
     fn projects_set(&self, a: &ProjectsSet) -> Res {
         let path = self.file(&self.files.projects)?;
-        let new = Projects::from_listing(a.repos.clone()).map_err(refused)?;
+        let new = match (&a.repos, &a.registry) {
+            (Some(repos), None) => Projects::from_listing(repos.clone())
+                .map_err(refused)?
+                .keeping_facts_of(&self.board.projects()),
+            (None, Some(registry)) => Projects::parse(&registry.to_string()).map_err(refused)?,
+            _ => {
+                return Err(refused(
+                    "give either `repos` or `registry`, not both".to_owned(),
+                ));
+            }
+        };
         if let Some(creds) = &self.creds {
             let creds = creds.read().unwrap_or_else(PoisonError::into_inner);
             if let Some((who, p)) = creds.list().find_map(|i| {
@@ -616,9 +1108,19 @@ impl Settings {
         Ok(json!({ "repos": new }))
     }
 
-    fn roles_set(&self, a: &RolesSet) -> Res {
+    fn roles_set(&self, by: &Caller, a: &RolesSet) -> Res {
+        let old = self.board.roles();
+        for (name, caps) in &a.roles.0 {
+            let before = old.0.get(name);
+            let added = caps
+                .iter()
+                .copied()
+                .filter(|c| !before.is_some_and(|b| b.contains(c)));
+            self.may_add(by, added)?;
+        }
         self.write_roles(&a.roles)?;
-        Ok(json!({ "roles": a.roles }))
+        let pruned = self.prune_minted()?;
+        Ok(json!({ "roles": a.roles, "removed": pruned }))
     }
 
     /// Validate `roles` against the agents, write them to their file, then apply them.

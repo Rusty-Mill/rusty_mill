@@ -51,3 +51,47 @@ Source: `crates/apps/rusty_mux/crates/tui/src/main.rs:794-797`; D196.
 ## Does the TUI byte oracle hold under our Windows host? (card #1423, D209/D211)
 Asked 2026-11-12 (PR #1629, green in manual ci.yml run 43149413399 on 4d945c578). **Yes, with one known difference**: the host first sends its `PREAMBLE` (`?9001h?1004h`), and sends each of those again right after the client turns it off (`?9001l`, `?1004l`). The harness (`host::as_sent`) strips exactly those bytes, and nothing else.
 Source: `crates/libs/ui/rusty_conhost/src/console.rs:47-50`; PR #1629, as reported by the card #1423 thread.
+
+## Is it fine that C76's `SignalBlock` reaches only the program's own process group? (PR #1633)
+Asked 2026-11-12 (PR #1633 review 5880140593, reviewer question). **Yes, by design.** `SignalBlock` signals the spawned program's own process group through `kill_tree`; jobs a job-control shell puts in their own groups, and anything that calls `setsid`, are not reached. The mux is not orch's way to end an agent: orch owns the end grace and kills through the session's cgroup, and the mux never kills an agent on its own (D87 `[stated]`). `ReleaseBlock` is sent only after the cgroup is empty. `SignalBlock` is for signalling the agent program itself (for example `term`, `int`, `stop`/`cont`); it is not meant to clean up a whole tree. If a block-wide signal is ever wanted, it would be a new row (cgroup or session reach). Tag: answered.
+Source: `docs/projects/mux/AGENT-HOSTING.md` §C76 ("orch owns the end grace and kills through the cgroup"; "It signals the program's own process group through the existing pidfd-safe `kill_tree`"; "orch sends `ReleaseBlock` only after the cgroup is empty"); D87; mux DECISIONS 2026-11-12 (C76).
+
+## What does "shared mode" mean in C26, and what does a personal server do with another user's connection today? (card #274)
+Asked 2026-11-12 (Arc 1, card #274 plan). **Sources only:** C26 says "shared mode (one server, several accounts, where C33 must be restricted)". Today a personal server's `peer_check` admits only its own uid and gives every client that principal (`server/src/lib.rs:238-251,273-280`); another principal reaches a server only by login mode's forwarded preface, trusted from the front door's uid (`serve_forwarded`, `lib.rs:215-236`). C33 is restricted (D166); takeover needs the client's own principal (`state.rs:789-806`). What is not sourced: who a shared server admits on its socket, and what each principal sees or may type. Those were escalated to Nano, not decided. Tag: answered from sources, escalations open.
+Source: CAPABILITIES C25, C26, C33; D164, D166, D231; mux DECISIONS 2026-11-01.
+
+## Did Nano confirm the shared-mode access model on PR #1650? (card #274)
+Asked 2026-11-13. Yes: Nano commented on PR #1650 (comment 6841530923, 2026-11-13T01:57Z) agreeing to the allowlist file, everyone-sees-everything `list` for the first slice, and creator-held input lease with explicit grants for others. That confirms D232 as written; D233 is not covered by that comment.
+Source: DECISIONS D232, D234.
+
+## What did Nano answer on the three TLS-LISTENER.md questions (card #506, PR #1656)?
+Asked 2026-11-13. Nano answered "Recommend" to all three: (1) tailnet path (C27) first, TLS listener after (D235); (2) user-supplied certificate and key with client-side fingerprint pinning, no generator (D236); (3) 256-bit random tokens, stored hashed, shown once, rotated and revoked by `rusty-mux-ctl` (D237). Not yet confirmed on the PR itself; Dottius needs that (D37). Tag: stated.
+Source: D235; D236; D237; `docs/projects/mux/TLS-LISTENER.md`.
+
+## What did Nano answer on the six MESH.md questions (C80, own mesh)?
+Asked 2026-11-13. Nano concurred with the recommendations, with comments on 2 (Tailscale stays a supported option) and 6 (Windows is a priority): spike A go (D248); Option A, Tailscale kept (D249); lift non-goal after spike A, own hub only (D250); `ts-hub` crate (D251); keep boringtun (D252); Windows priority, spike A-W needs its own go (D253).
+Source: D248-D253; `docs/projects/mux/MESH.md`.
+
+## Is spike A-W started, and is the rusty_tailscale crate move part of it?
+Asked 2026-11-13. A-W has Nano's go (D254), on a throwaway branch with no merge. The 13-crate move to `crates/libs/` (Q60, D233) stays a separate step (D255); Q60 stays open.
+Source: D254; D255; D253; `docs/projects/mux/MESH.md`.
+
+## Is the mesh client dial path a go, and what did the spikes show?
+Asked 2026-11-13. Dial path has a go, tagged `[default]` because it came by the coordinator's relay with no Nano message id; Nano should confirm on the PR (D256). Spikes A-W, A and dial passed on throwaway branches; two bug fixes and the Windows reactor idle spin are open and need their own PRs and go (D257; Q61-Q63). D255 stands.
+Source: D256; D257; D255; `docs/projects/mux/MESH.md`.
+
+## Is the TLS listener (#506) slice 1 gated, and what can it build without a `rusty_tls` change?
+Asked 2026-11-13 after Nano's "A" (start #506). "A" is the row-start go (D235); D236 says a `rusty_tls` fingerprint-pin change "is asked for separately", so that change stays an owner gate. Slice 1 is the server side (generic `conn::run` already done by C27, `--tls-cert`/`--tls-key`, `TlsAcceptor`, token frame and `rusty-mux-ctl token`), using in-workspace `rusty_sha2` (SHA-256), `rusty_base64` and `rusty_rand`; no third-party dependency. Client pinning waits for the separate go. Next free D id on main: D258.
+Source: D235; D236; D237; `docs/projects/mux/TLS-LISTENER.md`; `crates/libs/net/rusty_tls/src/trust.rs`.
+
+## What does PAM login mode check, and how does a refusal look?
+Asked 2026-11-14 (#1460). Account checks only (`pam_acct_mgmt` on the target account, for every principal source); never passwords; sessions deferred because account servers outlive the front door. Off unless `--pam`; fails closed; a refusal is a closed socket plus a stderr line, no wire change (D266). The dependency is loaded with dlopen at run time, no link and no `-dev` package (Nano, D267 [stated]); the session scope stays open (Q65).
+Source: D266; D267; D233; D39; mux `RISKS.md` R17; `REX-DELTA.md` R8/D9; `crates/apps/rusty_mux/crates/server/src/login.rs` `admit`.
+
+## Does UDP work for login-mode account servers?
+Not yet; it is a go (D268) with a design note first (PR #1689). The front door only passes `--udp ADDR:LO-HI`; each account server binds the first free port itself and starts without UDP when the range is full. Tailnet principals are refused `OpenDatagram`; account servers use `--udp-idle 3600`; no wire change (D269, Q66).
+Source: D268; D269; D45; mux `UDP-ACCOUNTS.md`, `SHARED-MODE.md`; `crates/apps/rusty_mux/crates/server/src/main.rs` (250-258).
+
+## How should hub failover (H8) promote and advertise standbys?
+Asked 2026-11-16. Manual promotion by restarting the standby with `--promote`, refused while the active still answers unless `--force`; an extra MapResponse field lists standby URLs, set by `--advertise-standby`; the test kills the active mid-transfer and checks existing pair, new join and a still-revoked machine. The replication channel is a shared secret over `/replicate` with the Noise key in the snapshot (Q67, D275).
+Source: D274; D275; MESH.md stage 4; hub-build-plan.md H8.

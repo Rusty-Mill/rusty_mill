@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::agents::Grant;
 use crate::board::{Board, NewCard};
 use crate::domain::{
     Actor, BoardError, Card, CardSummary, CloseReason, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS,
@@ -30,6 +31,10 @@ pub struct Identity {
     /// Projects this credential may work in; `None` is all of them.
     #[serde(default)]
     pub projects: Option<Vec<String>>,
+    /// Set by the transport for an OAuth sign-in (a shared connector): its writes must name a
+    /// registered agent (`agent_register`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub connector: bool,
 }
 
 /// Why a call failed.
@@ -111,25 +116,68 @@ pub(crate) struct Who {
     actor: Option<String>,
     /// Role name; see `board_roles`.
     role: Option<String>,
+    /// Your registered agent id, from `agent_register`. A connector sign-in needs it on every write.
+    agent_id: Option<String>,
+    /// Your agent's secret key, from `agent_register`.
+    agent_key: Option<String>,
 }
 
-/// The acting identity: the credential's if there is one (a disagreeing
-/// `actor`/`role` is refused), else the arguments'.
+/// The `properties` of [`Who`]'s schema, for operations whose arguments are described by hand.
+pub(crate) fn who_properties() -> Value {
+    let schema = serde_json::to_value(schemars::schema_for!(Who)).unwrap_or(Value::Null);
+    schema
+        .get("properties")
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
+
+/// The acting identity: the credential's if there is one, else the arguments'. A credential
+/// fixes the role and the actor; the actor may only gain a `/label` naming the agent
+/// instance (attribution, not authority). Anything else that disagrees is refused.
 pub(crate) fn acting(
     b: &Shared,
     identity: Option<&Identity>,
     who: &Who,
 ) -> Result<Actor, BoardError> {
     match identity {
-        Some(i) => {
-            let differs = who.actor.as_deref().is_some_and(|a| a != i.actor)
-                || who.role.as_deref().is_some_and(|r| r != i.role);
-            if differs {
+        Some(i) if i.connector => {
+            let (Some(id), Some(key)) = (who.agent_id.as_deref(), who.agent_key.as_deref()) else {
                 return Err(BoardError::Invalid(
-                    "actor and role are fixed by your credential; omit them",
+                    "this connector needs a registered agent: call agent_register once, then pass agent_id and agent_key on every write",
+                ));
+            };
+            let Some(grant) = b.verify_agent(&i.actor, id, key) else {
+                return Err(BoardError::Invalid(
+                    "unknown agent or wrong key: call agent_register again",
+                ));
+            };
+            // The agent's own role and projects, else its connector's.
+            let role = grant.role.as_ref().unwrap_or(&i.role);
+            if who.role.as_deref().is_some_and(|r| r != role) {
+                return Err(BoardError::Invalid(
+                    "role is fixed by your credential; omit it",
                 ));
             }
-            let mut actor = b.roles().actor(&i.actor, &i.role)?;
+            let mut actor = b.roles().actor(id, role)?;
+            let projects = grant.projects.as_ref().or(i.projects.as_ref());
+            actor.projects = projects.map(|p| p.iter().cloned().collect());
+            Ok(actor)
+        }
+        Some(i) => {
+            let name = match who.actor.as_deref() {
+                None => i.actor.clone(),
+                Some(a) => crate::identities::instance_name(&i.actor, a).ok_or(
+                    BoardError::Invalid(
+                        "actor is fixed by your credential: omit it, or add /label (letters, digits . _ -)",
+                    ),
+                )?,
+            };
+            if who.role.as_deref().is_some_and(|r| r != i.role) {
+                return Err(BoardError::Invalid(
+                    "role is fixed by your credential; omit it",
+                ));
+            }
+            let mut actor = b.roles().actor(&name, &i.role)?;
             actor.projects = i.projects.as_ref().map(|p| p.iter().cloned().collect());
             Ok(actor)
         }
@@ -147,13 +195,14 @@ pub(crate) fn acting(
     }
 }
 
-/// The actor for an inbox op. These ops carry BBP's human authority (they lift
-/// its gates and budgets), so a caller-named actor and role are not enough: only
-/// an identity bound to the transport (a token or OAuth grant) may use them.
+/// The actor for an op that only an authenticated admin may run: the inbox ops, which carry
+/// BBP's human authority (they lift its gates and budgets), and `board_number_cards`, which
+/// writes every project's cards. A caller-named actor and role are not enough: only an
+/// identity bound to the transport (a token or OAuth grant) may use them.
 fn bound_acting(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Actor, BoardError> {
     if identity.is_none() {
         return Err(BoardError::Invalid(
-            "the inbox needs an authenticated admin credential; a named actor and role are not enough",
+            "this needs an authenticated admin credential; a named actor and role are not enough",
         ));
     }
     acting(b, identity, who)
@@ -161,6 +210,16 @@ fn bound_acting(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Ac
 
 #[derive(Deserialize, JsonSchema)]
 struct Nothing {}
+
+/// The arguments of `agent_register`.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RegisterArgs {
+    /// A role to act with instead of the connector's: it may hold no capability the connector's lacks.
+    agent_role: Option<String>,
+    /// Projects to work in instead of all of the connector's: each must be one of the connector's.
+    agent_projects: Option<Vec<String>>,
+}
 
 /// The arguments of an operation that takes only who is acting.
 #[derive(Deserialize, JsonSchema)]
@@ -345,6 +404,8 @@ struct OwnsArgs {
     project: String,
     /// Repository paths to classify.
     files: Vec<String>,
+    /// The repository the paths are in, for a project that spans several (default: its default).
+    repo: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -355,6 +416,8 @@ struct AssignArgs {
     id: String,
     /// The project to move it to (see `board_projects`).
     project: String,
+    /// The repository, for a project that spans several (default: the project's `default_repo`).
+    repo: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -423,11 +486,26 @@ struct AddArgs {
     tags: Option<Vec<String>>,
     /// The project the card belongs to (default: `default`; see `board_projects`).
     project: Option<String>,
+    /// The repository, for a project that spans several (default: the project's `default_repo`).
+    repo: Option<String>,
     /// Create it straight in Done, to record work that already merged (needs `close`).
     done: Option<bool>,
     /// Id or number of the card this one is split from. Set it whenever you split work into
     /// pieces, so the decomposition is recorded rather than implied by titles.
     parent: Option<String>,
+    /// Evidence that the work shipped (a merged PR or other http(s) link), at most 8. A Done
+    /// card counts as shipped only with evidence; without, metrics report it as a prototype.
+    evidence: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct EvidenceArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Card id, or its number (`#42` or `42`).
+    id: String,
+    /// Links to add: a merged PR, or any http(s) page that shows the work shipped.
+    links: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -709,8 +787,27 @@ pub fn ops() -> Vec<Op> {
             },
         ),
         op(
+            "agent_register",
+            "Register yourself as a unique agent on this connector (once per task). Returns {agent_id, agent_key}: pass both on every write. By default you act with the connector's role and projects; `agent_role` and `agent_projects` narrow them (never wider than the connector's). An admin can later set a different role for you in Settings. Keep the key private; if you lose it, register again.",
+            |b, i, a: RegisterArgs| {
+                let Some(identity) = i.filter(|i| i.connector) else {
+                    return Err(BoardError::Invalid(
+                        "agent_register is for connector sign-ins; your own token already names you",
+                    ));
+                };
+                let grant = Grant {
+                    role: a.agent_role,
+                    projects: a.agent_projects,
+                };
+                let own = identity.projects.as_deref();
+                b.check_agent_grant(&grant, Some((&identity.role, own)))?;
+                let (agent_id, agent_key) = b.register_agent(&identity.actor, grant)?;
+                to_json(json!({ "agent_id": agent_id, "agent_key": agent_key }))
+            },
+        ),
+        op(
             "board_projects",
-            "List the repositories this board serves, their projects (applications) and the repository paths each project may change: {repos: {repo: {project: [paths]}}}. Cards belong to one project; a repository's own project (named like it) owns every path no other project of that repository does.",
+            "List the repositories this board serves, their projects (applications) and the repository paths each project may change: {repos: {repo: {project: [paths]}}}, plus `projects`: {project: {repos: {repo: [paths]}, default_repo}} (a project may span repositories). Cards belong to one project; a repository's own project (named like it) owns every path no other project of that repository does.",
             |b, i, _: Nothing| {
                 // A limited credential is told only about the projects it may work in.
                 let mut repos = serde_json::to_value(b.projects())
@@ -731,8 +828,17 @@ pub fn ops() -> Vec<Op> {
                         status.insert(name.to_owned(), json!(s));
                     }
                 }
+                let registry = b.projects();
+                let projects: serde_json::Map<String, Value> = registry
+                    .names()
+                    .filter(|n| in_scope(scope(i), n))
+                    .filter_map(|n| {
+                        Some((n.to_owned(), serde_json::to_value(registry.info(n)?).ok()?))
+                    })
+                    .collect();
                 to_json(json!({
                     "repos": repos,
+                    "projects": projects,
                     "status": status,
                     "default": DEFAULT_PROJECT,
                     "count": b.projects().names().count(),
@@ -819,7 +925,17 @@ pub fn ops() -> Vec<Op> {
             "Which of `files` (repository paths, `/`-separated) the project does NOT own: those belonging to another project of its repository. Answers from the whole registry, so a runner limited to one project can still tell when work strays into a sibling's paths: {foreign: [paths]}.",
             |b, i, a: OwnsArgs| {
                 checked_project(b, scope(i), Some(&a.project))?;
-                to_json(json!({ "foreign": b.projects().not_owned_by(&a.project, &a.files) }))
+                let projects = b.projects();
+                let foreign = match a.repo.as_deref() {
+                    None => projects.not_owned_by(&a.project, &a.files),
+                    Some(repo) if projects.repos_of(&a.project).any(|r| r == repo) => {
+                        projects.not_owned_by_in(&a.project, repo, &a.files)
+                    }
+                    Some(_) => {
+                        return Err(BoardError::Invalid("the project has no such repository"));
+                    }
+                };
+                to_json(json!({ "foreign": foreign }))
             },
         ),
         op(
@@ -855,12 +971,13 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_whoami",
-            "Who you are on this board: your actor name, role and what that role may do.",
+            "Who you are on this board: your actor name, role and what that role may do, and the nicknames an admin gave registered agents (agent id to nickname; display only).",
             |b, i, _: Nothing| {
                 let Some(i) = i else {
                     return to_json(json!({
                         "authenticated": false,
-                        "note": "no per-model credential: pass actor and role on each call"
+                        "note": "no per-model credential: pass actor and role on each call",
+                        "nicknames": b.agent_nicknames()
                     }));
                 };
                 let who = b.roles().actor(&i.actor, &i.role)?;
@@ -868,7 +985,8 @@ pub fn ops() -> Vec<Op> {
                     "authenticated": true,
                     "actor": who.name,
                     "role": i.role,
-                    "capabilities": who.caps
+                    "capabilities": who.caps,
+                    "nicknames": b.agent_nicknames()
                 }))
             },
         ),
@@ -905,12 +1023,14 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_add",
-            "Create a card in Backlog, or with `done: true` straight in Done to record work that already merged (needs `close`; put the merged PR in the body). When splitting work into pieces, pass `parent` (the card it is split from) on each piece.",
+            "Create a card in Backlog, or with `done: true` straight in Done to record work that already merged (needs `close`; pass the merged PR as `evidence`, or it counts as a prototype). When splitting work into pieces, pass `parent` (the card it is split from) on each piece.",
             |b, i, a: AddArgs| {
                 let who = acting(b, i, &a.who)?;
                 let new = NewCard {
                     done: a.done == Some(true),
                     parent: a.parent.as_deref().map(|r| card_ref(b, r)).transpose()?,
+                    evidence: a.evidence.unwrap_or_default(),
+                    repo: a.repo.as_deref(),
                     ..NewCard::new(
                         &a.title,
                         a.body.as_deref().unwrap_or(""),
@@ -962,7 +1082,7 @@ pub fn ops() -> Vec<Op> {
             "Move a card to another project (needs `triage`, or `project` for a card nobody else has claimed; a Done card needs `triage` or `close` and stays Done). Drops any claim.",
             |b, i, a: AssignArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.assign(card_ref(b, &a.id)?, &a.project, &who)?)
+                card(b.assign_in(card_ref(b, &a.id)?, &a.project, a.repo.as_deref(), &who)?)
             },
         ),
         op(
@@ -987,6 +1107,14 @@ pub fn ops() -> Vec<Op> {
             |b, i, a: IdArgs| {
                 let who = acting(b, i, &a.who)?;
                 card(b.release(card_ref(b, &a.id)?, &who)?)
+            },
+        ),
+        op(
+            "card_evidence",
+            "Add evidence that a card's work shipped: a merged PR, or any http(s) page that shows it (at most 8 per card; links already there are kept). A Done card counts as shipped in `board_metrics` only with evidence; without, it is reported as a prototype. Needs `close`, `merge` or `triage`.",
+            |b, i, a: EvidenceArgs| {
+                let who = acting(b, i, &a.who)?;
+                card(b.add_evidence(card_ref(b, &a.id)?, &a.links, &who)?)
             },
         ),
         op(
@@ -1088,9 +1216,9 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_number_cards",
-            "Number the cards that have no number yet: tasks tagged `agent` directly in rusty_tick since the board started (the board also does this when it starts). Needs admin, unlimited to projects. {numbered: count}.",
+            "Number the cards that have no number yet: tasks tagged `agent` directly in rusty_tick since the board started (the board also does this when it starts). Needs an authenticated admin credential, unlimited to projects. {numbered: count}.",
             |b, i, a: WhoArgs| {
-                let who = acting(b, i, &a.who)?;
+                let who = bound_acting(b, i, &a.who)?;
                 to_json(json!({ "numbered": b.number_cards_as(&who)? }))
             },
         ),
@@ -1841,6 +1969,90 @@ mod tests {
     }
 
     #[test]
+    fn evidence_is_added_by_whoever_records_shipped_work() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let as_ = |role: &str, extra: Value| {
+            let mut a = json!({"actor": "nano", "role": role});
+            a.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            a
+        };
+        let pr = "https://github.com/o/r/pull/9";
+        let added = call_as(
+            &board,
+            None,
+            "card_add",
+            as_(
+                "builder",
+                json!({"title": "merged", "done": true, "evidence": [pr]}),
+            ),
+        )
+        .expect("add")["card"]
+            .clone();
+        assert_eq!(added["evidence"], json!([pr]));
+        call_as(
+            &board,
+            None,
+            "card_add",
+            as_("human", json!({"title": "t"})),
+        )
+        .expect("add");
+        let refused = call_as(
+            &board,
+            None,
+            "card_evidence",
+            as_("reviewer", json!({"id": "#2", "links": [pr]})),
+        );
+        assert!(
+            matches!(&refused, Err(CallError::Board(BoardError::ForbiddenAny(cs))) if cs.len() == 4),
+            "{refused:?}"
+        );
+        // Nor can evidence come in with a new card, done or not, without those capabilities.
+        for done in [false, true] {
+            let sneaked = call_as(
+                &board,
+                None,
+                "card_add",
+                as_(
+                    "reviewer",
+                    json!({"title": "sneak", "done": done, "evidence": [pr]}),
+                ),
+            );
+            // The Done gate (`Close`) answers first for a done card.
+            let gated = if done {
+                matches!(
+                    sneaked,
+                    Err(CallError::Board(BoardError::Forbidden(Capability::Close)))
+                )
+            } else {
+                matches!(sneaked, Err(CallError::Board(BoardError::ForbiddenAny(_))))
+            };
+            assert!(gated, "done {done}: {sneaked:?}");
+        }
+        let bad = call_as(
+            &board,
+            None,
+            "card_evidence",
+            as_("human", json!({"id": "#2", "links": ["not a link"]})),
+        );
+        assert!(matches!(bad, Err(CallError::Board(BoardError::Invalid(_)))));
+        let ok = call_as(
+            &board,
+            None,
+            "card_evidence",
+            as_("human", json!({"id": "#2", "links": [pr]})),
+        )
+        .expect("evidence");
+        assert_eq!(ok["card"]["evidence"], json!([pr]));
+        let m = call_as(&board, None, "board_metrics", json!({})).expect("metrics");
+        assert_eq!(
+            m["lead_time"]["shipped"], 1,
+            "the merged card counts as shipped"
+        );
+    }
+
+    #[test]
     fn a_card_is_named_by_id_or_by_number() {
         let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
         let add = json!({"actor": "nano", "role": "human", "title": "t"});
@@ -1893,7 +2105,7 @@ mod tests {
     }
 
     #[test]
-    fn board_number_cards_numbers_strays_for_an_unlimited_admin_only() {
+    fn board_number_cards_numbers_strays_for_an_authenticated_unlimited_admin_only() {
         let store = MemStore::default();
         let stray = Card::new("stray", "", vec![], 1).expect("card");
         store
@@ -1913,6 +2125,18 @@ mod tests {
         let mut limited = ident("nano", "human");
         limited.projects = Some(vec!["default".into()]);
         assert!(refused(&limited), "it writes every project's cards");
+        let stated = json!({"actor": "nano", "role": "human"});
+        assert!(
+            matches!(
+                call_as(&board, None, "board_number_cards", stated),
+                Err(CallError::Board(BoardError::Invalid(m))) if m.contains("authenticated admin credential")
+            ),
+            "a stated admin role without a credential is refused"
+        );
+        assert!(
+            call_as(&board, None, "board_number_cards", json!({})).is_err(),
+            "no credential and no actor is refused"
+        );
         let human = ident("nano", "human");
         let out = call_as(&board, Some(&human), "board_number_cards", json!({})).expect("number");
         assert_eq!(out["numbered"], 1);
@@ -1926,7 +2150,152 @@ mod tests {
             projects: None,
             actor: actor.into(),
             role: role.into(),
+            connector: false,
         }
+    }
+
+    #[test]
+    fn a_connector_writes_only_as_a_registered_agent() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let connector = Identity {
+            connector: true,
+            ..ident("claude-cloud", "builder")
+        };
+        let add = |args: Value| call_as(&board, Some(&connector), "card_add", args);
+        let refused = |r: Result<Value, CallError>| {
+            matches!(r, Err(CallError::Board(BoardError::Invalid(_))))
+        };
+        assert!(refused(add(json!({"title": "t"}))), "no agent");
+        assert!(
+            refused(add(json!({"title": "t", "actor": "claude-cloud/x"}))),
+            "a label is not an agent"
+        );
+        let a = call_as(&board, Some(&connector), "agent_register", json!({})).expect("a");
+        let b = call_as(&board, Some(&connector), "agent_register", json!({})).expect("b");
+        assert_ne!(a["agent_id"], b["agent_id"]);
+        let ok = add(json!({"title": "t", "agent_id": a["agent_id"], "agent_key": a["agent_key"]}))
+            .expect("add");
+        assert_eq!(ok["card"]["column"], "backlog");
+        assert!(
+            refused(add(
+                json!({"title": "t", "agent_id": a["agent_id"], "agent_key": b["agent_key"]})
+            )),
+            "b's key"
+        );
+        assert!(refused(add(
+            json!({"title": "t", "agent_id": "claude-cloud#zzzzzz", "agent_key": a["agent_key"]})
+        )));
+        // A bearer-token credential is already unique: it needs no agent and cannot register.
+        let own = ident("claude-cli", "builder");
+        // ...and cannot write under a registered id by naming it as a label.
+        let spoof = json!({"title": "t", "actor": a["agent_id"].as_str().expect("id").replace("claude-cloud", "claude-cli")});
+        assert!(refused(call_as(&board, Some(&own), "card_add", spoof)));
+        let cloud_bearer = ident("claude-cloud", "builder");
+        let spoof = json!({"title": "t", "actor": a["agent_id"]});
+        assert!(
+            refused(call_as(&board, Some(&cloud_bearer), "card_add", spoof)),
+            "a bearer holder cannot name a registered id"
+        );
+        assert!(call_as(&board, Some(&own), "card_add", json!({"title": "t"})).is_ok());
+        assert!(refused(call_as(
+            &board,
+            Some(&own),
+            "agent_register",
+            json!({})
+        )));
+    }
+
+    #[test]
+    fn a_registered_agent_may_narrow_itself_and_an_admin_may_widen_it() {
+        let mut roles = Roles::default();
+        let caps = |c: &[Capability]| c.iter().copied().collect();
+        roles
+            .0
+            .insert("wide".into(), caps(&[Capability::Build, Capability::Close]));
+        roles
+            .0
+            .insert("mid".into(), caps(&[Capability::Build, Capability::Record]));
+        roles.0.insert("low".into(), caps(&[Capability::Build]));
+        let board: Shared = Board::new(Box::new(MemStore::default()), roles);
+        let connector = Identity {
+            connector: true,
+            ..ident("claude-cloud", "mid")
+        };
+        let register = |args: Value| call_as(&board, Some(&connector), "agent_register", args);
+        // Wider or unknown roles and unknown projects are refused; a narrower role is accepted.
+        for bad in [
+            json!({"agent_role": "wide"}),
+            json!({"agent_role": "nope"}),
+            json!({"agent_projects": ["nope"]}),
+            json!({"agent_projects": []}),
+            json!({"agent_roles": "low"}),
+        ] {
+            assert!(register(bad.clone()).is_err(), "{bad}");
+        }
+        let low = register(json!({"agent_role": "low"})).expect("narrow");
+        let plain = register(json!({})).expect("plain");
+        let write = |who: &Value, role: Option<&str>| {
+            let mut args = json!({"title": "t", "done": true,
+                "agent_id": who["agent_id"], "agent_key": who["agent_key"]});
+            if let Some(r) = role {
+                args["role"] = json!(r);
+            }
+            call_as(&board, Some(&connector), "card_add", args)
+        };
+        // `done: true` needs Close: neither holds it yet. The narrowed agent also lacks Record.
+        assert!(matches!(
+            write(&low, None),
+            Err(CallError::Board(BoardError::Forbidden(_)))
+        ));
+        assert!(
+            write(&plain, Some("low")).is_err(),
+            "role is fixed by the credential"
+        );
+        // An admin gives the plain agent a wider role than the connector holds: it can close.
+        let id = plain["agent_id"].as_str().expect("id");
+        board
+            .check_agent_grant(
+                &Grant {
+                    role: Some("wide".into()),
+                    projects: None,
+                },
+                None,
+            )
+            .expect("admin may widen");
+        assert!(
+            board
+                .set_agent_grant(
+                    id,
+                    Grant {
+                        role: Some("wide".into()),
+                        projects: None
+                    }
+                )
+                .expect("set")
+        );
+        assert_eq!(
+            write(&plain, None).expect("closes")["card"]["column"],
+            "done"
+        );
+        // The other agent is unaffected, and clearing the grant returns to the connector's role.
+        assert!(write(&low, None).is_err());
+        assert!(board.set_agent_grant(id, Grant::default()).expect("clear"));
+        assert!(write(&plain, None).is_err());
+        // A nickname is display only: whoami lists it by id, to anyone.
+        assert!(
+            board
+                .set_agent_nickname(id, Some("QA bot".into()))
+                .expect("nick")
+        );
+        let me = call_as(
+            &board,
+            Some(&ident("claude-cli", "mid")),
+            "board_whoami",
+            json!({}),
+        );
+        assert_eq!(me.expect("whoami")["nicknames"][id], "QA bot");
+        let anon = call_as(&board, None, "board_whoami", json!({})).expect("anon");
+        assert_eq!(anon["nicknames"][id], "QA bot");
     }
 
     #[test]
@@ -1957,6 +2326,105 @@ mod tests {
         )
         .expect("add");
         assert_eq!(plain["card"]["column"], "backlog");
+    }
+
+    #[test]
+    fn record_adds_merged_work_with_a_pull_request_link_and_nothing_else() {
+        let mut roles = Roles::default();
+        roles.0.insert(
+            "recorder".into(),
+            [Capability::Build, Capability::Record]
+                .into_iter()
+                .collect(),
+        );
+        let board: Shared = Board::new(Box::new(MemStore::default()), roles);
+        let rec = ident("claude", "recorder");
+        let pr = "https://github.com/Rusty-Mill/rusty_mill/pull/1648";
+        let refused = |args: Value| {
+            matches!(
+                call_as(&board, Some(&rec), "card_add", args),
+                Err(CallError::Board(BoardError::Forbidden(Capability::Close)))
+            )
+        };
+        assert!(refused(json!({"title": "t", "done": true})));
+        assert!(refused(
+            json!({"title": "t", "done": true, "evidence": ["https://example.org/x"]})
+        ));
+        let added = call_as(
+            &board,
+            Some(&rec),
+            "card_add",
+            json!({"title": "shipped", "done": true, "evidence": [pr]}),
+        )
+        .expect("record");
+        assert_eq!(added["card"]["column"], "done");
+        // Evidence from `record` is pull request links only, on a new card or an existing one.
+        let rejected = |r: Result<Value, CallError>| matches!(r, Err(CallError::Board(BoardError::Invalid(m))) if m.contains("pull request"));
+        assert!(rejected(call_as(
+            &board,
+            Some(&rec),
+            "card_evidence",
+            json!({"id": "#1", "links": ["https://example.org/x"]})
+        )));
+        assert!(rejected(call_as(
+            &board,
+            Some(&rec),
+            "card_evidence",
+            json!({"id": "#1", "links": [pr, "https://github.com/a/b/issues/5"]})
+        )));
+        assert!(rejected(call_as(
+            &board,
+            Some(&rec),
+            "card_add",
+            json!({"title": "t", "evidence": ["https://example.org/x"]})
+        )));
+        call_as(
+            &board,
+            Some(&rec),
+            "card_evidence",
+            json!({"id": "#1", "links": ["https://github.com/a/b/pull/2"]}),
+        )
+        .expect("another pull request link");
+        for op in ["card_archive", "card_restore"] {
+            assert!(
+                matches!(
+                    call_as(&board, Some(&rec), op, json!({"id": "#1"})),
+                    Err(CallError::Board(BoardError::Forbidden(Capability::Close)))
+                ),
+                "{op} stays with Close"
+            );
+        }
+    }
+
+    #[test]
+    fn a_credential_lets_an_instance_label_its_actor_not_its_role() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let dev = ident("claude", "builder");
+        let who = |actor: &str| {
+            acting(
+                &board,
+                Some(&dev),
+                &Who {
+                    actor: Some(actor.into()),
+                    role: None,
+                    agent_id: None,
+                    agent_key: None,
+                },
+            )
+        };
+        let labelled = who("claude/thread-7x5").expect("label");
+        assert_eq!(labelled.name, "claude/thread-7x5");
+        assert_eq!(labelled.caps, who("claude").expect("base").caps);
+        for bad in [
+            "claude/",
+            "claude/a/b",
+            "claude/ x",
+            "claudex",
+            "nano/thread",
+            "nano",
+        ] {
+            assert!(who(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -2367,6 +2835,85 @@ mod tests {
             Err(CallError::Board(BoardError::OutOfScope(_)))
         ));
     }
+    #[test]
+    fn a_card_of_a_project_spanning_repositories_names_its_repository() {
+        use crate::projects::Projects;
+        let projects = Projects::parse(
+            r#"{"version": 2, "repos": {"mill": {}, "py": {}},
+                "projects": {"tooling": {"repos": {"mill": [".github"], "py": ["ci"]},
+                                         "default_repo": "mill"},
+                             "term": {"repos": {"mill": ["crates/term"]}}}}"#,
+        )
+        .expect("projects");
+        let board: Shared = Board::new(
+            Box::new(MemStore::default()) as Box<dyn Store>,
+            Roles::default(),
+        )
+        .with_projects(projects);
+        let human = ident("nano", "human");
+        let run = |op: &str, args: Value| call_as(&board, Some(&human), op, args);
+        let added = run(
+            "card_add",
+            json!({"title": "c", "project": "tooling", "repo": "py"}),
+        )
+        .expect("add");
+        assert_eq!(added["card"]["repo"], "py");
+        let by_default = run(
+            "card_add",
+            json!({"title": "c2", "project": "tooling", "repo": "mill"}),
+        )
+        .expect("add");
+        assert!(
+            by_default["card"].get("repo").is_none(),
+            "the default repository has one spelling: {by_default}"
+        );
+        let plain = run("card_add", json!({"title": "d", "project": "tooling"})).expect("add");
+        assert!(
+            plain["card"].get("repo").is_none(),
+            "no repo means the default: {plain}"
+        );
+        for bad in [
+            json!({"title": "e", "project": "tooling", "repo": "nope"}),
+            json!({"title": "e", "project": "term", "repo": "py"}),
+        ] {
+            assert!(matches!(
+                run("card_add", bad),
+                Err(CallError::Board(BoardError::Invalid(_)))
+            ));
+        }
+        let id = plain["card"]["id"].clone();
+        let moved = run(
+            "card_assign",
+            json!({"id": id, "project": "tooling", "repo": "py"}),
+        )
+        .expect("assign");
+        assert_eq!(moved["card"]["repo"], "py");
+        let refiled = run("card_assign", json!({"id": id, "project": "term"})).expect("assign");
+        assert!(
+            refiled["card"].get("repo").is_none(),
+            "re-filing clears the repo: {refiled}"
+        );
+        let listed = run("board_projects", json!({})).expect("projects");
+        assert_eq!(listed["projects"]["tooling"]["default_repo"], "mill");
+        assert_eq!(listed["projects"]["tooling"]["repos"]["py"], json!(["ci"]));
+        let owns = |repo: Option<&str>, files: Value| {
+            let mut args = json!({"project": "tooling", "files": files});
+            if let Some(r) = repo {
+                args["repo"] = json!(r);
+            }
+            run("board_owns", args)
+        };
+        let foreign = owns(Some("py"), json!(["ci/x.yml", "src/a.rs"])).expect("owns");
+        assert_eq!(foreign["foreign"], json!(["src/a.rs"]));
+        let foreign = owns(None, json!([".github/w.yml", "ci/x.yml"])).expect("owns");
+        assert_eq!(
+            foreign["foreign"],
+            json!(["ci/x.yml"]),
+            "the default repository"
+        );
+        assert!(owns(Some("zz"), json!([])).is_err());
+    }
+
     #[test]
     fn metrics_narrow_to_scope_project_and_repo() {
         use crate::projects::Projects;

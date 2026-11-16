@@ -736,3 +736,29 @@ fn a_board_refuses_an_old_grant_file_that_names_no_issuer() {
     );
     assert_eq!(std::fs::read_to_string(&state).expect("read"), legacy);
 }
+
+#[test]
+fn minting_credentials_takes_the_agents_own_token_not_an_oauth_grant() {
+    let addr = start_oauth(Auth::Credentials(credentials()));
+    let access = sign_in(addr, CLAUDE_TOKEN);
+    let body = r#"{"label":"w","agent_role":"builder"}"#;
+    for op in ["agent_enrol", "agent_enrol_revoke"] {
+        let (status, out) = api(addr, &access, op, body);
+        assert_eq!(status, 403, "{out}");
+        assert!(
+            out["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("own token")),
+            "{out}"
+        );
+    }
+    // The agent's own token gets past that check (and is then refused for lacking `enrol`).
+    let (status, out) = api(addr, CLAUDE_TOKEN, "agent_enrol", body);
+    assert_eq!(status, 403, "{out}");
+    assert!(
+        out["error"]
+            .as_str()
+            .is_some_and(|e| !e.contains("own token")),
+        "{out}"
+    );
+}

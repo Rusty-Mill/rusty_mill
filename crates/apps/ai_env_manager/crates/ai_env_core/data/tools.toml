@@ -1,0 +1,14 @@
+# Built-in tool catalog (pack D7). One [[tool]] per AI tool: `id` and the
+# folder its skills are linked into. `~/` is the user's home directory.
+# Paths are verified against rusty_mux's agent layout
+# (crates/apps/rusty_mux/crates/ctl/src/agent/layout.rs, pack D18).
+# Cursor and Gemini CLI (pack Q4) are not listed: their skills folders are not
+# verified yet.
+
+[[tool]]
+id = "claude-code"
+skills_dir = "~/.claude/skills"
+
+[[tool]]
+id = "codex"
+skills_dir = "~/.agents/skills"

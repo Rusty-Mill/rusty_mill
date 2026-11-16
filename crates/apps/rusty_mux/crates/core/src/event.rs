@@ -165,6 +165,12 @@ pub enum Event {
     /// The server read its config again and now starts new blocks as it
     /// says.
     ConfigReloaded,
+    /// The server's tailnet node changed state, or its name (C27): the
+    /// state `tailscaled` reports, and the node's own name when it has one.
+    TailscaleStatusChanged {
+        state: TailscaleState,
+        node: Option<String>,
+    },
     /// The block's program set a selection (OSC 52). The text is not in
     /// the event: it may be a secret, and clients attached to the block
     /// already received it in the output. Several writes read at once are
@@ -221,4 +227,41 @@ pub enum Progress {
     /// Busy, with no known amount.
     Indeterminate,
     Paused(u8),
+}
+
+/// Where the server's tailnet node stands, from `tailscaled`'s backend
+/// state. Anything this does not name is `Other`, so a new state of
+/// `tailscaled` never breaks a client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TailscaleState {
+    /// Up: peers can reach the server.
+    Running,
+    /// Logged out or waiting for the machine to be approved.
+    NeedsLogin,
+    /// Turned off.
+    Stopped,
+    /// Starting, or a state this does not name.
+    Other,
+}
+
+impl TailscaleState {
+    /// The state `tailscaled`'s `BackendState` text names.
+    pub fn from_backend(text: &str) -> Self {
+        match text {
+            "Running" => Self::Running,
+            "NeedsLogin" | "NeedsMachineAuth" => Self::NeedsLogin,
+            "Stopped" => Self::Stopped,
+            _ => Self::Other,
+        }
+    }
+
+    /// The name shown by `events` and `watch`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::NeedsLogin => "needs-login",
+            Self::Stopped => "stopped",
+            Self::Other => "other",
+        }
+    }
 }

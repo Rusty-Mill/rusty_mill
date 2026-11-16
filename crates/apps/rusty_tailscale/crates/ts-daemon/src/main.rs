@@ -5,6 +5,9 @@
 //! daemons on the same tailnet can ping each other's `100.64.x.y` entirely
 //! over the relay — no direct paths (Phase 5), no TUN/root (Phase 4).
 //!
+//! `ts-daemon hub ...` runs the first-party coordination server instead (see
+//! `ts_hub::launch`).
+//!
 //! Usage:
 //!   ts-daemon --login-server http://127.0.0.1:8080 --authkey <KEY> \
 //!             [--derp-server URL] [--state-dir DIR] [--hostname NAME] \
@@ -37,6 +40,9 @@ options:
   --hosts-file <path>    write MagicDNS peer names into this hosts file
   --direct               enable direct-path discovery (magicsock/disco);
                          peers upgrade from DERP to direct UDP when possible
+  --tls-ca <file>        trust only the certificate(s) in this PEM file for
+                         https:// control and DERP URLs (default: system
+                         trust anchors)
   --stun <host:port>     STUN server for reflexive-endpoint discovery
                          (for NAT traversal; implies --direct)
   --socket <path>        serve the LocalAPI on this Unix socket so ts-cli can
@@ -57,6 +63,7 @@ options:
         hosts_file: Option<PathBuf>,
         direct: bool,
         stun: Option<String>,
+        tls_ca: Option<PathBuf>,
         socket: PathBuf,
         ping: Option<Ipv4Addr>,
     }
@@ -71,6 +78,7 @@ options:
         let mut hosts_file = None;
         let mut direct = false;
         let mut stun = None;
+        let mut tls_ca = None;
         let mut socket = PathBuf::from(DEFAULT_SOCKET);
         let mut ping = None;
 
@@ -87,6 +95,7 @@ options:
                 "--hosts-file" => hosts_file = Some(PathBuf::from(next()?)),
                 "--direct" => direct = true,
                 "--stun" => stun = Some(next()?),
+                "--tls-ca" => tls_ca = Some(PathBuf::from(next()?)),
                 "--socket" => socket = PathBuf::from(next()?),
                 "--ping" => {
                     let v = next()?;
@@ -106,6 +115,7 @@ options:
             hosts_file,
             direct,
             stun,
+            tls_ca,
             socket,
             ping,
         })
@@ -128,6 +138,10 @@ options:
             )
             .with_target(false)
             .init();
+
+        if std::env::args().nth(1).as_deref() == Some("hub") {
+            return ts_hub::launch::main("ts-daemon hub", std::env::args().skip(2)).await;
+        }
 
         let args = match parse_args() {
             Ok(a) => a,
@@ -154,6 +168,25 @@ options:
         let hostname = args.hostname.unwrap_or_else(default_hostname);
         rusty_log::info!(node_key = %state.node.public(), hostname = %hostname, "identity loaded");
 
+        let https = |u: &str| u.starts_with("https://");
+        let derp = args.derp_server.as_deref().unwrap_or(&args.login_server);
+        if args.tls_ca.is_some() && !https(&args.login_server) && !https(derp) {
+            eprintln!("ts-daemon: --tls-ca needs an https:// --login-server or --derp-server");
+            return Ok(ExitCode::from(2));
+        }
+        let trust = match &args.tls_ca {
+            None => ts_engine::Trust::System,
+            Some(path) => match std::fs::read_to_string(path)
+                .map_err(|e| e.to_string())
+                .and_then(|pem| ts_dial::trust_from_pem(&pem).map_err(|e| e.to_string()))
+            {
+                Ok(trust) => trust,
+                Err(e) => {
+                    eprintln!("ts-daemon: --tls-ca {}: {e}", path.display());
+                    return Ok(ExitCode::from(2));
+                }
+            },
+        };
         let tun_mode = args.tun.is_some();
         let control_url = args.login_server.clone();
         let config = EngineConfig {
@@ -168,6 +201,7 @@ options:
             enable_direct: args.direct || args.stun.is_some(),
             stun_server: args.stun,
             stack_io: None,
+            trust,
         };
 
         let engine = Engine::start(config, state).await?;

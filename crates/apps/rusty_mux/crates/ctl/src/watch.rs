@@ -148,6 +148,7 @@ pub(crate) fn needs(kind: &str) -> Features {
         "clipboard-written" | "status-removed" => Features::MORE_PROGRAM_EVENTS,
         "active-window-changed" => Features::ACTIVE_WINDOW,
         "config-reloaded" => Features::CONFIG_RELOAD,
+        "tailscale-status-changed" => Features::TAILSCALE_STATUS,
         "window-moved" => Features::LAYOUT_EDIT,
         "focus-changed" => Features::FOCUS,
         _ => Features::NONE,

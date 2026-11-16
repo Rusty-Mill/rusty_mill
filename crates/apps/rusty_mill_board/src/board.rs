@@ -1,6 +1,7 @@
 //! The service: resolves actors from roles, applies domain operations and
 //! commits them through a [`Store`], retrying on revision conflicts.
 
+use crate::agents::{AgentInfo, Grant};
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,7 +14,7 @@ use uuid::Uuid;
 use crate::domain::{
     Actor, BoardError, Capability, Card, CloseReason, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS,
     Dates, Edit, Event, EventKind, ExecutionLink, MoveRules, Plan, ProjectStatus, Shelf, View,
-    import_id, text_hash,
+    import_id, is_pull_link, text_hash,
 };
 use crate::external::Observation;
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
@@ -36,6 +37,20 @@ const NUMBERER: &str = "board";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Roles(pub BTreeMap<String, BTreeSet<Capability>>);
+
+/// The repository to store for a card of `project`: `repo` if it names one of the project's
+/// repositories other than its default, else none (the default has one spelling).
+fn stored_repo(
+    registry: &Projects,
+    project: &str,
+    repo: Option<&str>,
+) -> Result<Option<String>, BoardError> {
+    let Some(r) = repo else { return Ok(None) };
+    if !registry.repos_of(project).any(|own| own == r) {
+        return Err(BoardError::Invalid("the project has no such repository"));
+    }
+    Ok((registry.repo_of(project) != Some(r)).then(|| r.to_owned()))
+}
 
 /// The capability, besides `Triage`, that re-files a card in `column`: closing work is what
 /// files a Done card, so `Close` re-files one.
@@ -120,6 +135,8 @@ pub struct Board<S> {
     escalations: Option<Arc<dyn Escalations>>,
     /// The projects' milestones, drawn on the roadmap.
     milestones: Box<dyn MilestoneStore>,
+    /// Agents registered on shared connectors.
+    agents: Mutex<crate::agents::Registry>,
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -141,6 +158,10 @@ pub struct NewCard<'a> {
     pub done: bool,
     /// The card it is split from.
     pub parent: Option<Uuid>,
+    /// Evidence links (see [`Card::add_evidence`]); none by default.
+    pub evidence: Vec<String>,
+    /// The repository of a project that spans several; none means its default.
+    pub repo: Option<&'a str>,
 }
 
 impl<'a> NewCard<'a> {
@@ -183,6 +204,7 @@ impl<S: Store> Board<S> {
             clock,
             escalations: None,
             milestones: Box::new(MemMilestones::default()),
+            agents: Mutex::default(),
         }
     }
 
@@ -285,6 +307,134 @@ impl<S: Store> Board<S> {
     pub fn with_milestones(mut self, store: Box<dyn MilestoneStore>) -> Self {
         self.milestones = store;
         self
+    }
+
+    /// Keep registered agents in `registry`.
+    #[must_use]
+    pub fn with_agents(self, registry: crate::agents::Registry) -> Self {
+        *self.agents.lock().unwrap_or_else(PoisonError::into_inner) = registry;
+        self
+    }
+
+    /// Register a new agent on `connector` with `grant`: its id and key.
+    ///
+    /// # Errors
+    /// See [`crate::agents::Registry::register`].
+    pub fn register_agent(
+        &self,
+        connector: &str,
+        grant: Grant,
+    ) -> Result<(String, String), BoardError> {
+        let now = (self.clock)();
+        self.agents()
+            .register(connector, grant, now)
+            .map_err(BoardError::Storage)
+    }
+
+    /// The grant of `id` if it is a live agent of `connector` holding `key`.
+    pub fn verify_agent(&self, connector: &str, id: &str, key: &str) -> Option<Grant> {
+        let now = (self.clock)();
+        self.agents().verify(connector, id, key, now)
+    }
+
+    /// Replace registered agent `id`'s own role and projects; whether it exists.
+    ///
+    /// # Errors
+    /// If the registry file cannot be written.
+    pub fn set_agent_grant(&self, id: &str, grant: Grant) -> Result<bool, BoardError> {
+        self.agents()
+            .set_grant(id, grant)
+            .map_err(BoardError::Storage)
+    }
+
+    /// Set or clear registered agent `id`'s nickname; whether it exists.
+    ///
+    /// # Errors
+    /// [`BoardError::Refused`] for a bad nickname; [`BoardError::Storage`] if it cannot be saved.
+    pub fn set_agent_nickname(
+        &self,
+        id: &str,
+        nickname: Option<String>,
+    ) -> Result<bool, BoardError> {
+        self.agents().set_nickname(id, nickname).map_err(|e| {
+            if e.starts_with("a nickname") {
+                BoardError::Refused(e)
+            } else {
+                BoardError::Storage(e)
+            }
+        })
+    }
+
+    /// Registered agents' nicknames: id to nickname.
+    pub fn agent_nicknames(&self) -> BTreeMap<String, String> {
+        self.agents().nicknames()
+    }
+
+    /// Remove registered agent `id`; whether it existed.
+    ///
+    /// # Errors
+    /// If the registry file cannot be written.
+    pub fn revoke_agent(&self, id: &str) -> Result<bool, BoardError> {
+        self.agents().revoke(id).map_err(BoardError::Storage)
+    }
+
+    /// Registered agents without keys.
+    pub fn agent_list(&self) -> Vec<AgentInfo> {
+        self.agents().list()
+    }
+
+    /// Check a registered agent's `grant`: its role must exist and its projects be known. With
+    /// `within` (the connector's role and projects) it may only narrow them: no capability the
+    /// connector lacks, no project outside the connector's.
+    ///
+    /// # Errors
+    /// [`BoardError::Refused`] naming what is wrong.
+    pub fn check_agent_grant(
+        &self,
+        grant: &Grant,
+        within: Option<(&str, Option<&[String]>)>,
+    ) -> Result<(), BoardError> {
+        let refused = |why: String| BoardError::Refused(why);
+        if let Some(role) = &grant.role {
+            let roles = read(&self.roles);
+            let caps = roles
+                .0
+                .get(role)
+                .ok_or_else(|| refused(format!("there is no role {role:?}")))?;
+            let ceiling = within.and_then(|(r, _)| roles.0.get(r));
+            if let Some(extra) = within.and_then(|_| {
+                caps.iter()
+                    .find(|c| !ceiling.is_some_and(|k| k.contains(c)))
+            }) {
+                return Err(refused(format!(
+                    "your connector does not hold {extra:?}, so you cannot take it: ask an admin to set your role"
+                )));
+            }
+        }
+        let Some(asked) = &grant.projects else {
+            return Ok(());
+        };
+        if asked.is_empty() {
+            return Err(refused(
+                "a project limit must name at least one project (omit it for all)".into(),
+            ));
+        }
+        let known = read(&self.projects);
+        if let Some(p) = asked.iter().find(|p| !known.contains(p)) {
+            return Err(refused(format!("there is no project {p:?}")));
+        }
+        if let Some((_, Some(own))) = within
+            && let Some(p) = asked.iter().find(|p| !own.contains(*p))
+        {
+            return Err(refused(format!(
+                "your connector does not work in project {p:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn agents(&self) -> std::sync::MutexGuard<'_, crate::agents::Registry> {
+        self.agents.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Serve the decision inbox from `source`.
@@ -401,6 +551,19 @@ impl<S: Store> Board<S> {
             return Err(BoardError::Refused(format!(
                 "project {:?} still has cards (for example {:?}); move them to another project first",
                 card.project, card.title
+            )));
+        }
+        // A card's repository must stay one of its project's.
+        if let Some(card) = self.store.list()?.iter().find(|c| {
+            c.repo.as_deref().is_some_and(|r| {
+                projects.contains(&c.project) && !projects.repos_of(&c.project).any(|own| own == r)
+            })
+        }) {
+            return Err(BoardError::Refused(format!(
+                "card {:?} is in repository {:?} of project {:?}, which would no longer have it; move the card first",
+                card.title,
+                card.repo.as_deref().unwrap_or_default(),
+                card.project
             )));
         }
         persist(&projects).map_err(BoardError::Refused)?;
@@ -1115,19 +1278,28 @@ impl<S: Store> Board<S> {
         project: &str,
         new: NewCard<'_>,
     ) -> Result<Card, BoardError> {
-        if new.done && !by.caps.contains(&Capability::Close) {
+        let records_merged_work = by.caps.contains(&Capability::Record)
+            && new.evidence.iter().any(|l| is_pull_link(l.trim()));
+        if new.done && !by.caps.contains(&Capability::Close) && !records_merged_work {
             return Err(BoardError::Forbidden(Capability::Close));
+        }
+        if !new.evidence.is_empty() {
+            check_records_shipped(by, &new.evidence)?;
         }
         let mut card = Card::new(new.title, new.body, new.tags, (self.clock)())?;
         if new.done {
             card.column = Column::DONE;
             card.done_ms = Some(card.created_ms);
         }
+        if !new.evidence.is_empty() {
+            card.evidence = card.add_evidence(&new.evidence, card.created_ms)?.evidence;
+        }
         if let Some(p) = new.parent {
             // A new card has no children, so no parent can close a loop through it.
             self.store.get(p)?.ok_or(BoardError::NotFound(p))?;
             card.parent = Some(p);
         }
+        card.repo = new.repo.map(str::to_owned);
         self.create(by, project, card)
     }
 
@@ -1140,6 +1312,7 @@ impl<S: Store> Board<S> {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
         self.check_accepts(project)?;
+        card.repo = stored_repo(&registry, project, card.repo.as_deref())?;
         project.clone_into(&mut card.project);
         let card = self.insert_numbered(by, card)?;
         drop(registry);
@@ -1321,6 +1494,7 @@ impl<S: Store> Board<S> {
                     | BoardError::Claimed(_)
                     | BoardError::NoSuchMove { .. }
                     | BoardError::Forbidden(_)
+                    | BoardError::ForbiddenAny(_)
                     | BoardError::NotClaimant
                     | BoardError::Terminal
                     | BoardError::OutOfScope(_)
@@ -1484,10 +1658,25 @@ impl<S: Store> Board<S> {
     /// An unknown project, a missing capability, an out-of-scope project, or a card claimed
     /// by someone else (without `Triage`).
     pub fn assign(&self, id: Uuid, project: &str, by: &Actor) -> Result<Card, BoardError> {
+        self.assign_in(id, project, None, by)
+    }
+
+    /// [`Board::assign`] into `repo` of a project that spans several repositories.
+    ///
+    /// # Errors
+    /// As [`Board::assign`], and if `repo` is not one of the project's repositories.
+    pub fn assign_in(
+        &self,
+        id: Uuid,
+        project: &str,
+        repo: Option<&str>,
+        by: &Actor,
+    ) -> Result<Card, BoardError> {
         let registry = self.registry();
         if !registry.contains(project) {
             return Err(BoardError::Invalid("unknown project"));
         }
+        let repo = stored_repo(&registry, project, repo)?;
         if !by.may_work_in(project) {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
@@ -1505,7 +1694,7 @@ impl<S: Store> Board<S> {
                 Some(holder) if !triage && *holder != by.name => {
                     Err(BoardError::Claimed(holder.clone()))
                 }
-                _ => Ok(c.assign(project, now)),
+                _ => Ok(c.assign(project, repo.as_deref(), now)),
             }
         });
         drop(registry);
@@ -1537,6 +1726,19 @@ impl<S: Store> Board<S> {
         let flow = self.flow();
         self.apply_in(&flow, id, by, EventKind::Closed, |c, now| {
             c.close(&flow, reason, by, now)
+        })
+    }
+
+    /// Add evidence links to a card (see [`Card::add_evidence`]). Needs `Close`, `Merge` or
+    /// `Triage`, or `Record` for GitHub pull request links only: whoever may record work as
+    /// shipped.
+    ///
+    /// # Errors
+    /// A missing capability, or see [`Card::add_evidence`].
+    pub fn add_evidence(&self, id: Uuid, links: &[String], by: &Actor) -> Result<Card, BoardError> {
+        check_records_shipped(by, links)?;
+        self.apply(id, by, EventKind::Edited, |c, now| {
+            c.add_evidence(links, now)
         })
     }
 
@@ -1907,4 +2109,30 @@ fn answerer(actor: &str) -> String {
     } else {
         label
     }
+}
+
+/// Who may record work as shipped (add evidence): a holder of `Close`, `Merge` or `Triage`, or
+/// of `Record` for GitHub pull request links only.
+fn check_records_shipped(by: &Actor, links: &[String]) -> Result<(), BoardError> {
+    const MAY: &[Capability] = &[
+        Capability::Close,
+        Capability::Record,
+        Capability::Merge,
+        Capability::Triage,
+    ];
+    if [Capability::Close, Capability::Merge, Capability::Triage]
+        .iter()
+        .any(|c| by.caps.contains(c))
+    {
+        return Ok(());
+    }
+    if !by.caps.contains(&Capability::Record) {
+        return Err(BoardError::ForbiddenAny(MAY));
+    }
+    if links.iter().all(|l| is_pull_link(l.trim())) {
+        return Ok(());
+    }
+    Err(BoardError::Invalid(
+        "record adds only GitHub pull request links (https://github.com/<owner>/<repo>/pull/<n>)",
+    ))
 }

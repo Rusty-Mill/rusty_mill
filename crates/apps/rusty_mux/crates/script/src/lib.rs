@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 
 pub mod hosts;
 mod parse;
+pub mod token;
 
 pub use parse::{parse, parse_declared, parse_server};
 
@@ -198,6 +199,7 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("clipboard-written", &["block", "selection"]),
     ("status-removed", &["block", "id"]),
     ("config-reloaded", &[]),
+    ("tailscale-status-changed", &["state", "node"]),
     ("hosts-changed", &[]),
 ];
 

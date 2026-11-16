@@ -75,7 +75,8 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `card_get`, `card_trace`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_close`,
   `card_archive`, `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `board_milestones`, `milestone_add`,
   `milestone_update`, `inbox_list`, `inbox_act`, `board_number_cards`. The web API
-  exposes the same table, so the two cannot drift.
+  exposes the same table, so the two cannot drift. `inbox_list`, `inbox_act` and `board_number_cards` need an
+  authenticated admin credential (a token or OAuth grant); a caller-named actor and role are refused.
 - **Milestones.** A project's dated goals (`src/milestones.rs`): a title and a target date, closed when reached, never
   deleted. `milestone_add` and `milestone_update` need Triage and the project in scope; `board_milestones` lists what the
   caller may see. In rusty_tick a milestone is a task tagged `milestone` (never `agent`, so never a card) in the
@@ -100,8 +101,8 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   task, beside `number:<n>`, so there is no migration.
 - **Project status.** A project is `active` (the default), `paused`, `experiment` or `archived`, kept in
   `project-status.json` in the settings directory (only non-active projects are listed; the projects file keeps its
-  format). Settings > Repositories sets it per project (`settings_project_status_set`, admin), written before it
-  applies. Paused and archived projects refuse `card_add`, forge imports (retried once active), open cards moved in
+  format). Settings > Repositories sets it per project, a repository's own project included (the screen shows no control for the Inbox)
+  (`settings_project_status_set`, admin), written before it applies. Paused and archived projects refuse `card_add`, forge imports (retried once active), open cards moved in
   with `card_assign` (a Done card may still be re-filed there), `card_claim`, and moves into a work column from
   outside one; `card_take` hands out none of their work. Work already under way may move on and finish. An
   experiment takes cards and hands out work. `board_list` lists projects that take work (active and experiment) by
@@ -109,6 +110,30 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `board_projects` reports `status` for non-active projects. The board's status picker (Active, Experiment, Paused,
   Archived, All projects) starts on Active. A paused or archived project must be made active before it is removed
   or renamed, so no status outlives its project.
+- **Record (merged work, narrowed).** `record` is `close` for recording merged work and nothing else: it moves a
+  claimed Building or V&Ving card to Done, or lets `card_add` with `done: true` record merged work, only when the
+  card (or the call) carries a GitHub pull request link as evidence (`https://github.com/<owner>/<repo>/pull/<n>`, with
+  at most `/files`, `/commits` or `/checks` after the number). Evidence it adds is pull request links only. It works
+  only from a work column and on the actor's own claim, even with movement rules off, and cannot archive or restore.
+  An issue or other link does not count. This checks the link's shape, not that the
+  pull request merged: that check against GitHub is not built yet. Give agent roles `record` instead of `close`.
+- **Shipped needs evidence.** A Done card counts as shipped only with evidence: a merged PR or any http(s) link
+  with a host that shows the work (printable ASCII, at most 512 bytes; `card_evidence`, or `evidence` on
+  `card_add`, both needing `close`, `record`, `merge` or `triage`), at most 8 per card, kept in the card's rusty_tick board
+  document. A dropped card takes none. Without evidence it is a prototype: `board_metrics` counts it as
+  `prototype` (per week and per project) and leaves it out of shipped and lead time; the Metrics view shows
+  prototypes beside shipped work. Cards Done before evidence existed are backfilled once, with the board stopped:
+  `rusty_mill_board --tick-url ... --settings-dir ... --backfill-evidence rusty_mill=Rusty-Mill/rusty_mill`
+  prints which Done cards (not dropped, no evidence yet) would get the pull requests their body and comments
+  name (`https://github.com/O/N/pull/N` anywhere; `PR #N` or `pull request #N` in a mapped repository's
+  projects; never a bare `#N`), at most 8 each; add `--backfill-record FILE` to write, and
+  `--undo-backfill FILE` clears what it wrote. Observed external refs (ADR-0006) never count. Done cards that name no pull request read as prototypes
+  until someone adds a link. The plan lists, per link, every place it is named (the text around it): read it, since a card
+  may say "superseded by PR #5". Add `--check-merged` (with `GITHUB_TOKEN`, read access to pull requests) to ask GitHub
+  whether each one merged and keep only those; dropped links go to stderr, and a failed lookup (auth, rate limit)
+  stops the run before anything is written. A card changed while the backfill runs is
+  skipped and reported.
+  Each run writes its own `--backfill-record` file (an existing one is refused); undo a run with that run's file.
 - **Close reasons (dropped work).** `card_close` closes an unstarted card (Backlog or a queue) without shipping
   it, for a required `reason`: `wont_do`, `duplicate` or `superseded`; an optional `note` becomes the closer's
   comment. It needs `triage`, and is refused for started, blocked or Done cards. The card goes to Done with no

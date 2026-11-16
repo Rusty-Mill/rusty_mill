@@ -76,8 +76,8 @@ has slack and can slip a phase without delaying the end state.
 
 | Code | Deliverable | Done when | Depends on | Lane | Size | Needs Nano |
 | --- | --- | --- | --- | --- | --- | --- |
-| L0 | First milestone committed | #758 (items 1-3), #1123, #1124 and #1166 are in Ready, with #1092 following once L2 confirms the host; their designs are batch-approved; the design freeze is recorded | None | Nano, Design | S | None left (decided: lel-m1-commit, lel-lost-designs, lel-m1-design-batch, lel-freeze); #1092 waits on L2 |
-| L1 | Deployment and prompts | The protocol host, orch and the inbox run on BaileyAi; the four lens prompts and the cost breaker wiring are merged | L0, G1 | Build | M | L2, L4 |
+| L0 | First milestone committed | #758 (items 1-3), #1123, #1124 and #1166 are in Ready, with #1092 following (L2 confirmed BaileyAi as host); their designs are batch-approved; the design freeze is recorded | None | Nano, Design | S | None left (decided: lel-m1-commit, lel-lost-designs, lel-m1-design-batch, lel-freeze, l2-baileyai-host) |
+| L1 | Deployment and prompts | The protocol host, orch and the inbox run on BaileyAi; the four lens prompts and the cost breaker wiring are merged | L0, G1 | Build | M | L4 |
 | L2 | Smoke run | One toy claim settles on the local model with a log that replays to the same outcome | L1 | Build, Review | S | L3 |
 | L3 | Duplicate-file experiment, stage one | Built from intent alone using the Codex container; golden set signed; shadow run done; a verdict against rusty_fclone on the five success criteria | L2 | Build, Research, Nano | L | L5, L6, L10, sign the golden set, judge the result |
 | L4 | First real intent | One real change to the ecosystem is built through it and merged on its evidence; jailed terminals and value scheduling re-enter scope | L3, G4 | All lanes | L | Intent and inbox only |
@@ -99,7 +99,7 @@ Let Em Loose questions go to `let-em-loose-expert`, not to this folder.
 | Code | Deliverable | Done when | Depends on | Lane | Size | Needs Nano |
 | --- | --- | --- | --- | --- | --- | --- |
 | S0 | Experiments closed out | Ledger, Conflux and Swarm OS each have a conclusion in remind-me and no open cards; Swarm OS is labelled a prototype | B0 | Design, Coordination | S | X1 to X3 |
-| S1 | Shared hygiene | One Rust toolchain pin across the repos; Ledger and Conflux on the newer SQLite binding, or archived instead | S0 | Build | S | E4 |
+| S1 | Shared hygiene | Ledger pinned to rusty_mill's 1.98.1 and on rusqlite 0.41; Conflux's repo archived. Converge and Communications are left alone (s1-hygiene-scope). Done 2026-11-13: baileyrd/ledger#5 merged (pin 1.98.1, rusqlite 0.41.1), Conflux archived | S0 | Build | S | E4 |
 | S2 | Two bounded trials | Communications has run one real-model trial and has a one-page conclusion; Converge has baseline numbers for rework, integration latency and redundant builds | G1 | Research, Build | M | X4, X5, a call budget |
 | S3 | Jujutsu trial | Two weeks of real work with Jujutsu, the merge queue and the affected-crate planner, measured against the baseline | S2 | Build, Merge steward | M | None |
 | S4 | Converge decision | A go or no-go on the kernel, written from the measured numbers | S3 | Nano | S | Decide |

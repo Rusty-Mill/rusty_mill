@@ -1,6 +1,6 @@
 //! The server's state: the model, each block's PTY and grid, each client's queue.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use rusty_mux_core::TailscaleState;
 use rusty_mux_core::{
     BlockId, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Mux, Principal, Side, Size,
     Transport, WindowId,
@@ -100,12 +102,26 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::SHUTDOWN)
     .union(Features::BACKGROUND_HISTORY)
     .union(Features::AGENT_LAUNCH)
-    .union(Features::HOLD);
+    .union(Features::HOLD)
+    .union(UNIX_ONLY);
+
+/// Offered on Linux only: signal and release (C76) act on a Unix process
+/// group, and orch, their one client, runs there; the tailscale status
+/// event (C27) comes from a `tailscaled` this server asks on Linux.
+#[cfg(target_os = "linux")]
+const UNIX_ONLY: Features = Features::SIGNAL_RELEASE.union(Features::TAILSCALE_STATUS);
+#[cfg(not(target_os = "linux"))]
+const UNIX_ONLY: Features = Features::NONE;
 
 /// An owner whose outbox holds more than this can't be told of more
 /// input, so an owner-only block refuses it (C77): half the budget, so a
 /// refusal comes well before the owner is dropped.
 const INPUT_REPORT_LIMIT: usize = crate::outbox::BUDGET / 2;
+
+/// Why a request that needs a block's program is refused once there is
+/// none (C76).
+#[cfg(target_os = "linux")]
+const EXITED: &str = "exited: the block's program is no longer running";
 
 /// The server's clock in unix ms, which grants are given in (C77).
 fn now_ms() -> u64 {
@@ -122,9 +138,36 @@ fn name_seed() -> u64 {
     u64::from_le_bytes(seed)
 }
 
+/// Fires when a block's PTY is released (C76), so a write already under
+/// way gives the master up at once instead of holding it open and
+/// delivering its bytes later.
+#[derive(Default)]
+pub(crate) struct Revoke {
+    fired: Cell<bool>,
+    notify: Notify,
+}
+
+impl Revoke {
+    #[cfg(target_os = "linux")]
+    fn fire(&self) {
+        self.fired.set(true);
+        self.notify.notify_waiters();
+    }
+
+    /// Resolves once the PTY is released; at once if it already was.
+    pub(crate) async fn fired(&self) {
+        if self.fired.get() {
+            return;
+        }
+        self.notify.notified().await;
+    }
+}
+
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
     pub(crate) pty: Rc<Pty>,
+    /// The block's release, which abandons this write (C76).
+    pub(crate) revoke: Rc<Revoke>,
     pub(crate) data: Vec<u8>,
     /// With [`Features::ECHO_ACK`]: the block and `Input` request to
     /// [`State::written`] once the write returns.
@@ -175,11 +218,16 @@ struct BlockRt {
     /// Launched with `hold` (C78): the block stays, read-only, once its
     /// program exits.
     hold: bool,
+    /// Its PTY was released (C76): read-only, with its program, if still
+    /// running, left to its owner.
+    released: bool,
 }
 
 /// A block's running program: its PTY and the task reading it.
 struct Live {
     pty: Rc<Pty>,
+    /// Fired on release, so pending writes drop their `pty` (C76).
+    revoke: Rc<Revoke>,
     process: Process,
     /// Tells the reader a key was written, so it drains when its grace ends.
     wake: Rc<Notify>,
@@ -226,6 +274,7 @@ impl Unscreened {
         ));
         let live = Live {
             pty: self.pty,
+            revoke: Rc::default(),
             process: self.process,
             wake,
             reader,
@@ -257,6 +306,7 @@ impl BlockRt {
             spool: None,
             input_seq: 0,
             hold: false,
+            released: false,
         }
     }
 
@@ -270,6 +320,9 @@ impl BlockRt {
     /// The program, or a refusal saying the block is read-only.
     fn live(&self) -> Result<&Live, Refusal> {
         self.live.as_ref().ok_or_else(|| {
+            if self.released {
+                return "the block is read-only: its pty was released".into();
+            }
             if self.hold {
                 return "the block is read-only: its program has exited".into();
             }
@@ -397,6 +450,10 @@ pub(crate) struct State {
 pub(crate) struct Lifetimes {
     pub(crate) idle: Duration,
     pub(crate) lease: Duration,
+    /// `--udp-lifetime`: a hard end for every association. While it is set,
+    /// a new association is asked for over a socket connection only, never
+    /// over UDP, or a client could renew its hour without the front door.
+    pub(crate) life: Option<Duration>,
 }
 
 /// What became of a client when its connection ended.
@@ -427,6 +484,7 @@ impl State {
             lifetimes: Lifetimes {
                 idle: ORPHAN_GRACE,
                 lease: ORPHAN_GRACE,
+                life: None,
             },
             stale: HashMap::new(),
             silenced: HashMap::new(),
@@ -529,6 +587,12 @@ impl State {
     /// and owns every session no client of another principal created.
     pub(crate) fn serve_as(&mut self, account: Principal) {
         self.account = Some(account);
+    }
+
+    /// Makes this a shared server (C26, D232): input leases go by the
+    /// principal that created a block's session; see [`Mux::share_leases`].
+    pub(crate) fn share_leases(&mut self, account: Principal) {
+        self.mux.share_leases(account);
     }
 
     /// Lets clients of the server's own account ([`State::serve_as`]) stop
@@ -647,6 +711,7 @@ impl State {
         takeover: Option<Takeover>,
     ) -> ClientId {
         let features = theirs.intersection(self.offered());
+        let who = principal.clone();
         let continued = takeover.and_then(|t| self.takes_over(t, &principal, features));
         let client = match continued {
             Some(client) => {
@@ -675,7 +740,7 @@ impl State {
             None => self.tokens.remove(&client),
         };
         let (cursor, missed) = if features.contains(Features::EVENT_SEQ) {
-            let (cursor, missed) = self.missed(resume, features);
+            let (cursor, missed) = self.missed(resume, features, &who);
             (Some(cursor), missed)
         } else {
             (None, Vec::new())
@@ -712,13 +777,18 @@ impl State {
     /// Where a client's stream starts, and the events it missed: from
     /// `resume` when possible, else from now with nothing to replay. Only
     /// events its `features` let it receive are replayed.
-    fn missed(&self, resume: Option<Cursor>, features: Features) -> (Cursor, Vec<Message>) {
+    fn missed(
+        &self,
+        resume: Option<Cursor>,
+        features: Features,
+        principal: &Principal,
+    ) -> (Cursor, Vec<Message>) {
         let replay = resume.and_then(|from| Some((from, self.history.since(from)?)));
         let Some((from, events)) = replay else {
             return (self.history.cursor(), Vec::new());
         };
         let messages = events
-            .filter(|(_, event)| receives(features, event))
+            .filter(|(_, event)| receives(features, principal, event))
             .map(|(seq, event)| Message::Event {
                 seq: Some(*seq),
                 event: event.clone(),
@@ -1181,6 +1251,11 @@ impl State {
             M::Rename { req, target, name } => (
                 req,
                 self.require(client, Features::LABELS, "rename")
+                    .and_then(|()| {
+                        self.mux
+                            .authorize_manage(client, target)
+                            .map_err(Refusal::from)
+                    })
                     .and_then(|()| match target {
                         EntityId::Block(block) => self.owns(client, [block]),
                         _ => Ok(()),
@@ -1190,6 +1265,11 @@ impl State {
             M::NameSession { req, session, name } => (
                 req,
                 self.require(client, Features::NAME_SESSION, "name-session")
+                    .and_then(|()| {
+                        self.mux
+                            .authorize_manage(client, EntityId::Session(session))
+                            .map_err(Refusal::from)
+                    })
                     .and_then(|()| done(self.mux.name_session(session, name))),
             ),
             M::Disconnect {
@@ -1229,6 +1309,23 @@ impl State {
                 self.require(client, Features::SHUTDOWN, "shutdown")
                     .and_then(|()| self.shutdown(client)),
             ),
+            #[cfg(target_os = "linux")]
+            M::SignalBlock { req, block, signal } => (
+                req,
+                self.require(client, Features::SIGNAL_RELEASE, "signal-block")
+                    .and_then(|()| self.signal_block(client, block, signal)),
+            ),
+            #[cfg(target_os = "linux")]
+            M::ReleaseBlock { req, block } => (
+                req,
+                self.require(client, Features::SIGNAL_RELEASE, "release-block")
+                    .and_then(|()| self.release_block(shared, client, block)),
+            ),
+            #[cfg(not(target_os = "linux"))]
+            M::SignalBlock { req, .. } | M::ReleaseBlock { req, .. } => (
+                req,
+                Err("signal and release are supported on Linux only".into()),
+            ),
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
@@ -1243,12 +1340,14 @@ impl State {
     /// this reply, inside the client's connection.
     fn open_datagram(&self, client: ClientId, req: u64) -> Result<Outcome, Refusal> {
         let registry = self.datagrams.as_ref().ok_or("no UDP listener")?;
-        let principal = self
-            .mux
-            .client(client)
-            .ok_or("unknown client")?
-            .principal()
-            .clone();
+        let asking = self.mux.client(client).ok_or("unknown client")?;
+        if self.lifetimes.life.is_some() && asking.transport() == Transport::Datagram {
+            return Err("a new association is asked for over a socket connection".into());
+        }
+        let principal = asking.principal().clone();
+        if is_tailnet(&principal) {
+            return Err("a tailnet peer has no UDP".into());
+        }
         let (port, id, key) = registry.offer(Instant::now(), principal)?;
         reply(
             "open datagram",
@@ -1275,6 +1374,95 @@ impl State {
                     .map(|()| Outcome::Done(None))
                     .map_err(Refusal::from)
             })
+    }
+
+    /// Sends `signal` to `block`'s program group, for its owner (C76).
+    #[cfg(target_os = "linux")]
+    fn signal_block(
+        &self,
+        client: ClientId,
+        block: BlockId,
+        signal: rusty_mux_proto::BlockSignal,
+    ) -> Result<Outcome, Refusal> {
+        self.owner_only(client, block)?;
+        let live = self.running(block)?;
+        live.process
+            .signal(signal)
+            .map_err(|e| format!("signalling the block's program: {e}"))?;
+        Ok(Outcome::Done(None))
+    }
+
+    /// Closes `block`'s PTY and waits for its program, never killing it,
+    /// for its owner (C76). The block is read-only from now on; once the
+    /// program exits, [`Self::exited`] keeps a held block and closes any
+    /// other, as for a program that exits by itself.
+    #[cfg(target_os = "linux")]
+    fn release_block(
+        &mut self,
+        shared: &Shared,
+        client: ClientId,
+        block: BlockId,
+    ) -> Result<Outcome, Refusal> {
+        self.owner_only(client, block)?;
+        self.running(block)?;
+        let rt = self
+            .blocks
+            .get_mut(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        let live = rt.live.take().ok_or(EXITED)?;
+        // Saved and restored read-only from now on (D72).
+        rt.started.read_only = true;
+        rt.unsaved = true;
+        rt.released = true;
+        live.reader.abort();
+        // A write already under way on another connection holds the master
+        // too: it gives it up now, so the master closes with this drop.
+        live.revoke.fire();
+        live.pty.release();
+        drop(live.pty);
+        self.end_echo(block);
+        // Disarmed here, before any future holds it: a task dropped unpolled
+        // must not kill the program either.
+        let Some(released) = live.process.release() else {
+            return Ok(Outcome::Done(None));
+        };
+        let shared = shared.clone();
+        rusty_tokio::task::spawn_local(async move {
+            let status = released.wait().await;
+            shared.borrow_mut().exited(block, status);
+        });
+        Ok(Outcome::Done(None))
+    }
+
+    /// `block`'s running program, or why there is none.
+    #[cfg(target_os = "linux")]
+    fn running(&self, block: BlockId) -> Result<&Live, Refusal> {
+        let rt = self
+            .blocks
+            .get(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        rt.live.as_ref().ok_or_else(|| EXITED.into())
+    }
+
+    /// Refuses `client` unless `block` has an owner and it is `client`:
+    /// signal and release reach only an owned block, for its owner, so a
+    /// block made without `own` behaves as before (C76, D230). Unlike
+    /// [`Self::owns`], an unowned block is refused too.
+    #[cfg(target_os = "linux")]
+    fn owner_only(&self, client: ClientId, block: BlockId) -> Result<(), Refusal> {
+        let target = self
+            .mux
+            .block(block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        if target.owner().is_none() {
+            return Err(format!(
+                "block {block} has no owner: only an owned block's owner may signal or release it"
+            )
+            .into());
+        }
+        self.mux
+            .authorize_owner(client, block)
+            .map_err(Refusal::from)
     }
 
     /// Refuses unless `client` may change each of `blocks`: nobody else
@@ -1357,6 +1545,9 @@ impl State {
             .blocks
             .get(&block)
             .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        self.mux
+            .authorize_attach(client, block)
+            .map_err(Refusal::from)?;
         let unknown = || Refusal {
             reason: format!("terminal blocks have no method `{method}`"),
             code: Some(Code::MethodNotFound),
@@ -1395,10 +1586,12 @@ impl State {
                 };
                 let data = keys::encode(keys, rt.grid.app_cursor_keys)
                     .map_err(|e| format!("{method}: {e}"))?;
-                let pty = rt.live()?.pty.clone();
+                let live = rt.live()?;
+                let (pty, revoke) = (live.pty.clone(), live.revoke.clone());
                 let report = self.reporting(client, block)?;
                 return Ok(Outcome::Write(PtyWrite {
                     pty,
+                    revoke,
                     data,
                     key: None,
                     report,
@@ -1785,18 +1978,18 @@ impl State {
         self.mux
             .authorize_input(client, block)
             .map_err(Refusal::from)?;
-        let pty = self
+        let live = self
             .blocks
             .get(&block)
             .ok_or_else(|| format!("block {block} has no PTY"))?
-            .live()?
-            .pty
-            .clone();
+            .live()?;
+        let (pty, revoke) = (live.pty.clone(), live.revoke.clone());
         let report = self.reporting(client, block)?;
         self.check_echo(block);
         let key = self.echoes(client).then_some((block, req));
         Ok(Outcome::Write(PtyWrite {
             pty,
+            revoke,
             data,
             key,
             report,
@@ -1853,28 +2046,40 @@ impl State {
     }
 
     /// Tells `block`'s owner that `client` asks for its lease (Q26): one
-    /// [`Message::LeaseRequested`], to the owner only. The owner decides.
+    /// [`Message::LeaseRequested`], to the owner only; for an open block on
+    /// a shared server, to the clients of the principal that may grant it
+    /// (the creator's). The one asked decides.
     fn request_lease(&mut self, client: ClientId, block: BlockId) -> Result<Outcome, Refusal> {
         let target = self.mux.block(block).ok_or(Error::UnknownBlock(block))?;
-        if target.input() != InputMode::OwnerOnly {
+        let owned = target.input() == InputMode::OwnerOnly;
+        let askees = self.mux.lease_askees(block)?;
+        if askees.is_empty() && !owned && self.mux.is_shared() {
+            return Err(
+                format!("owner_unreachable: block {block}'s creator can't be asked now").into(),
+            );
+        }
+        if askees.is_empty() {
             return Err(format!("block {block} takes input from anyone: acquire its lease").into());
         }
-        let owner = target
-            .owner()
-            .and_then(|o| o.client())
-            .ok_or(Error::Orphaned(block))?;
-        if owner == client {
+        if askees.contains(&client) {
             return Err(format!("block {block} is yours: acquire its lease").into());
         }
-        // As C77's input reports: an owner behind on its output isn't sent
+        // As C77's input reports: one behind on its output isn't sent
         // more, so a flood of asks can't push it over its budget.
-        let reachable = self
-            .clients
-            .get(&owner)
-            .is_some_and(|out| out.queued() <= INPUT_REPORT_LIMIT);
-        if !reachable || !self.has(owner, Features::LEASE_REQUESTS) {
+        let askees: Vec<ClientId> = askees
+            .into_iter()
+            .filter(|a| {
+                self.has(*a, Features::LEASE_REQUESTS)
+                    && self
+                        .clients
+                        .get(a)
+                        .is_some_and(|out| out.queued() <= INPUT_REPORT_LIMIT)
+            })
+            .collect();
+        if askees.is_empty() {
+            let who = if owned { "owner" } else { "creator" };
             return Err(
-                format!("owner_unreachable: block {block}'s owner can't be asked now").into(),
+                format!("owner_unreachable: block {block}'s {who} can't be asked now").into(),
             );
         }
         let principal = self
@@ -1888,7 +2093,9 @@ impl State {
             client,
             principal,
         };
-        self.send(owner, &ask);
+        for askee in askees {
+            self.send(askee, &ask);
+        }
         self.flush();
         Ok(Outcome::Done(None))
     }
@@ -1938,9 +2145,32 @@ impl State {
         let Some(rt) = self.blocks.get_mut(&block) else {
             return;
         };
+        // No reader drains a released block: its keys were resolved by
+        // the release's `EchoMode` instead (`end_echo`).
+        let Some(live) = &rt.live else {
+            return;
+        };
+        live.wake.notify_one();
         rt.waiting.written(client, req, at);
-        if let Some(live) = &rt.live {
-            live.wake.notify_one();
+    }
+
+    /// `block`'s output has ended for good (C76 release): nothing will be
+    /// read again, so no key can be acked under [`Message::EchoAck`]'s
+    /// contract. Drops its keys and says the echo is now
+    /// [`Echo::Unknown`], which tells
+    /// every client to stop predicting and drop its guesses: the terminal
+    /// resolution of every pending key, the one written after this too.
+    #[cfg(target_os = "linux")]
+    fn end_echo(&mut self, block: BlockId) {
+        let Some(rt) = self.blocks.get_mut(&block) else {
+            return;
+        };
+        rt.waiting = Waiting::default();
+        if std::mem::replace(&mut rt.echo, Echo::Unknown) == Echo::Unknown {
+            return;
+        }
+        for client in self.attached(block) {
+            self.send_echo(client, block);
         }
     }
 
@@ -2261,6 +2491,14 @@ impl State {
         }
     }
 
+    /// Announces the server's tailnet node in `state` (C27) to the clients
+    /// that asked for it. Only the Linux shared server has a tailnet.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn tailscale_status(&mut self, state: TailscaleState, node: Option<String>) {
+        self.mux.note_tailscale_status(state, node);
+        self.flush();
+    }
+
     /// Deletes closed `block`'s spool by its path, whether or not a handle
     /// to it is left. A stopping server closes no block, so keeps them all.
     fn forget_history(&self, block: BlockId) {
@@ -2294,7 +2532,11 @@ impl State {
                 let clients: Vec<(ClientId, bool)> = self
                     .features
                     .iter()
-                    .filter(|(_, f)| receives(**f, &event))
+                    .filter(|(c, f)| {
+                        self.mux
+                            .client(**c)
+                            .is_some_and(|client| receives(**f, client.principal(), &event))
+                    })
                     .map(|(c, f)| (*c, f.contains(Features::EVENT_SEQ)))
                     .collect();
                 for (client, numbers) in clients {
@@ -2382,7 +2624,7 @@ fn launched(config: &Config, launch: &Launch) -> Result<Config, Refusal> {
 /// with [`Features::STATUS`], a pwd or title event only with
 /// [`Features::TERMINAL_EVENTS`], so older clients never see a kind they
 /// can't decode.
-fn receives(features: Features, event: &Event) -> bool {
+fn receives(features: Features, principal: &Principal, event: &Event) -> bool {
     let needs = match event {
         Event::BlockStatus { .. } => Features::STATUS,
         Event::PwdChanged { .. } | Event::TitleChanged { .. } => Features::TERMINAL_EVENTS,
@@ -2405,9 +2647,18 @@ fn receives(features: Features, event: &Event) -> bool {
         Event::WindowMoved { .. } => Features::LAYOUT_EDIT,
         Event::FocusChanged { .. } => Features::FOCUS,
         Event::GrantChanged { .. } => Features::INPUT_GATE,
+        Event::TailscaleStatusChanged { .. } if !is_tailnet(principal) => return false,
+        Event::TailscaleStatusChanged { .. } => Features::TAILSCALE_STATUS,
         _ => Features::NONE,
     };
     features.contains(needs)
+}
+
+/// Whether `principal` came in over the tailnet (`ts:` or `ts-node:`): the
+/// only connections told where the node stands (C27, D265).
+fn is_tailnet(principal: &Principal) -> bool {
+    let id = principal.id();
+    id.starts_with("ts:") || id.starts_with("ts-node:")
 }
 
 /// A principal for tests, which build a state without a peer check.
@@ -2935,6 +3186,86 @@ mod regression {
                 takeover,
             );
             assert_eq!(again, client, "the token still works for its owner");
+        });
+    }
+
+    /// An open block of a shared server whose creator is not connected has
+    /// no one to ask: that is unreachable, not "takes input from anyone".
+    #[test]
+    fn a_lease_request_with_the_creator_away_is_unreachable() {
+        runtime().block_on(async {
+            let (shared, _, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let features = Features::CHECKPOINT_V6.union(Features::LEASE_REQUESTS);
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            // The session's creator is a principal with no connection.
+            let session = state.mux.sessions().next().unwrap().id();
+            let away = Principal::unix(1002, Some("away".into())).unwrap();
+            state.mux.set_creator(session, away).unwrap();
+            let (out, _inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            assert_eq!(state.mux.lease_askees(block), Ok(Vec::new()));
+            let refused = state.request_lease(guest, block).err().map(|r| r.reason);
+            assert!(
+                refused
+                    .as_deref()
+                    .is_some_and(|r| r.contains("owner_unreachable")),
+                "{refused:?}"
+            );
+        });
+    }
+
+    /// On a shared server a guest reads nothing from a block it could not
+    /// attach to: block calls take the same check as `attach` (C26, D239).
+    #[test]
+    fn a_guest_block_call_on_the_accounts_block_is_refused() {
+        runtime().block_on(async {
+            let (shared, _, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let features = Features::CHECKPOINT_V6.union(Features::BLOCK_CALL);
+            let (out, _inbox, _) = outbox();
+            let account = state.connect(out, test_owner(), Transport::Socket, features, None, None);
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _guest_inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            for method in ["terminal.format", "terminal.history", "terminal.title"] {
+                let refused = state
+                    .block_call(guest, 1, block, method, Vec::new())
+                    .err()
+                    .map(|r| r.reason);
+                assert!(
+                    refused.as_deref().is_some_and(|r| r.contains("principal")),
+                    "{method}: {refused:?}"
+                );
+            }
+            let ok = state.block_call(
+                account,
+                2,
+                block,
+                "terminal.format",
+                vec![("history".into(), Value::Lines(0))],
+            );
+            assert!(
+                ok.is_ok(),
+                "the account reads its own block: {:?}",
+                ok.err()
+            );
         });
     }
 
@@ -3861,5 +4192,31 @@ mod offered {
                 assert_eq!(feature.names().len(), 1, "bit {bit} has no name");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tailscale_status {
+    use super::*;
+
+    fn event() -> Event {
+        Event::TailscaleStatusChanged {
+            state: rusty_mux_core::TailscaleState::Running,
+            node: Some("box.t.ts.net".into()),
+        }
+    }
+
+    /// Only a tailnet connection that negotiated the bit is told where the
+    /// node stands (D265): not a local one, and not a tailnet one without it.
+    #[test]
+    fn only_a_tailnet_connection_with_the_bit_receives_it() {
+        let local = test_owner();
+        let tailnet = Principal::new("ts:carol@example.com", "").expect("valid");
+        let node = Principal::new("ts-node:box.t.ts.net", "").expect("valid");
+        let bit = Features::TAILSCALE_STATUS;
+        assert!(receives(bit, &tailnet, &event()));
+        assert!(receives(bit, &node, &event()));
+        assert!(!receives(bit, &local, &event()), "a local client got it");
+        assert!(!receives(Features::NONE, &tailnet, &event()));
     }
 }
