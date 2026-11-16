@@ -35,7 +35,9 @@ use std::time::{Duration, Instant};
 
 use crate::sync::Mutex;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, Window, WindowId};
@@ -361,6 +363,17 @@ struct Place {
     block: Rect,
 }
 
+impl Place {
+    /// Whether window pixel `(x, y)` is on the block's grid, not its
+    /// header, border or buttons (focus follows mouse, gui-design D67).
+    fn grid_contains(&self, (cell_w, cell_h): (usize, usize), x: usize, y: usize) -> bool {
+        x >= self.x
+            && y >= self.y
+            && x < self.x + self.cells.cols * cell_w
+            && y < self.y + self.cells.rows * cell_h
+    }
+}
+
 impl Tab {
     fn pane(&self, id: u64) -> Option<&Pane> {
         self.panes.iter().find(|p| p.id == id)
@@ -604,6 +617,8 @@ struct WindowState<'a> {
     source: &'a dyn Source,
     /// The focus last told to `source` or told by it.
     told: Option<u64>,
+    /// The pinch gesture's summed magnification so far (C62).
+    pinch: f64,
     /// An attached window's prefix (Ctrl-]) is armed: the next key is a
     /// layout command (gui-design F2, D49).
     armed: bool,
@@ -1596,6 +1611,10 @@ impl WindowState<'_> {
             pressed: self.pressed.and_then(Hit::block),
         };
         let armed = self.armed;
+        let fade_inactive = self
+            .config
+            .dim_inactive_panes
+            .unwrap_or(crate::config::DIM_INACTIVE_DEFAULT);
         let body = &mut self.body;
         // F2 numbers follow the layout's order, 1 to 9 (handoff D104).
         let number = |id: u64| {
@@ -1642,6 +1661,7 @@ impl WindowState<'_> {
             empty: None,
             banner: body.banner(),
             dim: body.offline(),
+            fade_inactive,
             ended: None,
         };
         let height = (size.height as usize).saturating_sub(top);
@@ -3398,6 +3418,8 @@ impl WindowState<'_> {
         let padding = s.padding();
         let status_bar = s.status_bar();
         let command_marks = s.command_marks();
+        let focus_follows_mouse = s.focus_follows_mouse();
+        let dim_inactive = s.dim_inactive();
         let opacity = s.opacity();
         let launch_mode = s.launch_mode_value();
         let cols = s.cols_value();
@@ -3467,6 +3489,8 @@ impl WindowState<'_> {
             }
             // Read live at draw time; updating the config is the whole apply.
             Field::CommandMarks => self.config.command_marks = Some(command_marks),
+            Field::FocusFollowsMouse => self.config.focus_follows_mouse = Some(focus_follows_mouse),
+            Field::DimInactive => self.config.dim_inactive_panes = Some(dim_inactive),
             Field::StatusBar => {
                 self.config.status_bar = Some(status_bar);
                 if let Some(size) = self.window.as_ref().map(|w| w.inner_size()) {
@@ -4893,6 +4917,88 @@ impl WindowState<'_> {
         false
     }
 
+    /// Focus follows mouse (C62): a pointer that enters another pane focuses
+    /// it, as a click does and through the same `tell_focus` request, so
+    /// the lease follows as for a click (handoff D102) and nothing is
+    /// taken from another client. Only on bare hover: not with a button
+    /// down, a drag, an open overlay or popover, an armed prefix, a down
+    /// link, a zoomed block, or on the chrome bar.
+    fn focus_under_pointer(&mut self, x: f64, y: f64) {
+        if !self.config.focus_follows_mouse.unwrap_or(false)
+            || self.mouse_button_down.is_some()
+            || self.drag.is_live()
+            || self.overlay.is_some()
+            || self.popover_open()
+            || self.armed
+            || self.searching.is_some()
+            || self.composing()
+            || self.offline()
+            || self.in_chrome(y)
+        {
+            return;
+        }
+        let (px, py) = (x.max(0.0) as usize, y.max(0.0) as usize);
+        let cell = (self.cell_w, self.cell_h);
+        let Some(id) = self
+            .places(self.active)
+            .into_iter()
+            .find(|(_, p)| p.grid_contains(cell, px, py))
+            .map(|(id, _)| id)
+        else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        if tab.zoomed || tab.focus == id {
+            return;
+        }
+        tab.focus = id;
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Whether the focused pane has an input-method composition under way.
+    fn composing(&self) -> bool {
+        self.pane()
+            .is_some_and(|p| !p.grid.lock().ime_preedit.is_empty())
+    }
+
+    /// Whether something other than the blocks owns the pointer and the
+    /// source takes no requests: an overlay, a popover or confirmation, a
+    /// down link or an ended session.
+    fn gesture_blocked(&self) -> bool {
+        self.overlay.is_some()
+            || self.popover_open()
+            || self.offline()
+            || self.body.ended().is_some()
+    }
+
+    /// A pinch (macOS): out zooms the focused block, in unzooms it, judged
+    /// when the gesture ends so one pinch is one request (C62).
+    fn on_pinch(&mut self, delta: f64, phase: TouchPhase) {
+        // Settings, a popover or confirmation, a down link or an ended
+        // session own the interaction: the gesture counts for nothing,
+        // and one that began before they opened is dropped (D68).
+        if self.gesture_blocked() {
+            self.pinch = 0.0;
+            return;
+        }
+        match phase {
+            TouchPhase::Started => self.pinch = 0.0,
+            TouchPhase::Moved => self.pinch += if delta.is_finite() { delta } else { 0.0 },
+            TouchPhase::Cancelled => self.pinch = 0.0,
+            TouchPhase::Ended => {
+                let sum = std::mem::take(&mut self.pinch);
+                let zoomed = self.tabs.get(self.active).is_some_and(|t| t.zoomed);
+                if pinch_toggles_zoom(sum, zoomed) {
+                    self.toggle_source_zoom();
+                }
+            }
+        }
+    }
+
     /// Move an attached window's focus to the neighbour `(dx, dy)` of the
     /// focused block in the unzoomed layout, as the TUI finds it.
     fn focus_block_dir(&mut self, dx: isize, dy: isize) {
@@ -5554,6 +5660,7 @@ impl WindowState<'_> {
                     }
                 }
                 self.popover_hover(position.x, position.y);
+                self.focus_under_pointer(position.x, position.y);
                 // Settings-page hover: highlight the card under the pointer.
                 if let Some((col, grid_row)) = self.overlay_cell(position.x, position.y) {
                     let grid_rows = self.rows as usize;
@@ -5728,6 +5835,7 @@ impl WindowState<'_> {
                     }
                 }
             }
+            WindowEvent::PinchGesture { delta, phase, .. } => self.on_pinch(delta, phase),
             // Wheel up browses into scrollback history, wheel down back toward
             // the live bottom. A notch is `WHEEL_LINES`; trackpads report pixels.
             WindowEvent::MouseWheel { delta, .. } => {
@@ -5861,6 +5969,7 @@ impl<'a> App<'a> {
         Ok(WindowState {
             source: self.source,
             told: None,
+            pinch: 0.0,
             armed: false,
             strip: StripState::new().ok_or("the interface font failed to parse")?,
             body: BodyState::new().ok_or("the interface font failed to parse")?,
@@ -6629,8 +6738,48 @@ fn osc52_reply(sel: char, text: &str) -> Vec<u8> {
     out
 }
 
+/// The summed magnification a pinch needs before it counts.
+const PINCH_MIN: f64 = 0.25;
+
+/// Whether a finished pinch of `sum` flips the zoom: out zooms an unzoomed
+/// block, in unzooms a zoomed one (C62).
+fn pinch_toggles_zoom(sum: f64, zoomed: bool) -> bool {
+    match zoomed {
+        false => sum >= PINCH_MIN,
+        true => sum <= -PINCH_MIN,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hover_focus_hits_the_grid_and_not_the_header_or_border() {
+        let place = super::Place {
+            cells: super::Rect::new(0, 0, 10, 4),
+            x: 100,
+            y: 140,
+            block: super::Rect::new(0, 0, 0, 0),
+        };
+        let cell = (8, 16);
+        assert!(place.grid_contains(cell, 100, 140), "grid's top-left");
+        assert!(place.grid_contains(cell, 179, 203), "grid's last pixel");
+        assert!(!place.grid_contains(cell, 120, 120), "the header above");
+        assert!(!place.grid_contains(cell, 99, 150), "the border left");
+        assert!(!place.grid_contains(cell, 180, 150) && !place.grid_contains(cell, 150, 204));
+    }
+
+    #[test]
+    fn a_pinch_zooms_out_to_zoom_and_in_to_unzoom_past_a_threshold() {
+        use super::pinch_toggles_zoom as flips;
+        assert!(flips(0.4, false) && !flips(-0.4, false), "out zooms");
+        assert!(flips(-0.4, true) && !flips(0.4, true), "in unzooms");
+        assert!(
+            !flips(0.1, false) && !flips(-0.1, true),
+            "a twitch is nothing"
+        );
+        assert!(!flips(f64::NAN, false));
+    }
+
     #[cfg(not(windows))]
     use super::shell_quote;
     use super::{
