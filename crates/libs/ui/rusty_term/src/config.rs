@@ -40,6 +40,13 @@ pub enum ReduceMotion {
     Off,
 }
 
+/// `[window] line_height` bounds (a multiple of the font's natural height).
+pub const LINE_HEIGHT: (f32, f32) = (0.8, 2.0);
+/// `[window] letter_spacing` bounds, in device px.
+pub const LETTER_SPACING: (i32, i32) = (-2, 8);
+/// Most `font_fallback` entries read; the rest are ignored.
+pub const FONT_FALLBACK_MAX: usize = 8;
+
 /// Which face is the base for ordinary text (`[window] font_weight`). The bold
 /// face is the one found for `font_bold` or next to `font`; without one,
 /// `Bold` changes nothing. No synthetic bold, no variable-font axis.
@@ -756,7 +763,7 @@ fn parse_value(s: &str) -> Result<Value, String> {
     if let Some(mut rest) = s.strip_prefix('[') {
         let mut items = Vec::new();
         loop {
-            rest = rest.trim_start_matches([' ', '\t', ',']);
+            rest = rest.trim_start_matches([' ', '\t']);
             if let Some(tail) = rest.strip_prefix(']') {
                 let tail = tail.trim();
                 if !tail.is_empty() && !tail.starts_with('#') {
@@ -769,7 +776,12 @@ fn parse_value(s: &str) -> Result<Value, String> {
             };
             let (item, tail) = parse_quoted(q)?;
             items.push(item);
-            rest = tail;
+            rest = tail.trim_start_matches([' ', '\t']);
+            match rest.strip_prefix(',') {
+                Some(r) => rest = r,
+                None if rest.starts_with(']') => {}
+                None => return Err("expected `,` or `]` after an array item".into()),
+            }
         }
     }
     // Bare scalar: strip a trailing comment, then try integer, then float.
@@ -864,7 +876,11 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
                 Value::Int(i) => i as f64,
                 _ => return Err(format!("{key}: expected a number")),
             };
-            cfg.line_height = Some((x as f32).clamp(0.8, 2.0));
+            if !x.is_finite() {
+                return Err(format!("{key}: expected a finite number"));
+            }
+            let (lo, hi) = LINE_HEIGHT;
+            cfg.line_height = Some((x as f32).clamp(lo, hi));
         }
         ("window", "letter_spacing") => {
             let px = match value {
@@ -872,7 +888,8 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
                 Value::Int(i) => i,
                 _ => return Err(format!("{key}: expected a number")),
             };
-            cfg.letter_spacing = Some(px.clamp(-2, 8) as i32);
+            let (lo, hi) = LETTER_SPACING;
+            cfg.letter_spacing = Some(px.clamp(lo as i64, hi as i64) as i32);
         }
         ("window", "ligatures") => cfg.ligatures = Some(expect_bool(key, value)?),
         ("window", "status_bar") => cfg.status_bar = Some(expect_bool(key, value)?),
@@ -1311,8 +1328,10 @@ mod tests {
         );
         let (cfg, w) = parse("[window]\nfont_fallback = []\n");
         assert!(w.is_empty() && cfg.font_fallback.is_empty());
-        let (_, w) = parse("[window]\nfont_fallback = [\"/a.ttf\" 3]\n");
-        assert_eq!(w.len(), 1, "{w:?}");
+        for bad in ["[\"/a.ttf\" 3]", "[\"/a\" \"/b\"]", "[, \"/a\"]"] {
+            let (_, w) = parse(&format!("[window]\nfont_fallback = {bad}\n"));
+            assert_eq!(w.len(), 1, "{bad}: {w:?}");
+        }
     }
 
     #[test]
@@ -1326,6 +1345,10 @@ mod tests {
         let (cfg, w) = parse("[window]\nline-height = 1.25\nletter-spacing = 3\n");
         assert!(w.is_empty());
         assert_eq!((cfg.line_height, cfg.letter_spacing), (Some(1.25), Some(3)));
+        for bad in ["nan", "inf", "-inf"] {
+            let (cfg, w) = parse(&format!("[window]\nline_height = {bad}\n"));
+            assert_eq!((w.len(), cfg.line_height), (1, None), "{bad}: {w:?}");
+        }
         let (cfg, w) = parse("[window]\nfont_weight = \"heavy\"\nline_height = \"x\"\n");
         assert_eq!(w.len(), 2, "{w:?}");
         assert_eq!(cfg.font_weight, None);

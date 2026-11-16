@@ -116,15 +116,18 @@ impl Default for FontMetrics {
 }
 
 impl FontMetrics {
-    pub(crate) const LINE_HEIGHT: std::ops::RangeInclusive<f32> = 0.8..=2.0;
-    pub(crate) const LETTER_SPACING: std::ops::RangeInclusive<i32> = -2..=8;
-
-    /// Clamp into the supported ranges.
+    /// Clamp into the supported ranges; a non-finite line height is 1.0.
     pub(crate) fn new(line_height: f32, letter_spacing: i32) -> Self {
+        let (lh_lo, lh_hi) = crate::config::LINE_HEIGHT;
+        let (ls_lo, ls_hi) = crate::config::LETTER_SPACING;
+        let line_height = if line_height.is_finite() {
+            line_height
+        } else {
+            1.0
+        };
         FontMetrics {
-            line_height: line_height.clamp(*Self::LINE_HEIGHT.start(), *Self::LINE_HEIGHT.end()),
-            letter_spacing: letter_spacing
-                .clamp(*Self::LETTER_SPACING.start(), *Self::LETTER_SPACING.end()),
+            line_height: line_height.clamp(lh_lo, lh_hi),
+            letter_spacing: letter_spacing.clamp(ls_lo, ls_hi),
         }
     }
 
@@ -624,8 +627,8 @@ pub(crate) fn load_set(
 ) -> Option<FontSet> {
     let regular = load_default_font(regular_path)?;
     let mut fb: Vec<Vec<u8>> = Vec::new();
-    for p in fallback {
-        match std::fs::read(p) {
+    for p in fallback.iter().take(crate::config::FONT_FALLBACK_MAX) {
+        match read_font_file(p) {
             Ok(b) => fb.push(b),
             Err(e) => eprintln!("rusty_term: font_fallback {}: {e}", p.display()),
         }
@@ -652,6 +655,22 @@ pub(crate) fn load_set(
         fallback: fb,
         emoji,
     })
+}
+
+/// Largest font file read from a configured path.
+const FONT_FILE_MAX: u64 = 64 << 20;
+
+/// Read a configured font: a regular file no larger than [`FONT_FILE_MAX`], so
+/// a FIFO, device or huge file can't hang or exhaust memory.
+fn read_font_file(p: &std::path::Path) -> Result<Vec<u8>, String> {
+    let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a regular file".into());
+    }
+    if meta.len() > FONT_FILE_MAX {
+        return Err(format!("larger than {} MiB", FONT_FILE_MAX >> 20));
+    }
+    std::fs::read(p).map_err(|e| e.to_string())
 }
 
 /// Load a styled variant: the explicit `configured` path if readable, else a
@@ -785,6 +804,16 @@ mod tests {
         assert_eq!((m.line_height, m.letter_spacing), (2.0, -2));
         let m = FontMetrics::new(0.0, 99);
         assert_eq!((m.line_height, m.letter_spacing), (0.8, 8));
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(FontMetrics::new(bad, 0).line_height, 1.0);
+        }
+    }
+
+    #[test]
+    fn font_file_reader_refuses_non_files() {
+        assert!(read_font_file(std::path::Path::new("/dev/null")).is_err());
+        assert!(read_font_file(std::path::Path::new("/")).is_err());
+        assert!(read_font_file(std::path::Path::new("/nonexistent/f.ttf")).is_err());
     }
 
     #[test]
