@@ -488,6 +488,8 @@ pub(crate) struct Scene {
     pub banner: Option<Banner>,
     /// The blocks show at 70% and take no clicks: the link is down (D62).
     pub dim: bool,
+    /// Blocks without the focus show at 70% (`dim_inactive_panes`, C62).
+    pub fade_inactive: bool,
     /// The shown session, by name, ended while the link was down: its
     /// panel fills the body (D28, D62).
     pub ended: Option<String>,
@@ -539,11 +541,14 @@ pub(crate) fn paint(
         spots.push((r, Spot::OpenSwitcher));
     }
     ribbon::paint(&mut out, y, &scene.ribbon, (&look.chrome, look.scale), font);
+    // Fades first: a badge sits over its block's veil, not under it.
     let mut over: Vec<(Pixmap, (usize, usize))> = scene
         .blocks
         .iter()
-        .filter_map(|b| badge(b, look, font))
+        .filter(|b| scene.fade_inactive && !b.focused)
+        .filter_map(|b| fade(b, look))
         .collect();
+    over.extend(scene.blocks.iter().filter_map(|b| badge(b, look, font)));
     if scene.dim {
         // The frame at 30% over the blocks shows them at 70%.
         spots.clear();
@@ -959,6 +964,20 @@ fn paint_zoomed_group(
 /// A block's F2 badge (D49), centred under its header: its own pixmap,
 /// since it sits over the grid, on the grid's background, and where it
 /// goes in the body.
+/// A veil over an unfocused block's grid: the terminal background at 30%
+/// shows it at 70% (D21). The frame and header keep full contrast (D27).
+fn fade(block: &Shown, look: &Look) -> Option<(Pixmap, (usize, usize))> {
+    let (s, r) = (look.scale, rect(block.rect));
+    let edge = BORDER * s;
+    let top = r.y + (BORDER + HEADER + HAIRLINE) * s;
+    let (w, h) = (r.w - 2.0 * edge, r.y + r.h - top - edge);
+    if w < 1.0 || h < 1.0 {
+        return None;
+    }
+    let veil = Pixmap::veil(w as usize, h as usize, look.bg, DIM_VEIL);
+    Some((veil, ((r.x + edge) as usize, top as usize)))
+}
+
 fn badge(block: &Shown, look: &Look, font: &mut UiText) -> Option<(Pixmap, (usize, usize))> {
     let n = block.badge?;
     let (s, c) = (look.scale, &look.chrome);
@@ -1796,6 +1815,31 @@ mod tests {
         assert_eq!((veil.opacity, veil.width), (DIM_VEIL, 1100));
         assert!(veil.height < 350, "the ribbon stays bright");
         assert_eq!(banner.height, banner::height(1.0));
+    }
+
+    #[test]
+    fn an_unfocused_block_is_veiled_below_its_header_when_fading_is_on() {
+        let look = look();
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let mut focused = block(1, Cells::new(8, 0, 500, 300));
+        focused.focused = true;
+        let mut other = block(2, Cells::new(520, 0, 500, 300));
+        other.badge = Some(2);
+        let scene = |fade| Scene {
+            fade_inactive: fade,
+            ..scene(vec![focused.clone(), other.clone()])
+        };
+        let off = paint(1100, 350, &scene(false), &look, &mut font);
+        assert_eq!(off.over.len(), 1, "only the badge");
+        let on = paint(1100, 350, &scene(true), &look, &mut font);
+        assert_eq!(on.over.len(), 2, "one veil and the badge");
+        let (veil, (x, y)) = (&on.over[0].0, on.over[0].1);
+        assert_eq!(veil.opacity, DIM_VEIL);
+        assert!(
+            x > 520 && y > HEADER as usize,
+            "inside the border, under the header"
+        );
+        assert!(on.over[1].0.opacity > veil.opacity, "the badge stays whole");
     }
 
     #[test]

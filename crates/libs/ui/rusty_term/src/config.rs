@@ -127,6 +127,10 @@ pub struct Config {
     /// beside each OSC 133 command block — green success, red failure, the
     /// accent while running (`[window] command_marks`; default on).
     pub command_marks: Option<bool>,
+    /// Pointing at a pane focuses it, as a click does (`[window] focus_follows_mouse`; default off; C62).
+    pub focus_follows_mouse: Option<bool>,
+    /// Unfocused panes show at 70% (`[window] dim_inactive_panes`; default off; C62).
+    pub dim_inactive_panes: Option<bool>,
     /// Bottom status ribbon (windowed front-end): cwd, git branch, last
     /// command's exit status, scrollback position, and grid size in a
     /// one-cell bar flush with the window's bottom edge (`[window]
@@ -291,6 +295,8 @@ impl Config {
 # status_bar = false        # hide the bottom status ribbon (default on)
 # reduce_motion = "on"      # "system" (default, follow the OS), "on" or "off"
 # command_marks = false     # hide the per-command gutter marks (default on)
+# focus_follows_mouse = true  # pointing at a pane focuses it (default off)
+# dim_inactive_panes = true   # unfocused panes show at 70% (default off)
 
 # copy_html = false         # don't add styled HTML to Ctrl+Shift+C copies
 # clipboard = "write-only"  # OSC 52 policy: "off", "write-only" (default), or "read-write"
@@ -803,6 +809,10 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
         ("window", "ligatures") => cfg.ligatures = Some(expect_bool(key, value)?),
         ("window", "status_bar") => cfg.status_bar = Some(expect_bool(key, value)?),
         ("window", "command_marks") => cfg.command_marks = Some(expect_bool(key, value)?),
+        ("window", "focus_follows_mouse") => {
+            cfg.focus_follows_mouse = Some(expect_bool(key, value)?)
+        }
+        ("window", "dim_inactive_panes") => cfg.dim_inactive_panes = Some(expect_bool(key, value)?),
         ("window", "launch_mode") => {
             let name = expect_str(key, value)?;
             cfg.launch_mode = Some(match name.to_ascii_lowercase().as_str() {
@@ -1737,6 +1747,22 @@ color15 = "ffffff"
         for &name in PRESETS {
             assert!(preset(name).is_some(), "advertised preset `{name}` missing");
         }
+    }
+
+    #[test]
+    fn focus_and_dim_keys_parse_and_default_unset() {
+        let (cfg, warns) =
+            parse("[window]\nfocus_follows_mouse = true\ndim_inactive_panes = true\n");
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(
+            (cfg.focus_follows_mouse, cfg.dim_inactive_panes),
+            (Some(true), Some(true))
+        );
+        let (cfg, _) = parse("");
+        assert_eq!(
+            (cfg.focus_follows_mouse, cfg.dim_inactive_panes),
+            (None, None)
+        );
     }
 
     #[test]
