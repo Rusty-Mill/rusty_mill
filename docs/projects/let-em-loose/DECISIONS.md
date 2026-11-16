@@ -141,6 +141,7 @@ Precise contracts used by this guide:
 | D131 | Deploy on BaileyAi authorised for M1 (protocol host, orch, Mill Board inbox); BaileyAi confirmed as host; #1092 released | [stated] 2026-11-13 (general, M1) |
 | D132 | #1092: Mill Board runs as `orch-runner` on BaileyAi for the inbox | [stated] 2026-11-16 (1092, M1) |
 | D133 | Lens, domain and skill packs load lazily; a role is defined by its lens; the project expert becomes a domain knowledge pack (direction; design is post-first-run) | [stated] 2026-11-16 (general, #723) |
+| D134 | #1124: no paid runs for now; the first smoke run is local-only and no spend ceiling is authorised | [stated] 2026-11-16 (1124, 1166) |
 
 ## D1. Lenses, not stages
 
@@ -1306,3 +1307,17 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] for the quoted direction; items 1-5 are readings · remind-me: mem_e0d4d0e7937a4adbaeaab4a7788e5f50
 **Key.** lel:general:packs-lazy-loaded-lens-defines-role
 **Source.** Nano, Millwright project thread message `cmsg_01632CBKCXsWe6RyFWvE9dovG75zPmnNVZB8k4NUGqW9h4`, 2026-11-16T16:53:53Z, verbatim: "So Lens, etc, Skill packs should be Lazy-loaded. A role is defined by the lens. The project expert goes away and is replaced by a project domain knowledge pack. Skill packs determines which packs load: its domain pack, lens pack, plus skill packs matched to its traits, such as Rust. Ai Env Manager catalogs the packs." Relates to D127, D130, #723, #1123, D19 (Factory is source of truth). Numbered D133 after D132.
+
+## D134. #1124: no paid runs for now; the first smoke run is local-only and no spend ceiling is authorised
+
+**Decision.** Asked which spend ceiling should apply to the paid half of the smoke run (A smoke only, B smoke + 1 stage-1 run, C full M2), Nano chose "No paid runs for now". No ceiling is authorised. The options in `1124-spend-estimate.md` § 5 stay on file for when he revisits.
+**Reading (the expert's, not Nano's words).**
+1. #1124's done-condition "declined paid runs" is met.
+2. The paid half of #1166 is deferred. The first smoke run uses local models only (Qwen3.6-35B-A3B and gpt-oss-120b via llama-swap), with no Claude or Codex lens call. "Paid" here follows the card's and D38's word: a flat-rate subscription call is held back too, until Nano names a ceiling.
+3. The M2 paid experiment (#600 stage-1 runs) has no ceiling and no paid run is authorised. D38's $200 / $25 / $40 still bind Phase B only, as before; nothing carries over to M2.
+4. Config is unchanged: v0 still refuses any nonzero price (ADR-0021).
+**Why.** It is Nano's answer to a decision card. It also removes the one ask-first item (paid model calls) that stood between the smoke-run plan and a first run.
+**Rejected.** Options A, B and C of the spend card. Treating "no paid runs" as only the dollar half and still running subscription Claude and Codex lenses.
+**Tag.** [stated] · remind-me: mem_ade5caad779242259f0a7c5b11ed64d3
+**Key.** lel:1124:no-paid-runs-for-now
+**Source.** Nano, Millwright project thread `cmsg_01632CBKCXsWe6RyFWvE9dovKYDoFmtvXi6TAYDxoS9Gmq`, tap on decision card `cmsg_01632CBKCXsWe6RyFWvE9dovEdZwxaX7X8V2c9ew2bfAKe`, 2026-11-16T17:20:01Z, question "Which spend ceiling should apply to the paid half of the smoke run?". Relates to D38, D130, D131, D127, `1124-spend-estimate.md`. Numbered D134 after D133.

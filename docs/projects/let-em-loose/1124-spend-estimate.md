@@ -1,6 +1,6 @@
 # #1124 Spend estimate, ceiling and provider checks (draft 2026-11-16)
 
-Status: proposal for Nano. Nothing is built and nothing here authorises a paid call (D38, ADR-0021, D130). No model was called to write it.
+Status: proposal for Nano; answered 2026-11-16, no paid runs for now (D134). Nothing is built and nothing here authorises a paid call (D38, ADR-0021, D130). No model was called to write it.
 
 ## 0. What "spend" means in v0
 - **Nothing is metered in dollars.** `config.rs` refuses any nonzero `price` (ADR-0021: v0 runs flat-rate subscriptions and local models), so the meter charges 0 per call. `experiment_usd`, `task_usd` and the breaker's `window_usd` cannot trip. 598-build/PLAN.md: "money ceilings don't bind in v0; the call ceiling does".
@@ -59,7 +59,7 @@ Smoke run paid half by option (expected / high / hard worst case, every call to 
 Before 2026-12-03: re-check that Codex and Claude are on plans with no overage or credits enabled, then re-run Nano's `no_overage` assertion in `/etc/let-em-loose/assertions.json`. It lapses 30 days after its date, after which lens calls stop being admitted. Also confirm the Codex login on the BaileyAi machine has not been switched; the check cannot see that. (The 2026-12-03 date is from the card.)
 
 ## Open for Nano
-Which ceiling to authorise for the paid half of the smoke run (#1166), and whether it also covers the first M2 stage-1 run. D38's $200 / $25 / $40 apply to Phase B only; reusing them for M2 is a new decision. Nonzero prices stay refused (ADR-0021).
+**Answered 2026-11-16 (D134).** Nano chose "No paid runs for now" on the decision card (tap 2026-11-16T17:20:01Z, thread `cmsg_01632CBKCXsWe6RyFWvE9dovKYDoFmtvXi6TAYDxoS9Gmq`, card `cmsg_01632CBKCXsWe6RyFWvE9dovEdZwxaX7X8V2c9ew2bfAKe`), over A (smoke only), B (smoke + 1 stage-1 run) and C (full M2). No ceiling is authorised. Reading (the expert's): the paid half of #1166 is deferred and its first run is local-only (`1166-smoke-run.md`); the M2 paid experiment has no ceiling; §5 stays on file for when he revisits. D38's $200 / $25 / $40 still apply to Phase B only. Nonzero prices stay refused (ADR-0021). Follow-up: OPEN_QUESTIONS Q49.
 
 ## Drift
 No lens transcripts exist, so the card's "tokens measured from recorded transcripts" cannot be met yet. The card's "paid" and "breaker settings that match it" do not fit v0: money ceilings cannot trip and the breaker is unwired (#758). #596's estimate lives only in remind-me. STARTER pins `model: "opus"` without a version. `builders_per_claim` is approved (D66) but its value is not in the repo.

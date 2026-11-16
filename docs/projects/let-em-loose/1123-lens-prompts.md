@@ -64,7 +64,7 @@ Factory `lens.json` + `lenses/{architect,research,adversary,operator}.md`; deplo
 
 ## Open
 - Card says "3 blind proposers + the rebel"; D34, code and QA give three candidates total (two proposers + rebel). [default] keep three; four would change the scheduler (new design, D127).
-- Unverified: llama-swap model ids and port on BaileyAi, Claude/Codex model pins, whether the BBP host rejects `evidence_kind: executed` from a lens. Checked in orch: `post.rs` `parse` accepts `executed` (strength 1, must cite an artifact or message), so only the prompt (shared rule 4) and any host-side check keep lenses from posting it. Settled for orch; the host side is checked when #1123's fixture lands, with a test that `parse` accepts only cited posts from a prompted lens.
+- Unverified: llama-swap model ids and port on BaileyAi, Claude/Codex model pins, whether the BBP host rejects `evidence_kind: executed` from a lens. Checked in orch: `post.rs` `parse` accepts `executed` (strength 1, must cite an artifact or message), so only the prompt (shared rule 4) and any host-side check keep lenses from posting it. The host side is settled from code (see 1166-smoke-run.md): `check_executed` in `claims_engine.rs` refuses an `executed` post unless a runner-written test report for the same claim backs it, so a lens cannot raise it. Tightening `parse` to refuse it earlier is a later orch change (card proposed to Nano).
 
 ## Drift
 In-doc `Not covered: ... (#723)` was written without a #723 source in the repo; Factory's `_protocol.md` Loading context is the nearest document. The earlier draft assumed a Factory pin for the Claude model; Factory has none.
