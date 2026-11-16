@@ -14,29 +14,28 @@ const LISTED_MAX: usize = 1000;
 /// Entries read at most, so one huge directory cannot hold the server.
 const READ_MAX: usize = 20_000;
 
-/// What an entry is, as the one-letter kind a line starts with.
-fn kind(path: &Path, entry: &fs::DirEntry) -> char {
-    let Ok(link) = entry.file_type() else {
-        return 'o';
-    };
-    // A link is told by what it points to; a broken one stays `l`.
-    let shown = if link.is_symlink() {
-        fs::metadata(path).ok().map(|m| m.file_type())
-    } else {
-        Some(link)
-    };
-    match shown {
-        Some(t) if t.is_dir() => 'd',
-        Some(t) if t.is_file() => {
-            if link.is_symlink() {
-                'l'
-            } else {
-                'f'
-            }
-        }
-        None => 'l',
-        Some(_) => 'o',
+/// What an entry is, as the one-letter kind a line starts with; `None` when
+/// the file system will not say.
+fn kind(path: &Path, entry: &fs::DirEntry) -> Option<char> {
+    let link = entry.file_type().ok()?;
+    if !link.is_symlink() {
+        return Some(match (link.is_dir(), link.is_file()) {
+            (true, _) => 'd',
+            (_, true) => 'f',
+            _ => 'o',
+        });
     }
+    // A link is told by what it points to; a broken one is `l`.
+    Some(match fs::metadata(path) {
+        Ok(m) if m.is_dir() => 'd',
+        _ => 'l',
+    })
+}
+
+/// Whether `path` names another machine (a UNC path), which opening would
+/// make the server contact.
+fn is_network_path(path: &str) -> bool {
+    path.starts_with("\\\\") || (cfg!(windows) && path.starts_with("//"))
 }
 
 /// What lists a directory: [`list`], or in tests a stand-in that stalls.
@@ -86,7 +85,7 @@ impl Drop for Slot {
 /// `l` another link, `o` anything else; directories first, then by name.
 /// Then, each only when it applies: `+<TAB>N`, exactly N entries read were
 /// left out; `><TAB>N`, the directory has more entries than are read, so at
-/// least N were left out; `!<TAB>N`, N entries could not be read. Names
+/// least N were left out; `!<TAB>N`, N entries could not be read or have a name that is not UTF-8. Names
 /// are [`escape`]d, so none adds a field or a line.
 pub(crate) fn list(base: Option<&str>, path: Option<&str>) -> Result<String, String> {
     list_with(base, path, READ_MAX, LISTED_MAX)
@@ -98,6 +97,9 @@ fn list_with(
     read_max: usize,
     listed_max: usize,
 ) -> Result<String, String> {
+    if path.is_some_and(is_network_path) {
+        return Err("a network path is not listed".into());
+    }
     let dir = match (path, base) {
         (Some(p), Some(b)) => Path::new(b).join(p),
         (Some(p), None) if Path::new(p).is_absolute() => p.into(),
@@ -111,10 +113,11 @@ fn list_with(
     let (mut entries, mut unread) = (Vec::new(), 0_usize);
     for item in read.by_ref().take(read_max) {
         match item {
-            Ok(e) => entries.push((
-                kind(&e.path(), &e),
-                e.file_name().to_string_lossy().into_owned(),
-            )),
+            Ok(e) => match (kind(&e.path(), &e), e.file_name().into_string()) {
+                (Some(k), Ok(name)) => entries.push((k, name)),
+                // A name that is not UTF-8 cannot be sent or typed back.
+                _ => unread += 1,
+            },
             Err(_) => unread += 1,
         }
     }
@@ -235,5 +238,18 @@ mod tests {
         assert!(list(None, None).is_err());
         assert!(list(None, Some("rel")).is_err());
         assert!(list(Some("/"), Some("no/such/dir")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+
+    #[test]
+    fn a_unc_path_is_refused() {
+        for path in ["\\\\host\\share", "\\\\?\\C:\\", "\\\\.\\pipe"] {
+            let reason = list(None, Some(path)).unwrap_err();
+            assert!(reason.contains("network"), "{path}: {reason}");
+        }
     }
 }

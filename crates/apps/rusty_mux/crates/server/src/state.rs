@@ -1712,11 +1712,12 @@ impl State {
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.pid())
                 .ok_or("the program's working directory is unknown")?,
             "terminal.list-dir" => {
-                // It shows the host's files, which a watch-only grant (C14)
-                // was not given.
-                if self.mux.block(block).is_some_and(|b| b.is_watching(client)) {
-                    return Err(rusty_mux_core::Error::NoLease { client, block }.into());
-                }
+                // It shows the host's files as the server's account, so it
+                // takes what typing into the block takes: the lease, which
+                // a watch-only grant (C14) never holds.
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
                 let base = terminal::pwd(&rt.grid, rt.pid());
                 let path = named.iter().find_map(|(n, v)| match (*n, v) {
                     ("path", Value::Text(p)) => Some(p.as_str()),
@@ -3476,6 +3477,11 @@ mod regression {
                 None,
                 None,
             );
+            {
+                let mut state = shared.borrow_mut();
+                state.mux.attach(client, block).unwrap();
+                state.mux.acquire_lease(client, block).unwrap();
+            }
             let (other, mut others) = reload_client(&shared);
             let call = |req| Message::BlockCall {
                 req,
@@ -3512,14 +3518,15 @@ mod regression {
 
     /// A watch-only client may read a block but not write its status (C14).
     #[test]
-    fn a_watcher_may_not_report_status() {
+    fn a_watcher_may_not_report_status_or_list_a_directory() {
         runtime().block_on(async {
             let (shared, account, block, _inbox) = fixture();
             let mut state = shared.borrow_mut();
             state.share_leases(test_owner());
             let features = Features::CHECKPOINT_V6
                 .union(Features::BLOCK_CALL)
-                .union(Features::AGENT_STATUS);
+                .union(Features::AGENT_STATUS)
+                .union(Features::DIR_LISTING);
             let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
             let (out, _guest_inbox, _) = outbox();
             let guest = state.connect(
@@ -3544,6 +3551,16 @@ mod regression {
                     "terminal.report-status",
                     vec![("state".into(), Value::Text("idle".into()))],
                 )
+                .err()
+                .map(|r| r.reason);
+            assert!(
+                refused.as_deref().is_some_and(|r| r.contains("lease")),
+                "{refused:?}"
+            );
+            // Nor may it list the host's directories.
+            state.mux.attach(guest, block).unwrap();
+            let refused = state
+                .block_call(guest, 2, block, "terminal.list-dir", Vec::new())
                 .err()
                 .map(|r| r.reason);
             assert!(

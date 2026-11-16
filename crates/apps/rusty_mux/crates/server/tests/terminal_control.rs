@@ -373,6 +373,7 @@ fn changes_need_the_lease_and_reads_do_not() {
             ("terminal.reset", &[][..]),
             ("terminal.set-theme", &theme[..]),
             ("terminal.clear", &[][..]),
+            ("terminal.list-dir", &[][..]),
         ] {
             let reason = refusal(&mut other, block, method, args);
             assert!(
