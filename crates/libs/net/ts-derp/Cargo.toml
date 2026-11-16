@@ -3,7 +3,7 @@ name = "ts-derp"
 description = "DERP relay client: framing, keepalive, region selection"
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_tailscale"
 
@@ -14,6 +14,7 @@ layer = "libs"
 ts-types.workspace = true
 ts-key.workspace = true
 rusty_tokio.workspace = true
+ts-dial.workspace = true
 crypto_box.workspace = true
 rusty_http = { workspace = true, features = ["rusty-tokio"] }
 thiserror.workspace = true

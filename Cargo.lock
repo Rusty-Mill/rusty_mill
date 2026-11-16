@@ -14381,6 +14381,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "ts-dial",
  "ts-key",
  "ts-types",
 ]
@@ -14393,6 +14394,7 @@ dependencies = [
  "rusty_tokio",
  "ts-control",
  "ts-derp",
+ "ts-dial",
  "ts-engine",
  "ts-hub",
  "ts-key",
@@ -14409,8 +14411,19 @@ dependencies = [
  "rusty_log",
  "rusty_tokio",
  "thiserror 1.0.69",
+ "ts-dial",
  "ts-key",
  "ts-types",
+]
+
+[[package]]
+name = "ts-dial"
+version = "0.0.1"
+dependencies = [
+ "rusty_base64",
+ "rusty_tls",
+ "rusty_tokio",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -14432,6 +14445,7 @@ dependencies = [
  "thiserror 1.0.69",
  "ts-control",
  "ts-derp",
+ "ts-dial",
  "ts-disco",
  "ts-filter",
  "ts-key",
@@ -14465,6 +14479,7 @@ dependencies = [
  "thiserror 1.0.69",
  "ts-control",
  "ts-derp",
+ "ts-dial",
  "ts-filter",
  "ts-key",
  "ts-stun",
@@ -14522,6 +14537,7 @@ name = "ts-net"
 version = "0.0.1"
 dependencies = [
  "parking_lot",
+ "rcgen",
  "rusty_log",
  "rusty_tokio",
  "smoltcp",

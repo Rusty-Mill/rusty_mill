@@ -1,5 +1,6 @@
-//! The operator's certificate, from PEM to a [`TlsAcceptor`]. The mux server
-//! reads PEM the same way (`rusty_mux_server::pem`); a library cannot depend
+//! The operator's certificate, from PEM to a [`TlsAcceptor`]. The PEM reader
+//! is `ts_dial::pem`, shared with the clients that read a CA file. The mux
+//! server has its own copy (`rusty_mux_server::pem`); a library cannot depend
 //! on that app, and a shared reader in `rusty_tls` is a public-API change for
 //! the owner to decide.
 
@@ -26,39 +27,12 @@ pub enum TlsConfigError {
     Tls(#[from] rusty_tls::Error),
 }
 
-/// The DER of every `-----BEGIN label-----` block in `text`, as `(label, der)`.
+/// The DER of every PEM block in `text`, as `(label, der)`.
 fn blocks(text: &str, file: &'static str) -> Result<Vec<(String, Vec<u8>)>, TlsConfigError> {
-    let pem = |reason| TlsConfigError::Pem { file, reason };
-    let mut out = Vec::new();
-    let mut open: Option<(String, String)> = None;
-    for line in text.lines().map(str::trim) {
-        if let Some(label) = line
-            .strip_prefix("-----BEGIN ")
-            .and_then(|l| l.strip_suffix("-----"))
-        {
-            if open.is_some() {
-                return Err(pem("a block begins inside another"));
-            }
-            open = Some((label.to_string(), String::new()));
-        } else if let Some(label) = line
-            .strip_prefix("-----END ")
-            .and_then(|l| l.strip_suffix("-----"))
-        {
-            let (begun, body) = open
-                .take()
-                .filter(|(begun, _)| begun == label)
-                .ok_or_else(|| pem("a block ends without beginning"))?;
-            let der =
-                rusty_base64::decode_standard(&body).map_err(|_| pem("a block is not base64"))?;
-            out.push((begun, der));
-        } else if let Some((_, body)) = open.as_mut() {
-            body.push_str(line);
-        }
-    }
-    match open {
-        Some(_) => Err(pem("a block is not closed")),
-        None => Ok(out),
-    }
+    ts_dial::pem::blocks(text, file).map_err(|e| TlsConfigError::Pem {
+        file: e.file,
+        reason: e.reason,
+    })
 }
 
 /// A TLS acceptor serving the certificate chain in `cert_pem` with the

@@ -187,6 +187,28 @@ fn a_bad_certificate_stops_the_hub_before_it_serves() {
     assert!(!String::from_utf8_lossy(&out.stdout).contains("listening"));
 }
 
+#[test]
+fn a_tls_ca_file_without_a_certificate_stops_the_daemon_before_it_dials() {
+    let dir = temp_dir("ca");
+    std::fs::write(dir.join("ca.pem"), "not a certificate\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ts-daemon"))
+        .args([
+            "--login-server",
+            "https://localhost:1",
+            "--authkey",
+            "k",
+            "--state-dir",
+        ])
+        .arg(dir.join("state"))
+        .arg("--tls-ca")
+        .arg(dir.join("ca.pem"))
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--tls-ca"));
+}
+
 #[rusty_tokio::test]
 async fn a_keys_file_that_does_not_parse_leaves_the_old_keys_working_after_sighup() {
     let hub = start(temp_dir("badreload"), "k1 alice reusable\n");

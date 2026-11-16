@@ -21,10 +21,9 @@ use crypto_box::{
 use rusty_http::async_tokio::{AsyncTransport, Replay};
 use rusty_http::head::RequestHead;
 use rusty_http::{HeaderMap, Method, Version};
-use rusty_tokio::io::AsyncRead;
-use rusty_tokio::net::TcpStream;
-use rusty_tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use rusty_tokio::io::{AsyncRead, AsyncWrite, SplitReadHalf, SplitWriteHalf, split};
 use rusty_tokio::sync::mpsc;
+use ts_dial::{BoxIo, Trust};
 use ts_key::NodePrivate;
 use ts_types::NodePublic;
 
@@ -47,9 +46,11 @@ const MAX_HANDSHAKE_FRAMES: usize = 16;
 pub enum DerpError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Dial(#[from] ts_dial::DialError),
     #[error("frame error: {0}")]
     Frame(#[from] frame::FrameError),
-    #[error("bad DERP URL {0:?} (want http://host:port)")]
+    #[error("bad DERP URL {0:?} (want http://host:port or https://host:port)")]
     BadUrl(String),
     #[error("HTTP upgrade failed: {0}")]
     Upgrade(String),
@@ -114,11 +115,21 @@ enum Outbound {
 }
 
 impl DerpClient {
-    /// Connects to a plain-HTTP DERP relay (`http://host:port`), performs
-    /// the upgrade and NaCl-box handshake using `node_key` as this client's
-    /// identity.
+    /// Connects to a DERP relay (`http://host:port`, or `https://host:port`
+    /// verified against the system trust anchors), performs the upgrade and
+    /// NaCl-box handshake using `node_key` as this client's identity.
     pub async fn connect(url: &str, node_key: &NodePrivate) -> Result<Self, DerpError> {
-        Self::connect_with_timeout(url, node_key, HANDSHAKE_TIMEOUT).await
+        Self::connect_with(url, node_key, &Trust::System).await
+    }
+
+    /// Like [`connect`](Self::connect), with `trust` deciding which
+    /// certificates an `https://` relay may present. `http://` ignores it.
+    pub async fn connect_with(
+        url: &str,
+        node_key: &NodePrivate,
+        trust: &Trust,
+    ) -> Result<Self, DerpError> {
+        Self::connect_with_timeout(url, node_key, trust, HANDSHAKE_TIMEOUT).await
     }
 
     /// Connects with an explicit bound on TCP connect + the full handshake
@@ -128,12 +139,13 @@ impl DerpClient {
     async fn connect_with_timeout(
         url: &str,
         node_key: &NodePrivate,
+        trust: &Trust,
         timeout: Duration,
     ) -> Result<Self, DerpError> {
         match rusty_tokio::time::timeout(timeout, async {
-            let (host_port, host_header) = parse_http_url(url)?;
-            let stream = TcpStream::connect(&host_port).await?;
-            stream.set_nodelay(true).ok();
+            let (tls, host_port, host_header) = parse_url(url)?;
+            let tls = tls.then(|| (ts_dial::server_name(&host_port), trust));
+            let stream = ts_dial::connect(&host_port, tls).await?;
             Self::handshake_over(stream, &host_header, node_key).await
         })
         .await
@@ -176,7 +188,7 @@ impl DerpClient {
     /// Performs the upgrade + handshake over an already-connected stream.
     /// Split out so tests can drive it over an in-memory duplex.
     async fn handshake_over(
-        stream: TcpStream,
+        stream: BoxIo,
         host_header: &str,
         node_key: &NodePrivate,
     ) -> Result<Self, DerpError> {
@@ -257,7 +269,7 @@ impl DerpClient {
 /// Reader task: dispatches control frames, forwards relayed packets inbound.
 ///
 /// Generic over the read half's type (rather than the concrete
-/// `OwnedReadHalf`) because [`http_upgrade`] may hand back a
+/// split half) because [`http_upgrade`] may hand back a
 /// [`Replay`]-wrapped one when the server's ServerKey greeting arrived
 /// bundled with the HTTP upgrade response.
 async fn reader_loop<R: AsyncRead + Unpin + Send + 'static>(
@@ -311,7 +323,10 @@ async fn reader_loop<R: AsyncRead + Unpin + Send + 'static>(
 }
 
 /// Writer task: drains the outbound queue to the relay.
-async fn writer_loop(mut write_half: OwnedWriteHalf, mut rx: mpsc::Receiver<Outbound>) {
+async fn writer_loop<W: AsyncWrite + Unpin + Send>(
+    mut write_half: W,
+    mut rx: mpsc::Receiver<Outbound>,
+) {
     while let Some(msg) = rx.recv().await {
         let result = match msg {
             Outbound::Send { dst, payload } => {
@@ -345,9 +360,9 @@ impl Drop for TaskGuard {
 /// reclaimed via `into_parts` and replayed into the read half rather than
 /// split off (and silently dropped) beforehand.
 async fn http_upgrade(
-    stream: TcpStream,
+    stream: BoxIo,
     host: &str,
-) -> Result<(Replay<OwnedReadHalf>, OwnedWriteHalf), DerpError> {
+) -> Result<(Replay<SplitReadHalf<BoxIo>>, SplitWriteHalf<BoxIo>), DerpError> {
     let mut transport = AsyncTransport::new(stream);
 
     let mut headers = HeaderMap::new();
@@ -378,20 +393,19 @@ async fn http_upgrade(
     }
 
     let (stream, leftover) = transport.into_parts();
-    let (read_half, write_half) = stream.into_split();
+    let (read_half, write_half) = split(stream);
     Ok((Replay::new(leftover, read_half), write_half))
 }
 
-/// Parses `http://host:port[/path]` into (`host:port`, host-header value).
-fn parse_http_url(url: &str) -> Result<(String, String), DerpError> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| DerpError::BadUrl(url.to_string()))?;
+/// Parses `http://host:port[/path]` or `https://host:port[/path]` into
+/// (is TLS, `host:port`, host-header value).
+fn parse_url(url: &str) -> Result<(bool, String, String), DerpError> {
+    let (tls, rest) = ts_dial::scheme(url).ok_or_else(|| DerpError::BadUrl(url.to_string()))?;
     let authority = rest.split(['/', '?']).next().unwrap_or(rest);
     if authority.is_empty() || !authority.contains(':') {
         return Err(DerpError::BadUrl(url.to_string()));
     }
-    Ok((authority.to_string(), authority.to_string()))
+    Ok((tls, authority.to_string(), authority.to_string()))
 }
 
 #[cfg(test)]
@@ -404,11 +418,16 @@ mod tests {
     #[test]
     fn url_parsing() {
         assert_eq!(
-            parse_http_url("http://127.0.0.1:8080/derp").unwrap().0,
-            "127.0.0.1:8080"
+            parse_url("http://127.0.0.1:8080/derp").unwrap(),
+            (
+                false,
+                "127.0.0.1:8080".to_string(),
+                "127.0.0.1:8080".to_string()
+            )
         );
-        assert!(parse_http_url("https://x:1").is_err());
-        assert!(parse_http_url("http://nohost").is_err());
+        assert!(parse_url("https://relay.example:443").unwrap().0);
+        assert!(parse_url("ftp://x:1").is_err());
+        assert!(parse_url("http://nohost").is_err());
     }
 
     /// A relay that accepts the TCP connection but never sends a byte back
@@ -425,7 +444,13 @@ mod tests {
         let key = NodePrivate::generate();
         let url = format!("http://{addr}");
         let start = Instant::now();
-        let result = DerpClient::connect_with_timeout(&url, &key, Duration::from_millis(200)).await;
+        let result = DerpClient::connect_with_timeout(
+            &url,
+            &key,
+            &Trust::System,
+            Duration::from_millis(200),
+        )
+        .await;
         let elapsed = start.elapsed();
 
         match result {
@@ -505,8 +530,13 @@ mod tests {
         });
 
         let url = format!("http://{addr}");
-        let result =
-            DerpClient::connect_with_timeout(&url, &client_key, Duration::from_secs(5)).await;
+        let result = DerpClient::connect_with_timeout(
+            &url,
+            &client_key,
+            &Trust::System,
+            Duration::from_secs(5),
+        )
+        .await;
 
         match result {
             Err(DerpError::BadServerInfo) => {}

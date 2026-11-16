@@ -56,14 +56,26 @@ pub struct ControlClient {
 }
 
 impl ControlClient {
-    /// Connects to `control_url` (`http://host:port`), fetching the server's
+    /// Connects to `control_url` (`http://host:port`, or `https://host:port`
+    /// verified against the system trust anchors), fetching the server's
     /// Noise key. Does not register yet.
     pub async fn connect(
         control_url: &str,
         machine_key: MachinePrivate,
         hostinfo: ts_types::tailcfg::Hostinfo,
     ) -> Result<Self, ClientError> {
-        let url = ControlUrl::parse(control_url)?;
+        Self::connect_with(control_url, machine_key, hostinfo, ts_dial::Trust::System).await
+    }
+
+    /// Like [`connect`](Self::connect), with `trust` deciding which
+    /// certificates an `https://` server may present. `http://` ignores it.
+    pub async fn connect_with(
+        control_url: &str,
+        machine_key: MachinePrivate,
+        hostinfo: ts_types::tailcfg::Hostinfo,
+        trust: ts_dial::Trust,
+    ) -> Result<Self, ClientError> {
+        let url = ControlUrl::parse(control_url)?.with_trust(trust);
         let control_key = controlhttp::fetch_control_key(&url, CURRENT_CAPABILITY_VERSION).await?;
         Ok(Self {
             url,
@@ -242,8 +254,8 @@ where
 /// byte.
 ///
 /// Generic over the Noise conn's own transport `T` (rather than the
-/// concrete `TcpStream`) because `controlhttp::dial`'s upgrade handoff may
-/// hand back a `Conn` wrapping `rusty_http::async_tokio::Replay<TcpStream>`
+/// concrete stream) because `controlhttp::dial`'s upgrade handoff may
+/// hand back a `Conn` wrapping `rusty_http::async_tokio::Replay<BoxIo>`
 /// instead, when Noise bytes arrived bundled with the upgrade response.
 async fn skip_early_payload<T: AsyncRead + AsyncWrite + Unpin + Send>(
     mut conn: Conn<T>,

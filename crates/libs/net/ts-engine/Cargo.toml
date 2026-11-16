@@ -21,6 +21,7 @@ ts-magicsock.workspace = true
 ts-disco.workspace = true
 ts-filter.workspace = true
 rusty_tokio.workspace = true
+ts-dial.workspace = true
 thiserror.workspace = true
 rusty_log = { workspace = true }
 

@@ -30,3 +30,5 @@ parking_lot = "0.12"
 [dev-dependencies]
 # The in-process hub the transfer test joins (`tests/hub_transfer.rs`).
 ts-hub.workspace = true
+# Throwaway certificates for the TLS transfer test; ts-hub's own tests use it too.
+rcgen = "0.13"

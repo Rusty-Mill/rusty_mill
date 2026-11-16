@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use rusty_tokio::sync::{mpsc, oneshot};
 use ts_control::ControlClient;
 use ts_derp::{DerpClient, DerpSender};
+pub use ts_dial::Trust;
 use ts_filter::Filter;
 use ts_key::NodeState;
 use ts_magicsock::{MagicSock, MagicUdp, PathKind, UdpInput};
@@ -114,6 +115,9 @@ pub struct EngineConfig {
     /// stack instead of a TUN device, and encapsulate packets the stack emits
     /// (Phase 7, `ts-net`). Mutually exclusive with `tun_name`; needs no root.
     pub stack_io: Option<StackIo>,
+    /// Which certificates an `https://` control or DERP server may present.
+    /// `http://` URLs ignore it.
+    pub trust: Trust,
 }
 
 /// Channel endpoints connecting the engine to a userspace network stack
@@ -353,12 +357,17 @@ impl Engine {
             routable_ips: Vec::new(),
         };
 
-        let control =
-            ControlClient::connect(&config.control_url, state.machine.clone(), hostinfo).await?;
+        let control = ControlClient::connect_with(
+            &config.control_url,
+            state.machine.clone(),
+            hostinfo,
+            config.trust.clone(),
+        )
+        .await?;
         control.register(node_key, &config.authkey).await?;
         rusty_log::info!("engine: registered with control server");
 
-        let derp = DerpClient::connect(&config.derp_url, &state.node).await?;
+        let derp = DerpClient::connect_with(&config.derp_url, &state.node, &config.trust).await?;
         let derp_tx = derp.sender();
         rusty_log::info!(server_key = %derp.server_key(), "engine: connected to DERP");
 

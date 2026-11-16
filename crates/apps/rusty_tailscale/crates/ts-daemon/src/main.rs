@@ -40,6 +40,9 @@ options:
   --hosts-file <path>    write MagicDNS peer names into this hosts file
   --direct               enable direct-path discovery (magicsock/disco);
                          peers upgrade from DERP to direct UDP when possible
+  --tls-ca <file>        trust only the certificate(s) in this PEM file for
+                         https:// control and DERP URLs (default: system
+                         trust anchors)
   --stun <host:port>     STUN server for reflexive-endpoint discovery
                          (for NAT traversal; implies --direct)
   --socket <path>        serve the LocalAPI on this Unix socket so ts-cli can
@@ -60,6 +63,7 @@ options:
         hosts_file: Option<PathBuf>,
         direct: bool,
         stun: Option<String>,
+        tls_ca: Option<PathBuf>,
         socket: PathBuf,
         ping: Option<Ipv4Addr>,
     }
@@ -74,6 +78,7 @@ options:
         let mut hosts_file = None;
         let mut direct = false;
         let mut stun = None;
+        let mut tls_ca = None;
         let mut socket = PathBuf::from(DEFAULT_SOCKET);
         let mut ping = None;
 
@@ -90,6 +95,7 @@ options:
                 "--hosts-file" => hosts_file = Some(PathBuf::from(next()?)),
                 "--direct" => direct = true,
                 "--stun" => stun = Some(next()?),
+                "--tls-ca" => tls_ca = Some(PathBuf::from(next()?)),
                 "--socket" => socket = PathBuf::from(next()?),
                 "--ping" => {
                     let v = next()?;
@@ -109,6 +115,7 @@ options:
             hosts_file,
             direct,
             stun,
+            tls_ca,
             socket,
             ping,
         })
@@ -161,6 +168,19 @@ options:
         let hostname = args.hostname.unwrap_or_else(default_hostname);
         rusty_log::info!(node_key = %state.node.public(), hostname = %hostname, "identity loaded");
 
+        let trust = match &args.tls_ca {
+            None => ts_engine::Trust::System,
+            Some(path) => match std::fs::read_to_string(path)
+                .map_err(|e| e.to_string())
+                .and_then(|pem| ts_dial::trust_from_pem(&pem).map_err(|e| e.to_string()))
+            {
+                Ok(trust) => trust,
+                Err(e) => {
+                    eprintln!("ts-daemon: --tls-ca {}: {e}", path.display());
+                    return Ok(ExitCode::from(2));
+                }
+            },
+        };
         let tun_mode = args.tun.is_some();
         let control_url = args.login_server.clone();
         let config = EngineConfig {
@@ -175,6 +195,7 @@ options:
             enable_direct: args.direct || args.stun.is_some(),
             stun_server: args.stun,
             stack_io: None,
+            trust,
         };
 
         let engine = Engine::start(config, state).await?;

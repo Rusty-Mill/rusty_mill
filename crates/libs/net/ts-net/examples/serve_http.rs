@@ -111,6 +111,7 @@ async fn main() -> ExitCode {
         state_dir: args.state_dir,
         enable_direct: args.direct || args.stun.is_some(),
         stun_server: args.stun,
+        trust: ts_net::Trust::System,
     })
     .await
     {

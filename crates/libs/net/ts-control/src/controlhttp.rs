@@ -3,16 +3,17 @@
 //! into the Noise transport. Mirrors Go `control/controlhttp/client.go`
 //! (see PROTOCOL.md).
 //!
-//! Phase-2 scope is plain HTTP against Headscale (`http://host:port`). TLS
-//! (:443) and the 80/443 race are deferred to the hosted-control-plane
-//! milestone.
+//! `http://host:port` talks plain HTTP (Headscale, the first-party hub);
+//! `https://host[:port]` wraps the connection in TLS first, trusting what
+//! [`ControlUrl::with_trust`] names (the system anchors by default). The
+//! 80/443 race is deferred to the hosted-control-plane milestone.
 //!
 //! HTTP/1.1 framing itself (the head parse/serialize, and reclaiming any
 //! Noise bytes bundled with the upgrade response) is `rusty_http`'s job, not
 //! hand-rolled here anymore -- see `DESIGN.md`'s dependency table.
 
-use rusty_tokio::net::TcpStream;
 use std::time::Duration;
+use ts_dial::{BoxIo, Trust};
 use ts_key::MachinePrivate;
 
 use rusty_http::async_tokio::{AsyncTransport, Replay};
@@ -36,10 +37,12 @@ const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ControlHttpError {
-    #[error("control URL must be http://host[:port] (got {0:?})")]
+    #[error("control URL must be http://host[:port] or https://host[:port] (got {0:?})")]
     BadUrl(String),
     #[error("I/O error talking to control server: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Dial(#[from] ts_dial::DialError),
     #[error("control server returned HTTP {0} for {1}")]
     HttpStatus(u16, String),
     #[error("could not parse control server response: {0}")]
@@ -54,21 +57,25 @@ pub enum ControlHttpError {
     Timeout,
 }
 
-/// A parsed `http://host:port` control URL.
+/// A parsed `http://host:port` or `https://host:port` control URL.
 #[derive(Debug, Clone)]
 pub struct ControlUrl {
     pub host: String,
     pub port: u16,
     /// Value for the HTTP `Host` header (host plus non-default port).
     pub authority: String,
+    /// Wrap the connection in TLS (`https://`).
+    pub tls: bool,
+    /// Which certificates an `https://` server may present.
+    trust: Trust,
 }
 
 impl ControlUrl {
-    /// Parses `http://host[:port]`. HTTPS is not yet supported.
+    /// Parses `http://host[:port]` (port 80) or `https://host[:port]`
+    /// (port 443, system trust anchors).
     pub fn parse(url: &str) -> Result<Self, ControlHttpError> {
-        let rest = url
-            .strip_prefix("http://")
-            .ok_or_else(|| ControlHttpError::BadUrl(url.to_string()))?;
+        let (tls, rest) =
+            ts_dial::scheme(url).ok_or_else(|| ControlHttpError::BadUrl(url.to_string()))?;
         // Strip any path/query; we only need the authority.
         let authority_str = rest.split(['/', '?']).next().unwrap_or(rest);
         if authority_str.is_empty() {
@@ -81,7 +88,7 @@ impl ControlUrl {
                     .map_err(|_| ControlHttpError::BadUrl(url.to_string()))?;
                 (h.to_string(), port)
             }
-            None => (authority_str.to_string(), 80),
+            None => (authority_str.to_string(), if tls { 443 } else { 80 }),
         };
         if host.is_empty() {
             return Err(ControlHttpError::BadUrl(url.to_string()));
@@ -90,11 +97,24 @@ impl ControlUrl {
             authority: authority_str.to_string(),
             host,
             port,
+            tls,
+            trust: Trust::System,
         })
     }
 
-    fn socket_addr(&self) -> (String, u16) {
-        (self.host.clone(), self.port)
+    /// Trusts `trust` for an `https://` server instead of the system anchors.
+    pub fn with_trust(mut self, trust: Trust) -> Self {
+        self.trust = trust;
+        self
+    }
+
+    /// Opens the connection: TCP, then TLS for `https://`.
+    async fn open(&self) -> Result<BoxIo, ControlHttpError> {
+        let host_port = format!("{}:{}", self.host, self.port);
+        let tls = self
+            .tls
+            .then(|| (ts_dial::server_name(&host_port), &self.trust));
+        Ok(ts_dial::connect(&host_port, tls).await?)
     }
 }
 
@@ -117,7 +137,7 @@ async fn fetch_control_key_with_timeout(
     timeout: Duration,
 ) -> Result<ts_types::MachinePublic, ControlHttpError> {
     match rusty_tokio::time::timeout(timeout, async {
-        let stream = TcpStream::connect(url.socket_addr()).await?;
+        let stream = url.open().await?;
         let mut transport = AsyncTransport::new(stream);
 
         let mut headers = HeaderMap::new();
@@ -170,7 +190,7 @@ pub async fn dial(
     machine_key: &MachinePrivate,
     control_key: &[u8; 32],
     protocol_version: u16,
-) -> Result<Conn<Replay<TcpStream>>, ControlHttpError> {
+) -> Result<Conn<Replay<BoxIo>>, ControlHttpError> {
     dial_with_timeout(
         url,
         machine_key,
@@ -191,11 +211,11 @@ async fn dial_with_timeout(
     control_key: &[u8; 32],
     protocol_version: u16,
     timeout: Duration,
-) -> Result<Conn<Replay<TcpStream>>, ControlHttpError> {
+) -> Result<Conn<Replay<BoxIo>>, ControlHttpError> {
     match rusty_tokio::time::timeout(timeout, async {
         let (init, handshake) = client_initiation(machine_key, control_key, protocol_version);
 
-        let stream = TcpStream::connect(url.socket_addr()).await?;
+        let stream = url.open().await?;
         let mut transport = AsyncTransport::new(stream);
 
         let mut headers = HeaderMap::new();
@@ -262,8 +282,14 @@ mod tests {
 
         let u = ControlUrl::parse("http://host:8080/path?x=1").unwrap();
         assert_eq!(u.authority, "host:8080");
+        assert!(!u.tls);
 
-        assert!(ControlUrl::parse("https://x").is_err());
+        let u = ControlUrl::parse("https://hub.example.com").unwrap();
+        assert!(u.tls);
+        assert_eq!((u.host.as_str(), u.port), ("hub.example.com", 443));
+        let u = ControlUrl::parse("https://hub.example.com:8443/x").unwrap();
+        assert_eq!(u.port, 8443);
+
         assert!(ControlUrl::parse("ftp://x").is_err());
         assert!(ControlUrl::parse("http://").is_err());
     }
