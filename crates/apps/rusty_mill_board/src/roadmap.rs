@@ -45,7 +45,7 @@ impl Lane {
         match kind {
             Kind::Work => Lane::Now,
             Kind::Queue => Lane::Next,
-            Kind::Backlog => Lane::Later,
+            Kind::Backlog | Kind::Parked => Lane::Later,
             Kind::Blocked => Lane::Blocked,
             Kind::Done => Lane::Shipped,
         }
@@ -201,7 +201,9 @@ mod tests {
         now.sort_unstable();
         assert_eq!(now, ["Building", "QA", "Review"]);
         assert_eq!(titles(&r, Lane::Next), ["Ready"]);
-        assert_eq!(titles(&r, Lane::Later), ["Backlog"]);
+        let mut later = titles(&r, Lane::Later);
+        later.sort_unstable();
+        assert_eq!(later, ["Backlog", "Parked"]);
         assert_eq!(titles(&r, Lane::Blocked), ["Blocked"]);
         assert_eq!(titles(&r, Lane::Shipped), ["done"]);
     }
