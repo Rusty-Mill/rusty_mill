@@ -73,11 +73,16 @@ pub(crate) fn read(dir: &Path) -> Result<Policy> {
 /// Trust `origin` (already checked with [`valid_origin`]). Idempotent and
 /// safe to run at once from any number of windows and processes.
 pub(crate) fn add(dir: &Path, origin: &str) -> Result<()> {
+    add_by(dir, origin, name_hash)
+}
+
+/// [`add`] with the naming hash injectable, so tests can force collisions.
+fn add_by(dir: &Path, origin: &str, hash: fn(&str) -> String) -> Result<()> {
     if valid_origin(origin).is_none() {
         return Err(Error::new(ErrorKind::InvalidInput, "not a web origin"));
     }
     std::fs::create_dir_all(dir)?;
-    let hash = name_hash(origin);
+    let hash = hash(origin);
     for slot in 0..SLOTS {
         let name = match slot {
             0 => format!("{hash}.{EXT}"),
@@ -88,35 +93,40 @@ pub(crate) fn add(dir: &Path, origin: &str) -> Result<()> {
             Ok(held) if held == origin => return Ok(()),
             // Another origin with the same hash (or a damaged file): next slot.
             Ok(_) => continue,
-            Err(e) if e.kind() == ErrorKind::NotFound => return publish(dir, &path, origin),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                if publish(dir, &hash, &path, origin)? {
+                    return Ok(());
+                }
+                // Lost the slot: fine if to the same origin, else try the next.
+                if std::fs::read_to_string(&path).is_ok_and(|held| held == origin) {
+                    return Ok(());
+                }
+            }
             Err(e) => return Err(e),
         }
     }
     Err(Error::other("too many origins share a hash"))
 }
 
-/// Write `origin` whole to `path`: to a temp name first, then rename.
-fn publish(dir: &Path, path: &Path, origin: &str) -> Result<()> {
+/// Write `origin` whole to `path` without replacing anything: to a temp
+/// name first, then a hard link (which fails if `path` exists). `Ok(false)`
+/// means `path` was taken. Where links are unsupported, falls back to rename,
+/// which can replace an entry only if two origins with one 64-bit hash race.
+fn publish(dir: &Path, hash: &str, path: &Path, origin: &str) -> Result<bool> {
     static N: AtomicU64 = AtomicU64::new(0);
     let tmp = dir.join(format!(
-        ".{}.{}.{}.tmp",
-        name_hash(origin),
+        ".{hash}.{}.{}.tmp",
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::write(&tmp, origin).inspect_err(|_| drop(std::fs::remove_file(&tmp)))?;
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            drop(std::fs::remove_file(&tmp));
-            // Where rename will not replace a file, losing a race to the same
-            // origin is success.
-            match std::fs::read_to_string(path) {
-                Ok(held) if held == origin => Ok(()),
-                _ => Err(e),
-            }
-        }
-    }
+    let done = match std::fs::hard_link(&tmp, path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(_) => std::fs::rename(&tmp, path).map(|()| true),
+    };
+    drop(std::fs::remove_file(&tmp));
+    done
 }
 
 /// The hash `origin`'s file is named by, in hex.
@@ -241,6 +251,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read(&d).unwrap(), Policy::default());
+    }
+
+    #[test]
+    fn racing_origins_with_one_hash_all_survive() {
+        let d = dir("collide");
+        let origins: Vec<String> = (0..6).map(|i| format!("https://h{i}.test")).collect();
+        let gate = std::sync::Barrier::new(origins.len());
+        std::thread::scope(|s| {
+            for o in &origins {
+                let (d, gate) = (&d, &gate);
+                s.spawn(move || {
+                    gate.wait();
+                    add_by(d, o, |_| "0".repeat(16)).unwrap();
+                });
+            }
+        });
+        // The injected hash is not the real one, so `read` would skip them: count files.
+        let files = std::fs::read_dir(&d)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .count();
+        assert_eq!(files, origins.len());
     }
 
     #[test]
