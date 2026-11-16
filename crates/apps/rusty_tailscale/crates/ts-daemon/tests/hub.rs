@@ -396,11 +396,11 @@ async fn nodes_ride_out_the_active_hub_dying_and_a_standby_taking_over() {
             OsStr::new(&standby_url),
         ],
     );
-    let node = |name: &str, url: &str| {
+    let node = |name: &str, url: &str, key: &str| {
         let cfg = ts_net::NodeConfig {
             control_url: url.to_owned(),
             derp_url: None,
-            authkey: "ka".into(),
+            authkey: key.into(),
             hostname: name.to_owned(),
             state_dir: dir.join(name),
             enable_direct: false,
@@ -409,8 +409,8 @@ async fn nodes_ride_out_the_active_hub_dying_and_a_standby_taking_over() {
         };
         async move { ts_net::Node::new(cfg).await.expect("node joins") }
     };
-    let a = node("a", &active.url).await;
-    let b = node("b", &active.url).await;
+    let a = node("a", &active.url, "ka").await;
+    let b = node("b", &active.url, "ka").await;
     let a_ip = a.wait_ip().await.expect("a has an address");
     b.wait_ip().await.expect("b has an address");
     let mut listener = a.bind(PORT).await.expect("bind");
@@ -468,7 +468,9 @@ async fn nodes_ride_out_the_active_hub_dying_and_a_standby_taking_over() {
                 active.child.wait().unwrap();
                 standby.child.kill().unwrap();
                 standby.child.wait().unwrap();
-                std::fs::copy(active.dir.join("keys"), dir.join("keys")).unwrap();
+                // The key the nodes joined with is gone from the standby's list
+                // (rotated out): they are known machines and must not need it.
+                write_private(&dir.join("keys"), "kz alice reusable\n");
                 std::fs::copy(active.dir.join("policy"), dir.join("policy")).unwrap();
                 let args: Vec<OsString> = [
                     "hub".into(),
@@ -492,10 +494,113 @@ async fn nodes_ride_out_the_active_hub_dying_and_a_standby_taking_over() {
     assert!(finished.is_ok(), "the stream finishes after the takeover");
     assert_eq!(got.len(), want.len(), "length");
     assert!(got == want, "bytes differ");
-    drop(sender.await);
+    let _kept = sender.await; // keeps b's node alive
 
-    let c = node("c", &standby_url).await;
-    c.wait_ip()
+    let c = node("c", &standby_url, "kz").await;
+    let c_ip = c
+        .wait_ip()
         .await
         .expect("a new node joins the promoted hub");
+
+    // The old nodes hear of it only if their control link followed the
+    // promotion (the stream above rode on what they already knew).
+    let mut listener = c.bind(PORT + 1).await.expect("bind on c");
+    let reached = rusty_tokio::time::timeout(Duration::from_secs(30), async {
+        let mut s = a.connect((c_ip, PORT + 1).into()).await.expect("connect");
+        s.write_all(b"hello").await.expect("write");
+        let mut conn = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 5];
+        conn.read_exact(&mut buf).await.expect("read");
+        buf
+    })
+    .await
+    .expect("an old node learns of the new one through the promoted hub");
+    assert_eq!(&reached, b"hello");
+}
+
+/// A different hub on an advertised standby address is not the hub the node
+/// joined: it must never see the node's pre-auth key.
+#[rusty_tokio::test]
+async fn a_node_will_not_follow_a_hub_with_a_different_key() {
+    use std::ffi::OsStr;
+
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let other_addr = probe.local_addr().unwrap();
+    drop(probe);
+    let other_url = format!("http://{other_addr}");
+
+    let mut active = start_with(
+        temp_dir("imposter-active"),
+        "ka alice reusable\n",
+        &[OsStr::new("--advertise-standby"), OsStr::new(&other_url)],
+    );
+    let dir = temp_dir("imposter-node");
+    let node = ts_net::Node::new(ts_net::NodeConfig {
+        control_url: active.url.clone(),
+        derp_url: None,
+        authkey: "ka".into(),
+        hostname: "wanderer".into(),
+        state_dir: dir.join("node"),
+        enable_direct: false,
+        stun_server: None,
+        trust: ts_net::Trust::System,
+    })
+    .await
+    .expect("node joins");
+    node.wait_ip().await.expect("address");
+
+    // A stranger: its own key, same pre-auth key, on the advertised address.
+    let args: Vec<std::ffi::OsString> = [
+        "hub".into(),
+        "--listen".into(),
+        other_addr.to_string().into(),
+        "--state-dir".into(),
+        dir.join("other").into(),
+        "--keys".into(),
+        dir.join("keys").into(),
+    ]
+    .into();
+    write_private(&dir.join("keys"), "ka mallory reusable\n");
+    let _other = spawn_hub(dir.clone(), &args);
+    active.child.kill().unwrap();
+    active.child.wait().unwrap();
+
+    rusty_tokio::time::sleep(Duration::from_secs(5)).await;
+    let table = std::fs::read_to_string(dir.join("other").join("nodes.json")).unwrap_or_default();
+    assert!(
+        !table.contains("wanderer"),
+        "the node registered with a hub it never joined: {table}"
+    );
+}
+
+/// A dropped node must not leave retry loops behind when its hub dies.
+#[rusty_tokio::test]
+async fn a_dropped_node_stops_retrying_when_its_hub_dies() {
+    let mut hub = start(temp_dir("dropped"), "ka alice reusable\n");
+    let addr = hub.url.trim_start_matches("http://").to_owned();
+    let node = ts_net::Node::new(ts_net::NodeConfig {
+        control_url: hub.url.clone(),
+        derp_url: None,
+        authkey: "ka".into(),
+        hostname: "leaver".into(),
+        state_dir: hub.dir.join("node"),
+        enable_direct: false,
+        stun_server: None,
+        trust: ts_net::Trust::System,
+    })
+    .await
+    .expect("node joins");
+    node.wait_ip().await.expect("address");
+    drop(node);
+    hub.child.kill().unwrap();
+    hub.child.wait().unwrap();
+
+    // Whatever still dials the old address shows up here.
+    let probe = std::net::TcpListener::bind(&addr).expect("the address is free again");
+    probe.set_nonblocking(true).unwrap();
+    rusty_tokio::time::sleep(Duration::from_secs(8)).await;
+    assert!(
+        probe.accept().is_err(),
+        "something still retries the dead hub"
+    );
 }

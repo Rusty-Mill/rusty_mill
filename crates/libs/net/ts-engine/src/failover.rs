@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use ts_control::ControlClient;
 use ts_derp::DerpClient;
-use ts_key::NodeState;
 use ts_types::tailcfg::{Hostinfo, MapResponse};
 
 use crate::Trust;
@@ -30,9 +29,7 @@ pub(crate) struct Standbys {
 impl Standbys {
     /// Replaces the list (a netmap without one leaves it alone).
     pub(crate) fn set(&self, urls: Vec<String>) {
-        if let Ok(mut g) = self.urls.lock() {
-            *g = urls;
-        }
+        *self.urls.lock().unwrap_or_else(|e| e.into_inner()) = urls;
     }
 
     /// The engine's loop has ended: reconnect tasks should give up.
@@ -40,14 +37,14 @@ impl Standbys {
         self.stopped.store(true, Ordering::Relaxed);
     }
 
-    fn stopped(&self) -> bool {
+    pub(crate) fn stopped(&self) -> bool {
         self.stopped.load(Ordering::Relaxed)
     }
 
     /// `primary` first, then each standby once, in advertised order.
     pub(crate) fn order(&self, primary: &str) -> Vec<String> {
         let mut out = vec![primary.to_string()];
-        let list = self.urls.lock().map(|g| g.clone()).unwrap_or_default();
+        let list = self.urls.lock().unwrap_or_else(|e| e.into_inner()).clone();
         for u in list {
             if !out.contains(&u) {
                 out.push(u);
@@ -66,13 +63,13 @@ fn next(delay: Duration) -> Duration {
 pub(crate) async fn reconnect_derp(
     primary: &str,
     standbys: &Standbys,
-    state: &NodeState,
+    node: &ts_key::NodePrivate,
     trust: &Trust,
 ) -> Option<DerpClient> {
     let mut delay = MIN_BACKOFF;
     while !standbys.stopped() {
         for url in standbys.order(primary) {
-            match DerpClient::connect_with(&url, &state.node, trust).await {
+            match DerpClient::connect_with(&url, node, trust).await {
                 Ok(c) => {
                     rusty_log::info!(%url, "engine: reconnected to DERP");
                     return Some(c);
@@ -93,6 +90,9 @@ pub(crate) struct ControlLink {
     pub hostinfo: Hostinfo,
     pub trust: Trust,
     pub machine: ts_key::MachinePrivate,
+    /// The control key seen at first start; a hub that answers with another
+    /// is not the one this node joined, and gets nothing.
+    pub pinned: ts_types::MachinePublic,
     pub node_key: ts_types::NodePublic,
     pub disco_key: ts_types::DiscoPublic,
     pub endpoints: Vec<std::net::SocketAddr>,
@@ -100,17 +100,74 @@ pub(crate) struct ControlLink {
     pub netmap_tx: mpsc::UnboundedSender<MapResponse>,
 }
 
+/// How one netmap stream ended.
+struct Ended {
+    /// Frames delivered before it ended.
+    frames: usize,
+    /// The engine stopped listening.
+    engine_gone: bool,
+    result: Result<(), ts_control::ClientError>,
+}
+
 impl ControlLink {
-    async fn open(&self, url: &str) -> Result<ControlClient, ts_control::ClientError> {
+    /// Connects to `url` (fetching its key only) and checks the key.
+    async fn open(&self, url: &str) -> Option<ControlClient> {
         let c = ControlClient::connect_with(
             url,
             self.machine.clone(),
             self.hostinfo.clone(),
             self.trust.clone(),
         )
-        .await?;
-        c.register(self.node_key, &self.authkey).await?;
-        Ok(c)
+        .await
+        .inspect_err(|e| rusty_log::debug!(%url, "engine: control reconnect failed: {e}"))
+        .ok()?;
+        if c.control_key() != self.pinned {
+            rusty_log::warn!(%url, "engine: refusing a control server with a different key");
+            return None;
+        }
+        Some(c)
+    }
+
+    async fn stream(&self, client: &ControlClient) -> Ended {
+        let (mut frames, mut engine_gone) = (0, false);
+        let result = client
+            .poll_netmap(
+                self.node_key,
+                self.disco_key,
+                self.endpoints.clone(),
+                |resp| {
+                    if let Some(urls) = resp.standby_urls.clone() {
+                        self.standbys.set(urls);
+                    }
+                    if self.netmap_tx.send(resp).is_err() {
+                        engine_gone = true;
+                        return std::ops::ControlFlow::Break(());
+                    }
+                    frames += 1;
+                    std::ops::ControlFlow::Continue(())
+                },
+            )
+            .await;
+        Ended {
+            frames,
+            engine_gone,
+            result,
+        }
+    }
+
+    /// Streams from `client`. A hub that already knows this machine (the
+    /// usual case after a restart or promotion) needs no pre-auth key, which
+    /// may have expired or been rotated out; only one that refuses the poll
+    /// without a single frame gets a registration and a second try.
+    async fn follow(&self, client: &ControlClient) -> Ended {
+        let first = self.stream(client).await;
+        if first.frames > 0 || first.engine_gone || self.standbys.stopped() {
+            return first;
+        }
+        if client.register(self.node_key, &self.authkey).await.is_err() {
+            return first;
+        }
+        self.stream(client).await
     }
 
     /// Streams the netmap from `first`, then from whichever hub answers after
@@ -119,43 +176,23 @@ impl ControlLink {
         let mut current = Some(first);
         let mut delay = MIN_BACKOFF;
         while !self.standbys.stopped() {
-            let urls = self.standbys.order(&self.primary);
-            for url in urls {
+            for url in self.standbys.order(&self.primary) {
                 let client = match current.take() {
                     Some(c) => c,
                     None => match self.open(&url).await {
-                        Ok(c) => {
-                            rusty_log::info!(%url, "engine: control reconnected");
-                            c
-                        }
-                        Err(e) => {
-                            rusty_log::debug!(%url, "engine: control reconnect failed: {e}");
-                            continue;
-                        }
+                        Some(c) => c,
+                        None => continue,
                     },
                 };
-                delay = MIN_BACKOFF;
-                let r = client
-                    .poll_netmap(
-                        self.node_key,
-                        self.disco_key,
-                        self.endpoints.clone(),
-                        |resp| {
-                            if let Some(urls) = resp.standby_urls.clone() {
-                                self.standbys.set(urls);
-                            }
-                            match self.netmap_tx.send(resp) {
-                                Ok(()) => std::ops::ControlFlow::Continue(()),
-                                Err(_) => std::ops::ControlFlow::Break(()),
-                            }
-                        },
-                    )
-                    .await;
-                if self.standbys.stopped() {
+                let ended = self.follow(&client).await;
+                if ended.engine_gone {
                     return;
                 }
-                if let Err(e) = r {
-                    rusty_log::warn!("engine: netmap poll ended: {e}");
+                if let Err(e) = ended.result {
+                    rusty_log::warn!(%url, "engine: netmap poll ended: {e}");
+                }
+                if ended.frames > 0 {
+                    delay = MIN_BACKOFF;
                 }
                 break; // restart from the primary
             }
@@ -181,5 +218,24 @@ mod tests {
     fn backoff_doubles_up_to_the_cap() {
         assert_eq!(next(MIN_BACKOFF), Duration::from_secs(1));
         assert_eq!(next(Duration::from_secs(4)), MAX_BACKOFF);
+    }
+
+    #[rusty_tokio::test]
+    async fn reconnecting_gives_up_once_the_engine_has_stopped() {
+        let standbys = Standbys::default();
+        let node = ts_key::NodePrivate::generate();
+        let stopper = standbys.clone();
+        rusty_tokio::spawn(async move {
+            rusty_tokio::time::sleep(Duration::from_millis(300)).await;
+            stopper.stop();
+        });
+        // Nothing listens on port 1: every attempt fails until the stop.
+        let got = rusty_tokio::time::timeout(
+            Duration::from_secs(10),
+            reconnect_derp("http://127.0.0.1:1", &standbys, &node, &Trust::System),
+        )
+        .await
+        .expect("it stops retrying");
+        assert!(got.is_none());
     }
 }

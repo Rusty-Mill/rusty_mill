@@ -169,8 +169,9 @@ impl Args {
         if self.tls_ca.is_some() {
             return Err("--tls-ca goes with --standby".into());
         }
-        if let Some(url) = self.standbys.iter().find(|u| ts_dial::split(u).is_none()) {
-            return Err(format!("--advertise-standby: bad URL {url:?}"));
+        // Nodes send their pre-auth key to these on every reconnect.
+        for url in &self.standbys {
+            needs_secure_link(url, "--advertise-standby")?;
         }
         if let Some(url) = &self.promote {
             needs_secure_link(url, "--promote")?;
