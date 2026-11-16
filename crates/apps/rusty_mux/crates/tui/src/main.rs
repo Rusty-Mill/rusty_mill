@@ -2963,6 +2963,14 @@ mod client {
 
         /// Redraws the composed screen where it changed.
         fn draw(&mut self) {
+            let focus = self.focus;
+            if let Some((find, (grid, _))) = self
+                .finding
+                .as_mut()
+                .zip(self.panes.get(&focus).and_then(|pane| pane.term.as_ref()))
+            {
+                find.follow(grid);
+            }
             if let Shown::Passing(block) = self.shown {
                 return self.pass_ahead(block);
             }

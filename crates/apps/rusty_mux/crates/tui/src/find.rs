@@ -31,6 +31,8 @@ pub struct Find {
     query: String,
     hits: Vec<Hit>,
     current: usize,
+    /// The start of a character a read cut short.
+    tail: Vec<u8>,
 }
 
 fn fold(c: char) -> char {
@@ -134,7 +136,17 @@ impl Find {
             }
         }
         if !typed.is_empty() {
-            self.query.push_str(&String::from_utf8_lossy(&typed));
+            self.tail.extend(typed);
+            let whole = match std::str::from_utf8(&self.tail) {
+                Ok(_) => self.tail.len(),
+                // An incomplete character at the end waits for its rest.
+                Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                Err(_) => self.tail.len(),
+            };
+            let rest = self.tail.split_off(whole);
+            let text =
+                String::from_utf8_lossy(&std::mem::replace(&mut self.tail, rest)).into_owned();
+            self.query.push_str(&text);
             self.refresh(grid);
         }
         self.show(grid);
@@ -151,6 +163,18 @@ impl Find {
     fn refresh(&mut self, grid: &Grid) {
         self.hits = search(grid, &self.query);
         self.current = 0;
+    }
+
+    /// Searches again, keeping the active match's place, for output that
+    /// arrived since: on a full history rows drop off the top and every hit
+    /// moves. Call before drawing.
+    pub fn follow(&mut self, grid: &Grid) {
+        if self.query.is_empty() {
+            return;
+        }
+        let at = self.current;
+        self.refresh(grid);
+        self.current = at.min(self.hits.len().saturating_sub(1));
     }
 
     /// Scrolls `grid` so the active match is a third of the way down.
@@ -223,6 +247,33 @@ mod tests {
         find.keys(&mut g, &[0x7f]);
         assert_eq!(find.query(), "needl");
         assert_eq!(find.keys(&mut g, b"\x1b"), Step::Leave);
+    }
+
+    #[test]
+    fn a_character_split_across_reads_is_typed_whole() {
+        let mut g = grid(10, 2, "caf\u{e9}");
+        let mut find = Find::default();
+        let bytes = "\u{e9}".as_bytes();
+        find.keys(&mut g, &[b'c', b'a', b'f', bytes[0]]);
+        assert_eq!(find.query(), "caf");
+        find.keys(&mut g, &bytes[1..]);
+        assert_eq!(find.query(), "caf\u{e9}");
+        assert_eq!(find.position(), Some((1, 1)));
+    }
+
+    #[test]
+    fn hits_follow_a_history_that_moved() {
+        let mut g = grid(10, 2, "");
+        g.set_scrollback_max(3);
+        AnsiParser::new().advance(&mut g, b"a\r\nb\r\nc\r\nfoo");
+        let mut find = Find::default();
+        find.keys(&mut g, b"foo");
+        let before = find.active().unwrap().abs;
+        // History is full: a row drops off the top for each new one.
+        AnsiParser::new().advance(&mut g, b"\r\nx\r\ny");
+        find.follow(&g);
+        assert_eq!(find.active().unwrap().abs, before - 1);
+        assert_eq!(find.position(), Some((1, 1)));
     }
 
     #[test]
