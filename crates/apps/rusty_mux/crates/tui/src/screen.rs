@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use rusty_mux_client::style::Style;
 use rusty_mux_core::{BlockId, Rect, Size};
-use rusty_term_core::{ATTR_UNDERLINE, AnsiParser, Cell, Grid, WIDE_TRAILER};
+use rusty_term_core::{ATTR_REVERSE, ATTR_UNDERLINE, AnsiParser, Cell, Grid, WIDE_TRAILER};
 
 use crate::keys::Dir;
 use crate::predict::Overlay;
@@ -70,6 +70,42 @@ impl Frame {
     fn row(&self, y: u16) -> &[Glyph] {
         let start = self.index(0, y);
         &self.cells[start..start + usize::from(self.area.cols())]
+    }
+
+    /// Marks `len` cells of `rect`'s row `y` from column `x` as a find
+    /// match: reversed, and underlined too when it is the active one.
+    pub fn mark(&mut self, rect: Rect, (x, y): (usize, usize), len: usize, active: bool) {
+        let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
+        if y >= rows {
+            return;
+        }
+        for dx in x..(x + len).min(cols) {
+            // Both fit in u16: they are below the rect's size.
+            let i = self.index(rect.x + dx as u16, rect.y + y as u16);
+            let attrs = &mut self.cells[i].style.attrs;
+            *attrs |= ATTR_REVERSE | if active { ATTR_UNDERLINE } else { 0 };
+        }
+    }
+
+    /// Draws `text` reversed over the last row of `rect`, which the block
+    /// shows beneath it; the cursor goes there.
+    pub fn bar(&mut self, rect: Rect, text: &str) {
+        let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
+        if rows == 0 {
+            return;
+        }
+        let y = rect.y + (rows - 1) as u16;
+        let mut chars = text.chars();
+        for dx in 0..cols {
+            let ch = chars.next().unwrap_or(' ');
+            let mut glyph = Glyph::plain(ch, Style::of(&Cell::blank()));
+            glyph.style.attrs |= ATTR_REVERSE;
+            // Both fit in u16: they are below the rect's size.
+            let i = self.index(rect.x + dx as u16, y);
+            self.cells[i] = glyph;
+        }
+        let end = text.chars().count().min(cols.saturating_sub(1));
+        self.cursor = Some((rect.x + end as u16, y));
     }
 
     /// The cursor colour this frame gave the terminal, if any.
@@ -560,6 +596,30 @@ mod tests {
         // Back on the live screen the same overlay draws again.
         g.reset_view();
         assert_eq!(text(&drawn(&g), 0), "tXY ");
+    }
+
+    #[test]
+    fn a_find_bar_and_marks_are_drawn_over_the_block() {
+        let g = grid(6, 3, "one\r\ntwo\r\nsix");
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            size: size(6, 3),
+        };
+        let views = [View {
+            block: id(1),
+            rect,
+            grid: Some(&g),
+            overlay: None,
+        }];
+        let mut frame = compose(size(6, 3), &views, id(1));
+        frame.mark(rect, (1, 0), 2, true);
+        frame.bar(rect, "/n  1/1");
+        let reversed = |x: usize, y: u16| frame.row(y)[x].style.attrs & ATTR_REVERSE != 0;
+        assert!(!reversed(0, 0) && reversed(1, 0) && reversed(2, 0) && !reversed(3, 0));
+        assert_eq!(text(&frame, 2), "/n  1/");
+        assert!(reversed(0, 2));
+        assert_eq!(frame.cursor, Some((5, 2)));
     }
 
     #[test]
