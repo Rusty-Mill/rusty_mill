@@ -713,6 +713,8 @@ impl State {
     ) -> ClientId {
         let features = theirs.intersection(self.offered());
         let who = principal.clone();
+        // A takeover must not get a screen its time has run out on (C14).
+        self.mux.expire_grants(now_ms());
         let continued = takeover.and_then(|t| self.takes_over(t, &principal, features));
         let client = match continued {
             Some(client) => {
@@ -3245,6 +3247,51 @@ mod regression {
                     .is_some_and(|r| r.contains("owner_unreachable")),
                 "{refused:?}"
             );
+        });
+    }
+
+    /// A watcher whose share ran out takes its connection over and gets no
+    /// screen: the attachment ended with the share (C14).
+    #[test]
+    fn a_takeover_after_a_shares_end_gets_no_screen() {
+        runtime().block_on(async {
+            let (shared, account, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _old_inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal.clone(),
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            let session = state.mux.sessions().next().unwrap().id();
+            let now = now_ms();
+            state
+                .mux
+                .share(account, session, guest, now + 40, now)
+                .unwrap();
+            state.mux.attach(guest, block).unwrap();
+            let takeover = Some(Takeover {
+                client: guest,
+                token: state.tokens[&guest].current,
+            });
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            let (out, _new_inbox, _) = outbox();
+            let again = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                features,
+                None,
+                takeover,
+            );
+            assert_eq!(again, guest);
+            assert_eq!(state.mux.client(guest).unwrap().attached(), None);
         });
     }
 
