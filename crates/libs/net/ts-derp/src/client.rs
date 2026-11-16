@@ -402,10 +402,18 @@ async fn http_upgrade(
 fn parse_url(url: &str) -> Result<(bool, String, String), DerpError> {
     let (tls, rest) = ts_dial::scheme(url).ok_or_else(|| DerpError::BadUrl(url.to_string()))?;
     let authority = rest.split(['/', '?']).next().unwrap_or(rest);
-    if authority.is_empty() || !authority.contains(':') {
+    if authority.is_empty() {
         return Err(DerpError::BadUrl(url.to_string()));
     }
-    Ok((tls, authority.to_string(), authority.to_string()))
+    let has_port = authority
+        .rsplit_once(':')
+        .is_some_and(|(_, p)| !p.contains(']'));
+    let dial = match (has_port, tls) {
+        (true, _) => authority.to_string(),
+        (false, true) => format!("{authority}:443"),
+        (false, false) => format!("{authority}:80"),
+    };
+    Ok((tls, dial, authority.to_string()))
 }
 
 #[cfg(test)]
@@ -427,7 +435,15 @@ mod tests {
         );
         assert!(parse_url("https://relay.example:443").unwrap().0);
         assert!(parse_url("ftp://x:1").is_err());
-        assert!(parse_url("http://nohost").is_err());
+        assert!(parse_url("http://").is_err());
+        // An omitted port follows the scheme, as in the control URL.
+        assert_eq!(
+            parse_url("https://hub.example/derp").unwrap(),
+            (true, "hub.example:443".into(), "hub.example".into())
+        );
+        assert_eq!(parse_url("http://nohost").unwrap().1, "nohost:80");
+        assert_eq!(parse_url("https://[::1]").unwrap().1, "[::1]:443");
+        assert_eq!(parse_url("https://[::1]:9").unwrap().1, "[::1]:9");
     }
 
     /// A relay that accepts the TCP connection but never sends a byte back
