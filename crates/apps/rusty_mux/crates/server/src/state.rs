@@ -3199,6 +3199,10 @@ mod regression {
             state.share_leases(test_owner());
             let features = Features::CHECKPOINT_V6.union(Features::LEASE_REQUESTS);
             let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            // The session's creator is a principal with no connection.
+            let session = state.mux.sessions().next().unwrap().id();
+            let away = Principal::unix(1002, Some("away".into())).unwrap();
+            state.mux.set_creator(session, away).unwrap();
             let (out, _inbox, _) = outbox();
             let guest = state.connect(
                 out,
@@ -3208,6 +3212,7 @@ mod regression {
                 None,
                 None,
             );
+            assert_eq!(state.mux.lease_askees(block), Ok(Vec::new()));
             let refused = state.request_lease(guest, block).err().map(|r| r.reason);
             assert!(
                 refused
