@@ -35,7 +35,7 @@ mod mux;
 mod names;
 mod saved;
 
-pub use entity::{Block, Client, InputMode, Owner, Session, Size, Window};
+pub use entity::{Block, Client, InputMode, Owner, Session, SessionShare, Size, Window};
 pub use error::Error;
 pub use event::{Event, ExitStatus, Progress, Selection, TailscaleState};
 pub use id::{BlockId, ClientId, EntityId, SessionId, WindowId};

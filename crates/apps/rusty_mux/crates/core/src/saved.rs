@@ -122,6 +122,7 @@ impl Mux {
                 active: s.active,
                 generated: s.generated,
                 creator: None,
+                shares: BTreeMap::new(),
             };
             mux.sessions.insert(s.id, session);
         }
@@ -140,6 +141,7 @@ impl Mux {
                 owner: None,
                 input: InputMode::Open,
                 grants: BTreeMap::new(),
+                watching: BTreeSet::new(),
             };
             self.blocks.insert(b.id, block);
         }
