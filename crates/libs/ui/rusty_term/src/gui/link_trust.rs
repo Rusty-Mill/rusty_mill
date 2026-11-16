@@ -93,7 +93,13 @@ fn add_by(dir: &Path, origin: &str, hash: fn(&str) -> String) -> Result<()> {
             Ok(held) if held == origin => return Ok(()),
             // Another origin with the same hash (or a damaged file): next slot.
             Ok(_) => continue,
-            Err(e) if e.kind() == ErrorKind::NotFound => {
+            Err(e) if e.kind() != ErrorKind::NotFound => {
+                // Damaged (not UTF-8) or not a file: leave it, use the next slot.
+                if slot + 1 == SLOTS {
+                    return Err(e);
+                }
+            }
+            Err(_) => {
                 if publish(dir, &hash, &path, origin)? {
                     return Ok(());
                 }
@@ -102,7 +108,6 @@ fn add_by(dir: &Path, origin: &str, hash: fn(&str) -> String) -> Result<()> {
                     return Ok(());
                 }
             }
-            Err(e) => return Err(e),
         }
     }
     Err(Error::other("too many origins share a hash"))
@@ -123,6 +128,8 @@ fn publish(dir: &Path, hash: &str, path: &Path, origin: &str) -> Result<bool> {
     let done = match std::fs::hard_link(&tmp, path) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
+        // Links unsupported here: rename, unless something has appeared.
+        Err(_) if path.exists() => Ok(false),
         Err(_) => std::fs::rename(&tmp, path).map(|()| true),
     };
     drop(std::fs::remove_file(&tmp));
@@ -147,7 +154,9 @@ mod tests {
     use super::*;
 
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("rt_trust_{name}_{}", std::process::id()));
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("rt_trust_{name}_{}_{n}", std::process::id()));
         drop(std::fs::remove_dir_all(&d));
         d
     }
@@ -274,6 +283,17 @@ mod tests {
             .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
             .count();
         assert_eq!(files, origins.len());
+    }
+
+    #[test]
+    fn a_damaged_or_directory_slot_is_skipped() {
+        let d = dir("damaged_slot");
+        std::fs::create_dir_all(&d).unwrap();
+        let h = name_hash("https://a.test");
+        std::fs::write(d.join(format!("{h}.origin")), [0xff, 0xfe]).unwrap();
+        std::fs::create_dir(d.join(format!("{h}-1.origin"))).unwrap();
+        add(&d, "https://a.test").unwrap();
+        assert!(d.join(format!("{h}-2.origin")).is_file());
     }
 
     #[test]

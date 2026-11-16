@@ -94,14 +94,60 @@ pub(crate) fn parse(url: &str) -> Result<Link, Deny> {
 /// width, soft hyphen, BOM): a link built from them reads as another one.
 fn is_invisible(c: char) -> bool {
     matches!(c, '\u{AD}' | '\u{61C}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
-        | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}')
+        | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}'
+        | '\u{115F}' | '\u{1160}' | '\u{2800}' | '\u{3164}' | '\u{FFA0}')
 }
 
 /// Extensions the OS opener runs or installs instead of showing.
-const PROGRAMS: [&str; 36] = [
-    "exe", "com", "bat", "cmd", "lnk", "scr", "msi", "msp", "ps1", "psm1", "vbs", "vbe", "js",
-    "jse", "wsf", "wsh", "hta", "cpl", "dll", "reg", "pif", "jar", "app", "command", "sh", "bash",
-    "zsh", "pkg", "dmg", "appimage", "desktop", "url", "scf", "chm", "inf", "gadget",
+const PROGRAMS: [&str; 48] = [
+    "exe",
+    "com",
+    "bat",
+    "cmd",
+    "lnk",
+    "scr",
+    "msi",
+    "msp",
+    "ps1",
+    "psm1",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "hta",
+    "cpl",
+    "dll",
+    "reg",
+    "pif",
+    "jar",
+    "app",
+    "command",
+    "sh",
+    "bash",
+    "zsh",
+    "pkg",
+    "dmg",
+    "appimage",
+    "desktop",
+    "url",
+    "scf",
+    "chm",
+    "inf",
+    "gadget",
+    "msix",
+    "appx",
+    "iso",
+    "img",
+    "vhd",
+    "vhdx",
+    "appref-ms",
+    "application",
+    "settingcontent-ms",
+    "xll",
+    "msc",
+    "jnlp",
 ];
 
 /// `file:` links open only on this computer and never a program. `rest` is
@@ -113,6 +159,10 @@ fn check_file(rest: &str) -> Result<(), Deny> {
     }
     let path = path.split(['?', '#']).next().unwrap_or("");
     let path = percent_decode(path).ok_or(Deny::File)?;
+    // Past an empty host, a leading `//` is a UNC share (`\\\\server\\share`).
+    if path.starts_with("//") {
+        return Err(Deny::File);
+    }
     // A drive prefix (`/C:/`) is the one colon a path may hold; any other
     // is a Windows alternate data stream.
     let body = match path.as_bytes() {
@@ -122,11 +172,11 @@ fn check_file(rest: &str) -> Result<(), Deny> {
     if path.contains('\\') || body.contains(':') || path.chars().any(char::is_control) {
         return Err(Deny::File);
     }
-    let name = body
-        .trim_end_matches(['/', '.'])
-        .rsplit('/')
-        .next()
-        .unwrap_or("");
+    let name = body.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    // Windows drops a trailing space or dot, so `a.exe ` is `a.exe`.
+    if name.ends_with([' ', '.']) {
+        return Err(Deny::File);
+    }
     let ext = name
         .rsplit_once('.')
         .map_or("", |(_, e)| e)
@@ -398,6 +448,15 @@ mod tests {
             "file:///tmp/a%zz.txt",
             "file:///tmp/a\\b.txt",
             "file:///tmp/x.bat?x=1",
+            "file:////attacker/share/x.txt",
+            "file://localhost//attacker/share/",
+            "file:///%2F%2Fattacker/share/x.txt",
+            "file:///C:/x/setup.exe%20",
+            "file:///C:/x/setup.exe%20.",
+            "file:///C:/x/setup.exe%20%20",
+            "file:///tmp/a.msix",
+            "file:///tmp/a.ISO",
+            "file:///tmp/a.jnlp",
         ] {
             assert_eq!(parse(u), Err(Deny::File), "{u}");
         }
