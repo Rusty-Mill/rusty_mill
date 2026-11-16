@@ -834,7 +834,8 @@ pub enum Message {
     },
     /// Answers [`Message::ClipboardRead`] with `data`, the `selection`'s
     /// text, or `None` to deny; a denial writes an empty answer to the
-    /// program. Accepted only from the block's lease holder, like input.
+    /// program. Accepted only from the block's lease holder, like input,
+    /// and only once for a read it was asked and has not answered.
     /// Negotiated with [`Features::CLIPBOARD`].
     ClipboardReply {
         req: u64,

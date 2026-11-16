@@ -107,6 +107,13 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::CLIPBOARD)
     .union(UNIX_ONLY);
 
+/// The most text a clipboard answer carries (C38's OSC 52 limit).
+const MAX_CLIPBOARD: usize = 1 << 20;
+
+/// How long a clipboard read waits for its answer before the next one is
+/// asked: a late answer would land as typed input in whatever runs next.
+const CLIPBOARD_WAIT: Duration = Duration::from_secs(30);
+
 /// Offered on Linux only: signal and release (C76) act on a Unix process
 /// group, and orch, their one client, runs there; the tailscale status
 /// event (C27) comes from a `tailscaled` this server asks on Linux.
@@ -118,8 +125,6 @@ const UNIX_ONLY: Features = Features::NONE;
 /// An owner whose outbox holds more than this can't be told of more
 /// input, so an owner-only block refuses it (C77): half the budget, so a
 /// refusal comes well before the owner is dropped.
-/// The most text a clipboard answer carries (C38's OSC 52 limit).
-const MAX_CLIPBOARD: usize = 1 << 20;
 const INPUT_REPORT_LIMIT: usize = crate::outbox::BUDGET / 2;
 
 /// Why a request that needs a block's program is refused once there is
@@ -408,6 +413,10 @@ pub(crate) struct State {
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
     features: HashMap<ClientId, Features>,
+    /// The one clipboard read asked of a block's lease holder per selection
+    /// (`true` for primary), until it is answered or [`CLIPBOARD_WAIT`] ends
+    /// (C54). A reply that matches none is refused.
+    reads: HashMap<(BlockId, bool), (ClientId, Instant)>,
     /// Each `TAKEOVER` client's tokens.
     tokens: HashMap<ClientId, Tokens>,
     /// Clients whose connection ended within [`ORPHAN_GRACE`], each with
@@ -481,6 +490,7 @@ impl State {
             blocks: HashMap::new(),
             clients: HashMap::new(),
             features: HashMap::new(),
+            reads: HashMap::new(),
             tokens: HashMap::new(),
             orphans: HashMap::new(),
             history: History::new(Uuid::new_v4(), HISTORY),
@@ -1385,6 +1395,18 @@ impl State {
         if data.len() > MAX_CLIPBOARD {
             return Err(format!("a clipboard answer is at most {MAX_CLIPBOARD} bytes").into());
         }
+        self.mux
+            .authorize_input(client, block)
+            .map_err(Refusal::from)?;
+        let key = (block, selection == Selection::Primary);
+        let waiting = self
+            .reads
+            .get(&key)
+            .is_some_and(|(asked, at)| *asked == client && at.elapsed() < CLIPBOARD_WAIT);
+        if !waiting {
+            return Err(format!("no {} read of block {block} is waiting", selection.name()).into());
+        }
+        self.reads.remove(&key);
         let target = match selection {
             Selection::Clipboard => 'c',
             Selection::Primary => 'p',
@@ -1411,7 +1433,20 @@ impl State {
         if !ready {
             return;
         }
+        // One read per selection at a time: a program looping on the query
+        // can't flood the holder, and its answer can't arrive late.
+        self.reads
+            .retain(|_, (_, at)| at.elapsed() < CLIPBOARD_WAIT);
         for selection in reads {
+            let key = (block, selection == Selection::Primary);
+            if self
+                .reads
+                .get(&key)
+                .is_some_and(|(asked, _)| *asked == holder)
+            {
+                continue;
+            }
+            self.reads.insert(key, (holder, Instant::now()));
             self.send(holder, &Message::ClipboardRead { block, selection });
         }
     }

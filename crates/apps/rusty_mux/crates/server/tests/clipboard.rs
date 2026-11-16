@@ -149,3 +149,61 @@ fn a_reply_after_the_lease_moved_is_refused() {
         "{answer:?}"
     );
 }
+
+fn reply(client: &mut Client, block: BlockId, data: &[u8]) -> Vec<Message> {
+    client.answer(|req| Message::ClipboardReply {
+        req,
+        block,
+        selection: Selection::Clipboard,
+        data: Some(data.to_vec()),
+    })
+}
+
+fn refused(answer: &[Message], needle: &str) -> bool {
+    matches!(answer.last(), Some(Message::Failed { reason, .. }) if reason.contains(needle))
+}
+
+#[test]
+fn a_reply_with_no_read_waiting_is_refused() {
+    let path = start_server();
+    let mut holder = Client::connect_with(&path, READS, None);
+    let block = block_for(&mut holder);
+    // Nothing asked: a late or invented answer would be typed into
+    // whatever runs next.
+    assert!(refused(&reply(&mut holder, block, b"x"), "is waiting"));
+}
+
+#[test]
+fn a_read_is_answered_once() {
+    let path = start_server();
+    let mut holder = Client::connect_with(&path, READS, None);
+    let block = block_for(&mut holder);
+    ask(&mut holder, block);
+    next_read(&mut holder, block);
+    holder.send(&Message::ClipboardReply {
+        req: 90,
+        block,
+        selection: Selection::Clipboard,
+        data: Some(b"hi".to_vec()),
+    });
+    holder.wait_for(block, "52;c;aGk=");
+    assert!(refused(&reply(&mut holder, block, b"again"), "is waiting"));
+}
+
+#[test]
+fn a_program_looping_on_the_query_asks_the_holder_once() {
+    let path = start_server();
+    let mut holder = Client::connect_with(&path, READS, None);
+    let block = block_for(&mut holder);
+    holder.input(
+        block,
+        b"for i in 1 2 3 4 5; do printf '\\033]52;c;?\\007'; done; echo DONE_$((1+1))\r",
+    );
+    let mut reads = 0;
+    while !holder.saw(block, "DONE_2") {
+        if let Message::ClipboardRead { .. } = holder.recv() {
+            reads += 1;
+        }
+    }
+    assert_eq!(reads, 1, "one outstanding read at a time");
+}
