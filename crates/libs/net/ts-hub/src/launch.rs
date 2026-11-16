@@ -500,6 +500,11 @@ mod tests {
             .is_ok()
         );
         assert!(run(&["--listen", "127.0.0.1:0", "--force"]).is_err());
+        // Nodes send their pre-auth key to advertised standbys.
+        let adv = |u: &'static str| run(&["--listen", "127.0.0.1:0", "--advertise-standby", u]);
+        assert!(adv("https://standby.example:8443").is_ok());
+        assert!(adv("http://127.0.0.1:9").is_ok());
+        assert!(adv("http://standby.example:9").is_err());
         assert!(
             run(&[
                 "--listen",
