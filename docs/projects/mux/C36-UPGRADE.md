@@ -79,3 +79,30 @@ removed while it is still this server's (Linux), and connections close last.
   over 15 s (pack D163). A second `server stop` right after exits 4.
 - **Upgrade recipe.** `rusty-mux-ctl server stop`, install the new binaries, then connect: the
   first client auto-starts the new server (C69), which restores the saved sessions (C45).
+
+## Close-out check (card #289)
+
+The Rex level is met by what (a) and (b) already do plus C69 and C45; no new
+code is needed. Each step has a test, and the whole run was checked by hand on
+Linux on 2026-11-16 (Windows not run; see below).
+
+| Step | Held by |
+|---|---|
+| A running server keeps its binary and sessions while a new one installs | The kernel keeps the old file open; checked by hand below |
+| `server stop` saves, frees the name and exits 0; a second one exits 4 | `server/tests/endpoint.rs` (`signals_and_a_request_stop_cleanly_...`), `ctl/tests/ctl.rs` (`server_stop_waits_for_the_stop_...`) |
+| The next server on the same store restores the sessions | `server/tests/endpoint.rs`, `server/tests/restore.rs` |
+| A client with no server starts one (`--idle-exit 60`) | `client/src/autostart.rs` tests, C69 |
+| No older-server notice when client and server match | `ctl/tests/ctl.rs` `ok()` asserts no "It lacks" |
+
+Manual check (Linux), with `rusty-mux-server` and `rusty-mux-ctl` built:
+
+1. Start `rusty-mux-server --state STATE SOCK`; `rusty-mux-ctl create-session --name kept`.
+2. Replace the server binary on disk (`mv` a new build over it).
+3. `rusty-mux-ctl create-window ...` still works against the old server.
+4. `rusty-mux-ctl server stop` exits 0; a second one exits 4.
+5. Start the installed server on the same `STATE` and `SOCK`: `rusty-mux-ctl list` shows
+   the session and window with the same ids, and no notice on stderr.
+
+Result 2026-11-16: all five held, with the same build standing in for "new". The
+Windows run (the same steps through the Ctrl+C path) is not done; it needs Nano's
+machine and is listed in the Windows manual-check note when run.
