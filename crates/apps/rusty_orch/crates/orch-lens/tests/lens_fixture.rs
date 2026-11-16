@@ -28,7 +28,11 @@ fn every_prompt_file_exists_and_is_plain_text() {
         assert!(!text.trim().is_empty(), "{} is empty", lens.prompt);
         // orch sends the file verbatim under its own `# Your lens` heading.
         assert!(!text.starts_with("---"), "{} has front matter", lens.prompt);
-        assert!(!text.starts_with('#'), "{} opens with a heading", lens.prompt);
+        assert!(
+            !text.starts_with('#'),
+            "{} opens with a heading",
+            lens.prompt
+        );
     }
 }
 
