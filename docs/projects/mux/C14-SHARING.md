@@ -46,6 +46,11 @@ when its lease is refused.
   disconnect. Each ends the watch grants, takes the watcher off any block it had only the watch
   right to, and sends `ShareChanged{until: None}` and the per-block `GrantChanged`. Unshare is
   immediate. A watcher that also has a full grant, or is the creator, owner or account, stays.
+- **On time.** The server expires grants and shares before it sends each chunk of PTY output and on
+  its periodic check, not only on a request, so a silent watcher sees nothing after `until`.
+- **Later blocks.** A block made later gets the watch grants its sharer could have granted. The
+  server makes a block, then sets its owner: when an owner is set, a watcher whose share was made
+  by anyone but that owner loses the watch (review of #1740). A split is the same.
 - **Not persisted.** A share lives in memory and dies with the server, as grants do; the C45 store
   keeps no new principal field (D164 (1)).
 - **Visibility.** `ShareChanged` goes to every client with `SHARING`, as `GrantChanged` goes to

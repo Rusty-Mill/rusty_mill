@@ -2322,6 +2322,9 @@ impl State {
     /// Feeds PTY output to the block's grid and tees it to attached clients.
     /// Returns the terminal's replies to queries, for the PTY.
     fn output(&mut self, block: BlockId, data: &[u8]) -> Vec<u8> {
+        // A watcher's time may be up with no request of its own to say so:
+        // it sees nothing more of the screen (C14).
+        self.mux.expire_grants(now_ms());
         // A mode change, such as echo turned off before a password prompt,
         // goes ahead of the output printed after it.
         self.check_echo(block);
@@ -2411,6 +2414,7 @@ impl State {
     /// [`Self::check_process`], names refreshed, and [`Self::check_echo`]
     /// for every block, then broadcasts.
     fn check_processes(&mut self) {
+        self.mux.expire_grants(now_ms());
         let blocks: Vec<BlockId> = self.blocks.keys().copied().collect();
         for block in blocks {
             self.check_process(block, true);
@@ -3241,6 +3245,39 @@ mod regression {
                     .is_some_and(|r| r.contains("owner_unreachable")),
                 "{refused:?}"
             );
+        });
+    }
+
+    /// A watcher's share ends on time even when it sends nothing and the
+    /// program keeps printing: the next output is not sent to it (C14).
+    #[test]
+    fn output_after_a_shares_end_does_not_reach_the_watcher() {
+        runtime().block_on(async {
+            let (shared, account, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _guest_inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                Features::CHECKPOINT_V6,
+                None,
+                None,
+            );
+            let session = state.mux.sessions().next().unwrap().id();
+            let now = now_ms();
+            state
+                .mux
+                .share(account, session, guest, now + 40, now)
+                .unwrap();
+            state.mux.attach(guest, block).unwrap();
+            state.output(block, b"in time");
+            assert!(state.attached(block).contains(&guest));
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            state.output(block, b"too late");
+            assert!(!state.attached(block).contains(&guest));
         });
     }
 

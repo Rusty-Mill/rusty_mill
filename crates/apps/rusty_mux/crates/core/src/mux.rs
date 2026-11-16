@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::names;
 use crate::{
     Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Layout,
-    MAX_DEPTH, Owner, Principal, Progress, Selection, Session, SessionId, Share, Side, Size,
-    TailscaleState, Toward, Transport, Window, WindowId,
+    MAX_DEPTH, Owner, Principal, Progress, Selection, Session, SessionId, SessionShare, Share,
+    Side, Size, TailscaleState, Toward, Transport, Window, WindowId,
 };
 
 /// The longest name any entity may have, in UTF-8 bytes. Names travel in
@@ -334,18 +334,24 @@ impl Mux {
     }
 
     /// Gives the clients its session is shared with a watch grant on the
-    /// new `block` (C14).
+    /// new `block` (C14), where their sharer could have granted it: an
+    /// owner made known later revalidates them in [`Self::own`].
     fn share_into(&mut self, block: BlockId) {
-        let shares: Vec<(ClientId, u64)> = self
-            .blocks
-            .get(&block)
-            .and_then(|b| self.windows.get(&b.window))
-            .and_then(|w| self.sessions.get(&w.session))
-            .map(|s| s.shares.iter().map(|(c, u)| (*c, *u)).collect())
+        let shares: Vec<(ClientId, SessionShare)> = self
+            .session_of_block(block)
+            .and_then(|s| self.sessions.get(&s))
+            .map(|s| s.shares.iter().map(|(c, sh)| (*c, *sh)).collect())
             .unwrap_or_default();
-        for (client, until) in shares {
-            self.put_grant(block, client, until, true);
+        for (client, share) in shares {
+            if self.authorize_granter(share.by, block).is_ok() {
+                self.put_grant(block, client, share.until, true);
+            }
         }
+    }
+
+    fn session_of_block(&self, block: BlockId) -> Option<SessionId> {
+        let window = self.blocks.get(&block)?.window;
+        Some(self.windows.get(&window)?.session)
     }
 
     /// Records a grant and announces it; `watch` makes it watch-only.
@@ -1032,7 +1038,32 @@ impl Mux {
             client: Some(client),
         });
         target.input = input;
+        self.recheck_watchers(block);
         Ok(())
+    }
+
+    /// A block just got its owner: a watcher of a share made by anyone
+    /// but that owner loses its watch, since only the owner grants (C14).
+    fn recheck_watchers(&mut self, block: BlockId) {
+        let owner = self
+            .blocks
+            .get(&block)
+            .and_then(|b| b.owner.as_ref()?.client);
+        let shares = self
+            .session_of_block(block)
+            .and_then(|s| self.sessions.get(&s))
+            .map(|s| s.shares.clone())
+            .unwrap_or_default();
+        let watchers: Vec<ClientId> = self
+            .blocks
+            .get(&block)
+            .map(|b| b.watching.iter().copied().collect())
+            .unwrap_or_default();
+        for client in watchers {
+            if shares.get(&client).map(SessionShare::by) != owner {
+                self.end_grant(block, client);
+            }
+        }
     }
 
     /// Lets `client` take `block`'s lease until `until` (unix ms), for the
@@ -1089,7 +1120,7 @@ impl Mux {
             }
         }
         if let Some(s) = self.sessions.get_mut(&session) {
-            s.shares.insert(client, until);
+            s.shares.insert(client, SessionShare { until, by: sharer });
         }
         self.events.push(Event::ShareChanged {
             session,
@@ -1195,7 +1226,7 @@ impl Mux {
             .flat_map(|s| {
                 s.shares
                     .iter()
-                    .filter(|&(_, &until)| until <= now)
+                    .filter(|&(_, share)| share.until <= now)
                     .map(|(&client, _)| (s.id, client))
             })
             .collect();

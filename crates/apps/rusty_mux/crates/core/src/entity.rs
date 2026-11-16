@@ -45,7 +45,7 @@ pub struct Session {
     pub(crate) creator: Option<Principal>,
     /// Clients the session is shared with (C14) and when each share ends
     /// (unix ms): each holds a watch-only grant on every block in it.
-    pub(crate) shares: BTreeMap<ClientId, u64>,
+    pub(crate) shares: BTreeMap<ClientId, SessionShare>,
 }
 
 impl Session {
@@ -58,7 +58,7 @@ impl Session {
     }
 
     /// The clients it is shared with and when each share ends (C14).
-    pub fn shares(&self) -> &BTreeMap<ClientId, u64> {
+    pub fn shares(&self) -> &BTreeMap<ClientId, SessionShare> {
         &self.shares
     }
 
@@ -144,6 +144,26 @@ impl Window {
     /// is placed. The attach client follows it: a person types into it.
     pub fn focused(&self) -> Option<BlockId> {
         self.focused
+    }
+}
+
+/// One client's share of a session (C14): when it ends (unix ms) and the
+/// client that made it, whose authority to grant each block it relies on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionShare {
+    pub(crate) until: u64,
+    pub(crate) by: ClientId,
+}
+
+impl SessionShare {
+    /// When the share ends, in unix ms on the server's clock.
+    pub fn until(&self) -> u64 {
+        self.until
+    }
+
+    /// The client that made the share.
+    pub fn by(&self) -> ClientId {
+        self.by
     }
 }
 

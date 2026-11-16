@@ -1901,3 +1901,38 @@ fn an_unshared_open_block_has_no_one_to_ask() {
     let (mux, _, _, block) = fixture();
     assert_eq!(mux.lease_askees(block), Ok(Vec::new()));
 }
+
+#[test]
+fn a_block_launched_later_by_another_owner_is_not_watched() {
+    let (mut mux, session, block, creator, guest) = sharing();
+    mux.share(creator, session, guest, NOW + 60_000, NOW)
+        .expect("share");
+    let window = mux.block(block).expect("block").window();
+    let other = connect_other(&mut mux);
+    // The server's order: the block is made, then its owner is set.
+    let made = mux.create_block(window, size(80, 24)).expect("block");
+    assert!(mux.block(made).is_some_and(|b| b.is_watching(guest)));
+    mux.own(other, made, InputMode::OwnerOnly).expect("own");
+    assert!(
+        mux.block(made).is_some_and(|b| b.grants().is_empty()),
+        "another client's block is its owner's to grant"
+    );
+    assert_eq!(
+        mux.attach(guest, made),
+        Err(Error::NotCreator { client: guest })
+    );
+    // A split is made the same way.
+    let id = BlockId::random();
+    mux.split_block(id, block, Side::Right, size(40, 24))
+        .expect("split");
+    mux.own(other, id, InputMode::OwnerOnly).expect("own");
+    assert_eq!(
+        mux.attach(guest, id),
+        Err(Error::NotCreator { client: guest })
+    );
+    // The sharer's own launch stays watched.
+    let mine = mux.create_block(window, size(80, 24)).expect("block");
+    mux.own(creator, mine, InputMode::OwnerOnly).expect("own");
+    assert!(mux.block(mine).is_some_and(|b| b.is_watching(guest)));
+    assert_eq!(mux.attach(guest, mine), Ok(()));
+}
