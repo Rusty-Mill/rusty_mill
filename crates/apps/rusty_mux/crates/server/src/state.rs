@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use rusty_mux_core::TailscaleState;
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Mux, Principal, Side, Size,
-    Transport, WindowId,
+    BlockId, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Mux, Principal, Selection,
+    Side, Size, Transport, WindowId,
 };
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
@@ -104,6 +104,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::AGENT_LAUNCH)
     .union(Features::HOLD)
     .union(Features::SHARING)
+    .union(Features::CLIPBOARD)
     .union(UNIX_ONLY);
 
 /// Offered on Linux only: signal and release (C76) act on a Unix process
@@ -117,6 +118,8 @@ const UNIX_ONLY: Features = Features::NONE;
 /// An owner whose outbox holds more than this can't be told of more
 /// input, so an owner-only block refuses it (C77): half the budget, so a
 /// refusal comes well before the owner is dropped.
+/// The most text a clipboard answer carries (C38's OSC 52 limit).
+const MAX_CLIPBOARD: usize = 1 << 20;
 const INPUT_REPORT_LIMIT: usize = crate::outbox::BUDGET / 2;
 
 /// Why a request that needs a block's program is refused once there is
@@ -1348,12 +1351,68 @@ impl State {
                 req,
                 Err("signal and release are supported on Linux only".into()),
             ),
+            M::ClipboardReply {
+                req,
+                block,
+                selection,
+                data,
+            } => (
+                req,
+                self.require(client, Features::CLIPBOARD, "a clipboard reply")
+                    .and_then(|()| self.clipboard_reply(client, req, block, selection, data)),
+            ),
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
                     .and_then(|()| self.open_datagram(client, req)),
             ),
             other => (0, Err(format!("not a client request: {other:?}").into())),
+        }
+    }
+
+    /// A lease holder's answer to a clipboard read (C54): the OSC 52 reply
+    /// the program asked for, written as the holder's input, so the lease
+    /// rule and the owner's report apply. A denial is an empty answer.
+    fn clipboard_reply(
+        &mut self,
+        client: ClientId,
+        req: u64,
+        block: BlockId,
+        selection: Selection,
+        data: Option<Vec<u8>>,
+    ) -> Result<Outcome, Refusal> {
+        let data = data.unwrap_or_default();
+        if data.len() > MAX_CLIPBOARD {
+            return Err(format!("a clipboard answer is at most {MAX_CLIPBOARD} bytes").into());
+        }
+        let target = match selection {
+            Selection::Clipboard => 'c',
+            Selection::Primary => 'p',
+        };
+        let reply = format!(
+            "\x1b]52;{target};{}\x07",
+            rusty_base64::encode_standard(&data)
+        );
+        self.input(client, req, block, reply.into_bytes())
+    }
+
+    /// Asks `block`'s lease holder for each clipboard `reads` (C54), when
+    /// it can answer and is not behind on its output; otherwise the read
+    /// goes unanswered. The server never answers one itself.
+    fn ask_clipboard(&mut self, block: BlockId, reads: Vec<Selection>) {
+        let Some(holder) = self.mux.block(block).and_then(|b| b.lease()) else {
+            return;
+        };
+        let ready = self.has(holder, Features::CLIPBOARD)
+            && self
+                .clients
+                .get(&holder)
+                .is_some_and(|out| out.queued() <= INPUT_REPORT_LIMIT);
+        if !ready {
+            return;
+        }
+        for selection in reads {
+            self.send(holder, &Message::ClipboardRead { block, selection });
         }
     }
 
@@ -2368,10 +2427,14 @@ impl State {
         for selection in terminal::take_clipboard(&mut rt.grid) {
             in_step("clipboard", self.mux.note_clipboard(block, selection));
         }
+        let reads = terminal::take_clipboard_reads(&mut rt.grid);
         // What a terminal host would relay, such as the bell; clients
         // already have the raw output.
         rt.grid.take_host_out();
         self.check_process(block, false);
+        if !reads.is_empty() {
+            self.ask_clipboard(block, reads);
+        }
         let frame = encode(&Message::Output {
             block,
             data: data.to_vec(),
