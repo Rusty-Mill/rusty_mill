@@ -1148,6 +1148,12 @@ impl GpuCore {
                 let hovered = !on_status
                     && hover_link.is_some_and(|(hr, s, e)| row == hr && col >= s && col <= e);
                 let (deco, dcol) = deco_for(cell.flags, cell.underline_color, fg, plain, hovered);
+                // An SGR 58 colour is not `fg`: hold it to the ratio too.
+                let dcol = if dcol == fg {
+                    dcol
+                } else {
+                    crate::core::ensure_contrast(dcol, bg, grid.min_contrast)
+                };
                 // Same run eligibility as the CPU renderer's ligature plan.
                 let run_ok = plain
                     && !concealed(&cell)
