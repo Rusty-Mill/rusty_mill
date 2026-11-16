@@ -235,6 +235,9 @@ fn methods_need_the_features_their_messages_are_gated_by() {
     ] {
         assert_eq!(needs(name), Features::LABELS, "{name}");
     }
+    for name in ["share-session", "unshare-session"] {
+        assert_eq!(needs(name), Features::SHARING, "{name}");
+    }
     for name in ["split-block", "zoom-block", "unzoom-window"] {
         assert_eq!(needs(name), Features::LAYOUT, "{name}");
     }

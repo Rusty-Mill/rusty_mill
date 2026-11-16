@@ -228,6 +228,12 @@ impl Features {
     /// without it: a server on a tailnet says when its node changes state.
     pub const TAILSCALE_STATUS: Self = Self(1 << 45);
 
+    /// Live sharing (C14): [`Message::ShareSession`] and
+    /// [`Message::UnshareSession`] give a client watch-only grants on a
+    /// session's blocks, announced by [`Event::ShareChanged`] (skipped for
+    /// a client without it).
+    pub const SHARING: Self = Self(1 << 46);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -319,6 +325,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::HOLD, "hold on exit"),
     (Features::SIGNAL_RELEASE, "signal and release"),
     (Features::TAILSCALE_STATUS, "tailscale status"),
+    (Features::SHARING, "live sharing"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -762,6 +769,28 @@ pub enum Message {
         block: BlockId,
         client: ClientId,
     },
+    /// Shares `session` with `client` until `until`, unix ms on the server's
+    /// clock and at most a day ahead (C14): `client` may attach to its
+    /// blocks, present and future, and watch, but never takes a lease
+    /// without a [`Message::GrantLease`]. Replaces the client's earlier
+    /// share. Only a client of the server's account or of the session's
+    /// creator may send it, and only a shared server accepts it. Blocks
+    /// whose lease the sender may not grant are left out. Negotiated with
+    /// [`Features::SHARING`].
+    ShareSession {
+        req: u64,
+        session: SessionId,
+        client: ClientId,
+        until: u64,
+    },
+    /// Ends `client`'s share of `session`, and with it every watch it
+    /// holds there: it is detached at once. Same senders as
+    /// [`Message::ShareSession`]. Negotiated with [`Features::SHARING`].
+    UnshareSession {
+        req: u64,
+        session: SessionId,
+        client: ClientId,
+    },
     /// Asks the owner of owner-only `block` to grant this client its lease.
     /// Done once the owner has been told, which grants nothing: a grant
     /// shows as [`Event::GrantChanged`]. Refused for the owner itself, for
@@ -1060,6 +1089,8 @@ mod ty {
     pub const REVOKE_LEASE: u8 = 0x22;
     pub const REQUEST_LEASE: u8 = 0x23;
     pub const SHUTDOWN: u8 = 0x24;
+    pub const SHARE_SESSION: u8 = 0x25;
+    pub const UNSHARE_SESSION: u8 = 0x26;
     pub const SIGNAL_BLOCK: u8 = 0x28;
     pub const RELEASE_BLOCK: u8 = 0x29;
     pub const WELCOME: u8 = 0x81;
@@ -1283,6 +1314,28 @@ impl Message {
                     .uuid(CLIENT, client.uuid())
                     .varint(UNTIL, *until);
                 ty::GRANT_LEASE
+            }
+            M::ShareSession {
+                req,
+                session,
+                client,
+                until,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(SESSION, session.uuid())
+                    .uuid(CLIENT, client.uuid())
+                    .varint(UNTIL, *until);
+                ty::SHARE_SESSION
+            }
+            M::UnshareSession {
+                req,
+                session,
+                client,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(SESSION, session.uuid())
+                    .uuid(CLIENT, client.uuid());
+                ty::UNSHARE_SESSION
             }
             M::RevokeLease { req, block, client } => {
                 out.varint(REQ, *req)
@@ -1579,6 +1632,17 @@ impl Message {
                 block: block(&f, BLOCK)?,
                 client: client(&f, CLIENT)?,
                 until: f.varint(UNTIL)?,
+            },
+            ty::SHARE_SESSION => M::ShareSession {
+                req: f.varint(REQ)?,
+                session: session(&f, SESSION)?,
+                client: client(&f, CLIENT)?,
+                until: f.varint(UNTIL)?,
+            },
+            ty::UNSHARE_SESSION => M::UnshareSession {
+                req: f.varint(REQ)?,
+                session: session(&f, SESSION)?,
+                client: client(&f, CLIENT)?,
             },
             ty::REVOKE_LEASE => M::RevokeLease {
                 req: f.varint(REQ)?,
@@ -1961,6 +2025,7 @@ mod kind {
     pub const FOCUS_CHANGED: u64 = 32;
     pub const GRANT_CHANGED: u64 = 33;
     pub const TAILSCALE_STATUS_CHANGED: u64 = 34;
+    pub const SHARE_CHANGED: u64 = 35;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -1997,6 +2062,18 @@ fn put_event(out: &mut Out, event: &Event) {
         } => {
             out.varint(KIND, kind::GRANT_CHANGED)
                 .uuid(BLOCK, block.uuid())
+                .uuid(CLIENT, client.uuid());
+            if let Some(until) = until {
+                out.varint(UNTIL, until);
+            }
+        }
+        E::ShareChanged {
+            session,
+            client,
+            until,
+        } => {
+            out.varint(KIND, kind::SHARE_CHANGED)
+                .uuid(SESSION, session.uuid())
                 .uuid(CLIENT, client.uuid());
             if let Some(until) = until {
                 out.varint(UNTIL, until);
@@ -2256,6 +2333,11 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         },
         kind::GRANT_CHANGED => E::GrantChanged {
             block: block(f, BLOCK)?,
+            client: client(f, CLIENT)?,
+            until: f.opt(UNTIL, In::varint)?,
+        },
+        kind::SHARE_CHANGED => E::ShareChanged {
+            session: session(f, SESSION)?,
             client: client(f, CLIENT)?,
             until: f.opt(UNTIL, In::varint)?,
         },

@@ -1685,3 +1685,171 @@ fn a_server_that_is_not_shared_lets_any_client_rename_and_close() {
     );
     assert_eq!(mux.authorize_close(other, block), Ok(()));
 }
+
+/// A shared server with `creator`'s session, a guest of a third principal
+/// attached to nothing, and the session's id.
+fn sharing() -> (Mux, SessionId, BlockId, ClientId, ClientId) {
+    let (mut mux, block, creator) = shared();
+    let session = mux.sessions().next().expect("session").id();
+    let guest = mux.connect(
+        Principal::unix(1002, Some("third".into())).expect("principal"),
+        Transport::Socket,
+    );
+    mux.take_events();
+    (mux, session, block, creator, guest)
+}
+
+#[test]
+fn a_shared_session_lets_a_guest_watch_but_never_lease() {
+    let (mut mux, session, block, creator, guest) = sharing();
+    assert_eq!(
+        mux.attach(guest, block),
+        Err(Error::NotCreator { client: guest })
+    );
+    mux.share(creator, session, guest, NOW + 60_000, NOW)
+        .expect("share");
+    assert!(
+        mux.session(session)
+            .is_some_and(|s| s.shares().contains_key(&guest))
+    );
+    assert!(mux.block(block).is_some_and(|b| b.is_watching(guest)));
+    mux.attach(guest, block).expect("watch");
+    assert_eq!(
+        mux.acquire_lease(guest, block),
+        Err(Error::InputGated(block)),
+        "a watcher never leases"
+    );
+    assert_eq!(
+        mux.authorize_input(guest, block),
+        Err(Error::NoLease {
+            client: guest,
+            block
+        })
+    );
+    assert_eq!(
+        mux.acquire_lease(creator, block),
+        Ok(()),
+        "the creator still types"
+    );
+}
+
+#[test]
+fn a_watcher_types_only_after_a_full_grant_replaces_its_watch_grant() {
+    let (mut mux, session, block, creator, guest) = sharing();
+    mux.share(creator, session, guest, NOW + 60_000, NOW)
+        .expect("share");
+    mux.attach(guest, block).expect("watch");
+    mux.grant(creator, block, guest, NOW + 60_000, NOW)
+        .expect("grant");
+    assert!(mux.block(block).is_some_and(|b| !b.is_watching(guest)));
+    assert_eq!(mux.acquire_lease(guest, block), Ok(()));
+    mux.share(creator, session, guest, NOW + 90_000, NOW)
+        .expect("share again");
+    assert!(
+        mux.block(block).is_some_and(|b| !b.is_watching(guest)),
+        "a share never takes a grant down to watch-only"
+    );
+}
+
+#[test]
+fn unsharing_drops_the_watcher_at_once() {
+    let (mut mux, session, block, creator, guest) = sharing();
+    mux.share(creator, session, guest, NOW + 60_000, NOW)
+        .expect("share");
+    mux.attach(guest, block).expect("watch");
+    mux.take_events();
+    mux.unshare(creator, session, guest).expect("unshare");
+    assert_eq!(mux.client(guest).and_then(|c| c.attached()), None);
+    assert!(mux.block(block).is_some_and(|b| b.grants().is_empty()));
+    let events = mux.take_events();
+    assert!(events.contains(&Event::Detached {
+        client: guest,
+        block
+    }));
+    assert!(events.contains(&Event::ShareChanged {
+        session,
+        client: guest,
+        until: None
+    }));
+    assert_eq!(
+        mux.attach(guest, block),
+        Err(Error::NotCreator { client: guest })
+    );
+}
+
+#[test]
+fn a_block_made_later_is_watched_too_and_a_share_ends_on_time() {
+    let (mut mux, session, block, creator, guest) = sharing();
+    mux.share(creator, session, guest, NOW + 10, NOW)
+        .expect("share");
+    let window = mux.block(block).expect("block").window();
+    let later = mux.create_block(window, size(80, 24)).expect("block");
+    assert!(mux.block(later).is_some_and(|b| b.is_watching(guest)));
+    mux.attach(guest, later).expect("watch");
+    mux.expire_grants(NOW + 10);
+    assert_eq!(mux.client(guest).and_then(|c| c.attached()), None);
+    assert!(mux.session(session).is_some_and(|s| s.shares().is_empty()));
+    assert!(mux.block(later).is_some_and(|b| b.grants().is_empty()));
+}
+
+#[test]
+fn only_the_creator_and_the_account_share_and_only_on_a_shared_server() {
+    let (mut mux, session, _, creator, guest) = sharing();
+    let other = mux.connect(
+        Principal::unix(1003, Some("fourth".into())).expect("principal"),
+        Transport::Socket,
+    );
+    assert_eq!(
+        mux.share(guest, session, other, NOW + 1_000, NOW),
+        Err(Error::NotCreator { client: guest })
+    );
+    assert_eq!(
+        mux.unshare(guest, session, other),
+        Err(Error::NotCreator { client: guest })
+    );
+    assert_eq!(
+        mux.share(creator, session, guest, NOW, NOW),
+        Err(Error::BadShare {
+            session,
+            until: NOW
+        })
+    );
+    assert_eq!(
+        mux.share(creator, session, guest, NOW + MAX_GRANT_MS + 1, NOW),
+        Err(Error::BadShare {
+            session,
+            until: NOW + MAX_GRANT_MS + 1
+        })
+    );
+    let (mut open, session, _, block) = fixture();
+    let a = connect(&mut open);
+    let b = connect_other(&mut open);
+    assert_eq!(
+        open.share(a, session, b, NOW + 1_000, NOW),
+        Err(Error::NotShared)
+    );
+    let _ = block;
+}
+
+#[test]
+fn a_watcher_that_disconnects_ends_its_share() {
+    let (mut mux, session, block, creator, guest) = sharing();
+    mux.share(creator, session, guest, NOW + 60_000, NOW)
+        .expect("share");
+    mux.disconnect(guest).expect("gone");
+    assert!(mux.session(session).is_some_and(|s| s.shares().is_empty()));
+    assert!(mux.block(block).is_some_and(|b| b.grants().is_empty()));
+}
+
+#[test]
+fn a_share_skips_blocks_its_sharer_may_not_grant() {
+    let (mut mux, session, block, creator, guest) = sharing();
+    let owner = connect(&mut mux);
+    mux.own(owner, block, InputMode::OwnerOnly).expect("own");
+    mux.share(creator, session, guest, NOW + 60_000, NOW)
+        .expect("share");
+    assert!(
+        mux.block(block).is_some_and(|b| b.grants().is_empty()),
+        "another client's owned block stays its owner's to grant"
+    );
+}

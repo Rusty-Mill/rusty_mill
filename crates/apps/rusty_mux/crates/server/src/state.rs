@@ -103,6 +103,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::BACKGROUND_HISTORY)
     .union(Features::AGENT_LAUNCH)
     .union(Features::HOLD)
+    .union(Features::SHARING)
     .union(UNIX_ONLY);
 
 /// Offered on Linux only: signal and release (C76) act on a Unix process
@@ -1289,6 +1290,25 @@ impl State {
                 req,
                 self.require(client, Features::INPUT_GATE, "grant-lease")
                     .and_then(|()| done(self.mux.grant(client, block, grantee, until, now_ms()))),
+            ),
+            M::ShareSession {
+                req,
+                session,
+                client: guest,
+                until,
+            } => (
+                req,
+                self.require(client, Features::SHARING, "share-session")
+                    .and_then(|()| done(self.mux.share(client, session, guest, until, now_ms()))),
+            ),
+            M::UnshareSession {
+                req,
+                session,
+                client: guest,
+            } => (
+                req,
+                self.require(client, Features::SHARING, "unshare-session")
+                    .and_then(|()| done(self.mux.unshare(client, session, guest))),
             ),
             M::RevokeLease {
                 req,
@@ -2633,6 +2653,7 @@ fn receives(features: Features, principal: &Principal, event: &Event) -> bool {
         Event::WindowMoved { .. } => Features::LAYOUT_EDIT,
         Event::FocusChanged { .. } => Features::FOCUS,
         Event::GrantChanged { .. } => Features::INPUT_GATE,
+        Event::ShareChanged { .. } => Features::SHARING,
         Event::TailscaleStatusChanged { .. } if !is_tailnet(principal) => return false,
         Event::TailscaleStatusChanged { .. } => Features::TAILSCALE_STATUS,
         _ => Features::NONE,

@@ -1,7 +1,7 @@
 //! The model's entities. Only [`Mux`](crate::Mux) builds or changes them, so
 //! their cross-references stay consistent.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{BlockId, ClientId, Error, Layout, Principal, SessionId, Transport, WindowId};
 
@@ -43,6 +43,9 @@ pub struct Session {
     pub(crate) generated: bool,
     /// The principal whose client created the session (arc 1, D164).
     pub(crate) creator: Option<Principal>,
+    /// Clients the session is shared with (C14) and when each share ends
+    /// (unix ms): each holds a watch-only grant on every block in it.
+    pub(crate) shares: BTreeMap<ClientId, u64>,
 }
 
 impl Session {
@@ -52,6 +55,11 @@ impl Session {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The clients it is shared with and when each share ends (C14).
+    pub fn shares(&self) -> &BTreeMap<ClientId, u64> {
+        &self.shares
     }
 
     /// Whether the name is one the server made up and nobody has renamed
@@ -152,6 +160,9 @@ pub struct Block {
     /// Owner-granted leases (C77): each client and when its grant ends,
     /// in unix ms on the server's clock.
     pub(crate) grants: BTreeMap<ClientId, u64>,
+    /// The clients in `grants` whose grant is watch-only (C14): they may
+    /// attach, never lease.
+    pub(crate) watching: BTreeSet<ClientId>,
 }
 
 impl Block {
@@ -191,6 +202,11 @@ impl Block {
     /// The live grants: each client and when its grant ends (unix ms).
     pub fn grants(&self) -> &BTreeMap<ClientId, u64> {
         &self.grants
+    }
+
+    /// Whether `client`'s grant is watch-only (C14).
+    pub fn is_watching(&self, client: ClientId) -> bool {
+        self.watching.contains(&client)
     }
 }
 

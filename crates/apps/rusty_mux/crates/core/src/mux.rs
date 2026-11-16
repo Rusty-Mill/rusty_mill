@@ -1,6 +1,6 @@
 //! The model's state and the operations that change it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::names;
 use crate::{
@@ -98,6 +98,7 @@ impl Mux {
             active: None,
             generated,
             creator: None,
+            shares: BTreeMap::new(),
         };
         self.sessions.insert(id, session);
         self.session_order.push(id);
@@ -320,6 +321,7 @@ impl Mux {
                 owner: None,
                 input: InputMode::Open,
                 grants: BTreeMap::new(),
+                watching: BTreeSet::new(),
             },
         );
         self.events.push(Event::BlockCreated {
@@ -328,6 +330,39 @@ impl Mux {
             size,
         });
         self.push_layout(window, None);
+        self.share_into(id);
+    }
+
+    /// Gives the clients its session is shared with a watch grant on the
+    /// new `block` (C14).
+    fn share_into(&mut self, block: BlockId) {
+        let shares: Vec<(ClientId, u64)> = self
+            .blocks
+            .get(&block)
+            .and_then(|b| self.windows.get(&b.window))
+            .and_then(|w| self.sessions.get(&w.session))
+            .map(|s| s.shares.iter().map(|(c, u)| (*c, *u)).collect())
+            .unwrap_or_default();
+        for (client, until) in shares {
+            self.put_grant(block, client, until, true);
+        }
+    }
+
+    /// Records a grant and announces it; `watch` makes it watch-only.
+    fn put_grant(&mut self, block: BlockId, client: ClientId, until: u64, watch: bool) {
+        let Some(target) = self.blocks.get_mut(&block) else {
+            return;
+        };
+        target.grants.insert(client, until);
+        match watch {
+            true => target.watching.insert(client),
+            false => target.watching.remove(&client),
+        };
+        self.events.push(Event::GrantChanged {
+            block,
+            client,
+            until: Some(until),
+        });
     }
 
     /// Shows `block` alone over its whole window, until it is unzoomed,
@@ -1019,15 +1054,109 @@ impl Mux {
         if until <= now || until - now > MAX_GRANT_MS {
             return Err(Error::BadGrant { block, until });
         }
-        if let Some(target) = self.blocks.get_mut(&block) {
-            target.grants.insert(client, until);
+        self.put_grant(block, client, until, false);
+        Ok(())
+    }
+
+    /// Shares `session` with `client` until `until` (unix ms), for a
+    /// client of the server's account or of the session's creator (C14):
+    /// `client` gets a watch-only grant on each block `sharer` may grant,
+    /// and on each one made later. It may attach and watch, never lease.
+    /// `now` is the server's clock; a share replaces the client's old one
+    /// and ends as a grant does.
+    pub fn share(
+        &mut self,
+        sharer: ClientId,
+        session: SessionId,
+        client: ClientId,
+        until: u64,
+        now: u64,
+    ) -> Result<(), Error> {
+        self.authorize_sharer(sharer, session)?;
+        if !self.clients.contains_key(&client) {
+            return Err(Error::UnknownClient(client));
         }
-        self.events.push(Event::GrantChanged {
-            block,
+        if until <= now || until - now > MAX_GRANT_MS {
+            return Err(Error::BadShare { session, until });
+        }
+        for block in self.blocks_of(session) {
+            let full = self
+                .blocks
+                .get(&block)
+                .is_some_and(|b| b.grants.contains_key(&client) && !b.watching.contains(&client));
+            if !full && self.authorize_granter(sharer, block).is_ok() {
+                self.put_grant(block, client, until, true);
+            }
+        }
+        if let Some(s) = self.sessions.get_mut(&session) {
+            s.shares.insert(client, until);
+        }
+        self.events.push(Event::ShareChanged {
+            session,
             client,
             until: Some(until),
         });
         Ok(())
+    }
+
+    /// Ends `client`'s share of `session`, for a client allowed to share
+    /// it (C14): its watch grants end, taking it off every block it was
+    /// only watching. Ending no share changes nothing.
+    pub fn unshare(
+        &mut self,
+        sharer: ClientId,
+        session: SessionId,
+        client: ClientId,
+    ) -> Result<(), Error> {
+        self.authorize_sharer(sharer, session)?;
+        self.end_share(session, client);
+        Ok(())
+    }
+
+    /// Succeeds when `client` may share `session`: the server is shared and
+    /// `client` is of its account or its creator's principal.
+    fn authorize_sharer(&self, client: ClientId, session: SessionId) -> Result<(), Error> {
+        if self.shared_account.is_none() {
+            return Err(Error::NotShared);
+        }
+        if !self.sessions.contains_key(&session) {
+            return Err(Error::UnknownSession(session));
+        }
+        self.authorize_manage(client, EntityId::Session(session))
+    }
+
+    fn blocks_of(&self, session: SessionId) -> Vec<BlockId> {
+        self.sessions
+            .get(&session)
+            .into_iter()
+            .flat_map(|s| s.windows.iter())
+            .filter_map(|w| self.windows.get(w))
+            .flat_map(|w| w.blocks.iter().copied())
+            .collect()
+    }
+
+    /// Drops `client`'s share of `session` and its watch grants.
+    fn end_share(&mut self, session: SessionId, client: ClientId) {
+        let Some(s) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        if s.shares.remove(&client).is_none() {
+            return;
+        }
+        self.events.push(Event::ShareChanged {
+            session,
+            client,
+            until: None,
+        });
+        for block in self.blocks_of(session) {
+            if self
+                .blocks
+                .get(&block)
+                .is_some_and(|b| b.watching.contains(&client))
+            {
+                self.end_grant(block, client);
+            }
+        }
     }
 
     /// Ends `client`'s grant on `block`, for its owner `owner`, and takes
@@ -1059,6 +1188,19 @@ impl Mux {
             .collect();
         for (block, client) in due {
             self.end_grant(block, client);
+        }
+        let ended: Vec<(SessionId, ClientId)> = self
+            .sessions
+            .values()
+            .flat_map(|s| {
+                s.shares
+                    .iter()
+                    .filter(|&(_, &until)| until <= now)
+                    .map(|(&client, _)| (s.id, client))
+            })
+            .collect();
+        for (session, client) in ended {
+            self.end_share(session, client);
         }
     }
 
@@ -1113,12 +1255,21 @@ impl Mux {
         if target.grants.remove(&client).is_none() {
             return;
         }
+        let watched = target.watching.remove(&client);
         self.events.push(Event::GrantChanged {
             block,
             client,
             until: None,
         });
         self.drop_lease_if_held(client, block);
+        // A watcher's grant was its only way in: it leaves the block too.
+        let attached = self
+            .clients
+            .get(&client)
+            .is_some_and(|c| c.attached == Some(block));
+        if watched && attached && self.authorize_attach(client, block).is_err() {
+            self.unattach(client);
+        }
     }
 
     /// On a shared server (D232), succeeds when `client` may rename or
@@ -1208,7 +1359,7 @@ impl Mux {
             return Err(Error::Orphaned(block));
         }
         let owner = target.owner.as_ref().and_then(|o| o.client);
-        let granted = target.grants.contains_key(&client);
+        let granted = target.grants.contains_key(&client) && !target.watching.contains(&client);
         let gated = match target.input {
             InputMode::OwnerOnly => owner != Some(client) && !granted,
             InputMode::Open => !granted && !self.may_lease_here(client, block),
@@ -1289,6 +1440,15 @@ impl Mux {
 
     /// Ends every grant `client` holds: it is gone.
     fn end_grants_of(&mut self, client: ClientId) {
+        let shared: Vec<SessionId> = self
+            .sessions
+            .values()
+            .filter(|s| s.shares.contains_key(&client))
+            .map(|s| s.id)
+            .collect();
+        for session in shared {
+            self.end_share(session, client);
+        }
         let granted: Vec<BlockId> = self
             .blocks
             .values()

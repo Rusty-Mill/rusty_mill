@@ -101,6 +101,13 @@ pub enum Error {
         block: BlockId,
         until: u64,
     },
+    /// Only a shared server (D232) shares sessions (C14).
+    NotShared,
+    /// A share must end as a grant must: after now and at most a day on.
+    BadShare {
+        session: SessionId,
+        until: u64,
+    },
 }
 
 impl fmt::Display for Error {
@@ -179,6 +186,11 @@ impl fmt::Display for Error {
             Self::BadGrant { block, until } => write!(
                 f,
                 "a grant on block {block} must end after now and within 24 h, not at {until}"
+            ),
+            Self::NotShared => write!(f, "only a shared server shares sessions"),
+            Self::BadShare { session, until } => write!(
+                f,
+                "a share of session {session} must end after now and within 24 h, not at {until}"
             ),
         }
     }
