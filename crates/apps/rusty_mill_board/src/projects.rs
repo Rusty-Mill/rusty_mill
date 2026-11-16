@@ -355,18 +355,9 @@ impl Projects {
         if self.contains(name) {
             return Err(format!("projects: {name:?} already exists"));
         }
-        let nested = |a: &str, b: &str| a.strip_prefix(b).is_some_and(|r| r.starts_with('/'));
         for raw in paths {
             let p = clean_path(raw).map_err(|e| format!("projects: {name:?}: {e}"))?;
-            let taken = self.projects.iter().find(|(_, theirs)| {
-                theirs
-                    .edges
-                    .get(repo)
-                    .is_some_and(|ps| ps.iter().any(|q| p == *q || nested(&p, q) || nested(q, &p)))
-            });
-            if let Some((other, _)) = taken {
-                return Err(format!("projects: {p:?} overlaps project {other:?}"));
-            }
+            self.refuse_overlap(&p, repo, name)?;
         }
         let mut repos = self.repos.clone();
         repos.entry(repo.to_owned()).or_default();
@@ -379,6 +370,74 @@ impl Projects {
             },
         );
         Self::build(repos, projects)
+    }
+
+    /// Refuse path `p` in `repo` if a project other than `me` owns it, or a path containing
+    /// or inside it.
+    fn refuse_overlap(&self, p: &str, repo: &str, me: &str) -> Result<(), String> {
+        let nested = |a: &str, b: &str| a.strip_prefix(b).is_some_and(|r| r.starts_with('/'));
+        let taken = self.projects.iter().find(|(other, theirs)| {
+            other.as_str() != me
+                && theirs
+                    .edges
+                    .get(repo)
+                    .is_some_and(|ps| ps.iter().any(|q| p == q || nested(p, q) || nested(q, p)))
+        });
+        match taken {
+            Some((other, _)) => Err(format!("projects: {p:?} overlaps project {other:?}")),
+            None => Ok(()),
+        }
+    }
+
+    /// This registry with `project` owning `paths` in `repo` too (a spanning project), or with
+    /// its paths there replaced if it already touches `repo`. Its default repository is kept.
+    ///
+    /// # Errors
+    /// If `project` is not an explicit project, `repo` is not a repository, a path is bad, or
+    /// the paths overlap another project's in `repo`.
+    pub fn with_link(&self, project: &str, repo: &str, paths: &[String]) -> Result<Self, String> {
+        if !self.repos.contains_key(repo) {
+            return Err(format!("projects: no repository {repo:?}"));
+        }
+        let mut projects = self.explicit();
+        let Some(p) = projects.get_mut(project) else {
+            return Err(format!("projects: no project {project:?} to link"));
+        };
+        let clean = paths
+            .iter()
+            .map(|raw| clean_path(raw).map_err(|e| format!("projects: {project:?}: {e}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        for path in &clean {
+            self.refuse_overlap(path, repo, project)?;
+        }
+        p.edges.insert(repo.to_owned(), clean);
+        Self::build(self.repos.clone(), projects)
+    }
+
+    /// This registry with `project` no longer touching `repo`; if that was its default
+    /// repository, the first remaining one takes over.
+    ///
+    /// # Errors
+    /// If `project` does not touch `repo`, or `repo` is its only repository (remove the project
+    /// instead).
+    pub fn without_link(&self, project: &str, repo: &str) -> Result<Self, String> {
+        let mut projects = self.explicit();
+        let Some(p) = projects.get_mut(project) else {
+            return Err(format!("projects: no project {project:?} to unlink"));
+        };
+        if !p.edges.contains_key(repo) {
+            return Err(format!("projects: {project:?} is not linked to {repo:?}"));
+        }
+        if p.edges.len() == 1 {
+            return Err(format!(
+                "projects: {repo:?} is {project:?}'s only repository; remove the project instead"
+            ));
+        }
+        p.edges.remove(repo);
+        if p.default_repo == repo {
+            p.default_repo = p.edges.keys().next().cloned().unwrap_or_default();
+        }
+        Self::build(self.repos.clone(), projects)
     }
 
     /// Read a projects file.
@@ -796,6 +855,43 @@ mod tests {
         assert_eq!(p.owner_of("mill", ".github/w.yml"), "tooling");
         let listing: Vec<_> = p.repos().map(|(r, ps)| (r, ps.count())).collect();
         assert_eq!(listing, [("default", 1), ("mill", 3), ("py", 2)]);
+    }
+
+    #[test]
+    fn linking_makes_a_project_span_and_unlinking_undoes_it() {
+        let p = Projects::parse(SPAN).expect("parse");
+        let paths = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        // term (only in mill) gains a second repository; its default stays.
+        let linked = p.with_link("term", "py", &paths(&["term"])).expect("link");
+        assert_eq!(linked.repos_of("term").collect::<Vec<_>>(), ["mill", "py"]);
+        assert_eq!(linked.repo_of("term"), Some("mill"));
+        assert_eq!(linked.paths_in("term", "py"), ["term"]);
+        // Linking again replaces the paths there.
+        let again = linked
+            .with_link("term", "py", &paths(&["t2"]))
+            .expect("relink");
+        assert_eq!(again.paths_in("term", "py"), ["t2"]);
+        // Unlinking returns to the start; unlinking the default hands it on.
+        assert_eq!(linked.without_link("term", "py").expect("unlink"), p);
+        let moved = p.without_link("tooling", "mill").expect("unlink default");
+        assert_eq!(moved.repo_of("tooling"), Some("py"));
+    }
+
+    #[test]
+    fn a_bad_link_is_refused() {
+        let p = Projects::parse(SPAN).expect("parse");
+        let one = |v: &str| vec![v.to_owned()];
+        let err = |r: Result<Projects, String>| r.expect_err("refused");
+        assert!(err(p.with_link("term", "nope", &[])).contains("no repository"));
+        assert!(err(p.with_link("nope", "py", &[])).contains("no project"));
+        // A repository's own project cannot be linked elsewhere.
+        assert!(err(p.with_link("mill", "py", &[])).contains("no project"));
+        // Paths another project owns in that repository, and unsafe paths.
+        assert!(err(p.with_link("term", "py", &one("ci/sub"))).contains("overlaps"));
+        assert!(err(p.with_link("term", "py", &one("../x"))).contains("relative"));
+        // Only repository, or not linked at all.
+        assert!(err(p.without_link("term", "mill")).contains("only repository"));
+        assert!(err(p.without_link("term", "py")).contains("not linked"));
     }
 
     #[test]
