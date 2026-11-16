@@ -34,6 +34,7 @@ mod font;
 mod gpu;
 pub(crate) mod input;
 mod layout;
+mod link_policy;
 mod motion;
 mod mouse;
 mod pace;
