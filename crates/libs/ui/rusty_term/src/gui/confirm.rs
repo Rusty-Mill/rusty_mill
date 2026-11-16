@@ -22,6 +22,8 @@ const RADIUS: f32 = 9.0;
 const BORDER: f32 = 1.0;
 /// Its top's space under the header (D64 2).
 pub(crate) const DROP: f32 = 8.0;
+/// The least space kept between the panel and the window's edge (D70).
+const EDGE: f32 = 8.0;
 /// Title size and line, the gap under it, body size and line, the gap
 /// before the buttons.
 const TITLE: (f32, f32) = (14.0, 20.0);
@@ -65,6 +67,11 @@ pub(crate) enum ConfirmKey {
     BackTab,
     Enter,
     Escape,
+    /// Scroll a long URL by a line or a page (D70).
+    Up,
+    Down,
+    PageUp,
+    PageDown,
 }
 
 /// The copy for taking `program` over from `owner` (D64 2).
@@ -112,13 +119,24 @@ pub(crate) struct Confirm {
     at: (usize, usize),
     focus: usize,
     hover: Option<usize>,
-    painted: Option<((Chrome, f32), Painted)>,
+    /// Where it was asked: its right edge and top, window px. It is kept
+    /// whole inside the window at paint time (D70).
+    anchor: (f32, f32),
+    /// The first body line shown, and the lines and rows of the last paint.
+    scroll: usize,
+    shown: (usize, usize),
+    painted: Option<(Look, Painted)>,
 }
+
+/// What a painting depends on besides the confirm's own state.
+type Look = (Chrome, f32, (u32, u32));
 
 /// A painted confirm and its buttons' boxes, in its own px.
 pub(crate) struct Painted {
     pub pixmap: Pixmap,
     pub buttons: Vec<(Rect, usize)>,
+    /// Body lines in all, and how many rows showed them.
+    pub lines: (usize, usize),
 }
 
 impl Confirm {
@@ -138,6 +156,9 @@ impl Confirm {
     ) -> Option<Self> {
         let x = (right - width * s).max(0.0).round() as usize;
         Some(Self {
+            anchor: (right, top),
+            scroll: 0,
+            shown: (0, 0),
             subject,
             text: UiText::embedded()?,
             title,
@@ -195,6 +216,16 @@ impl Confirm {
                 self.step(true);
                 Answer::Stay
             }
+            ConfirmKey::Up | ConfirmKey::Down | ConfirmKey::PageUp | ConfirmKey::PageDown => {
+                let page = self.shown.1.max(1) as isize;
+                self.scroll_by(match key {
+                    ConfirmKey::Up => -1,
+                    ConfirmKey::Down => 1,
+                    ConfirmKey::PageUp => -page,
+                    _ => page,
+                });
+                Answer::Stay
+            }
             ConfirmKey::Enter => press(self.focus),
             ConfirmKey::Escape => Answer::Cancel,
         }
@@ -234,22 +265,50 @@ impl Confirm {
         true
     }
 
-    /// Paint for `chrome` at `scale`, unless the last painting is that.
-    pub(crate) fn repaint(&mut self, chrome: Chrome, scale: f32) {
-        let look = (chrome, scale);
+    /// Scroll the body by `by` lines (a long URL); no-op if it all shows.
+    pub(crate) fn scroll_by(&mut self, by: isize) {
+        let (lines, rows) = self.shown;
+        let max = lines.saturating_sub(rows);
+        let to = self.scroll.saturating_add_signed(by).min(max);
+        if to != self.scroll {
+            self.scroll = to;
+            self.painted = None;
+        }
+    }
+
+    /// Paint for `chrome` at `scale` in a window of `view` px, unless the
+    /// last painting is that. The panel is narrowed, moved and its body
+    /// cut to rows with a scroll hint so every button is inside the window
+    /// (D70): the user can always see and reach what they approve.
+    pub(crate) fn repaint(&mut self, chrome: Chrome, scale: f32, view: (f32, f32)) {
+        let look = (chrome, scale, (view.0 as u32, view.1 as u32));
         if matches!(&self.painted, Some((l, _)) if *l == look) {
             return;
         }
+        let margin = EDGE * scale;
+        let width = (self.width * scale).min((view.0 - 2.0 * margin).max(1.0));
+        let fixed = (2.0 * PAD + TITLE.1 + TITLE_GAP + ACTS_GAP + BUTTON.0) * scale;
+        let rows = ((view.1 - 2.0 * margin - fixed) / (BODY.1 * scale))
+            .floor()
+            .max(1.0) as usize;
         let state = State {
             title: &self.title,
             body: &self.body,
             buttons: &self.buttons,
             lead: self.lead,
-            width: self.width,
+            width: width / scale,
+            rows,
+            scroll: self.scroll,
             focus: self.focus,
             hover: self.hover,
         };
         let painted = paint(&state, (&chrome, scale), &mut self.text);
+        let (w, h) = (painted.pixmap.width as f32, painted.pixmap.height as f32);
+        let x = (self.anchor.0 - w).min(view.0 - w - margin).max(0.0);
+        let y = self.anchor.1.min(view.1 - h - margin).max(0.0);
+        self.at = (x.round() as usize, y.round() as usize);
+        self.shown = painted.lines;
+        self.scroll = self.scroll.min(self.shown.0.saturating_sub(self.shown.1));
         self.painted = Some((look, painted));
     }
 
@@ -284,6 +343,9 @@ struct State<'a> {
     buttons: &'a [String],
     lead: usize,
     width: f32,
+    /// How many body rows fit, and the first line to show.
+    rows: usize,
+    scroll: usize,
     focus: usize,
     hover: Option<usize>,
 }
@@ -296,12 +358,13 @@ fn paint(confirm: &State<'_>, (c, s): (&Chrome, f32), font: &mut UiText) -> Pain
     let (title_px, title_h) = (TITLE.0 * s, TITLE.1 * s);
     let (body_px, body_h) = (BODY.0 * s, BODY.1 * s);
     let title = font.fit(confirm.title, Weight::Medium, title_px, room);
-    let lines = wrap_hard(font, confirm.body, body_px, room);
+    let all = wrap_hard(font, confirm.body, body_px, room);
+    let (lines, hint) = cut(&all, confirm.rows, confirm.scroll);
     let (btn_h, btn_pad, btn_r, btn_px) = BUTTON;
     let h = (2.0 * PAD * s
         + title_h
         + TITLE_GAP * s
-        + body_h * lines.len() as f32
+        + body_h * (lines.len() + usize::from(hint.is_some())) as f32
         + (ACTS_GAP + btn_h) * s)
         .round();
     let mut out = Pixmap::clear(w as usize, h as usize);
@@ -324,9 +387,14 @@ fn paint(confirm: &State<'_>, (c, s): (&Chrome, f32), font: &mut UiText) -> Pain
         c.text,
     );
     y += title_h + TITLE_GAP * s;
-    for line in &lines {
+    for line in lines {
         let base = y + body_h / 2.0 + font.centre_drop(body_px);
         out.text(font, line, Weight::Regular, body_px, PAD * s, base, c.muted);
+        y += body_h;
+    }
+    if let Some(hint) = hint {
+        let base = y + body_h / 2.0 + font.centre_drop(body_px);
+        out.text(font, &hint, Weight::Medium, body_px, PAD * s, base, c.text);
         y += body_h;
     }
     y += ACTS_GAP * s;
@@ -378,7 +446,25 @@ fn paint(confirm: &State<'_>, (c, s): (&Chrome, f32), font: &mut UiText) -> Pain
     Painted {
         pixmap: out,
         buttons,
+        lines: (all.len(), lines.len()),
     }
+}
+
+/// The lines of `all` to show in `rows` rows from line `scroll`, and, when
+/// they do not all fit, a hint row saying which (it takes one of the rows).
+fn cut(all: &[String], rows: usize, scroll: usize) -> (&[String], Option<String>) {
+    if all.len() <= rows {
+        return (all, None);
+    }
+    let rows = rows.saturating_sub(1).max(1);
+    let from = scroll.min(all.len() - rows);
+    let hint = format!(
+        "Lines {}-{} of {}. Up and Down scroll.",
+        from + 1,
+        from + rows,
+        all.len()
+    );
+    (&all[from..from + rows], Some(hint))
 }
 
 /// [`wrap`], then any line still wider than `room` (a long URL has no
@@ -508,7 +594,11 @@ mod tests {
     #[test]
     fn it_sits_right_aligned_and_clicks_hit_its_buttons_or_cancel() {
         let mut c = open();
-        c.repaint(Chrome::from_theme(&crate::core::Theme::default()), 1.0);
+        c.repaint(
+            Chrome::from_theme(&crate::core::Theme::default()),
+            1.0,
+            (10000.0, 10000.0),
+        );
         let (pixmap, at) = c.painted().expect("painted");
         assert_eq!(at, (300, 100), "its right edge on the button's");
         assert_eq!(pixmap.width, 300);
@@ -537,5 +627,116 @@ mod tests {
         assert_eq!(c.click(x, y), Answer::Cancel);
         assert_eq!(c.click(310.0, 110.0), Answer::Stay, "on the panel");
         assert_eq!(c.click(10.0, 10.0), Answer::Cancel, "off it");
+    }
+
+    /// Paint `c` in `view` at `scale`; panic unless the whole panel, buttons
+    /// included, is inside the window.
+    fn assert_inside(c: &mut Confirm, scale: f32, view: (f32, f32)) {
+        c.repaint(
+            Chrome::from_theme(&crate::core::Theme::default()),
+            scale,
+            view,
+        );
+        let (pm, at) = c.painted().expect("painted");
+        assert!(
+            at.0 as f32 + pm.width as f32 <= view.0,
+            "right edge {at:?} in {view:?}"
+        );
+        assert!(
+            at.1 as f32 + pm.height as f32 <= view.1,
+            "bottom edge {at:?} in {view:?}"
+        );
+        let (_, p) = c.painted.as_ref().expect("painted");
+        for (r, _) in &p.buttons {
+            assert!(
+                r.y + r.h <= pm.height as f32 && r.x >= 0.0,
+                "button inside the panel"
+            );
+        }
+    }
+
+    fn open_at(url: &str, right: f32, top: f32, s: f32) -> Confirm {
+        let l = link(url);
+        Confirm::new(
+            Subject::Link(l.clone()),
+            link_copy(&l),
+            link_buttons(true),
+            (1, 0, LINK_WIDTH),
+            right,
+            top,
+            s,
+        )
+        .expect("faces")
+    }
+
+    #[test]
+    fn a_click_near_the_bottom_or_right_edge_keeps_the_panel_inside() {
+        for scale in [1.0, 1.5, 2.0] {
+            for (x, y) in [(790.0, 590.0), (5.0, 595.0), (400.0, 580.0), (800.0, 0.0)] {
+                let mut c = open_at(
+                    "https://example.com/a/b?c=d",
+                    x + 190.0 * scale,
+                    y + 12.0 * scale,
+                    scale,
+                );
+                assert_inside(&mut c, scale, (800.0, 600.0));
+            }
+        }
+    }
+
+    #[test]
+    fn a_maximum_length_url_scrolls_with_its_buttons_in_view() {
+        let url = format!("https://example.com/{}", "ab/".repeat(675));
+        assert!(url.len() > 2000);
+        for (view, scale) in [
+            ((800.0, 600.0), 1.0),
+            ((320.0, 240.0), 1.0),
+            ((900.0, 700.0), 2.0),
+        ] {
+            let mut c = open_at(&url, view.0, view.1, scale);
+            assert_inside(&mut c, scale, view);
+            let (total, rows) = c.shown;
+            assert!(total > rows, "{view:?}: it needs scrolling");
+            // Scrolling to the end shows the tail; the panel stays inside.
+            c.scroll_by(isize::MAX / 2);
+            assert_inside(&mut c, scale, view);
+            assert_eq!(c.scroll, total - rows, "clamped at the last page");
+            c.scroll_by(-(isize::MAX / 2));
+            assert_eq!(c.scroll, 0, "clamped at the top");
+        }
+    }
+
+    #[test]
+    fn the_keys_scroll_a_long_url_and_a_short_one_does_not() {
+        let url = format!("https://example.com/{}", "ab/".repeat(675));
+        let mut c = open_at(&url, 800.0, 100.0, 1.0);
+        assert_inside(&mut c, 1.0, (800.0, 400.0));
+        assert_eq!(c.key(ConfirmKey::Down), Answer::Stay);
+        assert_eq!(c.scroll, 1);
+        c.key(ConfirmKey::PageDown);
+        assert_eq!(c.scroll, 1 + c.shown.1);
+        c.key(ConfirmKey::Up);
+        c.key(ConfirmKey::PageUp);
+        assert_eq!(c.scroll, 0);
+        let mut short = open_at("https://example.com/", 800.0, 100.0, 1.0);
+        assert_inside(&mut short, 1.0, (800.0, 600.0));
+        short.key(ConfirmKey::Down);
+        assert_eq!(short.scroll, 0, "nothing to scroll");
+    }
+
+    #[test]
+    fn a_window_narrower_than_the_panel_narrows_it() {
+        let mut c = open_at("https://example.com/", 300.0, 10.0, 1.0);
+        assert_inside(&mut c, 1.0, (320.0, 600.0));
+        let (pm, _) = c.painted().expect("painted");
+        assert!(pm.width <= 304, "narrowed to the window less its edges");
+    }
+
+    #[test]
+    fn a_new_window_size_or_scale_repaints() {
+        let mut c = open_at("https://example.com/a", 790.0, 590.0, 1.0);
+        assert_inside(&mut c, 1.0, (800.0, 600.0));
+        assert_inside(&mut c, 1.0, (800.0, 300.0));
+        assert_inside(&mut c, 2.0, (800.0, 300.0));
     }
 }

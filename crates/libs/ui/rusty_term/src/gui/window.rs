@@ -1188,10 +1188,14 @@ impl WindowState<'_> {
         let places = self.places(self.active);
         self.repaint_body(&places);
         let scale = self.scale_factor as f32;
+        let view = self.window.as_ref().map_or((f32::MAX, f32::MAX), |w| {
+            let size = w.inner_size();
+            (size.width as f32, size.height as f32)
+        });
         let popover = &mut self.popover;
         popover.repaint(tokens, scale);
         if let Some(confirm) = &mut self.confirm {
-            confirm.repaint(tokens, scale);
+            confirm.repaint(tokens, scale, view);
         }
         let oy = self.grid_oy();
         // The command dock renders as one more (synthetic, unfocused) pane
@@ -5183,6 +5187,10 @@ impl WindowState<'_> {
             Key::Named(NamedKey::Tab) => ConfirmKey::Tab,
             Key::Named(NamedKey::Enter) => ConfirmKey::Enter,
             Key::Named(NamedKey::Escape) => ConfirmKey::Escape,
+            Key::Named(NamedKey::ArrowUp) => ConfirmKey::Up,
+            Key::Named(NamedKey::ArrowDown) => ConfirmKey::Down,
+            Key::Named(NamedKey::PageUp) => ConfirmKey::PageUp,
+            Key::Named(NamedKey::PageDown) => ConfirmKey::PageDown,
             _ => return,
         };
         let answer = match &mut self.confirm {
@@ -5213,13 +5221,19 @@ impl WindowState<'_> {
         match subject {
             Subject::Block(key) => self.source.act(Act::TakeOver(key)),
             Subject::Link(link) => {
-                // Button 2 is "Always trust": remember the origin, then open.
-                if n == 2 && self.links.trust(&link) && save_trust(&self.links).is_err() {
-                    self.show_notice(Some(super::source::Notice {
-                        title: "Could not save trusted sites".to_owned(),
-                        detail: "This link opens, but the site will ask again next time."
-                            .to_owned(),
-                    }));
+                // Button 2 is "Always trust": remember the origin, but only in
+                // memory once the file is saved, so what the notice says holds.
+                if n == 2 {
+                    let mut next = self.links.clone();
+                    if next.trust(&link) {
+                        match save_trust(&next) {
+                            Ok(()) => self.links = next,
+                            Err(_) => self.show_notice(Some(super::source::Notice {
+                                title: "Could not save trusted sites".to_owned(),
+                                detail: "This link opens once. The site will ask again.".to_owned(),
+                            })),
+                        }
+                    }
                 }
                 open_link(&link);
             }
@@ -5821,6 +5835,14 @@ impl WindowState<'_> {
                 let (lines, remainder) = accumulate_scroll_lines(self.scroll_accum, raw_lines);
                 self.scroll_accum = remainder;
                 if lines == 0 {
+                    return;
+                }
+                // An open confirm owns the wheel: it scrolls a long URL.
+                if let Some(confirm) = &mut self.confirm {
+                    confirm.scroll_by(-(lines as isize));
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                     return;
                 }
                 // The settings overlay owns the wheel while it's up: scroll
