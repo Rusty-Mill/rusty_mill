@@ -11,6 +11,7 @@
 //! | `H` `J` `K` `L` | make the focused block narrower, taller, shorter or wider |
 //! | `{` or `}` | swap the focused block with the previous or next block |
 //! | `D` | detach the focused block from the layout; it keeps running |
+//! | `[` or `]` | scroll the focused block to the previous or next prompt (OSC 133) |
 //! | Ctrl-] | type a Ctrl-] |
 //!
 //! Any other key is dropped.
@@ -50,6 +51,12 @@ pub enum Action {
     },
     /// Take the focused block out of the layout, still running.
     DetachBlock,
+    /// Scroll the focused block's history to the next (`true`) or previous
+    /// prompt its shell marked (OSC 133). The next key typed returns to the
+    /// live screen.
+    Prompt {
+        next: bool,
+    },
     /// A key after the prefix that means nothing.
     Unknown,
 }
@@ -143,6 +150,8 @@ impl Keys {
             b'{' => Action::Swap { next: false },
             b'}' => Action::Swap { next: true },
             b'D' => Action::DetachBlock,
+            b'[' => Action::Prompt { next: false },
+            b']' => Action::Prompt { next: true },
             _ => Action::Unknown,
         };
         self.go(State::Typing, Some(action))
@@ -229,6 +238,8 @@ mod tests {
             (b"\x1d{", Action::Swap { next: false }),
             (b"\x1d}", Action::Swap { next: true }),
             (b"\x1dD", Action::DetachBlock),
+            (b"\x1d[", Action::Prompt { next: false }),
+            (b"\x1d]", Action::Prompt { next: true }),
             (b"\x1dq", Action::Unknown),
             (b"\x1d\x1bq", Action::Unknown),
             (b"\x1d\x1b[Z", Action::Unknown),
