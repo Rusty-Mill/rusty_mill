@@ -113,8 +113,9 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
         }
         if let Some(grid) = view.grid {
             draw(&mut frame, view.rect, grid);
-            let ahead =
-                (view.overlay.as_ref()).and_then(|o| predict(&mut frame, view.rect, grid, o));
+            // A prediction sits at the live cursor: never over history.
+            let overlay = view.overlay.as_ref().filter(|_| grid.view_offset == 0);
+            let ahead = overlay.and_then(|o| predict(&mut frame, view.rect, grid, o));
             if view.block == focused {
                 // Shown only where the grid shows it, after the predictions.
                 let shown = cursor(view.rect, grid);
@@ -528,6 +529,37 @@ mod tests {
         assert_eq!(text(&frame, 0), "one ");
         assert_eq!(text(&frame, 1), "two ");
         assert_eq!(frame.cursor, None);
+    }
+
+    #[test]
+    fn no_prediction_is_drawn_over_history() {
+        let mut g = Grid::new(4, 2);
+        let input = "\x1b]133;A\x07one\r\n\x1b]133;A\x07two\r\n\x1b]133;A\x07tri";
+        AnsiParser::new().advance(&mut g, input.as_bytes());
+        let drawn = |g: &Grid| {
+            let views = [View {
+                block: id(1),
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    size: size(4, 2),
+                },
+                grid: Some(g),
+                overlay: Some(Overlay {
+                    row: 0,
+                    cells: vec![(1, Some('X')), (2, Some('Y'))],
+                    cursor: 3,
+                }),
+            }];
+            compose(size(4, 2), &views, id(1))
+        };
+        assert!(g.scroll_to_prev_prompt());
+        let frame = drawn(&g);
+        assert_eq!(text(&frame, 0), "one ");
+        assert_eq!(frame.cursor, None);
+        // Back on the live screen the same overlay draws again.
+        g.reset_view();
+        assert_eq!(text(&drawn(&g), 0), "tXY ");
     }
 
     #[test]
