@@ -1,16 +1,21 @@
 //! The trusted origins on disk (C63, gui-design D72): one small file per
 //! origin in a directory beside `config.toml`.
 //!
-//! Trusting is one `create_new` of a file named from the origin's hash: no
-//! read-merge-write, so two windows or processes never lose each other's
-//! additions; no lock, so there is nothing to go stale or to wait on; no
-//! temp file to share. Reading lists the directory and keeps only entries
-//! that are exactly a normalised http(s) origin. Removing a site is deleting
-//! its file.
+//! A file's name is the hash of the origin it holds, and it is published
+//! whole: written under a dot-name no reader looks at, then renamed into
+//! place. So a reader never sees a half-written record, a crash leaves only
+//! an ignored temp file, and two windows or processes adding the same origin
+//! write identical bytes to the same name (one file, however many race).
+//! There is no read-merge-write, no lock and nothing to wait on. Reading
+//! lists the directory and keeps only entries that are exactly a normalised
+//! http(s) origin *and* match their file name's hash, so a truncated or
+//! hand-made file can never trust another origin. Removing a site is
+//! deleting its file.
 
 use super::link_policy::{Policy, valid_origin};
-use std::io::{Error, ErrorKind, Result, Write};
+use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The file name's extension, and how many same-hash origins one hash may
 /// hold (a 64-bit collision, in practice never).
@@ -51,10 +56,13 @@ pub(crate) fn read(dir: &Path) -> Result<Policy> {
         if !meta.is_file() || meta.len() > MAX_FILE {
             continue;
         }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let named = stem.split('-').next().unwrap_or("");
         if let Some(o) = std::fs::read_to_string(&path)
             .ok()
             .as_deref()
             .and_then(valid_origin)
+            .filter(|o| name_hash(o) == named)
         {
             origins.push(o.to_owned());
         }
@@ -69,33 +77,51 @@ pub(crate) fn add(dir: &Path, origin: &str) -> Result<()> {
         return Err(Error::new(ErrorKind::InvalidInput, "not a web origin"));
     }
     std::fs::create_dir_all(dir)?;
-    let hash = fnv1a(origin.as_bytes());
+    let hash = name_hash(origin);
     for slot in 0..SLOTS {
         let name = match slot {
-            0 => format!("{hash:016x}.{EXT}"),
-            n => format!("{hash:016x}-{n}.{EXT}"),
+            0 => format!("{hash}.{EXT}"),
+            n => format!("{hash}-{n}.{EXT}"),
         };
         let path = dir.join(name);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut f) => {
-                return f
-                    .write_all(origin.as_bytes())
-                    .inspect_err(|_| drop(std::fs::remove_file(&path)));
-            }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                // Ours already (or a hash collision: try the next slot).
-                if std::fs::read_to_string(&path).is_ok_and(|t| t == origin) {
-                    return Ok(());
-                }
-            }
+        match std::fs::read_to_string(&path) {
+            Ok(held) if held == origin => return Ok(()),
+            // Another origin with the same hash (or a damaged file): next slot.
+            Ok(_) => continue,
+            Err(e) if e.kind() == ErrorKind::NotFound => return publish(dir, &path, origin),
             Err(e) => return Err(e),
         }
     }
     Err(Error::other("too many origins share a hash"))
+}
+
+/// Write `origin` whole to `path`: to a temp name first, then rename.
+fn publish(dir: &Path, path: &Path, origin: &str) -> Result<()> {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let tmp = dir.join(format!(
+        ".{}.{}.{}.tmp",
+        name_hash(origin),
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&tmp, origin).inspect_err(|_| drop(std::fs::remove_file(&tmp)))?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            drop(std::fs::remove_file(&tmp));
+            // Where rename will not replace a file, losing a race to the same
+            // origin is success.
+            match std::fs::read_to_string(path) {
+                Ok(held) if held == origin => Ok(()),
+                _ => Err(e),
+            }
+        }
+    }
+}
+
+/// The hash `origin`'s file is named by, in hex.
+fn name_hash(origin: &str) -> String {
+    format!("{:016x}", fnv1a(origin.as_bytes()))
 }
 
 /// FNV-1a, 64 bit: a stable file name, not a security boundary (the file's
@@ -141,39 +167,92 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_adds_from_many_threads_keep_every_origin() {
+    fn a_race_to_add_one_origin_leaves_one_file_that_revoking_clears() {
         let d = dir("race");
-        let handles: Vec<_> = (0..48)
-            .map(|i| {
-                let d = d.clone();
-                // Two threads per origin: the same one added at once.
-                std::thread::spawn(move || add(&d, &format!("https://site{}.example", i / 2)))
+        std::fs::create_dir_all(&d).unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let (d, start) = (d.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    add(&d, "https://same.example")
+                })
             })
             .collect();
         for h in handles {
             h.join().expect("no panic").expect("added");
         }
-        let got = read(&d).unwrap();
-        assert_eq!(got.origins().count(), 24);
-        for i in 0..24 {
-            assert!(
-                got.origins()
-                    .any(|g| g == format!("https://site{i}.example"))
-            );
+        let files: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(
+            files.len(),
+            1,
+            "one file, no duplicates and no temp left: {files:?}"
+        );
+        assert_eq!(origins(&read(&d).unwrap()), ["https://same.example"]);
+        std::fs::remove_file(&files[0]).unwrap();
+        assert_eq!(read(&d).unwrap(), Policy::default(), "revoked for good");
+    }
+
+    #[test]
+    fn overlapping_adds_of_different_origins_keep_every_one() {
+        let d = dir("many");
+        let handles: Vec<_> = (0..24)
+            .map(|i| {
+                let d = d.clone();
+                std::thread::spawn(move || add(&d, &format!("https://site{i}.example")))
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("no panic").expect("added");
         }
+        assert_eq!(read(&d).unwrap().origins().count(), 24);
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 24);
+    }
+
+    #[test]
+    fn a_truncated_record_never_trusts_another_origin() {
+        let d = dir("prefix");
+        std::fs::create_dir_all(&d).unwrap();
+        // A write cut short: `https://example.co` is itself a valid origin.
+        let name = format!("{}.{EXT}", name_hash("https://example.com"));
+        std::fs::write(d.join(&name), "https://example.co").unwrap();
+        assert_eq!(
+            read(&d).unwrap(),
+            Policy::default(),
+            "the prefix is not trusted"
+        );
+        // Adding the real origin works around the bad file, not through it.
+        add(&d, "https://example.com").unwrap();
+        assert_eq!(origins(&read(&d).unwrap()), ["https://example.com"]);
+    }
+
+    #[test]
+    fn an_unpublished_temp_file_is_ignored() {
+        let d = dir("temp");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(".abc.1.0.tmp"), "https://tmp.example").unwrap();
+        std::fs::write(
+            d.join(format!("{}.{EXT}.tmp", name_hash("https://t.example"))),
+            "https://t.example",
+        )
+        .unwrap();
+        assert_eq!(read(&d).unwrap(), Policy::default());
     }
 
     #[test]
     fn a_same_hash_origin_takes_the_next_slot() {
         let d = dir("collide");
         std::fs::create_dir_all(&d).unwrap();
-        let hash = fnv1a(b"https://a.com");
-        std::fs::write(d.join(format!("{hash:016x}.{EXT}")), "https://other.com").unwrap();
+        let hash = name_hash("https://a.com");
+        std::fs::write(d.join(format!("{hash}.{EXT}")), "https://other.com").unwrap();
         add(&d, "https://a.com").unwrap();
-        assert_eq!(
-            origins(&read(&d).unwrap()),
-            ["https://a.com", "https://other.com"]
-        );
+        // The planted file is bound to another hash, so only ours is trusted.
+        assert_eq!(origins(&read(&d).unwrap()), ["https://a.com"]);
+        assert!(d.join(format!("{hash}-1.{EXT}")).exists());
     }
 
     #[test]
@@ -186,6 +265,7 @@ mod tests {
             ("c.origin", ""),
             ("d.origin", "https://Up.com"),
             ("e.txt", "https://txt.com"),
+            ("f.origin", "https://valid-but-unbound.com"),
         ] {
             std::fs::write(d.join(name), body).unwrap();
         }
