@@ -136,14 +136,16 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
 fn draw(frame: &mut Frame, rect: Rect, grid: &Grid) {
     let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
     for y in 0..rows.min(grid.rows) {
-        let cells: Vec<Cell> = grid.row_cells(y).take(cols).collect();
+        // Scrolled into history, the viewport shows it above the live rows.
+        let all: Vec<Cell> = match grid.view_offset {
+            0 => grid.row_cells(y).collect(),
+            _ => (0..grid.cols).map(|x| grid.viewport_cell(x, y)).collect(),
+        };
+        let cells = &all[..all.len().min(cols)];
         for (x, cell) in cells.iter().enumerate() {
             let wide_cut = x + 1 == cols
                 && cells.len() == cols
-                && grid
-                    .row_cells(y)
-                    .nth(cols)
-                    .is_some_and(|c| c.flags & WIDE_TRAILER != 0);
+                && all.get(cols).is_some_and(|c| c.flags & WIDE_TRAILER != 0);
             let glyph = match wide_cut {
                 true => Glyph::plain(' ', Style::of(cell)),
                 false => Glyph {
@@ -201,7 +203,8 @@ fn cursor(rect: Rect, grid: &Grid) -> Option<(u16, u16)> {
     let (cx, cy) = grid.cursor;
     let inside = cx < usize::from(rect.size.cols()) && cy < usize::from(rect.size.rows());
     // Both fit in u16: they are below the rect's size.
-    (grid.cursor_visible && inside).then(|| (rect.x + cx as u16, rect.y + cy as u16))
+    (grid.cursor_visible && grid.view_offset == 0 && inside)
+        .then(|| (rect.x + cx as u16, rect.y + cy as u16))
 }
 
 /// Box-drawing lines over every cell no view covers, joined where they
@@ -502,6 +505,29 @@ mod tests {
         let focused = frame.row(1)[4].style.fg;
         assert_eq!(focused, FOCUS);
         assert_ne!(frame.row(4)[4].style.fg, FOCUS);
+    }
+
+    #[test]
+    fn a_block_scrolled_to_a_prompt_shows_its_history_and_no_cursor() {
+        let mut g = Grid::new(4, 2);
+        let input = "\x1b]133;A\x07one\r\n\x1b]133;A\x07two\r\n\x1b]133;A\x07tri";
+        AnsiParser::new().advance(&mut g, input.as_bytes());
+        assert!(g.scroll_to_prev_prompt());
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            size: size(4, 2),
+        };
+        let views = [View {
+            block: id(1),
+            rect,
+            grid: Some(&g),
+            overlay: None,
+        }];
+        let frame = compose(size(4, 2), &views, id(1));
+        assert_eq!(text(&frame, 0), "one ");
+        assert_eq!(text(&frame, 1), "two ");
+        assert_eq!(frame.cursor, None);
     }
 
     #[test]

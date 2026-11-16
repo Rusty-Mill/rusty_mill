@@ -1040,6 +1040,7 @@ mod client {
             keys: Keys::default(),
             area,
             shown: Shown::Nothing,
+            browsing: false,
             split: None,
             arriving: None,
             opened: 0,
@@ -1537,6 +1538,9 @@ mod client {
         keys: Keys,
         area: Size,
         shown: Shown,
+        /// The focused block's history is on screen (after a prompt jump),
+        /// so it is composed, never passed through.
+        browsing: bool,
         /// The pending split, whose new block takes the focus.
         split: Option<u64>,
         /// The split's new block, until the layout shows it.
@@ -2313,7 +2317,11 @@ mod client {
             if action.on_focused_block() && !self.shows(focus) {
                 return bell();
             }
+            if self.browsing && !matches!(action, Action::Prompt { .. }) {
+                self.live();
+            }
             match action {
+                Action::Prompt { next } => self.prompt(next),
                 Action::Input(data) => {
                     if let Some(pane) = self.panes.get_mut(&focus) {
                         pane.typed(data);
@@ -2361,6 +2369,38 @@ mod client {
                 }
                 Action::Unknown => bell(),
             }
+        }
+
+        /// Scrolls the focused block to the next or previous prompt; rings
+        /// when there is none or the block is a full-screen program's.
+        fn prompt(&mut self, next: bool) {
+            let focus = self.focus;
+            let moved = self
+                .panes
+                .get_mut(&focus)
+                .and_then(|pane| pane.term.as_mut())
+                .is_some_and(|(grid, _)| match next {
+                    true => grid.scroll_to_next_prompt(),
+                    false => grid.scroll_to_prev_prompt(),
+                });
+            if !moved {
+                return bell();
+            }
+            self.browsing = self.grid(focus).is_some_and(|grid| grid.view_offset > 0);
+            self.sync();
+            self.draw();
+        }
+
+        /// Back to the live screen after browsing history.
+        fn live(&mut self) {
+            self.browsing = false;
+            for pane in self.panes.values_mut() {
+                if let Some((grid, _)) = pane.term.as_mut() {
+                    grid.reset_view();
+                }
+            }
+            self.sync();
+            self.draw();
         }
 
         /// Whether `block` is in the layout shown.
@@ -2651,7 +2691,7 @@ mod client {
             self.lease();
             self.fit();
             let shown = match visible.as_slice() {
-                [(only, _)] => Shown::Passing(*only),
+                [(only, _)] if !self.browsing => Shown::Passing(*only),
                 _ => Shown::Composed(None),
             };
             if shown != self.shown || matches!(shown, Shown::Composed(_)) {
@@ -3336,6 +3376,7 @@ mod client {
                 keys: Keys::default(),
                 area: Size::new(80, 24).expect("size"),
                 shown: Shown::Nothing,
+                browsing: false,
                 split: None,
                 arriving: None,
                 opened: 0,
