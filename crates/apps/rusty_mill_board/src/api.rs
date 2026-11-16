@@ -286,7 +286,7 @@ struct ListArgs {
     /// returns them.
     #[serde(default)]
     view: View,
-    /// Only cards of projects with these statuses (`active`, `paused`, `experiment`, `deferred`,
+    /// Only cards of projects with these statuses (`active`, `paused`, `experiment`,
     /// `archived`). Default: active projects only, unless `project` names one.
     project_status: Option<Vec<ProjectStatus>>,
     /// Page size, 1 to 500. With it (or `cursor`) the result also has `next_cursor` (null

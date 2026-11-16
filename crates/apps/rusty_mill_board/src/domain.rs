@@ -481,30 +481,25 @@ pub enum ProjectStatus {
     Paused,
     /// A labelled experiment: takes new cards and hands out work, but is off the default views.
     Experiment,
-    /// Parked for later: off the default views, refuses new cards, hands out no work. Unlike
-    /// `Paused` (stopped in flight), it was never started or is not due yet.
-    Deferred,
     /// Finished with: off the default views, refuses new cards, hands out no work.
     Archived,
 }
 
 impl ProjectStatus {
     /// Every status, in display order.
-    pub const ALL: [ProjectStatus; 5] = [
+    pub const ALL: [ProjectStatus; 4] = [
         ProjectStatus::Active,
         ProjectStatus::Paused,
         ProjectStatus::Experiment,
-        ProjectStatus::Deferred,
         ProjectStatus::Archived,
     ];
 
-    /// The stored name (`active`, `paused`, `experiment`, `deferred`, `archived`).
+    /// The stored name (`active`, `paused`, `experiment`, `archived`).
     pub fn as_str(self) -> &'static str {
         match self {
             ProjectStatus::Active => "active",
             ProjectStatus::Paused => "paused",
             ProjectStatus::Experiment => "experiment",
-            ProjectStatus::Deferred => "deferred",
             ProjectStatus::Archived => "archived",
         }
     }
@@ -1575,7 +1570,7 @@ mod tests {
         let takes: Vec<bool> = ProjectStatus::ALL
             .map(ProjectStatus::accepts_cards)
             .to_vec();
-        assert_eq!(takes, [true, false, true, false, false]);
+        assert_eq!(takes, [true, false, true, false]);
         assert_eq!(ProjectStatus::default(), ProjectStatus::Active);
     }
 

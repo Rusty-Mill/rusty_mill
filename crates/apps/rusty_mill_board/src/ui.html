@@ -373,7 +373,7 @@ const $=id=>document.getElementById(id);
 let cards=[],cursor=null,loaded=false,dlg=null,repos={},sel={repo:"",project:"",agent:""};
 /* Project statuses (board_projects' `status`, unlisted = active) and which the board shows: active by default,
    "" for every status. A chosen project is shown whatever its status. */
-const STATUSES=["active","experiment","paused","deferred","archived"];
+const STATUSES=["active","experiment","paused","archived"];
 let pstatus={},statusSel="active";
 const statusOf=p=>Object.hasOwn(pstatus,p)?pstatus[p]:"active";
 const projects=()=>Object.values(repos).flat();
