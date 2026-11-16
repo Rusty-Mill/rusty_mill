@@ -157,8 +157,8 @@ impl Args {
         if self.force && self.promote.is_none() {
             return Err("--force goes with --promote".into());
         }
-        if self.tls_ca.is_some() && self.promote.is_none() {
-            return Err("--tls-ca goes with --standby or --promote".into());
+        if self.tls_ca.is_some() {
+            return Err("--tls-ca goes with --standby".into());
         }
         if let Some(url) = &self.promote {
             needs_secure_link(url, "--promote")?;
@@ -494,6 +494,29 @@ mod tests {
                 "https://h:1"
             ])
             .is_err()
+        );
+        // Promotion does not talk TLS to the old active, so a CA would be ignored.
+        assert!(
+            run(&[
+                "--listen",
+                "127.0.0.1:0",
+                "--promote",
+                "https://hub:1",
+                "--tls-ca",
+                "ca"
+            ])
+            .is_err()
+        );
+        assert!(
+            run(&[
+                "--standby",
+                "https://hub:1",
+                "--replica-secret",
+                "s",
+                "--tls-ca",
+                "ca"
+            ])
+            .is_ok()
         );
         // The secret never goes over plain HTTP off this host.
         assert!(run(&["--listen", "0.0.0.0:80", "--replica-secret", "s"]).is_err());
