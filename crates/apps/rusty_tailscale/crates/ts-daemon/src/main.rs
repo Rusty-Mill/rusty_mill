@@ -168,6 +168,12 @@ options:
         let hostname = args.hostname.unwrap_or_else(default_hostname);
         rusty_log::info!(node_key = %state.node.public(), hostname = %hostname, "identity loaded");
 
+        let https = |u: &str| u.starts_with("https://");
+        let derp = args.derp_server.as_deref().unwrap_or(&args.login_server);
+        if args.tls_ca.is_some() && !https(&args.login_server) && !https(derp) {
+            eprintln!("ts-daemon: --tls-ca needs an https:// --login-server or --derp-server");
+            return Ok(ExitCode::from(2));
+        }
         let trust = match &args.tls_ca {
             None => ts_engine::Trust::System,
             Some(path) => match std::fs::read_to_string(path)
