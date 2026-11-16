@@ -129,7 +129,7 @@ pub struct Config {
     pub command_marks: Option<bool>,
     /// Pointing at a pane focuses it, as a click does (`[window] focus_follows_mouse`; default off; C62).
     pub focus_follows_mouse: Option<bool>,
-    /// Unfocused panes show at 70% (`[window] dim_inactive_panes`; default off; C62).
+    /// Unfocused panes show at 70% (`[window] dim_inactive_panes`; default on; C62).
     pub dim_inactive_panes: Option<bool>,
     /// Bottom status ribbon (windowed front-end): cwd, git branch, last
     /// command's exit status, scrollback position, and grid size in a
@@ -296,7 +296,7 @@ impl Config {
 # reduce_motion = "on"      # "system" (default, follow the OS), "on" or "off"
 # command_marks = false     # hide the per-command gutter marks (default on)
 # focus_follows_mouse = true  # pointing at a pane focuses it (default off)
-# dim_inactive_panes = true   # unfocused panes show at 70% (default off)
+# dim_inactive_panes = false  # don't dim unfocused panes (default on)
 
 # copy_html = false         # don't add styled HTML to Ctrl+Shift+C copies
 # clipboard = "write-only"  # OSC 52 policy: "off", "write-only" (default), or "read-write"

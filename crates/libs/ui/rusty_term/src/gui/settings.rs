@@ -451,7 +451,7 @@ impl Settings {
             status_bar: cfg.status_bar.unwrap_or(true),
             command_marks: cfg.command_marks.unwrap_or(true),
             focus_follows_mouse: cfg.focus_follows_mouse.unwrap_or(false),
-            dim_inactive: cfg.dim_inactive_panes.unwrap_or(false),
+            dim_inactive: cfg.dim_inactive_panes.unwrap_or(true),
             opacity: cfg.opacity.unwrap_or(1.0),
             launch_mode: cfg.launch_mode,
             cols: cfg.cols.unwrap_or(DEFAULT_COLS),
@@ -783,7 +783,7 @@ impl Settings {
             Field::StatusBar => !self.status_bar,
             Field::CommandMarks => !self.command_marks,
             Field::FocusFollowsMouse => self.focus_follows_mouse,
-            Field::DimInactive => self.dim_inactive,
+            Field::DimInactive => !self.dim_inactive,
             Field::Opacity => self.opacity != 1.0,
             Field::LaunchMode => self.launch_mode.is_some(),
             Field::Cols => self.cols != DEFAULT_COLS,
@@ -1240,7 +1240,7 @@ impl Settings {
                 section: "window",
                 key: "dim_inactive_panes",
                 value: Some(self.dim_inactive.to_string()),
-                insert: self.dim_inactive, // default is off
+                insert: !self.dim_inactive, // default is on
             },
             SettingEdit {
                 section: "window",
@@ -1615,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_and_dim_default_off_and_persist_only_when_on() {
+    fn focus_follows_defaults_off_and_dim_defaults_on_and_each_persists_off_default() {
         let mut s = seeded();
         let edit = |s: &Settings, key: &str| {
             s.all_edits()
@@ -1623,17 +1623,18 @@ mod tests {
                 .find(|e| e.key == key)
                 .expect("managed key")
         };
-        for (field, key) in [
-            (Field::FocusFollowsMouse, "focus_follows_mouse"),
-            (Field::DimInactive, "dim_inactive_panes"),
+        for (field, key, default) in [
+            (Field::FocusFollowsMouse, "focus_follows_mouse", false),
+            (Field::DimInactive, "dim_inactive_panes", true),
         ] {
             select_field(&mut s, field);
             assert!(!s.rows()[s.sel].modified && !edit(&s, key).insert);
             s.change(true);
             assert!(s.rows()[s.sel].modified && edit(&s, key).insert);
-            assert_eq!(edit(&s, key).value.as_deref(), Some("true"));
+            let want = (!default).to_string();
+            assert_eq!(edit(&s, key).value.as_deref(), Some(want.as_str()));
         }
-        assert!(s.focus_follows_mouse() && s.dim_inactive());
+        assert!(s.focus_follows_mouse() && !s.dim_inactive());
     }
 
     #[test]

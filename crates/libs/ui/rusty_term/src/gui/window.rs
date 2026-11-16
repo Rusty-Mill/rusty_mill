@@ -1600,7 +1600,7 @@ impl WindowState<'_> {
             pressed: self.pressed.and_then(Hit::block),
         };
         let armed = self.armed;
-        let fade_inactive = self.config.dim_inactive_panes.unwrap_or(false);
+        let fade_inactive = self.config.dim_inactive_panes.unwrap_or(true);
         let body = &mut self.body;
         // F2 numbers follow the layout's order, 1 to 9 (handoff D104).
         let number = |id: u64| {
