@@ -26,7 +26,7 @@ T1, with T3 and T4a beside it, then T2 and T4b, then T5a and T5b, then T6, then 
 
 - No new dependency or lockfile change in T1-T6. T7 with GLSL (naga `glsl-in`) needs Nano's approval (Q76).
 - Each child ships tests and dark + light, CPU + GPU screenshots (GPU-only children: GPU only, with the CPU fallback shown).
-- C61 is done in CAPABILITIES when every child lands.
+- C61 is done in CAPABILITIES when T1-T6 land and T7 has landed or Nano has declined it (Q76). T7 is the only optional child.
 
 ## Questions for Nano (interim choice in brackets)
 
