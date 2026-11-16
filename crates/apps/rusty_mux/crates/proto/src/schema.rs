@@ -1302,7 +1302,10 @@ pub static CATALOG: &[Method] = &[
               `KIND<TAB>NAME`, `KIND` being `d` for a directory (or a link to one), `f` a \
               file, `l` any other link, `o` anything else; directories first, then by name, \
               and every name written as `terminal.process` writes a field. At most 1000 \
-              entries are listed; a last `+<TAB>N` line counts those left out. Refused to a \
+              entries are listed. Then, each only when it applies: `+<TAB>N`, exactly N \
+              entries were left out; `><TAB>N`, the directory is too large to read whole, so \
+              at least N were left out; `!<TAB>N`, N entries could not be read. Read off \
+              the server's main thread and refused after 5 seconds. Refused to a \
               watch-only client.",
         params: &[
             BLOCK,
