@@ -43,6 +43,7 @@ PLAN_KEYS = {
     "rleval_image",
     "crypto_ct",
     "rand_platforms",
+    "mesh_nat",
     "msrv_manifests",
     "shards",
     "components",
@@ -431,7 +432,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "ai_env_gui": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "ai_env_gui": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "mesh_nat": False},
         )
 
     def test_rleval_jobs_follow_cargo_impact_and_the_viewer_fixture(self) -> None:
@@ -568,11 +569,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "ai_env_gui": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "ai_env_gui": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "mesh_nat": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "ai_env_gui": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "ai_env_gui": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "mesh_nat": False},
         )
 
     def test_agui_package_change_selects_tick_web_too(self) -> None:
@@ -1016,6 +1017,25 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self._planner_map("--packages", "", input=f"{path}\n")["tls_engine"], "false")
 
+    def test_two_nat_job_is_selected_by_the_hub_crates_and_its_own_ci(self) -> None:
+        for packages in ("ts-hub", "ts-net", "ts-daemon"):
+            with self.subTest(packages=packages):
+                self.assertTrue(specialized_job_flags([], [packages])["mesh_nat"])
+        self.assertFalse(specialized_job_flags([], ["rusty_config", "ts-types"])["mesh_nat"])
+        for path in (
+            ".github/workflows/ci.yml",
+            ".github/scripts/ci_plan.py",
+            "crates/apps/rusty_tailscale/interop/two_nat_test.sh",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(specialized_job_flags([path], [])["mesh_nat"])
+        self.assertFalse(specialized_job_flags(["docs/README.md"], [])["mesh_nat"])
+        job = self.job_text("two-nat-direct-path")
+        self.assertIn("if: needs.plan.outputs.mesh_nat == 'true' && needs.plan.outputs.linux == 'true'", job)
+        self.assertIn("two_nat_test.sh cone", job)
+        self.assertIn("two_nat_test.sh symmetric", job)
+        self.assertIn("      - two-nat-direct-path\n", self.workflow.split("  required-gate:\n", 1)[1])
+
     def test_rleval_service_jobs_run_when_their_own_ci_changes(self) -> None:
         for path in (".github/workflows/ci.yml", ".github/scripts/ci_plan.py"):
             with self.subTest(path=path):
@@ -1049,7 +1069,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 self.assertEqual(outputs["rand_platforms"], "false" if "unrelated" in path else "true")
                 # ci.yml and ci_plan.py also select the native TLS engine and rleval service jobs.
                 own = path in {".github/workflows/ci.yml", ".github/scripts/ci_plan.py"}
-                for key in ("tls_engine", "rleval_service", "rleval_image"):
+                for key in ("tls_engine", "rleval_service", "rleval_image", "mesh_nat"):
                     self.assertEqual(outputs[key], "true" if own else "false", key)
                 win32 = own or path == ".github/scripts/test_ci_workflow.py"
                 self.assertEqual(outputs["win32"], "true" if win32 else "false")
@@ -1057,7 +1077,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                     all(
                         outputs[key] == "false"
                         for key in SPECIALIZED_KEYS
-                        - {"rand_platforms", "tls_engine", "rleval_service", "rleval_image", "win32"}
+                        - {"rand_platforms", "tls_engine", "rleval_service", "rleval_image", "mesh_nat", "win32"}
                     )
                 )
         self.assertIn(
