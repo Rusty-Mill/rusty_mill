@@ -316,6 +316,7 @@ jobs:
       rleval_image: ${{ steps.plan.outputs.rleval_image }}
       crypto_ct: ${{ steps.plan.outputs.crypto_ct }}
       rand_platforms: ${{ steps.plan.outputs.rand_platforms }}
+      mesh_nat: ${{ steps.plan.outputs.mesh_nat }}
       msrv_manifests: ${{ steps.plan.outputs.msrv_manifests }}
       shards: ${{ steps.plan.outputs.shards }}
       components: ${{ steps.plan.outputs.components }}
@@ -2012,6 +2013,36 @@ jobs:
           path: acceptance-results/
           if-no-files-found: warn
 
+  # The mesh hub's direct-path test: a hub and one `ts-net` node behind each of
+  # two Linux NATs (network namespaces + iptables, so root). Cone NAT must go
+  # direct within 10 s; symmetric NAT must stay on the relay; every byte must
+  # arrive either way. The script asserts all of it and exits non-zero on a miss.
+  two-nat-direct-path:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-two-nat-direct-path
+      queue: max
+      cancel-in-progress: false
+    name: mesh hub two-NAT direct path (Linux)
+    needs: [plan, fmt]
+    if: needs.plan.outputs.mesh_nat == 'true' && needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Build the hub and the probe
+        run: |
+          cargo build --locked -p ts-daemon
+          cargo build --locked -p ts-net --example mesh_node
+      - name: Cone NAT goes direct
+        run: sudo env "PATH=$PATH" crates/apps/rusty_tailscale/interop/two_nat_test.sh cone
+      - name: Symmetric NAT stays on the relay
+        run: sudo env "PATH=$PATH" crates/apps/rusty_tailscale/interop/two_nat_test.sh symmetric
+
   prune-caches:
     # `main`'s rust-cache keys end in a Cargo.lock/manifest hash, so each sweep
     # saves a new entry beside yesterday's and the 10 GB budget evicts by least
@@ -2067,6 +2098,7 @@ jobs:
       - clippy
       - ci-smoke
       - orch-bbp-acceptance
+      - two-nat-direct-path
       - test
       - data-mesh-monitor
       - rusty-term-web
