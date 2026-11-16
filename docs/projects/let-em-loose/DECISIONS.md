@@ -138,6 +138,7 @@ Precise contracts used by this guide:
 | D128 | M1 committed: #758 items 1-3, #1123, #1124, #1166 to Ready; #1092 waits for the BaileyAi host; #754 out | [stated] 2026-11-12 (general, M1) |
 | D129 | Lost designs not needed for M1; #1402 builder-session rebuild waits until after the first run | [stated] 2026-11-12 (general, M1) |
 | D130 | M1 design steps approved as one batch of runbooks and config (changes D25 for M1) | [stated] 2026-11-12 (general, M1) |
+| D132 | #1092: Mill Board runs as `orch-runner` on BaileyAi for the inbox | [stated] 2026-11-16 (1092, M1) |
 
 ## D1. Lenses, not stages
 
@@ -1269,3 +1270,13 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_970ab68163f14d498f99ddf976739c5f
 **Key.** lel:general:m1-design-steps-batch-approved
 **Source.** Nano, Mill thread message `cmsg_01632CBKCXsWe6RyFWvE9dov81m5TvtNmj43NpXMCV23tc`, 2026-11-12T19:22:57Z, project thread `cmsg_01632CBKCXsWe6RyFWvE9dov5LxGS7LhnBwjYdXbAXf7nm`, verbatim: "Go, a, a, a". The third "a" answers Millwright L8, option a. Changes D25 for M1; D127, D128. Numbered D130 after D129.
+
+## D132. #1092: Mill Board runs as `orch-runner` on BaileyAi for the inbox
+
+**Decision.** On BaileyAi the Mill Board service runs as `orch-runner` (option a of `1092-deploy-layout.md` § Decision), so `bbp human` can read `master` in `/srv/lel/bbp`. The shipped unit's `baileyrd` user is overridden for this deploy. Rejected b and c stay out of the layout.
+**Known consequence.** The Claude harness runs host-side as `orch-runner` and is not sandboxed from the board. It can read the board's environment and files, so `RUSTY_TICK_TOKEN` and the board's agent tokens are readable by it. Nothing in the design stops that. Nano chose a) with this recorded in the doc; review by baileyrd on PR #1744 is where it is checked. Sandboxed pool members do not have this exposure.
+**Why.** Fewest parts and reversible: option a needs no group-shared secret and no sudo wrapper.
+**Rejected.** b) `baileyrd` with group-shared `/srv/lel/bbp` incl. `master` 0640 (needs a check that `bbp` accepts it; widens exposure of the secret). c) `baileyrd` with a narrow `sudo -u orch-runner` wrapper (drops the unit's `NoNewPrivileges=true`).
+**Tag.** [stated] · remind-me: mem_056ed8754777410b9abf716a13542a80
+**Key.** lel:1092:board-runs-as-orch-runner
+**Source.** Nano, tapped "a) orch-runner" on a decision card, 2026-11-16T16:15:00Z, Millwright project thread `cmsg_01632CBKCXsWe6RyFWvE9dovKYDoFmtvXi6TAYDxoS9Gmq`, card `cmsg_01632CBKCXsWe6RyFWvE9dovUsbPrkpu7L7hajGhXCVDa8`, question "Which user should run Mill Board on BaileyAi for the inbox?". Design in `1092-deploy-layout.md` (PR #1744). Within D130 (design batch) and D131 (deploy authorised). Numbered D132 after D130 on this branch; D131 is on `main` and not yet merged here.

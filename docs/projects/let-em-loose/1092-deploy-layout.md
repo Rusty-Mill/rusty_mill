@@ -11,7 +11,7 @@ Install to `/opt/lel/<git-sha>/bin/`, symlink `/opt/lel/current -> <git-sha>`. P
 - `orch-runner`: runs `rusty_orch`, `bbp mod`, harnesses; owns BBP dir, orch state, rootless podman `lel-codex`.
 - `baileyrd`: Nano's login; reads logs and the UI.
 - Mux: M1 deploys none. #600 builder sessions come after the first run (D129). When it lands it runs as `orch-runner` (mux-hosted-agents-design.md section 7), not `baileyrd` as the card says; the design wins.
-- Mill Board user: open, see "Decision needed".
+- Mill Board user: `orch-runner` (D132), see "Decision".
 
 ## Directories (outside any source checkout and workload read roots)
 | Path | Owner / mode | Notes |
@@ -44,9 +44,9 @@ Drain, then flip: (1) no open tasks (`bbp inbox`; `rusty_orch run --cancel <reas
 3. `bbp open` a toy claims task on a throwaway repo (pattern: `crates/apps/rusty_bbp_host/docs/proving-run.md`, `BBP_DIR=/srv/lel/bbp`); `bbp card` and `bbp why` print JSON.
 4. Link the task from a card; `inbox_list` shows its escalations (cross-check `bbp inbox --dir /srv/lel/bbp --task <T>`); `inbox_act` on a toy escalation proves the board can write the log.
 
-## Decision needed: which user runs Mill Board?
+## Decision: which user runs Mill Board? (Nano chose a, 2026-11-16, D132)
 The inbox runs `bbp human`, which writes the BBP log and needs `master` (owner-only for orch-runner). The shipped unit runs as `baileyrd` and cannot.
-- a) Run the board as `orch-runner` (recommended): fewest parts, reversible; board tokens (`RUSTY_TICK_TOKEN`, its agent tokens) become readable by anything running as `orch-runner`. Sandboxed pool members avoid that, but the Claude harness runs host-side as `orch-runner` and is not sandboxed from them. Nothing in this design keeps it away from the board's environment and files; pick a) only if that is acceptable, or prefer c).
+- a) **CHOSEN (D132).** Run the board as `orch-runner` (recommended): fewest parts, reversible; board tokens (`RUSTY_TICK_TOKEN`, its agent tokens) become readable by anything running as `orch-runner`. Sandboxed pool members avoid that, but the Claude harness runs host-side as `orch-runner` and is not sandboxed from them. Nothing in this design keeps it away from the board's environment and files; pick a) only if that is acceptable, or prefer c).
 - b) Keep `baileyrd`, group-share `/srv/lel/bbp` incl. `master` 0640: needs a check that `bbp` accepts it; widens exposure of the secret.
 - c) Keep `baileyrd`, narrow `sudo -u orch-runner` fixed to `--dir /srv/lel/bbp`: drops the unit's `NoNewPrivileges=true`.
 
