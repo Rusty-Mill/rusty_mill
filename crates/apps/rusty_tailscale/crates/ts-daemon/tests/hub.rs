@@ -604,3 +604,37 @@ async fn a_dropped_node_stops_retrying_when_its_hub_dies() {
         "something still retries the dead hub"
     );
 }
+
+/// The same, when the hub dies first and the last handle goes while the node
+/// is already retrying.
+#[rusty_tokio::test]
+async fn a_node_dropped_while_retrying_stops_retrying() {
+    let mut hub = start(temp_dir("dropped-late"), "ka alice reusable\n");
+    let addr = hub.url.trim_start_matches("http://").to_owned();
+    let node = ts_net::Node::new(ts_net::NodeConfig {
+        control_url: hub.url.clone(),
+        derp_url: None,
+        authkey: "ka".into(),
+        hostname: "latecomer".into(),
+        state_dir: hub.dir.join("node"),
+        enable_direct: false,
+        stun_server: None,
+        trust: ts_net::Trust::System,
+    })
+    .await
+    .expect("node joins");
+    node.wait_ip().await.expect("address");
+    hub.child.kill().unwrap();
+    hub.child.wait().unwrap();
+    // Let it notice and start retrying against the dead address.
+    rusty_tokio::time::sleep(Duration::from_secs(2)).await;
+    drop(node);
+
+    let probe = std::net::TcpListener::bind(&addr).expect("the address is free again");
+    probe.set_nonblocking(true).unwrap();
+    rusty_tokio::time::sleep(Duration::from_secs(8)).await;
+    assert!(
+        probe.accept().is_err(),
+        "something still retries the dead hub"
+    );
+}

@@ -487,6 +487,12 @@ impl Engine {
         tick.set_missed_tick_behavior(rusty_tokio::time::MissedTickBehavior::Delay);
         let mut handles_gone = false;
         loop {
+            // No one can ask for anything and no relay is up: whichever of
+            // the two happened last, nothing is left to wait for.
+            if handles_gone && self.derp.is_none() {
+                rusty_log::warn!("engine: no handles and no relay; stopping");
+                break;
+            }
             // Clone the TUN handle and UDP socket (cheap Arc, or None) so the
             // read futures borrow locals rather than `self`, leaving the other
             // branches free to take `&mut self`.
