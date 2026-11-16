@@ -2066,28 +2066,40 @@ impl State {
     }
 
     /// Tells `block`'s owner that `client` asks for its lease (Q26): one
-    /// [`Message::LeaseRequested`], to the owner only. The owner decides.
+    /// [`Message::LeaseRequested`], to the owner only; for an open block on
+    /// a shared server, to the clients of the principal that may grant it
+    /// (the creator's). The one asked decides.
     fn request_lease(&mut self, client: ClientId, block: BlockId) -> Result<Outcome, Refusal> {
         let target = self.mux.block(block).ok_or(Error::UnknownBlock(block))?;
-        if target.input() != InputMode::OwnerOnly {
+        let owned = target.input() == InputMode::OwnerOnly;
+        let askees = self.mux.lease_askees(block)?;
+        if askees.is_empty() && !owned && self.mux.is_shared() {
+            return Err(
+                format!("owner_unreachable: block {block}'s creator can't be asked now").into(),
+            );
+        }
+        if askees.is_empty() {
             return Err(format!("block {block} takes input from anyone: acquire its lease").into());
         }
-        let owner = target
-            .owner()
-            .and_then(|o| o.client())
-            .ok_or(Error::Orphaned(block))?;
-        if owner == client {
+        if askees.contains(&client) {
             return Err(format!("block {block} is yours: acquire its lease").into());
         }
-        // As C77's input reports: an owner behind on its output isn't sent
+        // As C77's input reports: one behind on its output isn't sent
         // more, so a flood of asks can't push it over its budget.
-        let reachable = self
-            .clients
-            .get(&owner)
-            .is_some_and(|out| out.queued() <= INPUT_REPORT_LIMIT);
-        if !reachable || !self.has(owner, Features::LEASE_REQUESTS) {
+        let askees: Vec<ClientId> = askees
+            .into_iter()
+            .filter(|a| {
+                self.has(*a, Features::LEASE_REQUESTS)
+                    && self
+                        .clients
+                        .get(a)
+                        .is_some_and(|out| out.queued() <= INPUT_REPORT_LIMIT)
+            })
+            .collect();
+        if askees.is_empty() {
+            let who = if owned { "owner" } else { "creator" };
             return Err(
-                format!("owner_unreachable: block {block}'s owner can't be asked now").into(),
+                format!("owner_unreachable: block {block}'s {who} can't be asked now").into(),
             );
         }
         let principal = self
@@ -2101,7 +2113,9 @@ impl State {
             client,
             principal,
         };
-        self.send(owner, &ask);
+        for askee in askees {
+            self.send(askee, &ask);
+        }
         self.flush();
         Ok(Outcome::Done(None))
     }
@@ -3193,6 +3207,40 @@ mod regression {
                 takeover,
             );
             assert_eq!(again, client, "the token still works for its owner");
+        });
+    }
+
+    /// An open block of a shared server whose creator is not connected has
+    /// no one to ask: that is unreachable, not "takes input from anyone".
+    #[test]
+    fn a_lease_request_with_the_creator_away_is_unreachable() {
+        runtime().block_on(async {
+            let (shared, _, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let features = Features::CHECKPOINT_V6.union(Features::LEASE_REQUESTS);
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            // The session's creator is a principal with no connection.
+            let session = state.mux.sessions().next().unwrap().id();
+            let away = Principal::unix(1002, Some("away".into())).unwrap();
+            state.mux.set_creator(session, away).unwrap();
+            let (out, _inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            assert_eq!(state.mux.lease_askees(block), Ok(Vec::new()));
+            let refused = state.request_lease(guest, block).err().map(|r| r.reason);
+            assert!(
+                refused
+                    .as_deref()
+                    .is_some_and(|r| r.contains("owner_unreachable")),
+                "{refused:?}"
+            );
         });
     }
 

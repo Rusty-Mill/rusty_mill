@@ -16,7 +16,7 @@ not part of C69, and it needs Nano's go ([term ROADMAP](../term/ROADMAP.md) ques
 | (a) | Own the socket's name (Orca O6) and a default socket, so the socket argument is optional | done (#1555) |
 | (b) | Auto-start from `rusty-mux` and `rusty-mux-gui`, and `--idle-exit SECS` | done (#1558) |
 | (c) | systemd user units, socket activation (`LISTEN_FDS`) | this PR |
-| (d) | utmp entries | deferred: needs setgid `utmp` or `libutempter`, both owner gates (pack Q29) |
+| (d) | utmp entries | declined (wontdo): Nano chose not to build it, pack Q29 and D276 |
 
 FreeBSD is not a server target (pack D130, Nano "Q8 not now").
 
@@ -120,4 +120,4 @@ started a server with no window, a second GUI shared it, and the server outlived
 its blocks lived. After the blocks closed, it stopped about 60 s later; when the GUI had been
 killed rather than closed, it took about 30 s longer (`ORPHAN_GRACE`).
 
-C69 is done except (d), utmp entries, which is deferred (pack Q29).
+C69 is done. (d), utmp entries, is declined (wontdo; pack Q29, D276).

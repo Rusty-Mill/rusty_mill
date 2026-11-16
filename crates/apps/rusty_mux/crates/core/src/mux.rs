@@ -1241,9 +1241,17 @@ impl Mux {
     }
 
     /// Whether the open `block` takes `client`'s lease without a grant:
-    /// always, but on a shared server only for its creator's principal.
+    /// always, but on a shared server only for its creator's principal and
+    /// the server's own account.
     fn may_lease_here(&self, client: ClientId, block: BlockId) -> bool {
-        self.shared_account.is_none() || self.is_creator(client, block)
+        let Some(account) = self.shared_account.as_ref() else {
+            return true;
+        };
+        self.is_creator(client, block)
+            || self
+                .clients
+                .get(&client)
+                .is_some_and(|c| c.principal.id() == account.id())
     }
 
     /// Removes `client`'s grant on `block`, if any, and the lease it holds
@@ -1274,13 +1282,17 @@ impl Mux {
 
     /// On a shared server (D232), succeeds when `client` may rename or
     /// close `target`: it is of the server's own account or of the
-    /// principal that created the session `target` is in (the C33 rule). An
-    /// unshared server, a client target and an unknown one are left to
-    /// their own rules.
+    /// principal that created the session `target` is in (the C33 rule). A
+    /// client target is the account's or its own principal's alone, as
+    /// for disconnect (D161). An unshared server and an unknown target are
+    /// left to their own rules.
     pub fn authorize_manage(&self, client: ClientId, target: EntityId) -> Result<(), Error> {
         let Some(account) = self.shared_account.as_ref() else {
             return Ok(());
         };
+        if let EntityId::Client(other) = target {
+            return self.authorize_client(client, other, account);
+        }
         let session = match target {
             EntityId::Session(s) => Some(s),
             EntityId::Window(w) => self.windows.get(&w).map(|w| w.session),
@@ -1305,6 +1317,67 @@ impl Mux {
             true => Ok(()),
             false => Err(Error::NotCreator { client }),
         }
+    }
+
+    /// `client` may manage the connection `other`: it is of the server's
+    /// `account` or of `other`'s own principal. An unknown `other` is
+    /// left to the caller's own check.
+    fn authorize_client(
+        &self,
+        client: ClientId,
+        other: ClientId,
+        account: &Principal,
+    ) -> Result<(), Error> {
+        let caller = self
+            .clients
+            .get(&client)
+            .ok_or(Error::UnknownClient(client))?
+            .principal
+            .id();
+        let Some(other) = self.clients.get(&other) else {
+            return Ok(());
+        };
+        match caller == account.id() || caller == other.principal.id() {
+            true => Ok(()),
+            false => Err(Error::NotCreator { client }),
+        }
+    }
+
+    /// Whether this is a shared server (D232).
+    pub fn is_shared(&self) -> bool {
+        self.shared_account.is_some()
+    }
+
+    /// The clients to tell that `client` asks for `block`'s lease (C77): its
+    /// owner; on a shared server, for a block with none, every client of
+    /// the principal that may grant it, the creator's. Empty when no one
+    /// can be asked; [`Error::Orphaned`] for an owner-only block whose owner is
+    /// away.
+    pub fn lease_askees(&self, block: BlockId) -> Result<Vec<ClientId>, Error> {
+        let target = self.blocks.get(&block).ok_or(Error::UnknownBlock(block))?;
+        if target.input == InputMode::Open && self.shared_account.is_none() {
+            return Ok(Vec::new());
+        }
+        if let Some(owner) = target.owner.as_ref() {
+            return owner.client.map(|c| vec![c]).ok_or(Error::Orphaned(block));
+        }
+        if self.shared_account.is_none() {
+            return Ok(Vec::new());
+        }
+        let creator = self
+            .blocks
+            .get(&block)
+            .and_then(|b| self.windows.get(&b.window))
+            .and_then(|w| self.sessions.get(&w.session))
+            .and_then(Session::creator)
+            .or(self.shared_account.as_ref())
+            .map(Principal::id);
+        Ok(self
+            .clients
+            .iter()
+            .filter(|(_, c)| Some(c.principal.id()) == creator)
+            .map(|(id, _)| *id)
+            .collect())
     }
 
     /// Succeeds when `client` may change `block`: it has no owner, or

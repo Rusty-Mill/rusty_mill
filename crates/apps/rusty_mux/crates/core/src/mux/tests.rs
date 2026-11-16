@@ -1541,11 +1541,20 @@ fn on_a_shared_server_an_open_block_leases_only_within_its_creators_principal() 
     let (mut mux, block, creator) = shared();
     let guest = connect(&mut mux);
     mux.attach(guest, block).expect("attach");
+    let stranger = mux.connect(
+        Principal::unix(1002, Some("third".into())).expect("principal"),
+        Transport::Socket,
+    );
+    assert_eq!(
+        mux.attach(stranger, block),
+        Err(Error::NotCreator { client: stranger })
+    );
     assert_eq!(
         mux.acquire_lease(guest, block),
-        Err(Error::InputGated(block)),
-        "even the server's own account needs a grant"
+        Ok(()),
+        "the server's own account leases a guest's open block"
     );
+    mux.release_lease(guest, block).expect("release");
     let second = connect_other(&mut mux);
     mux.attach(second, block).expect("attach");
     assert_eq!(
@@ -1560,8 +1569,10 @@ fn on_a_shared_server_an_open_block_leases_only_within_its_creators_principal() 
 #[test]
 fn the_creators_principal_grants_a_guest_the_lease_of_an_unowned_block() {
     let (mut mux, block, creator) = shared();
-    let guest = connect(&mut mux);
-    mux.attach(guest, block).expect("attach");
+    let guest = mux.connect(
+        Principal::unix(1002, Some("third".into())).expect("principal"),
+        Transport::Socket,
+    );
     assert_eq!(
         mux.grant(guest, block, guest, NOW + 1, NOW),
         Err(Error::NotOwner {
@@ -1572,6 +1583,7 @@ fn the_creators_principal_grants_a_guest_the_lease_of_an_unowned_block() {
     );
     mux.grant(creator, block, guest, NOW + 60_000, NOW)
         .expect("grant");
+    mux.attach(guest, block).expect("attach");
     assert_eq!(mux.acquire_lease(guest, block), Ok(()));
     mux.revoke(creator, block, guest).expect("revoke");
     assert_eq!(mux.block(block).and_then(|b| b.lease()), None, "taken back");
@@ -1852,4 +1864,39 @@ fn a_share_skips_blocks_its_sharer_may_not_grant() {
         mux.block(block).is_some_and(|b| b.grants().is_empty()),
         "another client's owned block stays its owner's to grant"
     );
+
+#[test]
+fn on_a_shared_server_a_client_is_renamed_only_by_its_principal_or_the_account() {
+    let (mut mux, _, creator) = shared();
+    let account = connect(&mut mux);
+    let stranger = mux.connect(
+        Principal::unix(1002, Some("third".into())).expect("principal"),
+        Transport::Socket,
+    );
+    let twin = connect_other(&mut mux);
+    let target = EntityId::Client(creator);
+    assert_eq!(
+        mux.authorize_manage(stranger, target),
+        Err(Error::NotCreator { client: stranger })
+    );
+    assert_eq!(mux.authorize_manage(creator, target), Ok(()));
+    assert_eq!(mux.authorize_manage(twin, target), Ok(()), "same principal");
+    assert_eq!(mux.authorize_manage(account, target), Ok(()));
+}
+
+#[test]
+fn a_lease_request_on_an_open_shared_block_goes_to_the_creators_clients() {
+    let (mut mux, block, creator) = shared();
+    let twin = connect_other(&mut mux);
+    let guest = connect(&mut mux);
+    let mut askees = mux.lease_askees(block).expect("askees");
+    askees.sort_by_key(|c| (*c != creator, *c != twin));
+    assert_eq!(askees, vec![creator, twin]);
+    assert!(!askees.contains(&guest));
+}
+
+#[test]
+fn an_unshared_open_block_has_no_one_to_ask() {
+    let (mux, _, _, block) = fixture();
+    assert_eq!(mux.lease_askees(block), Ok(Vec::new()));
 }
