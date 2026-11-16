@@ -2053,6 +2053,11 @@ impl State {
         let target = self.mux.block(block).ok_or(Error::UnknownBlock(block))?;
         let owned = target.input() == InputMode::OwnerOnly;
         let askees = self.mux.lease_askees(block)?;
+        if askees.is_empty() && !owned && self.mux.is_shared() {
+            return Err(
+                format!("owner_unreachable: block {block}'s creator can't be asked now").into(),
+            );
+        }
         if askees.is_empty() {
             return Err(format!("block {block} takes input from anyone: acquire its lease").into());
         }
@@ -3181,6 +3186,35 @@ mod regression {
                 takeover,
             );
             assert_eq!(again, client, "the token still works for its owner");
+        });
+    }
+
+    /// An open block of a shared server whose creator is not connected has
+    /// no one to ask: that is unreachable, not "takes input from anyone".
+    #[test]
+    fn a_lease_request_with_the_creator_away_is_unreachable() {
+        runtime().block_on(async {
+            let (shared, _, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let features = Features::CHECKPOINT_V6.union(Features::LEASE_REQUESTS);
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            let refused = state.request_lease(guest, block).err().map(|r| r.reason);
+            assert!(
+                refused
+                    .as_deref()
+                    .is_some_and(|r| r.contains("owner_unreachable")),
+                "{refused:?}"
+            );
         });
     }
 

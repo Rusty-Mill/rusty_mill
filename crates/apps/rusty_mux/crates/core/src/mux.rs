@@ -1192,6 +1192,11 @@ impl Mux {
         }
     }
 
+    /// Whether this is a shared server (D232).
+    pub fn is_shared(&self) -> bool {
+        self.shared_account.is_some()
+    }
+
     /// The clients to tell that `client` asks for `block`'s lease (C77): its
     /// owner; on a shared server, for a block with none, every client of
     /// the principal that may grant it, the creator's. Empty when no one
