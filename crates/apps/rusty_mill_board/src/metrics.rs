@@ -327,7 +327,7 @@ mod tests {
                 Column::QA,
                 Column::REVIEW,
                 Column::BLOCKED,
-                Column::DEFERRED
+                Column::PARKED
             ]
         );
         let prios: Vec<u8> = m.by_priority.iter().map(|t| t.key).collect();

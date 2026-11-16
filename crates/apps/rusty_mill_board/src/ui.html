@@ -106,7 +106,7 @@ header.top{display:flex;align-items:center;gap:6px;padding:0 14px;min-height:52p
 [data-kind=work][data-late]{--ink-fill:var(--cyan-wash);--ink-on:var(--ink);--sw:#7fcbec}
 [data-kind=done]{--ink-fill:var(--done);--ink-on:var(--ink);--sw:var(--done)}
 [data-kind=blocked]{--ink-fill:var(--red-fill);--ink-on:#fff;--sw:var(--red-fill)}
-[data-kind=deferred]{--ink-fill:var(--done);--ink-on:var(--ink);--sw:var(--done)}
+[data-kind=parked]{--ink-fill:var(--done);--ink-on:var(--ink);--sw:var(--done)}
 
 /* The board. Columns scroll on their own; an empty one folds to a spine. */
 main{overflow:auto;padding:10px 14px 14px;min-height:0}
@@ -582,7 +582,7 @@ function render(){
 let view=location.pathname==="/inbox"?"decisions":["roadmap","metrics","archive"].includes(pref("view"))?pref("view"):"board",mapSeq=0;
 // Each lane's columns, from the workflow's kinds (the server's Lane::of).
 const LANE_KIND={now:"work",next:"queue",later:"backlog",blocked:"blocked",shipped:"done"};
-const laneHint=l=>FLOW.columns.filter(c=>c.kind===LANE_KIND[l]||(l==="later"&&c.kind==="deferred")).map(c=>c.label).join(", ")+(l==="shipped"?", last 30 days":"");
+const laneHint=l=>FLOW.columns.filter(c=>c.kind===LANE_KIND[l]||(l==="later"&&c.kind==="parked")).map(c=>c.label).join(", ")+(l==="shipped"?", last 30 days":"");
 const pressed=()=>{$("boardv").setAttribute("aria-pressed",view==="board");$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics");$("decide").setAttribute("aria-pressed",view==="decisions");$("archive").setAttribute("aria-pressed",view==="archive")};
 function setView(v){view=v;pref("view",v);pressed();render()}
 /* Roadmap: a timeline of the last ten weeks, the progress and recent activity under it, then the lanes.
@@ -1401,9 +1401,9 @@ function rolesTab(){
 }
 
 /* Columns and the moves between them. Edited as a draft and saved whole: the server checks it
-   (Backlog, Done and Blocked stay, Deferred is optional; a column that still holds cards cannot be removed). */
+   (Backlog, Done and Blocked stay, Parked is optional; a column that still holds cards cannot be removed). */
 let flowDraft=null;
-const KINDS={queue:"Queue: waits to be taken",work:"Work: claimed; leaving needs the claim",backlog:"Backlog",done:"Done",blocked:"Blocked",deferred:"Deferred: parked outside active work"};
+const KINDS={queue:"Queue: waits to be taken",work:"Work: claimed; leaving needs the claim",backlog:"Backlog",done:"Done",blocked:"Blocked",parked:"Parked: outside active work"};
 function columnsTab(){
   const t=el("div"),err=el("div",null,"err"),ro=!cfg.files.workflow;
   if(ro)t.append(unwritable("--settings-dir DIR"));
@@ -1412,7 +1412,7 @@ function columnsTab(){
   const held=id=>count(k=>k.column===id);
   const cols=el("table"),ch=el("tr");["Column","Label","Kind","Cards",""].forEach(h=>ch.append(el("th",h)));cols.append(ch);
   d.columns.forEach((c,i)=>{
-    const tr=el("tr"),fixed=["backlog","done","blocked","deferred"].includes(c.kind),anchor=fixed&&c.kind!=="deferred";   // Deferred has a fixed kind but may be removed
+    const tr=el("tr"),fixed=["backlog","done","blocked","parked"].includes(c.kind),anchor=fixed&&c.kind!=="parked";   // Parked has a fixed kind but may be removed
     const lb=field("input",{value:c.label,size:18,disabled:ro});lb.setAttribute("aria-label","label of "+c.id);lb.oninput=()=>{c.label=lb.value};
     const kind=fixed?el("span",KINDS[c.kind]):field("select",{disabled:ro});
     if(!fixed){for(const k of ["queue","work"])kind.append(new Option(KINDS[k],k));kind.value=c.kind;kind.onchange=()=>{c.kind=kind.value}}
@@ -1425,8 +1425,8 @@ function columnsTab(){
     tr.append(el("td",c.id),(()=>{const td=el("td");td.append(lb);return td})(),k,el("td",String(held(c.id))),ops);cols.append(tr);
   });
   const id=field("input",{placeholder:"new column id, e.g. design",size:20,disabled:ro}),nl=field("input",{placeholder:"label",size:14,disabled:ro});
-  const nk=field("select",{disabled:ro});for(const k of ["queue","work","deferred"])nk.append(new Option(KINDS[k],k));nk.value="work";
-  const add=btn("Add column",()=>{const v=nk.value==="deferred"?"deferred":id.value.trim();if(!v||d.columns.some(c=>c.id===v))return;
+  const nk=field("select",{disabled:ro});for(const k of ["queue","work","parked"])nk.append(new Option(KINDS[k],k));nk.value="work";
+  const add=btn("Add column",()=>{const v=nk.value==="parked"?"parked":id.value.trim();if(!v||d.columns.some(c=>c.id===v))return;
     const at=d.columns.findIndex(c=>c.kind==="done");d.columns.splice(at<0?d.columns.length:at,0,{id:v,label:nl.value.trim()||v,kind:nk.value})});
   const addRow=el("div",null,"row");addRow.append(id,nl,nk,add);
   const ids=d.columns.map(c=>c.id),caps=cfg.capabilities;

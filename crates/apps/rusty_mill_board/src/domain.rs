@@ -39,7 +39,7 @@ impl Column {
     /// Stuck; needs a human. Any open card may be moved here.
     pub const BLOCKED: Self = Self(Cow::Borrowed("blocked"));
     /// Parked outside active work. Optional: a workflow may have none.
-    pub const DEFERRED: Self = Self(Cow::Borrowed("deferred"));
+    pub const PARKED: Self = Self(Cow::Borrowed("parked"));
     /// The default workflow's queue: approved, waiting for a builder.
     pub const READY: Self = Self(Cow::Borrowed("ready"));
     /// The default workflow's building column.
