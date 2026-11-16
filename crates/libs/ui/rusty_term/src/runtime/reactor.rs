@@ -308,7 +308,10 @@ fn watch_config(parser: Arc<Mutex<AnsiParser>>, grid: Arc<Mutex<Grid>>, frame: A
     };
     let profile = crate::config::flag_value(&args, "--profile").map(str::to_string);
     let reload_args = vec!["--config".to_string(), path.to_string_lossy().into_owned()];
-    crate::config::watch(path, move || {
+    let themes = crate::config::theme_file::dir_of(&path);
+    let (parser2, grid2, frame2) = (Arc::clone(&parser), Arc::clone(&grid), Arc::clone(&frame));
+    let reload = move || {
+        let (parser, grid, frame) = (&parser2, &grid2, &frame2);
         let (mut new, mut warnings) = crate::config::Config::load(&reload_args);
         if let Some(name) = &profile
             && let Some(w) = new.apply_profile(name)
@@ -322,14 +325,22 @@ fn watch_config(parser: Arc<Mutex<AnsiParser>>, grid: Arc<Mutex<Grid>>, frame: A
             }
             g.force_full_repaint();
         }
-        let old = parser.lock().retheme(new.theme);
-        if old != new.theme {
-            g.retheme(&old, &new.theme);
+        // A theme that no longer resolves keeps the one on screen (D73).
+        if !new.theme_failed {
+            let old = parser.lock().retheme(new.theme);
+            if old != new.theme {
+                g.retheme(&old, &new.theme);
+            }
         }
         g.set_scrollback_max(new.scrollback.unwrap_or(crate::core::SCROLLBACK_MAX));
         drop(g);
         frame.notify_one();
-    });
+    };
+    let reload = Arc::new(reload);
+    for watched in std::iter::once(path).chain(themes) {
+        let reload = Arc::clone(&reload);
+        crate::config::watch(watched, move || reload());
+    }
 }
 
 #[cfg(unix)]

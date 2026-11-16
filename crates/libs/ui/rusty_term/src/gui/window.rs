@@ -421,10 +421,14 @@ fn launch<'a>(
     let args = crate::config::own_args(&all);
     let config_path = crate::config::Config::file_path(args);
     if let Some(path) = config_path.clone() {
-        let watch_proxy = proxy.clone();
-        crate::config::watch(path, move || {
-            let _ = watch_proxy.send_event(UserEvent::ConfigChanged);
-        });
+        // The themes dir too: a theme file edit reloads like a config save.
+        let themes = crate::config::theme_file::dir_of(&path);
+        for watched in std::iter::once(path).chain(themes) {
+            let watch_proxy = proxy.clone();
+            crate::config::watch(watched, move || {
+                let _ = watch_proxy.send_event(UserEvent::ConfigChanged);
+            });
+        }
     }
 
     let profile_override = crate::config::flag_value(args, "--profile").map(str::to_string);
@@ -2884,6 +2888,13 @@ impl WindowState<'_> {
         }
         for w in &warnings {
             eprintln!("rusty_term: {w}");
+        }
+        if new.theme_failed {
+            // A theme that no longer resolves (D73): keep the one on screen.
+            new.theme = self.theme;
+            new.theme_auto = self.config.theme_auto;
+            new.theme_dark = self.config.theme_dark;
+            new.theme_light = self.config.theme_light;
         }
         for tab in &self.tabs {
             for p in &tab.panes {

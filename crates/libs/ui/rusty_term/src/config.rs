@@ -22,6 +22,8 @@ use std::path::PathBuf;
 use crate::core::{CursorShape, Theme};
 use crate::keymap::{Keymap, parse_action, parse_chord};
 
+pub mod theme_file;
+
 /// Initial window state (`--maximized` / `--fullscreen`, or a `[window]
 /// launch_mode` config key); `None` is the normal windowed default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,6 +221,12 @@ pub struct Config {
     /// The console host for Windows shells (`[console] host`); other
     /// platforms ignore it.
     pub console_host: Option<ConsoleHost>,
+    /// Where `theme = "name"` looks for a theme file before the built-in
+    /// presets (`themes/` beside the config file). `None`: presets only.
+    pub themes_dir: Option<PathBuf>,
+    /// A theme named in the file could not be resolved (unknown name or a bad
+    /// theme file). A live reload then keeps the theme it already has.
+    pub theme_failed: bool,
 }
 
 impl Config {
@@ -234,7 +242,7 @@ impl Config {
         };
         match std::fs::read_to_string(&path) {
             Ok(text) => {
-                let (cfg, parse_warnings) = parse(&text);
+                let (cfg, parse_warnings) = parse_in(&text, theme_file::dir_of(&path));
                 warnings.extend(
                     parse_warnings
                         .into_iter()
@@ -625,9 +633,20 @@ fn header_name(line: &str) -> Option<String> {
 /// half-second latency is imperceptible next to a manual save. Also fires
 /// when the file first appears.
 pub fn watch(path: PathBuf, on_change: impl Fn() + Send + 'static) {
+    // A directory (the themes dir) stamps as its newest entry plus the sum
+    // of entry sizes and the count, so adds, removes and edits all show.
     fn stamp(p: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
         let m = std::fs::metadata(p).ok()?;
-        Some((m.modified().ok()?, m.len()))
+        if !m.is_dir() {
+            return Some((m.modified().ok()?, m.len()));
+        }
+        let mut stamp = (std::time::UNIX_EPOCH, 0);
+        for e in std::fs::read_dir(p).ok()?.flatten() {
+            let Ok(em) = e.metadata() else { continue };
+            stamp.0 = stamp.0.max(em.modified().unwrap_or(std::time::UNIX_EPOCH));
+            stamp.1 += em.len() + 1;
+        }
+        Some(stamp)
     }
     std::thread::spawn(move || {
         let mut last = stamp(&path);
@@ -655,10 +674,25 @@ enum Value {
     Bool(bool),
 }
 
+/// Resolve `name` to a theme (user file first, then preset), recording a
+/// failure on `cfg` so a live reload can keep the old theme.
+fn named_theme(cfg: &mut Config, name: &str) -> Result<Theme, String> {
+    theme_file::resolve(name, cfg.themes_dir.as_deref()).inspect_err(|_| cfg.theme_failed = true)
+}
+
 /// Parse config text. Never fails: every malformed or unknown line becomes a
 /// warning and is otherwise ignored.
+#[cfg(test)]
 fn parse(text: &str) -> (Config, Vec<String>) {
-    let mut cfg = Config::default();
+    parse_in(text, None)
+}
+
+/// [`parse`] with the directory that `theme = "name"` checks for theme files.
+fn parse_in(text: &str, themes_dir: Option<PathBuf>) -> (Config, Vec<String>) {
+    let mut cfg = Config {
+        themes_dir,
+        ..Config::default()
+    };
     let mut warnings = Vec::new();
     let mut section = String::new();
 
@@ -768,18 +802,16 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
             if name.eq_ignore_ascii_case("auto") {
                 cfg.theme_auto = true;
             } else {
-                cfg.theme = preset(&name).ok_or_else(|| {
-                    format!("unknown theme `{name}` (try {})", PRESETS.join(", "))
-                })?;
+                cfg.theme = named_theme(cfg, &name)?;
             }
         }
         ("", "theme_dark") => {
             let name = expect_str(key, value)?;
-            cfg.theme_dark = Some(preset(&name).ok_or_else(|| format!("unknown theme `{name}`"))?);
+            cfg.theme_dark = Some(named_theme(cfg, &name)?);
         }
         ("", "theme_light") => {
             let name = expect_str(key, value)?;
-            cfg.theme_light = Some(preset(&name).ok_or_else(|| format!("unknown theme `{name}`"))?);
+            cfg.theme_light = Some(named_theme(cfg, &name)?);
         }
         ("", "minimum_contrast") => {
             let ratio = match value {
@@ -864,19 +896,7 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
             cfg.quake_height = Some(v as f32);
         }
         ("window", "quake_hotkey") => cfg.quake_hotkey = Some(expect_str(key, value)?),
-        ("colors", "foreground") => cfg.theme.fg = expect_color(key, value)?,
-        ("colors", "background") => cfg.theme.bg = expect_color(key, value)?,
-        ("colors", "cursor") => cfg.theme.cursor = expect_color(key, value)?,
-        ("colors", k) => {
-            let Some(n) = k
-                .strip_prefix("color")
-                .and_then(|n| n.parse::<usize>().ok())
-                .filter(|&n| n < 16)
-            else {
-                return Err(format!("unknown [colors] key `{k}`"));
-            };
-            cfg.theme.palette16[n] = expect_color(k, value)?;
-        }
+        ("colors", k) => set_color(&mut cfg.theme, k, value)?,
         ("", "copy_html") => cfg.copy_html = Some(expect_bool(key, value)?),
         ("console", "host") => {
             let name = expect_str(key, value)?;
@@ -930,14 +950,13 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
                     cfg.profiles.len() - 1
                 }
             };
-            let p = &mut cfg.profiles[idx];
             match k {
-                "shell" => p.shell = Some(expect_str(key, value)?),
-                "cwd" => p.cwd = Some(PathBuf::from(expect_str(key, value)?)),
+                "shell" => cfg.profiles[idx].shell = Some(expect_str(key, value)?),
+                "cwd" => cfg.profiles[idx].cwd = Some(PathBuf::from(expect_str(key, value)?)),
                 "theme" => {
                     let t = expect_str(key, value)?;
-                    p.theme =
-                        Some(preset(&t).ok_or_else(|| format!("unknown theme `{t}` in [{s}]"))?);
+                    let theme = named_theme(cfg, &t).map_err(|e| format!("{e} in [{s}]"))?;
+                    cfg.profiles[idx].theme = Some(theme);
                 }
                 other => return Err(format!("unknown key `{other}` in [{s}]")),
             }
@@ -990,6 +1009,27 @@ fn expect_dim(key: &str, v: Value) -> Result<u16, String> {
         Value::Int(i) => Err(format!("{key}: {i} out of range (1-65535)")),
         _ => Err(format!("{key}: expected an integer")),
     }
+}
+
+/// Set one `[colors]` key (`foreground`, `background`, `cursor`, `color0`..
+/// `color15`) on `theme`. Shared by the config file and theme files.
+fn set_color(theme: &mut Theme, key: &str, value: Value) -> Result<(), String> {
+    match key {
+        "foreground" => theme.fg = expect_color(key, value)?,
+        "background" => theme.bg = expect_color(key, value)?,
+        "cursor" => theme.cursor = expect_color(key, value)?,
+        k => {
+            let Some(n) = k
+                .strip_prefix("color")
+                .and_then(|n| n.parse::<usize>().ok())
+                .filter(|&n| n < 16)
+            else {
+                return Err(format!("unknown [colors] key `{k}`"));
+            };
+            theme.palette16[n] = expect_color(k, value)?;
+        }
+    }
+    Ok(())
 }
 
 /// A color: `"#RRGGBB"` or `"RRGGBB"`.
@@ -1775,6 +1815,30 @@ color15 = "ffffff"
         assert_eq!(cfg.theme.bg, 0x000000, "explicit bg wins");
         assert_eq!(cfg.theme.fg, 0xf8f8f2, "dracula fg kept");
         assert_eq!(cfg.theme.palette16[4], 0xbd93f9, "dracula purple kept");
+    }
+
+    #[test]
+    fn theme_files_resolve_everywhere_a_preset_does() {
+        let d = std::env::temp_dir().join(format!("rt-cfg-themes-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("mine.toml"), "[colors]\nbackground = \"#102030\"\n").unwrap();
+        let (cfg, warns) = parse_in(
+            "theme = \"mine\"\ntheme_light = \"mine\"\n[profile.p]\ntheme = \"mine\"\n",
+            Some(d.clone()),
+        );
+        assert!(warns.is_empty() && !cfg.theme_failed, "{warns:?}");
+        assert_eq!(cfg.theme.bg, 0x102030);
+        assert_eq!(cfg.theme_light.unwrap().bg, 0x102030);
+        assert_eq!(cfg.profile("p").unwrap().theme.unwrap().bg, 0x102030);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_theme_that_does_not_resolve_is_flagged_so_reload_keeps_the_old_one() {
+        let (cfg, warns) = parse_in("theme = \"missing\"\n", Some(PathBuf::from("/nonexistent")));
+        assert_eq!(warns.len(), 1);
+        assert!(cfg.theme_failed);
+        assert!(!parse("theme = \"nord\"\n").0.theme_failed);
     }
 
     #[test]
