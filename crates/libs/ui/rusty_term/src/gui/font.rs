@@ -82,6 +82,71 @@ pub(crate) struct FontSet {
     pub emoji: Option<Vec<u8>>,
 }
 
+impl FontSet {
+    /// Make the bold faces the base: bold becomes regular, bold-italic becomes
+    /// italic. A set with no bold face is returned unchanged.
+    pub(crate) fn bold_base(mut self) -> Self {
+        let Some(bold) = self.bold.clone() else {
+            return self;
+        };
+        self.regular = bold;
+        if self.bold_italic.is_some() {
+            self.italic = self.bold_italic.clone();
+        }
+        self
+    }
+}
+
+/// User cell-metric adjustments: line height as a multiple of the font's
+/// natural height, and extra horizontal advance in whole device pixels.
+/// One value feeds both renderers and the PTY grid size (via [`GlyphSource`]).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct FontMetrics {
+    pub line_height: f32,
+    pub letter_spacing: i32,
+}
+
+impl Default for FontMetrics {
+    fn default() -> Self {
+        FontMetrics {
+            line_height: 1.0,
+            letter_spacing: 0,
+        }
+    }
+}
+
+impl FontMetrics {
+    /// Clamp into the supported ranges; a non-finite line height is 1.0.
+    pub(crate) fn new(line_height: f32, letter_spacing: i32) -> Self {
+        let (lh_lo, lh_hi) = crate::config::LINE_HEIGHT;
+        let (ls_lo, ls_hi) = crate::config::LETTER_SPACING;
+        let line_height = if line_height.is_finite() {
+            line_height
+        } else {
+            1.0
+        };
+        FontMetrics {
+            line_height: line_height.clamp(lh_lo, lh_hi),
+            letter_spacing: letter_spacing.clamp(ls_lo, ls_hi),
+        }
+    }
+
+    /// Adjust natural `(cell_w, cell_h, baseline)`. Height scales by
+    /// `line_height` (min 1 px) and the baseline moves by half the change, so
+    /// text stays vertically centred; width grows by `letter_spacing` (min 1 px).
+    pub(crate) fn apply(self, w: usize, h: usize, baseline: i32) -> (usize, usize, i32) {
+        let nh = ((h as f32 * self.line_height).round() as usize).max(1);
+        let nw = (w as i32 + self.letter_spacing).max(1) as usize;
+        let base = baseline + (nh as i32 - h as i32).div_euclid(2);
+        (nw, nh, base)
+    }
+
+    /// Horizontal glyph shift that keeps a glyph centred in its adjusted cell.
+    fn glyph_dx(self) -> i32 {
+        self.letter_spacing.div_euclid(2)
+    }
+}
+
 /// Source of cell metrics and rasterized glyphs. [`FontCache`] is the real
 /// implementation; tests provide a deterministic mock.
 pub(crate) trait GlyphSource {
@@ -125,6 +190,8 @@ pub(crate) struct FontCache {
     cell_w: usize,
     cell_h: usize,
     baseline: i32,
+    /// X shift applied to font glyphs so letter spacing keeps them centred.
+    dx: i32,
     cache: HashMap<(char, Style), Rc<Glyph>>,
     /// Glyphs rasterized by glyph id (ligatures / contextual substitutions),
     /// which the `(char, Style)` cache can't key.
@@ -179,10 +246,24 @@ impl FontCache {
             cell_w,
             cell_h,
             baseline,
+            dx: 0,
             cache: HashMap::new(),
             gid_cache: HashMap::new(),
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         })
+    }
+
+    /// Apply user cell metrics. Call right after [`FontCache::new`], before any
+    /// glyph is drawn (the caches are cleared).
+    pub(crate) fn with_metrics(mut self, m: FontMetrics) -> Self {
+        let (w, h, b) = m.apply(self.cell_w, self.cell_h, self.baseline);
+        self.cell_w = w;
+        self.cell_h = h;
+        self.baseline = b;
+        self.dx = m.glyph_dx();
+        self.cache.clear();
+        self.gid_cache.clear();
+        self
     }
 
     /// This cache's identity: equal only for frames drawn with the same
@@ -293,7 +374,9 @@ impl FontCache {
             .as_ref()
             .unwrap_or_else(|| self.faces[0].as_ref().unwrap());
         let ratio = self.scale / face.units_per_em() as f32;
-        let g = Rc::new(rasterize_id(face, ratio, gid));
+        let mut g = rasterize_id(face, ratio, gid);
+        g.left += self.dx;
+        let g = Rc::new(g);
         self.gid_cache.insert((gid, style), Rc::clone(&g));
         g
     }
@@ -328,6 +411,10 @@ impl GlyphSource for FontCache {
                     // classification allots; contain-fit them so icons never
                     // clip or bleed into the neighbor cell (Ghostty-style
                     // glyph constraining).
+                    // Shift first, so a PUA glyph is fitted to the cell it is
+                    // finally drawn in and never leaves it.
+                    let mut g = g;
+                    g.left += self.dx;
                     if is_private_use(ch) {
                         constrain_to_cell(
                             g,
@@ -529,24 +616,27 @@ pub(crate) fn load_default_font(configured: Option<&std::path::Path>) -> Option<
 
 /// Load the full [`FontSet`]: the regular face (see [`load_default_font`]),
 /// optional bold/italic/bold-italic faces (explicit config paths or filename-
-/// derived siblings of the regular font), and a fallback chain (an optional
-/// config path plus common system CJK/symbol fonts).
+/// derived siblings of the regular font), and a fallback chain (the
+/// configured paths, in order, plus common system CJK/symbol fonts).
 pub(crate) fn load_set(
     regular_path: Option<&std::path::Path>,
     bold: Option<&std::path::Path>,
     italic: Option<&std::path::Path>,
     bold_italic: Option<&std::path::Path>,
-    fallback: Option<&std::path::Path>,
+    fallback: &[std::path::PathBuf],
 ) -> Option<FontSet> {
     let regular = load_default_font(regular_path)?;
     let mut fb: Vec<Vec<u8>> = Vec::new();
-    if let Some(b) = fallback.and_then(|p| std::fs::read(p).ok()) {
-        fb.push(b);
+    for p in fallback.iter().take(crate::config::FONT_FALLBACK_MAX) {
+        match read_font_file(p) {
+            Ok(b) => fb.push(b),
+            Err(e) => eprintln!("rusty_term: font_fallback {}: {e}", p.display()),
+        }
     }
     // Auto-discover an installed Nerd Fonts symbols companion (the unpatched
     // icons-only face): with it in the chain, any base font gets working
     // Powerline/devicon/codicon glyphs without a patched font or any config.
-    // An explicit `font_fallback` still wins (it's first in the chain).
+    // Explicit `font_fallback` entries still win (they come first, in order).
     if let Some(b) = find_nerd_symbols() {
         fb.push(b);
     }
@@ -565,6 +655,22 @@ pub(crate) fn load_set(
         fallback: fb,
         emoji,
     })
+}
+
+/// Largest font file read from a configured path.
+const FONT_FILE_MAX: u64 = 64 << 20;
+
+/// Read a configured font: a regular file no larger than [`FONT_FILE_MAX`], so
+/// a FIFO, device or huge file can't hang or exhaust memory.
+fn read_font_file(p: &std::path::Path) -> Result<Vec<u8>, String> {
+    let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a regular file".into());
+    }
+    if meta.len() > FONT_FILE_MAX {
+        return Err(format!("larger than {} MiB", FONT_FILE_MAX >> 20));
+    }
+    std::fs::read(p).map_err(|e| e.to_string())
 }
 
 /// Load a styled variant: the explicit `configured` path if readable, else a
@@ -665,6 +771,78 @@ const SYSTEM_FALLBACKS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shifted_wide_icon_stays_inside_adjusted_cell() {
+        // Natural 10 px cell, letter_spacing -2 and +8: a full-width icon,
+        // shifted by the spacing offset first, must still end inside the box.
+        for ls in [-2, 8] {
+            let m = FontMetrics::new(1.0, ls);
+            let (box_w, box_h, base) = m.apply(10, 20, 16);
+            let icon = Glyph {
+                width: 10,
+                height: 12,
+                left: m.glyph_dx(),
+                top: -14,
+                coverage: vec![255; 120],
+                color: None,
+            };
+            let g = constrain_to_cell(icon, box_w, box_h, base);
+            assert!(
+                g.left >= 0 && g.left as usize + g.width <= box_w,
+                "ls {ls}: left {} width {} box {box_w}",
+                g.left,
+                g.width
+            );
+        }
+    }
+
+    #[test]
+    fn metrics_default_is_identity_and_clamps() {
+        assert_eq!(FontMetrics::default().apply(9, 18, 14), (9, 18, 14));
+        let m = FontMetrics::new(9.0, -50);
+        assert_eq!((m.line_height, m.letter_spacing), (2.0, -2));
+        let m = FontMetrics::new(0.0, 99);
+        assert_eq!((m.line_height, m.letter_spacing), (0.8, 8));
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(FontMetrics::new(bad, 0).line_height, 1.0);
+        }
+    }
+
+    #[test]
+    fn font_file_reader_refuses_non_files() {
+        assert!(read_font_file(std::path::Path::new("/dev/null")).is_err());
+        assert!(read_font_file(std::path::Path::new("/")).is_err());
+        assert!(read_font_file(std::path::Path::new("/nonexistent/f.ttf")).is_err());
+    }
+
+    #[test]
+    fn metrics_scale_cell_and_centre_baseline() {
+        let m = FontMetrics::new(1.5, 2);
+        // h 20 -> 30 (+10): baseline moves down 5; w 9 -> 11.
+        assert_eq!(m.apply(9, 20, 16), (11, 30, 21));
+        // 0.8 of 20 -> 16 (-4): baseline moves up 2; w never below 1.
+        assert_eq!(FontMetrics::new(0.8, -2).apply(2, 20, 16), (1, 16, 14));
+    }
+
+    #[test]
+    fn bold_base_swaps_faces_only_when_bold_exists() {
+        let set = FontSet {
+            regular: vec![1],
+            bold: Some(vec![2]),
+            bold_italic: Some(vec![4]),
+            italic: Some(vec![3]),
+            ..FontSet::default()
+        }
+        .bold_base();
+        assert_eq!((set.regular, set.italic), (vec![2], Some(vec![4])));
+        let none = FontSet {
+            regular: vec![1],
+            ..FontSet::default()
+        }
+        .bold_base();
+        assert_eq!(none.regular, vec![1]);
+    }
 
     #[test]
     fn constrain_scales_oversized_pua_glyphs_and_leaves_fitting_ones() {

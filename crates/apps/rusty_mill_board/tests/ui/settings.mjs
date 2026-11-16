@@ -53,32 +53,44 @@ await dialog.getByRole("button", { name: "Add agent" }).click();
 await page.waitForFunction(() => document.querySelector("#settings .err")?.textContent.includes("already"));
 check(true, "a duplicate agent is refused with the reason");
 
-// Repositories and projects.
+// Repositories and projects are two tabs; each button applies at once and the sheet redraws.
+const settled = async () => { await page.waitForTimeout(400); await page.waitForFunction(() => !document.querySelector("#settings .err")?.textContent); };
 await dialog.getByRole("button", { name: "Repositories" }).click();
-await dialog.locator("input[placeholder='new repository name']").fill("rusty_mill");
-await dialog.getByRole("button", { name: "+ repository" }).click();
-await dialog.getByRole("button", { name: "+ project" }).last().click();
-await dialog.locator("input[placeholder='project name']").fill("rocket_league");
-await dialog.locator("textarea").fill("crates/apps/rocket_league");
-// A save redraws the sheet from fresh settings; wait for that before touching it again.
-const saved = () => Promise.all([page.waitForResponse((r) => r.url().includes("/api/settings_get")), dialog.getByRole("button", { name: "Save repositories and projects" }).click()]).then(() => page.waitForTimeout(300));
-await saved();
-await page.waitForFunction(() => !document.querySelector("#settings .err")?.textContent);
-const listed = (await api(rotated, "board_projects")).body.repos;
-check(listed.rusty_mill?.rocket_league?.[0] === "crates/apps/rocket_league", "a repository with a project is saved");
-
-// The same project name under a second repository makes it span both; the first stays its default.
-await dialog.locator("input[placeholder='new repository name']").fill("tools");
-await dialog.getByRole("button", { name: "+ repository" }).click();
-await dialog.getByRole("button", { name: "+ project" }).last().click();
-await dialog.locator("input[placeholder='project name']").last().fill("rocket_league");
-await dialog.locator("textarea").last().fill("ci");
+for (const r of ["rusty_mill", "tools"]) {
+  await dialog.locator("input[placeholder='new repository name']").fill(r);
+  await dialog.getByRole("button", { name: "+ repository" }).click();
+  await settled();
+}
 await dialog.locator("input[aria-label='tools GitHub repository']").fill("rusty-mill/tools");
-await saved();
-await page.waitForFunction(() => !document.querySelector("#settings .err")?.textContent);
+await dialog.locator("fieldset", { hasText: "tools" }).getByRole("button", { name: "Save" }).click();
+await settled();
+check((await api(TOKEN, "settings_get")).body.registry.repos.tools?.github === "rusty-mill/tools", "a repository's GitHub slug is saved");
+
+await dialog.getByRole("button", { name: "Projects", exact: true }).click();
+await dialog.locator("input[placeholder='new project name']").fill("rocket_league");
+await dialog.locator("select[aria-label='repository of the new project']").selectOption("rusty_mill");
+await dialog.locator("textarea[placeholder^='paths in that repository']").fill("crates/apps/rocket_league");
+await dialog.getByRole("button", { name: "+ project" }).click();
+await settled();
+const listed = (await api(rotated, "board_projects")).body.repos;
+check(listed.rusty_mill?.rocket_league?.[0] === "crates/apps/rocket_league", "a project in a repository is saved");
+
+// Linking it to a second repository makes it span both; the first stays its default. Unlinking undoes it.
+const fs = dialog.locator("fieldset", { hasText: "rocket_league" });
+await fs.locator("select[aria-label='rocket_league repository to link']").selectOption("tools");
+await fs.locator("textarea[placeholder^='paths there']").fill("ci");
+await fs.getByRole("button", { name: "Link repository" }).click();
+await settled();
 const spanning = (await api(rotated, "board_projects")).body.projects.rocket_league;
-check(spanning?.default_repo === "rusty_mill" && spanning.repos.tools?.[0] === "ci" && spanning.repos.rusty_mill?.[0] === "crates/apps/rocket_league", "a project named under two repositories spans both, keeping its default");
-check((await api(TOKEN, "settings_get")).body.registry.repos.tools?.github === "rusty-mill/tools", "and a repository's GitHub slug is saved");
+check(spanning?.default_repo === "rusty_mill" && spanning.repos.tools?.[0] === "ci" && spanning.repos.rusty_mill?.[0] === "crates/apps/rocket_league", "linking a project to a second repository makes it span both, keeping its default");
+await fs.locator("textarea[aria-label='rocket_league paths in tools']").fill("ci\nbuild");
+await fs.getByRole("button", { name: "Save paths" }).nth(1).click();
+await settled();
+check(((await api(rotated, "board_projects")).body.projects.rocket_league.repos.tools ?? []).join() === "ci,build", "its paths in a linked repository can be changed");
+await fs.getByRole("button", { name: "Unlink" }).nth(1).click();
+await settled();
+check(Object.keys((await api(rotated, "board_projects")).body.projects.rocket_league.repos).join() === "rusty_mill", "unlinking drops the repository again");
+check(await dialog.getByRole("button", { name: "Unlink" }).first().isDisabled(), "a project's only repository cannot be unlinked");
 await dialog.getByRole("button", { name: "Close" }).click();
 await page.locator("#repo option", { hasText: "rusty_mill" }).waitFor({ state: "attached", timeout: 3000 }).catch(() => {});
 check((await page.locator("#repo option", { hasText: "rusty_mill" }).count()) >= 1, "and appears in the repository picker at once");
