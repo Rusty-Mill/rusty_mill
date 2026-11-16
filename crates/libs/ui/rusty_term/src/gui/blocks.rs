@@ -545,7 +545,9 @@ pub(crate) fn paint(
     let mut over: Vec<(Pixmap, (usize, usize))> = scene
         .blocks
         .iter()
-        .filter(|b| scene.fade_inactive && !b.focused)
+        // A down link already veils every block (D62); a second veil would
+        // stack to about 49%.
+        .filter(|b| scene.fade_inactive && !scene.dim && !b.focused)
         .filter_map(|b| fade(b, look))
         .collect();
     over.extend(scene.blocks.iter().filter_map(|b| badge(b, look, font)));
@@ -961,9 +963,6 @@ fn paint_zoomed_group(
     x
 }
 
-/// A block's F2 badge (D49), centred under its header: its own pixmap,
-/// since it sits over the grid, on the grid's background, and where it
-/// goes in the body.
 /// A veil over an unfocused block's grid: the terminal background at 30%
 /// shows it at 70% (D21). The frame and header keep full contrast (D27).
 fn fade(block: &Shown, look: &Look) -> Option<(Pixmap, (usize, usize))> {
@@ -978,6 +977,9 @@ fn fade(block: &Shown, look: &Look) -> Option<(Pixmap, (usize, usize))> {
     Some((veil, ((r.x + edge) as usize, top as usize)))
 }
 
+/// A block's F2 badge (D49), centred under its header: its own pixmap,
+/// since it sits over the grid, on the grid's background, and where it
+/// goes in the body.
 fn badge(block: &Shown, look: &Look, font: &mut UiText) -> Option<(Pixmap, (usize, usize))> {
     let n = block.badge?;
     let (s, c) = (look.scale, &look.chrome);
@@ -1840,6 +1842,12 @@ mod tests {
             "inside the border, under the header"
         );
         assert!(on.over[1].0.opacity > veil.opacity, "the badge stays whole");
+        let down = Scene {
+            dim: true,
+            ..scene(true)
+        };
+        let down = paint(1100, 350, &down, &look, &mut font);
+        assert_eq!(down.over.len(), 2, "the link's veil and the badge, no fade");
     }
 
     #[test]

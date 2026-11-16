@@ -1611,7 +1611,10 @@ impl WindowState<'_> {
             pressed: self.pressed.and_then(Hit::block),
         };
         let armed = self.armed;
-        let fade_inactive = self.config.dim_inactive_panes.unwrap_or(true);
+        let fade_inactive = self
+            .config
+            .dim_inactive_panes
+            .unwrap_or(crate::config::DIM_INACTIVE_DEFAULT);
         let body = &mut self.body;
         // F2 numbers follow the layout's order, 1 to 9 (handoff D104).
         let number = |id: u64| {
@@ -4927,6 +4930,8 @@ impl WindowState<'_> {
             || self.overlay.is_some()
             || self.popover_open()
             || self.armed
+            || self.searching.is_some()
+            || self.composing()
             || self.offline()
             || self.in_chrome(y)
         {
@@ -4952,6 +4957,12 @@ impl WindowState<'_> {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    /// Whether the focused pane has an input-method composition under way.
+    fn composing(&self) -> bool {
+        self.pane()
+            .is_some_and(|p| !p.grid.lock().ime_preedit.is_empty())
     }
 
     /// Whether something other than the blocks owns the pointer and the
@@ -5824,9 +5835,9 @@ impl WindowState<'_> {
                     }
                 }
             }
+            WindowEvent::PinchGesture { delta, phase, .. } => self.on_pinch(delta, phase),
             // Wheel up browses into scrollback history, wheel down back toward
             // the live bottom. A notch is `WHEEL_LINES`; trackpads report pixels.
-            WindowEvent::PinchGesture { delta, phase, .. } => self.on_pinch(delta, phase),
             WindowEvent::MouseWheel { delta, .. } => {
                 // Accumulate fractional delta across events instead of
                 // rounding each one independently — a high-resolution wheel

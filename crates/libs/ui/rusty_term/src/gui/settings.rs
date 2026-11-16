@@ -451,7 +451,9 @@ impl Settings {
             status_bar: cfg.status_bar.unwrap_or(true),
             command_marks: cfg.command_marks.unwrap_or(true),
             focus_follows_mouse: cfg.focus_follows_mouse.unwrap_or(false),
-            dim_inactive: cfg.dim_inactive_panes.unwrap_or(true),
+            dim_inactive: cfg
+                .dim_inactive_panes
+                .unwrap_or(config::DIM_INACTIVE_DEFAULT),
             opacity: cfg.opacity.unwrap_or(1.0),
             launch_mode: cfg.launch_mode,
             cols: cfg.cols.unwrap_or(DEFAULT_COLS),
