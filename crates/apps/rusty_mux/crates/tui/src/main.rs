@@ -2690,6 +2690,10 @@ mod client {
             }
             self.lease();
             self.fit();
+            // Browsing ends when the focused block is back on its live screen
+            // (it closed, or the server changed the focus).
+            self.browsing =
+                self.browsing && self.grid(self.focus).is_some_and(|g| g.view_offset > 0);
             let shown = match visible.as_slice() {
                 [(only, _)] if !self.browsing => Shown::Passing(*only),
                 _ => Shown::Composed(None),

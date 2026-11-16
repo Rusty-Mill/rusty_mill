@@ -20,9 +20,7 @@ rusty_mux_client = { workspace = true, features = ["screen"] }
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
 rusty_mux_transport = { workspace = true }
-# `gui` brings the scrolled viewport and the prompt marks, no new dependency
-# outside the repository (it adds rusty_regx for find).
-rusty_term_core = { workspace = true, features = ["gui"] }
+rusty_term_core = { workspace = true }
 rusty_uuid = { workspace = true }
 platform = { workspace = true }
 
