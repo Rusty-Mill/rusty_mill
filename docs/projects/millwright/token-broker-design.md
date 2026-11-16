@@ -48,7 +48,7 @@ Three layers, weakest first; the honest limit is stated below.
 Limit: a prompt-injected session can leak its own `agent_key`. Blast radius is one agent id
 and one role, but successive mints can cover **every repo in the agent's effective scope**,
 not one repo in aggregate. Revoking the key on the board stops *later* mints only. Tokens
-already issued stay valid until they expire (up to 1 hour); that exposure is accepted in v0.
+already issued stay valid until they expire (up to 1 hour); that exposure is a **proposed** v0 tradeoff, not yet accepted by Nano.
 If it is not acceptable, v2 can hold issued tokens in memory and call GitHub's
 [installation-token revocation](https://docs.github.com/en/rest/apps/installations#revoke-an-installation-access-token)
 on key revoke. Same accepted tradeoff as `agent_register`. Not isolation between hostile sessions.
@@ -107,7 +107,7 @@ Five tracked gates; items 1 and 2 are decided, the rest are open. This note auth
    -sign` behind the `signer` port, no new dependency, recommended for v0; (b) the `rsa`
    crate, already in Cargo.lock; (c) write private-key signing in `rusty_rsa` (needs
    blinding; most work and risk).
-3. **Mill Board verify tool** (read-only: `agent_id`+`key` -> role). A public API change
+3. **Mill Board verify tool** (read-only: `agent_id`+`key` -> effective role **and projects**). A public API change
    queued behind Mill Board's in-flight change (one-change-per-system). v0 avoids it.
 4. **Role table** (approved 2026-11-15, remind-me `mem_6d5d9c2e307743598c46fa521f1e509f`; the proposal file `g1-roles-proposal.md` lives in the project Library, not this repo) and **which App serves which
    role**; Apps exist, roles unmapped.
