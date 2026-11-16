@@ -45,7 +45,6 @@ use super::chrome::{Chrome, Marks};
 use super::confirm::{self, Answer, Confirm, ConfirmKey, Subject};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
-use super::link_policy;
 use super::motion;
 use super::pace::Pacer;
 use super::popover::{self, DetachedRow, Kind, Menu, Pick, Popover, Row};
@@ -55,6 +54,7 @@ use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use super::source::{Act, Feed, PaneIo, Remote, Source, Tree};
 use super::strip::{self, Spot, StripState};
+use super::{link_policy, link_trust};
 use crate::backend::BackendHandle;
 use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
@@ -6578,45 +6578,18 @@ fn open_link(link: &link_policy::Link) -> bool {
     spawned.is_ok()
 }
 
-/// Where the trusted origins live: beside `config.toml`, in a file of their
-/// own, so a runtime write never rewrites the user's hand-edited config (D72).
-fn trust_path() -> Option<std::path::PathBuf> {
-    Some(
-        rusty_dirs::config_root()?
-            .join("rusty_term")
-            .join("trusted_origins.toml"),
-    )
-}
-
-/// The saved trusted origins. A missing file is an empty list; any other
-/// read error is an error, so a save never overwrites what it could not read.
-fn read_trust() -> std::io::Result<link_policy::Policy> {
-    let path = trust_path().ok_or_else(|| std::io::Error::other("no config directory"))?;
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(link_policy::Policy::from_toml(&text)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(link_policy::Policy::default()),
-        Err(e) => Err(e),
-    }
-}
-
 /// At start an unreadable file trusts nothing: every site asks.
 fn load_trust() -> link_policy::Policy {
-    read_trust().unwrap_or_default()
+    link_trust::default_path()
+        .and_then(|p| link_trust::read(&p).ok())
+        .unwrap_or_default()
 }
 
-/// Save `policy` merged with what is on disk now (another window may have
-/// trusted a site since this one started), atomically (write beside, then
-/// rename). Returns what was saved.
+/// Save `policy` merged with the file (see [`link_trust::save`]).
 fn save_trust(policy: &link_policy::Policy) -> std::io::Result<link_policy::Policy> {
-    let merged = read_trust()?.union(policy);
-    let path = trust_path().ok_or_else(|| std::io::Error::other("no config directory"))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, merged.to_toml())?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(merged)
+    let path =
+        link_trust::default_path().ok_or_else(|| std::io::Error::other("no config directory"))?;
+    link_trust::save(&path, policy)
 }
 
 /// Map an OSC 22-requested pointer shape — a CSS `cursor` keyword, the
