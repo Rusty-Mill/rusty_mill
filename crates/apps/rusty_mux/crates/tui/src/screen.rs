@@ -113,8 +113,9 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
         }
         if let Some(grid) = view.grid {
             draw(&mut frame, view.rect, grid);
-            let ahead =
-                (view.overlay.as_ref()).and_then(|o| predict(&mut frame, view.rect, grid, o));
+            // A prediction sits at the live cursor: never over history.
+            let overlay = view.overlay.as_ref().filter(|_| grid.view_offset == 0);
+            let ahead = overlay.and_then(|o| predict(&mut frame, view.rect, grid, o));
             if view.block == focused {
                 // Shown only where the grid shows it, after the predictions.
                 let shown = cursor(view.rect, grid);
@@ -136,14 +137,16 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
 fn draw(frame: &mut Frame, rect: Rect, grid: &Grid) {
     let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
     for y in 0..rows.min(grid.rows) {
-        let cells: Vec<Cell> = grid.row_cells(y).take(cols).collect();
+        // Scrolled into history, the viewport shows it above the live rows.
+        let all: Vec<Cell> = match grid.view_offset {
+            0 => grid.row_cells(y).collect(),
+            _ => (0..grid.cols).map(|x| grid.viewport_cell(x, y)).collect(),
+        };
+        let cells = &all[..all.len().min(cols)];
         for (x, cell) in cells.iter().enumerate() {
             let wide_cut = x + 1 == cols
                 && cells.len() == cols
-                && grid
-                    .row_cells(y)
-                    .nth(cols)
-                    .is_some_and(|c| c.flags & WIDE_TRAILER != 0);
+                && all.get(cols).is_some_and(|c| c.flags & WIDE_TRAILER != 0);
             let glyph = match wide_cut {
                 true => Glyph::plain(' ', Style::of(cell)),
                 false => Glyph {
@@ -201,7 +204,8 @@ fn cursor(rect: Rect, grid: &Grid) -> Option<(u16, u16)> {
     let (cx, cy) = grid.cursor;
     let inside = cx < usize::from(rect.size.cols()) && cy < usize::from(rect.size.rows());
     // Both fit in u16: they are below the rect's size.
-    (grid.cursor_visible && inside).then(|| (rect.x + cx as u16, rect.y + cy as u16))
+    (grid.cursor_visible && grid.view_offset == 0 && inside)
+        .then(|| (rect.x + cx as u16, rect.y + cy as u16))
 }
 
 /// Box-drawing lines over every cell no view covers, joined where they
@@ -502,6 +506,60 @@ mod tests {
         let focused = frame.row(1)[4].style.fg;
         assert_eq!(focused, FOCUS);
         assert_ne!(frame.row(4)[4].style.fg, FOCUS);
+    }
+
+    #[test]
+    fn a_block_scrolled_to_a_prompt_shows_its_history_and_no_cursor() {
+        let mut g = Grid::new(4, 2);
+        let input = "\x1b]133;A\x07one\r\n\x1b]133;A\x07two\r\n\x1b]133;A\x07tri";
+        AnsiParser::new().advance(&mut g, input.as_bytes());
+        assert!(g.scroll_to_prev_prompt());
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            size: size(4, 2),
+        };
+        let views = [View {
+            block: id(1),
+            rect,
+            grid: Some(&g),
+            overlay: None,
+        }];
+        let frame = compose(size(4, 2), &views, id(1));
+        assert_eq!(text(&frame, 0), "one ");
+        assert_eq!(text(&frame, 1), "two ");
+        assert_eq!(frame.cursor, None);
+    }
+
+    #[test]
+    fn no_prediction_is_drawn_over_history() {
+        let mut g = Grid::new(4, 2);
+        let input = "\x1b]133;A\x07one\r\n\x1b]133;A\x07two\r\n\x1b]133;A\x07tri";
+        AnsiParser::new().advance(&mut g, input.as_bytes());
+        let drawn = |g: &Grid| {
+            let views = [View {
+                block: id(1),
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    size: size(4, 2),
+                },
+                grid: Some(g),
+                overlay: Some(Overlay {
+                    row: 0,
+                    cells: vec![(1, Some('X')), (2, Some('Y'))],
+                    cursor: 3,
+                }),
+            }];
+            compose(size(4, 2), &views, id(1))
+        };
+        assert!(g.scroll_to_prev_prompt());
+        let frame = drawn(&g);
+        assert_eq!(text(&frame, 0), "one ");
+        assert_eq!(frame.cursor, None);
+        // Back on the live screen the same overlay draws again.
+        g.reset_view();
+        assert_eq!(text(&drawn(&g), 0), "tXY ");
     }
 
     #[test]

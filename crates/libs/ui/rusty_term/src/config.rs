@@ -40,6 +40,9 @@ pub enum ReduceMotion {
     Off,
 }
 
+/// `[window] dim_inactive_panes` when unset (C62).
+pub const DIM_INACTIVE_DEFAULT: bool = true;
+
 /// OSC 52 clipboard policy (`clipboard` config key). A child program can ask
 /// the terminal to read the system clipboard back to it (`52;c;?`) — with no
 /// gate, `curl https://evil | cat` printing that escape sequence silently
@@ -127,6 +130,10 @@ pub struct Config {
     /// beside each OSC 133 command block — green success, red failure, the
     /// accent while running (`[window] command_marks`; default on).
     pub command_marks: Option<bool>,
+    /// Pointing at a pane focuses it, as a click does (`[window] focus_follows_mouse`; default off; C62).
+    pub focus_follows_mouse: Option<bool>,
+    /// Unfocused panes show at 70% (`[window] dim_inactive_panes`; default on; C62).
+    pub dim_inactive_panes: Option<bool>,
     /// Bottom status ribbon (windowed front-end): cwd, git branch, last
     /// command's exit status, scrollback position, and grid size in a
     /// one-cell bar flush with the window's bottom edge (`[window]
@@ -291,6 +298,8 @@ impl Config {
 # status_bar = false        # hide the bottom status ribbon (default on)
 # reduce_motion = "on"      # "system" (default, follow the OS), "on" or "off"
 # command_marks = false     # hide the per-command gutter marks (default on)
+# focus_follows_mouse = true  # pointing at a pane focuses it (default off)
+# dim_inactive_panes = false  # don't dim unfocused panes (default on)
 
 # copy_html = false         # don't add styled HTML to Ctrl+Shift+C copies
 # clipboard = "write-only"  # OSC 52 policy: "off", "write-only" (default), or "read-write"
@@ -787,6 +796,10 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
                 Value::Int(i) => i as f32,
                 _ => return Err(format!("{key}: expected a number")),
             };
+            // NaN would pass `clamp` and force every glyph to black or white.
+            if !ratio.is_finite() {
+                return Err(format!("{key}: expected a finite number"));
+            }
             cfg.minimum_contrast = Some(ratio.clamp(1.0, 21.0));
         }
         ("window", "cols") => cfg.cols = Some(expect_dim(key, value)?),
@@ -803,6 +816,10 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
         ("window", "ligatures") => cfg.ligatures = Some(expect_bool(key, value)?),
         ("window", "status_bar") => cfg.status_bar = Some(expect_bool(key, value)?),
         ("window", "command_marks") => cfg.command_marks = Some(expect_bool(key, value)?),
+        ("window", "focus_follows_mouse") => {
+            cfg.focus_follows_mouse = Some(expect_bool(key, value)?)
+        }
+        ("window", "dim_inactive_panes") => cfg.dim_inactive_panes = Some(expect_bool(key, value)?),
         ("window", "launch_mode") => {
             let name = expect_str(key, value)?;
             cfg.launch_mode = Some(match name.to_ascii_lowercase().as_str() {
@@ -1385,6 +1402,12 @@ color15 = "ffffff"
         // Out-of-range contrast clamps; integers accepted.
         let (cfg3, _) = parse("minimum_contrast = 99\n");
         assert_eq!(cfg3.minimum_contrast, Some(21.0));
+        // Non-finite values are refused with a warning, not clamped.
+        for bad in ["nan", "inf", "-inf"] {
+            let (cfg, warns) = parse(&format!("minimum_contrast = {bad}\n"));
+            assert_eq!(cfg.minimum_contrast, None, "{bad}");
+            assert_eq!(warns.len(), 1, "{bad}: {warns:?}");
+        }
     }
 
     #[test]
@@ -1737,6 +1760,64 @@ color15 = "ffffff"
         for &name in PRESETS {
             assert!(preset(name).is_some(), "advertised preset `{name}` missing");
         }
+    }
+
+    /// Contrast audit of the built-in presets (card #690 T3, gui-design D76).
+    /// The palettes are published ones, so low pairs are recorded, not edited:
+    /// `minimum_contrast` is what lifts them, and the second half proves it
+    /// does on every surface a glyph can sit on.
+    #[test]
+    fn preset_contrast_audit() {
+        use crate::core::{contrast_ratio, ensure_contrast};
+        // Known sub-4.5 default text and sub-3 cursors (published palettes).
+        let low_text = ["solarized-light"];
+        let low_cursor = ["catppuccin-latte"];
+        for &name in PRESETS {
+            let t = preset(name).expect("preset");
+            let text = contrast_ratio(t.fg, t.bg);
+            assert!(
+                text >= 4.5 || low_text.contains(&name),
+                "{name}: fg on bg {text:.2}"
+            );
+            assert!(
+                text >= 4.0,
+                "{name}: fg on bg {text:.2} fell below the floor"
+            );
+            let cursor = contrast_ratio(t.cursor, t.bg);
+            assert!(
+                cursor >= 3.0 || low_cursor.contains(&name),
+                "{name}: cursor on bg {cursor:.2}"
+            );
+            // Every colour on every theme surface, the cursor block included.
+            let inks: Vec<u32> = t.palette16.iter().copied().chain([t.fg, t.bg]).collect();
+            let surfaces = inks.iter().copied().chain([t.cursor]);
+            for bg in surfaces {
+                for &fg in &inks {
+                    let got = ensure_contrast(fg, bg, 4.5);
+                    let best = contrast_ratio(0xFFFFFF, bg).max(contrast_ratio(0x000000, bg));
+                    assert!(
+                        contrast_ratio(got, bg) >= 4.5f32.min(best) - 0.01,
+                        "{name}: {fg:06x} on {bg:06x} -> {got:06x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn focus_and_dim_keys_parse_and_default_unset() {
+        let (cfg, warns) =
+            parse("[window]\nfocus_follows_mouse = true\ndim_inactive_panes = true\n");
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(
+            (cfg.focus_follows_mouse, cfg.dim_inactive_panes),
+            (Some(true), Some(true))
+        );
+        let (cfg, _) = parse("");
+        assert_eq!(
+            (cfg.focus_follows_mouse, cfg.dim_inactive_panes),
+            (None, None)
+        );
     }
 
     #[test]
