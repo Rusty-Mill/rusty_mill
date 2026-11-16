@@ -434,10 +434,14 @@ fn launch<'a>(
     let args = crate::config::own_args(&all);
     let config_path = crate::config::Config::file_path(args);
     if let Some(path) = config_path.clone() {
-        let watch_proxy = proxy.clone();
-        crate::config::watch(path, move || {
-            let _ = watch_proxy.send_event(UserEvent::ConfigChanged);
-        });
+        // The themes dir too: a theme file edit reloads like a config save.
+        let themes = crate::config::theme_file::dir_of(&path);
+        for watched in std::iter::once(path).chain(themes) {
+            let watch_proxy = proxy.clone();
+            crate::config::watch(watched, move || {
+                let _ = watch_proxy.send_event(UserEvent::ConfigChanged);
+            });
+        }
     }
 
     let profile_override = crate::config::flag_value(args, "--profile").map(str::to_string);
@@ -2897,6 +2901,9 @@ impl WindowState<'_> {
         };
         let args = vec!["--config".to_string(), path.to_string_lossy().into_owned()];
         let (mut new, mut warnings) = crate::config::Config::load(&args);
+        // A theme key that no longer resolves keeps its old value (D73); a
+        // `--profile` theme still applies over it.
+        new.keep_failed_themes(&self.config, self.theme);
         if let Some(name) = &self.profile_override
             && let Some(w) = new.apply_profile(name)
         {
