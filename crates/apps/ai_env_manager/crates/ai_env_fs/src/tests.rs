@@ -172,6 +172,16 @@ fn symlink_inside_an_entry_fails_the_copy_cleanly() {
     assert!(!t.target(&e).exists(), "no partial copy left behind");
 }
 
+#[cfg(unix)]
+#[test]
+fn symlink_added_to_a_copy_reads_as_edited_not_an_error() {
+    let tmp = Tmp::new();
+    let (e, t) = fixture(&tmp);
+    enable(&e, &t, LinkMethod::Copy).unwrap();
+    std::os::unix::fs::symlink("/etc/hostname", t.target(&e).join("evil.md")).unwrap();
+    assert_eq!(observe(&e, &t).unwrap(), Observed::ManagedModified);
+}
+
 #[test]
 fn tree_hash_ignores_marker_and_sees_changes() {
     let tmp = Tmp::new();
