@@ -14,7 +14,7 @@
 # Either way every byte arrives in order (the receiver checks the pattern).
 #
 # Build first (the script builds nothing):
-#   cargo build -p ts-daemon -p ts-net --example mesh_node
+#   cargo build -p ts-daemon && cargo build -p ts-net --example mesh_node
 # Override the binaries with TS_DAEMON and MESH_NODE.
 set -euo pipefail
 export PATH="$PATH:/usr/sbin:/sbin"

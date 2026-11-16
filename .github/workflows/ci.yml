@@ -2035,7 +2035,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Build the hub and the probe
-        run: cargo build --locked -p ts-daemon -p ts-net --example mesh_node
+        run: |
+          cargo build --locked -p ts-daemon
+          cargo build --locked -p ts-net --example mesh_node
       - name: Cone NAT goes direct
         run: sudo env "PATH=$PATH" crates/apps/rusty_tailscale/interop/two_nat_test.sh cone
       - name: Symmetric NAT stays on the relay
