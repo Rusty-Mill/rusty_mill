@@ -408,7 +408,11 @@ impl GlyphSource for FontCache {
                     // classification allots; contain-fit them so icons never
                     // clip or bleed into the neighbor cell (Ghostty-style
                     // glyph constraining).
-                    let mut g = if is_private_use(ch) {
+                    // Shift first, so a PUA glyph is fitted to the cell it is
+                    // finally drawn in and never leaves it.
+                    let mut g = g;
+                    g.left += self.dx;
+                    if is_private_use(ch) {
                         constrain_to_cell(
                             g,
                             crate::core::char_width(ch).max(1) * cw,
@@ -417,9 +421,7 @@ impl GlyphSource for FontCache {
                         )
                     } else {
                         g
-                    };
-                    g.left += self.dx;
-                    g
+                    }
                 }),
         );
         self.cache.insert((ch, style), Rc::clone(&g));
@@ -750,6 +752,31 @@ const SYSTEM_FALLBACKS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shifted_wide_icon_stays_inside_adjusted_cell() {
+        // Natural 10 px cell, letter_spacing -2 and +8: a full-width icon,
+        // shifted by the spacing offset first, must still end inside the box.
+        for ls in [-2, 8] {
+            let m = FontMetrics::new(1.0, ls);
+            let (box_w, box_h, base) = m.apply(10, 20, 16);
+            let icon = Glyph {
+                width: 10,
+                height: 12,
+                left: m.glyph_dx(),
+                top: -14,
+                coverage: vec![255; 120],
+                color: None,
+            };
+            let g = constrain_to_cell(icon, box_w, box_h, base);
+            assert!(
+                g.left >= 0 && g.left as usize + g.width <= box_w,
+                "ls {ls}: left {} width {} box {box_w}",
+                g.left,
+                g.width
+            );
+        }
+    }
 
     #[test]
     fn metrics_default_is_identity_and_clamps() {
