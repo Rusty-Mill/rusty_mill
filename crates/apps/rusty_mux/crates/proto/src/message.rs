@@ -234,6 +234,10 @@ impl Features {
     /// a client without it).
     pub const SHARING: Self = Self(1 << 46);
 
+    /// `terminal.list-dir` (C08): a client's directory browse reads a
+    /// directory on the server's host.
+    pub const DIR_LISTING: Self = Self(1 << 47);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -326,6 +330,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::SIGNAL_RELEASE, "signal and release"),
     (Features::TAILSCALE_STATUS, "tailscale status"),
     (Features::SHARING, "live sharing"),
+    (Features::DIR_LISTING, "directory listing"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the

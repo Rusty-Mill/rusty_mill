@@ -125,6 +125,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.status",
             "terminal.process",
             "terminal.size",
+            "terminal.list-dir",
             "terminal.reset",
             "terminal.set-theme",
             "terminal.modes",
@@ -145,6 +146,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             (_, _, "terminal.shell") => Features::BLOCK_CALL.union(Features::TERMINAL_SHELL),
             (_, _, "terminal.report-status") => Features::BLOCK_CALL.union(Features::AGENT_STATUS),
             (_, _, "terminal.history") => Features::BLOCK_CALL.union(Features::TERMINAL_HISTORY),
+            (_, _, "terminal.list-dir") => Features::BLOCK_CALL.union(Features::DIR_LISTING),
             _ => Features::BLOCK_CALL,
         };
         assert_eq!(method.needs, needs, "{name}");
@@ -321,6 +323,7 @@ fn optional_parameters_add_their_features_only_when_given() {
             "trim",
             "unwrap",
             "vt",
+            "path",
             "foreground",
             "background",
             "cursor",

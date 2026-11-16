@@ -31,6 +31,7 @@ use crate::datagram::Registry;
 use crate::echo::Waiting;
 use crate::history::History;
 use crate::keys;
+use crate::listing;
 use crate::outbox::Outbox;
 use crate::passed::{Fd, Passed};
 use crate::process;
@@ -104,6 +105,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::AGENT_LAUNCH)
     .union(Features::HOLD)
     .union(Features::SHARING)
+    .union(Features::DIR_LISTING)
     .union(UNIX_ONLY);
 
 /// Offered on Linux only: signal and release (C76) act on a Unix process
@@ -1621,6 +1623,19 @@ impl State {
             }
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.pid())
                 .ok_or("the program's working directory is unknown")?,
+            "terminal.list-dir" => {
+                // It shows the host's files, which a watch-only grant (C14)
+                // was not given.
+                if self.mux.block(block).is_some_and(|b| b.is_watching(client)) {
+                    return Err(rusty_mux_core::Error::NoLease { client, block }.into());
+                }
+                let base = terminal::pwd(&rt.grid, rt.pid());
+                let path = named.iter().find_map(|(n, v)| match (*n, v) {
+                    ("path", Value::Text(p)) => Some(p.as_str()),
+                    _ => None,
+                });
+                listing::list(base.as_deref(), path).map_err(|e| format!("{method}: {e}"))?
+            }
             "terminal.title" => rt.grid.title.clone(),
             "terminal.status" => rt.status.shown().bodies().join("\n"),
             "terminal.process" => {
