@@ -87,12 +87,26 @@ pub(crate) fn copy(program: &str, owner: &str) -> (String, String) {
 /// The copy for opening `link` (C63, D70): the whole URL, never cut, then
 /// what "Always trust" would remember.
 pub(crate) fn link_copy(link: &Link) -> (String, String) {
-    let mut body = format!("Opens {}", link.url);
+    let mut body = format!("Opens {}.", link.url);
     if !link.origin.is_empty() {
         body.push_str(&format!(" Always trust remembers {}.", link.origin));
     }
-    ("Open this link?".to_owned(), body)
+    // Lead with the host: it is what the user decides on.
+    let title = match link.origin.split_once("://") {
+        Some((_, host)) => format!("Open link to {host}?"),
+        None => "Open this link?".to_owned(),
+    };
+    (title, body)
 }
+
+/// The link prompt's "Always trust" button, as an [`Answer::Pick`] ("Open
+/// once" is Pick(1)).
+pub(crate) const ALWAYS: usize = 2;
+
+/// Clicks this soon after the prompt opens are ignored, so the click that
+/// opened it (or a double click) cannot press a button that appeared under
+/// the pointer.
+const CLICK_GUARD: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// The link prompt's buttons: Cancel (focused), Open once, and, where the
 /// policy allows it, Always trust.
@@ -125,6 +139,7 @@ pub(crate) struct Confirm {
     /// The first body line shown, and the lines and rows of the last paint.
     scroll: usize,
     shown: (usize, usize),
+    opened: std::time::Instant,
     painted: Option<(Look, Painted)>,
 }
 
@@ -159,6 +174,7 @@ impl Confirm {
             anchor: (right, top),
             scroll: 0,
             shown: (0, 0),
+            opened: std::time::Instant::now(),
             subject,
             text: UiText::embedded()?,
             title,
@@ -234,6 +250,9 @@ impl Confirm {
     /// Answer a click at window px `(x, y)`: a button presses, anywhere
     /// off the panel cancels.
     pub(crate) fn click(&self, x: f64, y: f64) -> Answer {
+        if self.opened.elapsed() < CLICK_GUARD {
+            return Answer::Stay;
+        }
         let Some((_, p)) = &self.painted else {
             return Answer::Cancel;
         };
@@ -561,6 +580,21 @@ mod tests {
     }
 
     #[test]
+    fn the_title_leads_with_the_host_and_the_body_ends_sentences() {
+        let (title, body) = link_copy(&link("https://docs.example.com:8443/a"));
+        assert_eq!(title, "Open link to docs.example.com:8443?");
+        assert_eq!(
+            body,
+            "Opens https://docs.example.com:8443/a. Always trust remembers https://docs.example.com:8443."
+        );
+        let (title, body) = link_copy(&link("mailto:a@b.c"));
+        assert_eq!(
+            (title.as_str(), body.as_str()),
+            ("Open this link?", "Opens mailto:a@b.c.")
+        );
+    }
+
+    #[test]
     fn untrustable_links_offer_no_always_trust() {
         assert_eq!(link_buttons(false), ["Cancel", "Open once"]);
         let mut c = open_link("file:///etc/hosts", false);
@@ -622,6 +656,8 @@ mod tests {
             )
         };
         let (x, y) = mid(take);
+        assert_eq!(c.click(x, y), Answer::Stay, "too soon after it opened");
+        c.opened -= std::time::Duration::from_secs(1);
         assert_eq!(c.click(x, y), Answer::Pick(1));
         let (x, y) = mid(cancel);
         assert_eq!(c.click(x, y), Answer::Cancel);

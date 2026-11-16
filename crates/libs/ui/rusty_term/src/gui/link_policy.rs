@@ -18,8 +18,12 @@ pub(crate) enum Deny {
     Malformed,
     /// A scheme we never hand to the OS (`javascript:`, `data:`, app schemes).
     Scheme,
-    /// An http(s) URL with no host, or with userinfo (`user@host` spoofing).
+    /// A host that is missing, has userinfo (`user@host` spoofing), or is
+    /// not plain ASCII letters, digits, dots and hyphens (or a bracketed IPv6).
     Host,
+    /// A `file:` link to another computer (a UNC share leaks the login hash
+    /// or runs a remote program) or to a program the opener would run.
+    File,
 }
 
 /// The schemes we know. Anything else is [`Deny::Scheme`].
@@ -57,21 +61,111 @@ pub(crate) enum Verdict {
 pub(crate) fn parse(url: &str) -> Result<Link, Deny> {
     if url.is_empty()
         || url.len() > MAX_LEN
-        || url.chars().any(|c| c.is_control() || c.is_whitespace())
+        || url
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || is_invisible(c))
     {
         return Err(Deny::Malformed);
     }
     let (scheme, rest) = split_scheme(url).ok_or(Deny::Scheme)?;
     let origin = match scheme {
         Scheme::Http | Scheme::Https => origin_of(scheme, rest)?,
-        Scheme::Ftp => String::new(),
-        Scheme::Mailto | Scheme::File => String::new(),
+        Scheme::Ftp => {
+            origin_of(Scheme::Https, rest)?;
+            String::new()
+        }
+        Scheme::File => {
+            check_file(rest)?;
+            String::new()
+        }
+        Scheme::Mailto => {
+            check_mailto(rest)?;
+            String::new()
+        }
     };
     Ok(Link {
         scheme,
         url: url.to_owned(),
         origin,
     })
+}
+
+/// Characters that draw as nothing or reorder text (bidi controls, zero
+/// width, soft hyphen, BOM): a link built from them reads as another one.
+fn is_invisible(c: char) -> bool {
+    matches!(c, '\u{AD}' | '\u{61C}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
+        | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}')
+}
+
+/// Extensions the OS opener runs or installs instead of showing.
+const PROGRAMS: [&str; 36] = [
+    "exe", "com", "bat", "cmd", "lnk", "scr", "msi", "msp", "ps1", "psm1", "vbs", "vbe", "js",
+    "jse", "wsf", "wsh", "hta", "cpl", "dll", "reg", "pif", "jar", "app", "command", "sh", "bash",
+    "zsh", "pkg", "dmg", "appimage", "desktop", "url", "scf", "chm", "inf", "gadget",
+];
+
+/// `file:` links open only on this computer and never a program. `rest` is
+/// what follows `file://`: `[host]/path`.
+fn check_file(rest: &str) -> Result<(), Deny> {
+    let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
+        return Err(Deny::File);
+    }
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    let path = percent_decode(path).ok_or(Deny::File)?;
+    // A drive prefix (`/C:/`) is the one colon a path may hold; any other
+    // is a Windows alternate data stream.
+    let body = match path.as_bytes() {
+        [b'/', d, b':', ..] if d.is_ascii_alphabetic() => &path[3..],
+        _ => &path[..],
+    };
+    if path.contains('\\') || body.contains(':') || path.chars().any(char::is_control) {
+        return Err(Deny::File);
+    }
+    let name = body
+        .trim_end_matches(['/', '.'])
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    let ext = name
+        .rsplit_once('.')
+        .map_or("", |(_, e)| e)
+        .to_ascii_lowercase();
+    match PROGRAMS.contains(&ext.as_str()) {
+        true => Err(Deny::File),
+        false => Ok(()),
+    }
+}
+
+/// `%XX` escapes decoded; `None` if one is malformed or the result is not UTF-8.
+fn percent_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'%' {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        let hex = s.get(i + 1..i + 3)?;
+        out.push(u8::from_str_radix(hex, 16).ok()?);
+        i += 3;
+    }
+    String::from_utf8(out).ok()
+}
+
+/// A `mailto:` that asks the mail app to attach a file is refused.
+fn check_mailto(rest: &str) -> Result<(), Deny> {
+    let query = rest.split_once('?').map_or("", |(_, q)| q);
+    let attaches = query.split('&').any(|kv| {
+        let key = kv.split('=').next().unwrap_or("");
+        percent_decode(key).is_some_and(|k| k.to_ascii_lowercase().starts_with("attach"))
+    });
+    match attaches {
+        true => Err(Deny::Malformed),
+        false => Ok(()),
+    }
 }
 
 fn split_scheme(url: &str) -> Option<(Scheme, &str)> {
@@ -102,7 +196,19 @@ fn origin_of(scheme: Scheme, rest: &str) -> Result<String, Deny> {
         Some((h, p)) if !p.contains(']') => (h, Some(p)),
         _ => (authority, None),
     };
+    let plain = host
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    let v6 = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .is_some_and(|h| {
+            !h.is_empty()
+                && h.bytes()
+                    .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+        });
     if host.is_empty()
+        || !(plain || v6)
         || port.is_some_and(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
     {
         return Err(Deny::Host);
@@ -148,6 +254,13 @@ impl Policy {
     /// Trust `link`'s origin. False (and no change) if it has none.
     pub(crate) fn trust(&mut self, link: &Link) -> bool {
         !link.origin.is_empty() && self.trusted.insert(link.origin.clone())
+    }
+
+    /// Everything trusted here or in `other` (a save merges what another
+    /// window wrote meanwhile).
+    pub(crate) fn union(mut self, other: &Policy) -> Self {
+        self.trusted.extend(other.trusted.iter().cloned());
+        self
     }
 
     /// The trusted origins, sorted, for saving.
@@ -251,6 +364,96 @@ mod tests {
         ] {
             assert_eq!(parse(u), Err(Deny::Host), "{u}");
         }
+    }
+
+    #[test]
+    fn hosts_are_plain_ascii_or_bracketed_ipv6() {
+        for u in [
+            "https://ex\u{430}mple.com/",
+            "https://exa\"mple.com/",
+            "https://a%2eb.com/",
+            "https://a|b.com/",
+            "ftp://good.com@evil.com/",
+            "ftp://ev\u{456}l.com/",
+            "https://[]/",
+            "https://[g::1]/",
+        ] {
+            assert_eq!(parse(u), Err(Deny::Host), "{u}");
+        }
+        assert_eq!(link("https://[::1]:8443/x").origin, "https://[::1]:8443");
+        assert_eq!(
+            link("https://xn--80ak6aa92e.com/").origin,
+            "https://xn--80ak6aa92e.com"
+        );
+        assert!(parse("ftp://files.example.com/pub").is_ok());
+    }
+
+    #[test]
+    fn invisible_and_bidi_characters_are_malformed() {
+        for c in [
+            '\u{202E}', '\u{200B}', '\u{2066}', '\u{2069}', '\u{FEFF}', '\u{AD}',
+        ] {
+            let u = format!("https://example.com/a{c}b");
+            assert_eq!(parse(&u), Err(Deny::Malformed), "{c:?}");
+        }
+        assert!(
+            parse("https://example.com/caf\u{e9}").is_ok(),
+            "ordinary non-ASCII paths stay"
+        );
+    }
+
+    #[test]
+    fn file_links_stay_on_this_computer_and_never_run_a_program() {
+        for u in [
+            "file://attacker/share/x.txt",
+            "file://evil.com/a.txt",
+            "file:///tmp/setup.exe",
+            "file:///tmp/Setup.EXE",
+            "file:///tmp/setup.exe.",
+            "file:///tmp/setup%2Eexe",
+            "file:///tmp/s%65tup.exe",
+            "file:///Applications/Tool.app/",
+            "file:///tmp/run.command",
+            "file:///C:/a/b.lnk",
+            "file:///C:/a/b.txt:evil.exe",
+            "file:///tmp/a%00.txt",
+            "file:///tmp/a%zz.txt",
+            "file:///tmp/a\\b.txt",
+            "file:///tmp/x.bat?x=1",
+        ] {
+            assert_eq!(parse(u), Err(Deny::File), "{u}");
+        }
+        for u in [
+            "file:///home/user/notes/todo.txt",
+            "file://localhost/etc/hosts",
+            "file:///C:/Users/me/doc.pdf",
+            "file:///tmp/archive.tar.gz",
+            "file:///tmp/a%20b.txt",
+        ] {
+            assert!(parse(u).is_ok(), "{u}");
+        }
+    }
+
+    #[test]
+    fn mailto_cannot_attach_a_file() {
+        assert!(parse("mailto:a@b.c?subject=hi&body=x").is_ok());
+        for u in [
+            "mailto:a@b.c?attach=/etc/passwd",
+            "mailto:a@b.c?x=1&Attachment=/x",
+            "mailto:a@b.c?%61ttach=/x",
+        ] {
+            assert_eq!(parse(u), Err(Deny::Malformed), "{u}");
+        }
+    }
+
+    #[test]
+    fn a_save_keeps_what_another_window_trusted() {
+        let mine = Policy::new(["https://a.com".to_owned()]);
+        let theirs = Policy::new(["https://b.com".to_owned()]);
+        assert_eq!(
+            mine.union(&theirs).origins().collect::<Vec<_>>(),
+            ["https://a.com", "https://b.com"]
+        );
     }
 
     #[test]

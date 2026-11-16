@@ -2712,9 +2712,7 @@ impl WindowState<'_> {
             Err(why) => return self.refuse_link(why),
         };
         match self.links.verdict(&link) {
-            link_policy::Verdict::Open => {
-                open_link(&link);
-            }
+            link_policy::Verdict::Open => self.launch_link(&link),
             link_policy::Verdict::Ask { can_trust } => self.ask_link(link, can_trust),
         }
     }
@@ -2726,7 +2724,8 @@ impl WindowState<'_> {
                 "The link is empty, too long, or holds spaces or control characters."
             }
             Deny::Scheme => "Only web, mail, ftp and file links open from here.",
-            Deny::Host => "The link's address is missing or disguised.",
+            Deny::Host => "The link's address is missing, disguised or not plain ASCII.",
+            Deny::File => "That file link points to another computer or to a program.",
         };
         self.show_notice(Some(super::source::Notice {
             title: "Link not opened".to_owned(),
@@ -5223,11 +5222,11 @@ impl WindowState<'_> {
             Subject::Link(link) => {
                 // Button 2 is "Always trust": remember the origin, but only in
                 // memory once the file is saved, so what the notice says holds.
-                if n == 2 {
+                if n == confirm::ALWAYS {
                     let mut next = self.links.clone();
                     if next.trust(&link) {
                         match save_trust(&next) {
-                            Ok(()) => self.links = next,
+                            Ok(saved) => self.links = saved,
                             Err(_) => self.show_notice(Some(super::source::Notice {
                                 title: "Could not save trusted sites".to_owned(),
                                 detail: "This link opens once. The site will ask again.".to_owned(),
@@ -5235,9 +5234,20 @@ impl WindowState<'_> {
                         }
                     }
                 }
-                open_link(&link);
+                self.launch_link(&link);
             }
         }
+    }
+
+    /// Open `link`, or say it could not be.
+    fn launch_link(&mut self, link: &link_policy::Link) {
+        if open_link(link) {
+            return;
+        }
+        self.show_notice(Some(super::source::Notice {
+            title: "Link not opened".to_owned(),
+            detail: "The system could not start a program for it.".to_owned(),
+        }));
     }
 
     /// Note where taking pane `key`'s block over stands (D64).
@@ -6550,9 +6560,17 @@ fn shell_quote(path: &str) -> String {
 fn open_link(link: &link_policy::Link) -> bool {
     let url = link.url.as_str();
     #[cfg(target_os = "windows")]
-    let spawned = std::process::Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", url])
-        .spawn();
+    let spawned = std::process::Command::new(
+        std::env::var_os("SystemRoot")
+            .map(|r| {
+                std::path::PathBuf::from(r)
+                    .join("System32")
+                    .join("rundll32.exe")
+            })
+            .unwrap_or_else(|| "rundll32".into()),
+    )
+    .args(["url.dll,FileProtocolHandler", url])
+    .spawn();
     #[cfg(target_os = "macos")]
     let spawned = std::process::Command::new("open").arg(url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -6570,22 +6588,35 @@ fn trust_path() -> Option<std::path::PathBuf> {
     )
 }
 
-fn load_trust() -> link_policy::Policy {
-    trust_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|t| link_policy::Policy::from_toml(&t))
-        .unwrap_or_default()
+/// The saved trusted origins. A missing file is an empty list; any other
+/// read error is an error, so a save never overwrites what it could not read.
+fn read_trust() -> std::io::Result<link_policy::Policy> {
+    let path = trust_path().ok_or_else(|| std::io::Error::other("no config directory"))?;
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(link_policy::Policy::from_toml(&text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(link_policy::Policy::default()),
+        Err(e) => Err(e),
+    }
 }
 
-/// Save atomically (write beside, then rename).
-fn save_trust(policy: &link_policy::Policy) -> std::io::Result<()> {
+/// At start an unreadable file trusts nothing: every site asks.
+fn load_trust() -> link_policy::Policy {
+    read_trust().unwrap_or_default()
+}
+
+/// Save `policy` merged with what is on disk now (another window may have
+/// trusted a site since this one started), atomically (write beside, then
+/// rename). Returns what was saved.
+fn save_trust(policy: &link_policy::Policy) -> std::io::Result<link_policy::Policy> {
+    let merged = read_trust()?.union(policy);
     let path = trust_path().ok_or_else(|| std::io::Error::other("no config directory"))?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, policy.to_toml())?;
-    std::fs::rename(&tmp, &path)
+    std::fs::write(&tmp, merged.to_toml())?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(merged)
 }
 
 /// Map an OSC 22-requested pointer shape — a CSS `cursor` keyword, the
