@@ -2889,13 +2889,8 @@ impl WindowState<'_> {
         for w in &warnings {
             eprintln!("rusty_term: {w}");
         }
-        if new.theme_failed {
-            // A theme that no longer resolves (D73): keep the one on screen.
-            new.theme = self.theme;
-            new.theme_auto = self.config.theme_auto;
-            new.theme_dark = self.config.theme_dark;
-            new.theme_light = self.config.theme_light;
-        }
+        // A theme key that no longer resolves keeps its old value (D73).
+        new.keep_failed_themes(&self.config, self.theme);
         for tab in &self.tabs {
             for p in &tab.panes {
                 let mut g = p.grid.lock();

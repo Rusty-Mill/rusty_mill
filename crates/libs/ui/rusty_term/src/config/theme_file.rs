@@ -1,5 +1,5 @@
 //! Theme files: `themes/<name>.toml` beside the config file (C61 T1, gui-design
-//! D73, handoff D297-D302).
+//! D73, handoff D297, D299).
 //!
 //! A theme file is the config's `[colors]` section on its own:
 //!
@@ -34,10 +34,27 @@ pub fn resolve(name: &str, dir: Option<&Path>) -> Result<Theme, String> {
         .map(|d| d.join(format!("{name}.toml")))
         && path.is_file()
     {
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("theme {name}: {e}"))?;
+        let text = read_capped(&path).map_err(|e| format!("theme {name}: {e}"))?;
         return parse_file(&text).map_err(|e| format!("theme file {}: {e}", path.display()));
     }
     preset(name).ok_or_else(|| format!("unknown theme `{name}` (try {})", PRESETS.join(", ")))
+}
+
+/// Largest theme file read (a real one is under 1 KiB).
+const MAX_BYTES: u64 = 64 * 1024;
+
+/// Read `path` as text, refusing more than [`MAX_BYTES`] so a symlink to a huge
+/// file cannot stall a reload.
+fn read_capped(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(path)?
+        .take(MAX_BYTES + 1)
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_BYTES {
+        return Err(std::io::Error::other("file too large (over 64 KiB)"));
+    }
+    Ok(text)
 }
 
 /// A usable file stem: no path separators, no leading dot.
@@ -59,6 +76,7 @@ pub fn parse_file(text: &str) -> Result<Theme, String> {
         if let Some(rest) = line.strip_prefix('[') {
             let name = rest
                 .split_once(']')
+                .filter(|(_, tail)| tail.trim().is_empty() || tail.trim().starts_with('#'))
                 .map(|(n, _)| n.trim().to_ascii_lowercase());
             if name.as_deref() != Some("colors") {
                 return Err(at("only a [colors] section is allowed".into()));
@@ -107,6 +125,7 @@ mod tests {
             "[window]\nopacity = 1\n",
             "foreground = \"#000000\"\n",
             "[colors]\nforeground\n",
+            "[colors]junk\nforeground = \"#000000\"\n",
             "# nothing\n",
         ] {
             assert!(parse_file(bad).is_err(), "accepted: {bad:?}");
@@ -148,12 +167,28 @@ mod tests {
     }
 
     #[test]
+    fn an_oversized_file_is_refused() {
+        let d = scratch("big");
+        let big = format!("[colors]\n{}", "# pad\n".repeat(20_000));
+        std::fs::write(d.join("big.toml"), big).unwrap();
+        let e = resolve("big", Some(&d)).unwrap_err();
+        assert!(e.contains("too large"), "{e}");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
     fn names_cannot_escape_the_theme_directory() {
         let d = scratch("escape");
-        std::fs::write(d.parent().unwrap().join("evil.toml"), GOOD).unwrap();
-        for name in ["../evil", "..\\evil", ".hidden", "a/b", ""] {
+        let evil = d
+            .parent()
+            .unwrap()
+            .join(format!("evil-{}.toml", std::process::id()));
+        std::fs::write(&evil, GOOD).unwrap();
+        let rel = format!("../{}", evil.file_stem().unwrap().to_string_lossy());
+        for name in [rel.as_str(), "..\\evil", ".hidden", "a/b", ""] {
             assert!(resolve(name, Some(&d)).is_err(), "{name:?}");
         }
+        let _ = std::fs::remove_file(evil);
         let _ = std::fs::remove_dir_all(d);
     }
 }

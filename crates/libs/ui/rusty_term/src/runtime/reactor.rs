@@ -326,7 +326,7 @@ fn watch_config(parser: Arc<Mutex<AnsiParser>>, grid: Arc<Mutex<Grid>>, frame: A
             g.force_full_repaint();
         }
         // A theme that no longer resolves keeps the one on screen (D73).
-        if !new.theme_failed {
+        if !new.theme_failed.contains(&crate::config::ThemeSlot::Theme) {
             let old = parser.lock().retheme(new.theme);
             if old != new.theme {
                 g.retheme(&old, &new.theme);

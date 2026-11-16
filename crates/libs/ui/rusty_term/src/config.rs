@@ -72,6 +72,17 @@ pub enum ConsoleHost {
     Own,
 }
 
+/// A top-level theme key, for [`Config::theme_failed`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeSlot {
+    /// `theme` (and its `auto` setting).
+    Theme,
+    /// `theme_dark`.
+    Dark,
+    /// `theme_light`.
+    Light,
+}
+
 /// One `[profile.<name>]` bundle: everything a "launch this kind of tab"
 /// action needs. Absent keys fall back to the top-level config.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -224,9 +235,10 @@ pub struct Config {
     /// Where `theme = "name"` looks for a theme file before the built-in
     /// presets (`themes/` beside the config file). `None`: presets only.
     pub themes_dir: Option<PathBuf>,
-    /// A theme named in the file could not be resolved (unknown name or a bad
-    /// theme file). A live reload then keeps the theme it already has.
-    pub theme_failed: bool,
+    /// Theme keys whose name did not resolve (unknown name or a bad theme
+    /// file). A live reload keeps the old value of exactly these
+    /// ([`Config::keep_failed_themes`]); a bad profile theme is only a warning.
+    pub theme_failed: Vec<ThemeSlot>,
 }
 
 impl Config {
@@ -629,6 +641,9 @@ fn header_name(line: &str) -> Option<String> {
 /// A change-sensitive snapshot of a file or directory: one (name, mtime, len)
 /// per entry, sorted by name, so edits, adds, removes and renames all differ.
 /// A file is a single entry with an empty name.
+/// Directory entries a [`stamp`] looks at.
+const STAMP_MAX_ENTRIES: usize = 1024;
+
 type Stamp = Vec<(std::ffi::OsString, std::time::SystemTime, u64)>;
 
 fn stamp(p: &std::path::Path) -> Option<Stamp> {
@@ -636,15 +651,16 @@ fn stamp(p: &std::path::Path) -> Option<Stamp> {
     if !m.is_dir() {
         return Some(vec![(Default::default(), m.modified().ok()?, m.len())]);
     }
+    // Capped: a themes dir is a handful of small files, not a hot path to scan.
     let mut out: Stamp = std::fs::read_dir(p)
         .ok()?
-        .flatten()
-        .filter_map(|e| {
+        .take(STAMP_MAX_ENTRIES)
+        .map(|e| {
+            let e = e.ok()?;
             let em = e.metadata().ok()?;
-            let mtime = em.modified().unwrap_or(std::time::UNIX_EPOCH);
-            Some((e.file_name(), mtime, em.len()))
+            Some((e.file_name(), em.modified().ok()?, em.len()))
         })
-        .collect();
+        .collect::<Option<_>>()?;
     out.sort();
     Some(out)
 }
@@ -654,7 +670,8 @@ fn stamp(p: &std::path::Path) -> Option<Stamp> {
 /// vary wildly in how they save (rename-over, truncate+write, atomic temp
 /// file), and polling sees through all of them, needs no platform API, and a
 /// half-second latency is imperceptible next to a manual save. Also fires
-/// when the file first appears.
+/// when the file first appears. `path` may be a directory (the themes dir):
+/// adds, removes, renames and edits of its entries all count as changes.
 pub fn watch(path: PathBuf, on_change: impl Fn() + Send + 'static) {
     std::thread::spawn(move || {
         let mut last = stamp(&path);
@@ -684,8 +701,13 @@ enum Value {
 
 /// Resolve `name` to a theme (user file first, then preset), recording a
 /// failure on `cfg` so a live reload can keep the old theme.
-fn named_theme(cfg: &mut Config, name: &str) -> Result<Theme, String> {
-    theme_file::resolve(name, cfg.themes_dir.as_deref()).inspect_err(|_| cfg.theme_failed = true)
+fn named_theme(cfg: &Config, name: &str) -> Result<Theme, String> {
+    theme_file::resolve(name, cfg.themes_dir.as_deref())
+}
+
+/// [`named_theme`] for a top-level key, recording a failure against `slot`.
+fn slot_theme(cfg: &mut Config, slot: ThemeSlot, name: &str) -> Result<Theme, String> {
+    named_theme(cfg, name).inspect_err(|_| cfg.theme_failed.push(slot))
 }
 
 /// Parse config text. Never fails: every malformed or unknown line becomes a
@@ -810,16 +832,16 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
             if name.eq_ignore_ascii_case("auto") {
                 cfg.theme_auto = true;
             } else {
-                cfg.theme = named_theme(cfg, &name)?;
+                cfg.theme = slot_theme(cfg, ThemeSlot::Theme, &name)?;
             }
         }
         ("", "theme_dark") => {
             let name = expect_str(key, value)?;
-            cfg.theme_dark = Some(named_theme(cfg, &name)?);
+            cfg.theme_dark = Some(slot_theme(cfg, ThemeSlot::Dark, &name)?);
         }
         ("", "theme_light") => {
             let name = expect_str(key, value)?;
-            cfg.theme_light = Some(named_theme(cfg, &name)?);
+            cfg.theme_light = Some(slot_theme(cfg, ThemeSlot::Light, &name)?);
         }
         ("", "minimum_contrast") => {
             let ratio = match value {
@@ -1235,6 +1257,22 @@ pub fn preset(name: &str) -> Option<Theme> {
 
 impl Config {
     /// The named profile, if defined (case-insensitive).
+    /// After a reload, put back the values of the theme keys that failed to
+    /// resolve (D73: a bad file keeps the previous theme). `old` is the config
+    /// that was live, `old_theme` the colours on screen.
+    pub fn keep_failed_themes(&mut self, old: &Config, old_theme: Theme) {
+        for slot in std::mem::take(&mut self.theme_failed) {
+            match slot {
+                ThemeSlot::Theme => {
+                    self.theme = old_theme;
+                    self.theme_auto = old.theme_auto;
+                }
+                ThemeSlot::Dark => self.theme_dark = old.theme_dark,
+                ThemeSlot::Light => self.theme_light = old.theme_light,
+            }
+        }
+    }
+
     pub fn profile(&self, name: &str) -> Option<&Profile> {
         self.profiles
             .iter()
@@ -1853,7 +1891,7 @@ color15 = "ffffff"
             "theme = \"mine\"\ntheme_light = \"mine\"\n[profile.p]\ntheme = \"mine\"\n",
             Some(d.clone()),
         );
-        assert!(warns.is_empty() && !cfg.theme_failed, "{warns:?}");
+        assert!(warns.is_empty() && cfg.theme_failed.is_empty(), "{warns:?}");
         assert_eq!(cfg.theme.bg, 0x102030);
         assert_eq!(cfg.theme_light.unwrap().bg, 0x102030);
         assert_eq!(cfg.profile("p").unwrap().theme.unwrap().bg, 0x102030);
@@ -1864,8 +1902,24 @@ color15 = "ffffff"
     fn a_theme_that_does_not_resolve_is_flagged_so_reload_keeps_the_old_one() {
         let (cfg, warns) = parse_in("theme = \"missing\"\n", Some(PathBuf::from("/nonexistent")));
         assert_eq!(warns.len(), 1);
-        assert!(cfg.theme_failed);
-        assert!(!parse("theme = \"nord\"\n").0.theme_failed);
+        assert_eq!(cfg.theme_failed, [ThemeSlot::Theme]);
+        assert!(parse("theme = \"nord\"\n").0.theme_failed.is_empty());
+    }
+
+    #[test]
+    fn a_failed_key_keeps_only_its_own_old_value() {
+        let old = parse("theme = \"nord\"\ntheme_light = \"dracula\"\n").0;
+        // Light is mistyped; the new dark theme and an unused profile typo
+        // must not hold anything back.
+        let (mut new, _) = parse(
+            "theme = \"gruvbox-dark\"\ntheme_dark = \"dracula\"\ntheme_light = \"oops\"\n[profile.p]\ntheme = \"oops\"\n",
+        );
+        assert_eq!(new.theme_failed, [ThemeSlot::Light]);
+        new.keep_failed_themes(&old, old.theme);
+        assert_eq!(new.theme, preset("gruvbox-dark").unwrap());
+        assert_eq!(new.theme_dark, preset("dracula"));
+        assert_eq!(new.theme_light, old.theme_light);
+        assert!(new.theme_failed.is_empty());
     }
 
     #[test]
