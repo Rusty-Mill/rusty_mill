@@ -166,14 +166,25 @@ mod tests {
     }
 
     #[test]
-    fn a_relative_path_is_taken_from_the_base_and_names_are_escaped() {
+    fn a_relative_path_is_taken_from_the_base() {
         let dir = scratch("rel");
         fs::create_dir_all(dir.join("sub")).unwrap();
-        fs::write(dir.join("sub").join("a\tb"), "").unwrap();
+        fs::write(dir.join("sub").join("a.txt"), "").unwrap();
         let text = list(Some(dir.to_str().unwrap()), Some("sub/../sub")).unwrap();
         let mut lines = text.lines();
         assert!(lines.next().unwrap().ends_with("sub"));
-        assert_eq!(lines.collect::<Vec<_>>(), ["f\ta\\tb"]);
+        assert_eq!(lines.collect::<Vec<_>>(), ["f\ta.txt"]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A tab cannot be in a Windows file name, so this one is Unix only.
+    #[cfg(unix)]
+    #[test]
+    fn names_are_escaped() {
+        let dir = scratch("esc");
+        fs::write(dir.join("a\tb"), "").unwrap();
+        let text = list(Some(dir.to_str().unwrap()), None).unwrap();
+        assert_eq!(text.lines().last(), Some("f\ta\\tb"));
         fs::remove_dir_all(dir).unwrap();
     }
 
