@@ -90,7 +90,7 @@ against a throwaway App. v1 = board identity adapter. v2 = task binding, `gh_pro
 
 ## Ask-first items for Nano
 1. **Host**: BaileyAi (recommended) or elsewhere. No decision covers it.
-2. **Signing dependency**: rusty_rsa only verifies. Options: (a) shell out to `openssl dgst
+2. **Signing dependency** (**decided, Nano 2026-11-16, decision card: openssl shell-out**): rusty_rsa only verifies. Options: (a) shell out to `openssl dgst
    -sign` behind the `signer` port, no new dependency, recommended for v0; (b) the `rsa`
    crate, already in Cargo.lock; (c) write private-key signing in `rusty_rsa` (needs
    blinding; most work and risk).
