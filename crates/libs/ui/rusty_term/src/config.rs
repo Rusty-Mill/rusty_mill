@@ -40,6 +40,15 @@ pub enum ReduceMotion {
     Off,
 }
 
+/// Which face is the base for ordinary text (`[window] font_weight`). The bold
+/// face is the one found for `font_bold` or next to `font`; without one,
+/// `Bold` changes nothing. No synthetic bold, no variable-font axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontWeight {
+    Regular,
+    Bold,
+}
+
 /// OSC 52 clipboard policy (`clipboard` config key). A child program can ask
 /// the terminal to read the system clipboard back to it (`52;c;?`) — with no
 /// gate, `curl https://evil | cat` printing that escape sequence silently
@@ -201,8 +210,16 @@ pub struct Config {
     pub font_bold: Option<PathBuf>,
     pub font_italic: Option<PathBuf>,
     pub font_bold_italic: Option<PathBuf>,
-    /// Fallback font for glyphs the main font lacks (CJK, symbols, emoji).
-    pub font_fallback: Option<PathBuf>,
+    /// Fallback fonts for glyphs the main font lacks (CJK, symbols, emoji),
+    /// tried in order. `font_fallback` takes one path or a list.
+    pub font_fallback: Vec<PathBuf>,
+    /// Which face is the base for ordinary text (windowed front-end).
+    pub font_weight: Option<FontWeight>,
+    /// Line height as a multiple of the font's natural height (0.8-2.0,
+    /// default 1.0).
+    pub line_height: Option<f32>,
+    /// Extra horizontal advance per cell in device px (-2..8, default 0).
+    pub letter_spacing: Option<i32>,
     /// Enable programming-font ligatures (GSUB `liga`/`calt`) in the windowed
     /// front-end. Default on; ignored if the font has no ligatures.
     pub ligatures: Option<bool>,
@@ -285,6 +302,10 @@ impl Config {
 # font = "C:\\Windows\\Fonts\\CascadiaMono.ttf"
 # font-size = 18
 # ligatures = false        # disable programming-font ligatures (default on)
+# font_fallback = ["C:\\Windows\\Fonts\\seguisym.ttf"]   # one path or a list, tried in order
+# font_weight = "regular"  # regular or bold: which face is the base for text
+# line_height = 1.0        # 0.8-2.0, times the font's natural height
+# letter_spacing = 0       # -2..8 device px added to each cell's width
 # launch_mode = "maximized" # or "fullscreen"
 # opacity = 0.9            # 0.0-1.0; GPU renderer (--features gui-gpu) only
 # padding = 8               # pixels of inner margin around the terminal (0 = flush)
@@ -653,6 +674,8 @@ enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// A one-line array of strings: `["a", "b"]`.
+    List(Vec<String>),
 }
 
 /// Parse config text. Never fails: every malformed or unknown line becomes a
@@ -696,34 +719,58 @@ fn parse(text: &str) -> (Config, Vec<String>) {
     (cfg, warnings)
 }
 
+/// Read a quoted string body (the opening `"` already consumed) and return it
+/// with the text after the closing quote.
+fn parse_quoted(rest: &str) -> Result<(String, &str), String> {
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Ok((out, chars.as_str())),
+            '\\' => match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                other => return Err(format!("unsupported escape \\{}", other.unwrap_or(' '))),
+            },
+            c => out.push(c),
+        }
+    }
+    Err("unterminated string".into())
+}
+
 /// Parse the right-hand side of `key = …`: a double-quoted string (with
 /// `\\ \" \t \n \r` escapes) or a bare integer/float. Trailing `#` comments are
 /// honored outside quotes.
 fn parse_value(s: &str) -> Result<Value, String> {
     if let Some(rest) = s.strip_prefix('"') {
-        let mut out = String::new();
-        let mut chars = rest.chars();
-        while let Some(c) = chars.next() {
-            match c {
-                '"' => {
-                    let tail = chars.as_str().trim();
-                    if !tail.is_empty() && !tail.starts_with('#') {
-                        return Err("trailing characters after closing quote".into());
-                    }
-                    return Ok(Value::Str(out));
-                }
-                '\\' => match chars.next() {
-                    Some('\\') => out.push('\\'),
-                    Some('"') => out.push('"'),
-                    Some('t') => out.push('\t'),
-                    Some('n') => out.push('\n'),
-                    Some('r') => out.push('\r'),
-                    other => return Err(format!("unsupported escape \\{}", other.unwrap_or(' '))),
-                },
-                c => out.push(c),
-            }
+        let (out, tail) = parse_quoted(rest)?;
+        let tail = tail.trim();
+        if !tail.is_empty() && !tail.starts_with('#') {
+            return Err("trailing characters after closing quote".into());
         }
-        return Err("unterminated string".into());
+        return Ok(Value::Str(out));
+    }
+    if let Some(mut rest) = s.strip_prefix('[') {
+        let mut items = Vec::new();
+        loop {
+            rest = rest.trim_start_matches([' ', '\t', ',']);
+            if let Some(tail) = rest.strip_prefix(']') {
+                let tail = tail.trim();
+                if !tail.is_empty() && !tail.starts_with('#') {
+                    return Err("trailing characters after `]`".into());
+                }
+                return Ok(Value::List(items));
+            }
+            let Some(q) = rest.strip_prefix('"') else {
+                return Err("expected a quoted string or `]` (arrays are one line)".into());
+            };
+            let (item, tail) = parse_quoted(q)?;
+            items.push(item);
+            rest = tail;
+        }
     }
     // Bare scalar: strip a trailing comment, then try integer, then float.
     let bare = match s.find('#') {
@@ -798,7 +845,34 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
             cfg.font_bold_italic = Some(PathBuf::from(expect_str(key, value)?))
         }
         ("window", "font_fallback") => {
-            cfg.font_fallback = Some(PathBuf::from(expect_str(key, value)?))
+            cfg.font_fallback = match value {
+                Value::List(items) => items.into_iter().map(PathBuf::from).collect(),
+                v => vec![PathBuf::from(expect_str(key, v)?)],
+            }
+        }
+        ("window", "font_weight") => {
+            let name = expect_str(key, value)?;
+            cfg.font_weight = Some(match name.to_ascii_lowercase().as_str() {
+                "regular" | "normal" => FontWeight::Regular,
+                "bold" => FontWeight::Bold,
+                _ => return Err(format!("unknown {key} `{name}` (regular or bold)")),
+            });
+        }
+        ("window", "line_height") => {
+            let x = match value {
+                Value::Float(f) => f,
+                Value::Int(i) => i as f64,
+                _ => return Err(format!("{key}: expected a number")),
+            };
+            cfg.line_height = Some((x as f32).clamp(0.8, 2.0));
+        }
+        ("window", "letter_spacing") => {
+            let px = match value {
+                Value::Float(f) => f.round() as i64,
+                Value::Int(i) => i,
+                _ => return Err(format!("{key}: expected a number")),
+            };
+            cfg.letter_spacing = Some(px.clamp(-2, 8) as i32);
         }
         ("window", "ligatures") => cfg.ligatures = Some(expect_bool(key, value)?),
         ("window", "status_bar") => cfg.status_bar = Some(expect_bool(key, value)?),
@@ -1223,6 +1297,39 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_fallback_takes_string_or_list() {
+        let (cfg, w) = parse("[window]\nfont_fallback = \"/a.ttf\"\n");
+        assert!(w.is_empty());
+        assert_eq!(cfg.font_fallback, vec![PathBuf::from("/a.ttf")]);
+        let (cfg, w) = parse("[window]\nfont-fallback = [\"/a.ttf\", \"/b,c.ttf\"] # x\n");
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(
+            cfg.font_fallback,
+            vec![PathBuf::from("/a.ttf"), PathBuf::from("/b,c.ttf")]
+        );
+        let (cfg, w) = parse("[window]\nfont_fallback = []\n");
+        assert!(w.is_empty() && cfg.font_fallback.is_empty());
+        let (_, w) = parse("[window]\nfont_fallback = [\"/a.ttf\" 3]\n");
+        assert_eq!(w.len(), 1, "{w:?}");
+    }
+
+    #[test]
+    fn line_height_letter_spacing_weight_clamp_and_reject() {
+        let (cfg, w) =
+            parse("[window]\nline_height = 5\nletter_spacing = -9\nfont_weight = \"Bold\"\n");
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(cfg.line_height, Some(2.0));
+        assert_eq!(cfg.letter_spacing, Some(-2));
+        assert_eq!(cfg.font_weight, Some(FontWeight::Bold));
+        let (cfg, w) = parse("[window]\nline-height = 1.25\nletter-spacing = 3\n");
+        assert!(w.is_empty());
+        assert_eq!((cfg.line_height, cfg.letter_spacing), (Some(1.25), Some(3)));
+        let (cfg, w) = parse("[window]\nfont_weight = \"heavy\"\nline_height = \"x\"\n");
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert_eq!(cfg.font_weight, None);
+    }
 
     #[test]
     fn empty_and_comments_yield_defaults() {
