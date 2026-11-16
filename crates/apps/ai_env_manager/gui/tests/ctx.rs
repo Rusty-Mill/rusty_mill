@@ -300,3 +300,18 @@ fn push_previews_then_copies_an_edited_copy_back_to_the_source() {
     assert!(ctx.push_preview("one", "claude-code", None).is_err());
     assert!(ctx.push_preview("one", "Bad Id", None).is_err());
 }
+
+/// WebKitGTK sizes a `flex:1` (basis 0) child of an auto-height dialog to nothing, so the editor body
+/// collapsed and the footer drew over it; Chromium (the Playwright scripts) hides this. The body must
+/// size to content and scroll, never overflow into the footer.
+#[test]
+fn editor_body_sizes_to_content_and_scrolls() {
+    let css =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/style.css")).unwrap();
+    let rule = css
+        .lines()
+        .find(|l| l.starts_with(".ed-body{"))
+        .expect(".ed-body rule");
+    assert!(rule.contains("flex:1 1 auto"), "{rule}");
+    assert!(rule.contains("overflow:auto"), "{rule}");
+}

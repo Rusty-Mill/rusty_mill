@@ -377,6 +377,23 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
                 ),
             ],
         ),
+        E::ShareChanged {
+            session,
+            client,
+            until,
+        } => (
+            "share-changed",
+            vec![
+                ("session", Id(session.uuid())),
+                ("client", Id(client.uuid())),
+                (
+                    "until",
+                    until.map_or(Field::Absent, |u| {
+                        Field::Num(i64::try_from(u).unwrap_or(i64::MAX))
+                    }),
+                ),
+            ],
+        ),
         E::BlockStatus { block } => ("block-status", vec![("block", Id(block.uuid()))]),
         E::PwdChanged { block } => ("pwd-changed", vec![("block", Id(block.uuid()))]),
         E::TitleChanged { block } => ("title-changed", vec![("block", Id(block.uuid()))]),
@@ -628,6 +645,11 @@ mod tests {
             },
             Event::GrantChanged {
                 block,
+                client,
+                until: Some(9),
+            },
+            Event::ShareChanged {
+                session,
                 client,
                 until: Some(9),
             },

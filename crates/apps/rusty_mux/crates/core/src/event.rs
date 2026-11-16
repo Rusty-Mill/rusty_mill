@@ -91,6 +91,14 @@ pub enum Event {
         client: ClientId,
         until: Option<u64>,
     },
+    /// The session was shared with `client` until `until` (unix ms, the
+    /// server's clock), or, with `None`, the share ended: unshared,
+    /// expired, or the client is gone (C14).
+    ShareChanged {
+        session: SessionId,
+        client: ClientId,
+        until: Option<u64>,
+    },
     /// What the block's program says it is doing changed state; the
     /// `terminal.status` block method reads it.
     BlockStatus {

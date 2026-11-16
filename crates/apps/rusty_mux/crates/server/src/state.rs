@@ -103,6 +103,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::BACKGROUND_HISTORY)
     .union(Features::AGENT_LAUNCH)
     .union(Features::HOLD)
+    .union(Features::SHARING)
     .union(UNIX_ONLY);
 
 /// Offered on Linux only: signal and release (C76) act on a Unix process
@@ -712,6 +713,8 @@ impl State {
     ) -> ClientId {
         let features = theirs.intersection(self.offered());
         let who = principal.clone();
+        // A takeover must not get a screen its time has run out on (C14).
+        self.mux.expire_grants(now_ms());
         let continued = takeover.and_then(|t| self.takes_over(t, &principal, features));
         let client = match continued {
             Some(client) => {
@@ -1290,6 +1293,25 @@ impl State {
                 self.require(client, Features::INPUT_GATE, "grant-lease")
                     .and_then(|()| done(self.mux.grant(client, block, grantee, until, now_ms()))),
             ),
+            M::ShareSession {
+                req,
+                session,
+                client: guest,
+                until,
+            } => (
+                req,
+                self.require(client, Features::SHARING, "share-session")
+                    .and_then(|()| done(self.mux.share(client, session, guest, until, now_ms()))),
+            ),
+            M::UnshareSession {
+                req,
+                session,
+                client: guest,
+            } => (
+                req,
+                self.require(client, Features::SHARING, "unshare-session")
+                    .and_then(|()| done(self.mux.unshare(client, session, guest))),
+            ),
             M::RevokeLease {
                 req,
                 block,
@@ -1628,7 +1650,14 @@ impl State {
                 return Ok(Outcome::Done(None));
             }
             "terminal.modes" => terminal::modes(&rt.grid),
-            "terminal.report-status" => return self.report_status(block, &named),
+            "terminal.report-status" => {
+                // It writes the block's status, so a watch-only grant (C14)
+                // may not; a client without the lease still may (agent hooks).
+                if self.mux.block(block).is_some_and(|b| b.is_watching(client)) {
+                    return Err(rusty_mux_core::Error::NoLease { client, block }.into());
+                }
+                return self.report_status(block, &named);
+            }
             "terminal.shell" => {
                 // A held or restored block's program is gone (C78), and so
                 // is one whose child was just reaped, whichever is seen.
@@ -2302,6 +2331,9 @@ impl State {
     /// Feeds PTY output to the block's grid and tees it to attached clients.
     /// Returns the terminal's replies to queries, for the PTY.
     fn output(&mut self, block: BlockId, data: &[u8]) -> Vec<u8> {
+        // A watcher's time may be up with no request of its own to say so:
+        // it sees nothing more of the screen (C14).
+        self.mux.expire_grants(now_ms());
         // A mode change, such as echo turned off before a password prompt,
         // goes ahead of the output printed after it.
         self.check_echo(block);
@@ -2391,6 +2423,7 @@ impl State {
     /// [`Self::check_process`], names refreshed, and [`Self::check_echo`]
     /// for every block, then broadcasts.
     fn check_processes(&mut self) {
+        self.mux.expire_grants(now_ms());
         let blocks: Vec<BlockId> = self.blocks.keys().copied().collect();
         for block in blocks {
             self.check_process(block, true);
@@ -2647,6 +2680,7 @@ fn receives(features: Features, principal: &Principal, event: &Event) -> bool {
         Event::WindowMoved { .. } => Features::LAYOUT_EDIT,
         Event::FocusChanged { .. } => Features::FOCUS,
         Event::GrantChanged { .. } => Features::INPUT_GATE,
+        Event::ShareChanged { .. } => Features::SHARING,
         Event::TailscaleStatusChanged { .. } if !is_tailnet(principal) => return false,
         Event::TailscaleStatusChanged { .. } => Features::TAILSCALE_STATUS,
         _ => Features::NONE,
@@ -3218,6 +3252,127 @@ mod regression {
                 refused
                     .as_deref()
                     .is_some_and(|r| r.contains("owner_unreachable")),
+                "{refused:?}"
+            );
+        });
+    }
+
+    /// A watcher whose share ran out takes its connection over and gets no
+    /// screen: the attachment ended with the share (C14).
+    #[test]
+    fn a_takeover_after_a_shares_end_gets_no_screen() {
+        runtime().block_on(async {
+            let (shared, account, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _old_inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal.clone(),
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            let session = state.mux.sessions().next().unwrap().id();
+            let now = now_ms();
+            state
+                .mux
+                .share(account, session, guest, now + 40, now)
+                .unwrap();
+            state.mux.attach(guest, block).unwrap();
+            let takeover = Some(Takeover {
+                client: guest,
+                token: state.tokens[&guest].current,
+            });
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            let (out, _new_inbox, _) = outbox();
+            let again = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                features,
+                None,
+                takeover,
+            );
+            assert_eq!(again, guest);
+            assert_eq!(state.mux.client(guest).unwrap().attached(), None);
+        });
+    }
+
+    /// A watcher's share ends on time even when it sends nothing and the
+    /// program keeps printing: the next output is not sent to it (C14).
+    #[test]
+    fn output_after_a_shares_end_does_not_reach_the_watcher() {
+        runtime().block_on(async {
+            let (shared, account, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _guest_inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                Features::CHECKPOINT_V6,
+                None,
+                None,
+            );
+            let session = state.mux.sessions().next().unwrap().id();
+            let now = now_ms();
+            state
+                .mux
+                .share(account, session, guest, now + 40, now)
+                .unwrap();
+            state.mux.attach(guest, block).unwrap();
+            state.output(block, b"in time");
+            assert!(state.attached(block).contains(&guest));
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            state.output(block, b"too late");
+            assert!(!state.attached(block).contains(&guest));
+        });
+    }
+
+    /// A watch-only client may read a block but not write its status (C14).
+    #[test]
+    fn a_watcher_may_not_report_status() {
+        runtime().block_on(async {
+            let (shared, account, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let features = Features::CHECKPOINT_V6
+                .union(Features::BLOCK_CALL)
+                .union(Features::AGENT_STATUS);
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _guest_inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            let session = state.mux.sessions().next().unwrap().id();
+            let now = now_ms();
+            state
+                .mux
+                .share(account, session, guest, now + 60_000, now)
+                .unwrap();
+            let refused = state
+                .block_call(
+                    guest,
+                    1,
+                    block,
+                    "terminal.report-status",
+                    vec![("state".into(), Value::Text("idle".into()))],
+                )
+                .err()
+                .map(|r| r.reason);
+            assert!(
+                refused.as_deref().is_some_and(|r| r.contains("lease")),
                 "{refused:?}"
             );
         });

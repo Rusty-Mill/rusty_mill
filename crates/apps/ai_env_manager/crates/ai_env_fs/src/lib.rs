@@ -87,8 +87,13 @@ pub fn observe(entry: &Entry, tool: &Tool) -> io::Result<Observed> {
     let Some(mark) = meta.is_dir().then(|| read_marker(&to)).flatten() else {
         return Ok(Observed::Unmanaged);
     };
-    if tree_hash(&to)? != mark.sha256 {
-        return Ok(Observed::ManagedModified);
+    // A symlink added inside a copy cannot be hashed (InvalidInput). That is an edit, not a
+    // failure: report it as modified so one bad copy does not break the whole listing.
+    match tree_hash(&to) {
+        Ok(h) if h == mark.sha256 => {}
+        Ok(_) => return Ok(Observed::ManagedModified),
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => return Ok(Observed::ManagedModified),
+        Err(e) => return Err(e),
     }
     let same_source = mark.source == entry.source.to_string_lossy();
     // A missing source makes the copy stale, not an error: disable still works.

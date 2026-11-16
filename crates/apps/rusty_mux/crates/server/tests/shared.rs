@@ -20,6 +20,12 @@ use rusty_tokio::io::UnixListener;
 use rusty_tokio::sync::{mpsc, oneshot};
 use rusty_tokio::{Builder, LocalOptions};
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 struct Shared {
     socket: PathBuf,
     reload: mpsc::UnboundedSender<Reload>,
@@ -182,6 +188,76 @@ fn a_reload_answers_whether_the_list_took_and_a_bad_one_changes_nothing() {
     );
     assert_served(&mut client);
     drop(client);
+    shared.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Live sharing over the wire (C14): the model's rules need a second uid
+/// and are tested in `rusty_mux_core`; here the requests, their feature
+/// bit and the event reach a client of the server's own account.
+#[test]
+fn a_session_is_shared_and_unshared_over_the_wire_with_an_event() {
+    use rusty_mux_core::{ClientId, Event, SessionId};
+
+    let dir = scratch();
+    let shared = Shared::start(&dir, write_list(&dir, ""));
+    let features = Features::CHECKPOINT_V6
+        .union(Features::SHARING)
+        .union(Features::INSPECT);
+    let mut owner = Client::connect_with(&shared.socket, features, None);
+    let guest = Client::connect_with(&shared.socket, features, None);
+    let session = SessionId::from_uuid(
+        owner
+            .request(|req| Message::CreateSession {
+                req,
+                name: "s".into(),
+            })
+            .expect("id"),
+    );
+    let guest_id: ClientId = guest.id();
+    let until = now_ms() + 60_000;
+    let answers = owner.answer(|req| Message::ShareSession {
+        req,
+        session,
+        client: guest_id,
+        until,
+    });
+    assert!(
+        matches!(answers.as_slice(), [Message::Done { .. }]),
+        "{answers:?}"
+    );
+    let answers = owner.answer(|req| Message::UnshareSession {
+        req,
+        session,
+        client: guest_id,
+    });
+    assert!(
+        matches!(answers.as_slice(), [Message::Done { .. }]),
+        "{answers:?}"
+    );
+    assert_served(&mut owner); // the events sent before this answer are in
+    let shares: Vec<_> = owner
+        .events
+        .iter()
+        .filter_map(|(_, e)| match e {
+            Event::ShareChanged { client, until, .. } if *client == guest_id => Some(*until),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shares, [Some(until), None]);
+
+    let mut plain = Client::connect_with(&shared.socket, Features::CHECKPOINT_V6, None);
+    let answers = plain.answer(|req| Message::ShareSession {
+        req,
+        session,
+        client: guest_id,
+        until,
+    });
+    assert!(
+        matches!(answers.as_slice(), [Message::Failed { reason, .. }] if reason.contains("feature bits")),
+        "{answers:?}"
+    );
+    drop((owner, guest, plain));
     shared.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
