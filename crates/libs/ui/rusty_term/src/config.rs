@@ -22,6 +22,8 @@ use std::path::PathBuf;
 use crate::core::{CursorShape, Theme};
 use crate::keymap::{Keymap, parse_action, parse_chord};
 
+pub mod theme_file;
+
 /// Initial window state (`--maximized` / `--fullscreen`, or a `[window]
 /// launch_mode` config key); `None` is the normal windowed default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +41,9 @@ pub enum ReduceMotion {
     /// Never reduce, whatever the OS says.
     Off,
 }
+
+/// `[window] dim_inactive_panes` when unset (C62).
+pub const DIM_INACTIVE_DEFAULT: bool = true;
 
 /// OSC 52 clipboard policy (`clipboard` config key). A child program can ask
 /// the terminal to read the system clipboard back to it (`52;c;?`) — with no
@@ -68,6 +73,17 @@ pub enum ConsoleHost {
     /// Our own console host, rusty_conhost. Default (design §9.2, Phase B).
     #[default]
     Own,
+}
+
+/// A top-level theme key, for [`Config::theme_failed`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeSlot {
+    /// `theme` (and its `auto` setting).
+    Theme,
+    /// `theme_dark`.
+    Dark,
+    /// `theme_light`.
+    Light,
 }
 
 /// One `[profile.<name>]` bundle: everything a "launch this kind of tab"
@@ -127,6 +143,10 @@ pub struct Config {
     /// beside each OSC 133 command block — green success, red failure, the
     /// accent while running (`[window] command_marks`; default on).
     pub command_marks: Option<bool>,
+    /// Pointing at a pane focuses it, as a click does (`[window] focus_follows_mouse`; default off; C62).
+    pub focus_follows_mouse: Option<bool>,
+    /// Unfocused panes show at 70% (`[window] dim_inactive_panes`; default on; C62).
+    pub dim_inactive_panes: Option<bool>,
     /// Bottom status ribbon (windowed front-end): cwd, git branch, last
     /// command's exit status, scrollback position, and grid size in a
     /// one-cell bar flush with the window's bottom edge (`[window]
@@ -219,6 +239,13 @@ pub struct Config {
     /// The console host for Windows shells (`[console] host`); other
     /// platforms ignore it.
     pub console_host: Option<ConsoleHost>,
+    /// Where `theme = "name"` looks for a theme file before the built-in
+    /// presets (`themes/` beside the config file). `None`: presets only.
+    pub themes_dir: Option<PathBuf>,
+    /// Theme keys whose name did not resolve (unknown name or a bad theme
+    /// file). A live reload keeps the old value of exactly these
+    /// ([`Config::keep_failed_themes`]); a bad profile theme is only a warning.
+    pub theme_failed: Vec<ThemeSlot>,
 }
 
 impl Config {
@@ -234,7 +261,7 @@ impl Config {
         };
         match std::fs::read_to_string(&path) {
             Ok(text) => {
-                let (cfg, parse_warnings) = parse(&text);
+                let (cfg, parse_warnings) = parse_in(&text, theme_file::dir_of(&path));
                 warnings.extend(
                     parse_warnings
                         .into_iter()
@@ -291,6 +318,8 @@ impl Config {
 # status_bar = false        # hide the bottom status ribbon (default on)
 # reduce_motion = "on"      # "system" (default, follow the OS), "on" or "off"
 # command_marks = false     # hide the per-command gutter marks (default on)
+# focus_follows_mouse = true  # pointing at a pane focuses it (default off)
+# dim_inactive_panes = false  # don't dim unfocused panes (default on)
 
 # copy_html = false         # don't add styled HTML to Ctrl+Shift+C copies
 # clipboard = "write-only"  # OSC 52 policy: "off", "write-only" (default), or "read-write"
@@ -618,17 +647,42 @@ fn header_name(line: &str) -> Option<String> {
     (tail.is_empty() || tail.starts_with('#')).then(|| name.trim().to_ascii_lowercase())
 }
 
+/// A change-sensitive snapshot of a file or directory: one (name, mtime, len)
+/// per entry, sorted by name, so edits, adds, removes and renames all differ.
+/// A file is a single entry with an empty name.
+type Stamp = Vec<(std::ffi::OsString, std::time::SystemTime, u64)>;
+
+/// Directory entries a [`stamp`] looks at.
+const STAMP_MAX_ENTRIES: usize = 1024;
+
+fn stamp(p: &std::path::Path) -> Option<Stamp> {
+    let m = std::fs::metadata(p).ok()?;
+    if !m.is_dir() {
+        return Some(vec![(Default::default(), m.modified().ok()?, m.len())]);
+    }
+    // Capped: a themes dir is a handful of small files, not a hot path to scan.
+    let mut out: Stamp = std::fs::read_dir(p)
+        .ok()?
+        .take(STAMP_MAX_ENTRIES)
+        .filter_map(|e| {
+            // An unreadable entry drops out; it must not hide the others.
+            let e = e.ok()?;
+            let em = e.metadata().ok()?;
+            Some((e.file_name(), em.modified().ok()?, em.len()))
+        })
+        .collect();
+    out.sort();
+    Some(out)
+}
+
 /// Watch `path` for changes from a daemon thread, invoking `on_change` after
 /// each observed modification. A simple 500ms mtime/length poll — editors
 /// vary wildly in how they save (rename-over, truncate+write, atomic temp
 /// file), and polling sees through all of them, needs no platform API, and a
 /// half-second latency is imperceptible next to a manual save. Also fires
-/// when the file first appears.
+/// when the file first appears. `path` may be a directory (the themes dir):
+/// adds, removes, renames and edits of its entries all count as changes.
 pub fn watch(path: PathBuf, on_change: impl Fn() + Send + 'static) {
-    fn stamp(p: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
-        let m = std::fs::metadata(p).ok()?;
-        Some((m.modified().ok()?, m.len()))
-    }
     std::thread::spawn(move || {
         let mut last = stamp(&path);
         loop {
@@ -655,10 +709,31 @@ enum Value {
     Bool(bool),
 }
 
+/// Resolve `name` to a theme (user file first, then preset), recording a
+/// failure on `cfg` so a live reload can keep the old theme.
+fn named_theme(cfg: &Config, name: &str) -> Result<Theme, String> {
+    theme_file::resolve(name, cfg.themes_dir.as_deref())
+}
+
+/// [`named_theme`] for a top-level key, recording a failure against `slot`.
+fn slot_theme(cfg: &mut Config, slot: ThemeSlot, name: &str) -> Result<Theme, String> {
+    cfg.theme_failed.retain(|&s| s != slot);
+    named_theme(cfg, name).inspect_err(|_| cfg.theme_failed.push(slot))
+}
+
 /// Parse config text. Never fails: every malformed or unknown line becomes a
 /// warning and is otherwise ignored.
+#[cfg(test)]
 fn parse(text: &str) -> (Config, Vec<String>) {
-    let mut cfg = Config::default();
+    parse_in(text, None)
+}
+
+/// [`parse`] with the directory that `theme = "name"` checks for theme files.
+fn parse_in(text: &str, themes_dir: Option<PathBuf>) -> (Config, Vec<String>) {
+    let mut cfg = Config {
+        themes_dir,
+        ..Config::default()
+    };
     let mut warnings = Vec::new();
     let mut section = String::new();
 
@@ -768,18 +843,16 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
             if name.eq_ignore_ascii_case("auto") {
                 cfg.theme_auto = true;
             } else {
-                cfg.theme = preset(&name).ok_or_else(|| {
-                    format!("unknown theme `{name}` (try {})", PRESETS.join(", "))
-                })?;
+                cfg.theme = slot_theme(cfg, ThemeSlot::Theme, &name)?;
             }
         }
         ("", "theme_dark") => {
             let name = expect_str(key, value)?;
-            cfg.theme_dark = Some(preset(&name).ok_or_else(|| format!("unknown theme `{name}`"))?);
+            cfg.theme_dark = Some(slot_theme(cfg, ThemeSlot::Dark, &name)?);
         }
         ("", "theme_light") => {
             let name = expect_str(key, value)?;
-            cfg.theme_light = Some(preset(&name).ok_or_else(|| format!("unknown theme `{name}`"))?);
+            cfg.theme_light = Some(slot_theme(cfg, ThemeSlot::Light, &name)?);
         }
         ("", "minimum_contrast") => {
             let ratio = match value {
@@ -787,6 +860,10 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
                 Value::Int(i) => i as f32,
                 _ => return Err(format!("{key}: expected a number")),
             };
+            // NaN would pass `clamp` and force every glyph to black or white.
+            if !ratio.is_finite() {
+                return Err(format!("{key}: expected a finite number"));
+            }
             cfg.minimum_contrast = Some(ratio.clamp(1.0, 21.0));
         }
         ("window", "cols") => cfg.cols = Some(expect_dim(key, value)?),
@@ -803,6 +880,10 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
         ("window", "ligatures") => cfg.ligatures = Some(expect_bool(key, value)?),
         ("window", "status_bar") => cfg.status_bar = Some(expect_bool(key, value)?),
         ("window", "command_marks") => cfg.command_marks = Some(expect_bool(key, value)?),
+        ("window", "focus_follows_mouse") => {
+            cfg.focus_follows_mouse = Some(expect_bool(key, value)?)
+        }
+        ("window", "dim_inactive_panes") => cfg.dim_inactive_panes = Some(expect_bool(key, value)?),
         ("window", "launch_mode") => {
             let name = expect_str(key, value)?;
             cfg.launch_mode = Some(match name.to_ascii_lowercase().as_str() {
@@ -864,19 +945,7 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
             cfg.quake_height = Some(v as f32);
         }
         ("window", "quake_hotkey") => cfg.quake_hotkey = Some(expect_str(key, value)?),
-        ("colors", "foreground") => cfg.theme.fg = expect_color(key, value)?,
-        ("colors", "background") => cfg.theme.bg = expect_color(key, value)?,
-        ("colors", "cursor") => cfg.theme.cursor = expect_color(key, value)?,
-        ("colors", k) => {
-            let Some(n) = k
-                .strip_prefix("color")
-                .and_then(|n| n.parse::<usize>().ok())
-                .filter(|&n| n < 16)
-            else {
-                return Err(format!("unknown [colors] key `{k}`"));
-            };
-            cfg.theme.palette16[n] = expect_color(k, value)?;
-        }
+        ("colors", k) => set_color(&mut cfg.theme, k, value)?,
         ("", "copy_html") => cfg.copy_html = Some(expect_bool(key, value)?),
         ("console", "host") => {
             let name = expect_str(key, value)?;
@@ -930,14 +999,13 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
                     cfg.profiles.len() - 1
                 }
             };
-            let p = &mut cfg.profiles[idx];
             match k {
-                "shell" => p.shell = Some(expect_str(key, value)?),
-                "cwd" => p.cwd = Some(PathBuf::from(expect_str(key, value)?)),
+                "shell" => cfg.profiles[idx].shell = Some(expect_str(key, value)?),
+                "cwd" => cfg.profiles[idx].cwd = Some(PathBuf::from(expect_str(key, value)?)),
                 "theme" => {
                     let t = expect_str(key, value)?;
-                    p.theme =
-                        Some(preset(&t).ok_or_else(|| format!("unknown theme `{t}` in [{s}]"))?);
+                    let theme = named_theme(cfg, &t).map_err(|e| format!("{e} in [{s}]"))?;
+                    cfg.profiles[idx].theme = Some(theme);
                 }
                 other => return Err(format!("unknown key `{other}` in [{s}]")),
             }
@@ -990,6 +1058,27 @@ fn expect_dim(key: &str, v: Value) -> Result<u16, String> {
         Value::Int(i) => Err(format!("{key}: {i} out of range (1-65535)")),
         _ => Err(format!("{key}: expected an integer")),
     }
+}
+
+/// Set one `[colors]` key (`foreground`, `background`, `cursor`, `color0`..
+/// `color15`) on `theme`. Shared by the config file and theme files.
+fn set_color(theme: &mut Theme, key: &str, value: Value) -> Result<(), String> {
+    match key {
+        "foreground" => theme.fg = expect_color(key, value)?,
+        "background" => theme.bg = expect_color(key, value)?,
+        "cursor" => theme.cursor = expect_color(key, value)?,
+        k => {
+            let Some(n) = k
+                .strip_prefix("color")
+                .and_then(|n| n.parse::<usize>().ok())
+                .filter(|&n| n < 16)
+            else {
+                return Err(format!("unknown [colors] key `{k}`"));
+            };
+            theme.palette16[n] = expect_color(k, value)?;
+        }
+    }
+    Ok(())
 }
 
 /// A color: `"#RRGGBB"` or `"RRGGBB"`.
@@ -1186,6 +1275,22 @@ pub fn preset(name: &str) -> Option<Theme> {
 }
 
 impl Config {
+    /// After a reload, put back the values of the theme keys that failed to
+    /// resolve (D73: a bad file keeps the previous theme). `old` is the config
+    /// that was live, `old_theme` the colours on screen.
+    pub fn keep_failed_themes(&mut self, old: &Config, old_theme: Theme) {
+        for slot in std::mem::take(&mut self.theme_failed) {
+            match slot {
+                ThemeSlot::Theme => {
+                    self.theme = old_theme;
+                    self.theme_auto = old.theme_auto;
+                }
+                ThemeSlot::Dark => self.theme_dark = old.theme_dark,
+                ThemeSlot::Light => self.theme_light = old.theme_light,
+            }
+        }
+    }
+
     /// The named profile, if defined (case-insensitive).
     pub fn profile(&self, name: &str) -> Option<&Profile> {
         self.profiles
@@ -1385,6 +1490,12 @@ color15 = "ffffff"
         // Out-of-range contrast clamps; integers accepted.
         let (cfg3, _) = parse("minimum_contrast = 99\n");
         assert_eq!(cfg3.minimum_contrast, Some(21.0));
+        // Non-finite values are refused with a warning, not clamped.
+        for bad in ["nan", "inf", "-inf"] {
+            let (cfg, warns) = parse(&format!("minimum_contrast = {bad}\n"));
+            assert_eq!(cfg.minimum_contrast, None, "{bad}");
+            assert_eq!(warns.len(), 1, "{bad}: {warns:?}");
+        }
     }
 
     #[test]
@@ -1739,6 +1850,64 @@ color15 = "ffffff"
         }
     }
 
+    /// Contrast audit of the built-in presets (card #690 T3, gui-design D76).
+    /// The palettes are published ones, so low pairs are recorded, not edited:
+    /// `minimum_contrast` is what lifts them, and the second half proves it
+    /// does on every surface a glyph can sit on.
+    #[test]
+    fn preset_contrast_audit() {
+        use crate::core::{contrast_ratio, ensure_contrast};
+        // Known sub-4.5 default text and sub-3 cursors (published palettes).
+        let low_text = ["solarized-light"];
+        let low_cursor = ["catppuccin-latte"];
+        for &name in PRESETS {
+            let t = preset(name).expect("preset");
+            let text = contrast_ratio(t.fg, t.bg);
+            assert!(
+                text >= 4.5 || low_text.contains(&name),
+                "{name}: fg on bg {text:.2}"
+            );
+            assert!(
+                text >= 4.0,
+                "{name}: fg on bg {text:.2} fell below the floor"
+            );
+            let cursor = contrast_ratio(t.cursor, t.bg);
+            assert!(
+                cursor >= 3.0 || low_cursor.contains(&name),
+                "{name}: cursor on bg {cursor:.2}"
+            );
+            // Every colour on every theme surface, the cursor block included.
+            let inks: Vec<u32> = t.palette16.iter().copied().chain([t.fg, t.bg]).collect();
+            let surfaces = inks.iter().copied().chain([t.cursor]);
+            for bg in surfaces {
+                for &fg in &inks {
+                    let got = ensure_contrast(fg, bg, 4.5);
+                    let best = contrast_ratio(0xFFFFFF, bg).max(contrast_ratio(0x000000, bg));
+                    assert!(
+                        contrast_ratio(got, bg) >= 4.5f32.min(best) - 0.01,
+                        "{name}: {fg:06x} on {bg:06x} -> {got:06x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn focus_and_dim_keys_parse_and_default_unset() {
+        let (cfg, warns) =
+            parse("[window]\nfocus_follows_mouse = true\ndim_inactive_panes = true\n");
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(
+            (cfg.focus_follows_mouse, cfg.dim_inactive_panes),
+            (Some(true), Some(true))
+        );
+        let (cfg, _) = parse("");
+        assert_eq!(
+            (cfg.focus_follows_mouse, cfg.dim_inactive_panes),
+            (None, None)
+        );
+    }
+
     #[test]
     fn status_bar_key_parses() {
         let (cfg, warns) = parse("[window]\nstatus_bar = false\n");
@@ -1775,6 +1944,71 @@ color15 = "ffffff"
         assert_eq!(cfg.theme.bg, 0x000000, "explicit bg wins");
         assert_eq!(cfg.theme.fg, 0xf8f8f2, "dracula fg kept");
         assert_eq!(cfg.theme.palette16[4], 0xbd93f9, "dracula purple kept");
+    }
+
+    #[test]
+    fn a_directory_stamp_changes_on_rename_add_and_remove() {
+        let d = std::env::temp_dir().join(format!("rt-stamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("nord.toml"), "x").unwrap();
+        let before = stamp(&d);
+        // Same mtime, same length, same count: only the name differs.
+        std::fs::rename(d.join("nord.toml"), d.join("back.toml")).unwrap();
+        let renamed = stamp(&d);
+        assert_ne!(before, renamed, "rename must change the stamp");
+        std::fs::write(d.join("new.toml"), "y").unwrap();
+        assert_ne!(renamed, stamp(&d), "add");
+        std::fs::remove_file(d.join("new.toml")).unwrap();
+        assert_eq!(renamed, stamp(&d), "remove restores");
+        assert_eq!(stamp(&d.join("missing")), None);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn theme_files_resolve_everywhere_a_preset_does() {
+        let d = std::env::temp_dir().join(format!("rt-cfg-themes-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("mine.toml"), "[colors]\nbackground = \"#102030\"\n").unwrap();
+        let (cfg, warns) = parse_in(
+            "theme = \"mine\"\ntheme_light = \"mine\"\n[profile.p]\ntheme = \"mine\"\n",
+            Some(d.clone()),
+        );
+        assert!(warns.is_empty() && cfg.theme_failed.is_empty(), "{warns:?}");
+        assert_eq!(cfg.theme.bg, 0x102030);
+        assert_eq!(cfg.theme_light.unwrap().bg, 0x102030);
+        assert_eq!(cfg.profile("p").unwrap().theme.unwrap().bg, 0x102030);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_theme_that_does_not_resolve_is_flagged_so_reload_keeps_the_old_one() {
+        let (cfg, warns) = parse_in("theme = \"missing\"\n", Some(PathBuf::from("/nonexistent")));
+        assert_eq!(warns.len(), 1);
+        assert_eq!(cfg.theme_failed, [ThemeSlot::Theme]);
+        assert!(parse("theme = \"nord\"\n").0.theme_failed.is_empty());
+    }
+
+    #[test]
+    fn a_later_valid_theme_key_clears_an_earlier_failure() {
+        let (cfg, _) = parse("theme = \"bad\"\ntheme = \"nord\"\n");
+        assert!(cfg.theme_failed.is_empty());
+    }
+
+    #[test]
+    fn a_failed_key_keeps_only_its_own_old_value() {
+        let old = parse("theme = \"nord\"\ntheme_light = \"dracula\"\n").0;
+        // Light is mistyped; the new dark theme and an unused profile typo
+        // must not hold anything back.
+        let (mut new, _) = parse(
+            "theme = \"gruvbox-dark\"\ntheme_dark = \"dracula\"\ntheme_light = \"oops\"\n[profile.p]\ntheme = \"oops\"\n",
+        );
+        assert_eq!(new.theme_failed, [ThemeSlot::Light]);
+        new.keep_failed_themes(&old, old.theme);
+        assert_eq!(new.theme, preset("gruvbox-dark").unwrap());
+        assert_eq!(new.theme_dark, preset("dracula"));
+        assert_eq!(new.theme_light, old.theme_light);
+        assert!(new.theme_failed.is_empty());
     }
 
     #[test]

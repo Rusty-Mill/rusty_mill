@@ -255,6 +255,37 @@ mod tests {
         }
     }
 
+    /// D35 over user theme files: the schema's extremes (all-black, all-white,
+    /// a lone bright accent on a dark and a light ground) keep chrome legible.
+    #[test]
+    fn chrome_is_legible_for_user_theme_files() {
+        for (name, text) in [
+            (
+                "black",
+                "[colors]\nbackground = \"#000000\"\ncursor = \"#000000\"\n",
+            ),
+            (
+                "white",
+                "[colors]\nbackground = \"#ffffff\"\ncursor = \"#ffffff\"\n",
+            ),
+            (
+                "neon-dark",
+                "[colors]\nbackground = \"#101010\"\ncursor = \"#ff00ff\"\n",
+            ),
+            (
+                "neon-light",
+                "[colors]\nbackground = \"#f0f0f0\"\ncursor = \"#ffff00\"\n",
+            ),
+            (
+                "mid",
+                "[colors]\nbackground = \"#808080\"\ncursor = \"#808080\"\n",
+            ),
+        ] {
+            let theme = crate::config::theme_file::parse_file(text).expect("a valid file");
+            assert_legible(&theme, name);
+        }
+    }
+
     #[test]
     fn chrome_is_legible_for_a_sweep_of_custom_themes() {
         for step in 0..=16u32 {

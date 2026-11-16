@@ -5423,6 +5423,18 @@ impl Grid {
     /// rows show the tail of history, the rest the live grid shifted down by
     /// `off`. A blank cell fills positions past a short history line's width.
     /// Used by the windowed renderers so a scrolled-up view paints history.
+    #[cfg(not(any(test, feature = "gui")))]
+    pub fn viewport_cell(&self, col: usize, row: usize) -> Cell {
+        // Headless: no folds, so the top `off` rows are the tail of history
+        // and the rest the live screen shifted down.
+        let off = self.view_offset.min(self.scrollback.len());
+        let line = match row.checked_sub(off) {
+            None => self.scrollback.get(self.scrollback.len() - off + row),
+            Some(live) => self.screen.get(live),
+        };
+        line.map_or_else(|| self.default_cell(), |line| self.line_cell(line, col))
+    }
+
     #[cfg(any(test, feature = "gui"))]
     pub fn viewport_cell(&self, col: usize, row: usize) -> Cell {
         self.cell_of(self.view_line(row), col)
