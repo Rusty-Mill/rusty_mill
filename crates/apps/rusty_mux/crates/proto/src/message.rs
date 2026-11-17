@@ -1121,10 +1121,10 @@ const EXITED: u32 = 61;
 const TAILSCALE: u32 = 62;
 /// A client entry's mark that it can be asked to show a session: 1 yes, 0
 /// no, absent from an older server (C64).
-const SHOWABLE: u32 = 65;
+const SHOWABLE: u32 = 70;
 /// A `ShowSession`'s mark that it asks every other window: 1; a request
 /// has this or a client, never neither (C64).
-const EVERY: u32 = 66;
+const EVERY: u32 = 71;
 // IDs 1..=EVERY are recognized. Extend this bound when adding field IDs.
 pub(crate) const FIELD_COUNT: usize = EVERY as usize;
 
@@ -1170,7 +1170,7 @@ mod ty {
     pub const SIGNAL_BLOCK: u8 = 0x28;
     pub const RELEASE_BLOCK: u8 = 0x29;
     pub const CLIPBOARD_REPLY: u8 = 0x2a;
-    pub const SHOW_SESSION: u8 = 0x2d;
+    pub const SHOW_SESSION: u8 = 0x30;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
