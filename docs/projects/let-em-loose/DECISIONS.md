@@ -154,6 +154,7 @@ Precise contracts used by this guide:
 | D144 | #1166: rejecting `executed` from lens replies at `post::parse` is a bug fix, not new design | [default] 2026-11-17 (1166) |
 | D145 | #1166: the llama.cpp 500 on valid harmony output is a host/adapter issue, not design | [default] 2026-11-17 (1166) |
 | D146 | #1166: an inbox-exercising seed is a test-fixture choice; thresholds and escalation rules unchanged | [default] 2026-11-17 (1166) |
+| D147 | #1166: the llama.cpp rebuild and the Qwen reasoning budget are held until the rerun's per-pass log shows which slot failed (D145 fix held, not applied) | [stated] 2026-11-17 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1430,7 +1431,7 @@ The first three were approved first. The last three were added to Q35 after that
 
 ## D145. #1166: the llama.cpp 500 on valid harmony output is a host/adapter issue, not design
 
-**Decision.** `gpt-oss-120b` via llama-swap returned HTTP 500 twice because llama.cpp (build f74e2fa, `common_chat_peg_parse`) rejects valid harmony output (`<|channel|>final <|constrain|>JSON<|message|>{...}`). Fixing it (a newer llama.cpp, a changed reasoning-format setting or a hardened `orch-openai` adapter) is a host or adapter fix and changes no lens, claim or board behaviour, so it is not new design under D127. Which fix to use is the builder's choice.
+**Decision.** `gpt-oss-120b` via llama-swap returned HTTP 500 twice because llama.cpp (build f74e2fa, `common_chat_peg_parse`) rejects valid harmony output (`<|channel|>final <|constrain|>JSON<|message|>{...}`). Fixing it (a newer llama.cpp, a changed reasoning-format setting or a hardened `orch-openai` adapter) is a host or adapter fix and changes no lens, claim or board behaviour, so it is not new design under D127. Which fix to use is the builder's choice. **Held by D147:** the fix is not applied yet. Root cause: build f74e2fa's gpt-oss parser (`common/parsers/gpt-oss.cpp`) accepts `<|constrain|>` after `final` only when a `response_format` is set; upstream master (a9d43ec) makes it optional, so the fix is a llama.cpp rebuild.
 **Why.** A provider's server bug on well-formed output.
 **Rejected.** Dropping `local-high` from the roster to avoid it; that would change the approved lens roster.
 **Tag.** [default] · remind-me: mem_331b473b9194401fb93c4237411fe5b1
@@ -1445,3 +1446,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_981c7beee6ad4b0190795bf1830e85b7
 **Key.** lel:1166:inbox-seed-is-fixture-choice
 **Source.** let-em-loose-expert, 2026-11-17. `1166-smoke-run.md` sections 2 and 9, D127, D143. Numbered D146 after D145.
+
+## D147. #1166: the llama.cpp rebuild and the Qwen reasoning budget are held until the rerun's per-pass log shows which slot failed
+
+**Decision.** Nano: "Hold both host changes (llama.cpp rebuild, reasoning budget) until the rerun's per-pass log shows which slot failed and why. One change at a time." So D145's fix (rebuild llama.cpp past build f74e2fa) and a Qwen reasoning budget (`--reasoning-budget 2048` in `~/llama/config.yaml`, untested) are held and not applied. The rerun is task `smoke-2` (`1166-smoke-rerun.sh`) on the code fixes D144 and D146 plus the stderr per-pass log (rusty_orch PR #1783). Host changes, one at a time, only after that log names the failed slot. When a rebuild is applied it must overwrite the shared libraries (not `cp -n`, which would keep the old `.so` files) and keep the rollback copy `~/llama/bin/vulkan.f74e2fa`.
+**Why.** Run 1 had only 2 of 3 candidates and which slot failed and why is unknown, because the per-pass log was lost to the closed-stdout panic (fixed in #1783). Changing the host first would hide the cause.
+**Rejected.** Applying the rebuild and the reasoning budget together before the rerun.
+**Tag.** [stated] · remind-me: mem_157ec68e43034d219af811c9735b1681
+**Key.** lel:1166:hold-host-changes-until-rerun-log
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-17, saved verbatim as `mem_7c2db8a737f0414898ce9e85a045f46e` (speaker Nano). Relates to D143, D144, D145, D146, Q52. Numbered D147 after D146.
