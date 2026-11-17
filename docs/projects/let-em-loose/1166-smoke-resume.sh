@@ -1,6 +1,6 @@
 #!/bin/bash
 # #1166 smoke run, RESUME after an interrupted step 6 (1166-smoke-run.sh). LOCAL-ONLY, no paid call.
-#   bash docs/projects/let-em-loose/1166-smoke-resume.sh
+#   LLAMA_SWAP=<llama-swap-host>:<port> bash docs/projects/let-em-loose/1166-smoke-resume.sh
 # Safe to run at any time, and again after Ctrl-C:
 #   1. if a `lens run` for this task is still alive (an interrupt that closed the terminal does not stop it), it waits
 #      for that run to end and never starts a second one;
@@ -18,6 +18,7 @@ LOG=$OUT/resume-$(date -u +%Y%m%dT%H%M%SZ).log
 exec > >(tee -a "$LOG") 2>&1
 echo "log: $LOG"
 
+LLAMA_SWAP=${LLAMA_SWAP:?set to the llama-swap host:port}   # e.g. LLAMA_SWAP=<llama-swap-host>:<port>
 cd /
 R="sudo -H -u orch-runner"   # orch-runner cannot enter baileyrd's directories: every call below runs from /
 BIN=/opt/lel/current/bin
@@ -33,7 +34,7 @@ alive() { pgrep -u orch-runner -f "$RUN_RE" >/dev/null; }
 status() {
   local p; p=$(pgrep -u orch-runner -o -f "rusty_orch lens run .*--task $TASK" || true)
   echo "$(date -u +%T)Z lens run alive: pid ${p:-?} elapsed $(ps -o etime= -p "${p:-0}" 2>/dev/null | tr -d ' ' || true);" \
-       "llama-swap loaded: $(curl -s -m 5 http://192.168.10.104:8080/running | jq -r '[.running[].model]|join(",")' 2>/dev/null || echo '?')"
+       "llama-swap loaded: $(curl -s -m 5 http://$LLAMA_SWAP/running | jq -r '[.running[].model]|join(",")' 2>/dev/null || echo '?')"
 }
 wait_for_end() {
   while alive; do status; sleep 60; done
