@@ -65,8 +65,8 @@ Asked 2026-11-13. Yes: Nano commented on PR #1650 (comment 6841530923, 2026-11-1
 Source: DECISIONS D232, D234.
 
 ## What did Nano answer on the three TLS-LISTENER.md questions (card #506, PR #1656)?
-Asked 2026-11-13. Nano answered "Recommend" to all three: (1) tailnet path (C27) first, TLS listener after (D235); (2) user-supplied certificate and key with client-side fingerprint pinning, no generator (D236); (3) 256-bit random tokens, stored hashed, shown once, rotated and revoked by `rusty-mux-ctl` (D237). Not yet confirmed on the PR itself; Dottius needs that (D37). Tag: stated.
-Source: D235; D236; D237; `docs/projects/mux/TLS-LISTENER.md`.
+Asked 2026-11-13. Nano answered "Recommend" to all three: (1) tailnet path (C27) first, TLS listener after (D235); (2) user-supplied certificate and key with client-side fingerprint pinning, no generator (D236); (3) 256-bit random tokens, stored hashed, shown once, rotated and revoked by `rusty-mux-ctl` (D237). Confirmed by Nano 2026-11-17 in the project thread (D319), which is the statement Dottius needs (D37). Tag: stated.
+Source: D235; D236; D237; D319; `docs/projects/mux/TLS-LISTENER.md`.
 
 ## What did Nano answer on the six MESH.md questions (C80, own mesh)?
 Asked 2026-11-13. Nano concurred with the recommendations, with comments on 2 (Tailscale stays a supported option) and 6 (Windows is a priority): spike A go (D248); Option A, Tailscale kept (D249); lift non-goal after spike A, own hub only (D250); `ts-hub` crate (D251); keep boringtun (D252); Windows priority, spike A-W needs its own go (D253).
