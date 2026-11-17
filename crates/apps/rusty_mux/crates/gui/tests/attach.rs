@@ -1314,3 +1314,38 @@ fn a_gui_attached_to_a_float_reattaches_beside_no_float() {
         |o| matches!(o, Out::Layout(Some(Tree::Pane(k)), f) if *k == detached && !f.is_empty()),
     );
 }
+
+#[test]
+fn a_place_that_changes_nothing_or_goes_nowhere_still_tells_the_floats() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let (_, new, outs, source) = split_window(attached);
+    source.act(Act::Float(new));
+    let Out::Floats(floats) = next_out(&outs, |o| matches!(o, Out::Floats(f) if !f.is_empty()))
+    else {
+        unreachable!("matched above");
+    };
+    let at = floats[0].at;
+
+    // Dropped where it is: the server says Done and changes nothing.
+    source.act(Act::Place { key: new, at });
+    assert_eq!(
+        next_out(&outs, |o| matches!(o, Out::Floats(_))),
+        Out::Floats(floats),
+        "told where it is, so it does not wait"
+    );
+
+    // Dropped under the least size: nothing is sent, and it still snaps back.
+    let tiny = rusty_term::gui::source::FloatAt {
+        x: 0,
+        y: 0,
+        w: 5,
+        h: 5,
+    };
+    source.act(Act::Place { key: new, at: tiny });
+    let Out::Floats(told) = next_out(&outs, |o| matches!(o, Out::Floats(_))) else {
+        unreachable!("matched above");
+    };
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0].at, at);
+}

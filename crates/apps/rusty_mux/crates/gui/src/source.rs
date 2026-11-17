@@ -350,6 +350,24 @@ impl State {
         let _ = lock(&self.asks).send(ask);
     }
 
+    /// The server floats blocks and lets this client edit the layout: the
+    /// window may move them.
+    fn edits_floats(&self) -> bool {
+        self.floats && self.edits_layout
+    }
+
+    /// A place the window waits on that goes nowhere: tells the window where
+    /// its floats are by an answered no-op, so the one dropped there snaps
+    /// back instead of staying where it was let go.
+    fn floats_told_again(&self, act: &Act) {
+        if matches!(act, Act::Place { .. }) {
+            self.send(|req| {
+                lock(&self.edits).insert(req);
+                Message::Sync { req }
+            });
+        }
+    }
+
     /// Sends a request on the control connection, returning its number;
     /// the events reader skips its answer unless it asked for it.
     fn send(&self, make: impl FnOnce(u64) -> Message) -> u64 {
@@ -407,8 +425,8 @@ impl MuxSource {
     /// place the server refuses is told back, so the float snaps to where it is.
     fn float(&self, key: u64, act: Act) {
         let block = self.0.shown().keys.id(key);
-        let (true, Some(block)) = (self.0.floats, block) else {
-            return;
+        let (true, Some(block)) = (self.0.edits_floats(), block) else {
+            return self.0.floats_told_again(&act);
         };
         match act {
             Act::Float(_) => {
@@ -417,13 +435,16 @@ impl MuxSource {
                 }
             }
             Act::Place { at, .. } => {
-                if let Some(at) = floats::rect(at) {
+                match floats::rect(at) {
                     // Told before it is sent: a refusal can come back before
                     // `send` does, and one not found here would be lost.
-                    self.0.send(|req| {
-                        lock(&self.0.edits).insert(req);
-                        Message::PlaceFloat { req, block, at }
-                    });
+                    Some(at) => {
+                        self.0.send(|req| {
+                            lock(&self.0.edits).insert(req);
+                            Message::PlaceFloat { req, block, at }
+                        });
+                    }
+                    None => self.0.floats_told_again(&act),
                 }
             }
             Act::Stack { top, .. } => {
@@ -473,8 +494,11 @@ impl Source for MuxSource {
         // A lease event may have come before the pane was known as this
         // window's: its headers are read again once everything sent so far is
         // answered.
-        let req = self.0.send(|req| Message::Sync { req });
-        lock(&self.0.opened).insert(req);
+        // Recorded before it is sent: the answer can come back first.
+        self.0.send(|req| {
+            lock(&self.0.opened).insert(req);
+            Message::Sync { req }
+        });
         Ok(PaneIo {
             writer: Box::new(pane),
             feed: Box::new(feed.into_iter()),
@@ -762,20 +786,24 @@ impl Events {
             if !self.headed(&message, out) {
                 return Stop::Closed;
             }
-            // A place the server refused leaves the float as it was: the window
-            // is told where it is, so the one dropped there snaps back (D91).
+            // A sync that fails is answered too, and forgotten.
+            if let Message::Failed { req, .. } = &message {
+                lock(&self.state.opened).remove(req);
+            }
             if let Message::Done { req, .. } = &message
                 && lock(&self.state.opened).remove(req)
                 && !out(Out::Blocks(self.blocks()))
             {
                 return Stop::Closed;
             }
-            if let Message::Failed { req, .. } | Message::Done { req, .. } = &message {
-                let asked = lock(&self.state.edits).remove(req);
-                let refused = matches!(message, Message::Failed { .. });
-                if asked && refused && !out(Out::Floats(self.floats())) {
-                    return Stop::Closed;
-                }
+            // A place the window waits on is answered with where its floats
+            // are: a refusal, or an answer with no change to follow, leaves
+            // the one dropped there where the server has it (D91).
+            if let Message::Failed { req, .. } | Message::Done { req, .. } = &message
+                && lock(&self.state.edits).remove(req)
+                && !out(Out::Floats(self.floats()))
+            {
+                return Stop::Closed;
             }
             let change = match &message {
                 Message::Event { event, .. } => self.model.apply(event),

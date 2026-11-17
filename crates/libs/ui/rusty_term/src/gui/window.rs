@@ -6156,6 +6156,7 @@ impl WindowState<'_> {
                 // A release that lands after focus moves away never reaches
                 // us, so drop the pressed look here rather than leave it stuck.
                 self.pressed = pressed_after_focus(self.pressed, focused);
+                self.float_drag = float_drag_after_focus(self.float_drag, focused);
                 if let Some(p) = self.pane_mut()
                     && p.grid.lock().focus_reporting
                 {
@@ -6459,6 +6460,9 @@ impl WindowState<'_> {
                 }
             },
             WindowEvent::CursorLeft { .. } => {
+                // A float held when the pointer leaves is dropped where it
+                // is: no release may follow to end it.
+                self.end_float_drag();
                 // Drop any chrome hover highlight when the pointer leaves.
                 if self.hover.take().is_some()
                     && let Some(window) = &self.window
@@ -7399,6 +7403,13 @@ fn pressed_after_focus(pressed: Option<Hit>, focused: bool) -> Option<Hit> {
     if focused { pressed } else { None }
 }
 
+/// A float held when focus goes is let go where it was: the release that
+/// would end it may land in another window, and the float would follow the
+/// pointer into the next press. One already dropped waits for the source.
+fn float_drag_after_focus(drag: Option<FloatDrag>, focused: bool) -> Option<FloatDrag> {
+    drag.filter(|d| focused || !d.live)
+}
+
 /// Whether a drag-selection past a pane's `[top_px, bottom_px]` edge should
 /// auto-scroll: `Some(true)` above the top margin, `Some(false)` below the
 /// bottom margin, `None` within the pane (plus its margin) so the caller
@@ -7664,6 +7675,31 @@ fn grid_may_answer(policy: ClipboardPolicy, serves: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_float_held_is_let_go_when_focus_goes() {
+        use super::{FloatDrag, Grab, Rect, float_drag_after_focus};
+        let at = Rect::new(0, 0, 10, 10);
+        let held = |live| FloatDrag {
+            key: 1,
+            grab: Grab::Move,
+            from: at,
+            press: (0.0, 0.0),
+            now: at,
+            live,
+        };
+        assert_eq!(float_drag_after_focus(Some(held(true)), false), None);
+        assert_eq!(
+            float_drag_after_focus(Some(held(true)), true),
+            Some(held(true))
+        );
+        assert_eq!(
+            float_drag_after_focus(Some(held(false)), false),
+            Some(held(false)),
+            "dropped, waiting for the source"
+        );
+        assert_eq!(float_drag_after_focus(None, false), None);
+    }
+
     #[test]
     fn hover_over_a_floats_header_or_border_focuses_no_tile_under_it() {
         use super::{Place, Rect, grid_under};
