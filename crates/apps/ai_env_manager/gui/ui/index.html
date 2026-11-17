@@ -17,13 +17,14 @@
       <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
       <input id="q" type="search" aria-label="Search skills" placeholder="Search name or source" autocomplete="off">
     </label>
+    <button id="choose" class="ghost">Choose folder…</button>
     <button id="theme" class="ghost" aria-label="Switch colour theme"></button>
   </header>
   <p id="error" class="error" role="alert" hidden></p>
   <div id="chips" class="chips" role="group" aria-label="Filter by state"></div>
   <div class="card">
     <table id="grid"><thead></thead><tbody></tbody></table>
-    <div id="empty" class="empty" hidden><p>No skills match.</p><button id="clear">Clear search and filter</button></div>
+    <div id="empty" class="empty" hidden><p id="empty-msg">No skills match.</p><button id="clear">Clear search and filter</button><button id="choose2" class="primary" hidden>Choose folder…</button></div>
   </div>
   <p id="skipped" class="dim" hidden></p>
   <ul class="legend">

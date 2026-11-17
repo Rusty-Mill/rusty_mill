@@ -40,9 +40,9 @@ impl Drop for Tmp {
 }
 
 #[test]
-fn args_need_skills_and_reject_the_unknown() {
+fn args_reject_the_unknown_and_skills_are_optional() {
     let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
-    assert!(parse_scope(args(&[])).is_err());
+    assert!(parse_scope(args(&[])).unwrap().skills.is_empty());
     assert!(parse_scope(args(&["--skills"])).is_err());
     assert!(parse_scope(args(&["--skills", "d", "--open", "x"])).is_err());
     assert!(parse_scope(args(&["--skills", "d", "--tool", "Bad Id"])).is_err());
@@ -314,4 +314,28 @@ fn editor_body_sizes_to_content_and_scrolls() {
         .expect(".ed-body rule");
     assert!(rule.contains("flex:1 1 auto"), "{rule}");
     assert!(rule.contains("overflow:auto"), "{rule}");
+}
+
+#[test]
+fn a_chosen_folder_is_searched_recursively_and_added_once() {
+    let t = Tmp::new();
+    let pack = t.0.join("pack");
+    for n in ["a/one", "a/b/two"] {
+        fs::create_dir_all(pack.join(n)).unwrap();
+        fs::write(pack.join(n).join("SKILL.md"), n).unwrap();
+    }
+    let ctx = Ctx::new(parse_scope([]).unwrap(), t.0.join("home"));
+    assert!(ctx.list().unwrap().rows.is_empty());
+    ctx.add_folder(pack.clone()).unwrap();
+    ctx.add_folder(pack).unwrap();
+    let ids: Vec<_> = ctx.list().unwrap().rows.into_iter().map(|r| r.id).collect();
+    assert_eq!(ids, ["one", "two"]);
+}
+
+#[test]
+fn a_missing_folder_is_refused_and_not_added() {
+    let t = Tmp::new();
+    let ctx = Ctx::new(parse_scope([]).unwrap(), t.0.join("home"));
+    assert!(ctx.add_folder(t.0.join("nope")).is_err());
+    assert!(ctx.list().unwrap().rows.is_empty());
 }

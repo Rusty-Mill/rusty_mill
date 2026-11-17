@@ -16,20 +16,24 @@ use ai_env_app::{
 use ai_env_core::{EntryId, Tool, ToolId};
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use view::{
     BaseIn, FileView, FilesView, ListView, Outcome, PreviewView, PushPreviewView, PushedView,
     Skipped, ToolPlan, ToolResult, Verb,
 };
 
-/// Fixed at launch; what the commands act on.
+/// What the commands act on: the tools are fixed at launch; the skill folders
+/// start from the command line and grow only through the native folder picker
+/// (D46), never from a path the page sends.
 pub struct Ctx {
-    scope: Scope,
+    scope: Mutex<Scope>,
     home: PathBuf,
 }
 
-const USAGE: &str = "usage: ai-env-gui --skills DIR... [--tool ID]...";
+const USAGE: &str = "usage: ai-env-gui [--skills DIR]... [--tool ID]...";
 
-/// Parses `--skills DIR` (repeatable, required) and `--tool ID` (repeatable).
+/// Parses `--skills DIR` and `--tool ID`, both repeatable and optional (folders
+/// can be chosen in the window).
 pub fn parse_scope(args: impl IntoIterator<Item = OsString>) -> Result<Scope, String> {
     let (mut skills, mut tools) = (Vec::new(), Vec::new());
     let mut args = args.into_iter();
@@ -49,24 +53,43 @@ pub fn parse_scope(args: impl IntoIterator<Item = OsString>) -> Result<Scope, St
             _ => return Err(format!("unexpected argument {flag:?}\n{USAGE}")),
         }
     }
-    if skills.is_empty() {
-        return Err(format!("--skills is required\n{USAGE}"));
-    }
     Ok(Scope { skills, tools })
 }
 
 impl Ctx {
     pub fn new(scope: Scope, home: PathBuf) -> Self {
-        Ctx { scope, home }
+        Ctx {
+            scope: Mutex::new(scope),
+            home,
+        }
+    }
+
+    fn scope(&self) -> Scope {
+        self.scope.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Adds a skills folder to this session (not saved, D47). The folder must
+    /// be readable now; one already present is not added twice.
+    pub fn add_folder(&self, dir: PathBuf) -> Result<(), String> {
+        ai_env_app::load_entries(&Scope {
+            skills: vec![dir.clone()],
+            tools: Vec::new(),
+        })
+        .map_err(|e| e.to_string())?;
+        let mut scope = self.scope.lock().unwrap_or_else(|e| e.into_inner());
+        if !scope.skills.contains(&dir) {
+            scope.skills.push(dir);
+        }
+        Ok(())
     }
 
     fn tools(&self) -> Result<Vec<Tool>, String> {
-        select_tools(&self.scope, &self.home).map_err(|e| e.to_string())
+        select_tools(&self.scope(), &self.home).map_err(|e| e.to_string())
     }
 
     pub fn list(&self) -> Result<ListView, String> {
         let tools = self.tools()?;
-        let loaded = load_entries(&self.scope).map_err(|e| e.to_string())?;
+        let loaded = load_entries(&self.scope()).map_err(|e| e.to_string())?;
         let mut rows = Vec::new();
         for entry in &loaded.entries {
             let mut cells = Vec::new();
@@ -91,7 +114,7 @@ impl Ctx {
 
     fn entry(&self, id: &str) -> Result<ai_env_core::Entry, String> {
         let id: EntryId = id.parse().map_err(|e| format!("{id:?}: {e}"))?;
-        let loaded = load_entries(&self.scope).map_err(|e| e.to_string())?;
+        let loaded = load_entries(&self.scope()).map_err(|e| e.to_string())?;
         find_entry(&loaded.entries, &id)
             .cloned()
             .map_err(|e| e.to_string())
@@ -312,12 +335,27 @@ fn apply_push(
     ctx.push_apply(&entry, &tool, bases)
 }
 
+/// Opens the native folder dialog and adds the folder picked. The page only
+/// triggers it: the path never passes through the page. `Ok(false)` means the
+/// dialog was cancelled.
+#[tauri::command]
+async fn choose_folder(app: tauri::AppHandle, ctx: tauri::State<'_, Ctx>) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let Some(picked) = app.dialog().file().blocking_pick_folder() else {
+        return Ok(false);
+    };
+    let dir = picked.into_path().map_err(|e| e.to_string())?;
+    ctx.add_folder(dir)?;
+    Ok(true)
+}
+
 /// Opens the window. `args` are the command-line arguments after the program.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     let scope = parse_scope(args)?;
     let home =
         home_dir().ok_or("set HOME (or USERPROFILE) so ~/ in the tool catalog can be resolved")?;
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(Ctx::new(scope, home))
         .invoke_handler(tauri::generate_handler![
             list,
@@ -328,7 +366,8 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
             preview_edit,
             apply_edit,
             preview_push,
-            apply_push
+            apply_push,
+            choose_folder
         ])
         .run(tauri::generate_context!())
         .map_err(|e| e.to_string())

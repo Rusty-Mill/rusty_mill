@@ -27,6 +27,8 @@ tauri-build = { version = "2", features = [] }
 ai_env_app = { path = "../crates/ai_env_app" }
 ai_env_core = { path = "../crates/ai_env_core" }
 tauri = { version = "2", features = [] }
+# Native folder picker, opened only from a backend command (D46).
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
