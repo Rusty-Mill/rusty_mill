@@ -34,15 +34,15 @@ ls -dZ /srv/lel/bbp                  # expect orch-runner, drwx------, var_t (no
 sudo install -d -o orch-runner -g orch-runner -m 0700 /srv/lel/orch-state
 sudo restorecon -Rv /srv/lel/orch-state
 
-# 3b. Lens config from Factory (baileyrd/factory, merged 2026-11-16), with the two host fixes below
-git clone --depth 1 https://github.com/baileyrd/factory /tmp/factory-lens
+# 3b. Lens configs from Factory (github.com/baileyrd/Factory; the address and model-id fix is Factory PR baileyrd/Factory#2)
+git clone --depth 1 https://github.com/baileyrd/factory /tmp/factory-lens   # needs Factory#2 merged; until then add: --branch claude/lens-local-endpoint-and-model-id
 sudo install -d -o orch-runner -g orch-runner -m 0750 /srv/lel/lenses
 sudo install -o orch-runner -g orch-runner -m 0640 /tmp/factory-lens/lenses/*.md /srv/lel/lenses/
-sed -e 's#http://127.0.0.1:8080/v1#http://192.168.10.104:8080/v1#g' \
-    -e 's#"Qwen3.6-35B-A3B"#"qwen3.6-35b-a3b"#' /tmp/factory-lens/lens.json \
-  | sudo install -o orch-runner -g orch-runner -m 0640 /dev/stdin /srv/lel/lens.json
-sudo restorecon -Rv /srv/lel/lens.json /srv/lel/lenses
-sudo -u orch-runner /opt/lel/current/bin/rusty_orch lens check /srv/lel/lens.json --repo /srv/lel/experiment   # local, local-high: ready
+sudo install -o orch-runner -g orch-runner -m 0640 /tmp/factory-lens/lens.json /tmp/factory-lens/lens-local.json /srv/lel/
+sudo restorecon -Rv /srv/lel/lens.json /srv/lel/lens-local.json /srv/lel/lenses
+# local, local-high, local-rebel: ready. claude, codex: unavailable until their assertions exist.
+sudo -u orch-runner /opt/lel/current/bin/rusty_orch lens check /srv/lel/lens.json --repo /srv/lel/experiment
+sudo -u orch-runner /opt/lel/current/bin/rusty_orch lens check /srv/lel/lens-local.json --repo /srv/lel/experiment
 
 # 4. Check, as orch-runner (needs your sudo to switch user)
 sudo -u orch-runner /opt/lel/current/bin/bbp --help | head -5
@@ -54,11 +54,10 @@ sudo -u orch-runner podman ps -a --format '{{.Names}} {{.Status}}'              
 
 Report back: the `ls -dZ` line, any AVC denials (`sudo ausearch -m avc -ts recent`), and the last two check lines.
 
-## Found on BaileyAi 2026-11-17 (why step 3b edits the Factory file)
-- Factory's `lens.json` and `lenses/*.md` (PR #1 there, 2026-11-16) are identical to the rusty_mill fixture; `python3 -m tools.check` and its unit tests pass.
-- llama-swap answers on port 8080, but only on `192.168.10.104`, not on `127.0.0.1` (connection gives nothing). orch accepts RFC1918 `base_url`s, so the deployed copy uses the LAN address. Factory keeps loopback because it is generic.
-- llama-swap serves `gpt-oss-120b`, `qwen3-vl-30b-a3b`, `qwen3.6-35b-a3b` and `qwen3.6-35b-a3b-rocm`. Factory names `Qwen3.6-35B-A3B`; ids are likely case-sensitive, so the deployed copy uses the lowercase id. Not verified with a model call.
-- `lens check` run as `baileyrd` reports `local` and `local-high` ready, `claude` and `codex` unavailable (no assertion). It also ignored `assertions.json` because the runner (baileyrd) owns it; run as `orch-runner` it is read.
+## Found on BaileyAi 2026-11-17 (fixed in Factory, so the deploy copies the repo files unchanged)
+- llama-swap answers on port 8080 only at `192.168.10.104`, not on `127.0.0.1`. orch accepts loopback and private addresses only, and `baileyai` does not resolve from the host, so Factory now names the LAN IP. It breaks if BaileyAi's address changes.
+- llama-swap routes by exact id. One free local call each: `Qwen3.6-35B-A3B` returned HTTP 404 "no router for requested model"; `qwen3.6-35b-a3b` answered. `gpt-oss-120b` matches. The id case therefore does matter, and Factory now uses the lowercase id.
+- `lens check` exits 0 even with providers unavailable. Run as `baileyrd` it ignored `assertions.json` (the runner owns it); the step above runs it as `orch-runner`, which reports codex's real status.
 
 ## Still not covered (each is its own step)
 - Claude and Codex stay `unavailable` in `lens check` until Nano writes their `no_overage` entries (codex's is machine-bound to `lel-codex`; Claude's is separate).
