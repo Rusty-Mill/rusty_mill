@@ -6,7 +6,7 @@ Status: draft 2026-11-17, uncommitted. Design: `1166-smoke-run.md` (sections 2 t
 
 Assumes the #1092 deploy is done (`/opt/lel/current/bin/{bbp,rusty_orch}`, `/srv/lel/bbp`, `/srv/lel/orch-state`, `/srv/lel/lens-local.json`, `/srv/lel/lenses/*.md`, all `orch-runner`). Everything runs as `orch-runner` (`R` below); the runner cannot be `baileyrd`. Run each block as `baileyrd`, in order, and stop at the first failure. Every path is absolute because `baileyrd` cannot enter `/srv/lel/toy`.
 
-Not guessed, read from code: `bbp open` flags (`crates/apps/rusty_bbp_host/src/bin/bbp.rs` header), the profile set and roster JSON shapes (`profiles.rs`, `holdout.rs`, `rusty_bbp/src/role.rs`), the claims `post` arguments (`rusty_bbp_host/src/mcp/claims.rs`, `lens/bbp.rs` `post_args`). Items marked `UNVERIFIED:` were not checkable without running.
+Not guessed, read from code: `bbp open` flags (`crates/apps/rusty_bbp_host/src/bin/bbp.rs` header), the profile set and roster JSON shapes (`profiles.rs`, `holdout.rs`, `rusty_bbp/src/role.rs`), the claims `post` arguments (`rusty_bbp_host/src/mcp/claims.rs`, `lens/bbp.rs` `post_args`). Command output shapes (`bbp card`, `bbp mcp` `Posted`, `bbp human`) were observed on a throwaway task.
 
 ## 0. Session variables and a pre-flight
 
@@ -151,17 +151,17 @@ done
 
 ## 4. Link the card, baseline reads
 
-Link task `smoke-1` to the #1166 card so `inbox_list` shows its escalations. In Claude (Mill Board connector), call `card_execution_link` with `id` the #1166 card, `bbp_task` `smoke-1`, `execution` `smoke-1`, `goal` `smoke-1`, `attempt` `1`, `assignment` `smoke-local`, `generation` `1` (the field names are `BindExecutionArgs` in `rusty_mill_board/src/api.rs`; the values are free ids, UNVERIFIED: `assignment` may need to match a configured assignment for the board to accept it). Then:
+Link task `smoke-1` to the #1166 card so `inbox_list` shows its escalations. In Claude (Mill Board connector), call `card_execution_link` with `id` the #1166 card, `bbp_task` `smoke-1`, `execution` `smoke-1`, `goal` `smoke-1`, `attempt` `1`, `assignment` `smoke-local`, `generation` `1` (the field names are `BindExecutionArgs` in `rusty_mill_board/src/api.rs`; the values are free ids: `ExecutionLink::validate` only requires every id non-empty and `generation` at least 1, and `Board::bind_execution` needs the `Build` capability, `rusty_mill_board/src/domain.rs:753` and `board.rs:1396`; no configured-assignment lookup exists, so `smoke-local` is accepted). Then:
 
 ```bash
 $R $BIN/bbp card   --dir $D --task $T | tee ~/smoke-1-card-before.json
 $R $BIN/bbp verify --dir $D --task $T | tee ~/smoke-1-verify-before.txt   # note the head hash
 ```
 
-Read the brief's artifact id from the card (`brief`; UNVERIFIED: the JSON shape of an artifact id, probably a number). Set it:
+The card's `brief` is a bare JSON number (observed on a throwaway task: `"brief":1`). Set it:
 
 ```bash
-BRIEF=1   # replace with the card's brief id
+BRIEF=$(jq -r .brief ~/smoke-1-card-before.json); echo "BRIEF=$BRIEF"   # a number, e.g. 1
 ```
 
 ## 5. Seed Q and A (hand-driven `bbp mcp` session as `seed`)
@@ -177,11 +177,12 @@ printf '%s\n' \
 | $R env BBP_DIR=$D BBP_TASK=$T BBP_PRINCIPAL=seed BBP_SESSION=yes $BIN/bbp mcp | tee ~/smoke-1-seed.out
 ```
 
-Read `~/smoke-1-seed.out`: the result for id 2 is Q, for id 3 is A (UNVERIFIED: the `Posted` response JSON shape; take each message id from it). Set them:
+Read `~/smoke-1-seed.out`: the result for id 2 is Q, for id 3 is A. Each result text is the JSON `{"Posted":N}` (observed: `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"Posted\":1}"}],"isError":false}}`); N is the message id (first two posts of a fresh task are 1 and 2). Set them:
 
 ```bash
-Q=   # message id of the question claim
-A=   # message id of the irreversible action claim
+Q=$(jq -r 'select(.id==2).result.content[0].text|fromjson|.Posted' ~/smoke-1-seed.out)
+A=$(jq -r 'select(.id==3).result.content[0].text|fromjson|.Posted' ~/smoke-1-seed.out)
+echo "Q=$Q A=$A"   # both must be numbers; a refusal shows as a non-numeric or empty value: stop
 ```
 
 A is domain `sweep`, medium, irreversible: budget 32, accept line 12. Q is domain `question` with no `answers`, which is what `is_question` keys on, so the architect's proposers answer it. If a post is refused, stop and send the line back.
@@ -214,7 +215,7 @@ Also run `bbp why --claim` for one candidate (take a candidate id from `bbp card
 
 ## 8. Human action at the inbox
 
-Expected: A reaches the strict line and escalates `irreversible`. In the Mill Board inbox tap **Reject** on A (`inbox_act`, `reject`). If Q escalates `stuck`, `choose` one candidate. Nothing is deleted at any point: nothing in M1 acts on an accepted claim. Dry-run first, then act, if the board is not available (CLI fallback, `claims mode: claim MSG accept|drop|reopen | choose Q C`; UNVERIFIED: whether `--rev` from the inbox row is mandatory):
+Expected: A reaches the strict line and escalates `irreversible`. In the Mill Board inbox tap **Reject** on A (`inbox_act`, `reject`). If Q escalates `stuck`, `choose` one candidate. Nothing is deleted at any point: nothing in M1 acts on an accepted claim. Dry-run first, then act, if the board is not available (CLI fallback, `claims mode: claim MSG accept|drop|reopen | choose Q C`; `--rev` is not needed for `claim` and `choose` (observed on a throwaway task; `human.rs` only requires it for reject, rerun, resume, cancel, close, approve-*):
 
 ```bash
 $R $BIN/bbp human --dir $D --task $T --dry-run yes claim $A drop
@@ -239,11 +240,11 @@ Claude writes `1166-smoke-run-record.md` from these (outcome, calls and tokens p
 ## What could break
 
 - **Empty replies from the reasoning model.** `qwen3.6-35b-a3b` is a reasoning model: with a small `max_tokens` a probe returned empty `content` and only `reasoning_content`. orch's `MAX_OUTPUT_TOKENS` is 4096. Check that the lenses' replies are non-empty: a run with many `refused` or no-post rounds from `local` and `local-rebel` is this, not a lens finding.
-- **Serialised calls.** llama-swap holds one large model at a time, so calls queue and swapping `gpt-oss-120b` and Qwen may dominate. Expect tens of minutes; the 90-minute box is real. `CALL_DEADLINE` in `lens/bbp.rs` bounds `bbp mcp` calls (30 s), not model calls; UNVERIFIED: the model-call timeout for `openai-http`.
+- **Serialised calls.** llama-swap holds one large model at a time, so calls queue and swapping `gpt-oss-120b` and Qwen may dominate. Expect tens of minutes; the 90-minute box is real. `CALL_DEADLINE` in `lens/bbp.rs` bounds `bbp mcp` calls (30 s), not model calls. The `openai-http` model call has one deadline for connect, write and read together (`orch-openai/src/client.rs:124`), default `HTTP_TIMEOUT` 300 s (`rusty_orch/src/lens/registry.rs:28`), settable per provider with `timeout_secs`, 1 to 86400 (`registry.rs:271`). A ~30 s reply fits; a cold load of `gpt-oss-120b` over 300 s would time out as a transient error, so if `local-high` calls time out, set `"timeout_secs": 900` on that provider in `lens-local.json`. Cold-load time itself is unknown: check the first `local-high` call's duration in `~/smoke-1-run.err`.
 - **Sandbox probe at open.** `bbp open --mode claims` refuses with `bad_claims_config` `sandbox:` if `orch-runner` cannot confine runs on this host (user namespaces or SELinux). Nothing is built, but the open still needs the probe. Check `ausearch -m avc` after a refusal.
 - **Rebel is not independent.** `local-rebel` is the same Qwen weights under another id; the three candidates are two models. Noted in the record.
 - **Executed-evidence refusals.** Small models may post `evidence_kind: executed`; the host refuses it (no candidate, no runner report): a wasted call counted as refused, no score change.
 - **Lenses post nothing, or opinion only, or malformed JSON.** Then A never reaches 12 (criterion 4). A finding.
-- **Holdout never runs here.** Only staged, hashed and validated at open. UNVERIFIED for the first #600 builder run: whether the sandboxed holdout run may write `$TMPDIR` for `mktemp -d`, and whether `touch -d '40 days ago'` and `ln -s` work under the profile's `PATH=/usr/bin:/bin`.
-- **Card link refused.** `assignment` may need to be a configured id (see step 4); the inbox cross-check against `bbp inbox` still holds without it.
+- **Holdout never runs here.** Only staged, hashed and validated at open. By code reading, the sandboxed run supports the suite: `TMPDIR` is set to a writable scratch directory beside the checkout (`runner.rs:486-502`), landlock grants every handled right including make-symlink, make-dir and remove on writable roots (`platform-linux/src/sys/security.rs:112-127`), and `mktemp`, `touch`, `ln`, `rm` and `grep` live under the readable `/bin` and `/usr`. Still to confirm in the first #600 builder run: that the host's coreutils are GNU (`touch -d '40 days ago'` and `touch -h -d`).
+- **Card link refused.** The link needs the `Build` capability on the connector's role, and a card that already has a different execution refuses a second link; the inbox cross-check against `bbp inbox` still holds without it.
 - **Wrong label.** If `ls -dZ /srv/lel/toy` still says `container_file_t`, orch-runner host processes may be denied; re-run `sudo restorecon -Rv /srv/lel/toy` only.
