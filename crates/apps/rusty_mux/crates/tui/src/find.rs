@@ -3,18 +3,13 @@
 //! client's own copy of the block (history it holds plus the screen), as the
 //! GUI's find bar does, case-insensitive and across soft-wrapped rows.
 
-use rusty_term_core::{Cell, Grid, WIDE_TRAILER};
+use rusty_term_core::Grid;
 
 /// Matches kept; more are not looked for.
 const MAX_HITS: usize = 10_000;
 
-/// One match: absolute row (0 = oldest history row), first column, columns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Hit {
-    pub abs: usize,
-    pub col: usize,
-    pub len: usize,
-}
+/// A match: absolute row (0 = oldest history row), first column, columns.
+pub use rusty_term_core::TextHit as Hit;
 
 /// What a read of keyboard bytes did to the bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,59 +30,10 @@ pub struct Find {
     tail: Vec<u8>,
 }
 
-fn fold(c: char) -> char {
-    c.to_lowercase().next().unwrap_or(c)
-}
-
-/// Every match of `query` in `grid`, oldest first. A logical line is the
-/// rows joined where the program wrapped, so a match may cross a wrap.
+/// Every match of `query` in `grid`, oldest first, found by
+/// [`Grid::find_text`].
 pub fn search(grid: &Grid, query: &str) -> Vec<Hit> {
-    let q: Vec<char> = query.chars().map(fold).collect();
-    let mut hits = Vec::new();
-    if q.is_empty() {
-        return hits;
-    }
-    let (mut text, mut at): (Vec<char>, Vec<(usize, usize)>) = (Vec::new(), Vec::new());
-    let mut abs = 0;
-    while let Some((cells, wrapped)) = grid.line_cells(abs) {
-        for (col, cell) in cells.iter().enumerate().filter(|(_, c)| !is_trailer(c)) {
-            text.push(fold(cell.ch));
-            at.push((abs, col));
-        }
-        abs += 1;
-        if wrapped {
-            continue;
-        }
-        scan(&text, &at, &q, &mut hits);
-        text.clear();
-        at.clear();
-        if hits.len() >= MAX_HITS {
-            return hits;
-        }
-    }
-    scan(&text, &at, &q, &mut hits);
-    hits
-}
-
-fn is_trailer(cell: &Cell) -> bool {
-    cell.flags & WIDE_TRAILER != 0
-}
-
-/// The non-overlapping matches of `q` in one logical line. A match that
-/// crosses a wrap is kept as its part on the first row.
-fn scan(text: &[char], at: &[(usize, usize)], q: &[char], hits: &mut Vec<Hit>) {
-    let end = text.iter().rposition(|&c| c != ' ').map_or(0, |i| i + 1);
-    let mut i = 0;
-    while i + q.len() <= end {
-        if text[i..i + q.len()] != *q {
-            i += 1;
-            continue;
-        }
-        let (abs, col) = at[i];
-        let len = at[i..i + q.len()].iter().take_while(|p| p.0 == abs).count();
-        hits.push(Hit { abs, col, len });
-        i += q.len();
-    }
+    grid.find_text(query, MAX_HITS)
 }
 
 impl Find {

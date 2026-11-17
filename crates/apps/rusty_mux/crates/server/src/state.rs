@@ -55,6 +55,8 @@ const CHUNK: usize = 16 << 10;
 /// The largest reply to a block call or `list`, in encoded bytes: half a
 /// client's output budget, so a reply alone never gets a client dropped.
 const REPLY_MAX: usize = crate::outbox::BUDGET / 2;
+/// What a `Text` reply adds to its text: tags, request id and length prefix.
+const REPLY_FRAME: usize = 64;
 
 /// Events kept for clients that reconnect.
 const HISTORY: usize = 4096;
@@ -107,6 +109,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::SHARING)
     .union(Features::DIR_LISTING)
     .union(Features::CLIPBOARD)
+    .union(Features::TERMINAL_FIND)
     .union(UNIX_ONLY);
 
 /// The most text a clipboard answer carries (C38's OSC 52 limit).
@@ -1782,6 +1785,28 @@ impl State {
             "terminal.format" => terminal::format(&rt.grid, capture(&named), REPLY_MAX)
                 .ok_or_else(|| format!("{method} reply exceeds {REPLY_MAX} bytes"))?,
             "terminal.history" => history(rt.spool.as_ref(), &rt.grid, &named)?,
+            "terminal.prompts" => terminal::prompts(&rt.grid),
+            "terminal.find" => {
+                let query = match named.iter().find(|(name, _)| *name == "query") {
+                    Some((_, Value::Text(query))) => query,
+                    _ => return Err(format!("{method}: missing query").into()),
+                };
+                let limit = named
+                    .iter()
+                    .find_map(|(name, value)| match value {
+                        Value::Lines(n) if *name == "limit" => Some(*n),
+                        _ => None,
+                    })
+                    .unwrap_or(terminal::FIND_DEFAULT);
+                if query.chars().count() > terminal::FIND_QUERY_MAX {
+                    return Err(format!(
+                        "{method}: query is over {} characters",
+                        terminal::FIND_QUERY_MAX
+                    )
+                    .into());
+                }
+                terminal::find(&rt.grid, query, limit, REPLY_MAX - REPLY_FRAME)
+            }
             "terminal.send-keys" => {
                 self.mux
                     .authorize_input(client, block)
@@ -3689,7 +3714,13 @@ mod regression {
                 None,
                 None,
             );
-            for method in ["terminal.format", "terminal.history", "terminal.title"] {
+            for method in [
+                "terminal.format",
+                "terminal.history",
+                "terminal.title",
+                "terminal.prompts",
+                "terminal.find",
+            ] {
                 let refused = state
                     .block_call(guest, 1, block, method, Vec::new())
                     .err()
