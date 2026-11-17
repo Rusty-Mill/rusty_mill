@@ -2215,6 +2215,7 @@ impl Grid {
         // `tw` already uses against `avail`.
         let max_cell_rows = self.rows.saturating_add(self.scrollback_max).max(1);
         let cell_rows = th.div_ceil(2).min(max_cell_rows);
+        let (start_scrolled, start_row) = (self.total_scrolled, self.cursor.1);
         let footprint = Footprint {
             serial: self.total_scrolled + self.cursor.1,
             col: origin,
@@ -2240,7 +2241,12 @@ impl Grid {
             self.newline();
         }
         self.carriage_return();
-        Some(footprint)
+        // Each row either moved the cursor down or scrolled the screen into
+        // history. A scroll that did neither (alternate screen, scroll region)
+        // shifted the cells already drawn, so the anchor above is wrong.
+        let moved =
+            (self.cursor.1 - start_row.min(self.cursor.1)) + (self.total_scrolled - start_scrolled);
+        (moved == cell_rows).then_some(footprint)
     }
 
     /// Render a decoded Sixel image (delegates to [`Grid::render_image`]).

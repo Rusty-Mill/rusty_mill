@@ -151,18 +151,20 @@ impl Grid {
         if self.placements.is_empty() {
             return Ok(());
         }
-        let wire: Vec<WirePlacement> = self
+        let wire = self
             .placements
             .iter()
-            .map(|p| WirePlacement {
-                image: p.image,
-                top: i32::try_from(p.serial as i64 - self.total_scrolled as i64)
-                    .unwrap_or(i32::MIN),
-                col: p.col,
-                cols: p.cols,
-                rows: p.rows,
+            .map(|p| {
+                Ok(WirePlacement {
+                    image: p.image,
+                    top: i32::try_from(p.serial as i64 - self.total_scrolled as i64)
+                        .map_err(|_| Error("placement row"))?,
+                    col: p.col,
+                    cols: p.cols,
+                    rows: p.rows,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         crate::checkpoint::Wire::write(&wire, w)
     }
 
@@ -170,7 +172,15 @@ impl Grid {
     /// grid's scroll count at its retained history, so a placement above the
     /// history this checkpoint carries (a split checkpoint) is dropped.
     pub(crate) fn read_placements(&mut self, r: &mut crate::checkpoint::Reader<'_>) -> Result<()> {
-        let wire: Vec<WirePlacement> = crate::checkpoint::Wire::read(r)?;
+        // The count is checked before anything is allocated for the list.
+        let n: usize = crate::checkpoint::Wire::read(r)?;
+        if n > MAX_PLACEMENTS {
+            return Err(Error("placement count"));
+        }
+        let mut wire = Vec::with_capacity(n);
+        for _ in 0..n {
+            wire.push(<WirePlacement as crate::checkpoint::Wire>::read(r)?);
+        }
         self.total_scrolled = self.scrollback.len();
         let base = self.total_scrolled as i64;
         self.placements = wire
@@ -199,7 +209,8 @@ impl Grid {
                     || p.col >= self.cols
                     || p.col.saturating_add(p.cols) > self.cols
                     || p.rows > self.rows.saturating_add(self.scrollback_max)
-                    || p.serial > self.total_scrolled.saturating_add(self.rows)
+                    || p.serial.saturating_add(p.rows)
+                        > self.total_scrolled.saturating_add(self.rows)
                     || !self.kitty_images.iter().any(|i| i.id == p.image)
             });
         if bad {
@@ -389,5 +400,43 @@ mod tests {
         step(&g, "frame advance");
         p.advance(&mut g, b"\x1bc");
         step(&g, "RIS empties a transmit-only store");
+    }
+
+    #[test]
+    fn an_image_that_scrolls_without_history_leaves_no_placement() {
+        // Alternate screen: drawn at the bottom, the screen scrolls under it.
+        let (mut g, mut p) = fed(20, 5, b"\x1b[?1049h\x1b[5;1H");
+        p.advance(&mut g, PLACE);
+        assert!(g.placements().is_empty(), "alt screen");
+        // A scroll region: the same.
+        let (mut g, mut p) = fed(20, 8, b"\x1b[1;4r\x1b[4;1H");
+        p.advance(&mut g, PLACE);
+        assert!(g.placements().is_empty(), "region");
+        // Primary screen at the bottom scrolls into history: kept, anchored.
+        let (mut g, mut p) = fed(20, 5, b"\x1b[5;1H");
+        p.advance(&mut g, PLACE);
+        assert_eq!(g.placements().len(), 1);
+        assert!(g.placement_top_row(&g.placements()[0]) < 5);
+    }
+
+    #[test]
+    fn hostile_counts_and_rects_are_rejected_on_decode() {
+        let (g, p) = fed(20, 5, PLACE);
+        let ok = checkpoint::encode_with_images(&g, &p).unwrap();
+        // The count is the first u64 of the section; the section is the tail.
+        let section = 8 + 4 + 4 + 8 * 4; // count + image + top + col, cols, rows (u64 each)
+        let at = ok.len() - section;
+        let mut huge = ok.clone();
+        huge[at..at + 8].copy_from_slice(&(u64::MAX >> 1).to_le_bytes());
+        assert!(checkpoint::decode(&huge).is_err(), "count");
+        // `top` one row past the screen.
+        let mut low = ok.clone();
+        low[at + 12..at + 16].copy_from_slice(&5i32.to_le_bytes());
+        assert!(checkpoint::decode(&low).is_err(), "top past the screen");
+        // A rect hanging below the screen.
+        let mut tall = ok.clone();
+        tall[ok.len() - 8..].copy_from_slice(&3u64.to_le_bytes());
+        tall[at + 12..at + 16].copy_from_slice(&3i32.to_le_bytes());
+        assert!(checkpoint::decode(&tall).is_err(), "hangs below");
     }
 }
