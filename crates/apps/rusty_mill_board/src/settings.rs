@@ -338,7 +338,7 @@ struct RegisteredAgentId {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StaleRevoke {
-    /// Unused for more than this many hours (1 to 720; default 24).
+    /// Unused for more than this many hours (2 to 720; default 24: above the hour a last use may lag on disk).
     #[serde(default = "default_stale_hours")]
     older_than_hours: i64,
     /// Revoke them. Without it nothing changes and the answer is only the count.
@@ -473,8 +473,8 @@ pub fn tools() -> Vec<SettingsTool> {
         ),
         tool(
             "settings_registered_agent_revoke_stale",
-            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago, default 24 (needs admin). A dry run unless `revoke: true`: it returns `count` and the agent `ids` it would revoke. Revoked agents can register again.",
-            json!({"older_than_hours": {"type": "integer", "description": "1-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}, "ids": {"type": "array", "items": {"type": "string"}, "description": "With revoke: only these previewed ids, and only if still stale."}}),
+            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin). A dry run unless `revoke: true`: it returns `count` and the agent `ids` it would revoke. Revoked agents can register again.",
+            json!({"older_than_hours": {"type": "integer", "description": "2-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}, "ids": {"type": "array", "items": {"type": "string"}, "description": "With revoke: only these previewed ids, and only if still stale."}}),
             &[],
         ),
         tool(
@@ -1002,8 +1002,8 @@ impl Settings {
 
     /// Forget registered agents unused for `older_than_hours`: a dry run unless `revoke`.
     fn registered_agent_revoke_stale(&self, a: &StaleRevoke) -> Res {
-        if !(1..=720).contains(&a.older_than_hours) {
-            return Err(refused("older_than_hours is 1 to 720".to_owned()));
+        if !(2..=720).contains(&a.older_than_hours) {
+            return Err(refused("older_than_hours is 2 to 720".to_owned()));
         }
         let age_ms = a.older_than_hours * 3600 * 1000;
         let ids = if a.revoke {

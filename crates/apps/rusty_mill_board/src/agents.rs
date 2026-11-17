@@ -231,8 +231,9 @@ impl Registry {
     /// `only` that are still stale (an agent used since a preview is kept). The ids removed.
     ///
     /// # Errors
-    /// If the file cannot be written. Memory then follows the file, which a failure after the
-    /// atomic replace may already have changed; if the file cannot be read, nothing is removed.
+    /// If the file cannot be written. Revocation fails closed: the agents are already gone from
+    /// memory (as with [`revoke`](Self::revoke)), and the file may or may not hold them until a
+    /// later write succeeds, so the admin should retry.
     pub fn revoke_stale(
         &mut self,
         now: i64,
@@ -246,33 +247,13 @@ impl Registry {
         if ids.is_empty() {
             return Ok(ids);
         }
-        let before = self.agents.clone();
         for id in &ids {
             self.agents.remove(id);
         }
-        match self.save() {
-            Ok(()) => {
-                self.mark_saved();
-                Ok(ids)
-            }
-            Err(e) => {
-                self.agents = self.reconcile(before);
-                Err(e)
-            }
-        }
-    }
-
-    /// `before`, cut to the agents the file still holds (all of them if it cannot be read).
-    fn reconcile(&self, mut before: BTreeMap<String, Agent>) -> BTreeMap<String, Agent> {
-        let on_disk = self
-            .path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| serde_json::from_str::<BTreeMap<String, Agent>>(&t).ok());
-        if let Some(disk) = on_disk {
-            before.retain(|id, _| disk.contains_key(id));
-        }
-        before
+        self.save()
+            .map_err(|e| format!("{e} (revoked in memory; retry to make it durable)"))?;
+        self.mark_saved();
+        Ok(ids)
     }
 
     fn mark_saved(&mut self) {
@@ -454,14 +435,15 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_write_revokes_nothing() {
+    fn a_failed_write_still_revokes_in_memory_and_says_to_retry() {
         let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
         std::fs::create_dir_all(&dir).expect("dir");
         let mut r = Registry::open(dir.join("agents.json")).expect("open");
         let (id, key) = r.register("c", Grant::default(), 0).expect("register");
         std::fs::remove_dir_all(&dir).expect("remove dir");
-        assert!(r.revoke_stale(10, 5, None).is_err());
-        assert!(r.verify("c", &id, &key, 11).is_some());
+        let e = r.revoke_stale(10, 5, None).expect_err("write fails");
+        assert!(e.contains("retry"), "{e}");
+        assert!(r.verify("c", &id, &key, 11).is_none(), "fails closed");
     }
 
     #[test]
