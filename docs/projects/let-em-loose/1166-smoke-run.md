@@ -136,3 +136,13 @@ Not a clean pass (D143: the first run is a clean #1166 pass, so this does not co
 - Defects: `executed` posted by a lens halted the run (D144, Q51); gpt-oss-120b via llama.cpp build f74e2fa returned HTTP 500 twice on valid harmony output (D145); the run process died on a closed stdout and was resumed; the seed did not exercise the inbox (D146). Rerun after the fixes (Q52).
 - Host facts: llama-swap answers only at `<llama-swap-host>:<port>` with lowercase model ids (`qwen3.6-35b-a3b`).
 
+## Run 2 result (2026-11-17, task `smoke-2`, local-only, ~$0)
+After PRs #1779, #1781, #1782 and #1783 merged and redeployed. Exit 0, `ended: Quiet`, no AVC denials, `bbp verify` clean (7 to 31 lines, 0 unchained). Evidence on BaileyAi in `~/smoke-2` (`run.out`, `why-A.json`, `why-A2.json`, `inbox.json`, `lens-record.txt`). Claims: Q=1, A=2, A2=3 (fixture), 4 and 5 fixture supports, candidates 6 (`local`) and 7 (`local-rebel`), 8 operator evidence on A, 9 adversary evidence on A.
+Against section 9: 1 met. 2 not met (2 candidates from 2 providers: `local-high` failed Propose, D149). 3 not met (A dropped, but Q stayed Open and no candidate was reviewed, D148). 4 the inbox fired on A2 (fixture, not lens-driven, D146) and Nano reports he dropped A2 with `bbp human`, the board answering "Ok" (stated by Nano, unverified by the coordinator, who cannot read the store). 5 `why --claim` for A and A2 printed, no candidate `why` yet, `lens record` 2 lines, `bbp verify` clean before and after. 6 within the call cap (about 6 calls, only the three local providers). 7 no board refusals (0 rejections). Not verified: candidate `why`, the board `inbox_list` and the card link.
+**Verdict (D143):** not yet the first run; the freeze holds.
+Findings:
+- Third candidate missing: `local-high` replied with an `evidence` field on a claim; parse refused it (D149).
+- Candidates never reviewed: stale question view in the lens seat (D148).
+- Mislabelled direction: msg 9 (adversary, `local-high`) is Counter / Cited / strength 2 (-4) citing art:1, but its note argues the action is safe; msg 8 (operator) cites msg 2, the claim itself. With both, A reached -8 and DropLine dropped it (Q53). Evidence: `why-A.json`, `lens-record.txt`.
+- Wrapper bugs (CDPATH made `cd` print the directory twice; the wrapper did not require or pass `LLAMA_SWAP`) are fixed in PR #1788.
+

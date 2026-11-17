@@ -155,6 +155,8 @@ Precise contracts used by this guide:
 | D145 | #1166: the llama.cpp 500 on valid harmony output is a host/adapter issue, not design | [default] 2026-11-17 (1166) |
 | D146 | #1166: an inbox-exercising seed is a test-fixture choice; thresholds and escalation rules unchanged | [default] 2026-11-17 (1166) |
 | D147 | #1166: the llama.cpp rebuild and the Qwen reasoning budget are held until the rerun's per-pass log shows which slot failed (D145 fix held, not applied) | [stated] 2026-11-17 (1166) |
+| D148 | #1166 smoke-2: candidates never reviewed (stale question view) is an orch bug fix, re-read the question with `claim_card` | [default] 2026-11-17 (1166) |
+| D149 | #1166 smoke-2: the architect prompt must say a claim has no `evidence` field (use `refs`); a prompt bug fix | [default] 2026-11-17 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1455,3 +1457,21 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_157ec68e43034d219af811c9735b1681
 **Key.** lel:1166:hold-host-changes-until-rerun-log
 **Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-17, saved verbatim as `mem_7c2db8a737f0414898ce9e85a045f46e` (speaker Nano). Relates to D143, D144, D145, D146, Q52. Numbered D147 after D146.
+
+## D148. #1166 smoke-2: candidates never reviewed (stale question view) is an orch bug fix, re-read the question with `claim_card`
+
+**Decision.** A lens seat keeps each claim view from `claims_delta` and refreshes only the claims the delta returns. `delta_ids` (rusty_bbp `claims.rs`) returns claims whose status, score or evidence changed, plus dependents (addendum, claims_delta), and a new candidate that `answers` Q does not mark Q changed. So within one `lens run` process Q's cached view keeps `candidates: []`, `attack_ready` (orch-lens `schedule.rs`, needs at least 2 candidates) never fires, and the candidates are never attacked, so Q stays open. Run 1 had the same cause: candidates were reviewed only in the resume process, which re-read from rev 0. This is a **bug fix in orch, not new design**: when a delta carries a claim whose `answers` is Q, the seat re-reads Q with `claim_card`. The protocol-side fix (make `delta_ids` include the answered question) changes an accepted `claims_delta` contract in the BBP core, an ask-first public API change, and is not chosen.
+**Why.** The approved design is that candidates are attacked (#594, C-R7); the runner contradicts it. The orch-side re-read uses an existing tool and changes no accepted contract.
+**Rejected.** Changing `delta_ids` in rusty_bbp; restarting the process between passes.
+**Tag.** [default] · remind-me: mem_c362c5cc7ba44a9e86ecd089f1dd1732
+**Key.** lel:1166:candidates-never-reviewed-orch-reread
+**Source.** let-em-loose-expert, 2026-11-17, from the coordinator's smoke-2 evidence (code read and a throwaway-board test). `bbp-claims-addendum.md` (claims_delta), D127, D143, Q52. Numbered D148 after D147.
+
+## D149. #1166 smoke-2: the architect prompt must say a claim has no `evidence` field (use `refs`); a prompt bug fix
+
+**Decision.** In smoke-2 `local-high` (gpt-oss-120b) failed Propose with `claim has unknown field "evidence"` (Permanent; the protocol allows only `refs` on a claim and parse accepts no other fields). Pass 2 skipped the slot (fallbacks already used), so only 2 candidates stood. The smallest fix is a **bug fix in the architect lens prompt** (Factory `lenses/architect.md`): a claim has no `evidence` field; cite sources in `refs`. It is prompt-only and probabilistic. Not done, because each is design: (b) `parse` accepting `evidence` as an alias for `refs` (loosens a deliberate strictness); (c) a same-provider retry for ordinary proposal slots (a scheduler change, as the rebel already has `REBEL_TRIES=2`); (d) a fourth provider id (an unused fallback, but not three distinct models). If the prompt fix fails on the next rerun, (c) goes to Nano as an escalation.
+**Why.** The prompt names a shape the protocol rejects; correcting it adds no behaviour and is reversible.
+**Rejected.** (b), (c), (d) above.
+**Tag.** [default] · remind-me: mem_ace006f513ab4737b5553b05f9ec4df5
+**Key.** lel:1166:architect-prompt-no-evidence-field
+**Source.** let-em-loose-expert, 2026-11-17, from the coordinator's smoke-2 evidence. D34, D127, D135, `1123-lens-prompts.md`. Numbered D149 after D148.
