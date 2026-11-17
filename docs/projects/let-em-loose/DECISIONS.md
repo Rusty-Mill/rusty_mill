@@ -142,6 +142,8 @@ Precise contracts used by this guide:
 | D132 | #1092: Mill Board runs as `orch-runner` on BaileyAi for the inbox | [stated] 2026-11-16 (1092, M1) |
 | D133 | Lens, domain and skill packs load lazily; a role is defined by its lens; the project expert becomes a domain knowledge pack (direction; design is post-first-run) | [stated] 2026-11-16 (general, #723) |
 | D134 | #1124: no paid runs for now; the first smoke run is local-only and no spend ceiling is authorised | [stated] 2026-11-16 (1124, 1166) |
+| D135 | #1123: Factory gets a top-level `lenses/` and `lens.json` | [stated] 2026-11-16 (1123) |
+| D136 | #1123: the operator lens loads no knowledge file in v0; its prompt stays flat (D34) | [stated] 2026-11-16 (1123) |
 
 ## D1. Lenses, not stages
 
@@ -1321,3 +1323,21 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_ade5caad779242259f0a7c5b11ed64d3
 **Key.** lel:1124:no-paid-runs-for-now
 **Source.** Nano, Millwright project thread `cmsg_01632CBKCXsWe6RyFWvE9dovKYDoFmtvXi6TAYDxoS9Gmq`, tap on decision card `cmsg_01632CBKCXsWe6RyFWvE9dovEdZwxaX7X8V2c9ew2bfAKe`, 2026-11-16T17:20:01Z, question "Which spend ceiling should apply to the paid half of the smoke run?". Relates to D38, D130, D131, D127, `1124-spend-estimate.md`. Numbered D134 after D133.
+
+## D135. #1123: Factory gets a top-level `lenses/` and `lens.json`
+
+**Decision.** Add `lens.json` and `lenses/{architect,research,adversary,operator}.md` at the top level of `baileyrd/Factory`, matching `prompt: "lenses/<id>.md"` in `STARTER`. They do not go under `roles/`, `knowledge/`, `standards/` or `overlays/`. Factory's `README.md` layout block gets one `lenses/` line. This answer is the Approver (Nano) approval that Factory's base-change rule requires.
+**Why.** D19 names Factory as the source of truth, and `lens.json` points at `lenses/<id>.md`. The layout can be undone by a PR. `tools.check` does not scan `lenses/`, so the rusty_mill fixture test is the only check on these files.
+**Rejected.** b) keep the lens files only in rusty_mill for v0; c) put them under `overlays/` as a let-em-loose overlay draft.
+**Tag.** [stated] · remind-me: mem_ef7ef639c5ea40e5842f0ee74cc142d6
+**Key.** lel:1123:factory-top-level-lenses
+**Source.** Nano, Let Em Loose project thread "Update Let Em Loose card statuses", message `cmsg_01WgyiM31RsSnZTgNuPX2VE4QN6xVQMjn5R66V99qaAV3F`, 2026-11-16T18:54:44Z, verbatim "1. Yes 2. No", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE4G61A94yPvYnAq2kXZprtE5`; repeated 2026-11-17T02:19:18Z (`cmsg_01WgyiM31RsSnZTgNuPX2VE4QtLAqh3fwqpLiBmAuUesYN`, "1. Yes. 2. No,"). ESCALATE 1 of `1123-lens-prompts.md`, option a. Builds on D19.
+
+## D136. #1123: the operator lens loads no knowledge file in v0; its prompt stays flat (D34)
+
+**Decision.** In v0 the operator lens does not load `factory/knowledge/linux-single-host-ops-expert.md`. Its prompt stays flat, written from D34. Loading knowledge waits for composition (#723), which comes after the first run (D127).
+**Why.** orch has no prompt composition, and appending the knowledge file would be new design during the D127 freeze. D133 sets the direction for lazy-loaded packs.
+**Rejected.** b) append the knowledge file to the operator prompt now.
+**Tag.** [stated] · remind-me: mem_69d5e68802c74fe29c21ff8c15684468
+**Key.** lel:1123:operator-lens-no-knowledge-v0
+**Source.** Nano, Let Em Loose project thread "Update Let Em Loose card statuses", message `cmsg_01WgyiM31RsSnZTgNuPX2VE4QN6xVQMjn5R66V99qaAV3F`, 2026-11-16T18:54:44Z, verbatim "1. Yes 2. No", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE4G61A94yPvYnAq2kXZprtE5`; repeated 2026-11-17T02:19:18Z (`cmsg_01WgyiM31RsSnZTgNuPX2VE4QtLAqh3fwqpLiBmAuUesYN`, "1. Yes. 2. No,"). ESCALATE 2 of `1123-lens-prompts.md`, option a. Relates to D34, D127, D133.
