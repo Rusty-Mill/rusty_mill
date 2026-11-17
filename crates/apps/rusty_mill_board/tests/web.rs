@@ -314,8 +314,15 @@ fn mcp_calls_carry_the_callers_identity() {
     };
 
     let me = call(CODEX_TOKEN, "board_whoami", "{}");
-    assert_eq!(me["result"]["structuredContent"]["actor"], "codex", "{me}");
-    assert_eq!(me["result"]["structuredContent"]["role"], "reviewer");
+    let me_text = me["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text result");
+    let me_json: serde_json::Value =
+        serde_json::from_str(me_text).expect("text is the JSON result");
+    assert_eq!(me_json["actor"], "codex", "{me}");
+    assert_eq!(me_json["role"], "reviewer");
+    // The result is sent once: no `structuredContent` copy beside the text.
+    assert!(me["result"].get("structuredContent").is_none(), "{me}");
 
     // A model that lies about its role gets a tool error naming the reason, not a protocol failure.
     let lie = call(CODEX_TOKEN, "card_add", r#"{"title":"t","role":"builder"}"#);

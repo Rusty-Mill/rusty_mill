@@ -1546,5 +1546,7 @@ fn settings_are_mcp_tools_except_those_that_carry_a_secret() {
         &f.admin,
         &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"settings_get","arguments":{}}}),
     );
-    assert!(got["structuredContent"]["roles"].is_object(), "{got}");
+    let text = got["content"][0]["text"].as_str().expect("text result");
+    let parsed: serde_json::Value = serde_json::from_str(text).expect("text is the JSON result");
+    assert!(parsed["roles"].is_object(), "{got}");
 }

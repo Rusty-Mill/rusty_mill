@@ -11,11 +11,6 @@ use crate::api::{CallError, Identity, Shared, ops};
 use crate::drain::InFlight;
 use crate::settings::{Settings, tools};
 
-fn wire(v: &serde_json::Value) -> Result<WireValue, ErrorData> {
-    WireValue::from_json_str(&v.to_string())
-        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string()))
-}
-
 /// Build the MCP server over `board`.
 ///
 /// # Errors
@@ -108,9 +103,10 @@ fn add(
             |a| serde_json::from_str(&a.to_json_string()).unwrap_or_default(),
         );
         match call(identity.as_ref(), args) {
+            // The JSON goes out once, as text. Tools declare no `outputSchema`, so
+            // `structuredContent` would only repeat it and double every result.
             Ok(out) => Ok(CallToolResult {
                 content: vec![ContentBlock::text(out.to_string())],
-                structured_content: Some(wire(&out)?),
                 ..CallToolResult::default()
             }),
             Err(CallError::BadArgs(why)) => Err(ErrorData::new(
