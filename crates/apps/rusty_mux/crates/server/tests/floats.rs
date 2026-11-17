@@ -124,9 +124,11 @@ fn floating_needs_layout_editing_too() {
         block,
         at: rect(0, 0, 50, 50),
     });
-    assert!(
     // The refusal names both bits, so it is the layout one that is missing.
-    let both = format!("{:#x}", Features::FLOATS.union(Features::LAYOUT_EDIT).bits());
+    let both = format!(
+        "{:#x}",
+        Features::FLOATS.union(Features::LAYOUT_EDIT).bits()
+    );
     assert!(
         matches!(answer.as_slice(), [Message::Failed { reason, .. }] if reason.contains(&both)),
         "{answer:?}"
