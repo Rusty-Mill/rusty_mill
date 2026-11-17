@@ -569,10 +569,15 @@ fn a_session_picked_in_the_switcher_is_shown_on_the_same_connection() {
 
 /// A control client of its own on `socket`, welcomed.
 fn control(socket: &std::path::Path) -> Conn<UnixStream> {
+    control_with(socket, CONTROL)
+}
+
+/// [`control`] with `features`.
+fn control_with(socket: &std::path::Path, features: Features) -> Conn<UnixStream> {
     let mut conn = Conn::new(UnixStream::connect(socket).expect("connect"));
     conn.send(&Message::Hello {
         version: None,
-        features: CONTROL,
+        features,
         resume: None,
         takeover: None,
     })
@@ -1239,4 +1244,73 @@ fn a_block_is_reattached_to_a_window_of_floats_alone() {
     };
     assert_eq!(tree, Tree::Pane(detached), "tiled again, the float stays");
     assert_eq!(floats[0].key, floated);
+}
+
+#[test]
+fn a_gui_attached_to_a_float_reattaches_beside_no_float() {
+    let socket = start_server();
+    // A first window with its block, made by a GUI kept open aside.
+    let _seed = attach(&socket, None).expect("seeded");
+    // A window of one float and one detached block, before the GUI is there.
+    let mut conn = control_with(&socket, rusty_mux_client::attach::FLOATING);
+    let mut req = Requests {
+        conn: &mut conn,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    req.welcome().expect("welcome");
+    let block_of = |m: &Message| match m {
+        Message::Entry {
+            entry: rusty_mux_proto::Entry::Block { block, .. },
+            ..
+        } => Some(*block),
+        _ => None,
+    };
+    let first = req
+        .call(|req| Message::List { req })
+        .expect("a list")
+        .iter()
+        .find_map(block_of)
+        .expect("a block");
+    req.call(|req| Message::Split {
+        req,
+        block: first,
+        side: Side::Right,
+        launch: Launch::default(),
+    })
+    .expect("split");
+    let both: Vec<BlockId> = req
+        .call(|req| Message::List { req })
+        .expect("a list")
+        .iter()
+        .filter_map(block_of)
+        .collect();
+    assert_eq!(both.len(), 2);
+    let (float, away) = (both[0], both[1]);
+    let at = rusty_mux_core::FloatRect::new(20, 20, 60, 60).expect("a float");
+    req.call(|req| Message::PlaceFloat {
+        req,
+        block: float,
+        at,
+    })
+    .expect("floated");
+    req.call(|req| Message::DetachBlock { req, block: away })
+        .expect("detached");
+
+    // The GUI attaches straight to the float.
+    let attached = attach(&socket, Some(float)).expect("attached");
+    let (tx, outs) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || events.run(|out| tx.send(out).is_ok()));
+    let detached = loop {
+        if let Some(d) = next_session(&outs).detached.first() {
+            break d.key;
+        }
+    };
+    attached.source.act(Act::Reattach(detached));
+    next_out(
+        &outs,
+        |o| matches!(o, Out::Layout(Some(Tree::Pane(k)), f) if *k == detached && !f.is_empty()),
+    );
 }

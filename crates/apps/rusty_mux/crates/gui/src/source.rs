@@ -189,7 +189,8 @@ pub fn attach_with(
         let focus = shown.keys.key(block);
         shown.focus = Some(focus);
         shown.window = Some(model.shown());
-        shown.tiled = layout.blocks();
+        // Not the stand-in `layout`: a float-only window has no tile.
+        shown.tiled = model.view().0.map(Layout::blocks).unwrap_or_default();
         (first, focus)
     };
     state.tell_focus(block);
