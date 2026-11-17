@@ -601,8 +601,9 @@ fn open_session_window(socket: &Path, session: SessionId) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 
-/// A block of `session` to show: the active window's first, else the first
-/// window with one, in the order listed.
+/// A laid-out block of `session` to show: the active window's first, else the
+/// first window with one, in the order listed. A detached block is not one:
+/// its window has no layout (a server that can ask for this always sends it).
 fn first_block(entries: &[Message], session: SessionId) -> Option<BlockId> {
     let entries = || {
         entries.iter().filter_map(|m| match m {
@@ -624,9 +625,11 @@ fn first_block(entries: &[Message], session: SessionId) -> Option<BlockId> {
     });
     let in_window = |window: WindowId| {
         entries().find_map(|e| match e {
-            Entry::Block {
-                block, window: w, ..
-            } if *w == window => Some(*block),
+            Entry::Window {
+                window: w,
+                layout: Some(layout),
+                ..
+            } if *w == window => layout.blocks().first().copied(),
             _ => None,
         })
     };
@@ -1658,11 +1661,15 @@ mod tests {
     }
 
     fn window(window: WindowId, session: SessionId) -> Message {
+        laid(window, session, None)
+    }
+
+    fn laid(window: WindowId, session: SessionId, shown: Option<BlockId>) -> Message {
         entry(Entry::Window {
             window,
             session,
             name: String::new(),
-            layout: None,
+            layout: shown.map(rusty_mux_core::Layout::Block),
             zoomed: None,
             focused: None,
         })
@@ -1696,15 +1703,29 @@ mod tests {
             })
         };
         // The first window is empty: the block in the second is found.
-        let list = [session(None), window(w1, s), window(w2, s), block(b, w2)];
+        let list = [
+            session(None),
+            window(w1, s),
+            laid(w2, s, Some(b)),
+            block(b, w2),
+        ];
         assert_eq!(first_block(&list, s), Some(b));
         // With an active window, that one's block comes first.
         let other = BlockId::from_uuid(Uuid::new_v4());
         let list = [
             session(Some(w2)),
-            window(w1, s),
-            window(w2, s),
+            laid(w1, s, Some(other)),
+            laid(w2, s, Some(b)),
             block(other, w1),
+            block(b, w2),
+        ];
+        assert_eq!(first_block(&list, s), Some(b));
+        // A detached block is skipped for a laid-out one in another window.
+        let list = [
+            session(Some(w1)),
+            laid(w1, s, None),
+            block(other, w1),
+            laid(w2, s, Some(b)),
             block(b, w2),
         ];
         assert_eq!(first_block(&list, s), Some(b));
