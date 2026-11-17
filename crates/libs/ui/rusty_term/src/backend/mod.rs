@@ -55,6 +55,12 @@ pub trait BackendHandle: Send {
     #[cfg_attr(unix, allow(dead_code))]
     fn write(&mut self, data: &[u8]) -> Result<(), std::io::Error>;
 
+    /// Answers a read of the clipboard (or, with `primary`, the primary
+    /// selection) the program made (C54): `Some(text)` hands it over,
+    /// `None` denies it. Only a mux block's handle takes it; the default
+    /// drops it.
+    fn clipboard_reply(&mut self, _primary: bool, _text: Option<String>) {}
+
     /// Produce an independent handle referring to the same child, so the
     /// read side and write side can live on separate threads without sharing
     /// a lock. The clone does not own the child (only the original reaps it).

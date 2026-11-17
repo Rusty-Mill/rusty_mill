@@ -161,6 +161,9 @@ pub(crate) enum UserEvent {
     /// Where taking pane `id`'s owner-only block over stands
     /// ([`super::source::Feed::Take`]).
     Take(u64, super::source::Take),
+    /// A pane's program reads the clipboard, or with `true` the primary
+    /// selection, and its source asks this window to answer (C54).
+    ClipboardRead(u64, bool),
     /// A folder listing the palette's browse asked for finished, under
     /// the number the palette gave it (gui-design D78).
     Listed(u64, Listed),
@@ -311,6 +314,9 @@ struct Pane {
     /// Shared with the pane's reader thread; the loop takes it only on config reload.
     parser: Arc<Mutex<AnsiParser>>,
     writer: Box<dyn BackendHandle>,
+    /// Clipboard reads reach the writer as [`Feed::ClipboardRead`]; the
+    /// grid's own record of one is not answered ([`PaneIo::serves_clipboard`]).
+    serves_clipboard: bool,
     /// Raised by the reader thread when it sends a wakeup, lowered when the
     /// window handles it (see `reader_loop`).
     wake: WakeFlag,
@@ -586,6 +592,12 @@ fn reader_loop(
             }
             continue;
         }
+        if let Feed::ClipboardRead { primary } = step {
+            if !send(UserEvent::ClipboardRead(id, primary)) {
+                break; // loop gone
+            }
+            continue;
+        }
         let response = apply(step, &grid, &parser, &mut themed);
         if let Some(replies) = replies.as_mut().filter(|_| !response.is_empty()) {
             let _ = replies.write(&response);
@@ -650,7 +662,7 @@ fn apply(
             Vec::new()
         }
         // The reader loop tells the window instead.
-        Feed::Take(_) => Vec::new(),
+        Feed::Take(_) | Feed::ClipboardRead { .. } => Vec::new(),
     }
 }
 
@@ -896,6 +908,7 @@ impl WindowState<'_> {
             grid,
             parser,
             writer: io.writer,
+            serves_clipboard: io.serves_clipboard,
             wake,
             shown: std::cell::RefCell::new(None),
             compactor: Compactor::default(),
@@ -2405,7 +2418,7 @@ impl WindowState<'_> {
     /// into `clipboard = "read-write"`.
     fn service_clipboard(&mut self, id: u64) {
         let policy = self.config.clipboard.unwrap_or_default();
-        let (set, set_primary, query, query_primary) = {
+        let (set, set_primary, query, query_primary, serves) = {
             let Some(p) = self.pane_by_id(id) else { return };
             let mut g = p.grid.lock();
             if g.clipboard_set.is_none()
@@ -2420,13 +2433,16 @@ impl WindowState<'_> {
                 g.clipboard_set_primary.take(),
                 std::mem::take(&mut g.clipboard_query),
                 std::mem::take(&mut g.clipboard_query_primary),
+                p.serves_clipboard,
             )
         };
         // Drain the pending request regardless of policy (above) so a denied
         // request doesn't re-fire on every subsequent poll; only actually
         // touch the clipboard when the policy allows it.
         let allow_write = policy != ClipboardPolicy::Off;
-        let allow_read = policy == ClipboardPolicy::ReadWrite;
+        // A source that serves reads asks this window itself (C54): the
+        // grid's record of one is not answered a second time.
+        let allow_read = grid_may_answer(policy, serves);
         if allow_write
             && let Some(text) = set
             && let Some(cb) = self.clipboard.as_mut()
@@ -2465,6 +2481,24 @@ impl WindowState<'_> {
             if let Some(p) = self.pane_by_id_mut(id) {
                 let _ = p.writer.write(&reply);
             }
+        }
+    }
+
+    /// Answers a block's program reading the clipboard (C54), as the source
+    /// asked: the text if the `clipboard` policy is `read-write`, else a
+    /// denial, so the program is never left waiting and never handed text
+    /// the user did not allow (handoff D309).
+    fn answer_clipboard_read(&mut self, id: u64, primary: bool) {
+        // Apply an OSC 52 set that came before the query first.
+        self.service_clipboard(id);
+        let allowed = reads_allowed(self.config.clipboard.unwrap_or_default());
+        let text = match (allowed, primary) {
+            (false, _) => None,
+            (true, true) => self.primary_text(),
+            (true, false) => self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()),
+        };
+        if let Some(p) = self.pane_by_id_mut(id) {
+            p.writer.clipboard_reply(primary, text);
         }
     }
 
@@ -6943,6 +6977,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                     w.show_take(id, take);
                 }
             }
+            UserEvent::ClipboardRead(id, primary) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(id)) {
+                    w.answer_clipboard_read(id, primary);
+                }
+            }
             UserEvent::Listed(ask, listed) => {
                 if let Some(w) = self.windows.first_mut() {
                     w.palette_listed(ask, listed);
@@ -7611,8 +7650,36 @@ fn pinch_toggles_zoom(sum: f64, zoomed: bool) -> bool {
     }
 }
 
+/// Whether `policy` lets a program read the clipboard (handoff D309).
+fn reads_allowed(policy: ClipboardPolicy) -> bool {
+    policy == ClipboardPolicy::ReadWrite
+}
+
+/// Whether the pane's own grid may answer a read: only when the policy
+/// allows it and the source does not serve reads itself (D312).
+fn grid_may_answer(policy: ClipboardPolicy, serves: bool) -> bool {
+    reads_allowed(policy) && !serves
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipboard_reads_are_denied_unless_read_write() {
+        use crate::config::ClipboardPolicy::*;
+        assert!(!super::reads_allowed(super::ClipboardPolicy::default()));
+        assert!(!super::reads_allowed(Off));
+        assert!(!super::reads_allowed(WriteOnly));
+        assert!(super::reads_allowed(ReadWrite));
+    }
+
+    #[test]
+    fn the_grid_stays_silent_when_the_source_serves_reads() {
+        use crate::config::ClipboardPolicy::*;
+        assert!(super::grid_may_answer(ReadWrite, false));
+        assert!(!super::grid_may_answer(ReadWrite, true));
+        assert!(!super::grid_may_answer(WriteOnly, false));
+    }
+
     #[test]
     fn hover_focus_hits_the_grid_and_not_the_header_or_border() {
         let place = super::Place {

@@ -979,3 +979,61 @@ fn a_folder_is_listed_over_the_blocks_connection_once_it_holds_the_lease() {
     assert!(refused.contains("terminal.list-dir"), "{refused}");
     std::fs::remove_dir_all(&tmp).expect("cleanup");
 }
+
+/// Reads `feed` until a clipboard read arrives, its selection (C54).
+fn next_clipboard_read(feed: &Receiver<Feed>) -> bool {
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if let Ok(Feed::ClipboardRead { primary }) = feed.recv_timeout(Duration::from_millis(50)) {
+            return primary;
+        }
+    }
+    panic!("no clipboard read");
+}
+
+/// Reads `feed` until its output holds `needle`.
+fn bytes_until(feed: &Receiver<Feed>, needle: &str) {
+    let deadline = Instant::now() + PATIENCE;
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        if let Ok(Feed::Bytes(b)) = feed.recv_timeout(Duration::from_millis(50)) {
+            seen.extend_from_slice(&b);
+        }
+        if String::from_utf8_lossy(&seen).contains(needle) {
+            return;
+        }
+    }
+    panic!("no {needle:?} in {seen:?}");
+}
+
+#[test]
+fn a_clipboard_read_reaches_the_window_and_its_answer_reaches_the_program() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let io = attached.source.open(key, 80, 24).expect("opened");
+    assert!(
+        io.serves_clipboard,
+        "the window answers reads, not the grid"
+    );
+    let (mut writer, feed) = feed_of(io);
+    type_until_echoed(writer.as_mut(), &feed, 1);
+
+    writer
+        .write(b"printf '\\033]52;c;?\\007'; read x\r")
+        .expect("typed");
+    assert!(!next_clipboard_read(&feed), "the clipboard, not primary");
+    writer.clipboard_reply(false, Some("hi".into()));
+    // The program's terminal echoes what it was sent: "hi" in base64.
+    bytes_until(&feed, "52;c;aGk=");
+
+    // A denial is an empty answer, so the program is not left waiting.
+    writer
+        .write(b"\rprintf '\\033]52;p;?\\007'; read y\r")
+        .expect("typed");
+    assert!(next_clipboard_read(&feed), "primary this time");
+    writer.clipboard_reply(true, None);
+    bytes_until(&feed, "52;p;^G");
+}

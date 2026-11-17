@@ -33,6 +33,12 @@ pub enum Feed {
     /// Where this window's taking over of an owner-only block stands
     /// (gui-design D64, handoff D153); first sent once the source can ask.
     Take(Take),
+    /// The pane's program reads a selection (OSC 52 `?`) and this window
+    /// holds the block's input lease, so it is asked (C54, handoff D309,
+    /// D310). The window answers by its `clipboard` policy through
+    /// [`BackendHandle::clipboard_reply`]; only a pane whose
+    /// [`PaneIo::serves_clipboard`] is set gets these.
+    ClipboardRead { primary: bool },
 }
 
 /// Where this window stands on typing into an owner-only block, whose
@@ -71,6 +77,11 @@ pub struct PaneIo {
     /// Whether the window answers the program's queries (DA, DSR). A mux
     /// server's own terminal already does, so its blocks say `false`.
     pub answers_queries: bool,
+    /// The source delivers the program's clipboard reads as
+    /// [`Feed::ClipboardRead`] and takes the answer, so the window does not
+    /// answer one from the pane's own grid as well: it would be answered
+    /// twice, once unasked (C54, handoff D312).
+    pub serves_clipboard: bool,
 }
 
 /// A window's panes as a source lays them out: leaves are the source's pane

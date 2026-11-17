@@ -1401,6 +1401,20 @@ mod client {
                         predict.mode(mode);
                     }
                 }
+                // The TUI has no clipboard policy to opt in with (handoff
+                // D309), so a program's read is denied at once: it gets an
+                // empty answer, not a wait (C54).
+                Message::ClipboardRead {
+                    block: b,
+                    selection,
+                } if b == block => {
+                    self.send(|req| Message::ClipboardReply {
+                        req,
+                        block,
+                        selection,
+                        data: None,
+                    });
+                }
                 Message::Event {
                     event: Event::BlockResized { block: b, size },
                     ..
@@ -4671,6 +4685,38 @@ mod client {
             );
             grant(&mut app, &inbox, &a_new, &asked);
             assert_eq!(typed_in(&sent(&a_new)), [b"typed".to_vec()]);
+        }
+
+        /// A program's clipboard read is denied at once: the TUI has no
+        /// policy to opt in with (C54, handoff D309).
+        #[cfg(unix)]
+        #[test]
+        fn a_clipboard_read_is_denied_with_an_empty_answer() {
+            let (mut app, _inbox, [_control, a_far, _b_far]) = app(Some(Box::new(Never)));
+            sent(&a_far);
+            let a = block(1);
+            let pane = app.panes.get_mut(&a).expect("A");
+            pane.take(
+                a,
+                Message::ClipboardRead {
+                    block: a,
+                    selection: rusty_mux_core::Selection::Primary,
+                },
+            )
+            .expect("taken");
+            let replies = sent(&a_far);
+            assert!(
+                replies.iter().any(|m| matches!(
+                    m,
+                    Message::ClipboardReply {
+                        block,
+                        selection: rusty_mux_core::Selection::Primary,
+                        data: None,
+                        ..
+                    } if *block == a
+                )),
+                "{replies:?}"
+            );
         }
 
         /// Whether `messages` give a lease back.

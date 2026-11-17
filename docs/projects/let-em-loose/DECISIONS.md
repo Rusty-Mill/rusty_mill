@@ -147,6 +147,14 @@ Precise contracts used by this guide:
 | D137 | `rusty_orch lens breaker` is a read-only report with no reset | [default] 2026-11-17 (#758) |
 | D138 | orch maps `sensitive_paths` to launcher `hide` via agents.json, and `real_data` to `bbp dry-run` | [default] 2026-11-17 (#758) |
 | D139 | A lens post with no taint entry reads as `sensitive` (unknown ids from lost posts) | [default] 2026-11-17 (#758) |
+| D140 | One paid lens run approved for 2026-11-17 (`--max-passes 5`, default call cap); supersedes D134 for that run only | [stated] 2026-11-17 (1124) |
+| D141 | Run 1 toy `sweep` smoke run stays local-only; run 2 SSH host launcher brief is paid (codex now, claude after its `no_overage` entry) | [stated] 2026-11-17 (1124, 1166) |
+| D142 | #1092: `/srv/lel` paths stay `container_file_t` on BaileyAi; no relabel before run 1 | [default] 2026-11-17 (1092) |
+| D143 | D127's "first run" is a clean #1166 pass (settled claim, inbox fires, `bbp verify` clean); the freeze holds until a rerun meets it | [stated] 2026-11-17 (general, 1166) |
+| D144 | #1166: rejecting `executed` from lens replies at `post::parse` is a bug fix, not new design | [default] 2026-11-17 (1166) |
+| D145 | #1166: the llama.cpp 500 on valid harmony output is a host/adapter issue, not design | [default] 2026-11-17 (1166) |
+| D146 | #1166: an inbox-exercising seed is a test-fixture choice; thresholds and escalation rules unchanged | [default] 2026-11-17 (1166) |
+| D147 | #1166: the llama.cpp rebuild and the Qwen reasoning budget are held until the rerun's per-pass log shows which slot failed (D145 fix held, not applied) | [stated] 2026-11-17 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1250,6 +1258,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Rejected.** Continuing to add designs before the first run.
 **Tag.** [stated] · remind-me: mem_1bae9f1358544fc3a517998b983b896a
 **Key.** lel:general:design-freeze-until-first-run
+**Meaning amended by D143 (2026-11-17): the first run is a clean #1166 pass.**
 **Source.** Nano, Millwright project thread message `cmsg_01632CBKCXsWe6RyFWvE9dovLW5oB3NEACWHuvMnsptmYP`, 2026-11-12T00:34:16Z: "Let Em Loose is under a design freeze until its first run. Add no design there." Answers `docs/projects/millwright/QUESTIONS.md` L9. Numbered D127 after D126.
 
 ## D128. M1 committed: #758 items 1-3, #1123, #1124, #1166 to Ready; #1092 waits for the BaileyAi host; #754 out
@@ -1370,3 +1379,79 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_4c08e98488ae4605a4afe1e41af0e4f4
 **Key.** lel:758:unknown-lens-post-reads-sensitive
 **Source.** let-em-loose-expert, 2026-11-17, answering a Codex P1 finding on PR #1764 (`orch-lens/src/round.rs` `partial`). 598-build/PLAN.md, D59, D62, D86, D127. Numbered D139 after D138.
+
+## D140. One paid lens run approved for 2026-11-17 (`--max-passes 5`, default call cap); supersedes D134 for that run only
+
+**Decision.** Nano approved ONE live paid `rusty_orch lens run` on 2026-11-17. The run is `rusty_orch lens run --max-passes 5` with the default call cap (`task_calls`, STARTER 400). This supersedes D134's "no paid runs" for that single run only. D134 stands for every other run; any further paid call, a second run included, is ask-first again. Dollar caps (`experiment_usd`, `task_usd`) do not enforce in v0, because the meter charges 0 per call (ADR-0021). The "$25" the user stated is a report threshold only. "Board directory" means the BBP directory `/srv/lel/bbp` (user-confirmed).
+**Why.** Nano's own words in the saved chat: after "Lens runner declared done 2026-11-05; a live paid run needed your approval and none is recorded. Make it today?" and the sequence "dry-run, live run capped at five passes, read the board", he answered "Yes, let's do it now." The goal is to see models use the BBP board and find what breaks (`mem_f2c87231f0fa4845952dad1fa237712e`).
+**Rejected.** Reading it as a ceiling for later runs. Reading it as a dollar cap (nothing enforces one). Treating the subscription Claude lens as cleared: `/etc/let-em-loose/assertions.json` has `no_overage` for codex only (checked 2026-11-03, lapses about 2026-12-03) and none for claude; Q50 asks Nano which providers may be paid.
+**Caveats.** The `--max-passes 5` and call-cap limits come from the chat sequence and the user's relay, not from Nano's "Yes" alone. The run intent (the rusty_mux SSH host launcher brief) is the user's relay; the chat has Claude suggesting it and Nano sending Orca screenshots, but Nano has not confirmed the brief as the task. The run is still blocked on #1092 (deploy: no `bbp`, `/opt/lel`, `/srv/lel/bbp`) and #1123 (no real `lens.json`); ask-first gates for deployment still apply.
+**Tag.** [stated] · remind-me: mem_76131c8f54154cbd8e93a0edbb4cd4d7
+**Key.** lel:1124:one-paid-lens-run-2026-11-17
+**Source.** Nano, claude.ai chat 2026-11-17, remind-me capture `cap_675c3da34b0946cdb0900aec848a07ba` (dialog `mem_307a8af289f84ce1b918249ea0691ab6`), noted first in `mem_f2c87231f0fa4845952dad1fa237712e`; relayed by the user (baileyrd) in Claude Code the same day, who gave these references. Relates to D134, D38, ADR-0021, `1124-spend-estimate.md`. Numbered D140 after D139.
+
+## D141. Run 1 toy `sweep` smoke run stays local-only; run 2 SSH host launcher brief is paid (codex now, claude after its `no_overage` entry)
+
+**Decision.** Nano answered Q50 himself, then corrected the record the same day (see Amended). Run 1 is the #1166 smoke run on the toy `sweep` intent, **local-only**, under that design's limits: `lens run --max-passes 8`, `task_calls 60`, `experiment_usd`/`task_usd` 1 at $0 real cost, providers `local`, `local-high`, `local-rebel` only, no paid provider (`1166-smoke-run.md` sections 3 to 7). Run 2 is the SSH host launcher brief for rusty_mux (Orca Remote Hosts panel), after run 1 has finished and been read. Run 2 is paid, with the D140 limits: `rusty_orch lens run --max-passes 5`, the default `task_calls` cap (STARTER 400), and no dollar-cap enforcement in v0 (ADR-0021; "$25" is a report threshold only). Paid providers for run 2: codex now; claude only once its `no_overage` entry exists in `/etc/let-em-loose/assertions.json` (today codex only, checked 2026-11-03, lapsing about 2026-12-03). This supersedes D140's "any second run is ask-first" for run 2, which needs no separate go. D140's single paid run is therefore run 2. A third run, a higher cap or an unlisted provider stays ask-first.
+**Why.** Nano's own words: "1. The smoke run uses the toy sweep intent as designed. The SSH host launcher brief is the second run. I approve both paid runs, same limits each. 2. Paid providers: codex now; claude once I add its no_overage entry." This closes Q50's two open asks.
+**Rejected.** Treating the launcher brief as the first run, since #1166 is designed around `sweep`. Paying the claude lens before its assertion exists. Reading "same limits each" as a shared budget across both runs. Giving run 1 the paid limits (corrected, see Amended).
+**Notes.** D134 still holds for everything else. Both runs wait on #1092 (deploy: `bbp`, `/opt/lel`, `/srv/lel/bbp`; Q-answers for the deploy). The lens config (#1123) landed in baileyrd/Factory#1 on 2026-11-16 and still has to be on the host. Claude lenses additionally wait on the assertion; until then a run with the claude lens is not paid-approved. Local models (llama-swap `<llama-swap-host>:<port>`, model id `qwen3.6-35b-a3b`) cover any lens not paid. Dated, not a ceiling: a second run only after the first has finished and been read.
+**Amended 2026-11-17.** First written as "both runs paid with `--max-passes 5` and call cap 400". Nano then said, typed in the session and saved verbatim as `mem_c5696762bdfb44f6aa7a169beceee027` (speaker Nano): "D141 says both runs are paid with --max-passes 5 and call cap 400, but run 1 is local-only at --max-passes 8 and task_calls 60. Ask the expert to amend D141: run 1 is local-only under the #1166 design's limits; the paid limits apply to run 2 only. This is a correction to the record, in Nano's name." Amended in place, not as a new D number: the correction is the same day, changes no other entry and keeps the key. The first wording of his Q50 reply ("I approve both paid runs, same limits each") is kept in the Source for the record.
+**Tag.** [stated] · remind-me: mem_2357f42a0f9c42ea8a1b7b4fddf537db
+**Key.** lel:1124:two-paid-runs-codex-first
+**Source.** Nano, typed into a Claude Code session on BaileyAi, 2026-11-17, saved verbatim by the coordinator as remind-me `mem_efab3121ffc64728a2ee6ba8ec5a5f9d` (speaker Nano). Builds on D140 (`lel:1124:one-paid-lens-run-2026-11-17`), D134, ADR-0021, `1166-smoke-run.md`. Amendment: remind-me `mem_c5696762bdfb44f6aa7a169beceee027`. Numbered D141 after D140.
+
+## D142. #1092: `/srv/lel` paths stay `container_file_t` on BaileyAi; no relabel before run 1
+
+**Decision.** `/srv/lel/bbp`, `/srv/lel/orch-state`, `/srv/lel/lenses` and `/srv/lel/lens.json` keep the SELinux type `container_file_t`. Nothing is relabelled before run 1 (#1166). The `var_t` that the deploy prompt told the operator to expect was wrong. On BaileyAi `matchpathcon` returns `container_file_t` as the policy default for these paths (a local fcontext rule on `/srv/lel`), so the labels are as intended. `restorecon -Rv` printed "not reset as customized by admin" because `container_file_t` is a customizable type, and `restorecon -F` would change nothing.
+**Why.** Run 1 and `lens check` run as `orch-runner` started with `sudo -u orch-runner` from `baileyrd`'s shell, which is `unconfined_t`; llama-swap is `unconfined_t` too, and `unconfined_t` reads `container_file_t`. `lel-codex` mounts only `/srv/lel/machine-id`, `/srv/lel/experiment` and a volume, so no confined service touches these paths yet. Facts checked on the host by the coordinator, 2026-11-17.
+**Revisit when.** (a) The `mill-board` systemd service (D132) is deployed: its wrapper runs `bbp` as `orch-runner` through sudo, so check that `/srv/lel/bbp` is readable and writable in the resulting domain. (b) Run 1 shows an AVC denial (`ausearch -m avc`). The `bbp open` sandbox probe (user namespaces or SELinux) is the first place a label problem would show. The fix then is a `semanage fcontext -a -t <type> '/srv/lel/bbp(/.*)?'` rule followed by `restorecon -Rv /srv/lel/bbp`, not `restorecon` alone (the policy default is `container_file_t`, so it is a no-op). Never run `restorecon` on `/srv/lel` or `/srv/lel/experiment` (the `lel-codex` bind mounts). The deploy and smoke-run prompts (`1092-deploy-prompt-bbp-and-board-dir.md`, `1166-smoke-run-prompt.md`) still expect `var_t` and should be corrected.
+**Rejected.** Relabelling to `var_t` now: a local policy change with no reader that needs it, and `restorecon` could not do it anyway. Running `restorecon -F`: no effect.
+**Tag.** [default] · remind-me: mem_f02b0b40230741e89e0a16de2496d4dd
+**Key.** lel:1092:srv-lel-labels-container-file-t
+**Source.** let-em-loose-expert, 2026-11-17, answering the coordinator for Nano. D131 (deploy on BaileyAi), D132 (`mill-board` service, not yet deployed), `1092-deploy-layout.md`, `1092-deploy-prompt-bbp-and-board-dir.md`. Numbered D142 after D141.
+
+## D143. D127's "first run" is a clean #1166 pass; the freeze holds until a rerun meets it
+
+**Decision.** Asked what counts as D127's undefined "first run", Nano chose "Clean #1166 pass first (Recommended)": the first run is a #1166 run with a settled claim, the inbox firing and `bbp verify` clean. The design freeze (D127) holds until a rerun, after the bug fixes, meets that. Run 1 (task `smoke-1`, local-only toy `sweep`, 2026-11-17) does not count: the machinery ran end to end, but criteria 2, 3 and 4 of `1166-smoke-run.md` section 9 were unmet and it halted on a refused post. D127's text is unchanged; only its meaning is fixed.
+**Why.** It lifts the freeze on evidence that the loop works, not on the loop merely running. Run 1's result is in remind-me `mem_ddc10f27ebb84572b6bcec43e05d21dc`.
+**Rejected.** a) Run 1 counts as the first run. c) The first run is the first live paid run (run 2, D141).
+**Tag.** [stated] · remind-me: mem_7a440c37500b439f8b5239db9d97aaac
+**Key.** lel:127:first-run-is-a-clean-1166-pass
+**Source.** Nano, answer dialog in the Claude Code session on BaileyAi, 2026-11-17, saved verbatim as `mem_c79bd23503c349ee84fc535c423a07f8` (speaker Nano). Amends the meaning of D127; relates to D141, `1166-smoke-run.md`. Numbered D143 after D142.
+
+## D144. #1166: rejecting `executed` from lens replies at `post::parse` is a bug fix, not new design
+
+**Decision.** In orch-lens `post::parse`, an `evidence_kind: executed` reply from a lens is rejected at the source as a permanent provider failure for that reply, non-halting. This is a bug fix under D127. The host already refuses such a post (`check_executed`, `1166-smoke-run.md` section 10), the 1123 prompts forbid it, and orch should not post it. Run 1's local-high reply posted one, `bbp` refused it (`EvidenceRequired`) and orch halted.
+**Why.** It brings orch in line with the approved design (a lens cannot post executed evidence that counts). It adds no behaviour. Changing the halt rule for board-refused posts is a separate policy question (Q51).
+**Rejected.** Treating it as new design that waits for the freeze to lift.
+**Tag.** [default] · remind-me: mem_164afed2da774d07bc291781207dcc53
+**Key.** lel:1166:reject-executed-at-parse
+**Source.** let-em-loose-expert, 2026-11-17. `1166-smoke-run.md` section 10, D127, D139, D143, `mem_ddc10f27ebb84572b6bcec43e05d21dc`. Numbered D144 after D143.
+
+## D145. #1166: the llama.cpp 500 on valid harmony output is a host/adapter issue, not design
+
+**Decision.** `gpt-oss-120b` via llama-swap returned HTTP 500 twice because llama.cpp (build f74e2fa, `common_chat_peg_parse`) rejects valid harmony output (`<|channel|>final <|constrain|>JSON<|message|>{...}`). Fixing it (a newer llama.cpp, a changed reasoning-format setting or a hardened `orch-openai` adapter) is a host or adapter fix and changes no lens, claim or board behaviour, so it is not new design under D127. Which fix to use is the builder's choice. **Held by D147:** the fix is not applied yet. Root cause: build f74e2fa's gpt-oss parser (`common/parsers/gpt-oss.cpp`) accepts `<|constrain|>` after `final` only when a `response_format` is set; upstream master (a9d43ec) makes it optional, so the fix is a llama.cpp rebuild.
+**Why.** A provider's server bug on well-formed output.
+**Rejected.** Dropping `local-high` from the roster to avoid it; that would change the approved lens roster.
+**Tag.** [default] · remind-me: mem_331b473b9194401fb93c4237411fe5b1
+**Key.** lel:1166:llamacpp-harmony-500-is-host-adapter
+**Source.** let-em-loose-expert, 2026-11-17. `mem_ddc10f27ebb84572b6bcec43e05d21dc`, D127. Numbered D145 after D144.
+
+## D146. #1166: an inbox-exercising seed is a test-fixture choice; thresholds and escalation rules unchanged
+
+**Decision.** The rerun's seed may be chosen so that the inbox fires (for example a claim A that reaches the strict line, not one dropped by counter evidence). That is a test-fixture choice within `1166-smoke-run.md` section 2. It must not change the thresholds (accept 8, strict 12, `drop_at -8`) or the escalation rules.
+**Why.** The seed is test input; the thresholds and rules are approved design under the freeze.
+**Rejected.** Lowering a threshold or adding an escalation path so the inbox fires.
+**Tag.** [default] · remind-me: mem_981c7beee6ad4b0190795bf1830e85b7
+**Key.** lel:1166:inbox-seed-is-fixture-choice
+**Source.** let-em-loose-expert, 2026-11-17. `1166-smoke-run.md` sections 2 and 9, D127, D143. Numbered D146 after D145.
+
+## D147. #1166: the llama.cpp rebuild and the Qwen reasoning budget are held until the rerun's per-pass log shows which slot failed
+
+**Decision.** Nano: "Hold both host changes (llama.cpp rebuild, reasoning budget) until the rerun's per-pass log shows which slot failed and why. One change at a time." So D145's fix (rebuild llama.cpp past build f74e2fa) and a Qwen reasoning budget (`--reasoning-budget 2048` in `~/llama/config.yaml`, untested) are held and not applied. The rerun is task `smoke-2` (`1166-smoke-rerun.sh`) on the code fixes D144 and D146 plus the stderr per-pass log (rusty_orch PR #1783). Host changes, one at a time, only after that log names the failed slot. When a rebuild is applied it must overwrite the shared libraries (not `cp -n`, which would keep the old `.so` files) and keep the rollback copy `~/llama/bin/vulkan.f74e2fa`.
+**Why.** Run 1 had only 2 of 3 candidates and which slot failed and why is unknown, because the per-pass log was lost to the closed-stdout panic (fixed in #1783). Changing the host first would hide the cause.
+**Rejected.** Applying the rebuild and the reasoning budget together before the rerun.
+**Tag.** [stated] · remind-me: mem_157ec68e43034d219af811c9735b1681
+**Key.** lel:1166:hold-host-changes-until-rerun-log
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-17, saved verbatim as `mem_7c2db8a737f0414898ce9e85a045f46e` (speaker Nano). Relates to D143, D144, D145, D146, Q52. Numbered D147 after D146.
