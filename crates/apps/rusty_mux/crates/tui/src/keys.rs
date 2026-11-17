@@ -60,6 +60,9 @@ pub enum Action {
     },
     /// Open find in the focused block's scrollback.
     Find,
+    /// Focus the next block shown, floats last, wrapping: the way to a
+    /// float that overlaps the tile under it, which no direction reaches.
+    Cycle,
     /// Float the focused block over the window (C42).
     Float,
     /// Raise (`true`) or lower the focused float.
@@ -75,7 +78,10 @@ pub enum Action {
 impl Action {
     /// Whether this acts on the focused block, which must then be shown.
     pub fn on_focused_block(&self) -> bool {
-        !matches!(self, Action::Detach | Action::Focus(_) | Action::Unknown)
+        !matches!(
+            self,
+            Action::Detach | Action::Focus(_) | Action::Cycle | Action::Unknown
+        )
     }
 }
 
@@ -165,6 +171,7 @@ impl Keys {
             b'}' => Action::Swap { next: true },
             b'D' => Action::DetachBlock,
             b'/' => Action::Find,
+            b'n' => Action::Cycle,
             b'f' => Action::Float,
             b'u' => Action::Stack { top: true },
             b'U' => Action::Stack { top: false },
@@ -227,8 +234,9 @@ mod tests {
     fn float_keys() {
         let mut keys = Keys::default();
         assert_eq!(
-            keys.feed(b"\x1df\x1du\x1dU\x1dml\x1dmx"),
+            keys.feed(b"\x1dn\x1df\x1du\x1dU\x1dml\x1dmx"),
             vec![
+                Action::Cycle,
                 Action::Float,
                 Action::Stack { top: true },
                 Action::Stack { top: false },

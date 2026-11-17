@@ -42,8 +42,12 @@ pub const CONTROL: Features = Features::CHECKPOINT_V6
     .union(Features::LAYOUT_EDIT)
     .union(Features::FOCUS)
     .union(Features::ACTIVE_WINDOW)
-    .union(Features::SESSION_NAMES)
-    .union(Features::FLOATS);
+    .union(Features::SESSION_NAMES);
+
+/// [`CONTROL`] for a client that draws floating blocks (C42): the TUI. A
+/// client that does not must not ask, or the server would tell it focus is
+/// on a block it cannot show.
+pub const FLOATING: Features = CONTROL.union(Features::FLOATS);
 
 /// What a block's connection asks for. `TERMINAL_CONTROL` tells the
 /// server this client's copy of the terminal can be reset safely.
@@ -367,14 +371,14 @@ pub fn answer(
 
 /// Takes the clients in `plan` over on the fresh path at `socket`: the
 /// control connection's first, with the layout asked for again, then
-/// each block's. Every answer is due within [`HANDSHAKE`].
+/// each block's, as the TUI asks. Every answer is due within [`HANDSHAKE`].
 pub fn take_over(socket: PathBuf, plan: Plan, cancel: &AtomicBool) -> Result<Back, Missed> {
-    take_over_with(socket, plan, CONTROL, PANE, cancel)
+    take_over_with(socket, plan, FLOATING, PANE, cancel)
 }
 
 /// [`take_over`], the control connection saying Hello with `features`
 /// and each block's with `pane`: a client that asked for more than
-/// [`CONTROL`] or [`PANE`] keeps it on the path back.
+/// [`FLOATING`] or [`PANE`] keeps it on the path back.
 pub fn take_over_with(
     socket: PathBuf,
     plan: Plan,

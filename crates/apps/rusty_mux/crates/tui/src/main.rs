@@ -116,8 +116,8 @@ mod client {
     #[cfg(windows)]
     use platform_windows::{WindowsTerminal as Term, WindowsUnixStream as UnixStream};
     use rusty_mux_client::attach::{
-        Back, CONTROL, HANDSHAKE, Missed, Opened, Plan, Requests, Shape, Welcomed, backoff, clone,
-        connect, first_session_name, reach, shape_of, take_over,
+        Back, CONTROL, FLOATING, HANDSHAKE, Missed, Opened, Plan, Requests, Shape, Welcomed,
+        backoff, clone, connect, first_session_name, reach, shape_of, take_over,
     };
     use rusty_mux_client::checkpoint::Receiver;
     use rusty_mux_core::{
@@ -916,7 +916,7 @@ mod client {
         let area = window_size(&term, classic);
         conn.send(&Message::Hello {
             version: Some(rusty_mux_proto::VERSION.into()),
-            features: CONTROL,
+            features: FLOATING,
             resume: None,
             takeover: None,
         })
@@ -1634,6 +1634,9 @@ mod client {
     struct Pending {
         layout: Option<Layout>,
         zoomed: Option<BlockId>,
+        /// The floats told since: they go with the layout, after the old
+        /// one's last drawing.
+        floats: Option<Vec<Float>>,
         /// The server's focus, announced since.
         focus: Option<BlockId>,
         leaving: Vec<BlockId>,
@@ -1881,8 +1884,8 @@ mod client {
             };
             self.window = Some(window);
             self.gone = false;
-            self.floats = shape.floats;
             self.relayout(shape.layout, shape.zoomed);
+            self.refloat(shape.floats);
             self.take_focus(shape.focused);
             true
         }
@@ -2184,16 +2187,18 @@ mod client {
         /// it drops have drained (see [`Pending`]).
         fn relayout(&mut self, layout: Option<Layout>, zoomed: Option<BlockId>) {
             let mut staying = layout.as_ref().map(Layout::blocks).unwrap_or_default();
-            staying.extend(self.floats.iter().map(|f| f.block));
+            let told = self.pending.as_ref().and_then(|p| p.floats.as_ref());
+            staying.extend(told.unwrap_or(&self.floats).iter().map(|f| f.block));
             let mut leaving: Vec<BlockId> = self
                 .panes
                 .iter()
                 .filter(|(b, p)| !staying.contains(b) && !p.closed)
                 .map(|(b, _)| *b)
                 .collect();
-            let mut focus = None;
+            let (mut focus, mut floats) = (None, None);
             if let Some(old) = self.pending.take() {
                 focus = old.focus;
+                floats = old.floats;
                 for block in old.leaving {
                     if !leaving.contains(&block) {
                         leaving.push(block);
@@ -2203,6 +2208,7 @@ mod client {
             self.pending = Some(Pending {
                 layout,
                 zoomed,
+                floats,
                 focus,
                 by: Instant::now() + GRACE,
                 leaving,
@@ -2216,14 +2222,14 @@ mod client {
         /// block out for floating came first: the block is no longer one
         /// that is leaving.
         fn refloat(&mut self, floats: Vec<Float>) {
-            self.floats = floats;
             let Some(pending) = self.pending.as_mut() else {
+                self.floats = floats;
                 return self.sync();
             };
-            let floating = &self.floats;
             pending
                 .leaving
-                .retain(|b| !floating.iter().any(|f| f.block == *b));
+                .retain(|b| !floats.iter().any(|f| f.block == *b));
+            pending.floats = Some(floats);
             if pending.leaving.is_empty() {
                 self.settle();
             }
@@ -2252,6 +2258,9 @@ mod client {
             self.draw();
             self.layout = pending.layout;
             self.zoomed = pending.zoomed;
+            if let Some(floats) = pending.floats {
+                self.floats = floats;
+            }
             if let Some(focus) = pending.focus {
                 self.focus = focus;
             }
@@ -2396,6 +2405,16 @@ mod client {
                 Action::Resize(_) | Action::Swap { .. } | Action::DetachBlock if !self.editing => {
                     bell()
                 }
+                Action::Cycle => {
+                    let shown = self.visible();
+                    let at = shown.iter().position(|(b, _)| *b == focus);
+                    let next = shown.get(at.map_or(0, |i| (i + 1) % shown.len()));
+                    match next {
+                        Some((block, _)) if *block != focus => self.focus_on(*block),
+                        _ => bell(),
+                    }
+                    self.sync();
+                }
                 Action::Float | Action::Stack { .. } | Action::Move(_)
                     if !self.editing || !self.floating =>
                 {
@@ -2486,11 +2505,13 @@ mod client {
             self.draw();
         }
 
-        /// Whether `block` is in the layout shown.
+        /// Whether `block` is in the layout shown, or floats over it.
         fn shows(&self, block: BlockId) -> bool {
-            self.layout
-                .as_ref()
-                .is_some_and(|l| l.blocks().contains(&block))
+            self.float_of(block).is_some()
+                || self
+                    .layout
+                    .as_ref()
+                    .is_some_and(|l| l.blocks().contains(&block))
         }
 
         /// Focuses `block` here at once and, on a server that keeps the
@@ -2815,7 +2836,9 @@ mod client {
             self.browsing =
                 self.browsing && self.grid(self.focus).is_some_and(|g| g.view_offset > 0);
             let shown = match visible.as_slice() {
-                [(only, _)] if !self.browsing => Shown::Passing(*only),
+                [(only, _)] if !self.browsing && self.float_of(*only).is_none() => {
+                    Shown::Passing(*only)
+                }
                 _ => Shown::Composed(None),
             };
             if shown != self.shown || matches!(shown, Shown::Composed(_)) {
@@ -3842,6 +3865,44 @@ mod client {
             app.floating = false;
             app.act(Action::Float);
             assert!(sent(&control).is_empty());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_float_out_of_the_layout_takes_keys_and_is_reached_by_cycling() {
+            let (mut app, _inbox, [control, _a, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.floating = true;
+            app.layout = Some(Layout::Block(b));
+            let at = FloatRect::new(20, 20, 60, 60).expect("a float");
+            app.floats = vec![Float { block: a, at }];
+            app.focus = b;
+            app.act(Action::Cycle);
+            assert_eq!(app.focus, a, "the float, over the tile it covers");
+            app.act(Action::Stack { top: false });
+            assert!(sent(&control).iter().any(|m| matches!(
+                m,
+                Message::StackFloat { block, top: false, .. } if *block == a
+            )));
+            app.act(Action::Cycle);
+            assert_eq!(app.focus, b, "and back, wrapping");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_tile_floated_while_drawn_changes_layout_and_floats_together() {
+            let (mut app, _inbox, [_control, _a, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.show(Shown::Composed(None));
+            // `a` fills the left of the screen: it must not be bordered as a
+            // float, with its old rect, before the layout moves on.
+            app.relayout(Some(Layout::Block(b)), None);
+            let at = FloatRect::new(0, 0, 50, 50).expect("a float");
+            app.refloat(vec![Float { block: a, at }]);
+            assert!(app.pending.is_none());
+            assert_eq!(app.floats.len(), 1);
+            let shown: Vec<BlockId> = app.visible().iter().map(|(k, _)| *k).collect();
+            assert_eq!(shown, vec![b, a]);
         }
 
         #[cfg(unix)]

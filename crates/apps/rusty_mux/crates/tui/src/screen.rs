@@ -106,17 +106,33 @@ fn ringed(inner: Rect, x: u16, y: u16) -> bool {
 /// by colour alone (D89).
 const FLOAT_TITLE: &str = " ◇ float ";
 
+/// Blanks `rect`, so a float is opaque over what it covers where its grid
+/// is smaller or has not arrived.
+fn clear(frame: &mut Frame, rect: Rect) {
+    for y in rect.y..rect.y + rect.size.rows() {
+        for x in rect.x..rect.x + rect.size.cols() {
+            let i = frame.index(x, y);
+            frame.cells[i] = Glyph::blank();
+        }
+    }
+}
+
 /// Draws the border ring around `inner`: rounded, the header row on top
 /// (D90), in [`FOCUS`] when `focused`. The ring is marked covered so no
 /// divider is drawn over it.
 fn border(frame: &mut Frame, covered: &mut [bool], inner: Rect, focused: bool) {
+    let (right, bottom) = (inner.x + inner.size.cols(), inner.y + inner.size.rows());
+    // The ring needs a cell on every side: a rect from a layout that is not
+    // a float's own (see `float_inner`) is left unbordered.
+    if inner.x == 0 || inner.y == 0 || right >= frame.area.cols() || bottom >= frame.area.rows() {
+        return;
+    }
     let plain = Style::of(&Cell::blank());
     let style = match focused {
         true => Style { fg: FOCUS, ..plain },
         false => plain,
     };
     let (left, top) = (inner.x - 1, inner.y - 1);
-    let (right, bottom) = (inner.x + inner.size.cols(), inner.y + inner.size.rows());
     let mut title = FLOAT_TITLE.chars();
     for y in top..=bottom {
         for x in left..=right {
@@ -228,6 +244,7 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
         }
         if view.float {
             border(&mut frame, &mut covered, view.rect, view.block == focused);
+            clear(&mut frame, view.rect);
         }
         if let Some(grid) = view.grid {
             draw(&mut frame, view.rect, grid);
@@ -244,9 +261,8 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
     }
     // A float drawn over the focused tile hides its cursor.
     if let Some((cx, cy)) = frame.cursor {
-        let under = views
-            .iter()
-            .any(|v| v.float && v.block != focused && ringed(v.rect, cx, cy));
+        let above = views.iter().skip_while(|v| v.block != focused).skip(1);
+        let under = above.into_iter().any(|v| v.float && ringed(v.rect, cx, cy));
         if under {
             frame.cursor = None;
         }
@@ -1085,5 +1101,68 @@ mod tests {
         // No room for a header and a row.
         assert_eq!(inner(at(0, 0, 100, 100), 11, 10), None);
         assert_eq!(inner(at(0, 0, 100, 100), 40, 3), None);
+    }
+
+    #[test]
+    fn a_cursor_shows_through_floats_behind_it_and_a_float_is_opaque() {
+        let tile = grid(14, 4, "");
+        let (back, front) = (grid(10, 2, "bbbbbbbbbb"), grid(4, 1, "f"));
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            size: size(14, 4),
+        };
+        let inner = Rect {
+            x: 2,
+            y: 1,
+            size: size(10, 2),
+        };
+        let views = [
+            View {
+                float: false,
+                block: id(1),
+                rect: whole,
+                grid: Some(&tile),
+                overlay: None,
+            },
+            View {
+                float: true,
+                block: id(2),
+                rect: inner,
+                grid: Some(&back),
+                overlay: None,
+            },
+            View {
+                float: true,
+                block: id(3),
+                rect: inner,
+                grid: Some(&front),
+                overlay: None,
+            },
+        ];
+        let frame = compose(size(14, 4), &views, id(3));
+        assert_eq!(frame.cursor, Some((3, 1)), "the front float's own cursor");
+        // The front grid is 4 wide: the rest of its interior is blank, not
+        // the float behind it.
+        assert_eq!(text(&frame, 1), " │f         │ ");
+    }
+
+    #[test]
+    fn a_float_at_the_screen_edge_gets_no_border_and_no_panic() {
+        let g = grid(4, 2, "ab");
+        let at_edge = Rect {
+            x: 0,
+            y: 0,
+            size: size(4, 2),
+        };
+        let views = [View {
+            float: true,
+            block: id(1),
+            rect: at_edge,
+            grid: Some(&g),
+            overlay: None,
+        }];
+        let frame = compose(size(14, 4), &views, id(1));
+        assert_eq!(text(&frame, 0).get(..2), Some("ab"));
     }
 }
