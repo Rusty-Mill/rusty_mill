@@ -11112,10 +11112,9 @@ dependencies = [
  "rusty_http",
  "rusty_json",
  "rusty_oauth",
+ "rusty_percent",
  "rusty_rand",
  "rusty_serve",
- "rusty_url",
- "serde",
  "tempfile",
 ]
 

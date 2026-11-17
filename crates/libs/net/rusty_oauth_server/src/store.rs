@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusty_json::{Map, Value};
-use serde::{Deserialize, Serialize};
 
 /// Which token bucket a stored or looked-up token hash belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,14 +20,14 @@ pub enum TokenKind {
 }
 
 /// Counts of tokens a bulk operation touched.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenCounts {
     pub access_tokens: usize,
     pub refresh_tokens: usize,
 }
 
 /// One registered client with its live token counts, for an admin listing.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSummary {
     pub client_id: String,
     pub client_name: Option<String>,
@@ -39,7 +38,7 @@ pub struct ClientSummary {
 }
 
 /// What revoking a client reports: who it was, and the tokens dropped.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokeSummary {
     pub client_id: String,
     pub client_name: Option<String>,
@@ -47,21 +46,60 @@ pub struct RevokeSummary {
     pub refresh_tokens: usize,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 struct State {
     /// The issuer this file's grants were made under; see
     /// [`StateStore::bound`]. Absent in files written before it existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     issuer: Option<String>,
-    #[serde(default)]
     clients: Map,
-    #[serde(default)]
     access_tokens: Map,
-    #[serde(default)]
     refresh_tokens: Map,
 }
 
+/// A member that must be an object when present; absent reads as empty.
+fn member_map(root: &Map, key: &str) -> Option<Map> {
+    match root.get(key) {
+        None => Some(Map::new()),
+        Some(Value::Object(map)) => Some(map.clone()),
+        Some(_) => None,
+    }
+}
+
 impl State {
+    /// `None` when the document is not a state file (not an object, or a
+    /// member of the wrong type), which reads as empty like a corrupt file.
+    fn from_value(value: &Value) -> Option<Self> {
+        let root = value.as_object()?;
+        let issuer = match root.get("issuer") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(_) => return None,
+        };
+        Some(Self {
+            issuer,
+            clients: member_map(root, "clients")?,
+            access_tokens: member_map(root, "access_tokens")?,
+            refresh_tokens: member_map(root, "refresh_tokens")?,
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        let mut root = Map::new();
+        if let Some(issuer) = &self.issuer {
+            root.insert("issuer".to_string(), Value::from(issuer.as_str()));
+        }
+        root.insert("clients".to_string(), Value::Object(self.clients.clone()));
+        root.insert(
+            "access_tokens".to_string(),
+            Value::Object(self.access_tokens.clone()),
+        );
+        root.insert(
+            "refresh_tokens".to_string(),
+            Value::Object(self.refresh_tokens.clone()),
+        );
+        Value::Object(root)
+    }
+
     fn tokens(&self, kind: TokenKind) -> &Map {
         match kind {
             TokenKind::Access => &self.access_tokens,
@@ -110,8 +148,7 @@ fn invalid(message: String) -> io::Error {
 }
 
 fn encode(state: &State) -> io::Result<String> {
-    let body = rusty_json::to_string_pretty(state).map_err(|e| invalid(e.to_string()))?;
-    Ok(format!("{body}\n"))
+    Ok(format!("{}\n", state.to_value().to_json_string_pretty()))
 }
 
 /// SHA-256 hex digest of a token — what the state file stores instead of
@@ -182,7 +219,7 @@ impl StateStore {
 
     fn read_once(&self) -> Option<State> {
         let raw = fs::read_to_string(&self.path).ok()?;
-        rusty_json::from_str(&raw).ok()
+        State::from_value(&Value::parse(&raw).ok()?)
     }
 
     /// Load state from disk, tolerating a missing or corrupt file (reads

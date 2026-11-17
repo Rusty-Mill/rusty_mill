@@ -31,6 +31,28 @@ use crate::projects::{Projects, Statuses};
 use crate::syncer::{MIN_SECS, Syncer};
 use crate::workflow::Workflow;
 
+/// A signed-in app as the settings listing shows it (the OAuth crate has no serde).
+fn client_json(c: &rusty_oauth_server::ClientSummary) -> Value {
+    json!({
+        "client_id": c.client_id,
+        "client_name": c.client_name,
+        "client_id_issued_at": c.client_id_issued_at,
+        "redirect_uris": c.redirect_uris,
+        "access_tokens": c.access_tokens,
+        "refresh_tokens": c.refresh_tokens,
+    })
+}
+
+/// What revoking an app dropped.
+fn revoked_json(r: &rusty_oauth_server::RevokeSummary) -> Value {
+    json!({
+        "client_id": r.client_id,
+        "client_name": r.client_name,
+        "access_tokens": r.access_tokens,
+        "refresh_tokens": r.refresh_tokens,
+    })
+}
+
 const DEFAULT_API: &str = "https://api.github.com";
 const DEFAULT_SECS: u64 = 60;
 const HINT: &str =
@@ -931,7 +953,7 @@ impl Settings {
             "rules": RulesFile { movement: self.board.move_rules() },
             "workflow": self.board.workflow(),
             "project_status": self.board.statuses(),
-            "apps": self.oauth.get().map(|p| p.store().list_clients()),
+            "apps": self.oauth.get().map(|p| p.store().list_clients().iter().map(client_json).collect::<Vec<_>>()),
             "registered_agents": self.board.agent_list(),
             "server": self.server,
             "paths": {
@@ -1029,7 +1051,7 @@ impl Settings {
             .get()
             .ok_or_else(|| refused("OAuth sign-in is off: start the board with --issuer"))?;
         match provider.store().revoke_client(&a.client_id) {
-            Ok(Some(gone)) => Ok(json!(gone)),
+            Ok(Some(gone)) => Ok(revoked_json(&gone)),
             Ok(None) => Err(refused(format!("no app {:?}", a.client_id))),
             Err(e) => Err(refused(format!("not revoked: {e}"))),
         }
