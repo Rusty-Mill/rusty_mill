@@ -8,6 +8,17 @@ Assumes the #1092 deploy is done (`/opt/lel/current/bin/{bbp,rusty_orch}`, `/srv
 
 Not guessed, read from code: `bbp open` flags (`crates/apps/rusty_bbp_host/src/bin/bbp.rs` header), the profile set and roster JSON shapes (`profiles.rs`, `holdout.rs`, `rusty_bbp/src/role.rs`), the claims `post` arguments (`rusty_bbp_host/src/mcp/claims.rs`, `lens/bbp.rs` `post_args`). Command output shapes (`bbp card`, `bbp mcp` `Posted`, `bbp human`) were observed on a throwaway task.
 
+## Rerun after run 1 (one command)
+
+Run 1 is recorded (D143, Q52): it is not a clean pass. The rerun uses a fresh task, the inbox fixture, a detached lens run and the read-back, and needs rusty_orch built from the merged fixes (#1781, #1783). When those have merged, or you have not deployed since:
+
+```bash
+cd ~/dev/rusty_mill && git switch main && git pull --ff-only && bash docs/projects/let-em-loose/1092-deploy.sh   # rebuild and install
+bash docs/projects/let-em-loose/1166-smoke-rerun.sh                                                              # task smoke-2
+```
+
+`1166-smoke-rerun.sh` refuses to start if the installed `rusty_orch` still offers `executed` evidence to lenses, or panics on a closed pipe; it then runs `1166-smoke-run.sh` for `TASK=smoke-2`. If the run is interrupted, `TASK=smoke-2 bash docs/projects/let-em-loose/1166-smoke-resume.sh`. The host changes (llama.cpp rebuild, a reasoning budget for Qwen) are held until this run's per-pass log shows which proposal slot failed and why: one change at a time.
+
 ## Run it (one command)
 
 ```bash

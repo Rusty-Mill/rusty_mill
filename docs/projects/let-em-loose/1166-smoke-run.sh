@@ -191,17 +191,26 @@ A2=$(sed -n 's/^A2=\([0-9][0-9]*\)$/\1/p' "$OUT/seed-inbox.out" | head -n 1)
 [[ $A2 =~ ^[0-9]+$ ]] || die "A2 was not seeded; see $OUT/seed-inbox.out"
 echo "$A2" > "$OUT/a2.id"
 
-# ---- 6. Run (time box 90 minutes; a stopped run can still be read back, so a non-zero exit does not stop the script)
+# ---- 6. Run (time box 90 minutes). Detached with setsid: closing the terminal or Ctrl-C stops only this script's polling,
+# never the run (run 1 was interrupted that way). If this script is interrupted, 1166-smoke-resume.sh waits for the
+# surviving run and reads back. The exit code is the last line of run.out; a non-zero exit does not stop the read-back.
 echo "=== 6. lens run $(date -u +%FT%TZ)"
-set +e
-timeout 5400 $R $BIN/rusty_orch lens run $CFG \
-  --bbp $BIN/bbp --dir $D --task "$TASK" --state /srv/lel/orch-state \
-  --experiment "$TASK" --repo $TOY/repo --max-passes 8 \
-  2> "$OUT/run.err" | tee "$OUT/run.out"
-RUN_EXIT=${PIPESTATUS[0]}
-set -e
-echo "lens run exit=$RUN_EXIT (124 = the 90-minute box stopped it) $(date -u +%FT%TZ)"
-echo "--- tail of run.err"; tail -n 20 "$OUT/run.err" || true
+trap 'echo; echo "Interrupted. The lens run keeps running on its own. Wait for it and read back with: TASK=$TASK bash $(dirname "$0")/1166-smoke-resume.sh"; exit 130' INT TERM
+sudo -v   # refresh the sudo timestamp in the foreground: a detached sudo cannot ask for a password
+: >"$OUT/run.out"; : >"$OUT/run.err"
+$R setsid sh -c "timeout 5400 $BIN/rusty_orch lens run $CFG --bbp $BIN/bbp --dir $D --task $TASK \
+  --state /srv/lel/orch-state --experiment $TASK --repo $TOY/repo --max-passes 8; echo \"lens run exit=\$?\"" \
+  >"$OUT/run.out" 2>"$OUT/run.err" </dev/null &
+disown
+sleep 5
+RUN_RE="rusty_orch lens run .*--task $TASK( |\$)"
+while pgrep -u orch-runner -f "$RUN_RE" >/dev/null; do
+  echo "$(date -u +%T)Z lens run alive; llama-swap loaded: $(curl -s -m 5 http://192.168.10.104:8080/running | jq -r '[.running[].model]|join(",")' 2>/dev/null || echo '?')"
+  sleep 60
+done
+echo "--- run.out (the last line is the exit code; 124 = the 90-minute box stopped it)"; cat "$OUT/run.out"
+echo "--- tail of run.err"; tail -n 30 "$OUT/run.err" || true
+tail -n 1 "$OUT/run.out" | grep -q "lens run exit=0" || echo "NOTE: the run did not exit 0; read the lines above before trusting the read-back"
 
 # ---- 7. Read back
 echo "=== 7. read back"
