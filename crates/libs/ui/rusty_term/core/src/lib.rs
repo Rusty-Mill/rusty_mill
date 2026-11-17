@@ -61,11 +61,12 @@ pub use grid::BidiRow;
 pub use grid::BlockMark;
 #[doc(hidden)]
 pub use grid::StyleStats;
+pub use grid::TextHit;
 #[cfg(any(test, feature = "gui"))]
 pub use grid::View;
 pub use grid::{
-    CursorShape, DirtyFrame, Grid, LineAttr, PROGRAM_STATUS_MAX, SCROLLBACK_MAX, ShellPhase,
-    SnapshotError, StatusSignal,
+    CursorShape, DirtyFrame, Grid, LineAttr, MAX_PLACEMENTS, PROGRAM_STATUS_MAX, Placement,
+    SCROLLBACK_MAX, ShellPhase, SnapshotError, StatusSignal,
 };
 #[cfg(any(test, feature = "gui"))]
 pub use grid::{FrameImage, FrameView, RowKey};

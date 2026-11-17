@@ -116,15 +116,17 @@ mod client {
     #[cfg(windows)]
     use platform_windows::{WindowsTerminal as Term, WindowsUnixStream as UnixStream};
     use rusty_mux_client::attach::{
-        Back, CONTROL, HANDSHAKE, Missed, Opened, Plan, Requests, Shape, Welcomed, backoff, clone,
-        connect, first_session_name, reach, shape_of, take_over,
+        Back, CONTROL, FLOATING, HANDSHAKE, Missed, Opened, Plan, Requests, Shape, Welcomed,
+        backoff, clone, connect, first_session_name, reach, shape_of, take_over,
     };
     use rusty_mux_client::checkpoint::Receiver;
     use rusty_mux_core::{
-        Axis, BlockId, Event, Layout, Rect, SessionId, Share, Side, Size, Toward, WindowId,
+        Axis, BlockId, Event, Float, FloatRect, Layout, Rect, SessionId, Share, Side, Size, Toward,
+        WindowId,
     };
     use rusty_mux_proto::{Entry, Features, Launch, Message, Takeover};
     use rusty_mux_tui::find::{Find, Step};
+    use rusty_mux_tui::floats;
     use rusty_mux_tui::follow::Follow;
     use rusty_mux_tui::keys::{Action, Dir, Keys};
     use rusty_mux_tui::predict::{Gate, Overlay, Predictor};
@@ -914,7 +916,7 @@ mod client {
         let area = window_size(&term, classic);
         conn.send(&Message::Hello {
             version: Some(rusty_mux_proto::VERSION.into()),
-            features: CONTROL,
+            features: FLOATING,
             resume: None,
             takeover: None,
         })
@@ -1027,6 +1029,7 @@ mod client {
             inspect: features.contains(Features::INSPECT),
             layouts: features.contains(Features::LAYOUT),
             editing: features.contains(Features::LAYOUT_EDIT),
+            floating: features.contains(Features::FLOATS),
             focusing: features.contains(Features::FOCUS),
             follow: Follow::default(),
             session: shape.session,
@@ -1036,6 +1039,7 @@ mod client {
             window,
             layout: shape.layout,
             zoomed: shape.zoomed,
+            floats: shape.floats,
             focus: block,
             panes: HashMap::new(),
             keys: Keys::default(),
@@ -1533,6 +1537,8 @@ mod client {
         layouts: bool,
         /// Whether the server edits layouts: [`Features::LAYOUT_EDIT`].
         editing: bool,
+        /// Whether the server floats blocks: [`Features::FLOATS`].
+        floating: bool,
         /// Whether the server keeps each window's focus, which this client
         /// then follows: [`Features::FOCUS`].
         focusing: bool,
@@ -1549,6 +1555,8 @@ mod client {
         window: Option<WindowId>,
         layout: Option<Layout>,
         zoomed: Option<BlockId>,
+        /// The window's floating blocks, back to front.
+        floats: Vec<Float>,
         focus: BlockId,
         panes: HashMap<BlockId, Pane>,
         keys: Keys,
@@ -1640,6 +1648,9 @@ mod client {
     struct Pending {
         layout: Option<Layout>,
         zoomed: Option<BlockId>,
+        /// The floats told since: they go with the layout, after the old
+        /// one's last drawing.
+        floats: Option<Vec<Float>>,
         /// The server's focus, announced since.
         focus: Option<BlockId>,
         leaving: Vec<BlockId>,
@@ -1888,6 +1899,7 @@ mod client {
             self.window = Some(window);
             self.gone = false;
             self.relayout(shape.layout, shape.zoomed);
+            self.refloat(shape.floats);
             self.take_focus(shape.focused);
             true
         }
@@ -2018,13 +2030,13 @@ mod client {
             for Aimed { at, action } in held {
                 match action {
                     Action::Detach => return self.detach(),
-                    Action::Focus(_) if self.visible().iter().any(|(b, _)| *b == at) => {
+                    action
+                        if action.moves_focus() && self.visible().iter().any(|(b, _)| *b == at) =>
+                    {
                         self.focus_on(at);
                         self.sync();
                     }
-                    action if at == self.focus && !matches!(action, Action::Focus(_)) => {
-                        self.act(action)
-                    }
+                    action if at == self.focus && !action.moves_focus() => self.act(action),
                     _ => bell(),
                 }
             }
@@ -2125,6 +2137,7 @@ mod client {
             }
             if let Some(shape) = back.layout {
                 (self.layout, self.zoomed) = (shape.layout, shape.zoomed);
+                self.floats = shape.floats;
                 if let Some(focused) = shape.focused.filter(|_| self.focusing) {
                     self.focus = focused;
                 }
@@ -2187,18 +2200,21 @@ mod client {
         /// Takes the window's new layout: at once, or once the shown blocks
         /// it drops have drained (see [`Pending`]).
         fn relayout(&mut self, layout: Option<Layout>, zoomed: Option<BlockId>) {
-            let staying = layout.as_ref().map(Layout::blocks).unwrap_or_default();
+            let mut staying = layout.as_ref().map(Layout::blocks).unwrap_or_default();
+            let told = self.pending.as_ref().and_then(|p| p.floats.as_ref());
+            staying.extend(told.unwrap_or(&self.floats).iter().map(|f| f.block));
             let mut leaving: Vec<BlockId> = self
                 .panes
                 .iter()
                 .filter(|(b, p)| !staying.contains(b) && !p.closed)
                 .map(|(b, _)| *b)
                 .collect();
-            let mut focus = None;
+            let (mut focus, mut floats) = (None, None);
             if let Some(old) = self.pending.take() {
                 focus = old.focus;
+                floats = old.floats;
                 for block in old.leaving {
-                    if !leaving.contains(&block) {
+                    if !leaving.contains(&block) && !staying.contains(&block) {
                         leaving.push(block);
                     }
                 }
@@ -2206,11 +2222,50 @@ mod client {
             self.pending = Some(Pending {
                 layout,
                 zoomed,
+                floats,
                 focus,
                 by: Instant::now() + GRACE,
                 leaving,
             });
             if self.pending.as_ref().is_some_and(|p| p.leaving.is_empty()) {
+                self.settle();
+            }
+        }
+
+        /// Takes the window's new floats. Told with a layout change, they
+        /// come after it (a block floated is no longer one that is leaving)
+        /// or before it (a float closed or put back in the layout): a float
+        /// no longer one, and in no layout yet, is held like a dropped tile
+        /// until it has drained or the layout names it.
+        fn refloat(&mut self, floats: Vec<Float>) {
+            let Some(pending) = self.pending.as_mut() else {
+                let dropped: Vec<BlockId> = self
+                    .floats
+                    .iter()
+                    .map(|f| f.block)
+                    .filter(|b| !floats.iter().any(|f| f.block == *b))
+                    .filter(|b| self.panes.get(b).is_some_and(|p| !p.closed))
+                    .filter(|b| !self.layout.as_ref().is_some_and(|l| l.blocks().contains(b)))
+                    .collect();
+                if dropped.is_empty() {
+                    self.floats = floats;
+                    return self.sync();
+                }
+                self.pending = Some(Pending {
+                    layout: self.layout.clone(),
+                    zoomed: self.zoomed,
+                    floats: Some(floats),
+                    focus: None,
+                    by: Instant::now() + GRACE,
+                    leaving: dropped,
+                });
+                return;
+            };
+            pending
+                .leaving
+                .retain(|b| !floats.iter().any(|f| f.block == *b));
+            pending.floats = Some(floats);
+            if pending.leaving.is_empty() {
                 self.settle();
             }
         }
@@ -2238,6 +2293,9 @@ mod client {
             self.draw();
             self.layout = pending.layout;
             self.zoomed = pending.zoomed;
+            if let Some(floats) = pending.floats {
+                self.floats = floats;
+            }
             if let Some(focus) = pending.focus {
                 self.focus = focus;
             }
@@ -2320,10 +2378,11 @@ mod client {
                 .iter()
                 .chain(self.standby.held())
                 .rev()
-                .find(|aimed| matches!(aimed.action, Action::Focus(_)))
+                .find(|aimed| aimed.action.moves_focus())
                 .map_or(self.focus, |aimed| aimed.at);
             let at = match &action {
                 Action::Focus(dir) => screen::neighbor(&self.visible(), focus, *dir)?,
+                Action::Cycle => self.next_shown(focus)?,
                 _ => focus,
             };
             Some(Aimed { at, action })
@@ -2381,6 +2440,27 @@ mod client {
                 }
                 Action::Resize(_) | Action::Swap { .. } | Action::DetachBlock if !self.editing => {
                     bell()
+                }
+                Action::Cycle => self.cycle(),
+                Action::Float | Action::Stack { .. } | Action::Move(_)
+                    if !self.editing || !self.floating =>
+                {
+                    bell()
+                }
+                Action::Float => self.float(),
+                Action::Stack { top } => match self.float_of(focus) {
+                    Some(_) => {
+                        self.request(|req| Message::StackFloat {
+                            req,
+                            block: focus,
+                            top,
+                        });
+                    }
+                    None => bell(),
+                },
+                Action::Move(dir) => self.nudge(floats::moved, dir),
+                Action::Resize(dir) if self.float_of(focus).is_some() => {
+                    self.nudge(floats::resized, dir)
                 }
                 Action::Resize(dir) => self.resize(dir),
                 Action::Swap { next } => self.swap(next),
@@ -2452,11 +2532,13 @@ mod client {
             self.draw();
         }
 
-        /// Whether `block` is in the layout shown.
+        /// Whether `block` is in the layout shown, or floats over it.
         fn shows(&self, block: BlockId) -> bool {
-            self.layout
-                .as_ref()
-                .is_some_and(|l| l.blocks().contains(&block))
+            self.float_of(block).is_some()
+                || self
+                    .layout
+                    .as_ref()
+                    .is_some_and(|l| l.blocks().contains(&block))
         }
 
         /// Focuses `block` here at once and, on a server that keeps the
@@ -2486,6 +2568,52 @@ mod client {
                     self.sync();
                 }
                 None => {}
+            }
+        }
+
+        /// The block shown after `from`, wrapping; `None` when it is the
+        /// only one.
+        fn next_shown(&self, from: BlockId) -> Option<BlockId> {
+            let shown = self.visible();
+            let at = shown.iter().position(|(b, _)| *b == from);
+            let (next, _) = shown.get(at.map_or(0, |i| (i + 1) % shown.len()))?;
+            (*next != from).then_some(*next)
+        }
+
+        /// Focuses the next block shown, wrapping.
+        fn cycle(&mut self) {
+            match self.next_shown(self.focus) {
+                Some(block) => self.focus_on(block),
+                None => bell(),
+            }
+            self.sync();
+        }
+
+        /// The place of `block` if it floats.
+        fn float_of(&self, block: BlockId) -> Option<FloatRect> {
+            self.floats.iter().find(|f| f.block == block).map(|f| f.at)
+        }
+
+        /// Floats the focused block, if it is a tile.
+        fn float(&mut self) {
+            let block = self.focus;
+            match (self.float_of(block), floats::first()) {
+                (None, Some(at)) => {
+                    self.request(|req| Message::PlaceFloat { req, block, at });
+                }
+                _ => bell(),
+            }
+        }
+
+        /// Asks for the focused float to be `edit`ed one step toward `dir`;
+        /// rings when it is no float or at its limit.
+        fn nudge(&mut self, edit: fn(FloatRect, Dir) -> Option<FloatRect>, dir: Dir) {
+            let block = self.focus;
+            match self.float_of(block).and_then(|at| edit(at, dir)) {
+                Some(at) => {
+                    self.request(|req| Message::PlaceFloat { req, block, at });
+                }
+                None => bell(),
             }
         }
 
@@ -2581,9 +2709,14 @@ mod client {
                     layout,
                     zoomed,
                 } if Some(window) == self.window => self.relayout(layout, zoomed),
+                Event::FloatsChanged { window, floats } if Some(window) == self.window => {
+                    self.refloat(floats)
+                }
                 Event::WindowClosed { window } if Some(window) == self.window => {
                     self.gone = true;
-                    self.relayout(None, None)
+                    self.relayout(None, None);
+                    // The window's floats close with it; no event says so.
+                    self.refloat(Vec::new());
                 }
                 Event::FocusChanged { window, block } if Some(window) == self.window => {
                     let focus = self.follow.told(block);
@@ -2672,20 +2805,26 @@ mod client {
         }
 
         /// The blocks shown and where: the zoomed block over everything,
-        /// else every block with room in the layout.
+        /// else every block with room in the layout, then the floats over
+        /// them, back to front.
         fn visible(&self) -> Vec<(BlockId, Rect)> {
-            let Some(layout) = &self.layout else {
-                return Vec::new();
-            };
             let whole = Rect {
                 x: 0,
                 y: 0,
                 size: self.area,
             };
-            match self.zoomed {
-                Some(block) if layout.blocks().contains(&block) => vec![(block, whole)],
-                _ => layout.rects(self.area),
-            }
+            let tiles = match (&self.layout, self.zoomed) {
+                (Some(layout), Some(block)) if layout.blocks().contains(&block) => {
+                    return vec![(block, whole)];
+                }
+                (Some(layout), _) => layout.rects(self.area),
+                (None, _) => Vec::new(),
+            };
+            let floats = self
+                .floats
+                .iter()
+                .filter_map(|f| Some((f.block, screen::float_inner(f.at, self.area)?)));
+            tiles.into_iter().chain(floats).collect()
         }
 
         /// Brings connections, leases and the screen in line with the
@@ -2700,7 +2839,7 @@ mod client {
             // A window whose blocks are all detached from its layout shows
             // nothing until one is moved back; a closed one ends the client.
             let empty_window = self.layouts && self.inspect && self.window.is_some() && !self.gone;
-            if visible.is_empty() && !empty_window {
+            if visible.is_empty() && !empty_window && self.floats.is_empty() {
                 self.end(Ended::Closed);
                 return;
             }
@@ -2744,7 +2883,9 @@ mod client {
             self.browsing =
                 self.browsing && self.grid(self.focus).is_some_and(|g| g.view_offset > 0);
             let shown = match visible.as_slice() {
-                [(only, _)] if !self.browsing => Shown::Passing(*only),
+                [(only, _)] if !self.browsing && self.float_of(*only).is_none() => {
+                    Shown::Passing(*only)
+                }
                 _ => Shown::Composed(None),
             };
             if shown != self.shown || matches!(shown, Shown::Composed(_)) {
@@ -2999,6 +3140,7 @@ mod client {
                     rect: *rect,
                     grid: self.grid(*block),
                     overlay: self.overlay(*block),
+                    float: self.floats.iter().any(|f| f.block == *block),
                 })
                 .collect();
             let mut frame = screen::compose(self.area, &views, self.focus);
@@ -3442,6 +3584,8 @@ mod client {
                 inspect: false,
                 layouts: true,
                 editing: true,
+                floating: false,
+                floats: Vec::new(),
                 focusing: false,
                 follow: Follow::default(),
                 session: None,
@@ -3731,6 +3875,165 @@ mod client {
             });
             app.settle();
             assert!(matches!(app.ended, Some(Ended::Closed)));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn float_keys_ask_the_server_and_edit_the_floats_place() {
+            let (mut app, _inbox, [control, _a, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            // Not a float yet: nothing to raise, move or resize.
+            app.floating = true;
+            app.act(Action::Float);
+            let at = FloatRect::new(20, 20, 60, 60).expect("a float");
+            let placed = |m: &Message, block: BlockId, at: FloatRect| matches!(m, Message::PlaceFloat { block: k, at: t, .. } if *k == block && *t == at);
+            assert!(sent(&control).iter().any(|m| placed(m, a, at)));
+            // Once told it floats, the keys edit its place.
+            app.floats = vec![Float { block: a, at }];
+            app.act(Action::Move(Dir::Left));
+            app.act(Action::Resize(Dir::Down));
+            app.act(Action::Stack { top: false });
+            app.act(Action::Float);
+            let asked = sent(&control);
+            let moved = FloatRect::new(15, 20, 60, 60).expect("a float");
+            let taller = FloatRect::new(20, 20, 60, 65).expect("a float");
+            assert!(asked.iter().any(|m| placed(m, a, moved)), "{asked:?}");
+            assert!(asked.iter().any(|m| placed(m, a, taller)), "{asked:?}");
+            assert!(asked.iter().any(|m| matches!(
+                m,
+                Message::StackFloat { block, top: false, .. } if *block == a
+            )));
+            // Already floating: no second place. A tile has no stack.
+            assert_eq!(asked.iter().filter(|m| placed(m, a, at)).count(), 0);
+            app.focus = b;
+            app.act(Action::Stack { top: true });
+            assert!(sent(&control).is_empty());
+            // Without the capability every key rings.
+            app.floating = false;
+            app.act(Action::Float);
+            assert!(sent(&control).is_empty());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_float_out_of_the_layout_takes_keys_and_is_reached_by_cycling() {
+            let (mut app, _inbox, [control, _a, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.floating = true;
+            app.layout = Some(Layout::Block(b));
+            let at = FloatRect::new(20, 20, 60, 60).expect("a float");
+            app.floats = vec![Float { block: a, at }];
+            app.focus = b;
+            app.act(Action::Cycle);
+            assert_eq!(app.focus, a, "the float, over the tile it covers");
+            app.act(Action::Stack { top: false });
+            assert!(sent(&control).iter().any(|m| matches!(
+                m,
+                Message::StackFloat { block, top: false, .. } if *block == a
+            )));
+            app.act(Action::Cycle);
+            assert_eq!(app.focus, b, "and back, wrapping");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_tile_floated_while_drawn_changes_layout_and_floats_together() {
+            let (mut app, _inbox, [_control, _a, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.show(Shown::Composed(None));
+            // `a` fills the left of the screen: it must not be bordered as a
+            // float, with its old rect, before the layout moves on.
+            app.relayout(Some(Layout::Block(b)), None);
+            let at = FloatRect::new(0, 0, 50, 50).expect("a float");
+            app.refloat(vec![Float { block: a, at }]);
+            assert!(app.pending.is_none());
+            assert_eq!(app.floats.len(), 1);
+            let shown: Vec<BlockId> = app.visible().iter().map(|(k, _)| *k).collect();
+            assert_eq!(shown, vec![b, a]);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_float_closed_or_returned_is_held_until_the_layout_tells() {
+            let (mut app, _inbox, [_control, _a, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            let at = FloatRect::new(20, 20, 60, 60).expect("a float");
+            app.layout = Some(Layout::Block(b));
+            app.floats = vec![Float { block: a, at }];
+            app.sync();
+            assert!(app.panes.contains_key(&a), "its connection is open");
+            // Told first that it floats no more: not detached yet.
+            app.refloat(Vec::new());
+            assert!(app.panes.contains_key(&a), "the connection is kept");
+            assert!(app.pending.as_ref().is_some_and(|p| p.leaving.contains(&a)));
+            // The layout then takes it back: it stays.
+            let layout: Layout = format!("cols50({a},{b})").parse().expect("a layout");
+            app.relayout(Some(layout), None);
+            assert!(app.pending.is_none());
+            assert!(app.panes.contains_key(&a), "no flicker, no lost lease");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_closed_window_takes_its_floats_with_it() {
+            let (mut app, _inbox, [_control, _a, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            let at = FloatRect::new(20, 20, 60, 60).expect("a float");
+            app.window = Some(window_id(7));
+            app.layout = Some(Layout::Block(b));
+            app.floats = vec![Float { block: a, at }];
+            app.sync();
+            app.on_control(Message::Event {
+                seq: None,
+                event: Event::WindowClosed {
+                    window: window_id(7),
+                },
+            });
+            assert!(app.pending.is_some(), "held until the blocks drain");
+            for block in [a, b] {
+                app.drained(block);
+            }
+            app.settle();
+            assert!(app.floats.is_empty());
+            assert!(app.visible().is_empty());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_held_cycle_is_aimed_and_replayed_with_the_keys_after_it() {
+            let (mut app, _inbox, [_control, _a_far, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            let at = FloatRect::new(20, 20, 60, 60).expect("a float");
+            app.layout = Some(Layout::Block(b));
+            app.floats = vec![Float { block: a, at }];
+            app.focus = b;
+            app.sync();
+            let aimed = app.aim(Action::Cycle).expect("a block to cycle to");
+            assert_eq!(aimed.at, a);
+            app.replay(vec![
+                aimed,
+                Aimed {
+                    at: a,
+                    action: Action::Input(b"x".to_vec()),
+                },
+            ]);
+            assert_eq!(app.focus, a);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_block_floated_is_no_longer_leaving() {
+            let (mut app, _inbox, [_control, _a, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            // The layout change that floats `a` comes first and holds.
+            app.relayout(Some(Layout::Block(b)), None);
+            assert!(app.pending.as_ref().is_some_and(|p| p.leaving.contains(&a)));
+            let at = FloatRect::new(20, 20, 60, 60).expect("a float");
+            app.refloat(vec![Float { block: a, at }]);
+            assert!(app.pending.is_none(), "settled once the float is told");
+            assert_eq!(app.layout, Some(Layout::Block(b)));
+            let shown: Vec<BlockId> = app.visible().iter().map(|(k, _)| *k).collect();
+            assert_eq!(shown, vec![b, a]);
         }
 
         #[cfg(unix)]

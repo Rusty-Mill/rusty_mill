@@ -1,0 +1,16 @@
+{
+  "providers": {
+    "claude": {"kind": "claude-cli", "model": "opus", "context_tokens": 200000, "price": {"input": 0, "output": 0, "cached_input": 0}},
+    "codex": {"kind": "codex-cli", "context_tokens": 200000, "price": {"input": 0, "output": 0, "cached_input": 0}},
+    "local": {"kind": "openai-http", "base_url": "http://127.0.0.1:8080/v1", "model": "Qwen3.6-35B-A3B", "context_tokens": 32768, "price": {"input": 0, "output": 0, "cached_input": 0}},
+    "local-high": {"kind": "openai-http", "base_url": "http://127.0.0.1:8080/v1", "model": "gpt-oss-120b", "context_tokens": 32768, "price": {"input": 0, "output": 0, "cached_input": 0}}
+  },
+  "domain_classes": {"real-data": "sensitive"},
+  "ceilings": {"experiment_usd": 200, "task_usd": 25, "task_calls": 400},
+  "lenses": [
+    {"id": "architect", "prompt": "lenses/architect.md", "domains": ["*"], "may_post": {"claim": true}, "proposers": ["claude", "local"], "rebel": "codex", "models": {"routine": ["claude", "local", "codex"], "contested": ["claude", "local-high"]}},
+    {"id": "research", "prompt": "lenses/research.md", "domains": ["*"], "may_post": {"evidence": ["support", "counter"], "claim": true}, "tools": "read-only", "models": {"routine": ["claude", "codex"], "contested": ["claude"]}},
+    {"id": "adversary", "prompt": "lenses/adversary.md", "domains": ["*"], "may_post": {"evidence": ["counter", "support"]}, "diversity_group": "attack", "models": {"routine": ["codex", "local"], "contested": ["claude", "local-high"]}},
+    {"id": "operator", "prompt": "lenses/operator.md", "domains": ["*"], "may_post": {"evidence": ["counter", "support"]}, "diversity_group": "attack", "models": {"routine": ["local", "codex"], "contested": ["local-high", "claude"]}}
+  ]
+}

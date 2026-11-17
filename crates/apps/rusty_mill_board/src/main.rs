@@ -471,7 +471,7 @@ fn run(cli: Cli) -> Result<(), String> {
         .transpose()?
         .unwrap_or_default();
     let agents = match agents_file(&cli, &files) {
-        Some(path) => Registry::open(path)?,
+        Some(path) => Registry::open(path, rusty_mill_board::board::system_ms())?,
         None => Registry::default(),
     };
     let mut board = Board::new(store, roles.clone())

@@ -56,6 +56,8 @@ const CHUNK: usize = 16 << 10;
 /// The largest reply to a block call or `list`, in encoded bytes: half a
 /// client's output budget, so a reply alone never gets a client dropped.
 const REPLY_MAX: usize = crate::outbox::BUDGET / 2;
+/// What a `Text` reply adds to its text: tags, request id and length prefix.
+const REPLY_FRAME: usize = 64;
 
 /// Events kept for clients that reconnect.
 const HISTORY: usize = 4096;
@@ -108,7 +110,13 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::SHARING)
     .union(Features::DIR_LISTING)
     .union(Features::CLIPBOARD)
+    .union(Features::FLOATS)
+    .union(Features::TERMINAL_FIND)
     .union(UNIX_ONLY);
+
+/// What a float edit needs: floating takes a block out of the layout, as a
+/// detach does.
+const FLOATS_EDIT: Features = Features::FLOATS.union(Features::LAYOUT_EDIT);
 
 /// How long a clipboard read waits for its answer before the next one is
 /// asked: a late answer would land as typed input in whatever runs next.
@@ -862,6 +870,26 @@ impl State {
         client
     }
 
+    /// Whether `event` moves focus onto a floating block (C42) for a
+    /// client without [`Features::FLOATS`]: it knows only tiles, so it is
+    /// never told, and keeps the focus it has.
+    fn focus_unseen(&self, features: Features, event: &Event) -> bool {
+        let Event::FocusChanged {
+            window,
+            block: Some(block),
+        } = event
+        else {
+            return false;
+        };
+        !features.contains(Features::FLOATS) && self.floats_on(*window, *block)
+    }
+
+    fn floats_on(&self, window: WindowId, block: BlockId) -> bool {
+        self.mux
+            .window(window)
+            .is_some_and(|w| w.floats().iter().any(|f| f.block == block))
+    }
+
     /// Where a client's stream starts, and the events it missed: from
     /// `resume` when possible, else from now with nothing to replay. Only
     /// events its `features` let it receive are replayed.
@@ -877,6 +905,7 @@ impl State {
         };
         let messages = events
             .filter(|(_, event)| receives(features, principal, event))
+            .filter(|(_, event)| !self.focus_unseen(features, event))
             .map(|(seq, event)| Message::Event {
                 seq: Some(*seq),
                 event: event.clone(),
@@ -1270,6 +1299,22 @@ impl State {
                     self.edit(client, "detach-block", |mux| mux.detach_block(block))
                 }),
             ),
+            M::PlaceFloat { req, block, at } => (
+                req,
+                self.owns(client, [block]).and_then(|()| {
+                    self.edit_needing(FLOATS_EDIT, client, "place-float", |mux| {
+                        mux.place_float(block, at)
+                    })
+                }),
+            ),
+            M::StackFloat { req, block, top } => (
+                req,
+                self.owns(client, [block]).and_then(|()| {
+                    self.edit_needing(FLOATS_EDIT, client, "stack-float", |mux| {
+                        mux.stack_float(block, top)
+                    })
+                }),
+            ),
             M::MoveWindow { req, window, index } => (
                 req,
                 self.edit(client, "move-window", |mux| mux.move_window(window, index)),
@@ -1572,12 +1617,22 @@ impl State {
         what: &str,
         edit: impl FnOnce(&mut Mux) -> Result<(), rusty_mux_core::Error>,
     ) -> Result<Outcome, Refusal> {
-        self.require(client, Features::LAYOUT_EDIT, what)
-            .and_then(|()| {
-                edit(&mut self.mux)
-                    .map(|()| Outcome::Done(None))
-                    .map_err(Refusal::from)
-            })
+        self.edit_needing(Features::LAYOUT_EDIT, client, what, edit)
+    }
+
+    /// A layout change for a client that negotiated `feature`.
+    fn edit_needing(
+        &mut self,
+        feature: Features,
+        client: ClientId,
+        what: &str,
+        edit: impl FnOnce(&mut Mux) -> Result<(), rusty_mux_core::Error>,
+    ) -> Result<Outcome, Refusal> {
+        self.require(client, feature, what).and_then(|()| {
+            edit(&mut self.mux)
+                .map(|()| Outcome::Done(None))
+                .map_err(Refusal::from)
+        })
     }
 
     /// Sends `signal` to `block`'s program group, for its owner (C76).
@@ -1780,6 +1835,28 @@ impl State {
             "terminal.format" => terminal::format(&rt.grid, capture(&named), REPLY_MAX)
                 .ok_or_else(|| format!("{method} reply exceeds {REPLY_MAX} bytes"))?,
             "terminal.history" => history(rt.spool.as_ref(), &rt.grid, &named)?,
+            "terminal.prompts" => terminal::prompts(&rt.grid),
+            "terminal.find" => {
+                let query = match named.iter().find(|(name, _)| *name == "query") {
+                    Some((_, Value::Text(query))) => query,
+                    _ => return Err(format!("{method}: missing query").into()),
+                };
+                let limit = named
+                    .iter()
+                    .find_map(|(name, value)| match value {
+                        Value::Lines(n) if *name == "limit" => Some(*n),
+                        _ => None,
+                    })
+                    .unwrap_or(terminal::FIND_DEFAULT);
+                if query.chars().count() > terminal::FIND_QUERY_MAX {
+                    return Err(format!(
+                        "{method}: query is over {} characters",
+                        terminal::FIND_QUERY_MAX
+                    )
+                    .into());
+                }
+                terminal::find(&rt.grid, query, limit, REPLY_MAX - REPLY_FRAME)
+            }
             "terminal.send-keys" => {
                 self.mux
                     .authorize_input(client, block)
@@ -1976,8 +2053,20 @@ impl State {
                     name: window.name().to_owned(),
                     layout: window.layout().cloned(),
                     zoomed: window.zoomed(),
-                    focused: window.focused(),
+                    // A client without floats is told of a tile only.
+                    focused: window
+                        .focused()
+                        .filter(|b| {
+                            self.has(client, Features::FLOATS) || !self.floats_on(window.id(), *b)
+                        })
+                        .or_else(|| window.layout().and_then(|l| l.blocks().first().copied())),
                 });
+                if !window.floats().is_empty() && self.has(client, Features::FLOATS) {
+                    entries.push(Entry::Floats {
+                        window: window.id(),
+                        floats: window.floats().to_vec(),
+                    });
+                }
                 for block in window.blocks().iter().filter_map(|b| self.mux.block(*b)) {
                     entries.push(Entry::Block {
                         block: block.id(),
@@ -2774,6 +2863,7 @@ impl State {
                         self.mux
                             .client(**c)
                             .is_some_and(|client| receives(**f, client.principal(), &event))
+                            && !self.focus_unseen(**f, &event)
                     })
                     .map(|(c, f)| (*c, f.contains(Features::EVENT_SEQ)))
                     .collect();
@@ -2876,6 +2966,7 @@ fn receives(features: Features, principal: &Principal, event: &Event) -> bool {
         | Event::BlockRenamed { .. }
         | Event::ClientRenamed { .. } => Features::LABELS,
         Event::LayoutChanged { .. } => Features::LAYOUT,
+        Event::FloatsChanged { .. } => Features::FLOATS,
         Event::ClientConnectionChanged { .. } => Features::IDENTITY,
         Event::ClipboardWritten { .. } | Event::StatusRemoved { .. } => {
             Features::MORE_PROGRAM_EVENTS
@@ -3689,7 +3780,13 @@ mod regression {
                 None,
                 None,
             );
-            for method in ["terminal.format", "terminal.history", "terminal.title"] {
+            for method in [
+                "terminal.format",
+                "terminal.history",
+                "terminal.title",
+                "terminal.prompts",
+                "terminal.find",
+            ] {
                 let refused = state
                     .block_call(guest, 1, block, method, Vec::new())
                     .err()
