@@ -101,13 +101,13 @@ fn catalog_covers_each_request_type_once() {
     // SelectWindow, 0x18 ReloadConfig, 0x19 to 0x1d the layout edits,
     // 0x1e and 0x1f focus, 0x20 NameSession. 0x21 to 0x23, the leases, and
     // 0x24 Shutdown (`rusty-mux-ctl server stop`) are not agent methods;
-    // 0x25 and 0x26, the session share (C14), are; so are 0x2c and 0x2d,
+    // 0x25 and 0x26, the session share (C14), are; so are 0x2e and 0x2f,
     // the floats (C42).
     let expected = (0x02..=0x14)
         .filter(|t| ![0x0d, 0x0f, 0x10].contains(t))
         .chain(0x16..=0x20)
         .chain(0x25..=0x26)
-        .chain(0x2c..=0x2d);
+        .chain(0x2e..=0x2f);
     assert_eq!(unique, expected.collect());
     assert!(block.iter().all(|m| ty(m) == 0x0f));
     assert_eq!(renames.len(), 4);
