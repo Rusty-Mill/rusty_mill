@@ -46,3 +46,13 @@ Resolved items are checked and point to the D# or QA entry that answers them. On
 - [ ] Q41 (2026-11-04, n): Undo log (README Phase 5: arrives as new intent). No design exists. — interim choice: GUI shows nothing for it, or a static "not built" placeholder.
 - [ ] Q42 (2026-11-04, n): Orch-side read for active lenses and per-claim/feature spend share ("Spend follows stakes" bar). Per-claim `spent`/`budget` exist; the rest does not. — interim choice: GUI shows per-claim budget only; lens list read from orch config.
 - [ ] Q43 (2026-11-04, n): Is "Try both builds" on a taste-call inbox card an inbox action, or only a link out? D35 Choose shows candidates side by side and nothing launches builds. — interim choice: show candidates only.
+
+## Packs and roles (from D133, 2026-11-16; all post-first-run, none blocking)
+
+- [ ] Q46 (2026-11-16, n): Where do pack files live: Factory, the `baileyrd/pack-validation` repo (where skill packs sit today, `mem_3a9643a03e6f43c9850ac5e9e775e5f9`), or copied into each repo under `.agents/packs/` (`mem_362db0e220974f16b808cf1fa20530d5`, unconfirmed by Nano)? Does a lens pack live in Factory `lenses/` as #1123 plans, or become a pack in the catalog? — interim choice: #1123 keeps flat `lenses/<id>.md` in Factory (its own ESCALATE 1 stays open); no pack layout is built.
+- [ ] Q47 (2026-11-16, n): When does the project expert retire in favour of a domain knowledge pack: only after a Let Em Loose domain pack exists and works, or at a set point? Does it also cover the other experts in CLAUDE.md? — interim choice: `let-em-loose-expert` keeps answering until Nano confirms the swap.
+- [ ] Q48 (2026-11-16, n): Are the Factory workflow roles (planner, builder, reviewer, ...) and the board lenses (architect, research, adversary, operator) one set of roles or two? "A role is defined by the lens" reads as one, but Factory's roles have human gates and lenses do not. #723 design question. — interim choice: two sets; #1123 borrows only ground rules from Factory roles.
+
+## Spend (from D134, 2026-11-16; not blocking)
+
+- [ ] Q49 (2026-11-16, n): When does a paid run come back, and under which ceiling? Nano chose "No paid runs for now" (D134), so options A, B and C of `1124-spend-estimate.md` §5 have no owner or date. Revisit after the local-only smoke run (`1166-smoke-run.md`) has produced measured tokens per call, since §1 has none. Does any subscription Claude or Codex lens call count as "paid" for this answer, or only API spend? D134 reads it as both (held back). — interim choice: local-only runs; no ceiling set; M2 (#600 stage-1 runs) waits for a ceiling.

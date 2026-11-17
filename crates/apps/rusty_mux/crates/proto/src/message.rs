@@ -251,6 +251,12 @@ impl Features {
     /// entry says whether it can be asked.
     pub const SHOW_SESSION: Self = Self(1 << 51);
 
+    /// The block methods `terminal.prompts` and `terminal.find` (C55): the
+    /// rows where the shell's prompts started (OSC 133/633 `A`) and the rows
+    /// holding a text, over the block's scrollback and screen. They travel as
+    /// [`Message::BlockCall`], so the bit only says the server knows them.
+    pub const TERMINAL_FIND: Self = Self(1 << 49);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -346,6 +352,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::DIR_LISTING, "directory listing"),
     (Features::CLIPBOARD, "clipboard reads"),
     (Features::SHOW_SESSION, "sessions across windows"),
+    (Features::TERMINAL_FIND, "prompts and find in scrollback"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the

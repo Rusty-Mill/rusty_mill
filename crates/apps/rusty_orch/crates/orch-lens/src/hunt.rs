@@ -82,6 +82,9 @@ pub struct Hunted {
     pub hunt: HuntRow,
     pub probes: Vec<ProbeRow>,
     pub notes: Vec<String>,
+    /// The ceiling that stopped the hunt after its enumerate call, if one
+    /// did: the hunt is still recorded, and the caller pauses the task.
+    pub stopped: Option<Stop>,
 }
 
 /// Why a hunt left nothing to record. Try again later.
@@ -142,6 +145,7 @@ pub fn hunt(
     };
     let named = suspects.len();
     let mut rows = Vec::new();
+    let mut stopped = None;
     for (n, s) in (1u32..).zip(rank(suspects, target.notes, list)) {
         let body = hunt_body(target, &s, list);
         let text = match ask(seat, target.class, &body, &mut ctx, models)?.end {
@@ -154,6 +158,7 @@ pub fn hunt(
             RawEnd::Unsaved(e) => return Err(Unrecorded::Unsaved(e)),
             RawEnd::Stopped(stop) => {
                 notes.push(format!("hunt {n}: stopped: {stop}"));
+                stopped = Some(stop);
                 break;
             }
             RawEnd::Failed {
@@ -193,6 +198,7 @@ pub fn hunt(
         hunt,
         probes: rows,
         notes,
+        stopped,
     })
 }
 
@@ -601,5 +607,6 @@ mod tests {
         assert_eq!(asked.len(), 2);
         assert_eq!((h.hunt.suspects, h.probes.len()), (2, 1));
         assert!(h.notes[0].starts_with("hunt 2: stopped"), "{:?}", h.notes);
+        assert_eq!(h.stopped, Some(Stop::TaskCalls), "the caller pauses");
     }
 }

@@ -277,6 +277,7 @@ mod tests {
                 write: strings(&[&src]),
                 env: vec!["PATH".into()],
                 checkout: false,
+                hide: vec!["secrets/**".into()],
             },
         );
         let confined = confine(&config, &lease(&[&dir.join("src"), &tool], &[&a])).unwrap();
@@ -286,6 +287,7 @@ mod tests {
             assert_eq!(sandbox.write, strings(&[&a]));
             assert_eq!(sandbox.read, strings(&[&src, &tool]));
             assert_eq!(sandbox.env, vec!["PATH".to_owned()]);
+            assert_eq!(sandbox.hide, vec!["secrets/**".to_owned()], "hide kept");
         }
     }
 

@@ -23,6 +23,11 @@ fn main() -> ExitCode {
         Some("maintain") => return maintain(argv),
         Some("lens") => return lens(argv),
         Some("watch") => return watch(argv),
+        Some("dry-run") => {
+            use rusty_orch::dry_run;
+            let argv = std::iter::once("dry-run".to_owned()).chain(argv);
+            return lens_command(dry_run::USAGE, dry_run::options(argv), dry_run::run);
+        }
         Some("consolidate") => {
             use rusty_orch::consolidate;
             return lens_command(
@@ -154,7 +159,7 @@ fn maintain(argv: impl IntoIterator<Item = String>) -> ExitCode {
 }
 
 fn lens(argv: impl IntoIterator<Item = String>) -> ExitCode {
-    use rusty_orch::lens::{alien, check, record, run};
+    use rusty_orch::lens::{alien, breaker, check, record, run};
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(error) => {
@@ -167,6 +172,7 @@ fn lens(argv: impl IntoIterator<Item = String>) -> ExitCode {
         Some("run") => lens_command(run::USAGE, run::options(argv, cwd), run::run),
         Some("alien") => lens_command(alien::USAGE, alien::options(argv), alien::run),
         Some("record") => lens_command(record::USAGE, record::options(argv), record::run),
+        Some("breaker") => lens_command(breaker::USAGE, breaker::options(argv), breaker::run),
         _ => lens_command(check::USAGE, check::options(argv, cwd), check::run),
     }
 }

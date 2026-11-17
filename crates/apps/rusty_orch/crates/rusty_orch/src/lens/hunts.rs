@@ -24,6 +24,7 @@ use orch_lens::class::admit;
 use orch_lens::config::{Alien, Tools};
 use orch_lens::context::raw_prefix;
 use orch_lens::hunt::{hunt, Hunted, Probes, Seat as Asking, Target, Unrecorded};
+use orch_lens::meter::Stop;
 use orch_lens::schedule::{reviews_settled, State};
 use orch_lens::LensConfig;
 use orch_store::Store;
@@ -70,7 +71,8 @@ pub struct Alienist<'a> {
 }
 
 /// Run one hunt for each eligible claim `seat` shows. Hunt results go to
-/// `log`, skips to `warnings`.
+/// `log`, skips to `warnings`. Returns the ceiling that stopped the sweep,
+/// if one did, so the caller can pause the task as `lens run` does.
 ///
 /// # Errors
 ///
@@ -84,7 +86,7 @@ pub fn sweep(
     models: &mut dyn Models,
     log: &mut String,
     warnings: &mut Vec<String>,
-) -> Result<(), String> {
+) -> Result<Option<Stop>, String> {
     let Alienist {
         config,
         alien,
@@ -175,10 +177,14 @@ pub fn sweep(
             Ok(hunted) => {
                 hunter.record(&hunted)?;
                 logged(log, &hunted);
+                if let Some(stop) = hunted.stopped {
+                    let _ = writeln!(log, "alien: stopped in claim {}: {stop}", card.id.0);
+                    return Ok(Some(stop));
+                }
             }
             Err(Unrecorded::Stopped(stop)) => {
                 let _ = writeln!(log, "alien: stopped before claim {}: {stop}", card.id.0);
-                return Ok(());
+                return Ok(Some(stop));
             }
             Err(Unrecorded::Exhausted(passed)) => {
                 warnings.push(skip(format!("no provider took the call: {passed:?}")));
@@ -186,7 +192,7 @@ pub fn sweep(
             Err(Unrecorded::Unsaved(e)) => return Err(format!("meter not saved: {e}")),
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// The alien lens's providers cleared for the card's class, in order.
@@ -250,6 +256,9 @@ pub struct Ordinary<'a> {
     pub config: &'a LensConfig,
     pub state: &'a State,
     pub rules: &'a str,
+    /// The task's taint table (#598): a tainted claim is shown only to
+    /// providers cleared for its class.
+    pub taints: &'a orch_lens::taint::Taints,
 }
 
 /// What `lens run --alien` opens before any pass, so a missing piece fails
@@ -329,12 +338,14 @@ impl Kit {
         metering: Metering<'_>,
         models: &mut dyn Models,
         log: &mut String,
-    ) -> Result<(), String> {
+    ) -> Result<Option<Stop>, String> {
         let Ordinary {
             config,
             state,
             rules,
+            taints,
         } = ordinary;
+        self.seat.taint(taints, &super::run::lens_history(state));
         let mut shelf = Shelf {
             store,
             task: metering.task,
@@ -570,6 +581,10 @@ mod tests {
         fn brief(&mut self) -> Result<String, String> {
             Ok("intent".to_owned())
         }
+        fn taint(&mut self, _: &orch_lens::taint::Taints, _: &std::collections::BTreeSet<String>) {}
+        fn rev(&self) -> u64 {
+            0
+        }
         fn cards(&self, _: &LensConfig) -> Vec<Card> {
             self.cards.clone()
         }
@@ -670,7 +685,7 @@ mod tests {
     }
 
     struct Swept {
-        result: Result<(), String>,
+        result: Result<Option<Stop>, String>,
         log: String,
         warnings: Vec<String>,
     }
@@ -724,7 +739,7 @@ mod tests {
         let mut hunter = FakeHunter::default();
         let mut models = script(&[SUSPECT, PROBE]);
         let s = go(&settled(&cards), &mut seat, &mut hunter, &mut models, 10);
-        assert_eq!(s.result, Ok(()));
+        assert_eq!(s.result, Ok(None));
         assert!(s.warnings.is_empty(), "{:?}", s.warnings);
         assert_eq!(seat.reads, [ArtId(57)]);
         assert_eq!(hunter.set_up.len(), 1);
@@ -776,7 +791,7 @@ mod tests {
         };
         let mut models = script(&[]);
         let s = go(&state, &mut seat, &mut hunter, &mut models, 10);
-        assert_eq!(s.result, Ok(()));
+        assert_eq!(s.result, Ok(None));
         assert!(seat.reads.is_empty());
         assert!(hunter.saved.is_empty() && models.1.is_empty() && s.warnings.is_empty());
     }
@@ -788,7 +803,7 @@ mod tests {
         let mut hunter = FakeHunter::default();
         let mut models = script(&[]);
         let s = go(&settled(&cards), &mut seat, &mut hunter, &mut models, 10);
-        assert_eq!(s.result, Ok(()));
+        assert_eq!(s.result, Ok(None));
         assert_eq!(seat.reads.len(), 1);
         assert!(hunter.saved.is_empty() && hunter.set_up.is_empty() && s.warnings.is_empty());
     }
@@ -797,7 +812,7 @@ mod tests {
     fn skipped(seat: &mut FakeSeat, cards: &[Card], hunter: &mut FakeHunter, want: &str) {
         let mut models = script(&[]);
         let s = go(&settled(cards), seat, hunter, &mut models, 10);
-        assert_eq!(s.result, Ok(()));
+        assert_eq!(s.result, Ok(None));
         assert_eq!(s.warnings.len(), 1, "{:?}", s.warnings);
         assert!(
             s.warnings[0].contains(want),
@@ -862,6 +877,21 @@ mod tests {
         );
     }
 
+    /// A ceiling after the enumerate call still records the hunt, and the
+    /// sweep reports it so the task is paused.
+    #[test]
+    fn a_ceiling_mid_hunt_is_recorded_and_reported() {
+        let cards = vec![card(7), card(8)];
+        let mut seat = seat(cards.clone(), RS);
+        let mut hunter = FakeHunter::default();
+        let mut models = script(&[SUSPECT]);
+        let s = go(&settled(&cards), &mut seat, &mut hunter, &mut models, 1);
+        assert_eq!(s.result, Ok(Some(Stop::TaskCalls)), "{}", s.log);
+        assert_eq!(hunter.saved.len(), 1, "the hunt on claim 7 is kept");
+        assert!(s.log.contains("alien: stopped in claim 7"), "{}", s.log);
+        assert_eq!(seat.reads, [ArtId(57)], "claim 8 is not read");
+    }
+
     #[test]
     fn a_ceiling_ends_the_pass_with_nothing_recorded() {
         let cards = vec![card(7), card(8)];
@@ -869,7 +899,7 @@ mod tests {
         let mut hunter = FakeHunter::default();
         let mut models = script(&[]);
         let s = go(&settled(&cards), &mut seat, &mut hunter, &mut models, 0);
-        assert_eq!(s.result, Ok(()));
+        assert_eq!(s.result, Ok(Some(Stop::TaskCalls)), "the caller pauses");
         assert!(s.log.contains("alien: stopped before claim 7"), "{}", s.log);
         assert_eq!(seat.reads, [ArtId(57)], "claim 8 is not read");
         assert!(hunter.saved.is_empty() && models.1.is_empty());
