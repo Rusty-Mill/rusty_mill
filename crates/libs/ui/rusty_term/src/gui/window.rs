@@ -49,12 +49,14 @@ use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::motion;
 use super::pace::Pacer;
+use super::palette::{self, Cmd, Entry, Id, Out};
+use super::palette_view::PaletteUi;
 use super::popover::{self, DetachedRow, Kind, Menu, Pick, Popover, Row};
 use super::prefix::{self, Command};
 use super::render::{CpuRenderer, PaneFrame, Renderer, Scene, SearchColors, blend};
 use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
-use super::source::{Act, Feed, PaneIo, Remote, Source, Tree};
+use super::source::{Act, Feed, Listed, PaneIo, Remote, Source, Tree};
 use super::strip::{self, Spot, StripState};
 use super::{link_policy, link_trust};
 use crate::backend::BackendHandle;
@@ -156,6 +158,9 @@ pub(crate) enum UserEvent {
     /// Where taking pane `id`'s owner-only block over stands
     /// ([`super::source::Feed::Take`]).
     Take(u64, super::source::Take),
+    /// A folder listing the palette's browse asked for finished, under
+    /// the number the palette gave it (gui-design D78).
+    Listed(u64, Listed),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -165,6 +170,7 @@ fn attached_scene<'a>(
     body: &'a BodyState,
     popover: &'a Popover,
     confirm: Option<&'a Confirm>,
+    palette: &'a PaletteUi,
 ) -> Scene<'a> {
     let body = body.painted();
     Scene {
@@ -173,7 +179,8 @@ fn attached_scene<'a>(
         over: body.map_or(&[], |b| &b.over),
         pop: popover
             .painted()
-            .or_else(|| confirm.and_then(Confirm::painted)),
+            .or_else(|| confirm.and_then(Confirm::painted))
+            .or_else(|| palette.painted()),
     }
 }
 
@@ -277,6 +284,8 @@ enum MenuKind {
     OpenUrl(String),
     /// Open the in-app settings page.
     Settings,
+    /// Open the command palette (gui-design D45 b).
+    Palette,
     /// Open the config file in the user's editor.
     EditConfig,
 }
@@ -636,6 +645,8 @@ struct WindowState<'a> {
     popover: Popover,
     /// An attached window's open take-over confirm (gui-design F3, D64).
     confirm: Option<Confirm>,
+    /// The command palette and its directory browse (gui-design D77, D78).
+    palette: PaletteUi,
     /// The trusted link origins (C63, D69-D72).
     links: link_policy::Policy,
     /// The effective config; refreshed on live reload so new tabs follow it.
@@ -1216,6 +1227,7 @@ impl WindowState<'_> {
         if let Some(confirm) = &mut self.confirm {
             confirm.repaint(tokens, scale, view);
         }
+        self.palette.repaint(tokens, scale, view);
         let oy = self.grid_oy();
         // The command dock renders as one more (synthetic, unfocused) pane
         // right of the pane area. Built before the renderer is borrowed and
@@ -1246,6 +1258,7 @@ impl WindowState<'_> {
                 &self.body,
                 &self.popover,
                 self.confirm.as_ref(),
+                &self.palette,
             );
             renderer.render(
                 &[],
@@ -1405,6 +1418,7 @@ impl WindowState<'_> {
             &self.body,
             &self.popover,
             self.confirm.as_ref(),
+            &self.palette,
         );
         renderer.render(
             &frames,
@@ -2358,6 +2372,7 @@ impl WindowState<'_> {
             Action::OpenSetup => self.open_setup(),
             Action::Search => self.start_search(),
             Action::OpenLinks => self.open_links_menu(),
+            Action::CommandPalette => self.open_palette(),
             Action::SplitRight | Action::SplitDown => {
                 let dir = match action {
                     Action::SplitRight => Dir::Vertical,
@@ -3380,6 +3395,7 @@ impl WindowState<'_> {
                 self.follow_link(&url);
             }
             MenuKind::Settings => self.open_settings(),
+            MenuKind::Palette => self.open_palette(),
             MenuKind::EditConfig => {
                 self.overlay = None;
                 self.open_config();
@@ -4829,6 +4845,7 @@ impl WindowState<'_> {
         }
         let session = self.strip.session().clone();
         self.refresh_popover(&session);
+        self.refresh_palette();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -4863,6 +4880,7 @@ impl WindowState<'_> {
         self.body.set_session(session.local, &session.host);
         self.refresh_popover(&session);
         self.strip.show(session);
+        self.refresh_palette();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -4874,6 +4892,7 @@ impl WindowState<'_> {
         body.show(blocks);
         let strip = &mut self.strip;
         strip.set_running(body.running());
+        self.refresh_palette();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -4893,6 +4912,14 @@ impl WindowState<'_> {
             None => return,
         };
         self.popover.update(rows);
+    }
+
+    /// The palette's rows now, when it is open (D77: they update live).
+    fn refresh_palette(&mut self) {
+        if self.palette.is_open() {
+            let entries = self.palette_entries();
+            self.palette.update(entries);
+        }
     }
 
     /// The source moved the focus to `key`.
@@ -5193,13 +5220,22 @@ impl WindowState<'_> {
     /// The menu's items an attached window lists under its sessions: the
     /// `▾` menu's (D45 b).
     fn switcher_items(&self) -> Vec<MenuItem> {
-        menu_items()
+        let mut items = vec![MenuItem {
+            label: "Command palette".to_string(),
+            kind: MenuKind::Palette,
+        }];
+        items.extend(menu_items());
+        items
     }
 
     /// A key while a popover is open: Up/Down move, Enter picks, Esc
     /// closes; the rest are dropped.
     fn popover_key(&mut self, key: &Key) {
         use winit::keyboard::NamedKey;
+        if self.palette.is_open() {
+            self.palette_key(key);
+            return;
+        }
         if self.confirm.is_some() {
             self.confirm_key(key);
             return;
@@ -5367,6 +5403,7 @@ impl WindowState<'_> {
     /// Note where taking pane `key`'s block over stands (D64).
     fn show_take(&mut self, key: u64, take: super::source::Take) {
         self.body.set_take(key, take);
+        self.refresh_palette();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -5374,13 +5411,14 @@ impl WindowState<'_> {
 
     /// Whether a popover is open.
     fn popover_open(&self) -> bool {
-        self.popover_kind().is_some() || self.confirm.is_some()
+        self.popover_kind().is_some() || self.confirm.is_some() || self.palette.is_open()
     }
 
     /// The pointer moved to `(x, y)`: light the row under it.
     fn popover_hover(&mut self, x: f64, y: f64) {
-        let changed =
-            self.popover.hover(x, y) || self.confirm.as_mut().is_some_and(|c| c.hover(x, y));
+        let changed = self.popover.hover(x, y)
+            || self.palette.hover(x, y)
+            || self.confirm.as_mut().is_some_and(|c| c.hover(x, y));
         if let (true, Some(window)) = (changed, &self.window) {
             window.request_redraw();
         }
@@ -5390,6 +5428,10 @@ impl WindowState<'_> {
     /// the panel does nothing, and one off it closes it. A click on the
     /// open popover's own chip closes it too, through the chip.
     fn popover_click(&mut self, x: f64, y: f64) {
+        if self.palette.is_open() {
+            self.palette_click(x, y);
+            return;
+        }
         if let Some(confirm) = &self.confirm {
             let answer = confirm.click(x, y);
             self.confirm_answer(answer);
@@ -5405,6 +5447,234 @@ impl WindowState<'_> {
                 }
             }
         }
+    }
+
+    /// The focused block's pane key.
+    fn focused(&self) -> Option<u64> {
+        self.tabs.get(self.active).map(|t| t.focus)
+    }
+
+    /// Open the command palette, or close it if it is open (gui-design
+    /// D77); a popover or confirm gives way to it.
+    fn open_palette(&mut self) {
+        self.set_armed(false);
+        match self.palette.is_open() {
+            true => self.palette.close(),
+            false => {
+                self.popover.close();
+                self.confirm = None;
+                let entries = self.palette_entries();
+                self.palette.open(entries);
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// What the palette lists now (gui-design D77, D78): the curated
+    /// actions, the server's sessions and windows, and directory browse
+    /// where the source can list. Rows that go to the server are disabled
+    /// while the link is down; Settings and the rest stay live.
+    fn palette_entries(&self) -> Vec<Entry> {
+        let session = self.strip.session();
+        let online = !self.offline();
+        let focus = self.focused();
+        let zoomed = self.tabs.get(self.active).is_some_and(|t| t.zoomed);
+        let take = focus.and_then(|k| self.body.take_of(k));
+        let entry = |id, label: &str, enabled| Entry {
+            id,
+            label: label.to_owned(),
+            detail: String::new(),
+            enabled,
+            current: false,
+        };
+        let act = |cmd, label: &str, enabled| entry(Id::Cmd(cmd), label, enabled);
+        let has_block = focus.is_some();
+        let mut out = vec![
+            act(Cmd::SplitRight, "Split right", online && has_block),
+            act(Cmd::SplitDown, "Split down", online && has_block),
+            act(
+                Cmd::Zoom,
+                if zoomed { "Exit zoom" } else { "Zoom" },
+                online && has_block,
+            ),
+            act(Cmd::CloseBlock, "Close block", online && has_block),
+            act(Cmd::FocusLeft, "Move focus left", has_block),
+            act(Cmd::FocusRight, "Move focus right", has_block),
+            act(Cmd::FocusUp, "Move focus up", has_block),
+            act(Cmd::FocusDown, "Move focus down", has_block),
+            act(Cmd::NewWindow, "New window", online),
+            act(Cmd::Switcher, "Open switcher", true),
+            act(Cmd::Settings, "Settings", true),
+            act(
+                Cmd::ReloadConfig,
+                "Reload config",
+                self.config_path.is_some(),
+            ),
+        ];
+        match take {
+            Some(super::source::Take::Held) => {
+                out.push(act(Cmd::GiveBack, "Give back", online));
+            }
+            Some(super::source::Take::Rest | super::source::Take::Ended) => {
+                out.push(act(Cmd::TakeOver, "Take over", online));
+            }
+            _ => {}
+        }
+        out.extend(session.sessions.iter().map(|s| Entry {
+            id: Id::Session(s.key),
+            label: s.name.clone(),
+            detail: match s.windows {
+                1 => "1 window".to_owned(),
+                n => format!("{n} windows"),
+            },
+            enabled: online && s.can_show,
+            current: s.current,
+        }));
+        out.extend(session.windows.iter().map(|w| Entry {
+            id: Id::Window(w.key),
+            label: w.name.clone(),
+            detail: String::new(),
+            enabled: online,
+            current: w.shown,
+        }));
+        if let Some(key) = focus.filter(|&k| self.source.lists(k)) {
+            let wait = matches!(
+                self.body.take_of(key),
+                Some(t) if t != super::source::Take::Held
+            );
+            let can = online && !wait;
+            let detail = if wait { "Take over first" } else { "" };
+            for (id, label) in [(Id::GoTo, "Go to directory"), (Id::Insert, "Insert path")] {
+                out.push(Entry {
+                    detail: detail.to_owned(),
+                    ..entry(id, label, can)
+                });
+            }
+        }
+        out
+    }
+
+    /// A key while the palette is open (gui-design D77, D78). Ctrl+Shift+P
+    /// again closes it.
+    fn palette_key(&mut self, key: &Key) {
+        use palette::Key as P;
+        use winit::keyboard::NamedKey;
+        let mapped = match key {
+            Key::Named(NamedKey::ArrowUp) => P::Up,
+            Key::Named(NamedKey::ArrowDown) => P::Down,
+            Key::Named(NamedKey::PageUp) => P::PageUp,
+            Key::Named(NamedKey::PageDown) => P::PageDown,
+            Key::Named(NamedKey::Enter) => P::Enter,
+            Key::Named(NamedKey::Tab) => P::Tab,
+            Key::Named(NamedKey::Backspace) => P::Backspace,
+            Key::Named(NamedKey::Escape) => P::Esc,
+            Key::Named(NamedKey::Space) => P::Char(" ".into()),
+            Key::Character(s) if self.mods.control_key() && s.eq_ignore_ascii_case("p") => P::Esc,
+            Key::Character(s) if !self.mods.control_key() && !self.mods.alt_key() => {
+                P::Char(s.to_string())
+            }
+            _ => return,
+        };
+        let out = self.palette.key(mapped);
+        self.palette_out(out);
+    }
+
+    /// A click while the palette is open: a row asks, a click off the
+    /// panel closes it.
+    fn palette_click(&mut self, x: f64, y: f64) {
+        let (out, on_panel) = self.palette.click(x, y);
+        match out {
+            Some(out) => self.palette_out(Some(out)),
+            None if !on_panel => self.palette_out(Some(Out::Close)),
+            None => {}
+        }
+    }
+
+    /// Carry out what the palette asked for.
+    fn palette_out(&mut self, out: Option<Out>) {
+        match out {
+            None | Some(Out::Stay) => {}
+            Some(Out::Close) => self.palette.close(),
+            Some(Out::Run(id)) => {
+                self.palette.close();
+                self.palette_run(id);
+            }
+            Some(Out::List { ask, path }) => self.palette_list(ask, path),
+            Some(Out::Type(text)) => {
+                self.palette.close();
+                self.type_text(&text);
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Run a palette row (gui-design D77).
+    fn palette_run(&mut self, id: Id) {
+        let focus = self.focused();
+        match id {
+            Id::Cmd(Cmd::SplitRight) => self.run_action(Action::SplitRight),
+            Id::Cmd(Cmd::SplitDown) => self.run_action(Action::SplitDown),
+            Id::Cmd(Cmd::Zoom) => self.toggle_source_zoom(),
+            Id::Cmd(Cmd::CloseBlock) => self.act_on_source(|key, _| Act::Close(key)),
+            Id::Cmd(Cmd::FocusLeft) => self.focus_block_dir(-1, 0),
+            Id::Cmd(Cmd::FocusRight) => self.focus_block_dir(1, 0),
+            Id::Cmd(Cmd::FocusUp) => self.focus_block_dir(0, -1),
+            Id::Cmd(Cmd::FocusDown) => self.focus_block_dir(0, 1),
+            Id::Cmd(Cmd::NewWindow) => self.source.new_window(),
+            Id::Cmd(Cmd::Switcher) => self.toggle_popover(Kind::Switcher),
+            Id::Cmd(Cmd::Settings) => self.open_settings(),
+            Id::Cmd(Cmd::ReloadConfig) => self.reload_config(),
+            Id::Cmd(Cmd::TakeOver) => {
+                if let Some(key) = focus {
+                    self.open_confirm(key);
+                }
+            }
+            Id::Cmd(Cmd::GiveBack) => self.act_on_source(|key, _| Act::GiveBack(key)),
+            Id::Session(key) => self.source.switch(key),
+            Id::Window(key) => self.source.select(key),
+            // Browse stays in the palette; it never runs.
+            Id::GoTo | Id::Insert => {}
+        }
+    }
+
+    /// Read a folder for the palette's browse, on the focused block's
+    /// host (gui-design D78); the answer comes back as
+    /// [`UserEvent::Listed`].
+    fn palette_list(&mut self, ask: u64, path: Option<String>) {
+        let Some(key) = self.focused() else {
+            self.palette
+                .listed(ask, Err("no block has the focus".into()));
+            return;
+        };
+        let proxy = self.proxy.clone();
+        self.source.list_dir(
+            key,
+            path,
+            Box::new(move |listed| {
+                let _ = proxy.send_event(UserEvent::Listed(ask, listed));
+            }),
+        );
+    }
+
+    /// A folder listing the palette asked for arrived.
+    fn palette_listed(&mut self, ask: u64, listed: Listed) {
+        self.palette.listed(ask, listed);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Type `text` into the focused block as a paste, without Enter
+    /// (gui-design D78).
+    fn type_text(&mut self, text: &str) {
+        let bracketed = self.pane().is_some_and(|p| p.grid.lock().bracketed_paste);
+        let bytes = encode_paste(text, bracketed);
+        self.write_child(&bytes);
+        self.snap_to_bottom();
     }
 
     /// An attached window's prefix keys (gui-design F2): Ctrl-] arms, and
@@ -6087,6 +6357,7 @@ impl<'a> App<'a> {
             body: BodyState::new().ok_or("the interface font failed to parse")?,
             popover: Popover::new().ok_or("the interface font failed to parse")?,
             confirm: None,
+            palette: PaletteUi::new().ok_or("the interface font failed to parse")?,
             links: load_trust(),
             config: self.config.clone(),
             config_path: self.config_path.clone(),
@@ -6230,6 +6501,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::Take(id, take) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(id)) {
                     w.show_take(id, take);
+                }
+            }
+            UserEvent::Listed(ask, listed) => {
+                if let Some(w) = self.windows.first_mut() {
+                    w.palette_listed(ask, listed);
                 }
             }
             UserEvent::Ended(name) => {

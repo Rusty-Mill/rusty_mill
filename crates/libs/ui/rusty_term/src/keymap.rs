@@ -30,6 +30,8 @@ pub enum Action {
     OpenSetup,
     Search,
     OpenLinks,
+    /// The command palette (gui-design D77): attached windows only.
+    CommandPalette,
     CopyMode,
     Broadcast,
     SplitRight,
@@ -158,6 +160,7 @@ impl Keymap {
                 (c(true, false, Char(',')), OpenSettings),
                 (c(true, true, Char('f')), Search),
                 (c(true, true, Char('o')), OpenLinks),
+                (c(true, true, Char('p')), CommandPalette),
                 (c(true, true, Char('d')), SplitRight),
                 (c(true, true, Char('e')), SplitDown),
                 (c(true, true, Char('j')), FocusNext),
@@ -229,6 +232,7 @@ pub fn parse_action(name: &str) -> Option<Action> {
         "open_setup" => Action::OpenSetup,
         "search" => Action::Search,
         "open_links" => Action::OpenLinks,
+        "command_palette" => Action::CommandPalette,
         "copy_mode" => Action::CopyMode,
         "broadcast" => Action::Broadcast,
         "focus_left" => Action::FocusLeft,
@@ -557,6 +561,10 @@ mod tests {
             Some(Action::ScrollPromptDown)
         );
         assert_eq!(parse_action("open_settings"), Some(Action::OpenSettings));
+        assert_eq!(
+            parse_action("command_palette"),
+            Some(Action::CommandPalette)
+        );
         assert_eq!(parse_action("open_setup"), Some(Action::OpenSetup));
         assert_eq!(
             parse_action("toggle_fullscreen"),

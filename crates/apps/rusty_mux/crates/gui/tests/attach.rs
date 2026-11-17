@@ -944,3 +944,38 @@ fn a_session_gone_after_a_reconnect_is_said_and_another_can_be_shown() {
         Out::Layout(Some(Tree::Pane(_)))
     ));
 }
+
+#[test]
+fn a_folder_is_listed_over_the_blocks_connection_once_it_holds_the_lease() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (mut writer, feed) = feed_of(attached.source.open(key, 80, 24).expect("opened"));
+    assert!(attached.source.lists(key), "the server lists folders");
+    assert!(!attached.source.lists(key + 99), "no such pane");
+    // Listing needs the lease, as typing does.
+    type_until_echoed(writer.as_mut(), &feed, 1);
+
+    let ask = |path: Option<&str>| {
+        let (tx, rx) = channel();
+        attached.source.list_dir(
+            key,
+            path.map(str::to_owned),
+            Box::new(move |r| drop(tx.send(r))),
+        );
+        rx.recv_timeout(PATIENCE).expect("an answer")
+    };
+    let here = ask(None).expect("the block's folder");
+    assert_eq!(here.lines().next(), Some("/"), "{here}");
+    let tmp = std::env::temp_dir().join(format!("rusty-mux-gui-list-{}", std::process::id()));
+    std::fs::create_dir_all(tmp.join("sub")).expect("mkdir");
+    std::fs::write(tmp.join("a.txt"), b"x").expect("write");
+    let listed = ask(tmp.to_str()).expect("a folder");
+    let kinds: Vec<_> = listed.lines().skip(1).collect();
+    assert_eq!(kinds, ["d\tsub", "f\ta.txt"], "{listed}");
+    let refused = ask(Some("/no/such/folder/here")).expect_err("no such folder");
+    assert!(refused.contains("terminal.list-dir"), "{refused}");
+    std::fs::remove_dir_all(&tmp).expect("cleanup");
+}
