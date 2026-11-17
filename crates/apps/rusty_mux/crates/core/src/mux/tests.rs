@@ -1999,12 +1999,29 @@ fn floating_a_tiled_block_leaves_the_layout_and_takes_focus_rules() {
     assert_eq!(w.floats().len(), 1);
     assert_eq!(w.detached().count(), 0);
     assert_eq!(w.zoomed(), None);
-    // The zoomed, focused block still shows, as a float, so keeps focus.
-    assert_eq!(w.focused(), Some(b));
+    // The focus was on `b`: it goes to the tile left in its place.
+    assert_eq!(w.focused(), Some(c));
     assert_eq!(
         mux.take_events(),
-        vec![layout_event(&mux, window), float_event(&mux, window)]
+        vec![
+            layout_event(&mux, window),
+            float_event(&mux, window),
+            focus_event(window, c)
+        ]
     );
+}
+
+#[test]
+fn floating_an_unfocused_or_last_tile_keeps_focus_where_it_can() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.focus_block(a).unwrap();
+    mux.place_float(c, rect(10, 10, 40, 40)).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(a));
+    mux.place_float(b, rect(10, 10, 40, 40)).unwrap();
+    mux.place_float(a, rect(10, 10, 40, 40)).unwrap();
+    // No tile is left, so focus stays on the float.
+    assert_eq!(mux.window(window).unwrap().focused(), Some(a));
+    assert!(mux.window(window).unwrap().layout().is_none());
 }
 
 #[test]

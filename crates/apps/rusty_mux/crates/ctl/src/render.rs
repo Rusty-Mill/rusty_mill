@@ -710,6 +710,13 @@ mod tests {
                 layout: Some(Layout::Block(block)),
                 zoomed: Some(block),
             },
+            Event::FloatsChanged {
+                window,
+                floats: vec![rusty_mux_core::Float {
+                    block,
+                    at: rusty_mux_core::FloatRect::new(0, 0, 50, 50).unwrap(),
+                }],
+            },
             Event::ClientConnectionChanged {
                 client,
                 principal: Principal::unix(1, None).unwrap(),

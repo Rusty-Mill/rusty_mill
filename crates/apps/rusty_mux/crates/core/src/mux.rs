@@ -501,8 +501,9 @@ impl Mux {
 
     /// Floats `block` over its window (C42), on top, at `at`; one that
     /// floats already moves and resizes in place, keeping its depth. A
-    /// tiled block leaves the layout as in [`Self::detach_block`], and a
-    /// zoom on it ends.
+    /// tiled block leaves the layout as in [`Self::detach_block`], a zoom
+    /// on it ends, and focus on it goes to the tile left in its place if
+    /// there is one.
     pub fn place_float(&mut self, block: BlockId, at: FloatRect) -> Result<(), Error> {
         let window = self.window_of(block)?;
         let Some(w) = self.windows.get_mut(&window) else {
@@ -524,11 +525,19 @@ impl Mux {
             }
         }
         w.floats.push(Float { block, at });
+        // Focus on the tile that floats goes to the tile left in its place,
+        // so a client that knows no floats never differs from the server.
+        let handed = tiled
+            && w.focused == Some(block)
+            && heir.is_some_and(|h| w.layout.as_ref().is_some_and(|l| l.contains(h)));
         if tiled {
             self.announce_layout(window);
         }
         self.announce_floats(window);
-        self.refocus(window, heir);
+        match handed {
+            true => self.set_focus(window, heir),
+            false => self.refocus(window, heir),
+        }
         Ok(())
     }
 

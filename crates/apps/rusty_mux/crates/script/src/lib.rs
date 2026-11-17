@@ -193,6 +193,7 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("block-renamed", &["block", "name"]),
     ("client-renamed", &["client", "name"]),
     ("layout-changed", &["window", "layout", "zoomed"]),
+    ("floats-changed", &["window", "floats"]),
     (
         "client-connection-changed",
         &["client", "principal", "user", "transport"],
