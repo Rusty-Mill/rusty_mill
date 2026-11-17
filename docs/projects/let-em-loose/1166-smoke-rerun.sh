@@ -1,13 +1,13 @@
 #!/bin/bash
 # #1166 smoke RERUN on BaileyAi: LOCAL-ONLY, no paid call. A fresh task, the inbox fixture (D146), lens run, read-back.
-#   bash docs/projects/let-em-loose/1166-smoke-rerun.sh          # task smoke-2; TASK=smoke-3 for another
+#   LLAMA_SWAP=<llama-swap-host>:<port> bash docs/projects/let-em-loose/1166-smoke-rerun.sh          # task smoke-2; TASK=smoke-3 for another
 #
 # It must run binaries built from the fixes (rusty_orch: no `executed` evidence from a lens, D144; no panic on a closed
 # stdout), so run this FIRST whenever those PRs have just merged or you have not deployed since:
 #   git switch main && git pull --ff-only && bash docs/projects/let-em-loose/1092-deploy.sh
 # This script refuses to start if the installed rusty_orch lacks either fix. It then runs 1166-smoke-run.sh (stage,
 # lens check, open, assign, seed Q and A, inbox fixture A2, detached lens run with the 90-minute box, read-back).
-# Interrupted? TASK=<id> bash docs/projects/let-em-loose/1166-smoke-resume.sh waits for the run and reads back.
+# Interrupted? TASK=<id> LLAMA_SWAP=<llama-swap-host>:<port> bash docs/projects/let-em-loose/1166-smoke-resume.sh waits for the run and reads back.
 set -euo pipefail
 
 export TASK=${TASK:-smoke-2}

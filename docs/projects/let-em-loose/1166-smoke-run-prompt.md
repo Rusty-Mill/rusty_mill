@@ -2,7 +2,7 @@
 
 Status: 2026-11-17. Design: `1166-smoke-run.md` (sections 2 to 5, 8, 9). The steps are in `1166-smoke-run.sh`; nothing has been run yet.
 
-**This run is LOCAL-ONLY.** Config `/srv/lel/lens-local.json`: providers `local`, `local-high`, `local-rebel` on llama-swap at `http://192.168.10.104:8080/v1` (models `qwen3.6-35b-a3b`, `gpt-oss-120b`). No paid call, no Claude, no Codex, no assertions needed, $0. D141 approves a paid half separately (`--max-passes 5` there); this prompt does not run it. This local run keeps the design's `--max-passes 8` and `task_calls 60` (in the config), because it is local and costs nothing.
+**This run is LOCAL-ONLY.** Config `/srv/lel/lens-local.json`: providers `local`, `local-high`, `local-rebel` on llama-swap at `http://<llama-swap-host>:<port>/v1` (models `qwen3.6-35b-a3b`, `gpt-oss-120b`). No paid call, no Claude, no Codex, no assertions needed, $0. D141 approves a paid half separately (`--max-passes 5` there); this prompt does not run it. This local run keeps the design's `--max-passes 8` and `task_calls 60` (in the config), because it is local and costs nothing.
 
 Assumes the #1092 deploy is done (`/opt/lel/current/bin/{bbp,rusty_orch}`, `/srv/lel/bbp`, `/srv/lel/orch-state`, `/srv/lel/lens-local.json`, `/srv/lel/lenses/*.md`, all `orch-runner`). Everything runs as `orch-runner`; the runner cannot be `baileyrd`, who cannot enter `/srv/lel/toy`.
 
@@ -14,16 +14,16 @@ Run 1 is recorded (D143, Q52): it is not a clean pass. The rerun uses a fresh ta
 
 ```bash
 cd ~/dev/rusty_mill && git switch main && git pull --ff-only && bash docs/projects/let-em-loose/1092-deploy.sh   # rebuild and install
-bash docs/projects/let-em-loose/1166-smoke-rerun.sh                                                              # task smoke-2
+LLAMA_SWAP=<llama-swap-host>:<port> bash docs/projects/let-em-loose/1166-smoke-rerun.sh                                                              # task smoke-2
 ```
 
-`1166-smoke-rerun.sh` refuses to start if the installed `rusty_orch` still offers `executed` evidence to lenses, or panics on a closed pipe; it then runs `1166-smoke-run.sh` for `TASK=smoke-2`. If the run is interrupted, `TASK=smoke-2 bash docs/projects/let-em-loose/1166-smoke-resume.sh`. The host changes (llama.cpp rebuild, a reasoning budget for Qwen) are held until this run's per-pass log shows which proposal slot failed and why: one change at a time.
+`1166-smoke-rerun.sh` refuses to start if the installed `rusty_orch` still offers `executed` evidence to lenses, or panics on a closed pipe; it then runs `1166-smoke-run.sh` for `TASK=smoke-2`. If the run is interrupted, `TASK=smoke-2 LLAMA_SWAP=<llama-swap-host>:<port> bash docs/projects/let-em-loose/1166-smoke-resume.sh`. The host changes (llama.cpp rebuild, a reasoning budget for Qwen) are held until this run's per-pass log shows which proposal slot failed and why: one change at a time.
 
 ## Run it (one command)
 
 ```bash
 cd ~/dev/rusty_mill && git switch claude/lel-1092-deploy-prompt   # or main once #1779 merges
-bash docs/projects/let-em-loose/1166-smoke-run.sh
+LLAMA_SWAP=<llama-swap-host>:<port> bash docs/projects/let-em-loose/1166-smoke-run.sh
 ```
 
 Do not paste the steps into an editor: the first #1092 run's pasted script picked up stray `OB` characters (terminal arrow or scroll events), so the steps are a committed script, `1166-smoke-run.sh`. It uses `set -euo pipefail`, runs every `orch-runner` call from `/`, and tees everything to `~/smoke-1/script-<time>.log` (the task id is `smoke-1`; `TASK=smoke-2 bash ...` for a rerun, since an existing task is refused). It asks for your sudo password when it first needs it.

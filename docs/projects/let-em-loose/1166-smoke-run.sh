@@ -1,7 +1,7 @@
 #!/bin/bash
 # #1166 smoke run on BaileyAi: LOCAL-ONLY (lens-local.json; no paid call, no Claude, no Codex, $0).
 # Run from a checkout as baileyrd, after the #1092 deploy (1092-deploy.sh):
-#   bash docs/projects/let-em-loose/1166-smoke-run.sh
+#   LLAMA_SWAP=<llama-swap-host>:<port> bash docs/projects/let-em-loose/1166-smoke-run.sh
 # Inbox fixture: 1166-seed-inbox.sh (D146).
 # Design: 1166-smoke-run.md (sections 2-5, 8, 9). D141: this run keeps --max-passes 8 and task_calls 60.
 # Everything is logged to ~/smoke-1/. A task id that already exists is refused: rerun with TASK=smoke-2.
@@ -14,6 +14,8 @@ LOG=$OUT/script-$(date -u +%Y%m%dT%H%M%SZ).log
 exec > >(tee -a "$LOG") 2>&1
 echo "log: $LOG"
 
+HERE=$(cd "$(dirname "$0")" && pwd)   # before cd /, so a relative $0 still resolves
+LLAMA_SWAP=${LLAMA_SWAP:?set to the llama-swap host:port}   # e.g. LLAMA_SWAP=<llama-swap-host>:<port>
 cd /
 R="sudo -H -u orch-runner"   # orch-runner cannot enter baileyrd's directories: every call below runs from /
 BIN=/opt/lel/current/bin
@@ -30,7 +32,7 @@ command -v jq >/dev/null || die "jq is not installed"
 $R test -r "$CFG" || die "$CFG missing or unreadable by orch-runner: run 1092-deploy.sh first"
 $R test -d "$D" || die "$D missing: run 1092-deploy.sh first"
 # llama-swap: LAN address (127.0.0.1 does not answer), lowercase model ids (case matters)
-curl -fsS -m 10 http://192.168.10.104:8080/v1/models | jq -r '.data[].id' | tr '\n' ' '; echo
+curl -fsS -m 10 http://$LLAMA_SWAP/v1/models | jq -r '.data[].id' | tr '\n' ' '; echo
 if $R $BIN/bbp card --dir $D --task "$TASK" >/dev/null 2>&1; then
   die "task $TASK already exists in $D; rerun with TASK=smoke-2 (or another new id)"
 fi
@@ -186,7 +188,7 @@ echo "Q=$Q A=$A"
 # ---- 5b. Inbox fixture (D146): A2, an irreversible claim with two fixture supports, escalates at once, so the inbox
 # is exercised even if the lenses drop A as they did in run 1. No threshold or escalation rule is touched.
 echo "=== 5b. inbox fixture"
-bash "$(dirname "$0")/1166-seed-inbox.sh" "$D" "$TASK" "$BRIEF" "$BIN" | tee "$OUT/seed-inbox.out"
+bash "$HERE/1166-seed-inbox.sh" "$D" "$TASK" "$BRIEF" "$BIN" | tee "$OUT/seed-inbox.out"
 A2=$(sed -n 's/^A2=\([0-9][0-9]*\)$/\1/p' "$OUT/seed-inbox.out" | head -n 1)
 [[ $A2 =~ ^[0-9]+$ ]] || die "A2 was not seeded; see $OUT/seed-inbox.out"
 echo "$A2" > "$OUT/a2.id"
@@ -195,7 +197,7 @@ echo "$A2" > "$OUT/a2.id"
 # never the run (run 1 was interrupted that way). If this script is interrupted, 1166-smoke-resume.sh waits for the
 # surviving run and reads back. The exit code is the last line of run.out; a non-zero exit does not stop the read-back.
 echo "=== 6. lens run $(date -u +%FT%TZ)"
-trap 'echo; echo "Interrupted. The lens run keeps running on its own. Wait for it and read back with: TASK=$TASK bash $(dirname "$0")/1166-smoke-resume.sh"; exit 130' INT TERM
+trap 'echo; echo "Interrupted. The lens run keeps running on its own. Wait for it and read back with: TASK=$TASK LLAMA_SWAP=$LLAMA_SWAP bash $HERE/1166-smoke-resume.sh"; exit 130' INT TERM
 sudo -v   # refresh the sudo timestamp in the foreground: a detached sudo cannot ask for a password
 : >"$OUT/run.out"; : >"$OUT/run.err"
 $R setsid sh -c "timeout 5400 $BIN/rusty_orch lens run $CFG --bbp $BIN/bbp --dir $D --task $TASK \
@@ -205,7 +207,7 @@ disown
 sleep 5
 RUN_RE="rusty_orch lens run .*--task $TASK( |\$)"
 while pgrep -u orch-runner -f "$RUN_RE" >/dev/null; do
-  echo "$(date -u +%T)Z lens run alive; llama-swap loaded: $(curl -s -m 5 http://192.168.10.104:8080/running | jq -r '[.running[].model]|join(",")' 2>/dev/null || echo '?')"
+  echo "$(date -u +%T)Z lens run alive; llama-swap loaded: $(curl -s -m 5 http://$LLAMA_SWAP/running | jq -r '[.running[].model]|join(",")' 2>/dev/null || echo '?')"
   sleep 60
 done
 echo "--- run.out (the last line is the exit code; 124 = the 90-minute box stopped it)"; cat "$OUT/run.out"

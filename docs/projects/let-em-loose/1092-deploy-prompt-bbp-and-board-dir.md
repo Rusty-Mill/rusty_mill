@@ -24,7 +24,7 @@ Report back: the whole output.
 **Labels.** `/srv/lel/*` is `container_file_t` by policy on BaileyAi (`matchpathcon` says so), so the script does not run `restorecon` on `/srv/lel/*`; it prints the policy default next to the actual label. The first run's "not reset as customized by admin" message was `restorecon` skipping a customizable type, not a fault.
 
 ## Found on BaileyAi 2026-11-17 (fixed in Factory, so the deploy copies the repo files unchanged)
-- llama-swap answers on port 8080 only at `192.168.10.104`, not on `127.0.0.1`. orch accepts loopback and private addresses only, and `baileyai` does not resolve from the host, so Factory now names the LAN IP. It breaks if BaileyAi's address changes.
+- llama-swap answers only on the LAN at `<llama-swap-host>:<port>`, not on `127.0.0.1`. orch accepts loopback and private addresses only, and `baileyai` does not resolve from the host, so Factory now names the LAN IP. It breaks if BaileyAi's address changes.
 - llama-swap routes by exact id. One free local call each: `Qwen3.6-35B-A3B` returned HTTP 404 "no router for requested model"; `qwen3.6-35b-a3b` answered. `gpt-oss-120b` matches. The id case therefore does matter, and Factory now uses the lowercase id.
 - `lens check` exits 0 even with providers unavailable. Run as `baileyrd` it ignored `assertions.json` (the runner owns it); the step above runs it as `orch-runner`, which reports codex's real status.
 
