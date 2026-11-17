@@ -3514,6 +3514,42 @@ mod regression {
         });
     }
 
+    /// A window is never asked by a client of another account (C64): not
+    /// by name, and not as one of "every other window".
+    #[test]
+    fn show_session_never_reaches_another_principal() {
+        runtime().block_on(async {
+            let (shared, asker, _block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            let session = state.mux.create_session("t").unwrap();
+            let features = Features::CHECKPOINT_V6.union(Features::SHOW_SESSION);
+            state.features.insert(asker, features);
+            let stranger = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _theirs_inbox, _) = outbox();
+            let theirs = state.connect(out, stranger, Transport::Socket, features, None, None);
+            let (out, _mine_inbox, _) = outbox();
+            let mine = state.connect(out, test_owner(), Transport::Socket, features, None, None);
+
+            let queued = |state: &State, id: ClientId| state.clients[&id].queued();
+            let (theirs_before, mine_before) = (queued(&state, theirs), queued(&state, mine));
+            // By name: refused, and nothing is sent.
+            let named = state.show_session(asker, session, ShowTo::Client(theirs));
+            assert!(named.is_err());
+            assert_eq!(queued(&state, theirs), theirs_before);
+            // To every other window: done, and only the same account hears.
+            assert!(state.show_session(asker, session, ShowTo::Others).is_ok());
+            assert_eq!(
+                queued(&state, theirs),
+                theirs_before,
+                "the stranger heard it"
+            );
+            assert!(
+                queued(&state, mine) > mine_before,
+                "the same account did not"
+            );
+        });
+    }
+
     /// An open block of a shared server whose creator is not connected has
     /// no one to ask: that is unreachable, not "takes input from anyone".
     #[test]

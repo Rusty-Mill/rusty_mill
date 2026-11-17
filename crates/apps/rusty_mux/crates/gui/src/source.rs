@@ -567,7 +567,7 @@ impl Source for MuxSource {
     }
 }
 
-/// Starts a `rusty-mux-gui` on the first block of `session`'s active window
+/// Starts a `rusty-mux-gui` on the first block of `session`'s first window
 /// (C64), with the options this one runs with.
 fn open_session_window(socket: &Path, session: SessionId) -> Result<(), String> {
     let stream = connect(socket)?;
@@ -594,7 +594,10 @@ fn open_session_window(socket: &Path, session: SessionId) -> Result<(), String> 
         .arg(socket)
         .arg(block.to_string())
         .spawn()
-        .map(drop)
+        .map(|mut child| {
+            // Reaped when it ends, so it never lingers as a zombie.
+            std::thread::spawn(move || child.wait());
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -632,6 +635,10 @@ fn forwarded(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi::Os
         match text {
             "--" => break,
             "--gpu" => out.push(arg),
+            // Options this window keeps to itself still take their value.
+            "--cwd" => {
+                args.next();
+            }
             "--config" | "--profile" => {
                 out.push(arg);
                 out.extend(args.next());
@@ -1618,7 +1625,7 @@ mod tests {
             "a.toml",
             "--profile=work",
             "--cwd",
-            "/x",
+            "--gpu",
             "/run/mux.sock",
             "--",
             "vim",

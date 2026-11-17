@@ -1121,9 +1121,12 @@ const EXITED: u32 = 61;
 const TAILSCALE: u32 = 62;
 /// A client entry's mark that it can be asked to show a session: 1 yes, 0
 /// no, absent from an older server (C64).
-const SHOWABLE: u32 = 63;
-// IDs 1..=SHOWABLE are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = SHOWABLE as usize;
+const SHOWABLE: u32 = 65;
+/// A `ShowSession`'s mark that it asks every other window: 1; a request
+/// has this or a client, never neither (C64).
+const EVERY: u32 = 66;
+// IDs 1..=EVERY are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = EVERY as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -1167,7 +1170,7 @@ mod ty {
     pub const SIGNAL_BLOCK: u8 = 0x28;
     pub const RELEASE_BLOCK: u8 = 0x29;
     pub const CLIPBOARD_REPLY: u8 = 0x2a;
-    pub const SHOW_SESSION: u8 = 0x2b;
+    pub const SHOW_SESSION: u8 = 0x2d;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -1326,9 +1329,10 @@ impl Message {
             M::ReleaseBlock { req, block } => req_block(out, *req, *block, ty::RELEASE_BLOCK),
             M::ShowSession { req, session, to } => {
                 out.varint(REQ, *req).uuid(SESSION, session.uuid());
-                if let ShowTo::Client(client) = to {
-                    out.uuid(CLIENT, client.uuid());
-                }
+                match to {
+                    ShowTo::Client(client) => out.uuid(CLIENT, client.uuid()),
+                    ShowTo::Others => out.varint(EVERY, 1),
+                };
                 ty::SHOW_SESSION
             }
             M::ClipboardReply {
@@ -1692,9 +1696,12 @@ impl Message {
             ty::SHOW_SESSION => M::ShowSession {
                 req: f.varint(REQ)?,
                 session: session(&f, SESSION)?,
-                to: f
-                    .opt(CLIENT, client)?
-                    .map_or(ShowTo::Others, ShowTo::Client),
+                // A request that names no one is invalid, not a broadcast.
+                to: match (f.opt(CLIENT, client)?, f.opt(EVERY, In::varint)?) {
+                    (Some(client), None) => ShowTo::Client(client),
+                    (None, Some(1)) => ShowTo::Others,
+                    _ => return Err(f.invalid(EVERY)),
+                },
             },
             ty::SESSION_SHOWN => M::SessionShown {
                 session: session(&f, SESSION)?,
