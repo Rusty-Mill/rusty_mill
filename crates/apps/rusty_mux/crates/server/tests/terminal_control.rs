@@ -16,7 +16,8 @@ const CONTROL: Features = Features::CHECKPOINT_V6
     .union(Features::BLOCK_CALL)
     .union(Features::TERMINAL_CONTROL)
     .union(Features::TERMINAL_MORE)
-    .union(Features::TERMINAL_SHELL);
+    .union(Features::TERMINAL_SHELL)
+    .union(Features::DIR_LISTING);
 
 /// What a clear feeds the terminal.
 const CLEAR: &str = "\x1b[H\x1b[2J\x1b[3J";
@@ -108,6 +109,41 @@ fn size_follows_the_blocks_resizes() {
     let size = Size::new(100, 30).expect("size");
     client.request(|req| Message::Resize { req, block, size });
     assert_eq!(text(&mut client, block, "terminal.size"), "100x30");
+}
+
+#[test]
+fn list_dir_reads_a_directory_and_refuses_one_that_is_missing() {
+    let dir = std::env::temp_dir().join(format!("rusty-mux-listdir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).expect("dir");
+    std::fs::write(dir.join("a.txt"), "").expect("file");
+    let path = start_server();
+    let mut client = Client::connect_with(&path, CONTROL, None);
+    let block = block_for(&mut client);
+    let at = |p: &str| [("path", Value::Text(p.into()))];
+    let listing = match client
+        .answer(call(
+            block,
+            "terminal.list-dir",
+            &at(dir.to_str().expect("utf8")),
+        ))
+        .as_slice()
+    {
+        [Message::Text { text, .. }] => text.clone(),
+        other => panic!("expected Text, got {other:?}"),
+    };
+    let lines: Vec<_> = listing.lines().skip(1).collect();
+    assert_eq!(lines, ["d\tsub", "f\ta.txt"]);
+    let reason = refusal(&mut client, block, "terminal.list-dir", &at("/no/such/dir"));
+    assert!(reason.contains("terminal.list-dir"), "{reason}");
+    // With no path it lists the block's own directory.
+    assert!(
+        text(&mut client, block, "terminal.list-dir")
+            .lines()
+            .count()
+            >= 1
+    );
+    std::fs::remove_dir_all(dir).expect("clean");
 }
 
 #[test]
@@ -337,6 +373,7 @@ fn changes_need_the_lease_and_reads_do_not() {
             ("terminal.reset", &[][..]),
             ("terminal.set-theme", &theme[..]),
             ("terminal.clear", &[][..]),
+            ("terminal.list-dir", &[][..]),
         ] {
             let reason = refusal(&mut other, block, method, args);
             assert!(
@@ -358,7 +395,7 @@ fn a_client_without_the_feature_is_refused() {
         .union(Features::BLOCK_CALL);
     let mut client = Client::connect_with(&path, older, None);
     let block = block_for(&mut client);
-    for method in ["terminal.size", "terminal.reset"] {
+    for method in ["terminal.size", "terminal.reset", "terminal.list-dir"] {
         let reason = refusal(&mut client, block, method, &[]);
         assert!(
             reason.contains("requires feature bits"),

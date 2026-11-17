@@ -31,7 +31,7 @@ impl FrameBench {
     /// font, as the window does) at `px` pixels and size the buffer for a
     /// `cols`×`rows` pane. `None` when no usable font is found.
     pub fn new(cols: usize, rows: usize, px: f32) -> Option<Self> {
-        let set = font::load_set(None, None, None, None, None)?;
+        let set = font::load_set(None, None, None, None, &[])?;
         let ui = FontCache::new(set.clone(), px, false)?;
         let font = FontCache::new(set, px, false)?;
         let (cw, ch) = font.cell_size();

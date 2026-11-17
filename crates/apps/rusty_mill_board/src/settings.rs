@@ -350,6 +350,18 @@ struct ProjectsSet {
 }
 
 #[derive(Deserialize)]
+struct ProjectLink {
+    project: String,
+    repo: String,
+    /// Paths the project owns in `repo` (none: the share no other project of it claims).
+    #[serde(default)]
+    paths: Vec<String>,
+    /// Remove the link instead of making it.
+    #[serde(default)]
+    unlink: bool,
+}
+
+#[derive(Deserialize)]
 struct RolesSet {
     roles: Roles,
 }
@@ -457,6 +469,12 @@ pub fn tools() -> Vec<SettingsTool> {
             "Replace the projects registry (needs admin): either `repos` (repository -> project -> paths) or `registry` (the version 2 file: repositories with an optional `github` slug and projects spanning repositories). A project that cards still use cannot lose the repository they are in.",
             json!({"repos": {"type": "object"}, "registry": {"type": "object"}}),
             &[],
+        ),
+        tool(
+            "settings_project_link",
+            "Link a project to a repository (needs admin): `{project, repo, paths?}` makes the project span `repo` too, owning `paths` there (none: what no other project of it claims); linking again replaces the paths. `unlink: true` removes the link; a project keeps at least one repository.",
+            json!({"project": text, "repo": text, "paths": {"type": "array", "items": text}, "unlink": {"type": "boolean"}}),
+            &["project", "repo"],
         ),
         tool(
             "settings_roles_set",
@@ -600,6 +618,7 @@ impl Settings {
             "settings_agent_remove" => |s, _, a| s.agent_remove(&parse(a)?),
             "settings_agent_rotate" => |s, by, a| s.agent_rotate(by, &parse(a)?),
             "settings_projects_set" => |s, _, a| s.projects_set(&parse(a)?),
+            "settings_project_link" => |s, _, a| s.project_link(&parse(a)?),
             "settings_roles_set" => |s, by, a| s.roles_set(by, &parse(a)?),
             "settings_role_rename" => |s, _, a| s.role_rename(&parse(a)?),
             "settings_github_set" => |s, _, a| s.github_set(&parse(a)?),
@@ -1089,6 +1108,23 @@ impl Settings {
                 ));
             }
         };
+        self.apply_projects(path, new)
+    }
+
+    fn project_link(&self, a: &ProjectLink) -> Res {
+        let path = self.file(&self.files.projects)?;
+        let old = self.board.projects();
+        let new = if a.unlink {
+            old.without_link(&a.project, &a.repo)
+        } else {
+            old.with_link(&a.project, &a.repo, &a.paths)
+        }
+        .map_err(refused)?;
+        self.apply_projects(path, new)
+    }
+
+    /// Check `new` against the agents' project limits, then write and apply it together.
+    fn apply_projects(&self, path: PathBuf, new: Projects) -> Res {
         if let Some(creds) = &self.creds {
             let creds = creds.read().unwrap_or_else(PoisonError::into_inner);
             if let Some((who, p)) = creds.list().find_map(|i| {

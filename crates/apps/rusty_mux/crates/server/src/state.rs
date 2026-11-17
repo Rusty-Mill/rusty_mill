@@ -31,6 +31,7 @@ use crate::datagram::Registry;
 use crate::echo::Waiting;
 use crate::history::History;
 use crate::keys;
+use crate::listing;
 use crate::outbox::Outbox;
 use crate::passed::{Fd, Passed};
 use crate::process;
@@ -104,6 +105,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::AGENT_LAUNCH)
     .union(Features::HOLD)
     .union(Features::SHARING)
+    .union(Features::DIR_LISTING)
     .union(Features::CLIPBOARD)
     .union(UNIX_ONLY);
 
@@ -443,6 +445,9 @@ pub(crate) struct State {
     /// A reload is reading the file; one at a time, so a stalled
     /// filesystem holds one thread at most.
     reloading: bool,
+    /// What `terminal.list-dir` reads a directory with.
+    pub(crate) lister: listing::Lister,
+    listings: listing::Gate,
     /// Where sessions are saved across restarts, with `Config::state_dir`.
     store: Option<Store>,
     /// The event number the store last saved the model at.
@@ -506,6 +511,8 @@ impl State {
             stopping: false,
             loader: crate::settings::reloader(),
             reloading: false,
+            lister: listing::lister(),
+            listings: listing::Gate::default(),
             store: None,
             saved_at: None,
             generation: 0,
@@ -559,6 +566,73 @@ impl State {
             let _ = done.send(());
         });
         Ok(Outcome::Later(finished))
+    }
+
+    /// `terminal.list-dir`: reads the directory on the blocking pool under
+    /// [`listing::DEADLINE`], in a task of its own, and answers once read
+    /// ([`Self::listed`]). The connection waits for it before its next
+    /// request; no other client, PTY or task waits.
+    fn list_dir(
+        &mut self,
+        shared: &Shared,
+        client: ClientId,
+        req: u64,
+        base: Option<String>,
+        path: Option<String>,
+    ) -> Result<oneshot::Receiver<()>, String> {
+        let cancel = self
+            .clients
+            .get(&client)
+            .map(|out| out.cancel().clone())
+            .ok_or("no such client")?;
+        let slot = self
+            .listings
+            .take()
+            .map_err(|e| format!("terminal.list-dir: {e}"))?;
+        let lister = self.lister.clone();
+        let work = rusty_tokio::spawn_blocking(move || {
+            // Held until the thread ends, not until the deadline.
+            let _slot = slot;
+            lister(base.as_deref(), path.as_deref())
+        });
+        let (done, finished) = oneshot::channel();
+        let weak = Rc::downgrade(shared);
+        rusty_tokio::task::spawn_local(async move {
+            let answer = match rusty_tokio::time::timeout(listing::DEADLINE, work).await {
+                Ok(Ok(listed)) => listed,
+                Ok(Err(e)) => Err(format!("the listing failed: {e}")),
+                Err(_) => Err("the listing timed out".into()),
+            };
+            if let Some(shared) = weak.upgrade() {
+                shared.borrow_mut().listed(client, &cancel, req, answer);
+            }
+            // The connection may have gone; nothing waits then.
+            let _ = done.send(());
+        });
+        Ok(finished)
+    }
+
+    /// A listing read `answer`; it goes to the connection that asked,
+    /// unless another took its client over, where `req` means nothing.
+    fn listed(
+        &mut self,
+        client: ClientId,
+        cancel: &Rc<Notify>,
+        req: u64,
+        answer: Result<String, String>,
+    ) {
+        let message = match answer {
+            Ok(text) => Message::Text { req, text },
+            Err(reason) => Message::Failed {
+                req,
+                reason: format!("terminal.list-dir: {reason}"),
+                code: None,
+            },
+        };
+        if self.served_by(client, cancel) {
+            self.send(client, &message);
+        }
+        self.flush();
     }
 
     /// A reload read `result`: a good config replaces the last and is
@@ -1052,6 +1126,22 @@ impl State {
             }
             Ok(Outcome::Write(write)) => Some(Pending::Write(write)),
             Ok(Outcome::Later(done)) => Some(Pending::Reload(done)),
+            Ok(Outcome::Listing { base, path }) => {
+                match this.list_dir(shared, client, req, base, path) {
+                    Ok(done) => Some(Pending::Reload(done)),
+                    Err(reason) => {
+                        this.send(
+                            client,
+                            &Message::Failed {
+                                req,
+                                reason,
+                                code: None,
+                            },
+                        );
+                        None
+                    }
+                }
+            }
             Err(Refusal { reason, code }) => {
                 this.send(client, &Message::Failed { req, reason, code });
                 None
@@ -1715,6 +1805,23 @@ impl State {
             }
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.pid())
                 .ok_or("the program's working directory is unknown")?,
+            "terminal.list-dir" => {
+                // It shows the host's files as the server's account, so it
+                // takes what typing into the block takes: the lease, which
+                // a watch-only grant (C14) never holds.
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                let base = terminal::pwd(&rt.grid, rt.pid());
+                let path = named.iter().find_map(|(n, v)| match (*n, v) {
+                    ("path", Value::Text(p)) => Some(p.as_str()),
+                    _ => None,
+                });
+                return Ok(Outcome::Listing {
+                    base,
+                    path: path.map(str::to_owned),
+                });
+            }
             "terminal.title" => rt.grid.title.clone(),
             "terminal.status" => rt.status.shown().bodies().join("\n"),
             "terminal.process" => {
@@ -2908,6 +3015,12 @@ enum Outcome {
     /// Answered later, by the task the request started; resolves once it
     /// has.
     Later(oneshot::Receiver<()>),
+    /// `terminal.list-dir`, to be read off this thread: the directory
+    /// `path` names from `base`.
+    Listing {
+        base: Option<String>,
+        path: Option<String>,
+    },
 }
 
 /// The line count `param` holds, 0 when left out.
@@ -3433,16 +3546,85 @@ mod regression {
         });
     }
 
+    /// A listing reads off the server's thread (C08): while the filesystem
+    /// stalls, another client is answered, and the stalled one is answered
+    /// once the read returns. One more than the gate allows is refused.
+    #[test]
+    fn a_stalled_listing_holds_up_no_other_client() {
+        runtime().block_on(async {
+            let (shared, _account, block, _inbox) = fixture();
+            let (go, wait) = std::sync::mpsc::channel::<()>();
+            let wait = std::sync::Mutex::new(wait);
+            shared.borrow_mut().lister = std::sync::Arc::new(move |_, _| {
+                wait.lock()
+                    .map_err(|e| e.to_string())?
+                    .recv()
+                    .map_err(|e| e.to_string())?;
+                Ok("/stalled\nd\tsub".into())
+            });
+            let features = Features::EVENT_SEQ
+                .union(Features::CHECKPOINT_V6)
+                .union(Features::BLOCK_CALL)
+                .union(Features::DIR_LISTING);
+            let (out, mut inbox, _) = outbox();
+            let client = shared.borrow_mut().connect(
+                out,
+                test_owner(),
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            {
+                let mut state = shared.borrow_mut();
+                state.mux.attach(client, block).unwrap();
+                state.mux.acquire_lease(client, block).unwrap();
+            }
+            let (other, mut others) = reload_client(&shared);
+            let call = |req| Message::BlockCall {
+                req,
+                block,
+                method: "terminal.list-dir".into(),
+                args: vec![("path".into(), Value::Text("/".into()))],
+            };
+            let Some(Pending::Reload(done)) = State::request(&shared, client, call(1)) else {
+                panic!("the connection must wait for the listing");
+            };
+            State::request(&shared, other, Message::Sync { req: 2 });
+            assert!(matches!(
+                reply_to(&mut others, 2).await,
+                Message::Done { .. }
+            ));
+            go.send(()).unwrap();
+            let answer = loop {
+                let frame = inbox.next().await.expect("a reply");
+                let message = rusty_mux_proto::decode(&frame).unwrap().unwrap().0;
+                if matches!(
+                    message,
+                    Message::Text { req: 1, .. } | Message::Failed { req: 1, .. }
+                ) {
+                    break message;
+                }
+            };
+            assert!(
+                matches!(&answer, Message::Text { text, .. } if text.starts_with("/stalled")),
+                "{answer:?}"
+            );
+            done.await.expect("finished");
+        });
+    }
+
     /// A watch-only client may read a block but not write its status (C14).
     #[test]
-    fn a_watcher_may_not_report_status() {
+    fn a_watcher_may_not_report_status_or_list_a_directory() {
         runtime().block_on(async {
             let (shared, account, block, _inbox) = fixture();
             let mut state = shared.borrow_mut();
             state.share_leases(test_owner());
             let features = Features::CHECKPOINT_V6
                 .union(Features::BLOCK_CALL)
-                .union(Features::AGENT_STATUS);
+                .union(Features::AGENT_STATUS)
+                .union(Features::DIR_LISTING);
             let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
             let (out, _guest_inbox, _) = outbox();
             let guest = state.connect(
@@ -3467,6 +3649,16 @@ mod regression {
                     "terminal.report-status",
                     vec![("state".into(), Value::Text("idle".into()))],
                 )
+                .err()
+                .map(|r| r.reason);
+            assert!(
+                refused.as_deref().is_some_and(|r| r.contains("lease")),
+                "{refused:?}"
+            );
+            // Nor may it list the host's directories.
+            state.mux.attach(guest, block).unwrap();
+            let refused = state
+                .block_call(guest, 2, block, "terminal.list-dir", Vec::new())
                 .err()
                 .map(|r| r.reason);
             assert!(

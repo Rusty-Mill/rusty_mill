@@ -234,6 +234,10 @@ impl Features {
     /// a client without it).
     pub const SHARING: Self = Self(1 << 46);
 
+    /// `terminal.list-dir` (C08): a client's directory browse reads a
+    /// directory on the server's host.
+    pub const DIR_LISTING: Self = Self(1 << 47);
+
     /// Clipboard reads (C54): a program's OSC 52 read is asked of the
     /// block's input-lease holder as [`Message::ClipboardRead`], which
     /// answers with [`Message::ClipboardReply`] if its own policy allows.
@@ -333,6 +337,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::SIGNAL_RELEASE, "signal and release"),
     (Features::TAILSCALE_STATUS, "tailscale status"),
     (Features::SHARING, "live sharing"),
+    (Features::DIR_LISTING, "directory listing"),
     (Features::CLIPBOARD, "clipboard reads"),
 ];
 

@@ -31,6 +31,8 @@ pub mod endpoint;
 mod history;
 #[cfg(any(target_os = "linux", windows))]
 mod keys;
+
+mod listing;
 #[cfg(target_os = "linux")]
 mod login;
 #[cfg(any(target_os = "linux", windows))]

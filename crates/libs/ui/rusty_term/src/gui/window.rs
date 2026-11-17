@@ -59,7 +59,7 @@ use super::strip::{self, Spot, StripState};
 use super::{link_policy, link_trust};
 use crate::backend::BackendHandle;
 use crate::compact::Compactor;
-use crate::config::{ClipboardPolicy, Config, LaunchMode};
+use crate::config::{ClipboardPolicy, Config, FontWeight, LaunchMode};
 use crate::core::{AnsiParser, Cell, Grid, Selection, Theme, WIDE_TRAILER, char_width};
 use crate::gui::mouse::{MouseButtonKind, MouseEvent, MousePoint, SgrEncoder};
 use crate::keymap::{Action, Chord};
@@ -3685,7 +3685,9 @@ impl WindowState<'_> {
     /// whether it succeeded (a missing/unparseable font leaves state
     /// untouched).
     fn rescale_font_cache(&mut self, px: f32, ligatures: bool, scale_factor: f64) -> bool {
-        let Some(font) = load_font(&self.config, px, ligatures) else {
+        let Some(font) = load_font_set(&self.config)
+            .and_then(|set| terminal_font(set, &self.config, px, ligatures))
+        else {
             return false;
         };
         let (cw, ch) = font.cell_size();
@@ -6068,18 +6070,12 @@ impl<'a> App<'a> {
     /// config copy so per-window settings changes stay per-window.
     fn new_window_state(&self) -> Result<WindowState<'a>, String> {
         let font_px = self.config.font_size.unwrap_or(FONT_PX);
-        let font_set = font::load_set(
-            self.config.font.as_deref(),
-            self.config.font_bold.as_deref(),
-            self.config.font_italic.as_deref(),
-            self.config.font_bold_italic.as_deref(),
-            self.config.font_fallback.as_deref(),
-        )
-        .ok_or("no monospace font found")?;
+        let font_set = load_font_set(&self.config).ok_or("no monospace font found")?;
         let ligatures = self.config.ligatures.unwrap_or(true);
         let ui_font = FontCache::new(font_set.clone(), UI_FONT_PX, ligatures)
             .ok_or("font failed to parse")?;
-        let font = FontCache::new(font_set, font_px, ligatures).ok_or("font failed to parse")?;
+        let font = terminal_font(font_set, &self.config, font_px, ligatures)
+            .ok_or("font failed to parse")?;
         let (cell_w, cell_h) = font.cell_size();
         let (bar_w, bar_h) = ui_font.cell_size();
         Ok(WindowState {
@@ -6579,17 +6575,39 @@ fn physical_px(logical: f32, scale: f64) -> f32 {
     ((logical as f64) * scale) as f32
 }
 
-/// Load the configured font set and build a glyph cache at `px`, `None` when
-/// no usable font is found.
-fn load_font(config: &Config, px: f32, ligatures: bool) -> Option<FontCache> {
-    let set = font::load_set(
+/// Load the configured font set, `None` when no usable font is found.
+fn load_font_set(config: &Config) -> Option<font::FontSet> {
+    font::load_set(
         config.font.as_deref(),
         config.font_bold.as_deref(),
         config.font_italic.as_deref(),
         config.font_bold_italic.as_deref(),
-        config.font_fallback.as_deref(),
-    )?;
-    FontCache::new(set, px, ligatures)
+        &config.font_fallback,
+    )
+}
+
+/// Build the interface (bars) glyph cache at `px`: natural metrics, regular weight.
+fn load_font(config: &Config, px: f32, ligatures: bool) -> Option<FontCache> {
+    FontCache::new(load_font_set(config)?, px, ligatures)
+}
+
+/// Build the terminal-grid glyph cache at `px` with the configured weight,
+/// line height and letter spacing.
+fn terminal_font(
+    set: font::FontSet,
+    config: &Config,
+    px: f32,
+    ligatures: bool,
+) -> Option<FontCache> {
+    let set = match config.font_weight {
+        Some(FontWeight::Bold) => set.bold_base(),
+        _ => set,
+    };
+    let metrics = font::FontMetrics::new(
+        config.line_height.unwrap_or(1.0),
+        config.letter_spacing.unwrap_or(0),
+    );
+    Some(FontCache::new(set, px, ligatures)?.with_metrics(metrics))
 }
 
 /// The IME candidate-popup origin, in physical pixels, for a cursor at
