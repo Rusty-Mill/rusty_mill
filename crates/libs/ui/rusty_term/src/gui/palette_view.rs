@@ -215,7 +215,14 @@ fn paint_input(
     let room = w - x - PAD * s;
     let both = format!("{query}{pre}");
     let shown = font.fit_tail(&both, Weight::Regular, QUERY_PX * s, room);
-    let typed = shown.len().min(query.len());
+    // Split on the preedit's own characters from the end: clipping may
+    // have prefixed `…`, so the query's byte length no longer indexes it.
+    let typed = shown
+        .char_indices()
+        .rev()
+        .nth(pre.chars().count().saturating_sub(1))
+        .map_or(0, |(i, _)| i);
+    let typed = if pre.is_empty() { shown.len() } else { typed };
     let used = out.text(
         font,
         &shown[..typed],
@@ -670,5 +677,15 @@ mod tests {
         let two = paint_at(&p, 2.0);
         assert_eq!(two.pop.pixmap.width, 2 * one.pop.pixmap.width);
         assert!(two.pop.pixmap.height >= 2 * one.pop.pixmap.height - 2);
+    }
+
+    #[test]
+    fn a_long_composition_clips_without_splitting_a_character() {
+        let mut p = Palette::open(entries(3), 0);
+        let _ = p.key(Key::Char("a".into()));
+        p.set_preedit(&"日本語の長い変換候補".repeat(8));
+        paint_at(&p, 1.0);
+        p.set_preedit("é");
+        paint_at(&p, 2.0);
     }
 }
