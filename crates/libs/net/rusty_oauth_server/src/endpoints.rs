@@ -557,14 +557,14 @@ impl Form {
     /// The name of the first repeated parameter.
     fn parse(input: &[u8]) -> Result<Self, String> {
         let mut fields = HashMap::new();
-        let text = String::from_utf8_lossy(input);
-        for pair in text.split('&').filter(|p| !p.is_empty()) {
-            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            let key = rusty_percent::decode_form(key).into_owned();
+        for pair in input.split(|&b| b == b'&').filter(|p| !p.is_empty()) {
+            let at = pair.iter().position(|&b| b == b'=');
+            let (key, value) = at.map_or((pair, &b""[..]), |i| (&pair[..i], &pair[i + 1..]));
+            let key = decode_form_bytes(key);
             if fields.contains_key(&key) {
                 return Err(key);
             }
-            fields.insert(key, rusty_percent::decode_form(value).into_owned());
+            fields.insert(key, decode_form_bytes(value));
         }
         Ok(Self(fields))
     }
@@ -572,6 +572,28 @@ impl Form {
     fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(String::as_str)
     }
+}
+
+/// Percent-decode one form component from raw bytes, `+` as a space. Escapes
+/// are resolved before any UTF-8 reading, so an escaped and a raw byte may
+/// make up one character; only then is invalid UTF-8 replaced.
+fn decode_form_bytes(input: &[u8]) -> String {
+    let hex = |b: Option<&u8>| b.and_then(|&b| char::from(b).to_digit(16));
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let (byte, used) = match input[i] {
+            b'+' => (b' ', 1),
+            b'%' => match (hex(input.get(i + 1)), hex(input.get(i + 2))) {
+                (Some(hi), Some(lo)) => (u8::try_from(hi * 16 + lo).unwrap_or(b'%'), 3),
+                _ => (b'%', 1),
+            },
+            other => (other, 1),
+        };
+        out.push(byte);
+        i += used;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Run `handler` on the decoded `input`, or refuse a repeated parameter
@@ -814,6 +836,10 @@ mod tests {
         assert_eq!(form.get("b"), Some(""));
         assert_eq!(form.get("c_d"), Some("\u{2713}"));
         assert_eq!(Form::parse(b"k=1&k%3D=2").map(|_| ()), Ok(()));
+        // An escaped byte and a raw byte can form one character.
+        let mixed = Form::parse(b"r=https%3A%2F%2Fx%2F%C3\xA9").unwrap();
+        assert_eq!(mixed.get("r"), Some("https://x/\u{e9}"));
+        assert_eq!(Form::parse(b"r=%zz%4").unwrap().get("r"), Some("%zz%4"));
         assert_eq!(Form::parse(b"k=1&k=2").err(), Some("k".to_string()));
     }
 
