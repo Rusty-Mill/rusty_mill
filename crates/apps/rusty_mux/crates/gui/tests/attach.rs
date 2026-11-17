@@ -1191,3 +1191,52 @@ fn a_place_the_server_refuses_snaps_the_float_back() {
         "told where it is"
     );
 }
+
+#[test]
+fn a_block_is_reattached_to_a_window_of_floats_alone() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let (first, new, outs, source) = split_window(attached);
+
+    // One block is detached; the other floats and has the focus: nothing is
+    // tiled, and a float is no block to place beside.
+    let mut conn = control(&socket);
+    let mut req = Requests {
+        conn: &mut conn,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    req.welcome().expect("welcome");
+    let listed = req.call(|req| Message::List { req }).expect("a list");
+    let block = listed
+        .iter()
+        .find_map(|m| match m {
+            Message::Entry {
+                entry: rusty_mux_proto::Entry::Block { block, .. },
+                ..
+            } => Some(*block),
+            _ => None,
+        })
+        .expect("a block");
+    req.call(|req| Message::DetachBlock { req, block })
+        .expect("detached");
+    let detached = loop {
+        if let Some(d) = next_session(&outs).detached.first() {
+            break d.key;
+        }
+    };
+    let floated = if detached == first { new } else { first };
+    source.act(Act::Float(floated));
+    next_out(&outs, |o| matches!(o, Out::Layout(_, f) if !f.is_empty()));
+
+    source.act(Act::Reattach(detached));
+    let Out::Layout(Some(tree), floats) = next_out(
+        &outs,
+        |o| matches!(o, Out::Layout(Some(Tree::Pane(k)), f) if *k == detached && !f.is_empty()),
+    ) else {
+        unreachable!("matched above");
+    };
+    assert_eq!(tree, Tree::Pane(detached), "tiled again, the float stays");
+    assert_eq!(floats[0].key, floated);
+}

@@ -189,6 +189,7 @@ pub fn attach_with(
         let focus = shown.keys.key(block);
         shown.focus = Some(focus);
         shown.window = Some(model.shown());
+        shown.tiled = layout.blocks();
         (first, focus)
     };
     state.tell_focus(block);
@@ -287,6 +288,18 @@ struct Shown {
     focus: Option<u64>,
     /// The server window shown.
     window: Option<WindowId>,
+    /// The shown window's tiled blocks: a float or a detached block is
+    /// none, and the server takes only a tile to place a block beside.
+    tiled: Vec<BlockId>,
+}
+
+/// The block a reattached one goes beside: the `focused` block if it is a
+/// tile, else the first tile, else none, which the server fills an empty or
+/// float-only window for (C42).
+fn anchor(tiled: &[BlockId], focused: Option<BlockId>) -> Option<BlockId> {
+    focused
+        .filter(|b| tiled.contains(b))
+        .or_else(|| tiled.first().copied())
 }
 
 impl State {
@@ -511,7 +524,7 @@ impl Source for MuxSource {
         if let Act::Float(key) | Act::Place { key, .. } | Act::Stack { key, .. } = act {
             return self.float(key, act);
         }
-        let (block, window, focused) = {
+        let (block, window, focused, tiled) = {
             let shown = self.0.shown();
             let key = match act {
                 Act::Split { key, .. } | Act::Zoom(key) | Act::Close(key) | Act::Reattach(key) => {
@@ -526,7 +539,12 @@ impl Source for MuxSource {
                 | Act::Stack { .. } => None,
             };
             let focused = shown.focus.and_then(|k| shown.keys.id(k));
-            (key.and_then(|k| shown.keys.id(k)), shown.window, focused)
+            (
+                key.and_then(|k| shown.keys.id(k)),
+                shown.window,
+                focused,
+                shown.tiled.clone(),
+            )
         };
         self.0.try_send(|req| match act {
             Act::Split { dir, .. } => block.map(|block| Message::Split {
@@ -541,11 +559,12 @@ impl Source for MuxSource {
             Act::Zoom(_) => block.map(|block| Message::Zoom { req, block }),
             Act::Close(_) => block.map(|block| Message::CloseBlock { req, block }),
             Act::Unzoom => window.map(|window| Message::Unzoom { req, window }),
-            // Beside the focused block; the server fills an empty window.
+            // Beside the focused tile, else the first; the server fills an
+            // empty window.
             Act::Reattach(_) => block.map(|block| Message::MoveBlock {
                 req,
                 block,
-                beside: focused,
+                beside: anchor(&tiled, focused),
                 side: Side::Right,
             }),
             Act::TakeOver(_)
@@ -1132,6 +1151,7 @@ impl Events {
         let floats = self.floats();
         let tiled = layout.map(|l| tree(l, &mut self.state.shown().keys));
         self.keep_focus_in(self.model.shown_blocks(), focused);
+        self.state.shown().tiled = layout.map(Layout::blocks).unwrap_or_default();
         // A window of floats alone is alive: the first float stands for the
         // tile under them, which draws nothing, as it floats (C42).
         let shown = tiled.or_else(|| floats.first().map(|f| Tree::Pane(f.key)));
@@ -1618,5 +1638,35 @@ impl Drop for PaneWriter {
         lock(&self.0.revive).take();
         self.0.send(|req| Message::Detach { req });
         let _ = lock(&self.0.stream).shutdown(Shutdown::Both);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusty_uuid::Uuid;
+
+    fn blocks() -> [BlockId; 3] {
+        std::array::from_fn(|_| BlockId::from_uuid(Uuid::new_v4()))
+    }
+
+    #[test]
+    fn a_reattached_block_goes_beside_the_focused_tile() {
+        let b = blocks();
+        assert_eq!(anchor(&[b[0], b[1]], Some(b[1])), Some(b[1]));
+    }
+
+    #[test]
+    fn a_focused_float_is_no_anchor_the_first_tile_is() {
+        let b = blocks();
+        assert_eq!(anchor(&[b[0], b[1]], Some(b[2])), Some(b[0]));
+        assert_eq!(anchor(&[b[0]], None), Some(b[0]), "no focus at all");
+    }
+
+    #[test]
+    fn a_window_with_no_tile_has_no_anchor() {
+        let b = blocks();
+        assert_eq!(anchor(&[], Some(b[0])), None, "floats alone");
+        assert_eq!(anchor(&[], None), None);
     }
 }
