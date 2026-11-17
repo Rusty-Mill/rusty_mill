@@ -41,7 +41,21 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 const HEADER: &[u8; 5] = b"RTCP\x06";
 
 /// Encode a consistent headless Grid and parser. No output log is retained.
+/// Never carries image placements, so every RTCP v6 reader accepts it; an
+/// image shows as its half-block cells. See [`encode_with_images`].
 pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
+    encode_as(grid, parser, false)
+}
+
+/// [`encode`] plus the optional trailing placements section. A v6 reader that
+/// predates it rejects any trailing bytes, so use this only for a consumer
+/// known to read placements (a peer that negotiated the images feature, or
+/// this build restoring its own checkpoint).
+pub fn encode_with_images(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
+    encode_as(grid, parser, true)
+}
+
+fn encode_as(grid: &Grid, parser: &AnsiParser, images: bool) -> Result<Vec<u8>> {
     // Cell style ids are checked per run as the lines are written.
     grid.validate_checkpoint()?;
     parser.validate_checkpoint()?;
@@ -49,7 +63,9 @@ pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
     w.put(HEADER)?;
     grid.write(&mut w)?;
     parser.write(&mut w)?;
-    grid.write_placements(&mut w)?;
+    if images {
+        grid.write_placements(&mut w)?;
+    }
     Ok(w.bytes)
 }
 
@@ -88,6 +104,25 @@ pub fn encode_split(
     parser: &AnsiParser,
     batch_bytes: usize,
 ) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
+    encode_split_as(grid, parser, batch_bytes, false)
+}
+
+/// [`encode_split`] with the trailing placements section, as
+/// [`encode_with_images`].
+pub fn encode_split_with_images(
+    grid: &Grid,
+    parser: &AnsiParser,
+    batch_bytes: usize,
+) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
+    encode_split_as(grid, parser, batch_bytes, true)
+}
+
+fn encode_split_as(
+    grid: &Grid,
+    parser: &AnsiParser,
+    batch_bytes: usize,
+    images: bool,
+) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
     grid.validate_checkpoint()?;
     parser.validate_checkpoint()?;
     let split = grid.history_split();
@@ -95,7 +130,9 @@ pub fn encode_split(
     w.put(HEADER)?;
     grid.write_from(&mut w, split)?;
     parser.write(&mut w)?;
-    grid.write_placements(&mut w)?;
+    if images {
+        grid.write_placements(&mut w)?;
+    }
     Ok((w.bytes, grid.history_batches(split, batch_bytes)?))
 }
 

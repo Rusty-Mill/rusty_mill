@@ -263,31 +263,44 @@ mod tests {
     }
 
     #[test]
-    fn a_checkpoint_carries_placements_and_stays_compatible_without() {
+    fn a_checkpoint_with_images_carries_placements() {
         let (g, p) = fed(20, 5, PLACE);
-        let (back, _) = checkpoint::decode(&checkpoint::encode(&g, &p).unwrap()).unwrap();
+        let bytes = checkpoint::encode_with_images(&g, &p).unwrap();
+        let (back, _) = checkpoint::decode(&bytes).unwrap();
         assert_eq!(back.placements(), g.placements());
         let (mut g, mut p) = fed(20, 5, PLACE);
         p.advance(&mut g, b"\r\n\r\n\r\n\r\n\r\n\r\n");
-        let (back, _) = checkpoint::decode(&checkpoint::encode(&g, &p).unwrap()).unwrap();
+        let bytes = checkpoint::encode_with_images(&g, &p).unwrap();
+        let (back, _) = checkpoint::decode(&bytes).unwrap();
         let (a, b) = (&g.placements()[0], &back.placements()[0]);
         assert_eq!(g.placement_top_row(a), back.placement_top_row(b));
-        // No placements: bytes are what a build without this section wrote.
         let (g, p) = fed(20, 5, b"hi");
-        let bytes = checkpoint::encode(&g, &p).unwrap();
-        assert!(
-            checkpoint::decode(&bytes)
-                .unwrap()
-                .0
-                .placements()
-                .is_empty()
-        );
+        let plain = checkpoint::encode_with_images(&g, &p).unwrap();
+        assert_eq!(plain, checkpoint::encode(&g, &p).unwrap());
+    }
+
+    /// A v6 reader without the trailing section rejects bytes after the
+    /// parser, so the default encoders must write none: the checkpoint of a
+    /// grid with a placement is byte-identical to one of the same grid
+    /// without it, and the half-block cells survive.
+    #[test]
+    fn the_default_encoders_stay_readable_by_older_v6_readers() {
+        let (mut g, p) = fed(20, 5, PLACE);
+        assert!(!g.placements().is_empty());
+        let legacy = checkpoint::encode(&g, &p).unwrap();
+        let split = checkpoint::encode_split(&g, &p, 1 << 20).unwrap().0;
+        assert_ne!(legacy, checkpoint::encode_with_images(&g, &p).unwrap());
+        g.placements.clear();
+        assert_eq!(legacy, checkpoint::encode(&g, &p).unwrap());
+        assert_eq!(split, checkpoint::encode_split(&g, &p, 1 << 20).unwrap().0);
+        let (back, _) = checkpoint::decode(&legacy).unwrap();
+        assert!(back.placements().is_empty());
     }
 
     #[test]
     fn a_hostile_trailing_section_is_rejected() {
         let (g, p) = fed(20, 5, PLACE);
-        let mut bytes = checkpoint::encode(&g, &p).unwrap();
+        let mut bytes = checkpoint::encode_with_images(&g, &p).unwrap();
         // The last field written is the final placement's `rows`: blow it up.
         let n = bytes.len();
         bytes[n - 8..].copy_from_slice(&u64::MAX.to_le_bytes());
