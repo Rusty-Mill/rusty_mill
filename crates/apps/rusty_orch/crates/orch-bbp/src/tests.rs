@@ -1006,11 +1006,15 @@ fn real_data_is_named_and_absolute_and_feeds_the_dry_run() {
     let mut c = config(&dir);
     let err = dry_run_args(&c, "n", "/w", "p", &[]).unwrap_err();
     assert!(err.contains("real_data"), "{err}");
+    // Absolute on every platform: `/srv/...` is not absolute on Windows.
+    let root = |name: &str| dir.join(name).to_string_lossy().into_owned();
+    let (orders, users) = (root("orders"), root("users"));
     c.real_data = BTreeMap::from([
-        ("orders".to_owned(), "/srv/orders".to_owned()),
-        ("users".to_owned(), "/srv/users".to_owned()),
+        ("orders".to_owned(), orders.clone()),
+        ("users".to_owned(), users.clone()),
     ]);
     c.validate().unwrap();
+    let data = format!("orders={orders},users={users}");
     assert_eq!(
         dry_run_args(&c, "plan-1", "/w", "migrate", &["--all".into()]).unwrap(),
         [
@@ -1018,7 +1022,7 @@ fn real_data_is_named_and_absolute_and_feeds_the_dry_run() {
             "--name",
             "plan-1",
             "--data",
-            "orders=/srv/orders,users=/srv/users",
+            data.as_str(),
             "--work",
             "/w",
             "--",
