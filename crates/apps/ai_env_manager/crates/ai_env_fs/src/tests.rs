@@ -279,6 +279,61 @@ fn discovery_finds_skill_folders_and_reports_bad_names() {
     assert!(discover_skills(&tmp.0.join("missing")).is_err());
 }
 
+fn skill(root: &std::path::Path, rel: &str) {
+    fs::create_dir_all(root.join(rel)).unwrap();
+    fs::write(root.join(rel).join("SKILL.md"), "x").unwrap();
+}
+
+#[test]
+fn discovery_recurses_into_nested_packs() {
+    let tmp = Tmp::new();
+    let root = tmp.0.join("pack");
+    skill(&root, "top");
+    skill(&root, "group/inner");
+    skill(&root, "group/deeper/leaf");
+    skill(&root, "top/nested-inside-a-skill");
+    let found = discover_skills(&root).unwrap();
+    let ids: Vec<_> = found.entries.iter().map(|e| e.id.as_str()).collect();
+    // A skill's own subfolders are content, not more skills.
+    assert_eq!(ids, ["inner", "leaf", "top"]);
+    assert!(found.skipped.is_empty());
+}
+
+#[test]
+fn discovery_skips_ignored_and_reports_depth_cap() {
+    let tmp = Tmp::new();
+    let root = tmp.0.join("pack");
+    skill(&root, "node_modules/a");
+    skill(&root, ".hidden/b");
+    skill(&root, "ok/c");
+    let deep = "d/d/d/d/d/d/d/d/too-deep";
+    skill(&root, deep);
+    let found = discover_skills(&root).unwrap();
+    let ids: Vec<_> = found.entries.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, ["c"]);
+    assert_eq!(found.skipped.len(), 1);
+    assert!(found.skipped[0].reason.contains("deeper"));
+}
+
+#[test]
+fn discovery_of_empty_folder_finds_nothing() {
+    let tmp = Tmp::new();
+    let root = tmp.0.join("empty");
+    fs::create_dir_all(root.join("sub/sub")).unwrap();
+    assert_eq!(discover_skills(&root).unwrap(), Discovered::default());
+}
+
+#[cfg(unix)]
+#[test]
+fn discovery_does_not_follow_symlinked_folders() {
+    let tmp = Tmp::new();
+    let root = tmp.0.join("pack");
+    skill(&root, "real");
+    std::os::unix::fs::symlink(&root, root.join("loop")).unwrap();
+    let found = discover_skills(&root).unwrap();
+    assert_eq!(found.entries.len(), 1);
+}
+
 // --- editor (edit.rs) ---
 
 use ai_env_core::{plan_edit, EditPlan, EditRefusal, Ownership, RelPath};
