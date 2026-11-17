@@ -248,8 +248,11 @@ pub struct Session<R> {
     taints: Taints,
     /// The run's taint table as last given.
     given: Taints,
-    /// Messages posted by a lens principal (a lens id or the alien's).
-    lens_posts: BTreeSet<MsgId>,
+    /// Every message read, by who posted it.
+    authors: BTreeMap<MsgId, String>,
+    /// The configured lens principals (lens ids and the alien's), as of
+    /// the last read.
+    lenses: BTreeSet<String>,
 }
 
 /// A fresh run id, so a later run's posts never replay an earlier run's.
@@ -273,7 +276,8 @@ impl<R: Rpc> Session<R> {
             brief: None,
             taints: Taints::default(),
             given: Taints::default(),
-            lens_posts: BTreeSet::new(),
+            authors: BTreeMap::new(),
+            lenses: BTreeSet::new(),
         }
     }
 
@@ -287,14 +291,23 @@ impl<R: Rpc> Session<R> {
     /// The given table, with every lens post it has no entry for read as
     /// `sensitive` (D139): a post whose answer was lost, or that landed
     /// just before a crash, has an unknown id and so no entry. Never saved,
-    /// so a post whose entry lands later reads at its real class.
+    /// so a post whose entry lands later reads at its real class. A lens
+    /// principal is a configured one, or any author of a post the table
+    /// has an entry for, so a lens since removed or renamed still counts
+    /// once one of its posts was tainted.
     fn fail_closed(&mut self) {
+        let tainted = self
+            .authors
+            .iter()
+            .filter(|(id, _)| self.given.of(**id).is_some())
+            .map(|(_, who)| who);
+        let lenses: BTreeSet<&String> = self.lenses.iter().chain(tainted).collect();
         let mut taints = self.given.clone();
         let unknown = self
-            .lens_posts
+            .authors
             .iter()
-            .filter(|id| self.given.of(**id).is_none());
-        for id in unknown {
+            .filter(|(id, who)| lenses.contains(who) && self.given.of(**id).is_none());
+        for (id, _) in unknown {
             taints.raise(*id, orch_lens::DataClass::Sensitive);
         }
         self.taints = taints;
@@ -335,11 +348,11 @@ impl<R: Rpc> Session<R> {
 
     /// Read every message after the cursor, a page at a time.
     fn read_new(&mut self, config: &LensConfig) -> Result<(), String> {
-        let lenses: BTreeSet<&str> = config
+        self.lenses = config
             .lenses
             .iter()
-            .map(|l| l.id.as_str())
-            .chain(config.alien.iter().map(|a| a.id.as_str()))
+            .map(|l| l.id.clone())
+            .chain(config.alien.iter().map(|a| a.id.clone()))
             .collect();
         loop {
             let mut args = vec![("limit", PAGE.into())];
@@ -355,9 +368,7 @@ impl<R: Rpc> Session<R> {
                 return Err("read answered something else".to_owned());
             };
             for m in messages {
-                if lenses.contains(m.from.0.as_str()) {
-                    self.lens_posts.insert(m.id);
-                }
+                self.authors.insert(m.id, m.from.0.clone());
                 if let Body::Claim(b) = m.draft.body {
                     self.claims.insert(m.id, b);
                 }
@@ -1068,9 +1079,14 @@ mod tests {
 
     #[test]
     fn tainted_claims_raise_their_cards_and_lines() {
+        // Only lens posts are tainted: 7 is the adversary's, 8 a human's.
+        let by_lens = Message {
+            from: PrincipalId("adversary".to_owned()),
+            ..claim(7)
+        };
         let fake = Fake::default()
             .on("task_card", task_card(5))
-            .on("read", read(vec![claim(7), claim(8)], false))
+            .on("read", read(vec![by_lens, claim(8)], false))
             .on(
                 "claims_delta",
                 Response::Claims(vec![
@@ -1112,7 +1128,13 @@ mod tests {
                 .on(
                     "read",
                     read(
-                        vec![from(7, "adversary"), from(8, "adversary"), from(9, "nano")],
+                        vec![
+                            from(7, "adversary"),
+                            from(8, "adversary"),
+                            from(9, "nano"),
+                            from(10, "retired"),
+                            from(11, "retired"),
+                        ],
                         false,
                     ),
                 )
@@ -1122,6 +1144,8 @@ mod tests {
                         view(7, ClaimStatus::Open, &[]),
                         view(8, ClaimStatus::Open, &[]),
                         view(9, ClaimStatus::Open, &[]),
+                        view(10, ClaimStatus::Open, &[]),
+                        view(11, ClaimStatus::Open, &[]),
                     ]),
                 );
             let mut s = Session::new("adversary", fake, "r1");
@@ -1136,10 +1160,13 @@ mod tests {
         // Before any table is given, and after a reload with only 8's entry.
         assert_eq!(class(&session())[..2], [(7, sensitive), (8, sensitive)]);
         let mut s = session();
-        s.taint(&Taints::from_entries([(8, internal)]));
+        s.taint(&Taints::from_entries([(8, internal), (10, internal)]));
         let got = class(&s);
         assert_eq!(got[..2], [(7, sensitive), (8, internal)], "{got:?}");
         assert!(got[2].1 < sensitive, "a human's post: {got:?}");
+        // "retired" is no longer configured, but its tainted post 10 marks
+        // it as a lens, so its entry-less post 11 still reads sensitive.
+        assert_eq!(got[3..], [(10, internal), (11, sensitive)], "{got:?}");
     }
 
     #[test]
