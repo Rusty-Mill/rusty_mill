@@ -207,7 +207,9 @@ impl Grid {
     }
 
     /// Placements must name a stored image, stay within the cap, and have a
-    /// sane footprint.
+    /// sane footprint. Height is not capped by the current history: a tall
+    /// placement made under a larger cap may be partly retained after it
+    /// shrinks, and its bottom is already bounded by the screen.
     pub(crate) fn validate_placements(&self) -> Result<()> {
         let bad = self.placements.len() > MAX_PLACEMENTS
             || self.placements.iter().any(|p| {
@@ -215,7 +217,6 @@ impl Grid {
                     || p.rows == 0
                     || p.col >= self.cols
                     || p.col.saturating_add(p.cols) > self.cols
-                    || p.rows > self.rows.saturating_add(self.scrollback_max)
                     || p.serial.saturating_add(p.rows)
                         > self.total_scrolled.saturating_add(self.rows)
                     || !self.kitty_images.iter().any(|i| i.id == p.image)
@@ -322,6 +323,20 @@ mod tests {
         assert_eq!(back.placements().len(), 1);
         let (a, b) = (&g.placements()[0], &back.placements()[0]);
         assert_eq!(g.placement_top_row(a), back.placement_top_row(b));
+    }
+
+    #[test]
+    fn a_full_checkpoint_keeps_a_tall_placement_after_the_history_cap_shrinks() {
+        let (mut g, p) = fed(
+            20,
+            5,
+            b"\x1b_Ga=T,f=32,s=1,v=2,i=7,c=6,r=6;/wAA//8AAP8=\x1b\\",
+        );
+        assert_eq!(g.placements().len(), 1);
+        g.set_scrollback_max(0);
+        let bytes = checkpoint::encode_with_images(&g, &p).unwrap();
+        let (back, _) = checkpoint::decode(&bytes).unwrap();
+        assert_eq!(back.placements().len(), g.placements().len());
     }
 
     #[test]
