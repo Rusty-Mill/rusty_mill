@@ -1518,9 +1518,12 @@ pub static CATALOG: &[Method] = &[
         doc: "Find text in the block's scrollback and screen, case-insensitively, across \
               rows the program wrapped: one line per match, oldest first, as \
               `ROW<TAB>COL<TAB>TEXT`. `ROW` counts as for `terminal.prompts`, `COL` is the \
-              column the match starts at on that row and `TEXT` the row, without trailing \
-              blanks. Only history still in the scrollback is searched, not what \
-              `terminal.history` reads.",
+              cell column the match starts at (a wide character counts twice, `TEXT` is in \
+              characters) and `TEXT` the row, without trailing blanks; a match across a wrap \
+              shows its first row. Combining marks are not matched. A query over 1024 \
+              characters is refused, and the reply stops before it passes the reply budget. \
+              Only history still in the scrollback is searched, not what `terminal.history` \
+              reads.",
         params: &[
             BLOCK,
             required("query", Ty::Text, "The text to find; empty finds nothing."),

@@ -136,6 +136,9 @@ pub(crate) fn shell(grid: &Grid, program: &str, activity: &str) -> String {
 /// The most matches `terminal.find` gives, and how many when `limit` is left out.
 pub(crate) const FIND_MAX: u32 = 10_000;
 pub(crate) const FIND_DEFAULT: u32 = 100;
+/// The longest `terminal.find` query, in characters: the search costs about
+/// the grid's size times the query's, on the loop every client shares.
+pub(crate) const FIND_QUERY_MAX: usize = 1024;
 
 /// The row `abs` as `terminal.prompts` and `terminal.find` count it: from
 /// the top of the screen, so the scrollback is negative.
@@ -162,17 +165,27 @@ pub(crate) fn prompts(grid: &Grid) -> String {
 }
 
 /// `terminal.find`: a `ROW<TAB>COL<TAB>TEXT` line for each of the first
-/// `limit` matches of `query`.
-pub(crate) fn find(grid: &Grid, query: &str, limit: u32) -> String {
+/// `limit` matches of `query`, cut short before the reply passes `max` bytes
+/// (each line repeats its row, so wide rows fill it first).
+pub(crate) fn find(grid: &Grid, query: &str, limit: u32, max: usize) -> String {
     let limit = limit.min(FIND_MAX) as usize;
-    grid.find_text(query, limit)
-        .iter()
-        .map(|hit| {
-            let (row, col) = (row_of(grid, hit.abs), hit.col);
-            format!("{row}\t{col}\t{}", row_text(grid, hit.abs))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut out = String::new();
+    for hit in grid.find_text(query, limit) {
+        let line = format!(
+            "{}\t{}\t{}",
+            row_of(grid, hit.abs),
+            hit.col,
+            row_text(grid, hit.abs)
+        );
+        if out.len() + line.len() + 1 > max {
+            break;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&line);
+    }
+    out
 }
 
 /// What `terminal.format` reads, and how.
@@ -583,11 +596,27 @@ mod tests {
         );
         // `one` scrolled one row above the screen, `two` and `tri` are on it.
         assert_eq!(prompts(&grid), "-1\tone\n0\ttwo\n1\ttri");
-        assert_eq!(find(&grid, "T", 10), "0\t0\ttwo\n1\t0\ttri");
-        assert_eq!(find(&grid, "T", 1), "0\t0\ttwo");
-        assert_eq!(find(&grid, "none", 10), "");
-        assert_eq!(find(&grid, "", 10), "");
+        let all = usize::MAX;
+        assert_eq!(find(&grid, "T", 10, all), "0\t0\ttwo\n1\t0\ttri");
+        assert_eq!(find(&grid, "T", 1, all), "0\t0\ttwo");
+        assert_eq!(find(&grid, "T", 0, all), "");
+        assert_eq!(find(&grid, "T", u32::MAX, all), "0\t0\ttwo\n1\t0\ttri");
+        assert_eq!(find(&grid, "none", 10, all), "");
+        assert_eq!(find(&grid, "", 10, all), "");
+        // A byte budget stops at the last line that fits.
+        assert_eq!(find(&grid, "T", 10, 10), "0\t0\ttwo");
+        assert_eq!(find(&grid, "T", 10, 5), "");
         assert_eq!(prompts(&Grid::new(10, 2)), "");
+    }
+
+    #[test]
+    fn find_folds_non_ascii_case() {
+        let mut grid = Grid::new(10, 2);
+        AnsiParser::new().advance(&mut grid, "ÉCOLE\r\nécole".as_bytes());
+        assert_eq!(
+            find(&grid, "école", 10, usize::MAX),
+            "0\t0\tÉCOLE\n1\t0\técole"
+        );
     }
 
     #[test]

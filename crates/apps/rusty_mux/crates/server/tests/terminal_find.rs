@@ -95,6 +95,22 @@ fn prompts_and_find_read_the_blocks_scrollback_and_screen() {
 }
 
 #[test]
+fn find_refuses_a_long_query_and_a_missing_one() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, FIND, None);
+    let block = block_for(&mut client);
+    let long = [("query", Value::Text("x".repeat(1025)))];
+    for (args, want) in [(&long[..], "over 1024"), (&[][..], "missing")] {
+        match call(&mut client, block, "terminal.find", args) {
+            Message::Failed { reason, .. } => assert!(reason.contains(want), "{reason}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+    let edge = [("query", Value::Text("x".repeat(1024)))];
+    assert_eq!(text(&mut client, block, "terminal.find", &edge), "");
+}
+
+#[test]
 fn a_client_without_the_feature_is_refused() {
     let path = start_server();
     let older = Features::CHECKPOINT_V6

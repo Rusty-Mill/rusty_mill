@@ -1796,7 +1796,14 @@ impl State {
                         _ => None,
                     })
                     .unwrap_or(terminal::FIND_DEFAULT);
-                terminal::find(&rt.grid, query, limit)
+                if query.chars().count() > terminal::FIND_QUERY_MAX {
+                    return Err(format!(
+                        "{method}: query is over {} characters",
+                        terminal::FIND_QUERY_MAX
+                    )
+                    .into());
+                }
+                terminal::find(&rt.grid, query, limit, REPLY_MAX)
             }
             "terminal.send-keys" => {
                 self.mux
@@ -3705,7 +3712,13 @@ mod regression {
                 None,
                 None,
             );
-            for method in ["terminal.format", "terminal.history", "terminal.title"] {
+            for method in [
+                "terminal.format",
+                "terminal.history",
+                "terminal.title",
+                "terminal.prompts",
+                "terminal.find",
+            ] {
                 let refused = state
                     .block_call(guest, 1, block, method, Vec::new())
                     .err()
