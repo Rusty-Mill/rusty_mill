@@ -245,6 +245,12 @@ impl Features {
     /// goes in an event.
     pub const CLIPBOARD: Self = Self(1 << 48);
 
+    /// Sessions across client windows (C64): [`Message::ShowSession`] asks
+    /// one other client, or every other client, of the same account to show
+    /// a session, and each hears it as [`Message::SessionShown`]. A client
+    /// entry says whether it can be asked.
+    pub const SHOW_SESSION: Self = Self(1 << 51);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -339,6 +345,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::SHARING, "live sharing"),
     (Features::DIR_LISTING, "directory listing"),
     (Features::CLIPBOARD, "clipboard reads"),
+    (Features::SHOW_SESSION, "sessions across windows"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -554,7 +561,19 @@ pub enum Entry {
         principal: Option<Principal>,
         /// How it is connected; `None` from an older server.
         transport: Option<Transport>,
+        /// It can be asked to show a session ([`Features::SHOW_SESSION`]);
+        /// `None` from an older server.
+        showable: Option<bool>,
     },
+}
+
+/// Whom a [`Message::ShowSession`] asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShowTo {
+    /// One client.
+    Client(ClientId),
+    /// Every other client of the sender's account that can show sessions.
+    Others,
 }
 
 /// One frame's content.
@@ -848,6 +867,18 @@ pub enum Message {
         selection: Selection,
         data: Option<Vec<u8>>,
     },
+    /// Asks `to` to show `session` (C64). Done once it is sent, which
+    /// changes nothing on the server: each target hears
+    /// [`Message::SessionShown`] and decides for itself. Refused for a
+    /// session that doesn't exist, a target of another account or without
+    /// [`Features::SHOW_SESSION`], and past the sender's rate limit. Sent
+    /// to [`ShowTo::Others`] with nobody eligible, it is still Done.
+    /// Negotiated with [`Features::SHOW_SESSION`].
+    ShowSession {
+        req: u64,
+        session: SessionId,
+        to: ShowTo,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -967,6 +998,14 @@ pub enum Message {
         block: BlockId,
         selection: Selection,
     },
+    /// Client `by` asks this client to show `session` (C64); never an
+    /// event, never replayed after a reconnect. The server attaches
+    /// nothing: the client decides. Negotiated with
+    /// [`Features::SHOW_SESSION`].
+    SessionShown {
+        session: SessionId,
+        by: ClientId,
+    },
     /// The block's [`Echo`] changed, or the client just attached; it
     /// precedes the Output read after the change. Negotiated with
     /// [`Features::ECHO_ACK`].
@@ -1080,8 +1119,11 @@ const HOLD: u32 = 60;
 const EXITED: u32 = 61;
 /// A [`TailscaleState`]: 1 running, 2 needs login, 3 stopped, 4 other (C27).
 const TAILSCALE: u32 = 62;
-// IDs 1..=TAILSCALE are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = TAILSCALE as usize;
+/// A client entry's mark that it can be asked to show a session: 1 yes, 0
+/// no, absent from an older server (C64).
+const SHOWABLE: u32 = 63;
+// IDs 1..=SHOWABLE are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = SHOWABLE as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -1125,6 +1167,7 @@ mod ty {
     pub const SIGNAL_BLOCK: u8 = 0x28;
     pub const RELEASE_BLOCK: u8 = 0x29;
     pub const CLIPBOARD_REPLY: u8 = 0x2a;
+    pub const SHOW_SESSION: u8 = 0x2b;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -1142,6 +1185,7 @@ mod ty {
     pub const LEASE_REQUESTED: u8 = 0x8f;
     pub const HISTORY: u8 = 0x90;
     pub const CLIPBOARD_READ: u8 = 0x91;
+    pub const SESSION_SHOWN: u8 = 0x92;
 }
 
 impl Message {
@@ -1280,6 +1324,13 @@ impl Message {
                 req_block(out, *req, *block, ty::SIGNAL_BLOCK)
             }
             M::ReleaseBlock { req, block } => req_block(out, *req, *block, ty::RELEASE_BLOCK),
+            M::ShowSession { req, session, to } => {
+                out.varint(REQ, *req).uuid(SESSION, session.uuid());
+                if let ShowTo::Client(client) = to {
+                    out.uuid(CLIENT, client.uuid());
+                }
+                ty::SHOW_SESSION
+            }
             M::ClipboardReply {
                 req,
                 block,
@@ -1409,6 +1460,10 @@ impl Message {
                 out.uuid(BLOCK, block.uuid()).uuid(CLIENT, client.uuid());
                 put_principal(out, principal);
                 ty::LEASE_REQUESTED
+            }
+            M::SessionShown { session, by } => {
+                out.uuid(SESSION, session.uuid()).uuid(CLIENT, by.uuid());
+                ty::SESSION_SHOWN
             }
             M::ClipboardRead { block, selection } => {
                 out.uuid(BLOCK, block.uuid())
@@ -1633,6 +1688,17 @@ impl Message {
             ty::RELEASE_BLOCK => M::ReleaseBlock {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
+            },
+            ty::SHOW_SESSION => M::ShowSession {
+                req: f.varint(REQ)?,
+                session: session(&f, SESSION)?,
+                to: f
+                    .opt(CLIENT, client)?
+                    .map_or(ShowTo::Others, ShowTo::Client),
+            },
+            ty::SESSION_SHOWN => M::SessionShown {
+                session: session(&f, SESSION)?,
+                by: client(&f, CLIENT)?,
             },
             ty::CLIPBOARD_REPLY => M::ClipboardReply {
                 req: f.varint(REQ)?,
@@ -2604,6 +2670,7 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             attached,
             principal,
             transport,
+            showable,
         } => {
             let o = out
                 .varint(KIND, entry::CLIENT)
@@ -2617,6 +2684,9 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             }
             if let Some(transport) = transport {
                 o.varint(TRANSPORT, transport_wire(*transport));
+            }
+            if let Some(showable) = showable {
+                o.varint(SHOWABLE, u64::from(*showable));
             }
         }
     }
@@ -2657,6 +2727,7 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             attached: f.opt(BLOCK, block)?,
             principal: f.opt(PRINCIPAL, principal)?,
             transport: f.opt(TRANSPORT, transport)?,
+            showable: f.opt(SHOWABLE, In::varint)?.map(|v| v != 0),
         },
         _ => return Err(f.invalid(KIND)),
     })

@@ -250,6 +250,7 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             attached,
             principal,
             transport,
+            ..
         } => {
             let mut fields = vec![
                 ("name", Text(name.clone())),
@@ -775,6 +776,7 @@ mod tests {
             attached: Some(BlockId::from_uuid(id(1))),
             principal: Some(Principal::unix(1000, Some("alice".into())).unwrap()),
             transport: Some(Transport::Datagram),
+            showable: None,
         };
         assert_eq!(
             entry_line(&client, false),
@@ -791,6 +793,7 @@ mod tests {
             attached: None,
             principal: None,
             transport: None,
+            showable: None,
         };
         assert_eq!(
             entry_line(&old, false),

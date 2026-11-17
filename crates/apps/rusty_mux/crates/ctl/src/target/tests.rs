@@ -51,6 +51,7 @@ fn listing() -> Vec<Entry> {
         attached: None,
         principal: None,
         transport: None,
+        showable: None,
     };
     vec![
         session(S1, "build"),
