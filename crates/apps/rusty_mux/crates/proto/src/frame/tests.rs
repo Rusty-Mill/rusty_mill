@@ -477,6 +477,22 @@ fn every_message_round_trips() {
             client: ClientId::from_uuid(Uuid::new_v4()),
             principal: Principal::unix(1000, Some("alice".into())).expect("valid"),
         },
+        Message::ClipboardRead {
+            block,
+            selection: Selection::Primary,
+        },
+        Message::ClipboardReply {
+            req: 26,
+            block,
+            selection: Selection::Clipboard,
+            data: Some(b"text".to_vec()),
+        },
+        Message::ClipboardReply {
+            req: 27,
+            block,
+            selection: Selection::Clipboard,
+            data: None,
+        },
     ];
     for message in messages {
         round_trip(message);
