@@ -186,7 +186,7 @@ fn lens_command<O>(
     let options = match parsed {
         Ok(options) => options,
         Err(ArgsError::Help) => {
-            println!("{usage}");
+            emit(&format!("{usage}\n"));
             return ExitCode::SUCCESS;
         }
         Err(ArgsError::Usage(message)) => {
@@ -196,13 +196,29 @@ fn lens_command<O>(
     };
     match run(&options) {
         Ok(report) => {
-            print!("{report}");
+            emit(&report);
             ExitCode::SUCCESS
         }
         Err(error) => {
             eprintln!("rusty_orch: {error}");
             ExitCode::from(1)
         }
+    }
+}
+
+/// Write a command's output to stdout. If stdout is closed (the terminal or
+/// the pipe it fed is gone), `print!` would panic and the whole report of a
+/// long run would be lost with it; the same text goes to stderr instead and
+/// the exit code is unchanged, since the work itself succeeded.
+fn emit(text: &str) {
+    use std::io::Write;
+    let mut out = io::stdout().lock();
+    if out
+        .write_all(text.as_bytes())
+        .and_then(|()| out.flush())
+        .is_err()
+    {
+        let _ = io::stderr().write_all(text.as_bytes());
     }
 }
 
