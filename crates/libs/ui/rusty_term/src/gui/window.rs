@@ -423,6 +423,18 @@ impl Place {
     }
 }
 
+/// The block whose grid is under window pixel `(x, y)`: the frontmost block
+/// under it owns it, so the pointer on a float's header or border, which
+/// covers the tile under it, is on no grid (focus follows mouse, D67; C42).
+fn grid_under(places: &[(u64, Place)], cell: (usize, usize), x: usize, y: usize) -> Option<u64> {
+    places
+        .iter()
+        .rev()
+        .find(|(_, p)| p.block.contains(x, y))
+        .filter(|(_, p)| p.grid_contains(cell, x, y))
+        .map(|&(id, _)| id)
+}
+
 impl Tab {
     fn pane(&self, id: u64) -> Option<&Pane> {
         self.panes.iter().find(|p| p.id == id)
@@ -5456,13 +5468,7 @@ impl WindowState<'_> {
         }
         let (px, py) = (x.max(0.0) as usize, y.max(0.0) as usize);
         let cell = (self.cell_w, self.cell_h);
-        let Some(id) = self
-            .places(self.active)
-            .into_iter()
-            .rev()
-            .find(|(_, p)| p.grid_contains(cell, px, py))
-            .map(|(id, _)| id)
-        else {
+        let Some(id) = grid_under(&self.places(self.active), cell, px, py) else {
             return;
         };
         let Some(tab) = self.tabs.get_mut(self.active) else {
@@ -5718,15 +5724,10 @@ impl WindowState<'_> {
     /// Focus block `key` and open its take-over confirm, right-aligned
     /// with its button and 8 px under its header (D64 2).
     fn open_confirm(&mut self, key: u64) {
-        let spot = blocks::Spot::Take(key, blocks::TakeButton::TakeOver);
         let Some((program, owner)) = self.body.owned(key) else {
             return;
         };
-        let Some(button) = self
-            .body
-            .painted()
-            .and_then(|b| b.spots.iter().find(|(_, s)| *s == spot).map(|(r, _)| *r))
-        else {
+        let Some(button) = self.body.painted().and_then(|b| b.take_over_button(key)) else {
             return;
         };
         if let Some(tab) = self.tabs.get_mut(self.active) {
@@ -7663,6 +7664,34 @@ fn grid_may_answer(policy: ClipboardPolicy, serves: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hover_over_a_floats_header_or_border_focuses_no_tile_under_it() {
+        use super::{Place, Rect, grid_under};
+        let cell = (10, 20);
+        // A tile over 0..400 x 0..200; a float's box over its right part,
+        // header 20 px tall and a 2 px border round a 10 x 5 cell grid.
+        let tile = Place {
+            cells: Rect::new(0, 0, 40, 10),
+            x: 0,
+            y: 0,
+            block: Rect::new(0, 0, 400, 200),
+            float: false,
+        };
+        let float = Place {
+            cells: Rect::new(20, 2, 10, 5),
+            x: 202,
+            y: 22,
+            block: Rect::new(200, 0, 104, 124),
+            float: true,
+        };
+        let places = [(1, tile), (2, float)];
+        assert_eq!(grid_under(&places, cell, 50, 50), Some(1), "the tile");
+        assert_eq!(grid_under(&places, cell, 250, 60), Some(2), "the float");
+        assert_eq!(grid_under(&places, cell, 250, 10), None, "float header");
+        assert_eq!(grid_under(&places, cell, 200, 60), None, "float border");
+        assert_eq!(grid_under(&places, cell, 350, 150), Some(1), "past it");
+    }
+
     #[test]
     fn clipboard_reads_are_denied_unless_read_write() {
         use crate::config::ClipboardPolicy::*;

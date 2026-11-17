@@ -404,8 +404,12 @@ impl MuxSource {
             }
             Act::Place { at, .. } => {
                 if let Some(at) = floats::rect(at) {
-                    let req = self.0.send(|req| Message::PlaceFloat { req, block, at });
-                    lock(&self.0.edits).insert(req);
+                    // Told before it is sent: a refusal can come back before
+                    // `send` does, and one not found here would be lost.
+                    self.0.send(|req| {
+                        lock(&self.0.edits).insert(req);
+                        Message::PlaceFloat { req, block, at }
+                    });
                 }
             }
             Act::Stack { top, .. } => {
@@ -779,7 +783,11 @@ impl Events {
                 Change::None => true,
                 Change::Strip => out(Out::Session(self.session())),
                 Change::Holders => out(Out::Blocks(self.blocks())),
-                Change::Floats => out(Out::Floats(self.floats())),
+                // The strip follows: a block that goes between a tile, a float
+                // and the detached list changes its thumbnail and that list.
+                Change::Floats => {
+                    out(Out::Floats(self.floats())) && out(Out::Session(self.session()))
+                }
                 // The strip follows: the thumbnail and detached blocks.
                 Change::Layout => self.layout(out) && out(Out::Session(self.session())),
                 Change::Focus(block) => {
@@ -1121,15 +1129,19 @@ impl Events {
     /// ends the GUI window, unless its blocks are detached (D61).
     fn layout(&self, out: &mut impl FnMut(Out) -> bool) -> bool {
         let (layout, focused) = self.model.view();
-        let shown = layout.map(|l| tree(l, &mut self.state.shown().keys));
+        let floats = self.floats();
+        let tiled = layout.map(|l| tree(l, &mut self.state.shown().keys));
         self.keep_focus_in(self.model.shown_blocks(), focused);
+        // A window of floats alone is alive: the first float stands for the
+        // tile under them, which draws nothing, as it floats (C42).
+        let shown = tiled.or_else(|| floats.first().map(|f| Tree::Pane(f.key)));
         if shown.is_none() && !self.model.detached().is_empty() {
             return out(Out::Empty);
         }
         let ended = shown.is_none();
         // With the layout, so a block that goes from a tile to a float keeps
         // its pane.
-        out(Out::Layout(shown, self.floats())) && !ended && out(Out::Zoom(self.zoomed()))
+        out(Out::Layout(shown, floats)) && !ended && out(Out::Zoom(self.zoomed()))
     }
 
     /// Keeps the focus Reattach places beside on a block `laid_out`:

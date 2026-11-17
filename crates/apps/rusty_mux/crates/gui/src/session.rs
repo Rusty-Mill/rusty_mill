@@ -37,6 +37,13 @@ struct Win {
     floats: Vec<Float>,
 }
 
+impl Win {
+    /// Whether the window has anything to show: a tiled layout or floats.
+    fn shows(&self) -> bool {
+        self.layout.is_some() || !self.floats.is_empty()
+    }
+}
+
 /// A block, as the List and events tell it.
 #[derive(Debug, Clone, PartialEq)]
 struct Blk {
@@ -314,16 +321,40 @@ impl Model {
     }
 
     /// `window`'s floats are `floats` now: what the shown window shows
-    /// changes only when it is that one and they differ.
+    /// changes only when it is that one and they differ. A shown window
+    /// with no tile has only its floats to show: when they change it is
+    /// the whole scene that does (C42).
     fn floated(&mut self, window: WindowId, floats: &[Float]) -> Change {
         let shown = window == self.shown;
-        self.with_window(window, |w| {
+        let change = self.with_window(window, |w| {
             if w.floats == floats {
                 return Change::None;
             }
             w.floats = floats.to_vec();
-            if shown { Change::Floats } else { Change::Strip }
-        })
+            match (shown, w.layout.is_some()) {
+                (false, _) => Change::Strip,
+                (true, true) => Change::Floats,
+                (true, false) => Change::Layout,
+            }
+        });
+        if change != Change::Layout || !self.follows_active {
+            return change;
+        }
+        self.nothing_tiled()
+    }
+
+    /// The shown window has no tile: it shows its detached blocks or its
+    /// floats if it has any (D61, C42); else the last block ended and the
+    /// server keeps the window, so move to a neighbour that shows blocks,
+    /// the one before it first; with none, the GUI ends as before.
+    fn nothing_tiled(&self) -> Change {
+        if !self.detached().is_empty() || !self.floats().is_empty() {
+            return Change::Layout;
+        }
+        match self.neighbour() {
+            Some(next) => Change::Emptied(next),
+            None => Change::Layout,
+        }
     }
 
     /// Show `session` instead (gui-design D60, handoff D109): its active
@@ -540,17 +571,7 @@ impl Model {
                 if change != Change::Layout || layout.is_some() || !self.follows_active {
                     return change;
                 }
-                // Its blocks are all detached: it shows that (D61).
-                if !self.detached().is_empty() {
-                    return Change::Layout;
-                }
-                // The last block of the shown window ended; the server keeps
-                // the window. Move to a neighbour that shows blocks, the one
-                // before it first; with none, the GUI ends as before.
-                match self.neighbour() {
-                    Some(next) => Change::Emptied(next),
-                    None => Change::Layout,
-                }
+                self.nothing_tiled()
             }
             Event::FloatsChanged { window, floats } => self.floated(*window, floats),
             Event::FocusChanged { window, block } => {
@@ -719,7 +740,7 @@ impl Model {
     /// The window a switch to `session` shows: its active one, else its
     /// first with blocks.
     fn window_to_show(&self, session: SessionId) -> Option<WindowId> {
-        let laid_out = |w: &&Win| w.session == session && w.layout.is_some();
+        let laid_out = |w: &&Win| w.session == session && w.shows();
         let active = self.sess(session)?.active;
         self.windows
             .iter()
@@ -744,7 +765,7 @@ impl Model {
             .iter()
             .rev()
             .chain(after.iter().skip(1))
-            .find(|w| w.layout.is_some())
+            .find(|w| w.shows())
             .map(|w| w.id)
     }
 
@@ -1454,6 +1475,66 @@ mod tests {
         };
         assert_eq!(m.apply(&none), Change::Floats);
         assert!(m.floats().is_empty());
+    }
+
+    #[test]
+    fn a_window_of_floats_alone_is_alive() {
+        let (s, w, b) = (
+            SessionId::from_uuid(Uuid::new_v4()),
+            ids(WindowId::from_uuid),
+            ids(BlockId::from_uuid),
+        );
+        let mut m = model(s, &w, &b);
+        let floats = |floats| Event::FloatsChanged {
+            window: w[0],
+            floats,
+        };
+        let untiled = Event::LayoutChanged {
+            window: w[0],
+            layout: None,
+            zoomed: None,
+        };
+        // Its tile goes, its block floats: the window stays, as a layout.
+        assert_eq!(m.apply(&floats(vec![float(b[0], 20)])), Change::Floats);
+        assert_eq!(m.apply(&untiled), Change::Layout, "not handed over");
+        assert_eq!(m.shown_blocks(), [b[0]]);
+        // The server may say the float first, then that the tile went.
+        let mut m = model(s, &w, &b);
+        m.apply(&Event::BlockClosed { block: b[0] });
+        assert_eq!(m.apply(&untiled), Change::Emptied(w[1]), "nothing shown");
+        assert_eq!(
+            m.apply(&floats(vec![float(b[0], 20)])),
+            Change::Layout,
+            "a float is the whole scene of a window with no tile"
+        );
+        // Its last float closes: it is emptied as a window with no block is.
+        assert_eq!(m.apply(&floats(Vec::new())), Change::Emptied(w[1]));
+    }
+
+    #[test]
+    fn a_window_of_floats_alone_is_a_neighbour_to_hand_over_to() {
+        let (s, w, b) = (
+            SessionId::from_uuid(Uuid::new_v4()),
+            ids(WindowId::from_uuid),
+            ids(BlockId::from_uuid),
+        );
+        let mut m = model(s, &w, &b);
+        m.apply(&Event::LayoutChanged {
+            window: w[1],
+            layout: None,
+            zoomed: None,
+        });
+        m.apply(&Event::FloatsChanged {
+            window: w[1],
+            floats: vec![float(b[1], 20)],
+        });
+        m.apply(&Event::BlockClosed { block: b[0] });
+        let told = m.apply(&Event::LayoutChanged {
+            window: w[0],
+            layout: None,
+            zoomed: None,
+        });
+        assert_eq!(told, Change::Emptied(w[1]), "it shows its float");
     }
 
     #[test]

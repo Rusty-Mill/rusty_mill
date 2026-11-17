@@ -542,6 +542,16 @@ pub(crate) struct FloatPaint {
 }
 
 impl Body {
+    /// Where block `key`'s take-over button is, on a tile or on a float.
+    pub(crate) fn take_over_button(&self, key: u64) -> Option<Rect> {
+        let spot = Spot::Take(key, TakeButton::TakeOver);
+        self.spots
+            .iter()
+            .chain(&self.float_spots)
+            .find(|(_, s)| *s == spot)
+            .map(|&(r, _)| r)
+    }
+
     /// The spot under `(x, y)`, if any.
     pub(crate) fn spot(&self, x: f32, y: f32) -> Option<Spot> {
         if let Some((_, s)) = self.top_spots.iter().find(|(r, _)| r.contains(x, y)) {
@@ -2099,6 +2109,22 @@ mod tests {
             .map(|&(_, s)| s)
             .collect();
         assert_eq!(zooms, [Spot::Zoom(1)], "only the tile zooms");
+    }
+
+    #[test]
+    fn a_floats_take_over_button_is_found_as_a_tiles_is() {
+        let look = look();
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let mut tile = block(1, Cells::new(8, 0, 600, 300));
+        tile.header.take = Some(TakeButton::TakeOver);
+        let mut owned = float(2, Cells::new(900, 0, 190, 200));
+        owned.header.take = Some(TakeButton::TakeOver);
+        let body = paint(1100, 350, &scene(vec![tile, owned]), &look, &mut font);
+        let on_tile = body.take_over_button(1).expect("the tile's button");
+        assert!(body.spots.iter().any(|&(r, _)| r == on_tile));
+        let on_float = body.take_over_button(2).expect("the float's button");
+        assert!(body.float_spots.iter().any(|&(r, _)| r == on_float));
+        assert_eq!(body.take_over_button(3), None, "no such block");
     }
 
     #[test]
