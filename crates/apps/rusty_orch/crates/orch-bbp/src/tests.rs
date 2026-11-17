@@ -99,6 +99,8 @@ pub(super) fn config(dir: &std::path::Path) -> Config {
         max_wall_secs: 60,
         end_grace_secs: None,
         slots: None,
+        sensitive_paths: vec![],
+        real_data: BTreeMap::new(),
     }
 }
 pub(super) fn task() -> (Task, Board) {
@@ -653,6 +655,7 @@ fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
         ceiling: Some(2),
         priority_secs: 30,
     });
+    c.sensitive_paths = vec!["secrets/**".into()];
     let now = unix_now().unwrap();
     let leased = |write: &str, expires: u64| {
         let mut f = fence();
@@ -700,6 +703,12 @@ fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
     )
     .unwrap();
     assert!(!agents.contains(&format!("{}\"", path("src"))), "{agents}");
+    // Every launcher hides the goal's sensitive paths (#598, D133).
+    assert_eq!(
+        agents.matches(r#""hide":["secrets/**"]"#).count(),
+        c.roster.len(),
+        "{agents}"
+    );
     // Fair admission is asked for the goal's ceiling and priority, and
     // knows the paths the task was confined to write.
     let claim = std::fs::read_to_string(
@@ -952,4 +961,79 @@ fn scrubbed_command_drops_the_mux_socket() {
         .find(|(k, _)| *k == "RUSTY_MUX_SOCKET")
         .and_then(|(_, v)| v);
     assert_eq!(kept, None);
+}
+
+#[test]
+fn sensitive_paths_need_every_pool_member_confined() {
+    let dir = temp();
+    let mut c = config(&dir);
+    c.sensitive_paths = vec!["secrets/**".into()];
+    let err = c.validate().unwrap_err();
+    assert!(err.contains("has no sandbox"), "{err}");
+    for agent in c.pool.values_mut() {
+        agent.sandbox = Some(Sandbox {
+            hide: vec!["own/**".into(), "secrets/**".into()],
+            ..Sandbox::default()
+        });
+    }
+    c.validate().unwrap();
+    let agent = c.pool.values().next().unwrap();
+    // Each glob once, the member's own first.
+    assert_eq!(
+        c.launch_sandbox(agent).unwrap().hide,
+        vec!["own/**".to_owned(), "secrets/**".to_owned()]
+    );
+    c.sensitive_paths = vec![" ".into()];
+    assert!(c.validate().unwrap_err().contains("blank"));
+}
+
+#[test]
+fn without_sensitive_paths_a_sandbox_launches_unchanged() {
+    let dir = temp();
+    let mut c = config(&dir);
+    let first = c.pool.values().next().unwrap().clone();
+    assert_eq!(c.launch_sandbox(&first), None, "unconfined stays so");
+    c.pool.values_mut().next().unwrap().sandbox = Some(Sandbox::default());
+    let launched = c.launch_sandbox(c.pool.values().next().unwrap()).unwrap();
+    assert!(launched.hide.is_empty());
+    // An empty hide is not written, so existing agents.json files keep their bytes.
+    assert!(!json(&launched).contains("hide"));
+}
+
+#[test]
+fn real_data_is_named_and_absolute_and_feeds_the_dry_run() {
+    let dir = temp();
+    let mut c = config(&dir);
+    let err = dry_run_args(&c, "n", "/w", "p", &[]).unwrap_err();
+    assert!(err.contains("real_data"), "{err}");
+    c.real_data = BTreeMap::from([
+        ("orders".to_owned(), "/srv/orders".to_owned()),
+        ("users".to_owned(), "/srv/users".to_owned()),
+    ]);
+    c.validate().unwrap();
+    assert_eq!(
+        dry_run_args(&c, "plan-1", "/w", "migrate", &["--all".into()]).unwrap(),
+        [
+            "dry-run",
+            "--name",
+            "plan-1",
+            "--data",
+            "orders=/srv/orders,users=/srv/users",
+            "--work",
+            "/w",
+            "--",
+            "migrate",
+            "--all"
+        ]
+    );
+    for (name, path, word) in [
+        ("Orders", "/srv/o", "name"),
+        ("", "/srv/o", "name"),
+        ("o", "srv/o", "absolute"),
+        ("o", "/srv/a,b", "comma"),
+    ] {
+        c.real_data = BTreeMap::from([(name.to_owned(), path.to_owned())]);
+        let err = c.validate().unwrap_err();
+        assert!(err.contains(word), "{name} {path}: {err}");
+    }
 }

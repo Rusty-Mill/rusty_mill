@@ -14,6 +14,9 @@ One entry per merged PR against `main`, newest first. No version tags yet.
   seen, and those claims go only to models cleared for that data.
 - New `rusty_orch lens breaker`: a read-only report on a task's breaker
   settings, calls and spend, taint counts, and whether it is paused.
+- A BBP config's `sensitive_paths` are hidden from every agent harness,
+  and new `rusty_orch dry-run` runs a program over its `real_data` roots
+  without letting the plan leave the host.
 
 ## Half-limit erosion cleanups
 **2026-11-06**

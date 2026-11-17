@@ -30,6 +30,10 @@ pub struct Sandbox {
     /// object store read-only.
     #[rusty_serde(default)]
     pub checkout: bool,
+    /// #598: globs of paths the harness must not see or touch: BBP's `hide`.
+    /// [`Config::sensitive_paths`] is added to every member's at launch.
+    #[rusty_serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hide: Vec<String>,
 }
 /// Explicit policy for one roster role. No role or provider is synthesized.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +70,15 @@ pub struct Config {
     /// Unset keeps BBP's default of 60 s.
     #[rusty_serde(default)]
     pub end_grace_secs: Option<u64>,
+    /// #598 (D62, D133): globs of paths no harness may see or touch. Each
+    /// pool member's sandbox `hide` gains them at launch, so its workspace
+    /// is BBP's filtered copy; every pool member must then be confined.
+    #[rusty_serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensitive_paths: Vec<String>,
+    /// #598 (D62, D133): the real data roots a dry run may read, by name
+    /// (`[a-z0-9_-]+`, absolute paths). Only [`dry_run_args`] uses them.
+    #[rusty_serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub real_data: BTreeMap<String, String>,
 }
 /// BBP's bound on a claim's `priority_secs`: a day.
 const MAX_PRIORITY_SECS: u64 = 86_400;
@@ -111,6 +124,7 @@ impl Config {
                 ));
             }
         }
+        self.validate_boundaries()?;
         if self.assignments.len() != self.roster.len() {
             return Err("assign every roster role exactly once".into());
         }
@@ -161,6 +175,52 @@ impl Config {
             }
         }
         Ok(())
+    }
+    /// `sensitive_paths` and `real_data`, fail closed: a hidden path needs
+    /// every pool member confined, since an unconfined harness would see it.
+    /// Glob syntax is BBP's to check, at launch.
+    fn validate_boundaries(&self) -> Result<(), String> {
+        if self.sensitive_paths.iter().any(|g| g.trim().is_empty()) {
+            return Err("sensitive_paths: a glob is blank".into());
+        }
+        if !self.sensitive_paths.is_empty() {
+            if let Some(name) = self
+                .pool
+                .iter()
+                .find(|(_, a)| a.sandbox.is_none())
+                .map(|(n, _)| n)
+            {
+                return Err(format!(
+                    "sensitive_paths needs every pool member confined; {name} has no sandbox"
+                ));
+            }
+        }
+        for (name, path) in &self.real_data {
+            let named = !name.is_empty()
+                && name.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
+                });
+            if !named {
+                return Err(format!("real_data: name {name:?} must be [a-z0-9_-]+"));
+            }
+            if !std::path::Path::new(path).is_absolute() || path.contains(',') {
+                return Err(format!(
+                    "real_data: {name} must be an absolute path without a comma, got {path:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+    /// A pool member's sandbox as launched: its own `hide` plus
+    /// `sensitive_paths`, each glob once. `None` stays unconfined.
+    pub fn launch_sandbox(&self, agent: &Agent) -> Option<Sandbox> {
+        let mut sandbox = agent.sandbox.clone()?;
+        for g in &self.sensitive_paths {
+            if !sandbox.hide.contains(g) {
+                sandbox.hide.push(g.clone());
+            }
+        }
+        Some(sandbox)
     }
     /// Pin paths before a moderator detaches, so resume never depends on its cwd.
     pub fn absolute(mut self) -> Result<Self, String> {
@@ -215,4 +275,44 @@ pub(crate) mod path_json {
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
         Ok(PathBuf::from(String::deserialize(deserializer)?))
     }
+}
+
+/// `bbp dry-run`'s arguments for a dry run named `name` of `program` over
+/// every `real_data` root, its plan under `work` (#598, D133). The roots go
+/// as one comma-separated `--data`, since BBP keeps only the last repeated
+/// flag.
+///
+/// # Errors
+///
+/// A message when the config names no `real_data`.
+pub fn dry_run_args(
+    config: &Config,
+    name: &str,
+    work: &str,
+    program: &str,
+    args: &[String],
+) -> Result<Vec<String>, String> {
+    if config.real_data.is_empty() {
+        return Err("a dry run needs real_data roots in the bbp config".into());
+    }
+    let data: Vec<String> = config
+        .real_data
+        .iter()
+        .map(|(n, p)| format!("{n}={p}"))
+        .collect();
+    let mut argv: Vec<String> = [
+        "dry-run",
+        "--name",
+        name,
+        "--data",
+        &data.join(","),
+        "--work",
+        work,
+        "--",
+        program,
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    argv.extend(args.iter().cloned());
+    Ok(argv)
 }

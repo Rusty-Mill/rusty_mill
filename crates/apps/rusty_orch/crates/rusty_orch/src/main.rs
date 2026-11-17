@@ -23,6 +23,11 @@ fn main() -> ExitCode {
         Some("maintain") => return maintain(argv),
         Some("lens") => return lens(argv),
         Some("watch") => return watch(argv),
+        Some("dry-run") => {
+            use rusty_orch::dry_run;
+            let argv = std::iter::once("dry-run".to_owned()).chain(argv);
+            return lens_command(dry_run::USAGE, dry_run::options(argv), dry_run::run);
+        }
         Some("consolidate") => {
             use rusty_orch::consolidate;
             return lens_command(
