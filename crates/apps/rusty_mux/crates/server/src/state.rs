@@ -55,6 +55,8 @@ const CHUNK: usize = 16 << 10;
 /// The largest reply to a block call or `list`, in encoded bytes: half a
 /// client's output budget, so a reply alone never gets a client dropped.
 const REPLY_MAX: usize = crate::outbox::BUDGET / 2;
+/// What a `Text` reply adds to its text: tags, request id and length prefix.
+const REPLY_FRAME: usize = 64;
 
 /// Events kept for clients that reconnect.
 const HISTORY: usize = 4096;
@@ -1803,7 +1805,7 @@ impl State {
                     )
                     .into());
                 }
-                terminal::find(&rt.grid, query, limit, REPLY_MAX)
+                terminal::find(&rt.grid, query, limit, REPLY_MAX - REPLY_FRAME)
             }
             "terminal.send-keys" => {
                 self.mux
