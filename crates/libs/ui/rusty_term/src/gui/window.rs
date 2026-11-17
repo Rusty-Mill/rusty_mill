@@ -6156,7 +6156,15 @@ impl WindowState<'_> {
                 // A release that lands after focus moves away never reaches
                 // us, so drop the pressed look here rather than leave it stuck.
                 self.pressed = pressed_after_focus(self.pressed, focused);
-                self.float_drag = float_drag_after_focus(self.float_drag, focused);
+                let held = held_after_focus(
+                    Held {
+                        float_drag: self.float_drag,
+                        button: self.mouse_button_down,
+                    },
+                    focused,
+                );
+                self.float_drag = held.float_drag;
+                self.mouse_button_down = held.button;
                 if let Some(p) = self.pane_mut()
                     && p.grid.lock().focus_reporting
                 {
@@ -6462,7 +6470,9 @@ impl WindowState<'_> {
             WindowEvent::CursorLeft { .. } => {
                 // A float held when the pointer leaves is dropped where it
                 // is: no release may follow to end it.
-                self.end_float_drag();
+                if self.end_float_drag() {
+                    self.mouse_button_down = None;
+                }
                 // Drop any chrome hover highlight when the pointer leaves.
                 if self.hover.take().is_some()
                     && let Some(window) = &self.window
@@ -7403,11 +7413,27 @@ fn pressed_after_focus(pressed: Option<Hit>, focused: bool) -> Option<Hit> {
     if focused { pressed } else { None }
 }
 
-/// A float held when focus goes is let go where it was: the release that
-/// would end it may land in another window, and the float would follow the
-/// pointer into the next press. One already dropped waits for the source.
-fn float_drag_after_focus(drag: Option<FloatDrag>, focused: bool) -> Option<FloatDrag> {
-    drag.filter(|d| focused || !d.live)
+/// What a held float leaves of the pointer: the float, and the button that
+/// holds it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Held {
+    float_drag: Option<FloatDrag>,
+    button: Option<MouseButtonKind>,
+}
+
+/// A float held when focus goes is let go where it was, and its button with
+/// it: the release that would end them may land in another window, and
+/// neither may follow the pointer back (the float into the next press, the
+/// button into hover focus and a mouse-tracking program's drag). One already
+/// dropped waits for the source.
+fn held_after_focus(held: Held, focused: bool) -> Held {
+    match held.float_drag {
+        Some(d) if d.live && !focused => Held {
+            float_drag: None,
+            button: held.button.filter(|b| *b != MouseButtonKind::Left),
+        },
+        _ => held,
+    }
 }
 
 /// Whether a drag-selection past a pane's `[top_px, bottom_px]` edge should
@@ -7676,10 +7702,10 @@ fn grid_may_answer(policy: ClipboardPolicy, serves: bool) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_float_held_is_let_go_when_focus_goes() {
-        use super::{FloatDrag, Grab, Rect, float_drag_after_focus};
+    fn a_float_held_is_let_go_with_its_button_when_focus_goes() {
+        use super::{FloatDrag, Grab, Held, MouseButtonKind, Rect, held_after_focus};
         let at = Rect::new(0, 0, 10, 10);
-        let held = |live| FloatDrag {
+        let drag = |live| FloatDrag {
             key: 1,
             grab: Grab::Move,
             from: at,
@@ -7687,17 +7713,26 @@ mod tests {
             now: at,
             live,
         };
-        assert_eq!(float_drag_after_focus(Some(held(true)), false), None);
+        let held = |live| Held {
+            float_drag: Some(drag(live)),
+            button: Some(MouseButtonKind::Left),
+        };
+        // Back from Alt-Tab: no float follows, no button is down, so hover
+        // focus is open again and a program sees no phantom drag.
+        let after = held_after_focus(held(true), false);
+        assert_eq!(after.float_drag, None);
+        assert_eq!(after.button, None);
+        assert_eq!(held_after_focus(held(true), true), held(true));
         assert_eq!(
-            float_drag_after_focus(Some(held(true)), true),
-            Some(held(true))
-        );
-        assert_eq!(
-            float_drag_after_focus(Some(held(false)), false),
-            Some(held(false)),
+            held_after_focus(held(false), false),
+            held(false),
             "dropped, waiting for the source"
         );
-        assert_eq!(float_drag_after_focus(None, false), None);
+        let other = Held {
+            float_drag: None,
+            button: Some(MouseButtonKind::Middle),
+        };
+        assert_eq!(held_after_focus(other, false), other, "no float, no change");
     }
 
     #[test]
