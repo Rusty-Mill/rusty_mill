@@ -129,7 +129,7 @@ $R tee $TOY/roster.json >/dev/null <<'EOF'
 ]
 EOF
 matchpathcon $TOY
-ls -dZ $TOY $TOY/repo $TOY/holdout   # expect container_file_t
+$R ls -dZ $TOY $TOY/repo $TOY/holdout   # as orch-runner: baileyrd cannot enter $TOY (0750). Expect container_file_t
 
 # ---- 2. Check: read the lines, not only the exit code (it exits 0 with providers unavailable)
 echo "=== 2. lens check"
