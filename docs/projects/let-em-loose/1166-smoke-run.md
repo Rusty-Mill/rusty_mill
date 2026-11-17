@@ -1,7 +1,7 @@
 # #1166 Smoke run: lens run on a toy claims task, local model first (step 1 design)
 
 Status: design for Nano's approval (card #1166 step 1). Nothing is built, deployed or run. No model was called and the board was not read (the card text was not available to the author; pass criteria below follow the brief for this design and are marked where the card may differ).
-Authority: D130 (M1 design batch), D131 (deploy on BaileyAi), **D134 (no paid runs for now: this run is local-only)**, D127 (freeze: nothing new), D53, D86, D93, D37.
+Authority: D130 (M1 design batch), D131 (deploy on BaileyAi), **D134 (no paid runs for now: this run is local-only; D141 on 2026-11-17 confirms this run stays local-only; the paid run is run 2, the launcher brief)**, D127 (freeze: nothing new), D53, D86, D93, D37.
 Depends on: #1092 deployed (`1092-deploy-layout.md`) and #1123's `lens.json` and prompts in place (`1123-lens-prompts.md`).
 
 ## 1. What this run proves (and what it cannot)
@@ -55,7 +55,7 @@ Toy repo (`/srv/lel/toy/repo`, throwaway git repo, outside any read root): a stu
 | adversary | counter and support evidence; group `attack` | local-high, local; local-high |
 | operator | counter and support evidence; group `attack` | local, local-high; local-high, local |
 
-`local` = Qwen3.6-35B-A3B, `local-high` = gpt-oss-120b, `local-rebel` = Qwen3.6-35B-A3B again under its own id (same weights; the rebel differs only by orch's rebel suffix, so the three candidates are not three independent models: noted in the record, not hidden). Adversary leads local-high and operator leads local, so `check_diversity` passes. All three are `openai-http` with `max_class` sensitive by default, price 0, `context_tokens` 32768, `base_url http://127.0.0.1:<port>/v1` (port and model ids unverified until step 1 of 8). **Research is omitted [default]:** its `tools: read-only` needs a CLI provider (`config.rs`) and without tools it has nothing it may cite, so it would post nothing.
+`local` = Qwen3.6-35B-A3B, `local-high` = gpt-oss-120b, `local-rebel` = Qwen3.6-35B-A3B again under its own id (same weights; the rebel differs only by orch's rebel suffix, so the three candidates are not three independent models: noted in the record, not hidden). Adversary leads local-high and operator leads local, so `check_diversity` passes. All three are `openai-http` with `max_class` sensitive by default, price 0, `context_tokens` 32768, `base_url http://192.168.10.104:8080/v1` and ids `qwen3.6-35b-a3b` and `gpt-oss-120b` (checked on BaileyAi 2026-11-17: llama-swap does not answer on loopback and routes by exact, lowercase id; the config is `lens-local.json` in baileyrd/Factory, Factory#2). **Research is omitted [default]:** its `tools: read-only` needs a CLI provider (`config.rs`) and without tools it has nothing it may cite, so it would post nothing.
 `domain_classes` empty; ceilings `experiment_usd 1`, `task_usd 1`, `task_calls 60`; no `breaker` key. Prompts: the same `lenses/{architect,adversary,operator}.md`.
 
 ## 5. Budget and call estimate (all $0, local)
@@ -100,8 +100,8 @@ If the models never push A to 12 (they may post nothing, opinion only, or malfor
 ## 10. The executed-evidence gap and this run
 - orch's `post::parse` accepts `evidence_kind: executed` from a lens (strength 1, one cited reference; `post.rs`), and its own reply protocol text (`post::protocol`) lists `executed` as an allowed kind. The 1123 prompts forbid it (shared rule 4) but the prompt is the only guard on the orch side.
 - The host is the real guard. `check_executed` in `rusty_bbp/src/claims_engine.rs` refuses an `executed` post unless it cites a final test report written by the runner for a run whose candidate names that same claim: `evidence_required` (no artifact), `evidence_unbound` (not a report, not the runner's, another claim's candidate, or an error report) or `not_passed`. This settles 1123's "Open" bullet from code: a lens cannot post `executed` evidence that counts, and nothing is scored from one.
-- **For this run:** no candidate and no runner report can exist, so every `executed` post from a local lens is refused. Expect some from small models, since the protocol text offers the kind. Consequences: a wasted call that counts as refused (it is not free, `round.rs`), a `refused` count on that lens's record line, no score movement, no budget unit spent (the post is not committed). It cannot make the run falsely pass.
-- **Residual:** the orch-side `parse` still accepts it, so a malicious or buggy host build could admit it. Fixing `parse` (reject `executed` from a lens at the source) is a code change to orch, not in M1's freeze; recorded as a follow-up, not done. Criterion 7 reports the count of refusals and their codes.
+- **For this run:** no candidate and no runner report can exist, so every `executed` post from a local lens is refused. Expect some from small models, since the protocol text offers the kind. A refused post costs a call and is not scored. **Correction after run 1 (2026-11-17):** this section predicted a refused post would be a non-fatal `refused` count. It is not: orch halts the run on any board-refused post (`round.rs` `partial` -> `Halt::Board`, exit 1), which is what ended run 1 when a `local-high` reply posted `executed`. D144 rejects `executed` at parse; whether any refused post should halt is Q51.
+- **Residual:** the orch-side `parse` accepted it, so run 1 halted on it. Rejecting `executed` at `parse` is a bug fix (D144), to be done before the rerun. Criterion 7 reports the count of refusals and their codes.
 
 ## Defaults taken
 - [default] Local-only config as a separate `lens-local.json`; no flag or code change.
@@ -115,7 +115,7 @@ If the models never push A to 12 (they may post nothing, opinion only, or malfor
 - No verb or command posts the question (domain `question`) in a live task; `lens run` assumes it exists. Only the architect lens posts claims, and only as answers. Orch's tests build it by hand.
 - No claims-mode roster file is in the repo (only `rusty_bbp/tests/claims.rs`); `docs/proving/roster.json` is the four-role stage-mode roster.
 - 1123 fixture and the llama-swap port 8080 and model ids are unverified; `STARTER` has `baileyai` as the host.
-- 1124 says the smoke-run paid half is deferred (D134); this design supersedes the card's "local model first, then paid" order: only the first half runs.
+- 1124 says the smoke-run paid half is deferred (D134); this design supersedes the card's "local model first, then paid" order: only the first half runs. Update 2026-11-17: D141 (as amended by Nano's correction) keeps this run local-only: `--max-passes 8`, `task_calls 60`, $0, `local`, `local-high`, `local-rebel`, no paid provider. The paid run is run 2, the SSH host launcher brief, after this run has finished and been read: `--max-passes 5`, default `task_calls` cap (400), no dollar-cap enforcement in v0, codex paid now and claude only after its `no_overage` entry exists in `/etc/let-em-loose/assertions.json`. Both wait on #1092 (deploy) and #1123's `lens.json` on the host.
 - The card's "Waits on #758" is wrong for the first run (section 7). The card text itself was not read.
 - Card lists `bbp why --claim` and `bbp verify`: both exist (`bbp.rs`). `lens why` (D58) is not used.
 
@@ -128,3 +128,11 @@ If the models never push A to 12 (they may post nothing, opinion only, or malfor
    OPTIONS: a) hand-driven session; no code; a documented one-off. b) a new read-write `lens seed` command (public API, ask-first, D127 freeze, and delays the run). c) the architect lens posts the question itself (changes the proposer rule; new design).
    RECOMMEND: a) it is reversible, adds no surface, and the Drift records the missing verb for later.
    REVERSES: none.
+
+## Run 1 result (2026-11-17, task `smoke-1`, local-only, $0)
+Not a clean pass (D143: the first run is a clean #1166 pass, so this does not count). Detail: remind-me `mem_ddc10f27ebb84572b6bcec43e05d21dc`; PR #1779.
+- Machinery ran end to end (deploy, `bbp open`, seed, `lens run`, read-back); `bbp verify` chain intact (40 lines, 0 unchained); no AVC denial (D142).
+- Criterion 2 unmet: 2 candidate claims, not 3 from 3 providers. Criterion 3 unmet: A was dropped by DropLine at -8 (two counter authors), no claim accepted. Criterion 4 unmet: the inbox stayed empty. Criterion 1 and 5's `bbp verify` met; criterion 6 and the refusal listing of criterion 7 not stated here.
+- Defects: `executed` posted by a lens halted the run (D144, Q51); gpt-oss-120b via llama.cpp build f74e2fa returned HTTP 500 twice on valid harmony output (D145); the run process died on a closed stdout and was resumed; the seed did not exercise the inbox (D146). Rerun after the fixes (Q52).
+- Host facts: llama-swap answers only at `192.168.10.104:8080` with lowercase model ids (`qwen3.6-35b-a3b`).
+
