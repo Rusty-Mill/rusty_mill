@@ -40,6 +40,8 @@ const HEADER: f32 = 38.0;
 /// Half the header, from a header control's middle to its bottom.
 pub(crate) const HEADER_HALF: f32 = HEADER / 2.0;
 const HAIRLINE: f32 = 1.0;
+/// The outer keyline of a float (gui-design D89), in logical px.
+const KEYLINE: f32 = 1.0;
 /// Header padding (left, right), space between its items, and the eye's
 /// space before the lease text.
 const HEADER_PAD: (f32, f32) = (14.0, 12.0);
@@ -60,6 +62,9 @@ const BTN_R: f32 = 5.0;
 /// padding, radii and text sizes.
 const TAG: (f32, f32, f32) = (20.0, 8.0, 5.0);
 const TAG_PX: f32 = 11.0;
+/// A float tag: its glyph's size and the space after it.
+const TAG_ICON: f32 = 12.0;
+const TAG_ICON_GAP: f32 = 4.0;
 const EXIT: (f32, f32, f32) = (24.0, 10.0, 6.0);
 /// The take-over button's space before the lease line (gui-design D64).
 const TAKE_GAP: f32 = 10.0;
@@ -104,6 +109,12 @@ pub(crate) fn area(width: usize, height: usize, top: usize, bottom: usize, scale
         width.saturating_sub(2 * gap),
         height.saturating_sub(top + bottom + gap),
     )
+}
+
+/// A block's header from its top edge to its grid's: the border, the header
+/// and its hairline, in px (what a float drag handle spans, D91).
+pub(crate) fn header_px(scale: f32) -> f32 {
+    (BORDER + HEADER + HAIRLINE) * scale
 }
 
 /// The gap between blocks, in px.
@@ -463,6 +474,10 @@ pub(crate) struct Shown {
     pub rect: Cells,
     pub focused: bool,
     pub zoomed: bool,
+    /// A float over the tiled blocks (mux C42, gui-design D89), drawn
+    /// after them, framed apart, with a "Float" tag in place of a zoom
+    /// button.
+    pub float: bool,
     pub header: Header,
     pub badge: Option<usize>,
 }
@@ -495,18 +510,52 @@ pub(crate) struct Scene {
     pub ended: Option<String>,
 }
 
-/// A painted body: its pixels, what is drawn over the grids (F2 badges),
-/// and the spots, all in the body's px.
+/// A painted body: its pixels, what is drawn over the tiles' grids (their
+/// fades and F2 badges), the floats, what is drawn over the floats (a down
+/// link's veil, the banner), and the spots, all in the body's px.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Body {
     pub pixmap: Pixmap,
     pub over: Vec<(Pixmap, (usize, usize))>,
+    /// The floats, back to front.
+    pub floats: Vec<FloatPaint>,
+    pub top: Vec<(Pixmap, (usize, usize))>,
     pub spots: Vec<(Rect, Spot)>,
+    /// The controls on the floats' headers: they sit over every tile.
+    pub float_spots: Vec<(Rect, Spot)>,
+    /// The banner's buttons: they sit over the floats too.
+    pub top_spots: Vec<(Rect, Spot)>,
+}
+
+/// A float painted apart from the body, to draw over the tiles' grids.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FloatPaint {
+    pub key: u64,
+    /// Its frame and header over its background, with the keyline round
+    /// it, at `at` in the body's px.
+    pub chrome: Pixmap,
+    pub at: (usize, usize),
+    /// The box that takes the pointer: the block, not its keyline.
+    pub rect: Rect,
+    /// The veil of an unfocused one (D66), over its grid.
+    pub veil: Option<(Pixmap, (usize, usize))>,
 }
 
 impl Body {
     /// The spot under `(x, y)`, if any.
     pub(crate) fn spot(&self, x: f32, y: f32) -> Option<Spot> {
+        if let Some((_, s)) = self.top_spots.iter().find(|(r, _)| r.contains(x, y)) {
+            return Some(*s);
+        }
+        // A float covers the tiles under it, their controls too: the front
+        // one under the pointer owns it, and only its own controls count.
+        if let Some(f) = self.floats.iter().rev().find(|f| f.rect.contains(x, y)) {
+            return self
+                .float_spots
+                .iter()
+                .find(|(r, s)| matches!(s, Spot::Take(k, _) if *k == f.key) && r.contains(x, y))
+                .map(|&(_, s)| s);
+        }
         self.spots
             .iter()
             .find(|(r, _)| r.contains(x, y))
@@ -525,7 +574,8 @@ pub(crate) fn paint(
 ) -> Body {
     let mut out = Pixmap::new(width, height, look.chrome.frame);
     let mut spots = Vec::new();
-    for block in &scene.blocks {
+    let (floats, tiles): (Vec<&Shown>, Vec<&Shown>) = scene.blocks.iter().partition(|b| b.float);
+    for block in &tiles {
         paint_block(&mut out, &mut spots, block, look, font);
     }
     for chip in &scene.rail {
@@ -542,23 +592,31 @@ pub(crate) fn paint(
     }
     ribbon::paint(&mut out, y, &scene.ribbon, (&look.chrome, look.scale), font);
     // Fades first: a badge sits over its block's veil, not under it.
-    let mut over: Vec<(Pixmap, (usize, usize))> = scene
-        .blocks
+    // A down link already veils every block (D62); a second veil would
+    // stack to about 49%.
+    let fades = scene.fade_inactive && !scene.dim;
+    let mut over: Vec<(Pixmap, (usize, usize))> = tiles
         .iter()
-        // A down link already veils every block (D62); a second veil would
-        // stack to about 49%.
-        .filter(|b| scene.fade_inactive && !scene.dim && !b.focused)
+        .filter(|b| fades && !b.focused)
         .filter_map(|b| fade(b, look))
         .collect();
-    over.extend(scene.blocks.iter().filter_map(|b| badge(b, look, font)));
+    over.extend(tiles.iter().filter_map(|b| badge(b, look, font)));
+    let mut float_spots = Vec::new();
+    let floats: Vec<FloatPaint> = floats
+        .into_iter()
+        .map(|b| paint_float(b, fades && !b.focused, &mut float_spots, look, font))
+        .collect();
+    let mut top = Vec::new();
     if scene.dim {
         // The frame at 30% over the blocks shows them at 70%.
         spots.clear();
-        over.push((
+        float_spots.clear();
+        top.push((
             Pixmap::veil(width, y as usize, look.chrome.frame, DIM_VEIL),
             (0, 0),
         ));
     }
+    let mut top_spots = Vec::new();
     if let Some(b) = &scene.banner {
         let painted = banner::paint(
             b,
@@ -567,18 +625,68 @@ pub(crate) fn paint(
             (&look.chrome, look.scale),
             font,
         );
-        spots.extend(
+        top_spots.extend(
             painted
                 .buttons
                 .into_iter()
                 .map(|(r, a)| (r, Spot::Banner(a))),
         );
-        over.push((painted.pixmap, (0, 0)));
+        top.push((painted.pixmap, (0, 0)));
     }
     Body {
         pixmap: out,
         over,
+        floats,
+        top,
         spots,
+        float_spots,
+        top_spots,
+    }
+}
+
+/// Float `block` painted apart (gui-design D89): its block frame (D47)
+/// inside a 1 px keyline in the frame colour that tells it from the tile it
+/// covers, no shadow. Its header controls go to `spots` in the body's px.
+fn paint_float(
+    block: &Shown,
+    veiled: bool,
+    spots: &mut Vec<(Rect, Spot)>,
+    look: &Look,
+    font: &mut UiText,
+) -> FloatPaint {
+    let s = look.scale;
+    let key = px(KEYLINE, s);
+    let r = block.rect;
+    let (w, h) = (r.cols + 2 * key, r.rows + 2 * key);
+    let mut out = Pixmap::clear(w, h);
+    let whole = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: w as f32,
+        h: h as f32,
+    };
+    out.fill(whole, RADIUS * s + key as f32, look.chrome.frame);
+    let local = Shown {
+        rect: Cells::new(key, key, r.cols, r.rows),
+        ..block.clone()
+    };
+    let mut made = Vec::new();
+    paint_block(&mut out, &mut made, &local, look, font);
+    let at = (r.col.saturating_sub(key), r.row.saturating_sub(key));
+    spots.extend(made.into_iter().map(|(spot, what)| {
+        let moved = Rect {
+            x: spot.x + at.0 as f32,
+            y: spot.y + at.1 as f32,
+            ..spot
+        };
+        (moved, what)
+    }));
+    FloatPaint {
+        key: block.key,
+        chrome: out,
+        at,
+        rect: rect(r),
+        veil: veiled.then(|| fade(block, look)).flatten(),
     }
 }
 
@@ -807,9 +915,11 @@ fn paint_header(
     let mut right = head.x + head.w - border - HEADER_PAD.1 * s;
     // The right group never shrinks: the zoom controls, then the lease
     // text with the eye before it.
-    right = match block.zoomed {
-        true => paint_zoomed_group(out, spots, right, mid, look, font),
-        false => {
+    right = match (block.zoomed, block.float) {
+        (true, _) => paint_zoomed_group(out, spots, right, mid, look, font),
+        // A float is not zoomed (the server zooms tiles); it says what it is.
+        (false, true) => paint_float_tag(out, right, mid, look, font),
+        (false, false) => {
             let r = Rect {
                 x: right - ZOOM_BTN.0 * s,
                 y: mid - ZOOM_BTN.1 * s / 2.0,
@@ -961,6 +1071,43 @@ fn paint_zoomed_group(
         c.muted,
     );
     x
+}
+
+/// A float header's "Float" tag, ending at `right` and centred on `mid`
+/// (gui-design D89: the glyph and the word, never colour alone). Returns
+/// where it starts.
+fn paint_float_tag(out: &mut Pixmap, right: f32, mid: f32, look: &Look, font: &mut UiText) -> f32 {
+    let (s, c) = (look.scale, &look.chrome);
+    let (tag_h, tag_pad, tag_r) = TAG;
+    let text_w = font.width("Float", Weight::Regular, TAG_PX * s);
+    let tag_w = text_w + (2.0 * tag_pad + TAG_ICON + TAG_ICON_GAP) * s;
+    let tag = Rect {
+        x: right - tag_w,
+        y: mid - tag_h * s / 2.0,
+        w: tag_w,
+        h: tag_h * s,
+    };
+    out.fill(tag, tag_r * s, c.raised);
+    out.border(tag, tag_r * s, BORDER * s, c.line);
+    let icon_x = tag.x + tag_pad * s;
+    out.icon(
+        icons::FLOAT,
+        icon_x,
+        mid - TAG_ICON * s / 2.0,
+        TAG_ICON * s,
+        ICON_STROKE * s,
+        c.muted,
+    );
+    out.text(
+        font,
+        "Float",
+        Weight::Regular,
+        TAG_PX * s,
+        icon_x + (TAG_ICON + TAG_ICON_GAP) * s,
+        mid + font.centre_drop(TAG_PX * s),
+        c.muted,
+    );
+    tag.x
 }
 
 /// A veil over an unfocused block's grid: the terminal background at 30%
@@ -1529,6 +1676,7 @@ mod tests {
             rect,
             focused: false,
             zoomed: false,
+            float: false,
             header: header(&shell(), None, Some("main"), None),
             badge: None,
         }
@@ -1818,9 +1966,10 @@ mod tests {
             ..scene(vec![b])
         };
         let down = paint(1100, 350, &down, &look, &mut font);
-        let spots: Vec<Spot> = down.spots.iter().map(|&(_, s)| s).collect();
+        assert!(down.spots.is_empty(), "no block takes a click");
+        let spots: Vec<Spot> = down.top_spots.iter().map(|&(_, s)| s).collect();
         assert_eq!(spots, [Spot::Banner(Action::Retry)]);
-        let (veil, banner) = (&down.over[0].0, &down.over[1].0);
+        let (veil, banner) = (&down.top[0].0, &down.top[1].0);
         assert_eq!((veil.opacity, veil.width), (DIM_VEIL, 1100));
         assert!(veil.height < 350, "the ribbon stays bright");
         assert_eq!(banner.height, banner::height(1.0));
@@ -1854,7 +2003,128 @@ mod tests {
             ..scene(true)
         };
         let down = paint(1100, 350, &down, &look, &mut font);
-        assert_eq!(down.over.len(), 2, "the link's veil and the badge, no fade");
+        assert_eq!(down.over.len(), 1, "the badge, no fade");
+        assert_eq!(down.top.len(), 1, "the link's veil");
+    }
+
+    fn float(key: u64, rect: Cells) -> Shown {
+        Shown {
+            float: true,
+            ..block(key, rect)
+        }
+    }
+
+    #[test]
+    fn a_float_is_painted_apart_in_a_keylined_frame_over_the_tiles() {
+        let look = look();
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let tile = block(1, Cells::new(8, 0, 1000, 300));
+        let float = float(2, Cells::new(200, 60, 400, 200));
+        let body = paint(1100, 350, &scene(vec![tile, float]), &look, &mut font);
+        assert_eq!(body.floats.len(), 1, "the float is not in the body");
+        let f = &body.floats[0];
+        assert_eq!((f.key, f.at), (2, (199, 59)), "its keyline is outside it");
+        assert_eq!((f.chrome.width, f.chrome.height), (402, 202));
+        assert!(f.chrome.see_through, "the corners show what is under");
+        assert_eq!(f.rect, rect(Cells::new(200, 60, 400, 200)));
+        // The body under it holds only the tile.
+        let at = |x: usize, y: usize| body.pixmap.pixels()[y * 1100 + x];
+        assert_ne!(
+            at(300, 100),
+            look.chrome.base,
+            "no float header in the body"
+        );
+        // The keyline is the frame colour around the block's own border.
+        let local = |x: usize, y: usize| f.chrome.pixels()[y * f.chrome.width + x];
+        assert_eq!(local(200, 0), look.chrome.frame, "keyline, top");
+        assert_eq!(local(0, 100), look.chrome.frame, "keyline, left");
+        assert_eq!(
+            local(200, 1),
+            look.chrome.line,
+            "unfocused: the plain border"
+        );
+    }
+
+    #[test]
+    fn a_focused_float_is_in_the_accent_and_an_unfocused_one_is_veiled() {
+        let look = look();
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let mut on = float(2, Cells::new(200, 60, 400, 200));
+        on.focused = true;
+        let off = float(3, Cells::new(300, 100, 400, 200));
+        let faded = Scene {
+            fade_inactive: true,
+            ..scene(vec![on.clone(), off.clone()])
+        };
+        let body = paint(1100, 350, &faded, &look, &mut font);
+        let local = |f: &FloatPaint, x: usize, y: usize| f.chrome.pixels()[y * f.chrome.width + x];
+        assert_eq!(local(&body.floats[0], 200, 1), focus_border(&look.chrome));
+        assert_eq!(local(&body.floats[1], 200, 1), look.chrome.line);
+        assert!(body.floats[0].veil.is_none(), "the focused float is whole");
+        let (veil, (x, y)) = body.floats[1].veil.as_ref().expect("a veil");
+        assert_eq!(veil.opacity, DIM_VEIL);
+        assert!(*x > 300 && *y > 100 + HEADER as usize, "under its header");
+        let plain = paint(1100, 350, &scene(vec![on, off]), &look, &mut font);
+        assert!(plain.floats[1].veil.is_none(), "no fade when it is off");
+        let down = Scene {
+            dim: true,
+            fade_inactive: true,
+            ..faded
+        };
+        let down = paint(1100, 350, &down, &look, &mut font);
+        assert!(
+            down.floats[1].veil.is_none(),
+            "the link's veil, not a second"
+        );
+    }
+
+    #[test]
+    fn a_float_header_says_float_and_has_no_zoom_button() {
+        let look = look();
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let body = paint(
+            1100,
+            350,
+            &scene(vec![
+                block(1, Cells::new(8, 0, 1000, 300)),
+                float(2, Cells::new(200, 60, 400, 200)),
+            ]),
+            &look,
+            &mut font,
+        );
+        let zooms: Vec<Spot> = body
+            .spots
+            .iter()
+            .chain(&body.float_spots)
+            .map(|&(_, s)| s)
+            .collect();
+        assert_eq!(zooms, [Spot::Zoom(1)], "only the tile zooms");
+    }
+
+    #[test]
+    fn a_float_takes_the_clicks_over_the_tile_under_it() {
+        let look = look();
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let tile = block(1, Cells::new(8, 0, 1000, 300));
+        let mut owned = float(2, Cells::new(900, 0, 190, 200));
+        owned.header.take = Some(TakeButton::TakeOver);
+        let body = paint(1100, 350, &scene(vec![tile, owned]), &look, &mut font);
+        let zoom = body
+            .spots
+            .iter()
+            .find(|(_, s)| *s == Spot::Zoom(1))
+            .map(|&(r, _)| r)
+            .expect("the tile's zoom button");
+        // The tile's zoom button sits under the float: a press there is the
+        // float's (here its own take-over button), never the tile's.
+        let (x, y) = (zoom.x + 1.0, zoom.y + 1.0);
+        assert!(body.floats[0].rect.contains(x, y), "the float covers it");
+        assert_ne!(body.spot(x, y), Some(Spot::Zoom(1)));
+        assert_eq!(body.spot(1000.0, 150.0), None, "the float's grid");
+        // The float's own take-over button is.
+        let (button, spot) = body.float_spots[0];
+        assert_eq!(spot, Spot::Take(2, TakeButton::TakeOver));
+        assert_eq!(body.spot(button.x + 1.0, button.y + 1.0), Some(spot));
     }
 
     #[test]

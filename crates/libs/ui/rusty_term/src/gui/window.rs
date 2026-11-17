@@ -45,6 +45,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, 
 use super::blocks::{self, BodyState};
 use super::chrome::{Chrome, Marks};
 use super::confirm::{self, Answer, Confirm, ConfirmKey, Subject};
+use super::floats::{self, Dir4, Grab};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::motion;
@@ -53,10 +54,10 @@ use super::palette::{self, Cmd, Entry, Id, Out};
 use super::palette_view::PaletteUi;
 use super::popover::{self, DetachedRow, Kind, Menu, Pick, Popover, Row};
 use super::prefix::{self, Command};
-use super::render::{CpuRenderer, PaneFrame, Renderer, Scene, SearchColors, blend};
+use super::render::{CpuRenderer, FloatLayer, PaneFrame, Renderer, Scene, SearchColors, blend};
 use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
-use super::source::{Act, Feed, Listed, PaneIo, Remote, Source, Tree};
+use super::source::{Act, Feed, Float, FloatAt, Listed, PaneIo, Remote, Source, Tree};
 use super::strip::{self, Spot, StripState};
 use super::{link_policy, link_trust};
 use crate::backend::BackendHandle;
@@ -135,9 +136,11 @@ pub(crate) enum UserEvent {
     Accessibility(accesskit_winit::Event),
     /// The attached window's source laid its panes out anew; `None` when
     /// its window is gone ([`Remote::layout`]).
-    Layout(Option<Tree>),
+    Layout(Option<Tree>, Vec<Float>),
     /// The source moved the attached window's focus ([`Remote::focus`]).
     Focus(u64),
+    /// The source floats these panes over the layout ([`Remote::floats`]).
+    Floats(Vec<Float>),
     /// The source zoomed a pane, or unzoomed with `None` ([`Remote::zoom`]).
     Zoom(Option<u64>),
     /// The source's window shows no block: all are detached
@@ -177,6 +180,8 @@ fn attached_scene<'a>(
         strip: strip.painted().map(|s| &s.pixmap),
         body: body.map(|b| &b.pixmap),
         over: body.map_or(&[], |b| &b.over),
+        floats: &[],
+        top: body.map_or(&[], |b| &b.top),
         pop: popover
             .painted()
             .or_else(|| confirm.and_then(Confirm::painted))
@@ -316,6 +321,23 @@ struct Pane {
     compactor: Compactor,
 }
 
+/// A float the pointer took hold of (gui-design D91): moved or resized in
+/// px as the pointer goes, and sent to the source only on release. After
+/// the release it stays where it was dropped until the source says where
+/// the float is, so a refused place snaps back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FloatDrag {
+    key: u64,
+    grab: Grab,
+    /// Where the float was and the pointer was when it was taken, window px.
+    from: Rect,
+    press: (f64, f64),
+    /// Where it is now.
+    now: Rect,
+    /// The button is still down.
+    live: bool,
+}
+
 /// A tab: one or more [`Pane`]s tiled by a [`Layout`], one of them focused.
 struct Tab {
     panes: Vec<Pane>,
@@ -353,6 +375,15 @@ fn frame_to_paint(
     }
 }
 
+/// Pins a closure that builds a pane's frame to one lifetime of its grid, which
+/// the compiler can't infer for a closure that returns what it borrows.
+fn frame_with<'a, F>(f: F) -> F
+where
+    F: Fn(&'a crate::core::FrameView, &Place, bool) -> PaneFrame<'a>,
+{
+    f
+}
+
 /// One synchronized-output tick: from the panes `before` held and the
 /// `(pane, timeout)` of each update `open` now, the panes now held, the
 /// earliest timeout to wake at, and whether any pane was released.
@@ -371,6 +402,8 @@ struct Place {
     x: usize,
     y: usize,
     block: Rect,
+    /// A float over the tiles (mux C42), not one of them.
+    float: bool,
 }
 
 impl Place {
@@ -636,6 +669,15 @@ struct WindowState<'a> {
     /// An attached window's prefix (Ctrl-]) is armed: the next key is a
     /// layout command (gui-design F2, D49).
     armed: bool,
+    /// The prefix is armed and `m` came: the next key moves the focused
+    /// float (the TUI's keys, mux D325).
+    moving: bool,
+    /// The floats the source told, back to front (mux C42). Their panes
+    /// are the tab's, beside the layout's.
+    floats: Vec<Float>,
+    /// A float being dragged, or dropped and waiting for the source to
+    /// tell where it is now (gui-design D91).
+    float_drag: Option<FloatDrag>,
     /// The window's top strip (gui-design D45).
     strip: StripState,
     /// The window's framed blocks under the strip (gui-design D47).
@@ -1067,24 +1109,48 @@ impl WindowState<'_> {
         )
     }
 
-    /// Where each pane of `layout` sits (only `focus`'s when `zoomed`).
-    /// Blocks tile pixels under the strip, each framed with its grid inside
-    /// (gui-design D47).
-    fn places_of(&self, layout: &Layout, zoomed: bool, focus: u64) -> Vec<(u64, Place)> {
+    /// Where each pane of `layout` sits (only `focus`'s when `zoomed`),
+    /// tiles first and then `floats` back to front. Blocks tile pixels
+    /// under the strip, each framed with its grid inside (gui-design D47);
+    /// a float sits over them at its percent of that area (D89), and a
+    /// zoom hides the floats (D91).
+    fn places_of(
+        &self,
+        layout: &Layout,
+        zoomed: bool,
+        focus: u64,
+        floats: &[Float],
+    ) -> Vec<(u64, Place)> {
         let (cw, ch) = (self.cell_w.max(1), self.cell_h.max(1));
         let oy = self.grid_oy();
         let scale = self.scale_factor as f32;
         let area = self.body_area();
-        let boxes = match zoomed {
+        let floating = |key: &u64| floats.iter().any(|f| f.key == *key);
+        let tiles = match zoomed {
             true => {
                 let others = layout.ids().len().saturating_sub(1);
                 vec![(focus, blocks::zoomed(area, others, scale).0)]
             }
-            false => layout.boxes(area, blocks::gap(scale)),
+            false => layout
+                .boxes(area, blocks::gap(scale))
+                .into_iter()
+                .filter(|(id, _)| !floating(id))
+                .collect(),
         };
-        boxes
-            .into_iter()
-            .map(|(id, b)| {
+        let held = self.float_drag.as_ref();
+        let over = floats
+            .iter()
+            .filter(|_| !zoomed)
+            .map(|f| match held {
+                Some(d) if d.key == f.key => (f.key, d.now),
+                _ => (f.key, floats::to_px(f.at, area)),
+            })
+            .collect::<Vec<_>>();
+        let tiles = tiles.into_iter().map(|b| (b, false));
+        let over = over.into_iter().map(|b| (b, true));
+        tiles
+            .chain(over)
+            .map(|((id, b), float)| {
                 let g = blocks::grid_area(b, scale);
                 // A block's cells count from the grid's corner only to
                 // order blocks by where they sit (focus moves by direction).
@@ -1099,6 +1165,7 @@ impl WindowState<'_> {
                     x: g.col,
                     y: g.row,
                     block: b,
+                    float,
                 };
                 (id, place)
             })
@@ -1108,7 +1175,7 @@ impl WindowState<'_> {
     /// Where each of tab `ti`'s panes sits.
     fn places(&self, ti: usize) -> Vec<(u64, Place)> {
         match self.tabs.get(ti) {
-            Some(t) => self.places_of(&t.layout, t.zoomed, t.focus),
+            Some(t) => self.places_of(&t.layout, t.zoomed, t.focus, &self.floats),
             None => Vec::new(),
         }
     }
@@ -1317,13 +1384,25 @@ impl WindowState<'_> {
         let focus = tab.focus;
         let mut snaps = Vec::new();
         let mut shown = Vec::new();
+        // The floats, apart: they draw over the tiles, back to front.
+        let mut float_snaps = Vec::new();
+        let mut float_shown = Vec::new();
         for &(id, place) in &places {
             if let Some(p) = tab.pane(id) {
                 // A pane larger than its place (an attached block another
                 // client sized) shows its top-left.
                 let r = place.cells;
-                snaps.push((p.frame_view().cropped(r.cols, r.rows), place, id == focus));
-                shown.push(p);
+                let snap = (p.frame_view().cropped(r.cols, r.rows), place, id == focus);
+                match place.float {
+                    false => {
+                        snaps.push(snap);
+                        shown.push(p);
+                    }
+                    true => {
+                        float_snaps.push((id, snap));
+                        float_shown.push(p);
+                    }
+                }
             }
         }
         // Cursor trail (G36): when the focused pane's cursor jumped since the
@@ -1369,36 +1448,45 @@ impl WindowState<'_> {
             crate::core::BlockMark::Running => marks.running,
         };
         let search = SearchColors::from_theme(&self.theme);
+        let hover_link = self.hover_link;
+        let pad = self.pad;
+        let frame_of =
+            frame_with(
+                |g: &crate::core::FrameView, place: &Place, foc: bool| PaneFrame {
+                    grid: g,
+                    // A block sits in pixels.
+                    col0: 0,
+                    row0: 0,
+                    px: (place.x.saturating_sub(pad), place.y.saturating_sub(oy)),
+                    focused: foc,
+                    cursor_on: blink,
+                    trail: Vec::new(),
+                    hover_link: if foc { hover_link } else { None },
+                    marks: if marks_on {
+                        g.block_marks()
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(row, m)| {
+                                // A block's marks sit in its padding, on the
+                                // terminal background.
+                                m.map(|m| (row, mark_color(m)))
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
+                    search,
+                },
+            );
         let mut frames: Vec<PaneFrame> = snaps
             .iter()
             .map(|(g, place, foc)| PaneFrame {
-                grid: g,
-                // A block sits in pixels.
-                col0: 0,
-                row0: 0,
-                px: (place.x.saturating_sub(self.pad), place.y.saturating_sub(oy)),
-                focused: *foc,
-                cursor_on: blink,
                 trail: if *foc {
                     std::mem::take(&mut ghosts)
                 } else {
                     Vec::new()
                 },
-                hover_link: if *foc { self.hover_link } else { None },
-                marks: if marks_on {
-                    g.block_marks()
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(row, m)| {
-                            // A block's marks sit in its padding, on the
-                            // terminal background.
-                            m.map(|m| (row, mark_color(m)))
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                },
-                search,
+                ..frame_of(g, place, *foc)
             })
             .collect();
         if let Some(dg) = &dock_grid {
@@ -1415,13 +1503,35 @@ impl WindowState<'_> {
                 search: SearchColors::default(),
             });
         }
-        let scene = attached_scene(
+        let mut scene = attached_scene(
             &self.strip,
             &self.body,
             &self.popover,
             self.confirm.as_ref(),
             &self.palette,
         );
+        // Each float's frame, pane and veil, back to front (gui-design D89).
+        let mut float_frames: Vec<(u64, PaneFrame)> = float_snaps
+            .iter()
+            .map(|(id, (g, place, foc))| (*id, frame_of(g, place, *foc)))
+            .collect();
+        let layers: Vec<FloatLayer> = self
+            .body
+            .painted()
+            .map(|b| b.floats.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|f| FloatLayer {
+                chrome: &f.chrome,
+                at: f.at,
+                pane: float_frames
+                    .iter()
+                    .position(|(id, _)| *id == f.key)
+                    .map(|i| float_frames.swap_remove(i).1),
+                veil: f.veil.as_ref(),
+            })
+            .collect();
+        scene.floats = &layers;
         renderer.render(
             &frames,
             &chrome,
@@ -1436,8 +1546,13 @@ impl WindowState<'_> {
             tokens.frame,
             self.pad,
         );
-        drop(frames);
-        for ((view, _, _), p) in snaps.into_iter().zip(shown) {
+        drop((frames, layers, float_frames));
+        let held = float_snaps.into_iter().map(|(_, snap)| snap);
+        for ((view, _, _), p) in snaps
+            .into_iter()
+            .chain(held)
+            .zip(shown.into_iter().chain(float_shown))
+        {
             p.shown.replace(Some(view));
         }
     }
@@ -1658,6 +1773,7 @@ impl WindowState<'_> {
                 rect: up(p.block),
                 focused: id == focus,
                 zoomed,
+                float: p.float,
                 header: body.header(id, read_git_branch),
                 badge: number(id).filter(|_| armed),
             })
@@ -1829,6 +1945,11 @@ impl WindowState<'_> {
         if self.offline() {
             return;
         }
+        // A float's header or edge takes hold of it (gui-design D91); its
+        // grid is clicked as any block's, after it is focused and raised.
+        if self.begin_float_drag(x, y) {
+            return;
+        }
         // A click on the command dock jumps the focused pane's scrollback to
         // the clicked command block; dock clicks never reach the terminal.
         if self.dock_cols() > 0 {
@@ -1930,12 +2051,121 @@ impl WindowState<'_> {
         }
     }
 
+    /// The float under window pixel `(x, y)`, the front one first, and what
+    /// a press there takes hold of (gui-design D91). None under a zoom,
+    /// which hides the floats.
+    fn float_grab(&self, x: f64, y: f64) -> Option<(u64, Grab)> {
+        let scale = self.scale_factor as f32;
+        let header = blocks::header_px(scale);
+        let places = self.places(self.active);
+        places
+            .iter()
+            .rev()
+            .filter(|(_, p)| p.float)
+            .find_map(|(id, p)| {
+                floats::grab_at(p.block, header, scale, x as f32, y as f32).map(|g| (*id, g))
+            })
+    }
+
+    /// The pointer cursor over a float's handles, or while one is held.
+    fn float_cursor(&self, x: f64, y: f64) -> Option<CursorIcon> {
+        let live = self.float_drag.filter(|d| d.live).map(|d| d.grab);
+        let grab = live.or_else(|| self.float_grab(x, y).map(|(_, g)| g))?;
+        match grab {
+            Grab::Body => None,
+            Grab::Move => Some(CursorIcon::Move),
+            Grab::Resize(e) => Some(match (e.left, e.right, e.top, e.bottom) {
+                (true, _, true, _) | (_, true, _, true) => CursorIcon::NwseResize,
+                (_, true, true, _) | (true, _, _, true) => CursorIcon::NeswResize,
+                (true, ..) | (_, true, ..) => CursorIcon::EwResize,
+                _ => CursorIcon::NsResize,
+            }),
+        }
+    }
+
+    /// Focus float `key` and raise it over the others, as a click on it
+    /// does (gui-design D91). The server is asked only when it isn't the
+    /// front one.
+    fn focus_and_raise(&mut self, key: u64) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.focus = key;
+        }
+        if self.floats.last().is_some_and(|f| f.key != key) {
+            self.source.act(Act::Stack { key, top: true });
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// A left press on a float's header or edge: focus and raise it, and
+    /// hold it to move or resize. Whether it took the press.
+    fn begin_float_drag(&mut self, x: f64, y: f64) -> bool {
+        let Some((key, grab)) = self.float_grab(x, y) else {
+            return false;
+        };
+        self.focus_and_raise(key);
+        let Some(place) = self.place(key).filter(|_| grab != Grab::Body) else {
+            return false;
+        };
+        self.float_drag = Some(FloatDrag {
+            key,
+            grab,
+            from: place.block,
+            press: (x, y),
+            now: place.block,
+            live: true,
+        });
+        true
+    }
+
+    /// The pointer moved with a float held: draw it where the drag puts it.
+    /// Nothing goes to the source until the button comes up. Whether a float
+    /// is held.
+    fn drag_float_to(&mut self, x: f64, y: f64) -> bool {
+        let area = self.body_area();
+        let Some(drag) = self.float_drag.as_mut().filter(|d| d.live) else {
+            return false;
+        };
+        let delta = ((x - drag.press.0) as isize, (y - drag.press.1) as isize);
+        drag.now = floats::dragged(drag.from, drag.grab, delta, area);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        true
+    }
+
+    /// The button came up on a held float: ask the source to put it where it
+    /// was dropped, in whole percent, and show it there until the source
+    /// says where it is. Whether a float was held.
+    fn end_float_drag(&mut self) -> bool {
+        let area = self.body_area();
+        let Some(drag) = self.float_drag.as_mut().filter(|d| d.live) else {
+            return false;
+        };
+        drag.live = false;
+        let (key, at) = (drag.key, floats::to_percent(drag.now, area));
+        drag.now = floats::to_px(at, area);
+        let told = self.floats.iter().find(|f| f.key == key).map(|f| f.at);
+        match told {
+            Some(told) if told != at => self.source.act(Act::Place { key, at }),
+            // Dropped where it was: nothing to ask, nothing to wait for.
+            _ => self.float_drag = None,
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        true
+    }
+
     /// The pane under pixel `(px, py)` in the active tab's grid area, if any.
     fn pane_under(&self, px: f64, py: f64) -> Option<u64> {
         let (x, y) = (px.max(0.0) as usize, py.max(0.0) as usize);
-        // Anywhere on a block is that block (handoff D102).
+        // Anywhere on a block is that block (handoff D102); a float is over
+        // the tile under it, and the last float over the others.
         self.places(self.active)
             .into_iter()
+            .rev()
             .find(|(_, p)| p.block.contains(x, y))
             .map(|(id, _)| id)
     }
@@ -4761,6 +4991,16 @@ impl WindowState<'_> {
         }
     }
 
+    /// Show the source's `tree` with `floats` over it: the floats are told
+    /// with the layout so a pane that moves between them never closes.
+    fn show_scene(&mut self, tree: Option<Tree>, floats: Vec<Float>) {
+        self.floats = floats;
+        if self.float_drag.is_some_and(|d| !d.live) {
+            self.float_drag = None;
+        }
+        self.show_tree(tree);
+    }
+
     /// Show the source's `tree` in the attached window's one tab: open the
     /// panes new to it, drop the ones it left out (which ends them at the
     /// source), keep the focus if it is still shown. `None` closes the
@@ -4775,7 +5015,7 @@ impl WindowState<'_> {
         let layout = Layout::from_tree(&tree);
         let first = layout.ids().first().copied().unwrap_or_default();
         let rects: Vec<(u64, Rect)> = self
-            .places_of(&layout, false, first)
+            .places_of(&layout, false, first, &self.floats)
             .into_iter()
             .map(|(id, p)| (id, p.cells))
             .collect();
@@ -4815,11 +5055,62 @@ impl WindowState<'_> {
         }
     }
 
+    /// Show the source's `floats` over the layout (mux C42, gui-design
+    /// D89): open the panes of the floats new to it and drop the ones
+    /// neither it nor the layout holds, which ends them at the source. The
+    /// source says every float each time, so this also ends the wait of a
+    /// float dropped by the pointer: it shows where the source has it, which
+    /// is where it was if the source refused the place (D91).
+    fn show_floats(&mut self, floats: Vec<Float>) {
+        self.floats = floats;
+        if self.float_drag.is_some_and(|d| !d.live) {
+            self.float_drag = None;
+        }
+        let source = self.source;
+        let Some(tab) = self.tabs.get(self.active) else {
+            // The layout comes after, and opens them with its own.
+            return;
+        };
+        let rects: Vec<(u64, Rect)> = self
+            .places_of(&tab.layout, false, tab.focus, &self.floats)
+            .into_iter()
+            .map(|(id, p)| (id, p.cells))
+            .collect();
+        let mut panes = std::mem::take(&mut self.tabs[self.active].panes);
+        panes.retain(|p| rects.iter().any(|(id, _)| *id == p.id));
+        for &(key, r) in &rects {
+            if panes.iter().any(|p| p.id == key) {
+                continue;
+            }
+            let (cols, rows) = (r.cols.max(1) as u16, r.rows.max(1) as u16);
+            let opened = source
+                .open(key, cols, rows)
+                .and_then(|io| self.pane_from(key, io, cols, rows, None));
+            match opened {
+                Ok(pane) => panes.push(pane),
+                Err(e) => eprintln!("rusty_term: pane {key}: {e}"),
+            }
+        }
+        let tab = &mut self.tabs[self.active];
+        tab.panes = panes;
+        if !rects.iter().any(|(id, _)| *id == tab.focus)
+            && let Some(&(first, _)) = rects.first()
+        {
+            tab.focus = first;
+        }
+        self.layout_panes(self.active);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// Show that the shown session, `name`, ended while the source was
     /// away (gui-design D62, handoff D114): no block, and a panel with
     /// "Open switcher" until a layout comes again.
     fn show_ended(&mut self, name: String) {
         self.body.set_ended(Some(name));
+        self.floats.clear();
+        self.float_drag = None;
         self.tabs.clear();
         self.active = 0;
         if let Some(window) = &self.window {
@@ -4831,6 +5122,8 @@ impl WindowState<'_> {
     /// (gui-design D61). The body says so until a layout comes again.
     fn show_empty(&mut self) {
         self.body.set_ended(None);
+        self.floats.clear();
+        self.float_drag = None;
         self.tabs.clear();
         self.active = 0;
         if let Some(window) = &self.window {
@@ -4847,6 +5140,8 @@ impl WindowState<'_> {
         let offline = body.offline();
         if link == (super::source::Link::Back { kept: false }) {
             self.tabs.clear();
+            self.floats.clear();
+            self.float_drag = None;
             self.active = 0;
         }
         if offline && self.popover_kind() == Some(Kind::Detached) {
@@ -4942,7 +5237,7 @@ impl WindowState<'_> {
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
-        if tab.layout.ids().contains(&key) {
+        if tab.layout.ids().contains(&key) || self.floats.iter().any(|f| f.key == key) {
             tab.focus = key;
             self.refresh_palette();
             if let Some(window) = &self.window {
@@ -5029,8 +5324,80 @@ impl WindowState<'_> {
             }
             // Dropping the panes detaches each block; the session runs on.
             Command::Detach => self.closed = true,
+            Command::Float => self.float_focused(),
+            Command::Stack { top } => self.stack_focused(top),
+            Command::Next => self.focus_next_shown(),
+            Command::MoveMode => {
+                // Only a source that floats has a float to move.
+                self.moving = self.source.floating();
+                return self.moving;
+            }
+            Command::Move(dir) => self.step_focused(floats::moved, dir),
+            Command::Resize(dir) => self.step_focused(floats::resized, dir),
         }
         false
+    }
+
+    /// Float the focused block, if it is a tile (mux C42): the source chooses
+    /// where.
+    fn float_focused(&self) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let tile = !self.floats.iter().any(|f| f.key == tab.focus);
+        if tile && self.source.floating() {
+            self.source.act(Act::Float(tab.focus));
+        }
+    }
+
+    /// The focused float's place, if the focus is on a float.
+    fn float_at(&self) -> Option<(u64, FloatAt)> {
+        let focus = self.tabs.get(self.active)?.focus;
+        self.floats
+            .iter()
+            .find(|f| f.key == focus)
+            .map(|f| (f.key, f.at))
+    }
+
+    /// Raise or lower the focused float.
+    fn stack_focused(&self, top: bool) {
+        if let Some((key, _)) = self.float_at() {
+            self.source.act(Act::Stack { key, top });
+        }
+    }
+
+    /// Ask for the focused float one step on (`edit`): nothing when it is
+    /// no float or at its limit.
+    fn step_focused(&self, edit: fn(FloatAt, Dir4) -> Option<FloatAt>, dir: Dir4) {
+        let Some((key, at)) = self.float_at() else {
+            return;
+        };
+        if let Some(at) = edit(at, dir) {
+            self.source.act(Act::Place { key, at });
+        }
+    }
+
+    /// Focus the next block shown: the tiles in layout order, then the
+    /// floats back to front, wrapping (the TUI's `n`).
+    fn focus_next_shown(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let mut shown: Vec<u64> = tab
+            .layout
+            .ids()
+            .into_iter()
+            .filter(|k| !self.floats.iter().any(|f| f.key == *k))
+            .collect();
+        shown.extend(self.floats.iter().map(|f| f.key));
+        if let Some(i) = shown.iter().position(|k| *k == tab.focus) {
+            tab.focus = shown[(i + 1) % shown.len()];
+        } else if let Some(&first) = shown.first() {
+            tab.focus = first;
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     /// Focus follows mouse (C62): a pointer that enters another pane focuses
@@ -5058,6 +5425,7 @@ impl WindowState<'_> {
         let Some(id) = self
             .places(self.active)
             .into_iter()
+            .rev()
             .find(|(_, p)| p.grid_contains(cell, px, py))
             .map(|(id, _)| id)
         else {
@@ -5136,6 +5504,7 @@ impl WindowState<'_> {
             return;
         }
         self.armed = armed;
+        self.moving &= armed;
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -5707,7 +6076,14 @@ impl WindowState<'_> {
             self.set_armed(true);
             return true;
         }
-        let stay = self.run_prefix(prefix::command(key, physical, self.mods));
+        let was_moving = std::mem::take(&mut self.moving);
+        let command = match was_moving {
+            true => prefix::move_command(key),
+            false => prefix::command(key, physical, self.mods),
+        };
+        let stay = self.run_prefix(command);
+        // A modifier alone leaves the mode waiting for the key it modifies.
+        self.moving |= was_moving && command == Command::Wait;
         self.set_armed(stay);
         true
     }
@@ -6062,6 +6438,11 @@ impl WindowState<'_> {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = (position.x, position.y);
+                // A float held follows the pointer and nothing else does: no
+                // hover, selection or mouse report for the drag (D91).
+                if self.drag_float_to(position.x, position.y) {
+                    return;
+                }
                 // Chrome-bar hover feedback: track the element under the
                 // pointer and repaint when it changes (drag-strip cells and
                 // anything below the bar count as no hover).
@@ -6114,7 +6495,9 @@ impl WindowState<'_> {
                 // child's OSC 22 request wins if it made one, and plain grid
                 // text otherwise gets the usual I-beam (any other text area);
                 // everywhere else (the chrome bar itself) default.
+                let float_icon = self.float_cursor(position.x, position.y);
                 let icon = match self.resize_zone(position.x, position.y) {
+                    _ if float_icon.is_some() => float_icon.unwrap_or_default(),
                     Some(ResizeDirection::NorthWest | ResizeDirection::SouthEast) => {
                         CursorIcon::NwseResize
                     }
@@ -6196,6 +6579,12 @@ impl WindowState<'_> {
                                 return;
                             }
                             self.on_left_press();
+                            // A float taken hold of is the pointer's alone: the focused
+                            // block hears nothing of the press.
+                            if self.float_drag.is_some_and(|d| d.live) {
+                                self.mouse_button_down = Some(kind);
+                                return;
+                            }
                         }
                         if kind == MouseButtonKind::Middle {
                             if self.searching.is_some() {
@@ -6227,6 +6616,10 @@ impl WindowState<'_> {
                     }
                     ElementState::Released => {
                         if kind == MouseButtonKind::Left {
+                            if self.end_float_drag() {
+                                self.mouse_button_down = None;
+                                return;
+                            }
                             if self.drag.release() {
                                 self.copy_selection_primary(); // copy-on-select
                             }
@@ -6430,6 +6823,9 @@ impl<'a> App<'a> {
             copy_mode: None,
             last_grid_click: None,
             click_streak: 0,
+            moving: false,
+            floats: Vec::new(),
+            float_drag: None,
             mouse_button_down: None,
             consumed_keys: ConsumedKeys::default(),
             hits: Vec::new(),
@@ -6502,14 +6898,19 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                     w.on_pane_output(id);
                 }
             }
-            UserEvent::Layout(tree) => {
+            UserEvent::Layout(tree, floats) => {
                 if let Some(w) = self.windows.first_mut() {
-                    w.show_tree(tree);
+                    w.show_scene(tree, floats);
                 }
             }
             UserEvent::Focus(key) => {
                 if let Some(w) = self.windows.first_mut() {
                     w.focus_from_source(key);
+                }
+            }
+            UserEvent::Floats(floats) => {
+                if let Some(w) = self.windows.first_mut() {
+                    w.show_floats(floats);
                 }
             }
             UserEvent::Zoom(key) => {
@@ -7219,6 +7620,7 @@ mod tests {
             x: 100,
             y: 140,
             block: super::Rect::new(0, 0, 0, 0),
+            float: false,
         };
         let cell = (8, 16);
         assert!(place.grid_contains(cell, 100, 140), "grid's top-left");

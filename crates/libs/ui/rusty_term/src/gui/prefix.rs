@@ -8,6 +8,7 @@
 
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
+use super::floats::Dir4;
 use super::layout::Dir;
 
 /// Ctrl-], typed into the focused block by pressing the prefix twice.
@@ -28,6 +29,19 @@ pub(crate) enum Command {
     Jump(usize),
     /// Detach the whole window; the session keeps running.
     Detach,
+    /// Float the focused block over the layout (mux C42, the TUI's `f`).
+    Float,
+    /// Raise (`true`) or lower the focused float (`u`, `U`).
+    Stack { top: bool },
+    /// Focus the next block shown, floats last (`n`): the way to a float
+    /// over the tile under it.
+    Next,
+    /// `m`: the next key, `h j k l`, moves the focused float.
+    MoveMode,
+    /// Move the focused float one step (after `m`).
+    Move(Dir4),
+    /// Resize the focused float one step (`H J K L`).
+    Resize(Dir4),
     /// Type a Ctrl-] into the focused block.
     Type,
     /// Leave the mode without a command (Esc).
@@ -43,6 +57,27 @@ pub(crate) fn is_prefix(key: &Key, physical: PhysicalKey, mods: ModifiersState) 
     let bracket = matches!(key, Key::Character(c) if c == "]")
         || physical == PhysicalKey::Code(KeyCode::BracketRight);
     mods.control_key() && !mods.alt_key() && bracket
+}
+
+/// What `key` asks for after `m`: `h j k l` or an arrow moves the focused
+/// float a step; Esc leaves; anything else is dropped.
+pub(crate) fn move_command(key: &Key) -> Command {
+    match key {
+        Key::Named(NamedKey::Escape) => Command::Cancel,
+        Key::Named(NamedKey::ArrowLeft) => Command::Move(Dir4::Left),
+        Key::Named(NamedKey::ArrowRight) => Command::Move(Dir4::Right),
+        Key::Named(NamedKey::ArrowUp) => Command::Move(Dir4::Up),
+        Key::Named(NamedKey::ArrowDown) => Command::Move(Dir4::Down),
+        Key::Named(NamedKey::Shift | NamedKey::Control | NamedKey::Alt) => Command::Wait,
+        Key::Character(c) => match c.as_str() {
+            "h" => Command::Move(Dir4::Left),
+            "j" => Command::Move(Dir4::Down),
+            "k" => Command::Move(Dir4::Up),
+            "l" => Command::Move(Dir4::Right),
+            _ => Command::Unknown,
+        },
+        _ => Command::Unknown,
+    }
 }
 
 /// What `key`, pressed while the prefix is armed, asks for.
@@ -81,6 +116,15 @@ fn char_command(c: &str) -> Command {
         "z" => Command::Zoom,
         "x" => Command::Close,
         "d" => Command::Detach,
+        "f" => Command::Float,
+        "u" => Command::Stack { top: true },
+        "U" => Command::Stack { top: false },
+        "n" => Command::Next,
+        "m" => Command::MoveMode,
+        "H" => Command::Resize(Dir4::Left),
+        "J" => Command::Resize(Dir4::Down),
+        "K" => Command::Resize(Dir4::Up),
+        "L" => Command::Resize(Dir4::Right),
         "h" => Command::Focus(-1, 0),
         "l" => Command::Focus(1, 0),
         "k" => Command::Focus(0, -1),
@@ -127,6 +171,33 @@ mod tests {
         assert_eq!(ch("j"), Command::Focus(0, 1));
         let arrow = Key::Named(NamedKey::ArrowUp);
         assert_eq!(command(&arrow, OTHER, NONE), Command::Focus(0, -1));
+    }
+
+    #[test]
+    fn the_float_keys_are_the_tuis() {
+        assert_eq!(ch("f"), Command::Float);
+        assert_eq!(ch("u"), Command::Stack { top: true });
+        assert_eq!(ch("U"), Command::Stack { top: false });
+        assert_eq!(ch("n"), Command::Next);
+        assert_eq!(ch("m"), Command::MoveMode);
+        assert_eq!(ch("H"), Command::Resize(Dir4::Left));
+        assert_eq!(ch("L"), Command::Resize(Dir4::Right));
+        assert_eq!(ch("K"), Command::Resize(Dir4::Up));
+        assert_eq!(ch("J"), Command::Resize(Dir4::Down));
+    }
+
+    #[test]
+    fn after_m_the_vi_keys_and_arrows_move() {
+        let key = |c: &str| move_command(&Key::Character(c.into()));
+        assert_eq!(key("h"), Command::Move(Dir4::Left));
+        assert_eq!(key("l"), Command::Move(Dir4::Right));
+        assert_eq!(key("k"), Command::Move(Dir4::Up));
+        assert_eq!(key("j"), Command::Move(Dir4::Down));
+        assert_eq!(key("H"), Command::Unknown, "resize is not move");
+        let esc = Key::Named(NamedKey::Escape);
+        assert_eq!(move_command(&esc), Command::Cancel);
+        let right = Key::Named(NamedKey::ArrowRight);
+        assert_eq!(move_command(&right), Command::Move(Dir4::Right));
     }
 
     #[test]

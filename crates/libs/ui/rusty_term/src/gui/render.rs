@@ -46,12 +46,31 @@ pub(super) fn grid_top(chrome: &[Cell], strip: Option<&Pixmap>, pad: usize, bar_
 /// behind the panes, small pixmaps over the panes (F2 badges, D49), at
 /// px from the body's corner, and a popover over everything (the session
 /// switcher, D60), at window px. All empty for local shells.
+///
+/// Floats (mux C42, gui-design D89) are blocks over the tiled ones: each
+/// draws after the tiles' panes and their `over` pixmaps, back to front,
+/// as its frame, its pane, then its veil, so a float covers whatever is
+/// under it, a lower float's text too. `top` pixmaps (a down link's veil,
+/// the banner) go over the floats.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Scene<'a> {
     pub strip: Option<&'a Pixmap>,
     pub body: Option<&'a Pixmap>,
     pub over: &'a [(Pixmap, (usize, usize))],
+    pub floats: &'a [FloatLayer<'a>],
+    pub top: &'a [(Pixmap, (usize, usize))],
     pub pop: Option<(&'a Pixmap, (usize, usize))>,
+}
+
+/// One float to draw over the tiles: its frame and header with the pane's
+/// opaque background (it hides what is under it), its pane, and the veil
+/// an unfocused one has over its grid. Pixmaps sit at px from the body's
+/// corner, as `over` does.
+pub(crate) struct FloatLayer<'a> {
+    pub chrome: &'a Pixmap,
+    pub at: (usize, usize),
+    pub pane: Option<PaneFrame<'a>>,
+    pub veil: Option<&'a (Pixmap, (usize, usize))>,
 }
 
 /// The theme-independent search highlight: amber for a match, orange for the
@@ -364,6 +383,9 @@ impl Renderer for CpuRenderer {
         let presented = buffer.present();
         // A failed present leaves the buffer's age unknown to us.
         match presented {
+            // Floats are not in a frame's record, so the next frame must not
+            // trust the pixels this one left: it paints whole.
+            Ok(()) if !scene.floats.is_empty() => self.damage.forget(),
             Ok(()) => self.damage.presented(frame),
             Err(_) => self.damage.forget(),
         }
@@ -402,8 +424,14 @@ pub(super) fn composite(
     let oy = grid_top(chrome, scene.strip, pad, bh);
     // A veil blends with what is under it, so drawn again over rows not
     // repainted it would darken them twice: a veiled frame is painted whole.
-    let veiled = scene.over.iter().any(|(p, _)| p.opacity < u8::MAX);
-    if let Some(rows) = repaint.filter(|_| !veiled) {
+    let veiled = scene
+        .over
+        .iter()
+        .chain(scene.top)
+        .any(|(p, _)| p.opacity < u8::MAX);
+    // Floats cover rows of the panes under them, which a row repaint would
+    // draw over: a frame with floats is painted whole.
+    if let Some(rows) = repaint.filter(|_| !veiled && scene.floats.is_empty()) {
         for (p, rows) in panes.iter().zip(rows) {
             let (ox, oy) = (pad + p.px.0, oy + p.px.1);
             cpu::draw_grid(
@@ -428,6 +456,7 @@ pub(super) fn composite(
             );
         }
         draw_over(buffer, w, h, &scene, oy - pad);
+        draw_top(buffer, w, h, &scene, oy - pad);
         return;
     }
     buffer.fill(bg); // the padding band (and any slack) is background
@@ -460,35 +489,65 @@ pub(super) fn composite(
         cpu::draw_bar(buffer, w, h, status, ui, bw, bh, h - bh);
     }
     for p in panes {
-        let (ox, oy) = (pad + p.px.0, oy + p.px.1);
-        cpu::draw_grid(
-            buffer,
-            w,
-            h,
-            p.grid,
-            p.col0,
-            p.row0,
-            ox,
-            oy,
-            p.focused,
-            p.cursor_on,
-            p.hover_link,
-            &p.search,
-            font,
-            None,
-        );
-        cpu::draw_trail(
-            buffer, w, h, p.grid, p.col0, p.row0, ox, oy, &p.trail, font, None,
-        );
-        cpu::draw_marks(buffer, w, h, p.col0, p.row0, ox, oy, &p.marks, font);
+        draw_pane(buffer, (w, h), p, (pad, oy), font);
     }
     draw_over(buffer, w, h, &scene, oy - pad);
+    for f in scene.floats {
+        cpu::draw_pixmap(buffer, w, h, f.chrome, f.at.0, oy - pad + f.at.1);
+        if let Some(p) = &f.pane {
+            draw_pane(buffer, (w, h), p, (pad, oy), font);
+        }
+        if let Some((veil, (x, y))) = f.veil {
+            cpu::draw_pixmap(buffer, w, h, veil, *x, oy - pad + y);
+        }
+    }
+    draw_top(buffer, w, h, &scene, oy - pad);
 }
 
-/// Draw `scene`'s pixmaps over the panes, the body's corner at `top`,
-/// then its popover.
+/// Paint one pane in full: its grid, cursor-trail ghosts and gutter marks,
+/// at `(pad, oy)` px plus its own offset.
+fn draw_pane(
+    buffer: &mut [u32],
+    (w, h): (usize, usize),
+    p: &PaneFrame,
+    (pad, oy): (usize, usize),
+    font: &mut dyn GlyphSource,
+) {
+    let (ox, oy) = (pad + p.px.0, oy + p.px.1);
+    cpu::draw_grid(
+        buffer,
+        w,
+        h,
+        p.grid,
+        p.col0,
+        p.row0,
+        ox,
+        oy,
+        p.focused,
+        p.cursor_on,
+        p.hover_link,
+        &p.search,
+        font,
+        None,
+    );
+    cpu::draw_trail(
+        buffer, w, h, p.grid, p.col0, p.row0, ox, oy, &p.trail, font, None,
+    );
+    cpu::draw_marks(buffer, w, h, p.col0, p.row0, ox, oy, &p.marks, font);
+}
+
+/// Draw `scene`'s pixmaps over the tiles' panes, the body's corner at
+/// `top`.
 fn draw_over(buffer: &mut [u32], w: usize, h: usize, scene: &Scene, top: usize) {
     for (pixmap, (x, y)) in scene.over {
+        cpu::draw_pixmap(buffer, w, h, pixmap, *x, top + y);
+    }
+}
+
+/// Draw what goes over the floats: `scene`'s `top` pixmaps, then its
+/// popover.
+fn draw_top(buffer: &mut [u32], w: usize, h: usize, scene: &Scene, top: usize) {
+    for (pixmap, (x, y)) in scene.top {
         cpu::draw_pixmap(buffer, w, h, pixmap, *x, top + y);
     }
     if let Some((pixmap, (x, y))) = scene.pop {
@@ -640,6 +699,76 @@ mod tests {
         let first = frame(None);
         let again = frame(Some(&[vec![false; 2]]));
         assert_eq!(first, again);
+    }
+
+    /// Floats draw over the tiles, back to front: each one's frame, then
+    /// its pane, then its veil, and the frame hides what is under it.
+    #[test]
+    fn a_float_covers_the_tiles_and_the_float_under_it_with_its_own_pane() {
+        use super::super::paint::Pixmap;
+        let tile_view = Grid::new(2, 2).frame_view();
+        let blank = Grid::new(1, 1).frame_view();
+        let pane = |view, px| PaneFrame {
+            grid: view,
+            col0: 0,
+            row0: 0,
+            px,
+            focused: false,
+            cursor_on: false,
+            trail: Vec::new(),
+            hover_link: None,
+            marks: Vec::new(),
+            search: SearchColors::default(),
+        };
+        let (w, h, pad) = (60, 60, 0);
+        let (below, above) = (Pixmap::new(30, 30, 0x00AA00), Pixmap::new(20, 20, 0x0000AA));
+        let veil = (Pixmap::veil(10, 10, 0xFFFFFF, 128), (20, 20));
+        let layers = [
+            FloatLayer {
+                chrome: &below,
+                at: (10, 10),
+                pane: Some(pane(&blank, (10, 10))),
+                veil: None,
+            },
+            FloatLayer {
+                chrome: &above,
+                at: (20, 20),
+                pane: None,
+                veil: Some(&veil),
+            },
+        ];
+        let scene = Scene {
+            floats: &layers,
+            ..Scene::default()
+        };
+        let mut buf = vec![0; w * h];
+        let (mut font, mut ui) = (Blank((10, 20)), Blank((6, 12)));
+        composite(
+            &mut buf,
+            &[pane(&tile_view, (0, 0))],
+            &[],
+            scene,
+            &[],
+            &mut font,
+            &mut ui,
+            w,
+            h,
+            0,
+            0x101010,
+            0,
+            pad,
+            None,
+        );
+        let at = |x: usize, y: usize| buf[y * w + x];
+        assert_eq!(at(12, 30), 0x00AA00, "a float's frame covers the tile");
+        assert_ne!(at(12, 12), 0x00AA00, "its pane is over its frame");
+        assert_eq!(
+            at(35, 35),
+            0x0000AA,
+            "the upper frame hides the lower float"
+        );
+        assert_ne!(at(25, 25), 0x0000AA, "its veil is over it");
+        assert_ne!(at(25, 25), 0x00AA00);
     }
 
     /// The first cell of a 1×1 grid after `bytes`, as the window draws it.

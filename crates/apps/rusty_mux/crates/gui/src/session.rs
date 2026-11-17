@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use rusty_mux_core::{BlockId, ClientId, Event, Layout, Principal, SessionId, WindowId};
+use rusty_mux_core::{BlockId, ClientId, Event, Float, Layout, Principal, SessionId, WindowId};
 use rusty_mux_proto::{Entry, Message};
 use rusty_term::gui::source::{Session, SessionChoice, WindowTab};
 
@@ -33,6 +33,8 @@ struct Win {
     focused: Option<BlockId>,
     /// The block shown alone, if any.
     zoomed: Option<BlockId>,
+    /// The floating blocks, back to front (C42).
+    floats: Vec<Float>,
 }
 
 /// A block, as the List and events tell it.
@@ -75,6 +77,8 @@ pub enum Change {
     Strip,
     /// The shown window's layout, and the strip's thumbnail of it.
     Layout,
+    /// The shown window's floating blocks (C42).
+    Floats,
     /// The shown window's focus moved to the block.
     Focus(BlockId),
     /// Another window is shown now.
@@ -253,7 +257,7 @@ impl Model {
     /// but out of its layout. Newest first; those detached before this
     /// client saw it last, by id.
     pub fn detached(&self) -> Vec<DetachedBlock> {
-        let laid_out = self.view().0.map(Layout::blocks).unwrap_or_default();
+        let laid_out = self.shown_blocks();
         let mut out: Vec<DetachedBlock> = self
             .blocks
             .iter()
@@ -293,6 +297,33 @@ impl Model {
     /// The block the shown window shows alone, if any.
     pub fn zoomed(&self) -> Option<BlockId> {
         self.window(self.shown).and_then(|w| w.zoomed)
+    }
+
+    /// The shown window's floating blocks, back to front (C42).
+    pub fn floats(&self) -> Vec<Float> {
+        self.window(self.shown)
+            .map(|w| w.floats.clone())
+            .unwrap_or_default()
+    }
+
+    /// The blocks drawn in the shown window, tiled or floating.
+    pub fn shown_blocks(&self) -> Vec<BlockId> {
+        let mut blocks = self.view().0.map(Layout::blocks).unwrap_or_default();
+        blocks.extend(self.floats().iter().map(|f| f.block));
+        blocks
+    }
+
+    /// `window`'s floats are `floats` now: what the shown window shows
+    /// changes only when it is that one and they differ.
+    fn floated(&mut self, window: WindowId, floats: &[Float]) -> Change {
+        let shown = window == self.shown;
+        self.with_window(window, |w| {
+            if w.floats == floats {
+                return Change::None;
+            }
+            w.floats = floats.to_vec();
+            if shown { Change::Floats } else { Change::Strip }
+        })
     }
 
     /// Show `session` instead (gui-design D60, handoff D109): its active
@@ -377,22 +408,27 @@ impl Model {
                 focused,
                 zoomed,
             } => {
-                let win = Win {
+                let mut win = Win {
                     id: *window,
                     session: *session,
                     name: name.clone(),
                     layout: layout.clone(),
                     focused: *focused,
                     zoomed: *zoomed,
+                    floats: Vec::new(),
                 };
                 match self.windows.iter_mut().find(|w| w.id == *window) {
-                    Some(w) => *w = win,
+                    // The floats come in their own entry, only while it has
+                    // some, and after this one: what is known stays.
+                    Some(w) => {
+                        win.floats = std::mem::take(&mut w.floats);
+                        *w = win;
+                    }
                     None => self.windows.push(win),
                 }
                 Change::Strip
             }
-            // The GUI does not ask for floats (C42) until it draws them.
-            Entry::Floats { .. } => Change::None,
+            Entry::Floats { window, floats } => self.floated(*window, floats),
             Entry::Block {
                 block,
                 window,
@@ -465,6 +501,7 @@ impl Model {
                         layout: None,
                         focused: None,
                         zoomed: None,
+                        floats: Vec::new(),
                     });
                 }
                 Change::Strip
@@ -515,6 +552,7 @@ impl Model {
                     None => Change::Layout,
                 }
             }
+            Event::FloatsChanged { window, floats } => self.floated(*window, floats),
             Event::FocusChanged { window, block } => {
                 let shown = *window == self.shown;
                 self.with_window(*window, |w| {
@@ -1339,5 +1377,111 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!((out[0].block, out[0].name.as_str()), (b[1], "htop"));
         assert_eq!(out[0].since, None, "detached before this client saw");
+    }
+
+    fn float(block: BlockId, x: u8) -> rusty_mux_core::Float {
+        rusty_mux_core::Float {
+            block,
+            at: rusty_mux_core::FloatRect::new(x, 10, 40, 40).expect("a float"),
+        }
+    }
+
+    /// The window `w` of `s`, its blocks `b`: `b[1]` is listed in it but
+    /// out of the layout, as a float or a detached block is.
+    fn with_out_of_layout(s: SessionId, w: &[WindowId; 3], b: &[BlockId; 3]) -> Model {
+        let mut list = list(s, &w[..1], &b[..1], w[0]);
+        list.push(Message::Entry {
+            req: 1,
+            entry: Entry::Block {
+                block: b[1],
+                window: w[0],
+                size: rusty_mux_core::Size::new(80, 24).expect("a size"),
+                holder: None,
+                title: "htop".into(),
+                name: String::new(),
+                owner: None,
+                input: rusty_mux_core::InputMode::Open,
+                exited: false,
+            },
+        });
+        Model::from_list(&list, b[0], "box".into(), true).expect("a model")
+    }
+
+    #[test]
+    fn a_floating_block_is_shown_but_not_detached() {
+        let (s, w, b) = (
+            SessionId::from_uuid(Uuid::new_v4()),
+            ids(WindowId::from_uuid),
+            ids(BlockId::from_uuid),
+        );
+        let mut m = with_out_of_layout(s, &w, &b);
+        assert_eq!(m.detached().len(), 1, "out of the layout, not floating");
+        assert_eq!(m.shown_blocks(), [b[0]]);
+        let told = m.apply(&Event::FloatsChanged {
+            window: w[0],
+            floats: vec![float(b[1], 20)],
+        });
+        assert_eq!(told, Change::Floats);
+        assert!(m.detached().is_empty(), "a float is not detached");
+        assert_eq!(m.shown_blocks(), [b[0], b[1]]);
+        assert_eq!(m.floats(), [float(b[1], 20)]);
+    }
+
+    #[test]
+    fn floats_change_the_shown_window_only_when_they_differ() {
+        let (s, w, b) = (
+            SessionId::from_uuid(Uuid::new_v4()),
+            ids(WindowId::from_uuid),
+            ids(BlockId::from_uuid),
+        );
+        let mut m = model(s, &w, &b);
+        let floats = |at: u8| Event::FloatsChanged {
+            window: w[0],
+            floats: vec![float(b[1], at)],
+        };
+        assert_eq!(m.apply(&floats(20)), Change::Floats);
+        assert_eq!(m.apply(&floats(20)), Change::None, "told again");
+        assert_eq!(m.apply(&floats(30)), Change::Floats, "moved");
+        let other = Event::FloatsChanged {
+            window: w[1],
+            floats: vec![float(b[2], 5)],
+        };
+        assert_eq!(m.apply(&other), Change::Strip, "another window's floats");
+        assert_eq!(m.floats(), [float(b[1], 30)], "the shown window's own");
+        let none = Event::FloatsChanged {
+            window: w[0],
+            floats: Vec::new(),
+        };
+        assert_eq!(m.apply(&none), Change::Floats);
+        assert!(m.floats().is_empty());
+    }
+
+    #[test]
+    fn a_floats_entry_and_a_later_window_entry_keep_the_floats() {
+        let (s, w, b) = (
+            SessionId::from_uuid(Uuid::new_v4()),
+            ids(WindowId::from_uuid),
+            ids(BlockId::from_uuid),
+        );
+        let mut list = list(s, &w[..1], &b[..1], w[0]);
+        list.push(Message::Entry {
+            req: 1,
+            entry: Entry::Floats {
+                window: w[0],
+                floats: vec![float(b[1], 25)],
+            },
+        });
+        let mut m = Model::from_list(&list, b[0], "box".into(), true).expect("a model");
+        assert_eq!(m.floats(), [float(b[1], 25)]);
+        // A List answered again says the window first.
+        let again = window(w[0], s, "w0", b[0]);
+        let Message::Entry { entry, .. } = &again else {
+            unreachable!("window() makes an entry");
+        };
+        m.take(entry);
+        assert_eq!(m.floats(), [float(b[1], 25)]);
+        // A reconnect lists afresh: the floats come with it.
+        let relisted = m.relisted(&list);
+        assert_eq!(relisted.floats(), [float(b[1], 25)]);
     }
 }
