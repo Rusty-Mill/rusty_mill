@@ -136,7 +136,7 @@ fn a_block_shows_its_screen_takes_typing_and_follows_the_layout() {
     let block = attached.block;
     std::thread::spawn(move || {
         events.run(|out| match out {
-            Out::Layout(t) => layouts_tx.send(t).is_ok(),
+            Out::Layout(t, _) => layouts_tx.send(t).is_ok(),
             _ => true,
         })
     });
@@ -258,7 +258,7 @@ fn an_owner_only_block_is_taken_over_once_its_owner_grants_and_given_back() {
     let events = attached.events;
     std::thread::spawn(move || {
         events.run(|out| match out {
-            Out::Layout(t) => layouts_tx.send(t).is_ok(),
+            Out::Layout(t, _) => layouts_tx.send(t).is_ok(),
             _ => true,
         })
     });
@@ -388,7 +388,7 @@ fn the_strip_shows_the_session_and_a_new_window_is_shown_when_made() {
     let deadline = Instant::now() + PATIENCE;
     let shown = loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        if let Out::Layout(Some(t)) = outs.recv_timeout(left).expect("the new window") {
+        if let Out::Layout(Some(t), _) = outs.recv_timeout(left).expect("the new window") {
             break t;
         }
     };
@@ -487,8 +487,8 @@ fn a_split_and_a_zoom_asked_by_the_window_come_back() {
         key,
         dir: Dir::Vertical,
     });
-    let Out::Layout(Some(Tree::Split { dir, a, .. })) =
-        next(&|o| matches!(o, Out::Layout(Some(Tree::Split { .. }))))
+    let Out::Layout(Some(Tree::Split { dir, a, .. }), _) =
+        next(&|o| matches!(o, Out::Layout(Some(Tree::Split { .. }), _)))
     else {
         unreachable!("matched above");
     };
@@ -549,7 +549,7 @@ fn a_session_picked_in_the_switcher_is_shown_on_the_same_connection() {
     let deadline = Instant::now() + PATIENCE;
     let shown = loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        if let Out::Layout(Some(t)) = outs.recv_timeout(left).expect("its layout") {
+        if let Out::Layout(Some(t), _) = outs.recv_timeout(left).expect("its layout") {
             break t;
         }
     };
@@ -569,10 +569,15 @@ fn a_session_picked_in_the_switcher_is_shown_on_the_same_connection() {
 
 /// A control client of its own on `socket`, welcomed.
 fn control(socket: &std::path::Path) -> Conn<UnixStream> {
+    control_with(socket, CONTROL)
+}
+
+/// [`control`] with `features`.
+fn control_with(socket: &std::path::Path, features: Features) -> Conn<UnixStream> {
     let mut conn = Conn::new(UnixStream::connect(socket).expect("connect"));
     conn.send(&Message::Hello {
         version: None,
-        features: CONTROL,
+        features,
         resume: None,
         takeover: None,
     })
@@ -601,8 +606,8 @@ fn a_detached_block_is_listed_and_reattach_puts_it_back() {
         key,
         dir: Dir::Vertical,
     });
-    let Out::Layout(Some(Tree::Split { b, .. })) =
-        next(&|o| matches!(o, Out::Layout(Some(Tree::Split { .. }))))
+    let Out::Layout(Some(Tree::Split { b, .. }), _) =
+        next(&|o| matches!(o, Out::Layout(Some(Tree::Split { .. }), _)))
     else {
         unreachable!("matched above");
     };
@@ -672,8 +677,8 @@ fn a_detached_block_is_listed_and_reattach_puts_it_back() {
     attached.source.act(Act::Reattach(new));
     assert!(
         matches!(
-            next(&|o| matches!(o, Out::Layout(Some(Tree::Split { .. })))),
-            Out::Layout(Some(_))
+            next(&|o| matches!(o, Out::Layout(Some(Tree::Split { .. }), _))),
+            Out::Layout(Some(_), _)
         ),
         "two blocks again"
     );
@@ -703,8 +708,8 @@ fn a_detached_block_is_listed_and_reattach_puts_it_back() {
     }
     attached.source.act(Act::Reattach(new));
     assert_eq!(
-        next(&|o| matches!(o, Out::Layout(_))),
-        Out::Layout(Some(Tree::Pane(new))),
+        next(&|o| matches!(o, Out::Layout(..))),
+        Out::Layout(Some(Tree::Pane(new)), Vec::new()),
         "it fills the empty window"
     );
 }
@@ -811,8 +816,8 @@ fn a_lost_link_is_taken_over_and_the_open_block_goes_on() {
     });
     assert_eq!(back, Out::Link(Link::Back { kept: true }));
     assert_eq!(
-        next_out(&outs, |o| matches!(o, Out::Layout(_))),
-        Out::Layout(Some(Tree::Pane(key)))
+        next_out(&outs, |o| matches!(o, Out::Layout(..))),
+        Out::Layout(Some(Tree::Pane(key)), Vec::new())
     );
     // The same pane: its screen read again, its lease kept or taken back.
     next_screen(&feed);
@@ -884,8 +889,8 @@ fn a_client_the_server_let_go_waits_for_retry_and_attaches_anew() {
     );
     assert_eq!(next_out(&outs, link), Out::Link(Link::Back { kept: false }));
     assert_eq!(
-        next_out(&outs, |o| matches!(o, Out::Layout(_))),
-        Out::Layout(Some(Tree::Pane(key)))
+        next_out(&outs, |o| matches!(o, Out::Layout(..))),
+        Out::Layout(Some(Tree::Pane(key)), Vec::new())
     );
     // The window opens its block again, as a new client.
     drop((writer, feed));
@@ -922,7 +927,7 @@ fn a_session_gone_after_a_reconnect_is_said_and_another_can_be_shown() {
     let link = |o: &Out| matches!(o, Out::Link(Link::Down { trying: false }));
     next_out(&outs, link);
     attached.source.retry();
-    let ended = next_out(&outs, |o| matches!(o, Out::Ended(_) | Out::Layout(_)));
+    let ended = next_out(&outs, |o| matches!(o, Out::Ended(_) | Out::Layout(..)));
     let Out::Ended(name) = ended else {
         panic!("the session ended: {ended:?}");
     };
@@ -940,8 +945,8 @@ fn a_session_gone_after_a_reconnect_is_said_and_another_can_be_shown() {
 
     attached.source.switch(pick.key);
     assert!(matches!(
-        next_out(&outs, |o| matches!(o, Out::Layout(_))),
-        Out::Layout(Some(Tree::Pane(_)))
+        next_out(&outs, |o| matches!(o, Out::Layout(..))),
+        Out::Layout(Some(Tree::Pane(_)), _)
     ));
 }
 
@@ -1036,4 +1041,311 @@ fn a_clipboard_read_reaches_the_window_and_its_answer_reaches_the_program() {
     assert!(next_clipboard_read(&feed), "primary this time");
     writer.clipboard_reply(true, None);
     bytes_until(&feed, "52;p;^G");
+}
+
+/// Splits the window of `attached` and returns the pane keys `(first, new)`,
+/// with the events of the run on `outs`.
+fn split_window(
+    attached: rusty_mux_gui::source::Attached,
+) -> (u64, u64, Receiver<Out>, rusty_mux_gui::source::MuxSource) {
+    let Tree::Pane(first) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (tx, outs) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || events.run(|out| tx.send(out).is_ok()));
+    attached.source.act(Act::Split {
+        key: first,
+        dir: Dir::Vertical,
+    });
+    let Out::Layout(Some(Tree::Split { b, .. }), _) = next_out(&outs, |o| {
+        matches!(o, Out::Layout(Some(Tree::Split { .. }), _))
+    }) else {
+        unreachable!("matched above");
+    };
+    let Tree::Pane(new) = *b else {
+        panic!("a block on the right: {b:?}");
+    };
+    (first, new, outs, attached.source)
+}
+
+#[test]
+fn a_window_of_floats_alone_stays_open_and_shows_them() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (tx, outs) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || events.run(|out| tx.send(out).is_ok()));
+
+    // The only block floats: no tile is left, and the window is not closed.
+    attached.source.act(Act::Float(key));
+    let deadline = Instant::now() + PATIENCE;
+    let (tree, floats) = loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match outs.recv_timeout(left).expect("a layout with the float") {
+            Out::Layout(None, _) => panic!("a window of floats alone was closed"),
+            Out::Layout(Some(tree), floats) if !floats.is_empty() => break (tree, floats),
+            _ => {}
+        }
+    };
+    assert_eq!(floats.len(), 1);
+    assert_eq!(floats[0].key, key);
+    assert_eq!(tree, Tree::Pane(key), "the float stands for the tile");
+}
+
+#[test]
+fn a_block_moving_between_detached_and_floating_tells_the_strip() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let (_, _, outs, source) = split_window(attached);
+
+    // Another client detaches one block: the strip lists it, the other stays
+    // tiled.
+    let mut conn = control(&socket);
+    let mut req = Requests {
+        conn: &mut conn,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    req.welcome().expect("welcome");
+    let listed = req.call(|req| Message::List { req }).expect("a list");
+    let block = listed
+        .iter()
+        .find_map(|m| match m {
+            Message::Entry {
+                entry: rusty_mux_proto::Entry::Block { block, .. },
+                ..
+            } => Some(*block),
+            _ => None,
+        })
+        .expect("a block");
+    req.call(|req| Message::DetachBlock { req, block })
+        .expect("detached");
+    let out = loop {
+        if let Some(d) = next_session(&outs).detached.first() {
+            break d.key;
+        }
+    };
+    // It floats: the window is told the float, and the strip that it is no
+    // longer on the detached list, though no layout changed.
+    source.act(Act::Float(out));
+    next_out(&outs, |o| matches!(o, Out::Floats(f) if !f.is_empty()));
+    loop {
+        if next_session(&outs).detached.is_empty() {
+            break;
+        }
+    }
+}
+
+#[test]
+fn a_place_the_server_refuses_snaps_the_float_back() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let (first, new, outs, source) = split_window(attached);
+
+    // Another client closes a block the window still has a key for: the
+    // server refuses to place it, however fast it answers.
+    let mut conn = control(&socket);
+    let mut req = Requests {
+        conn: &mut conn,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    req.welcome().expect("welcome");
+    let listed = req.call(|req| Message::List { req }).expect("a list");
+    let blocks: Vec<_> = listed
+        .iter()
+        .filter_map(|m| match m {
+            Message::Entry {
+                entry: rusty_mux_proto::Entry::Block { block, .. },
+                ..
+            } => Some(*block),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(blocks.len(), 2);
+    // One of the two goes; the window is left with the other.
+    req.call(|req| Message::CloseBlock {
+        req,
+        block: blocks[0],
+    })
+    .expect("closed");
+    let Out::Layout(Some(Tree::Pane(left)), _) =
+        next_out(&outs, |o| matches!(o, Out::Layout(Some(Tree::Pane(_)), _)))
+    else {
+        unreachable!("matched above");
+    };
+    let gone = if left == first { new } else { first };
+    source.act(Act::Place {
+        key: gone,
+        at: rusty_term::gui::source::FloatAt {
+            x: 10,
+            y: 10,
+            w: 50,
+            h: 50,
+        },
+    });
+    assert_eq!(
+        next_out(&outs, |o| matches!(o, Out::Floats(_))),
+        Out::Floats(Vec::new()),
+        "told where it is"
+    );
+}
+
+#[test]
+fn a_block_is_reattached_to_a_window_of_floats_alone() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let (first, new, outs, source) = split_window(attached);
+
+    // One block is detached; the other floats and has the focus: nothing is
+    // tiled, and a float is no block to place beside.
+    let mut conn = control(&socket);
+    let mut req = Requests {
+        conn: &mut conn,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    req.welcome().expect("welcome");
+    let listed = req.call(|req| Message::List { req }).expect("a list");
+    let block = listed
+        .iter()
+        .find_map(|m| match m {
+            Message::Entry {
+                entry: rusty_mux_proto::Entry::Block { block, .. },
+                ..
+            } => Some(*block),
+            _ => None,
+        })
+        .expect("a block");
+    req.call(|req| Message::DetachBlock { req, block })
+        .expect("detached");
+    let detached = loop {
+        if let Some(d) = next_session(&outs).detached.first() {
+            break d.key;
+        }
+    };
+    let floated = if detached == first { new } else { first };
+    source.act(Act::Float(floated));
+    next_out(&outs, |o| matches!(o, Out::Layout(_, f) if !f.is_empty()));
+
+    source.act(Act::Reattach(detached));
+    let Out::Layout(Some(tree), floats) = next_out(
+        &outs,
+        |o| matches!(o, Out::Layout(Some(Tree::Pane(k)), f) if *k == detached && !f.is_empty()),
+    ) else {
+        unreachable!("matched above");
+    };
+    assert_eq!(tree, Tree::Pane(detached), "tiled again, the float stays");
+    assert_eq!(floats[0].key, floated);
+}
+
+#[test]
+fn a_gui_attached_to_a_float_reattaches_beside_no_float() {
+    let socket = start_server();
+    // A first window with its block, made by a GUI kept open aside.
+    let _seed = attach(&socket, None).expect("seeded");
+    // A window of one float and one detached block, before the GUI is there.
+    let mut conn = control_with(&socket, rusty_mux_client::attach::FLOATING);
+    let mut req = Requests {
+        conn: &mut conn,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    req.welcome().expect("welcome");
+    let block_of = |m: &Message| match m {
+        Message::Entry {
+            entry: rusty_mux_proto::Entry::Block { block, .. },
+            ..
+        } => Some(*block),
+        _ => None,
+    };
+    let first = req
+        .call(|req| Message::List { req })
+        .expect("a list")
+        .iter()
+        .find_map(block_of)
+        .expect("a block");
+    req.call(|req| Message::Split {
+        req,
+        block: first,
+        side: Side::Right,
+        launch: Launch::default(),
+    })
+    .expect("split");
+    let both: Vec<BlockId> = req
+        .call(|req| Message::List { req })
+        .expect("a list")
+        .iter()
+        .filter_map(block_of)
+        .collect();
+    assert_eq!(both.len(), 2);
+    let (float, away) = (both[0], both[1]);
+    let at = rusty_mux_core::FloatRect::new(20, 20, 60, 60).expect("a float");
+    req.call(|req| Message::PlaceFloat {
+        req,
+        block: float,
+        at,
+    })
+    .expect("floated");
+    req.call(|req| Message::DetachBlock { req, block: away })
+        .expect("detached");
+
+    // The GUI attaches straight to the float.
+    let attached = attach(&socket, Some(float)).expect("attached");
+    let (tx, outs) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || events.run(|out| tx.send(out).is_ok()));
+    let detached = loop {
+        if let Some(d) = next_session(&outs).detached.first() {
+            break d.key;
+        }
+    };
+    attached.source.act(Act::Reattach(detached));
+    next_out(
+        &outs,
+        |o| matches!(o, Out::Layout(Some(Tree::Pane(k)), f) if *k == detached && !f.is_empty()),
+    );
+}
+
+#[test]
+fn a_place_that_changes_nothing_or_goes_nowhere_still_tells_the_floats() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let (_, new, outs, source) = split_window(attached);
+    source.act(Act::Float(new));
+    let Out::Floats(floats) = next_out(&outs, |o| matches!(o, Out::Floats(f) if !f.is_empty()))
+    else {
+        unreachable!("matched above");
+    };
+    let at = floats[0].at;
+
+    // Dropped where it is: the server says Done and changes nothing.
+    source.act(Act::Place { key: new, at });
+    assert_eq!(
+        next_out(&outs, |o| matches!(o, Out::Floats(_))),
+        Out::Floats(floats),
+        "told where it is, so it does not wait"
+    );
+
+    // Dropped under the least size: nothing is sent, and it still snaps back.
+    let tiny = rusty_term::gui::source::FloatAt {
+        x: 0,
+        y: 0,
+        w: 5,
+        h: 5,
+    };
+    source.act(Act::Place { key: new, at: tiny });
+    let Out::Floats(told) = next_out(&outs, |o| matches!(o, Out::Floats(_))) else {
+        unreachable!("matched above");
+    };
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0].at, at);
 }
