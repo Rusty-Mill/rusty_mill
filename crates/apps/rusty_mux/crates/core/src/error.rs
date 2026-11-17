@@ -65,7 +65,7 @@ pub enum Error {
         w: u8,
         h: u8,
     },
-    /// The block floats (C42), so it is in no split to swap or resize.
+    /// The block floats (C42), so it is in no split to swap.
     Floating(BlockId),
     /// The block does not float.
     NotFloating(BlockId),

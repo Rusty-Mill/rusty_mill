@@ -172,8 +172,8 @@ pub enum Event {
     },
     /// The window's floating blocks (C42) changed: one floated, moved,
     /// resized, raised, lowered, or stopped floating or closed. Back to
-    /// front, every float; it follows the [`Event::LayoutChanged`] that a
-    /// block leaving the layout causes.
+    /// front, every float; a block leaving the layout sends
+    /// [`Event::LayoutChanged`] before it or after it, as the edit orders them.
     FloatsChanged {
         window: WindowId,
         floats: Vec<Float>,

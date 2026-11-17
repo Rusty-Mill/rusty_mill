@@ -101,13 +101,13 @@ fn catalog_covers_each_request_type_once() {
     // SelectWindow, 0x18 ReloadConfig, 0x19 to 0x1d the layout edits,
     // 0x1e and 0x1f focus, 0x20 NameSession. 0x21 to 0x23, the leases, and
     // 0x24 Shutdown (`rusty-mux-ctl server stop`) are not agent methods;
-    // 0x25 and 0x26, the session share (C14), are; so are 0x2b and 0x2c,
+    // 0x25 and 0x26, the session share (C14), are; so are 0x2c and 0x2d,
     // the floats (C42).
     let expected = (0x02..=0x14)
         .filter(|t| ![0x0d, 0x0f, 0x10].contains(t))
         .chain(0x16..=0x20)
         .chain(0x25..=0x26)
-        .chain(0x2b..=0x2c);
+        .chain(0x2c..=0x2d);
     assert_eq!(unique, expected.collect());
     assert!(block.iter().all(|m| ty(m) == 0x0f));
     assert_eq!(renames.len(), 4);
@@ -265,7 +265,11 @@ fn methods_need_the_features_their_messages_are_gated_by() {
         assert_eq!(needs(name), Features::FOCUS, "{name}");
     }
     for name in ["place-float", "stack-float"] {
-        assert_eq!(needs(name), Features::FLOATS, "{name}");
+        assert_eq!(
+            needs(name),
+            Features::FLOATS.union(Features::LAYOUT_EDIT),
+            "{name}"
+        );
     }
     assert_eq!(needs("reload-config"), Features::CONFIG_RELOAD);
     assert_eq!(needs("name-session"), Features::NAME_SESSION);

@@ -110,6 +110,10 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::FLOATS)
     .union(UNIX_ONLY);
 
+/// What a float edit needs: floating takes a block out of the layout, as a
+/// detach does.
+const FLOATS_EDIT: Features = Features::FLOATS.union(Features::LAYOUT_EDIT);
+
 /// The most text a clipboard answer carries (C38's OSC 52 limit).
 const MAX_CLIPBOARD: usize = 1 << 20;
 
@@ -865,6 +869,26 @@ impl State {
         client
     }
 
+    /// Whether `event` moves focus onto a floating block (C42) for a
+    /// client without [`Features::FLOATS`]: it knows only tiles, so it is
+    /// never told, and keeps the focus it has.
+    fn focus_unseen(&self, features: Features, event: &Event) -> bool {
+        let Event::FocusChanged {
+            window,
+            block: Some(block),
+        } = event
+        else {
+            return false;
+        };
+        !features.contains(Features::FLOATS) && self.floats_on(*window, *block)
+    }
+
+    fn floats_on(&self, window: WindowId, block: BlockId) -> bool {
+        self.mux
+            .window(window)
+            .is_some_and(|w| w.floats().iter().any(|f| f.block == block))
+    }
+
     /// Where a client's stream starts, and the events it missed: from
     /// `resume` when possible, else from now with nothing to replay. Only
     /// events its `features` let it receive are replayed.
@@ -880,6 +904,7 @@ impl State {
         };
         let messages = events
             .filter(|(_, event)| receives(features, principal, event))
+            .filter(|(_, event)| !self.focus_unseen(features, event))
             .map(|(seq, event)| Message::Event {
                 seq: Some(*seq),
                 event: event.clone(),
@@ -1276,7 +1301,7 @@ impl State {
             M::PlaceFloat { req, block, at } => (
                 req,
                 self.owns(client, [block]).and_then(|()| {
-                    self.edit_needing(Features::FLOATS, client, "place-float", |mux| {
+                    self.edit_needing(FLOATS_EDIT, client, "place-float", |mux| {
                         mux.place_float(block, at)
                     })
                 }),
@@ -1284,7 +1309,7 @@ impl State {
             M::StackFloat { req, block, top } => (
                 req,
                 self.owns(client, [block]).and_then(|()| {
-                    self.edit_needing(Features::FLOATS, client, "stack-float", |mux| {
+                    self.edit_needing(FLOATS_EDIT, client, "stack-float", |mux| {
                         mux.stack_float(block, top)
                     })
                 }),
@@ -2005,7 +2030,13 @@ impl State {
                     name: window.name().to_owned(),
                     layout: window.layout().cloned(),
                     zoomed: window.zoomed(),
-                    focused: window.focused(),
+                    // A client without floats is told of a tile only.
+                    focused: window
+                        .focused()
+                        .filter(|b| {
+                            self.has(client, Features::FLOATS) || !self.floats_on(window.id(), *b)
+                        })
+                        .or_else(|| window.layout().and_then(|l| l.blocks().first().copied())),
                 });
                 if !window.floats().is_empty() && self.has(client, Features::FLOATS) {
                     entries.push(Entry::Floats {
@@ -2807,6 +2838,7 @@ impl State {
                         self.mux
                             .client(**c)
                             .is_some_and(|client| receives(**f, client.principal(), &event))
+                            && !self.focus_unseen(**f, &event)
                     })
                     .map(|(c, f)| (*c, f.contains(Features::EVENT_SEQ)))
                     .collect();

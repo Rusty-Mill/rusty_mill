@@ -548,9 +548,10 @@ impl Mux {
             return Ok(());
         }
         let float = w.floats.remove(at);
-        match top {
-            true => w.floats.push(float),
-            false => w.floats.insert(0, float),
+        if top {
+            w.floats.push(float);
+        } else {
+            w.floats.insert(0, float);
         }
         self.announce_floats(window);
         Ok(())

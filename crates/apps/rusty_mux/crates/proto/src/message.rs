@@ -247,7 +247,8 @@ impl Features {
     pub const CLIPBOARD: Self = Self(1 << 48);
 
     /// Floating layers (C42): [`Message::PlaceFloat`] and
-    /// [`Message::StackFloat`] float a block over its window, announced by
+    /// [`Message::StackFloat`] float a block over its window (each needs
+    /// [`Features::LAYOUT_EDIT`] too), announced by
     /// [`Event::FloatsChanged`] (skipped for a client without it) and
     /// listed by [`Entry::Floats`]. Bit 49 is another capability's.
     pub const FLOATS: Self = Self(1 << 50);
@@ -1111,9 +1112,9 @@ const EXITED: u32 = 61;
 /// A [`TailscaleState`]: 1 running, 2 needs login, 3 stopped, 4 other (C27).
 const TAILSCALE: u32 = 62;
 /// Floating blocks (C42) in the text form of [`rusty_mux_core::floats_text`].
-const FLOATS: u32 = 63;
+const FLOATS: u32 = 64;
 /// A [`Message::StackFloat`]'s end: 1 top, 0 bottom.
-const TOP: u32 = 64;
+const TOP: u32 = 65;
 // IDs 1..=TOP are recognized. Extend this bound when adding field IDs.
 pub(crate) const FIELD_COUNT: usize = TOP as usize;
 
@@ -1159,8 +1160,8 @@ mod ty {
     pub const SIGNAL_BLOCK: u8 = 0x28;
     pub const RELEASE_BLOCK: u8 = 0x29;
     pub const CLIPBOARD_REPLY: u8 = 0x2a;
-    pub const PLACE_FLOAT: u8 = 0x2b;
-    pub const STACK_FLOAT: u8 = 0x2c;
+    pub const PLACE_FLOAT: u8 = 0x2c;
+    pub const STACK_FLOAT: u8 = 0x2d;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -1728,7 +1729,11 @@ impl Message {
             ty::STACK_FLOAT => M::StackFloat {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
-                top: f.varint(TOP)? == 1,
+                top: match f.varint(TOP)? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(f.invalid(TOP)),
+                },
             },
             ty::MOVE_WINDOW => M::MoveWindow {
                 req: f.varint(REQ)?,

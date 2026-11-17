@@ -28,8 +28,8 @@
 use std::fmt;
 
 use rusty_mux_core::{
-    Axis, BlockId, ClientId, EntityId, FloatRect, InputMode, SessionId, Share, Side, Size, Toward,
-    WindowId,
+    Axis, BlockId, ClientId, EntityId, FloatRect, InputMode, MIN_FLOAT, SessionId, Share, Side,
+    Size, Toward, WindowId,
 };
 use rusty_uuid::Uuid;
 
@@ -516,7 +516,8 @@ impl Args<'_> {
         }
     }
 
-    /// The `percent` parameter, from 1 to 99.
+    /// The `x`, `y`, `width` and `height` parameters, in percent of the
+    /// window.
     fn float_rect(&self) -> Result<FloatRect, CallError> {
         let part = |name: &'static str| {
             let n = self.number(name)?;
@@ -525,14 +526,18 @@ impl Args<'_> {
                 why: format!("{n} is not a percent from 0 to 100"),
             })
         };
-        FloatRect::new(part("x")?, part("y")?, part("width")?, part("height")?).map_err(|e| {
+        let (x, y, w, h) = (part("x")?, part("y")?, part("width")?, part("height")?);
+        FloatRect::new(x, y, w, h).map_err(|e| {
+            // Name the side that does not fit.
+            let wide = w >= MIN_FLOAT && u16::from(x) + u16::from(w) <= 100;
             CallError::Invalid {
-                param: "width",
+                param: if wide { "height" } else { "width" },
                 why: e.to_string(),
             }
         })
     }
 
+    /// The `percent` parameter, from 1 to 99.
     fn share(&self) -> Result<Share, CallError> {
         let percent = self.number("percent")?;
         u8::try_from(percent)
@@ -1137,7 +1142,7 @@ pub static CATALOG: &[Method] = &[
                 "Its height, in percent of the window's.",
             ),
         ],
-        needs: Features::FLOATS,
+        needs: Features::FLOATS.union(Features::LAYOUT_EDIT),
         returns: Returns::Nothing,
         build: |req, a| {
             Ok(Message::PlaceFloat {
@@ -1154,10 +1159,11 @@ pub static CATALOG: &[Method] = &[
             required("block", Ty::Id(Entity::Block), "The floating block."),
             required("to", Ty::Text, "`top` to raise it, `bottom` to lower it."),
         ],
-        needs: Features::FLOATS,
+        needs: Features::FLOATS.union(Features::LAYOUT_EDIT),
         returns: Returns::Nothing,
         build: |req, a| {
-            let top = match a.text("to")?.as_str() {
+            let to = a.text("to")?;
+            let top = match to.as_str() {
                 "top" => true,
                 "bottom" => false,
                 other => {

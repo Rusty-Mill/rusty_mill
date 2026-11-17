@@ -257,4 +257,29 @@ mod tests {
         bad[0].windows[0].blocks[0].cols = 0;
         assert!(super::manifest(bad).is_err());
     }
+
+    /// D323: floats are not stored, so one comes back detached and focus
+    /// leaves it for a tile, which restore needs.
+    #[test]
+    fn a_float_is_saved_as_a_detached_block_with_focus_on_a_tile() {
+        use rusty_mux_core::{FloatRect, Mux};
+        let manifest = manifest_of_two_sessions();
+        let mut mux = Mux::restore(manifest.saved.clone()).unwrap();
+        let window = manifest.saved.sessions[0].windows[0].id;
+        let float = mux.window(window).unwrap().blocks()[0];
+        mux.place_float(float, FloatRect::new(10, 10, 40, 40).unwrap())
+            .unwrap();
+        mux.focus_block(float).unwrap();
+        let saved = Manifest {
+            saved: mux.save(),
+            started: manifest.started.clone(),
+        };
+        let back = super::manifest(records(&saved)).expect("restores");
+        let restored = Mux::restore(back.saved).expect("a valid model");
+        let w = restored.window(window).unwrap();
+        assert!(w.floats().is_empty());
+        assert!(w.detached().any(|b| b == float));
+        assert_ne!(w.focused(), Some(float));
+        assert!(w.focused().is_some());
+    }
 }

@@ -107,3 +107,59 @@ fn a_client_without_the_feature_can_not_float_and_hears_none() {
     );
     assert_eq!(listed(&mut floating, window).len(), 1);
 }
+
+#[test]
+fn floating_needs_layout_editing_too() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, PLAIN.union(Features::FLOATS), None);
+    let mut no_edit = Client::connect_with(
+        &path,
+        Features::from_bits(FLOATING.bits() & !Features::LAYOUT_EDIT.bits()),
+        None,
+    );
+    let window = window_for(&mut client);
+    let block = new_block(&mut client, window);
+    let answer = no_edit.answer(|req| Message::PlaceFloat {
+        req,
+        block,
+        at: rect(0, 0, 50, 50),
+    });
+    assert!(
+        matches!(answer.as_slice(), [Message::Failed { .. }]),
+        "{answer:?}"
+    );
+}
+
+#[test]
+fn a_client_without_the_bit_is_never_told_focus_is_on_a_float() {
+    let path = start_server();
+    let mut plain = Client::connect_with(&path, PLAIN.union(Features::FOCUS), None);
+    let mut floating = Client::connect_with(&path, FLOATING.union(Features::FOCUS), None);
+    let window = window_for(&mut plain);
+    let tile = new_block(&mut plain, window);
+    let float = new_block(&mut plain, window);
+    floating.request(|req| Message::PlaceFloat {
+        req,
+        block: float,
+        at: rect(10, 10, 40, 40),
+    });
+    floating.request(|req| Message::FocusBlock { req, block: float });
+    let listed_focus = |client: &mut Client| {
+        client
+            .answer(|req| Message::List { req })
+            .into_iter()
+            .find_map(|m| match m {
+                Message::Entry {
+                    entry: Entry::Window { focused, .. },
+                    ..
+                } => Some(focused),
+                _ => None,
+            })
+            .expect("the window")
+    };
+    assert_eq!(listed_focus(&mut plain), Some(tile));
+    assert_eq!(listed_focus(&mut floating), Some(float));
+    let to_float = |(_, e): &(_, Event)| matches!(e, Event::FocusChanged { block: Some(b), .. } if *b == float);
+    assert!(!plain.events.iter().any(to_float));
+    assert!(floating.events.iter().any(to_float));
+}
