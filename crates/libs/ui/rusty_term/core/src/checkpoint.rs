@@ -41,7 +41,21 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 const HEADER: &[u8; 5] = b"RTCP\x06";
 
 /// Encode a consistent headless Grid and parser. No output log is retained.
+/// Never carries image placements, so every RTCP v6 reader accepts it; an
+/// image shows as its half-block cells. See [`encode_with_images`].
 pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
+    encode_as(grid, parser, false)
+}
+
+/// [`encode`] plus the optional trailing placements section. A v6 reader that
+/// predates it rejects any trailing bytes, so use this only for a consumer
+/// known to read placements (a peer that negotiated the images feature, or
+/// this build restoring its own checkpoint).
+pub fn encode_with_images(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
+    encode_as(grid, parser, true)
+}
+
+fn encode_as(grid: &Grid, parser: &AnsiParser, images: bool) -> Result<Vec<u8>> {
     // Cell style ids are checked per run as the lines are written.
     grid.validate_checkpoint()?;
     parser.validate_checkpoint()?;
@@ -49,6 +63,9 @@ pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
     w.put(HEADER)?;
     grid.write(&mut w)?;
     parser.write(&mut w)?;
+    if images {
+        grid.write_placements(&mut w)?;
+    }
     Ok(w.bytes)
 }
 
@@ -60,9 +77,13 @@ pub fn decode(data: &[u8]) -> Result<(Grid, AnsiParser)> {
         return Err(Error("checkpoint header/version/size"));
     }
     let mut r = Reader::new(&data[HEADER.len()..], MAX_DECODED);
-    let grid = Grid::read(&mut r)?;
+    let mut grid = Grid::read(&mut r)?;
     let parser = AnsiParser::read(&mut r)?;
+    if !r.bytes.is_empty() {
+        grid.read_placements(&mut r)?;
+    }
     grid.validate_checkpoint()?;
+    grid.validate_placements()?;
     grid.validate_cell_styles()?;
     parser.validate_checkpoint()?;
     if !r.bytes.is_empty() {
@@ -83,6 +104,25 @@ pub fn encode_split(
     parser: &AnsiParser,
     batch_bytes: usize,
 ) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
+    encode_split_as(grid, parser, batch_bytes, false)
+}
+
+/// [`encode_split`] with the trailing placements section, as
+/// [`encode_with_images`].
+pub fn encode_split_with_images(
+    grid: &Grid,
+    parser: &AnsiParser,
+    batch_bytes: usize,
+) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
+    encode_split_as(grid, parser, batch_bytes, true)
+}
+
+fn encode_split_as(
+    grid: &Grid,
+    parser: &AnsiParser,
+    batch_bytes: usize,
+    images: bool,
+) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
     grid.validate_checkpoint()?;
     parser.validate_checkpoint()?;
     let split = grid.history_split();
@@ -90,6 +130,9 @@ pub fn encode_split(
     w.put(HEADER)?;
     grid.write_from(&mut w, split)?;
     parser.write(&mut w)?;
+    if images {
+        grid.write_placements(&mut w)?;
+    }
     Ok((w.bytes, grid.history_batches(split, batch_bytes)?))
 }
 
@@ -918,7 +961,15 @@ mod tests {
             ("collect_program_status", "host configuration"),
             ("program_status", "pending host status signals"),
             ("ime_preedit", "GUI input composition"),
-            ("total_scrolled", "GUI overlay image anchor"),
+            (
+                "total_scrolled",
+                "re-anchored at the retained history on decode; placements are written relative to the screen",
+            ),
+            (
+                "placements",
+                "optional trailing section after the parser (write_placements)",
+            ),
+            ("image_stamp", "rebuilt image change stamp"),
             (
                 "images",
                 "GUI-only pixel overlays; headless cells/store are encoded",
