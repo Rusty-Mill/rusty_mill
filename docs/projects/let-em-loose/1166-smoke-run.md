@@ -1,7 +1,7 @@
 # #1166 Smoke run: lens run on a toy claims task, local model first (step 1 design)
 
 Status: design for Nano's approval (card #1166 step 1). Nothing is built, deployed or run. No model was called and the board was not read (the card text was not available to the author; pass criteria below follow the brief for this design and are marked where the card may differ).
-Authority: D130 (M1 design batch), D131 (deploy on BaileyAi), **D134 (no paid runs for now: this run is local-only; D140 and D141 on 2026-11-17 approve paid runs, separately from this design)**, D127 (freeze: nothing new), D53, D86, D93, D37.
+Authority: D130 (M1 design batch), D131 (deploy on BaileyAi), **D134 (no paid runs for now: this run is local-only; D141 on 2026-11-17 confirms this run stays local-only; the paid run is run 2, the launcher brief)**, D127 (freeze: nothing new), D53, D86, D93, D37.
 Depends on: #1092 deployed (`1092-deploy-layout.md`) and #1123's `lens.json` and prompts in place (`1123-lens-prompts.md`).
 
 ## 1. What this run proves (and what it cannot)
@@ -115,7 +115,7 @@ If the models never push A to 12 (they may post nothing, opinion only, or malfor
 - No verb or command posts the question (domain `question`) in a live task; `lens run` assumes it exists. Only the architect lens posts claims, and only as answers. Orch's tests build it by hand.
 - No claims-mode roster file is in the repo (only `rusty_bbp/tests/claims.rs`); `docs/proving/roster.json` is the four-role stage-mode roster.
 - 1123 fixture and the llama-swap port 8080 and model ids are unverified; `STARTER` has `baileyai` as the host.
-- 1124 says the smoke-run paid half is deferred (D134); this design supersedes the card's "local model first, then paid" order: only the first half runs. Update 2026-11-17: D141 approves the paid half. Run 1 is this toy `sweep` smoke run and run 2 is the SSH host launcher brief, each with `lens run --max-passes 5`, the default `task_calls` cap and no dollar-cap enforcement in v0. Paid providers are codex now, claude only after its `no_overage` entry exists in `/etc/let-em-loose/assertions.json`. The paid half is blocked on #1092 (deploy), #1123's `lens.json` on the host and, for claude, the assertion. The local-only design above is unchanged and runs first.
+- 1124 says the smoke-run paid half is deferred (D134); this design supersedes the card's "local model first, then paid" order: only the first half runs. Update 2026-11-17: D141 (as amended by Nano's correction) keeps this run local-only: `--max-passes 8`, `task_calls 60`, $0, `local`, `local-high`, `local-rebel`, no paid provider. The paid run is run 2, the SSH host launcher brief, after this run has finished and been read: `--max-passes 5`, default `task_calls` cap (400), no dollar-cap enforcement in v0, codex paid now and claude only after its `no_overage` entry exists in `/etc/let-em-loose/assertions.json`. Both wait on #1092 (deploy) and #1123's `lens.json` on the host.
 - The card's "Waits on #758" is wrong for the first run (section 7). The card text itself was not read.
 - Card lists `bbp why --claim` and `bbp verify`: both exist (`bbp.rs`). `lens why` (D58) is not used.
 
