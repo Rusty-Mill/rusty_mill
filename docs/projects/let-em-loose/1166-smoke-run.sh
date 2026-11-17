@@ -2,6 +2,7 @@
 # #1166 smoke run on BaileyAi: LOCAL-ONLY (lens-local.json; no paid call, no Claude, no Codex, $0).
 # Run from a checkout as baileyrd, after the #1092 deploy (1092-deploy.sh):
 #   bash docs/projects/let-em-loose/1166-smoke-run.sh
+# Inbox fixture: 1166-seed-inbox.sh (D146).
 # Design: 1166-smoke-run.md (sections 2-5, 8, 9). D141: this run keeps --max-passes 8 and task_calls 60.
 # Everything is logged to ~/smoke-1/. A task id that already exists is refused: rerun with TASK=smoke-2.
 set -euo pipefail
@@ -119,13 +120,16 @@ $R tee $TOY/holdout-profiles.json >/dev/null <<'EOF'
 }
 EOF
 
-# claims-mode roster (shape of rusty_bbp/tests/claims.rs lens()): one role that posts Claim and one that posts Evidence at least
+# claims-mode roster (shape of rusty_bbp/tests/claims.rs lens()): one role that posts Claim and one that posts Evidence at least.
+# seed-s1 and seed-s2 are the fixture supports of 1166-seed-inbox.sh (D146); no lens runs as them.
 $R tee $TOY/roster.json >/dev/null <<'EOF'
 [
   {"id": "seed",      "turn_order": 0, "post": ["Claim"],    "write": [], "read_artifacts": ["Brief", "Diff", "Candidate", "TestReport", "Log", "Source"], "read_messages": "All", "verdict_at": [], "final_decision": false, "consultable": false},
   {"id": "architect", "turn_order": 1, "post": ["Claim"],    "write": [], "read_artifacts": ["Brief", "Diff", "Candidate", "TestReport", "Log", "Source"], "read_messages": "All", "verdict_at": [], "final_decision": false, "consultable": false},
   {"id": "adversary", "turn_order": 2, "post": ["Evidence"], "write": [], "read_artifacts": ["Brief", "Diff", "Candidate", "TestReport", "Log", "Source"], "read_messages": "All", "verdict_at": [], "final_decision": false, "consultable": false},
-  {"id": "operator",  "turn_order": 3, "post": ["Evidence"], "write": [], "read_artifacts": ["Brief", "Diff", "Candidate", "TestReport", "Log", "Source"], "read_messages": "All", "verdict_at": [], "final_decision": false, "consultable": false}
+  {"id": "operator",  "turn_order": 3, "post": ["Evidence"], "write": [], "read_artifacts": ["Brief", "Diff", "Candidate", "TestReport", "Log", "Source"], "read_messages": "All", "verdict_at": [], "final_decision": false, "consultable": false},
+  {"id": "seed-s1",   "turn_order": 4, "post": ["Evidence"], "write": [], "read_artifacts": ["Brief", "Diff", "Candidate", "TestReport", "Log", "Source"], "read_messages": "All", "verdict_at": [], "final_decision": false, "consultable": false},
+  {"id": "seed-s2",   "turn_order": 5, "post": ["Evidence"], "write": [], "read_artifacts": ["Brief", "Diff", "Candidate", "TestReport", "Log", "Source"], "read_messages": "All", "verdict_at": [], "final_decision": false, "consultable": false}
 ]
 EOF
 matchpathcon $TOY
@@ -147,7 +151,7 @@ OPENED=$($R $BIN/bbp open --mode claims --dir $D --task "$TASK" --repo $TOY/repo
   --holdout-profiles $TOY/holdout-profiles.json --holdout-root $TOY/holdout)
 echo "$OPENED"
 case "$OPENED" in *Rejected*|*rejected*) die "bbp open was refused (a sandbox refusal shows as bad_claims_config 'sandbox:'; then run: sudo ausearch -m avc -ts recent)";; esac
-for r in seed architect adversary operator; do
+for r in seed architect adversary operator seed-s1 seed-s2; do
   $R $BIN/bbp assign --dir $D --task "$TASK" --role $r --principal $r --vendor local
 done
 
@@ -179,23 +183,41 @@ A=$(jq -r 'select(.id==3).result.content[0].text|fromjson|.Posted' "$OUT/seed.ou
 echo "Q=$Q A=$A"
 [[ $Q =~ ^[0-9]+$ && $A =~ ^[0-9]+$ ]] || die "a seed post was refused; see $OUT/seed.out"
 
-# ---- 6. Run (time box 90 minutes; a stopped run can still be read back, so a non-zero exit does not stop the script)
+# ---- 5b. Inbox fixture (D146): A2, an irreversible claim with two fixture supports, escalates at once, so the inbox
+# is exercised even if the lenses drop A as they did in run 1. No threshold or escalation rule is touched.
+echo "=== 5b. inbox fixture"
+bash "$(dirname "$0")/1166-seed-inbox.sh" "$D" "$TASK" "$BRIEF" "$BIN" | tee "$OUT/seed-inbox.out"
+A2=$(sed -n 's/^A2=\([0-9][0-9]*\)$/\1/p' "$OUT/seed-inbox.out" | head -n 1)
+[[ $A2 =~ ^[0-9]+$ ]] || die "A2 was not seeded; see $OUT/seed-inbox.out"
+echo "$A2" > "$OUT/a2.id"
+
+# ---- 6. Run (time box 90 minutes). Detached with setsid: closing the terminal or Ctrl-C stops only this script's polling,
+# never the run (run 1 was interrupted that way). If this script is interrupted, 1166-smoke-resume.sh waits for the
+# surviving run and reads back. The exit code is the last line of run.out; a non-zero exit does not stop the read-back.
 echo "=== 6. lens run $(date -u +%FT%TZ)"
-set +e
-timeout 5400 $R $BIN/rusty_orch lens run $CFG \
-  --bbp $BIN/bbp --dir $D --task "$TASK" --state /srv/lel/orch-state \
-  --experiment "$TASK" --repo $TOY/repo --max-passes 8 \
-  2> "$OUT/run.err" | tee "$OUT/run.out"
-RUN_EXIT=${PIPESTATUS[0]}
-set -e
-echo "lens run exit=$RUN_EXIT (124 = the 90-minute box stopped it) $(date -u +%FT%TZ)"
-echo "--- tail of run.err"; tail -n 20 "$OUT/run.err" || true
+trap 'echo; echo "Interrupted. The lens run keeps running on its own. Wait for it and read back with: TASK=$TASK bash $(dirname "$0")/1166-smoke-resume.sh"; exit 130' INT TERM
+sudo -v   # refresh the sudo timestamp in the foreground: a detached sudo cannot ask for a password
+: >"$OUT/run.out"; : >"$OUT/run.err"
+$R setsid sh -c "timeout 5400 $BIN/rusty_orch lens run $CFG --bbp $BIN/bbp --dir $D --task $TASK \
+  --state /srv/lel/orch-state --experiment $TASK --repo $TOY/repo --max-passes 8; echo \"lens run exit=\$?\"" \
+  >"$OUT/run.out" 2>"$OUT/run.err" </dev/null &
+disown
+sleep 5
+RUN_RE="rusty_orch lens run .*--task $TASK( |\$)"
+while pgrep -u orch-runner -f "$RUN_RE" >/dev/null; do
+  echo "$(date -u +%T)Z lens run alive; llama-swap loaded: $(curl -s -m 5 http://192.168.10.104:8080/running | jq -r '[.running[].model]|join(",")' 2>/dev/null || echo '?')"
+  sleep 60
+done
+echo "--- run.out (the last line is the exit code; 124 = the 90-minute box stopped it)"; cat "$OUT/run.out"
+echo "--- tail of run.err"; tail -n 30 "$OUT/run.err" || true
+tail -n 1 "$OUT/run.out" | grep -q "lens run exit=0" || echo "NOTE: the run did not exit 0; read the lines above before trusting the read-back"
 
 # ---- 7. Read back
 echo "=== 7. read back"
 $R $BIN/bbp card   --dir $D --task "$TASK"                | tee "$OUT/card-after.json"
 $R $BIN/bbp verify --dir $D --task "$TASK"                | tee "$OUT/verify-after.txt"
 $R $BIN/bbp why    --dir $D --task "$TASK" --claim "$A"   | tee "$OUT/why-A.json"
+$R $BIN/bbp why    --dir $D --task "$TASK" --claim "$A2"  | tee "$OUT/why-A2.json"
 $R $BIN/bbp inbox  --dir $D --task "$TASK" --json yes     | tee "$OUT/inbox.json"
 $R $BIN/rusty_orch lens record --bbp $BIN/bbp --dir $D --task "$TASK" --state /srv/lel/orch-state | tee "$OUT/lens-record.txt"
 echo "--- AVC denials (none expected)"
@@ -205,8 +227,9 @@ cat <<EOF
 
 === Done. Nothing is deleted at any point. Files are in $OUT
 Next, by hand:
-  1. Inbox: A (msg $A) should have escalated 'irreversible'. In the Mill Board inbox tap Reject on A
-     (or the CLI: sudo -H -u orch-runner $BIN/bbp human --dir $D --task $TASK --dry-run yes claim $A drop, then without --dry-run).
+  1. Inbox: A2 (msg $A2, the fixture claim) is escalated 'irreversible': tap Reject on it in the Mill Board inbox. A (msg $A)
+     is the lens-judged one: it may have been dropped by the lenses or escalated; act on it only if it is in the inbox.
+     CLI fallback: sudo -H -u orch-runner $BIN/bbp human --dir $D --task $TASK --dry-run yes claim $A2 drop, then without --dry-run.
      If Q escalated 'stuck', choose one candidate. If the lenses never pushed A to the line, that is a finding: do not edit A by hand.
   2. 'bbp why --claim' for one candidate: take its id from $OUT/card-after.json.
   3. Send Claude: $OUT/run.out, tail of $OUT/run.err, card-before/after, verify-before/after, lens-record.txt, why-A.json,

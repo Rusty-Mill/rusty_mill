@@ -50,7 +50,8 @@ cat "$OUT/card-resume-start.json"; echo
 Q=$(jq -r 'select(.id==2).result.content[0].text|fromjson|.Posted' "$OUT/seed.out")
 A=$(jq -r 'select(.id==3).result.content[0].text|fromjson|.Posted' "$OUT/seed.out")
 [[ $Q =~ ^[0-9]+$ && $A =~ ^[0-9]+$ ]] || die "cannot read Q and A from $OUT/seed.out"
-echo "Q=$Q A=$A"
+A2=$(cat "$OUT/a2.id" 2>/dev/null || true)
+echo "Q=$Q A=$A A2=${A2:-none}"
 echo "--- processes now"; pgrep -u orch-runner -af "rusty_orch|bbp mcp" | cut -c1-160 || echo "none"
 
 # ---- 1. Let a surviving run finish; never start a second one beside it
@@ -86,6 +87,7 @@ $R $BIN/bbp card   --dir $D --task "$TASK"                | tee "$OUT/card-after
 $R $BIN/bbp verify --dir $D --task "$TASK"                | tee "$OUT/verify-after.txt"
 $R $BIN/bbp why    --dir $D --task "$TASK" --claim "$A"   | tee "$OUT/why-A.json"
 $R $BIN/bbp why    --dir $D --task "$TASK" --claim "$Q"   | tee "$OUT/why-Q.json"
+[[ ${A2:-} =~ ^[0-9]+$ ]] && $R $BIN/bbp why --dir $D --task "$TASK" --claim "$A2" | tee "$OUT/why-A2.json"
 $R $BIN/bbp inbox  --dir $D --task "$TASK" --json yes     | tee "$OUT/inbox.json"
 $R $BIN/rusty_orch lens record --bbp $BIN/bbp --dir $D --task "$TASK" --state /srv/lel/orch-state | tee "$OUT/lens-record.txt"
 echo "--- AVC denials (none expected)"

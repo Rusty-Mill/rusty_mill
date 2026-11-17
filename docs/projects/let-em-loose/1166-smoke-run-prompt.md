@@ -8,6 +8,17 @@ Assumes the #1092 deploy is done (`/opt/lel/current/bin/{bbp,rusty_orch}`, `/srv
 
 Not guessed, read from code: `bbp open` flags (`crates/apps/rusty_bbp_host/src/bin/bbp.rs` header), the profile set and roster JSON shapes (`profiles.rs`, `holdout.rs`, `rusty_bbp/src/role.rs`), the claims `post` arguments (`rusty_bbp_host/src/mcp/claims.rs`, `lens/bbp.rs` `post_args`). Command output shapes (`bbp card`, `bbp mcp` `Posted`, `bbp human`) were observed on a throwaway task.
 
+## Rerun after run 1 (one command)
+
+Run 1 is recorded (D143, Q52): it is not a clean pass. The rerun uses a fresh task, the inbox fixture, a detached lens run and the read-back, and needs rusty_orch built from the merged fixes (#1781, #1783). When those have merged, or you have not deployed since:
+
+```bash
+cd ~/dev/rusty_mill && git switch main && git pull --ff-only && bash docs/projects/let-em-loose/1092-deploy.sh   # rebuild and install
+bash docs/projects/let-em-loose/1166-smoke-rerun.sh                                                              # task smoke-2
+```
+
+`1166-smoke-rerun.sh` refuses to start if the installed `rusty_orch` still offers `executed` evidence to lenses, or panics on a closed pipe; it then runs `1166-smoke-run.sh` for `TASK=smoke-2`. If the run is interrupted, `TASK=smoke-2 bash docs/projects/let-em-loose/1166-smoke-resume.sh`. The host changes (llama.cpp rebuild, a reasoning budget for Qwen) are held until this run's per-pass log shows which proposal slot failed and why: one change at a time.
+
 ## Run it (one command)
 
 ```bash
@@ -19,7 +30,9 @@ Do not paste the steps into an editor: the first #1092 run's pasted script picke
 
 What it does, in order (the design's section 8): pre-flight (tools, deploy present, llama-swap answers, task id is new) → stage `/srv/lel/toy` (brief, stub repo, holdout, profiles, roster) → `lens check` on `lens-local.json` and stop unless `local`, `local-high`, `local-rebel` are ready → `bbp open --mode claims` and `bbp assign` → baseline `card` and `verify`, then a pause for the optional card link (press Enter) → seed Q and A through `bbp mcp` → `lens run --max-passes 8` under a 90-minute `timeout` (a non-zero exit does not stop the read-back) → `card`, `verify`, `why --claim A`, `inbox`, `lens record` and AVC denials. It stops at the first failure with a `STOP:` line.
 
-Two steps stay by hand, because they need people: the optional card link (`card_execution_link`; the script prints the exact fields) and the human action at the inbox (tap **Reject** on A; the script prints the CLI fallback). The `/srv/lel/*` labels are `container_file_t` by policy on BaileyAi (D142): the script does not run `restorecon`, and you should not.
+**Inbox fixture (D146).** After seeding Q and A the script runs `1166-seed-inbox.sh`, which posts a second irreversible claim, A2, and two fixture supports (cited, strength 3, principals `seed-s1` and `seed-s2`, which only the fixture uses). A2 reaches the strict line at 12 and escalates `irreversible` at once, so `bbp inbox` and the Mill Board inbox have a real escalation to act on even when the lenses drop A as they did in run 1. The posts say they are fixture support: A2's escalation is not a lens finding, and A stays lens-judged. The lens scheduler only reviews open claims, so the lenses never post on A2 (it reaches them only as a settled line). Tested against a throwaway `bbp` store: A2 escalated at score 12 of 12, `bbp human claim A2 drop` cleared the inbox, `bbp verify` stayed clean. No threshold or escalation rule changed.
+
+Two steps stay by hand, because they need people: the optional card link (`card_execution_link`; the script prints the exact fields) and the human action at the inbox (tap **Reject** on A2, and on A if the lenses escalated it; the script prints the CLI fallback). The `/srv/lel/*` labels are `container_file_t` by policy on BaileyAi (D142): the script does not run `restorecon`, and you should not.
 
 ## Paste back to Claude
 
