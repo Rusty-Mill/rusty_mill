@@ -150,6 +150,10 @@ Precise contracts used by this guide:
 | D140 | One paid lens run approved for 2026-11-17 (`--max-passes 5`, default call cap); supersedes D134 for that run only | [stated] 2026-11-17 (1124) |
 | D141 | Run 1 toy `sweep` smoke run stays local-only; run 2 SSH host launcher brief is paid (codex now, claude after its `no_overage` entry) | [stated] 2026-11-17 (1124, 1166) |
 | D142 | #1092: `/srv/lel` paths stay `container_file_t` on BaileyAi; no relabel before run 1 | [default] 2026-11-17 (1092) |
+| D143 | D127's "first run" is a clean #1166 pass (settled claim, inbox fires, `bbp verify` clean); the freeze holds until a rerun meets it | [stated] 2026-11-17 (general, 1166) |
+| D144 | #1166: rejecting `executed` from lens replies at `post::parse` is a bug fix, not new design | [default] 2026-11-17 (1166) |
+| D145 | #1166: the llama.cpp 500 on valid harmony output is a host/adapter issue, not design | [default] 2026-11-17 (1166) |
+| D146 | #1166: an inbox-exercising seed is a test-fixture choice; thresholds and escalation rules unchanged | [default] 2026-11-17 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1253,6 +1257,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Rejected.** Continuing to add designs before the first run.
 **Tag.** [stated] · remind-me: mem_1bae9f1358544fc3a517998b983b896a
 **Key.** lel:general:design-freeze-until-first-run
+**Meaning amended by D143 (2026-11-17): the first run is a clean #1166 pass.**
 **Source.** Nano, Millwright project thread message `cmsg_01632CBKCXsWe6RyFWvE9dovLW5oB3NEACWHuvMnsptmYP`, 2026-11-12T00:34:16Z: "Let Em Loose is under a design freeze until its first run. Add no design there." Answers `docs/projects/millwright/QUESTIONS.md` L9. Numbered D127 after D126.
 
 ## D128. M1 committed: #758 items 1-3, #1123, #1124, #1166 to Ready; #1092 waits for the BaileyAi host; #754 out
@@ -1404,3 +1409,39 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_f02b0b40230741e89e0a16de2496d4dd
 **Key.** lel:1092:srv-lel-labels-container-file-t
 **Source.** let-em-loose-expert, 2026-11-17, answering the coordinator for Nano. D131 (deploy on BaileyAi), D132 (`mill-board` service, not yet deployed), `1092-deploy-layout.md`, `1092-deploy-prompt-bbp-and-board-dir.md`. Numbered D142 after D141.
+
+## D143. D127's "first run" is a clean #1166 pass; the freeze holds until a rerun meets it
+
+**Decision.** Asked what counts as D127's undefined "first run", Nano chose "Clean #1166 pass first (Recommended)": the first run is a #1166 run with a settled claim, the inbox firing and `bbp verify` clean. The design freeze (D127) holds until a rerun, after the bug fixes, meets that. Run 1 (task `smoke-1`, local-only toy `sweep`, 2026-11-17) does not count: the machinery ran end to end, but criteria 2, 3 and 4 of `1166-smoke-run.md` section 9 were unmet and it halted on a refused post. D127's text is unchanged; only its meaning is fixed.
+**Why.** It lifts the freeze on evidence that the loop works, not on the loop merely running. Run 1's result is in remind-me `mem_ddc10f27ebb84572b6bcec43e05d21dc`.
+**Rejected.** a) Run 1 counts as the first run. c) The first run is the first live paid run (run 2, D141).
+**Tag.** [stated] · remind-me: mem_7a440c37500b439f8b5239db9d97aaac
+**Key.** lel:127:first-run-is-a-clean-1166-pass
+**Source.** Nano, answer dialog in the Claude Code session on BaileyAi, 2026-11-17, saved verbatim as `mem_c79bd23503c349ee84fc535c423a07f8` (speaker Nano). Amends the meaning of D127; relates to D141, `1166-smoke-run.md`. Numbered D143 after D142.
+
+## D144. #1166: rejecting `executed` from lens replies at `post::parse` is a bug fix, not new design
+
+**Decision.** In orch-lens `post::parse`, an `evidence_kind: executed` reply from a lens is rejected at the source as a permanent provider failure for that reply, non-halting. This is a bug fix under D127. The host already refuses such a post (`check_executed`, `1166-smoke-run.md` section 10), the 1123 prompts forbid it, and orch should not post it. Run 1's local-high reply posted one, `bbp` refused it (`EvidenceRequired`) and orch halted.
+**Why.** It brings orch in line with the approved design (a lens cannot post executed evidence that counts). It adds no behaviour. Changing the halt rule for board-refused posts is a separate policy question (Q51).
+**Rejected.** Treating it as new design that waits for the freeze to lift.
+**Tag.** [default] · remind-me: mem_164afed2da774d07bc291781207dcc53
+**Key.** lel:1166:reject-executed-at-parse
+**Source.** let-em-loose-expert, 2026-11-17. `1166-smoke-run.md` section 10, D127, D139, D143, `mem_ddc10f27ebb84572b6bcec43e05d21dc`. Numbered D144 after D143.
+
+## D145. #1166: the llama.cpp 500 on valid harmony output is a host/adapter issue, not design
+
+**Decision.** `gpt-oss-120b` via llama-swap returned HTTP 500 twice because llama.cpp (build f74e2fa, `common_chat_peg_parse`) rejects valid harmony output (`<|channel|>final <|constrain|>JSON<|message|>{...}`). Fixing it (a newer llama.cpp, a changed reasoning-format setting or a hardened `orch-openai` adapter) is a host or adapter fix and changes no lens, claim or board behaviour, so it is not new design under D127. Which fix to use is the builder's choice.
+**Why.** A provider's server bug on well-formed output.
+**Rejected.** Dropping `local-high` from the roster to avoid it; that would change the approved lens roster.
+**Tag.** [default] · remind-me: mem_331b473b9194401fb93c4237411fe5b1
+**Key.** lel:1166:llamacpp-harmony-500-is-host-adapter
+**Source.** let-em-loose-expert, 2026-11-17. `mem_ddc10f27ebb84572b6bcec43e05d21dc`, D127. Numbered D145 after D144.
+
+## D146. #1166: an inbox-exercising seed is a test-fixture choice; thresholds and escalation rules unchanged
+
+**Decision.** The rerun's seed may be chosen so that the inbox fires (for example a claim A that reaches the strict line, not one dropped by counter evidence). That is a test-fixture choice within `1166-smoke-run.md` section 2. It must not change the thresholds (accept 8, strict 12, `drop_at -8`) or the escalation rules.
+**Why.** The seed is test input; the thresholds and rules are approved design under the freeze.
+**Rejected.** Lowering a threshold or adding an escalation path so the inbox fires.
+**Tag.** [default] · remind-me: mem_981c7beee6ad4b0190795bf1830e85b7
+**Key.** lel:1166:inbox-seed-is-fixture-choice
+**Source.** let-em-loose-expert, 2026-11-17. `1166-smoke-run.md` sections 2 and 9, D127, D143. Numbered D146 after D145.

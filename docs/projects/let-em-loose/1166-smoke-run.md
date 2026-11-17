@@ -100,8 +100,8 @@ If the models never push A to 12 (they may post nothing, opinion only, or malfor
 ## 10. The executed-evidence gap and this run
 - orch's `post::parse` accepts `evidence_kind: executed` from a lens (strength 1, one cited reference; `post.rs`), and its own reply protocol text (`post::protocol`) lists `executed` as an allowed kind. The 1123 prompts forbid it (shared rule 4) but the prompt is the only guard on the orch side.
 - The host is the real guard. `check_executed` in `rusty_bbp/src/claims_engine.rs` refuses an `executed` post unless it cites a final test report written by the runner for a run whose candidate names that same claim: `evidence_required` (no artifact), `evidence_unbound` (not a report, not the runner's, another claim's candidate, or an error report) or `not_passed`. This settles 1123's "Open" bullet from code: a lens cannot post `executed` evidence that counts, and nothing is scored from one.
-- **For this run:** no candidate and no runner report can exist, so every `executed` post from a local lens is refused. Expect some from small models, since the protocol text offers the kind. Consequences: a wasted call that counts as refused (it is not free, `round.rs`), a `refused` count on that lens's record line, no score movement, no budget unit spent (the post is not committed). It cannot make the run falsely pass.
-- **Residual:** the orch-side `parse` still accepts it, so a malicious or buggy host build could admit it. Fixing `parse` (reject `executed` from a lens at the source) is a code change to orch, not in M1's freeze; recorded as a follow-up, not done. Criterion 7 reports the count of refusals and their codes.
+- **For this run:** no candidate and no runner report can exist, so every `executed` post from a local lens is refused. Expect some from small models, since the protocol text offers the kind. A refused post costs a call and is not scored. **Correction after run 1 (2026-11-17):** this section predicted a refused post would be a non-fatal `refused` count. It is not: orch halts the run on any board-refused post (`round.rs` `partial` -> `Halt::Board`, exit 1), which is what ended run 1 when a `local-high` reply posted `executed`. D144 rejects `executed` at parse; whether any refused post should halt is Q51.
+- **Residual:** the orch-side `parse` accepted it, so run 1 halted on it. Rejecting `executed` at `parse` is a bug fix (D144), to be done before the rerun. Criterion 7 reports the count of refusals and their codes.
 
 ## Defaults taken
 - [default] Local-only config as a separate `lens-local.json`; no flag or code change.
@@ -128,3 +128,11 @@ If the models never push A to 12 (they may post nothing, opinion only, or malfor
    OPTIONS: a) hand-driven session; no code; a documented one-off. b) a new read-write `lens seed` command (public API, ask-first, D127 freeze, and delays the run). c) the architect lens posts the question itself (changes the proposer rule; new design).
    RECOMMEND: a) it is reversible, adds no surface, and the Drift records the missing verb for later.
    REVERSES: none.
+
+## Run 1 result (2026-11-17, task `smoke-1`, local-only, $0)
+Not a clean pass (D143: the first run is a clean #1166 pass, so this does not count). Detail: remind-me `mem_ddc10f27ebb84572b6bcec43e05d21dc`; PR #1779.
+- Machinery ran end to end (deploy, `bbp open`, seed, `lens run`, read-back); `bbp verify` chain intact (40 lines, 0 unchained); no AVC denial (D142).
+- Criterion 2 unmet: 2 candidate claims, not 3 from 3 providers. Criterion 3 unmet: A was dropped by DropLine at -8 (two counter authors), no claim accepted. Criterion 4 unmet: the inbox stayed empty. Criterion 1 and 5's `bbp verify` met; criterion 6 and the refusal listing of criterion 7 not stated here.
+- Defects: `executed` posted by a lens halted the run (D144, Q51); gpt-oss-120b via llama.cpp build f74e2fa returned HTTP 500 twice on valid harmony output (D145); the run process died on a closed stdout and was resumed; the seed did not exercise the inbox (D146). Rerun after the fixes (Q52).
+- Host facts: llama-swap answers only at `192.168.10.104:8080` with lowercase model ids (`qwen3.6-35b-a3b`).
+
