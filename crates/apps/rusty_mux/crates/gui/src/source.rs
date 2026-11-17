@@ -37,7 +37,9 @@ use rusty_mux_client::attach::{
 };
 use rusty_mux_client::checkpoint::{HistoryReceiver, Receiver};
 use rusty_mux_client::older::Older;
-use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Side, Size, WindowId};
+use rusty_mux_core::{
+    BlockId, ClientId, Event, Layout, Selection, SessionId, Side, Size, WindowId,
+};
 use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Features, Launch, Message, Program, Takeover};
 use rusty_term::backend::BackendHandle;
@@ -71,7 +73,8 @@ pub const GUI: Features = CONTROL
 /// What a block's connection asks for: the panes' features, and the input
 /// gate's grants and lease requests, so an owner-only block can be taken
 /// over (handoff D153), and folder listings, for the palette's directory
-/// browse (D78). The TUI's [`PANE`] stays as it is.
+/// browse (D78). [`PANE`] asks for clipboard reads (C54), which the
+/// window answers by its policy.
 pub const BLOCK: Features = PANE
     .union(Features::INPUT_GATE)
     .union(Features::LEASE_REQUESTS)
@@ -404,11 +407,13 @@ impl Source for MuxSource {
         shown.blocks.retain(|_, b| b.strong_count() > 0);
         shown.blocks.insert(key, Arc::downgrade(&pane.0));
         pane.0.want_lease(shown.focus == Some(key));
+        let serves_clipboard = pane.0.clipboard;
         Ok(PaneIo {
             writer: Box::new(pane),
             feed: Box::new(feed.into_iter()),
             // The server's own terminal answers the program's queries.
             answers_queries: false,
+            serves_clipboard,
         })
     }
 
@@ -1097,6 +1102,9 @@ struct Block {
     told: Mutex<Option<Take>>,
     /// The server lists folders on this connection (`terminal.list-dir`).
     lists: bool,
+    /// The server asks this connection's client for clipboard reads
+    /// (C54), so the window answers them, not the pane's own grid.
+    clipboard: bool,
     /// Who waits for a listing, by request number.
     listings: Mutex<HashMap<u64, ListDone>>,
 }
@@ -1139,6 +1147,7 @@ impl Block {
                 .features
                 .contains(Features::BLOCK_CALL.union(Features::DIR_LISTING)),
             listings: Mutex::new(HashMap::new()),
+            clipboard: opened.features.contains(Features::CLIPBOARD),
         });
         shared.send(|req| Message::Attach { req, block });
         let (tx, feed) = std::sync::mpsc::sync_channel(FEED_AHEAD);
@@ -1355,6 +1364,12 @@ impl Block {
                     }
                 }
                 Message::Output { block: b, data } if b == block => Feed::Bytes(data),
+                Message::ClipboardRead {
+                    block: b,
+                    selection,
+                } if b == block => Feed::ClipboardRead {
+                    primary: selection == Selection::Primary,
+                },
                 Message::Event {
                     event: Event::BlockResized { block: b, size },
                     ..
@@ -1435,6 +1450,24 @@ impl BackendHandle for PaneWriter {
             self.0.send(|req| Message::Input { req, block, data });
         }
         Ok(())
+    }
+
+    /// Answers the block's lease holder's read (C54); the server refuses it
+    /// from anyone else.
+    fn clipboard_reply(&mut self, primary: bool, text: Option<String>) {
+        let block = self.0.block;
+        let selection = if primary {
+            Selection::Primary
+        } else {
+            Selection::Clipboard
+        };
+        let data = text.map(String::into_bytes);
+        self.0.send(|req| Message::ClipboardReply {
+            req,
+            block,
+            selection,
+            data,
+        });
     }
 
     fn try_clone(&self) -> std::io::Result<Box<dyn BackendHandle>> {

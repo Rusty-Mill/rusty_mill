@@ -46,8 +46,11 @@ pub const CONTROL: Features = Features::CHECKPOINT_V6
 
 /// What a block's connection asks for. `TERMINAL_CONTROL` tells the
 /// server this client's copy of the terminal can be reset safely.
+/// `CLIPBOARD` has the server ask this client when the block's program
+/// reads the clipboard (C54); a client that takes no part answers none.
 pub const PANE: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_CONTROL)
+    .union(Features::CLIPBOARD)
     .union(Features::TAKEOVER)
     .union(Features::ECHO_ACK)
     .union(Features::SYNC);
