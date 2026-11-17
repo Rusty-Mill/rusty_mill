@@ -206,6 +206,35 @@ impl Registry {
         Ok(found)
     }
 
+    /// Ids of agents last used (or, if never used, created) more than `age_ms` before `now`.
+    pub fn stale(&self, now: i64, age_ms: i64) -> Vec<String> {
+        self.agents
+            .iter()
+            .filter(|(_, a)| now - a.seen_ms.max(a.created_ms) > age_ms)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Remove every [`stale`](Self::stale) agent with one write; the ids removed.
+    ///
+    /// # Errors
+    /// If the file cannot be written; nothing is removed then.
+    pub fn revoke_stale(&mut self, now: i64, age_ms: i64) -> Result<Vec<String>, String> {
+        let ids = self.stale(now, age_ms);
+        if ids.is_empty() {
+            return Ok(ids);
+        }
+        let kept = self.agents.clone();
+        for id in &ids {
+            self.agents.remove(id);
+        }
+        if let Err(e) = self.save() {
+            self.agents = kept;
+            return Err(e);
+        }
+        Ok(ids)
+    }
+
     /// Every agent without its key.
     pub fn list(&self) -> Vec<AgentInfo> {
         self.agents
@@ -312,6 +341,42 @@ mod tests {
         assert!(again.verify("c", &a, &ka, 1).is_none());
         assert!(again.verify("c", &b, &kb, 1).is_some());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn stale_means_unused_for_more_than_the_age_and_revoke_stale_keeps_the_rest() {
+        const DAY: i64 = 24 * 3600 * 1000;
+        let mut r = Registry::default();
+        let (old, _) = r.register("c", Grant::default(), 0).expect("old");
+        let (edge, ke) = r.register("c", Grant::default(), 0).expect("edge");
+        let (used, ku) = r.register("c", Grant::default(), 0).expect("used");
+        let now = 3 * DAY;
+        assert!(r.verify("c", &edge, &ke, now - DAY).is_some());
+        assert!(r.verify("c", &used, &ku, now - 1).is_some());
+        // Exactly a day old is not "more than a day"; one ms older is.
+        assert_eq!(r.stale(now, DAY), vec![old.clone()]);
+        assert_eq!(r.stale(now + 1, DAY).len(), 2);
+        assert!(
+            r.stale(now, DAY).contains(&old),
+            "a dry run removes nothing"
+        );
+        assert_eq!(r.list().len(), 3, "a dry run removes nothing");
+        let gone = r.revoke_stale(now + 1, DAY).expect("revoke");
+        assert_eq!(gone.len(), 2);
+        assert!(r.verify("c", &used, &ku, now + 2).is_some());
+        assert!(r.verify("c", &edge, &ke, now + 2).is_none());
+        assert!(r.revoke_stale(now + 2, DAY).expect("none").is_empty());
+    }
+
+    #[test]
+    fn a_failed_write_revokes_nothing() {
+        let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let mut r = Registry::open(dir.join("agents.json")).expect("open");
+        let (id, key) = r.register("c", Grant::default(), 0).expect("register");
+        std::fs::remove_dir_all(&dir).expect("remove dir");
+        assert!(r.revoke_stale(10, 5).is_err());
+        assert!(r.verify("c", &id, &key, 11).is_some());
     }
 
     #[test]

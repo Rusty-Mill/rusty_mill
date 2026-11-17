@@ -378,6 +378,21 @@ impl<S: Store> Board<S> {
         self.agents().revoke(id).map_err(BoardError::Storage)
     }
 
+    /// Ids of registered agents unused (or, never used, uncreated) for more than `age_ms`.
+    pub fn stale_agents(&self, age_ms: i64) -> Vec<String> {
+        self.agents().stale(self.now_ms(), age_ms)
+    }
+
+    /// Remove every registered agent unused for more than `age_ms`; the ids removed.
+    ///
+    /// # Errors
+    /// If the registry file cannot be written.
+    pub fn revoke_stale_agents(&self, age_ms: i64) -> Result<Vec<String>, BoardError> {
+        self.agents()
+            .revoke_stale(self.now_ms(), age_ms)
+            .map_err(BoardError::Storage)
+    }
+
     /// Registered agents without keys.
     pub fn agent_list(&self) -> Vec<AgentInfo> {
         self.agents().list()
