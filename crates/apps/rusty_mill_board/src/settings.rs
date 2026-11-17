@@ -334,6 +334,25 @@ struct RegisteredAgentId {
     id: String,
 }
 
+/// Which registered agents to forget as stale, and whether to do it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StaleRevoke {
+    /// Unused for more than this many hours (2 to 720; default 24: above the hour a last use may lag on disk).
+    #[serde(default = "default_stale_hours")]
+    older_than_hours: i64,
+    /// Revoke them. Without it nothing changes and the answer is only the count.
+    #[serde(default)]
+    revoke: bool,
+    /// With `revoke`: only these ids (a previewed list), and only if still stale.
+    #[serde(default)]
+    ids: Option<Vec<String>>,
+}
+
+fn default_stale_hours() -> i64 {
+    24
+}
+
 #[derive(Deserialize)]
 struct AppId {
     client_id: String,
@@ -451,6 +470,12 @@ pub fn tools() -> Vec<SettingsTool> {
             "Forget a registered agent (needs admin): its key stops working at once; it can register again.",
             json!({"id": text}),
             &["id"],
+        ),
+        tool(
+            "settings_registered_agent_revoke_stale",
+            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin). A dry run unless `revoke: true`: it returns `count`, the agent `ids` it would revoke and `unsaved` (a revocation that failed to write: call again with `revoke: true` to write it). After a board restart, nothing counts as stale until `older_than_hours` have passed since the start. Revoked agents can register again.",
+            json!({"older_than_hours": {"type": "integer", "description": "2-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}, "ids": {"type": "array", "items": {"type": "string"}, "description": "With revoke: only these previewed ids, and only if still stale."}}),
+            &[],
         ),
         tool(
             "settings_agent_update",
@@ -630,6 +655,9 @@ impl Settings {
             }
             "settings_registered_agent_set" => |s, by, a| s.registered_agent_set(by, &parse(a)?),
             "settings_registered_agent_revoke" => |s, _, a| s.registered_agent_revoke(&parse(a)?),
+            "settings_registered_agent_revoke_stale" => {
+                |s, _, a| s.registered_agent_revoke_stale(&parse(a)?)
+            }
             "settings_app_revoke" => |s, _, a| s.app_revoke(&parse(a)?),
             _ => return None,
         };
@@ -970,6 +998,28 @@ impl Settings {
         } else {
             Err(refused(format!("no registered agent {:?}", a.id)))
         }
+    }
+
+    /// Forget registered agents unused for `older_than_hours`: a dry run unless `revoke`.
+    fn registered_agent_revoke_stale(&self, a: &StaleRevoke) -> Res {
+        if !(2..=720).contains(&a.older_than_hours) {
+            return Err(refused("older_than_hours is 2 to 720".to_owned()));
+        }
+        let age_ms = a.older_than_hours * 3600 * 1000;
+        let ids = if a.revoke {
+            let ids = self.board.revoke_stale_agents(age_ms, a.ids.as_deref())?;
+            rusty_log::warn!(
+                count = ids.len(),
+                hours = a.older_than_hours,
+                "stale registered agents revoked"
+            );
+            ids
+        } else {
+            self.board.stale_agents(age_ms)
+        };
+        Ok(
+            json!({"dry_run": !a.revoke, "older_than_hours": a.older_than_hours, "count": ids.len(), "ids": ids, "unsaved": self.board.agents_unsaved()}),
+        )
     }
 
     /// Sign an app out: drop its registration and every token it holds. It can sign in again.

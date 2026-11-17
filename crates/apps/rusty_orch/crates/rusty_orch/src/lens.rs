@@ -9,6 +9,7 @@
 //!   its way to post.
 //! - [`check`]: `rusty_orch lens check`, a dry run of the above.
 //! - [`run`]: `rusty_orch lens run`, passes over every lens until quiet.
+//! - [`breaker`]: `rusty_orch lens breaker`, the #598 cost breaker's read-only report.
 //! - [`container`]: the dedicated container a host-cleared provider runs in.
 //! - [`alien`]: `rusty_orch lens alien report`, the #708 alien lens's shadow numbers.
 //! - [`record`]: each lens's track record, from its stored blind reviews and
@@ -19,6 +20,7 @@
 pub mod alien;
 pub mod assertions;
 pub mod bbp;
+pub mod breaker;
 pub mod check;
 pub mod container;
 pub mod hunts;

@@ -7,7 +7,7 @@
 mod config;
 mod lease;
 mod supervisor;
-pub use config::{Agent, Assignment, Config, Sandbox, Slots};
+pub use config::{dry_run_args, Agent, Assignment, Config, Sandbox, Slots};
 pub use supervisor::{StdSupervisor, Supervised, Supervisor};
 
 use orch_cli::{CommandRunner, ExecError, StdCommand};
@@ -436,7 +436,7 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
                     program: agent.program.clone(),
                     args: agent.args.clone(),
                     builtin_tools: assignment.builtin_tools,
-                    sandbox: agent.sandbox.clone(),
+                    sandbox: config.launch_sandbox(agent),
                 },
             );
         }

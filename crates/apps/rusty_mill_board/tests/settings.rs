@@ -195,6 +195,31 @@ fn registered_agents_are_listed_and_an_unknown_one_cannot_be_revoked() {
         &json!({"id": "x/abcdef"}),
     );
     assert_eq!(status, 422);
+    // Stale revoke: a dry run by default, and the age is bounded.
+    let (status, out, text) = f.admin("settings_registered_agent_revoke_stale", &json!({}));
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(
+        (
+            out["dry_run"].clone(),
+            out["count"].clone(),
+            out["older_than_hours"].clone()
+        ),
+        (json!(true), json!(0), json!(24))
+    );
+    assert_eq!(out["unsaved"], json!(false));
+    for body in [
+        json!({"older_than_hours": 1}),
+        json!({"older_than_hours": 721}),
+        json!({"hours": 24}),
+    ] {
+        let (status, _, text) = f.admin("settings_registered_agent_revoke_stale", &body);
+        assert!(status == 422 || status == 400, "{body}: {status} {text}");
+    }
+    let (status, out, _) = f.admin(
+        "settings_registered_agent_revoke_stale",
+        &json!({"revoke": true}),
+    );
+    assert_eq!((status, out["dry_run"].clone()), (200, json!(false)));
     // Setting a grant: an unknown agent, and a role or project that does not exist, are refused.
     for body in [
         json!({"id": "x#abcdef", "agent_role": "builder"}),
@@ -225,6 +250,7 @@ fn only_an_admin_may_change_settings() {
         "settings_github_set",
         "settings_github_clear",
         "settings_registered_agent_revoke",
+        "settings_registered_agent_revoke_stale",
         "settings_registered_agent_set",
         "settings_rules_set",
     ] {
