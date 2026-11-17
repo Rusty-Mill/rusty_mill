@@ -68,18 +68,20 @@ impl Ctx {
         self.scope.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Adds a skills folder to this session (not saved, D47). The folder must
-    /// be readable now; one already present is not added twice.
+    /// Adds a skills folder to this session (not saved, D47). The whole scope
+    /// with the folder added must load, so a folder that is unreadable or
+    /// repeats a skill id already loaded (a parent of a `--skills` folder, a
+    /// copy of a skill) is refused and the list keeps working. One already
+    /// present is not added twice.
     pub fn add_folder(&self, dir: PathBuf) -> Result<(), String> {
-        ai_env_app::load_entries(&Scope {
-            skills: vec![dir.clone()],
-            tools: Vec::new(),
-        })
-        .map_err(|e| e.to_string())?;
         let mut scope = self.scope.lock().unwrap_or_else(|e| e.into_inner());
-        if !scope.skills.contains(&dir) {
-            scope.skills.push(dir);
+        if scope.skills.contains(&dir) {
+            return Ok(());
         }
+        let mut next = scope.clone();
+        next.skills.push(dir);
+        load_entries(&next).map_err(|e| e.to_string())?;
+        *scope = next;
         Ok(())
     }
 

@@ -35,7 +35,8 @@ const IGNORED: [&str; 3] = ["node_modules", "target", ".git"];
 /// link target would break once the link is read from another folder). A skill
 /// folder whose name is not a valid id is reported in `skipped`, never
 /// silently dropped. An unreadable `dir` is an error; an unreadable folder
-/// below it is reported in `skipped`.
+/// below it is reported in `skipped`; so is a folder with one unreadable
+/// entry (the whole folder is passed over, not just that entry).
 pub fn discover_skills(dir: &Path) -> io::Result<Discovered> {
     let root = std::path::absolute(dir)?;
     let mut found = Discovered::default();

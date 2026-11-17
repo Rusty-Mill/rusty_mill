@@ -339,3 +339,16 @@ fn a_missing_folder_is_refused_and_not_added() {
     assert!(ctx.add_folder(t.0.join("nope")).is_err());
     assert!(ctx.list().unwrap().rows.is_empty());
 }
+
+#[test]
+fn a_folder_repeating_a_loaded_skill_is_refused_and_the_list_keeps_working() {
+    let t = Tmp::new();
+    let pack = t.0.join("pack");
+    fs::create_dir_all(pack.join("deep/foo")).unwrap();
+    fs::write(pack.join("deep/foo/SKILL.md"), "x").unwrap();
+    let launch = parse_scope([OsString::from("--skills"), pack.join("deep").into()]).unwrap();
+    let ctx = Ctx::new(launch, t.0.join("home"));
+    // The parent reaches the same `foo` again: a second source for one id.
+    assert!(ctx.add_folder(pack).is_err());
+    assert_eq!(ctx.list().unwrap().rows.len(), 1);
+}
