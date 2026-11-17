@@ -2212,7 +2212,7 @@ impl WindowState<'_> {
         let allow_write = policy != ClipboardPolicy::Off;
         // A source that serves reads asks this window itself (C54): the
         // grid's record of one is not answered a second time.
-        let allow_read = policy == ClipboardPolicy::ReadWrite && !serves;
+        let allow_read = grid_may_answer(policy, serves);
         if allow_write
             && let Some(text) = set
             && let Some(cb) = self.clipboard.as_mut()
@@ -2261,7 +2261,7 @@ impl WindowState<'_> {
     fn answer_clipboard_read(&mut self, id: u64, primary: bool) {
         // Apply an OSC 52 set that came before the query first.
         self.service_clipboard(id);
-        let allowed = self.config.clipboard.unwrap_or_default() == ClipboardPolicy::ReadWrite;
+        let allowed = reads_allowed(self.config.clipboard.unwrap_or_default());
         let text = match (allowed, primary) {
             (false, _) => None,
             (true, true) => self.primary_text(),
@@ -7249,8 +7249,36 @@ fn pinch_toggles_zoom(sum: f64, zoomed: bool) -> bool {
     }
 }
 
+/// Whether `policy` lets a program read the clipboard (handoff D309).
+fn reads_allowed(policy: ClipboardPolicy) -> bool {
+    policy == ClipboardPolicy::ReadWrite
+}
+
+/// Whether the pane's own grid may answer a read: only when the policy
+/// allows it and the source does not serve reads itself (D312).
+fn grid_may_answer(policy: ClipboardPolicy, serves: bool) -> bool {
+    reads_allowed(policy) && !serves
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipboard_reads_are_denied_unless_read_write() {
+        use crate::config::ClipboardPolicy::*;
+        assert!(!super::reads_allowed(super::ClipboardPolicy::default()));
+        assert!(!super::reads_allowed(Off));
+        assert!(!super::reads_allowed(WriteOnly));
+        assert!(super::reads_allowed(ReadWrite));
+    }
+
+    #[test]
+    fn the_grid_stays_silent_when_the_source_serves_reads() {
+        use crate::config::ClipboardPolicy::*;
+        assert!(super::grid_may_answer(ReadWrite, false));
+        assert!(!super::grid_may_answer(ReadWrite, true));
+        assert!(!super::grid_may_answer(WriteOnly, false));
+    }
+
     #[test]
     fn hover_focus_hits_the_grid_and_not_the_header_or_border() {
         let place = super::Place {

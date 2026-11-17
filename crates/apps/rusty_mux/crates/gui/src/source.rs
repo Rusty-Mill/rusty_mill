@@ -1464,9 +1464,16 @@ impl BackendHandle for PaneWriter {
         };
         // Over the limit the server refuses the answer and the program would
         // wait; deny it instead.
-        let data = text
-            .map(String::into_bytes)
-            .filter(|d| d.len() <= MAX_CLIPBOARD);
+        let data = text.map(String::into_bytes).filter(|d| {
+            let fits = d.len() <= MAX_CLIPBOARD;
+            if !fits {
+                eprintln!(
+                    "rusty-mux-gui: clipboard answer of {} bytes denied (over the limit)",
+                    d.len()
+                );
+            }
+            fits
+        });
         self.0.send(|req| Message::ClipboardReply {
             req,
             block,
