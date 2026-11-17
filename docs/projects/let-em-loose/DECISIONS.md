@@ -148,6 +148,7 @@ Precise contracts used by this guide:
 | D138 | orch maps `sensitive_paths` to launcher `hide` via agents.json, and `real_data` to `bbp dry-run` | [default] 2026-11-17 (#758) |
 | D139 | A lens post with no taint entry reads as `sensitive` (unknown ids from lost posts) | [default] 2026-11-17 (#758) |
 | D140 | One paid lens run approved for 2026-11-17 (`--max-passes 5`, default call cap); supersedes D134 for that run only | [stated] 2026-11-17 (1124) |
+| D141 | Two paid runs approved: toy `sweep` smoke run, then the SSH host launcher brief; codex paid now, claude after its `no_overage` entry | [stated] 2026-11-17 (1124, 1166) |
 
 ## D1. Lenses, not stages
 
@@ -1381,3 +1382,13 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_76131c8f54154cbd8e93a0edbb4cd4d7
 **Key.** lel:1124:one-paid-lens-run-2026-11-17
 **Source.** Nano, claude.ai chat 2026-11-17, remind-me capture `cap_675c3da34b0946cdb0900aec848a07ba` (dialog `mem_307a8af289f84ce1b918249ea0691ab6`), noted first in `mem_f2c87231f0fa4845952dad1fa237712e`; relayed by the user (baileyrd) in Claude Code the same day, who gave these references. Relates to D134, D38, ADR-0021, `1124-spend-estimate.md`. Numbered D140 after D139.
+
+## D141. Two paid runs approved: toy `sweep` smoke run, then the SSH host launcher brief; codex paid now, claude after its `no_overage` entry
+
+**Decision.** Nano answered Q50 himself. (1) Run 1 is the #1166 smoke run on the toy `sweep` intent as designed. Run 2 is the SSH host launcher brief for rusty_mux (Orca Remote Hosts panel), after run 1 finishes. Both are approved as paid runs with the same limits as D140: `rusty_orch lens run --max-passes 5`, the default `task_calls` cap (STARTER 400), and no dollar-cap enforcement in v0 (ADR-0021; "$25" is a report threshold only). (2) Paid providers: codex now; claude only once its `no_overage` entry exists in `/etc/let-em-loose/assertions.json` (today it has codex only, checked 2026-11-03, lapsing about 2026-12-03). This supersedes D140's "any further paid call, a second run included, is ask-first" for run 2; the run needs no separate go. Any third paid run, a higher cap or an unlisted provider stays ask-first.
+**Why.** Nano's own words: "1. The smoke run uses the toy sweep intent as designed. The SSH host launcher brief is the second run. I approve both paid runs, same limits each. 2. Paid providers: codex now; claude once I add its no_overage entry." This closes Q50's two open asks.
+**Rejected.** Treating the launcher brief as the first run, since #1166 is designed around `sweep`. Paying the claude lens before its assertion exists. Reading "same limits each" as a shared budget across both runs.
+**Notes.** D134 still holds for everything else. Both runs wait on #1092 (deploy: `bbp`, `/opt/lel`, `/srv/lel/bbp`; Q-answers for the deploy). The lens config (#1123) landed in Factory PR #1 on 2026-11-16 and still has to be on the host. Claude lenses additionally wait on the assertion; until then a run with the claude lens is not paid-approved. Local models (llama-swap `192.168.10.104:8080`, model id `qwen3.6-35b-a3b`) cover any lens not paid. Dated, not a ceiling: a second run only after the first has finished and been read.
+**Tag.** [stated] · remind-me: mem_2357f42a0f9c42ea8a1b7b4fddf537db
+**Key.** lel:1124:two-paid-runs-codex-first
+**Source.** Nano, typed into a Claude Code session on BaileyAi, 2026-11-17, saved verbatim by the coordinator as remind-me `mem_efab3121ffc64728a2ee6ba8ec5a5f9d` (speaker Nano). Builds on D140 (`lel:1124:one-paid-lens-run-2026-11-17`), D134, ADR-0021, `1166-smoke-run.md`. Numbered D141 after D140.
