@@ -42,10 +42,9 @@ check((await bar("open by project", "rl")) === "2", "per-project counts");
 check((await bar("open by priority", "High")) === "1", "per-priority counts");
 check((await panel("idle longest").locator(".card b").allInnerTexts()).join() === "Ready card", "idle lists cards past backlog");
 
-await page.selectOption("#repo", "games");
-await page.waitForFunction(() => document.querySelector(".metrics h3")?.textContent.endsWith("games"));
-check((await kpi("open")) === "2", "a chosen repository narrows the metrics");
-check((await panel("open by project").count()) === 1, "per-project panel shown for a repository");
+await page.selectOption("#project", "rl");
+await page.waitForFunction(() => document.querySelector(".metrics h3")?.textContent.endsWith("rl"));
+check((await kpi("open")) === "2", "a chosen project narrows the metrics");
 
 await api("card_move", { id: ready.id, to: "blocked" });
 await sleep(2500);

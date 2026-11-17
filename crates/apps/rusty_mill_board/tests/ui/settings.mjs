@@ -92,8 +92,9 @@ await settled();
 check(Object.keys((await api(rotated, "board_projects")).body.projects.rocket_league.repos).join() === "rusty_mill", "unlinking drops the repository again");
 check(await dialog.getByRole("button", { name: "Unlink" }).first().isDisabled(), "a project's only repository cannot be unlinked");
 await dialog.getByRole("button", { name: "Close" }).click();
-await page.locator("#repo option", { hasText: "rusty_mill" }).waitFor({ state: "attached", timeout: 3000 }).catch(() => {});
-check((await page.locator("#repo option", { hasText: "rusty_mill" }).count()) >= 1, "and appears in the repository picker at once");
+await page.locator("#project option", { hasText: "rocket_league" }).waitFor({ state: "attached", timeout: 3000 }).catch(() => {});
+check((await page.locator("#project option", { hasText: "rocket_league" }).count()) >= 1, "and appears in the project picker at once");
+check((await page.locator("#repo").count()) === 0, "(no repository picker)");
 
 // A credential limited to some projects sees each repository with just those: a repository's one visible
 // project that is not its own stays in the Projects list, and cards added under it land there.
@@ -104,12 +105,9 @@ const limited = await browser.newPage({ viewport: { width: 1300, height: 900 } }
 limited.on("pageerror", (e) => errors.push(String(e)));
 await limited.goto(`${BASE}/#token=${scoped.body.token}`);
 await limited.waitForFunction(() => document.querySelector("#actor").value === "scoped" && document.querySelectorAll("#nav1 .item").length > 0);
-const sideItems = async () => [...await limited.locator("#repo option").allInnerTexts(), ...await limited.locator("#nav1 .item").allInnerTexts()].map((t) => t.split(/\n| · /)[0].trim());
-const sideItem = (name) => limited.locator("#nav1 .item").filter({ hasText: new RegExp(`^${name}\\d`) });
-check(JSON.stringify(await sideItems()) === JSON.stringify(["All repositories", "rusty_mill", "super_board", "rocket_league", "skills"]), `a limited agent sees its projects listed (${await sideItems()})`);
-await limited.selectOption("#repo", "super_board");
-check(JSON.stringify((await sideItems()).slice(3)) === '["skills"]', "choosing a repository keeps its one visible project");
-await sideItem("skills").click();
+const sideItems = async () => [...await limited.locator("#project option").allInnerTexts(), ...await limited.locator("#nav1 .item").allInnerTexts()].map((t) => t.split(/\n| · /)[0].trim());
+check(JSON.stringify(await sideItems()) === JSON.stringify(["All projects", "rocket_league", "skills", "rocket_league", "skills"]), `a limited agent sees only its projects listed (${await sideItems()})`);
+await limited.selectOption("#project", "skills");
 await limited.fill("#title", "scoped card");
 await limited.click("#add");
 await limited.locator(".card", { hasText: "scoped card" }).waitFor();
