@@ -76,7 +76,7 @@ header.top{display:flex;align-items:center;gap:6px;padding:0 14px;min-height:52p
 #nav1 .lbl{font-size:12px;font-weight:600;color:var(--mute);margin:0 2px 0 8px}
 #nav1 .lbl:first-child{margin-left:0}
 #nav1 .sep{width:1px;align-self:stretch;background:var(--line);margin:2px 6px}
-#repo{font-weight:600;padding:5px 8px;max-width:260px}
+#project{font-weight:600;padding:5px 8px;max-width:260px}
 #nav1 .item{border-radius:14px;padding:4px 10px;gap:7px;background:var(--card);border-color:var(--line);font-size:13px}
 #nav1 .item .n{font:700 14px/1 var(--num);color:var(--mute)}
 #nav1 .item.on{background:var(--ink);border-color:var(--ink);color:var(--card)}
@@ -333,7 +333,7 @@ dialog h2{margin:0;font-size:18px}
   <nav class="views" aria-label="views">
     <button id="boardv" type="button" aria-pressed="true">Board</button>
     <button id="view" type="button" aria-pressed="false" title="The chosen project's roadmap">Roadmap</button>
-    <button id="metrics" type="button" aria-pressed="false" title="Metrics for the chosen repository or project, or the whole board">Metrics</button>
+    <button id="metrics" type="button" aria-pressed="false" title="Metrics for the chosen project, or the whole board">Metrics</button>
     <button id="archive" type="button" aria-pressed="false" title="Done cards set aside: archived, or done more than 14 days ago">Archive</button>
     <button id="decide" type="button" aria-pressed="false" hidden title="Decisions waiting for you: open BBP escalations">Decisions <span id="decide-n" class="badge"></span></button>
   </nav>
@@ -349,7 +349,7 @@ dialog h2{margin:0;font-size:18px}
   <button id="gear" type="button" class="icon" title="Settings" aria-label="settings"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   <button id="signout" type="button" class="icon" hidden title="Sign out" aria-label="sign out"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button>
 </header>
-<nav id="nav1" aria-label="repositories, projects and agents"></nav>
+<nav id="nav1" aria-label="projects and agents"></nav>
 <nav id="strip" class="strip" aria-label="columns" hidden></nav>
 <main id="board"></main>
 <dialog id="dlg"></dialog>
@@ -371,18 +371,17 @@ const working=()=>FLOW.columns.filter(c=>c.kind==="work").map(c=>c.id);
 let tok=null;
 const $=id=>document.getElementById(id);
 // `loaded`: the board has been read once. The cursor cannot say so: it is null on a board with no events yet.
-let cards=[],cursor=null,loaded=false,dlg=null,repos={},sel={repo:"",project:"",agent:""};
+let cards=[],cursor=null,loaded=false,dlg=null,repos={},sel={project:"",agent:""};
 /* Project statuses (board_projects' `status`, unlisted = active) and which the board shows: active by default,
    "" for every status. A chosen project is shown whatever its status. */
 const STATUSES=["active","experiment","paused","archived"];
 let pstatus={},statusSel="active";
 const statusOf=p=>Object.hasOwn(pstatus,p)?pstatus[p]:"active";
-const projects=()=>Object.values(repos).flat();
+const projects=()=>[...new Set(Object.values(repos).flat())];
 /* `default` is the Inbox: where a card that names no project lands (rusty_tick's Inbox list). Shown by that name only. */
 const INBOX="default",label=p=>p===INBOX?"Inbox":p;
-const repoOf=p=>Object.keys(repos).find(r=>repos[r].includes(p))||"";
 const statusShown=p=>p===sel.project||!statusSel||statusOf(p)===statusSel;
-const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project)&&statusShown(k.project)&&(!sel.agent||k.claim===sel.agent);
+const shown=k=>(!sel.project||k.project===sel.project)&&statusShown(k.project)&&(!sel.agent||k.claim===sel.agent);
 const count=f=>cards.filter(f).length;
 /* A Done card is shelved, off the board and in the Archive view, once archived or 14 days after it
    was done (closed without shipping: after its last change) or last restored. The server's
@@ -502,7 +501,7 @@ function ticket(k){
   const d=el("div",null,"card");
   d.append(...heading(k));
   const m=el("div",null,"meta");
-  if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");t.title=repoOf(k.project);m.append(t)}
+  if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");m.append(t)}
   if(k.claim){
     d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
     const t=el("span",null,"tag agent"+(working().includes(k.column)?" running":""));t.append(el("i",null,"dot"),nick(k.claim));t.title=k.claim;m.append(t);
@@ -608,8 +607,8 @@ function windowOf(scoped,stones){
 // The project the lanes are for: the chosen one, else the only one in scope, else none.
 function focusProject(){
   if(sel.project)return sel.project;
-  const scope=projects().filter(p=>!sel.repo||repoOf(p)===sel.repo);
-  return scope.length===1?scope[0]:"";
+  const all=projects();
+  return all.length===1?all[0]:"";
 }
 const planned=k=>["work","queue","blocked"].includes(kindOf(k.column));
 const overdue=k=>!isDone(k)&&k.target_ms!=null&&k.target_ms<dayStart(Date.now());
@@ -674,7 +673,7 @@ function projectRows(scoped,t0,stones){
     const sub=[[n("work"),"in progress"],[n("queue"),"next"],[n("blocked"),"blocked"]].filter(([v])=>v).map(([v,w])=>v+" "+w).join(" · ")||"all shipped";
     const late=t.open.filter(overdue).length;
     t.flag=[n("blocked")&&n("blocked")+" blocked",late&&late+" overdue"].filter(Boolean).join(" · ");
-    out.push({...t,label:label(p),sub,text:t.shipped.length+" shipped",right:t.pct+"%",title:label(p)+": "+t.pct+"% of planned work shipped",open:()=>pick(repoOf(p),p),rank:n("work")*3+n("blocked")*2+n("queue")});
+    out.push({...t,label:label(p),sub,text:t.shipped.length+" shipped",right:t.pct+"%",title:label(p)+": "+t.pct+"% of planned work shipped",open:()=>pick(p),rank:n("work")*3+n("blocked")*2+n("queue")});
   }
   return out.sort((a,z)=>z.rank-a.rank||a.label.localeCompare(z.label));
 }
@@ -735,7 +734,7 @@ function editStone(m,project){
 }
 /* Milestones change without card events (another session may add one), so while the roadmap is open
    the poll re-reads them every ten seconds and redraws when they differ from what is shown. */
-const stoneArgs=focus=>focus?{project:focus}:sel.repo?{repo:sel.repo}:{};
+const stoneArgs=focus=>focus?{project:focus}:{};
 let stonesSeen="",stonesAt=0;
 async function stonesChanged(){
   if(view!=="roadmap"||Date.now()-stonesAt<10000)return false;
@@ -754,7 +753,7 @@ async function renderRoadmap(){
   b.classList.remove("board","metrics","decisions","archive");b.classList.add("roadmap");
   const scoped=cards.filter(k=>shown(k)&&(!focus||k.project===focus));
   const w=windowOf(scoped,stones),top=el("div",null,"rm-top");top.append(insights(scoped,w.t0),activity(scoped));
-  const h=el("div",null,"rm-head");h.append(el("h3","Roadmap · "+(focus?label(focus):sel.repo||"all projects")));
+  const h=el("div",null,"rm-head");h.append(el("h3","Roadmap · "+(focus?label(focus):"all projects")));
   if(focus){const add=el("button","Add milestone");add.type="button";add.onclick=()=>editStone(null,focus);h.append(add)}
   b.replaceChildren(h,timeline(scoped,focus,w,stones),top);
   if(!map){renderSide();syncDialog();return}
@@ -794,7 +793,7 @@ function rows(list,max=Math.max(1,...list.map(r=>r.n))){
 }
 async function renderMetrics(){
   const seq=++mapSeq,b=$("board"),stale=()=>seq!==mapSeq||view!=="metrics";
-  const args=sel.project?{project:sel.project}:sel.repo?{repo:sel.repo}:{};
+  const args=sel.project?{project:sel.project}:{};
   let m;
   try{m=await api("board_metrics",args)}
   catch(e){if(!stale()){b.classList.remove("board","roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
@@ -806,7 +805,7 @@ async function renderMetrics(){
     const k=el("div",null,"kpi");k.append(el("b",String(v)),l);if(t)k.title=t;kpis.append(k);
   }
   b.classList.remove("board","roadmap","decisions","archive");b.classList.add("metrics");
-  const scope=sel.project?label(sel.project):sel.repo||"all projects";
+  const scope=sel.project?label(sel.project):"all projects";
   // Flow: cards added and shipped each week, side by side, the current week last.
   const wmax=Math.max(1,...m.weeks.flatMap(w=>[w.added,w.done,w.prototype]));
   const flow=panel("Flow","w8","cards created, shipped and done as prototypes per week, the current week last");
@@ -847,12 +846,9 @@ async function renderMetrics(){
   renderSide();syncDialog();
 }
 
-/* The scope bar: the repository, its projects as chips, then the agents holding claims.
+/* The scope bar: the project picker, projects as chips, then the agents holding claims.
    Everything here only narrows what the board shows. */
 function renderSide(){
-  // Every repository is offered, an empty one too (you may be about to add its first card), except the
-  // `default` repository when the Inbox is all it holds: the Inbox chip is it.
-  const names=Object.keys(repos).filter(r=>r!==INBOX||repos[r].length>1);
   const item=(text,n,on,fn,agent)=>{
     const b=el("button",null,"item"+(on?" on":""));b.type="button";b.setAttribute("aria-pressed",String(on));
     const name=el("span",null,"name");
@@ -860,29 +856,25 @@ function renderSide(){
     name.append(text);b.append(name,el("span",String(n),"n"));b.onclick=fn;return b};
   const n1=$("nav1");n1.replaceChildren();
   if(projects().length>1){
-    const r=el("select");r.id="repo";r.setAttribute("aria-label","repository");
-    r.append(new Option("All repositories · "+listed(()=>true),""));
-    for(const x of names)r.append(new Option(x+" · "+listed(k=>repoOf(k.project)===x),x));
-    r.value=sel.repo;r.onchange=()=>pick(r.value,"");
+    // Projects only, the Inbox among them: repositories are not a way to sort or filter the board.
+    const r=el("select");r.id="project";r.setAttribute("aria-label","project");
+    r.append(new Option("All projects · "+listed(()=>true),""));
+    for(const p of projects().filter(statusShown).sort((x,y)=>label(x).localeCompare(label(y))))r.append(new Option(label(p)+" · "+listed(k=>k.project===p),p));
+    r.value=sel.project;r.onchange=()=>pick(r.value);
     n1.append(r);
     // Which project statuses are on the board: committed (active) work unless asked.
     const st=el("select");st.id="pstatus";st.setAttribute("aria-label","project status");
     st.append(...STATUSES.map(x=>new Option(x[0].toUpperCase()+x.slice(1)+" projects",x)),new Option("All projects",""));
     st.value=statusSel;st.onchange=()=>{statusSel=st.value;pref("pstatus",statusSel);render()};
     n1.append(st);
-    // The Inbox is a project, not a repository: it shows and counts only cards with no other project.
-    // Listed only when this credential may see it, like every other entry here.
+    // The Inbox shows and counts only cards with no other project. Listed only when this credential
+    // may see it, like every other entry here.
     const chips=[];
-    if(projects().includes(INBOX))chips.push(item("Inbox",listed(k=>k.project===INBOX),sel.project===INBOX,()=>pick(repoOf(INBOX),INBOX)));
-    // The projects of the chosen repository, or of every repository, so one project's cards are a click
-    // away. A repository whose only project is its own is left out: it is the repository, chosen above.
-    // (A credential limited to some projects may see a repository with one other project: that one stays.)
-    const named=Object.entries(repos).filter(([x])=>!sel.repo||x===sel.repo)
-      .flatMap(([x,ps])=>ps.length===1&&ps[0]===x?[]:ps).filter(p=>p!==INBOX&&statusShown(p)).sort();
-    for(const p of named)chips.push(item(p,listed(k=>k.project===p),sel.project===p,()=>sel.project===p?pick(sel.repo,""):pick(repoOf(p),p)));
+    if(projects().includes(INBOX))chips.push(item("Inbox",listed(k=>k.project===INBOX),sel.project===INBOX,()=>pick(INBOX)));
+    for(const p of projects().filter(p=>p!==INBOX&&statusShown(p)).sort())chips.push(item(p,listed(k=>k.project===p),sel.project===p,()=>pick(sel.project===p?"":p)));
     if(chips.length)n1.append(el("i",null,"sep"),el("span","Projects","lbl"),...chips);
   }
-  // Agents: whoever holds a claim, with how many cards. A second filter, independent of the repository.
+  // Agents: whoever holds a claim, with how many cards. A second filter, independent of the project.
   const claims={};cards.forEach(k=>{if(k.claim)claims[k.claim]=(claims[k.claim]||0)+1});
   const agents=Object.keys(claims).sort();
   if(agents.length){
@@ -936,7 +928,7 @@ function renderArchive(){
   renderSide();syncDialog();
 }
 
-function pick(repo,project){sel={...sel,repo,project};pref("repo",repo);pref("project",project);render()}
+function pick(project){sel={...sel,project};pref("project",project);render()}
 function pickAgent(agent){sel={...sel,agent};render()}
 
 /* The card dialog is built once and then kept in step with the board without ever
@@ -950,7 +942,7 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
   const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),up:el("input","","up"),ms:el("select")};
-  for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(label(p),p)));f.p.append(g)}
+  projects().forEach(p=>f.p.append(new Option(label(p),p)));
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
   [5,3,1,0].forEach(v=>f.pr.append(new Option("Priority: "+PRIORITY[v],v)));
@@ -1536,7 +1528,6 @@ async function loadMeta(){
   // repo -> its projects. A credential limited to some projects hears only of those.
   const pj=await meta("board_projects",{repos:{}}),listed=pj.repos;pstatus=pj.status||{};
   repos=Object.fromEntries(Object.entries(listed).map(([r,p])=>[r,Object.keys(p)]));
-  if(sel.repo&&!(sel.repo in repos))sel={repo:"",project:"",agent:sel.agent};
   if(sel.project&&!projects().includes(sel.project))sel={...sel,project:""};
 }
 (async()=>{
@@ -1550,13 +1541,13 @@ async function loadMeta(){
   $("archive").onclick=()=>setView(view==="archive"?"board":"archive");
   $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
   $("boardv").onclick=()=>setView("board");
-  // New cards go to the chosen project, else to the chosen repository's own project.
-  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project||sel.repo;if(!t){$("title").focus();return}$("title").value="";act("card_add",{title:t,...(project&&{project})})};
+  // New cards go to the chosen project, else to the Inbox.
+  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project;if(!t){$("title").focus();return}$("title").value="";act("card_add",{title:t,...(project&&{project})})};
   $("title").onkeydown=e=>{if(e.key==="Enter")$("add").click()};
   await loadMeta();
-  const r=pref("repo"),p=pref("project"),ps=pref("pstatus");
+  const p=pref("project"),ps=pref("pstatus");
   if(ps!==null&&(ps===""||STATUSES.includes(ps)))statusSel=ps;
-  if(r in repos&&(!p||repos[r].includes(p)))sel={repo:r,project:p||"",agent:""};
+  if(p&&projects().includes(p))sel={project:p,agent:""};
   try{await refresh()}catch(e){toast(e.message)}
   poll();
 })();
