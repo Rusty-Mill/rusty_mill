@@ -141,6 +141,7 @@ Precise contracts used by this guide:
 | D131 | Deploy on BaileyAi authorised for M1 (protocol host, orch, Mill Board inbox); BaileyAi confirmed as host; #1092 released | [stated] 2026-11-13 (general, M1) |
 | D137 | `rusty_orch lens breaker` is a read-only report with no reset | [default] 2026-11-17 (#758) |
 | D138 | orch maps `sensitive_paths` to launcher `hide` via agents.json, and `real_data` to `bbp dry-run` | [default] 2026-11-17 (#758) |
+| D139 | A lens post with no taint entry reads as `sensitive` (unknown ids from lost posts) | [default] 2026-11-17 (#758) |
 
 ## D1. Lenses, not stages
 
@@ -1299,3 +1300,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_2c2213dcd287429e8d8c64398a3737f4
 **Key.** lel:758:sensitive-paths-real-data-mapping
 **Source.** let-em-loose-expert, 2026-11-17, for the #758 build session. D62; PLAN PR 3, S4, B4; `rusty_bbp_host/src/confine.rs` (`HarnessSandbox.hide`), `filtered.rs`, `dry_run.rs`, `bin/bbp.rs` (`dry-run` usage); `orch-bbp/src/lib.rs` (`materialize`), `orch-bbp/src/config.rs`.
+
+## D139. A lens post with no taint entry reads as `sensitive` (unknown ids from lost posts)
+
+**Decision.** Card #758 item 1, inside the approved taint rule (598-build/PLAN.md PR 3; D59, D62). Every landed lens post gets a taint entry. When a post's answer is lost twice (`PostError { unsure: true }`), its id is unknown and no entry can be written. This also happens when the run stops between a post and `save_taints`. So when a Session builds cards and lines, any message whose `from` is a configured lens principal (lens ids and the alien id) and has no entry in the current taint table reads as `sensitive`. `from` is the session principal, which `Child::spawn` sets to the lens id through `BBP_PRINCIPAL`. The rule is checked when cards are built and never saved, so a post whose entry lands later reads at its real class. `partial` is unchanged, and the run still halts with `Halt::Board`.
+**Why.** It fails closed in the same round, after a crash and on every later run, with no new orch-store record, no BBP change and no new pause reason, so it adds no new design under D127. D86 already rules out inferring an unknown post's id.
+**Rejected.** Reading forward after an unsure post and tainting the lens's own new messages, because that covers only the same round. Persisting the unsure op and replaying it at the next start, because that is a new store record. Pausing the task on an unsure post, because that is a new pause reason and new behaviour. Leaving it as a documented gap, because it breaks D59's rule that sensitive data stays local. Matching on `from_role`, because it is `None` for human posts and depends on the roster.
+**Tag.** [default] · remind-me: mem_4c08e98488ae4605a4afe1e41af0e4f4
+**Key.** lel:758:unknown-lens-post-reads-sensitive
+**Source.** let-em-loose-expert, 2026-11-17, answering a Codex P1 finding on PR #1764 (`orch-lens/src/round.rs` `partial`). 598-build/PLAN.md, D59, D62, D86, D127. Numbered D139 after D138.

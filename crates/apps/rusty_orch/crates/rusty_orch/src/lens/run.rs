@@ -317,6 +317,24 @@ impl Prefixes {
     }
 }
 
+/// The task-wide claim set the breaker marks: every seat's cards merged
+/// by claim id, `fresh`'s winning since it was just refreshed. Lenses
+/// follow different domains, so one lens's view alone would count claims
+/// new to it as progress.
+fn task_cards(
+    seats: &BTreeMap<String, Box<dyn Seat>>,
+    fresh: &str,
+    config: &LensConfig,
+) -> Vec<Card> {
+    let others = seats.iter().filter(|(id, _)| id.as_str() != fresh);
+    let latest = seats.get(fresh).into_iter();
+    let mut all: BTreeMap<_, Card> = BTreeMap::new();
+    for seat in others.map(|(_, s)| s).chain(latest) {
+        all.extend(seat.cards(config).into_iter().map(|c| (c.id, c)));
+    }
+    all.into_values().collect()
+}
+
 /// Run up to `max` passes over every lens until one starts no job. A lens
 /// without a seat is an error. Each job's outcome is written to `log`.
 /// `state` goes to `keep` after every lens's round, so a restart resumes
@@ -341,6 +359,11 @@ pub fn passes(
     } = lenses;
     let mut prefixes = Prefixes::default();
     let mut window: Option<Mark> = None;
+    // Every view filled before the breaker's first mark, so no lens's
+    // claims first appear mid-window as progress.
+    for (id, seat) in seats.iter_mut() {
+        seat.refresh(config).map_err(|e| format!("{id}: {e}"))?;
+    }
     for pass in 1..=max {
         let tracks: BTreeMap<String, String> = match (records.read)() {
             Ok(t) => t.iter().map(|(l, t)| (l.clone(), t.line())).collect(),
@@ -362,7 +385,8 @@ pub fn passes(
                 .map_err(|e| format!("{}: {e}", lens.id))?;
             let cards = seat.cards(config);
             let calls = metering.meter.calls(metering.task);
-            let now = Mark::of(calls, metering.meter.task_spent(metering.task), &cards);
+            let seen = task_cards(seats, &lens.id, config);
+            let now = Mark::of(calls, metering.meter.task_spent(metering.task), &seen);
             let start = window.get_or_insert_with(|| now.clone());
             match judge(&guard.breaker, start, &now) {
                 Outcome::Open => {}
@@ -377,6 +401,9 @@ pub fn passes(
                     return Ok(Ended::Paused(detail));
                 }
             }
+            let seat = seats
+                .get_mut(&lens.id)
+                .ok_or_else(|| format!("no BBP session for lens {}", lens.id))?;
             let lines = seat
                 .lines(config)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
@@ -1042,6 +1069,27 @@ mod tests {
         assert!(outcome(&Ended::Paused(detail), log).is_ok());
     }
 
+    /// Lenses that follow different domains see different claims. The
+    /// breaker marks every seat's claims together, so one lens's claims are
+    /// not progress when the next lens's turn comes (#758 review).
+    #[test]
+    fn lenses_with_disjoint_views_share_one_breaker_mark() {
+        let scored = |id: u64| Card {
+            score: 4,
+            ..card(id)
+        };
+        let seats = vec![
+            ("adversary", FakeSeat::new(vec![scored(7)])),
+            ("operator", FakeSeat::new(vec![scored(8)])),
+        ];
+        let mut e = echo(Ok(vec![counter()]));
+        // The window closes as the second lens starts: the first lens's
+        // claim must not read as moved from zero then.
+        let (ended, log, g) = guarded(seats, &mut e, 10, 5, enforcing(1), Taints::default());
+        assert!(matches!(ended, Ok(Ended::Paused(_))), "{ended:?}\n{log}");
+        assert_eq!(g.pauses.len(), 1);
+    }
+
     #[test]
     fn an_observing_breaker_logs_and_the_run_goes_on() {
         let observe = orch_lens::breaker::Breaker {
@@ -1655,10 +1703,11 @@ mod tests {
     #[test]
     fn a_revised_intent_rebuilds_the_prefix_before_the_next_call() {
         let mut echo = echo(Ok(vec![counter()]));
-        // Revised (and the claim reopened) at the second pass's refresh.
+        // Revised (and the claim reopened) at the second pass's refresh,
+        // the third: the run refreshes every seat once before pass 1.
         let seats = ["adversary", "operator"].map(|lens| {
             let mut seat = FakeSeat::new(vec![card(7)]);
-            seat.revise_at = Some(2);
+            seat.revise_at = Some(3);
             (lens, seat)
         });
         let (ended, log) = go(seats.into(), &mut echo, 10, 20);
