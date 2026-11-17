@@ -24,9 +24,30 @@ Install to `/opt/lel/<git-sha>/bin/`, symlink `/opt/lel/current -> <git-sha>`. P
 | `/etc/let-em-loose/assertions.json` | root:orch-runner 0640 | read by `lens check`; only Nano writes it (`no_overage`, `host_cleared`, 30-day expiry) |
 | `~baileyrd/lel/machine-id` | existing, 444 | R5; ro bind-mount at `/etc/machine-id` in `lel-codex`; keep on recreate |
 | `/var/lib/mill-board` | mill-board 0700 | board state and `board.env` 0600; replaces `~baileyrd/.mill-board` |
-| `/usr/local/libexec/mill-board-bbp` | root 0755 | `exec sudo -n -u orch-runner /opt/lel/current/bin/bbp "$@"` |
+| `/usr/local/libexec/mill-board-bbp` | root 0755 | board side (`MILL_BOARD_BBP_BIN`): `exec sudo -n -u orch-runner /usr/local/libexec/mill-board-bbp-guard "$@"` |
+| `/usr/local/libexec/mill-board-bbp-guard` | root 0755 | runs as `orch-runner`; the only command the sudoers rule allows (below) |
 
-`/etc/sudoers.d/mill-board` (root 0440): `mill-board ALL=(orch-runner) NOPASSWD: /opt/lel/current/bin/bbp inbox --dir /srv/lel/bbp *, /opt/lel/current/bin/bbp human --dir /srv/lel/bbp *`
+`/etc/sudoers.d/mill-board` (root 0440): `mill-board ALL=(orch-runner) NOPASSWD: /usr/local/libexec/mill-board-bbp-guard`. The rule names the guard, never `bbp` with a glob: `bbp` keeps the last of a repeated flag (`args.rs`, a `HashMap`), so a rule like `bbp inbox --dir /srv/lel/bbp *` would also allow a second `--dir` pointing anywhere. sudo's default `env_reset` stays, so `BBP_DIR` cannot be passed in either. `/usr/local/libexec` and `/opt/lel` are root-owned all the way up.
+
+The guard (all of it):
+```sh
+#!/bin/sh
+# Runs as orch-runner via sudo. Allows: bbp inbox|human --dir /srv/lel/bbp <args without another --dir>.
+set -eu
+case "${1-}" in inbox|human) ;; *) echo "mill-board-bbp-guard: verb refused" >&2; exit 64 ;; esac
+if [ "${2-}" != --dir ] || [ "${3-}" != /srv/lel/bbp ]; then echo "mill-board-bbp-guard: --dir refused" >&2; exit 64; fi
+verb=$1; shift 3
+skip=0
+for a in "$@"; do   # walks the args the way bbp's parser does: every --key takes the next token as its value
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$a" in
+    --dir) echo "mill-board-bbp-guard: second --dir refused" >&2; exit 64 ;;
+    --*) skip=1 ;;
+  esac
+done
+exec /opt/lel/current/bin/bbp "$verb" --dir /srv/lel/bbp "$@"
+```
+It accepts exactly the argv `bbp_cli.rs` builds (`inbox|human --dir <root> ...`), so the board needs no code change. The guarantee: as `orch-runner`, `mill-board` can run only `bbp inbox` and `bbp human`, only on `/srv/lel/bbp`.
 
 ## systemd
 - `mill-board.service`: the shipped unit plus a drop-in: `User=mill-board`, `EnvironmentFile=/var/lib/mill-board/board.env`, `ReadWritePaths=/var/lib/mill-board /srv/lel/bbp` (the `bbp human` child writes the log), `NoNewPrivileges=false` (sudo), `MILL_BOARD_BBP_BIN=/usr/local/libexec/mill-board-bbp`, `MILL_BOARD_BBP_ROOT=/srv/lel/bbp`. rusty_tick must already be up.
@@ -47,10 +68,10 @@ Drain, then flip: (1) no open tasks (`bbp inbox`; `rusty_orch run --cancel <reas
 2. `rusty_orch lens check /srv/lel/lens.json --assertions /etc/let-em-loose/assertions.json --repo <repo>` exits 0. An unavailable provider is a finding, not a deploy failure.
 3. `bbp open` a toy claims task on a throwaway repo (pattern: `crates/apps/rusty_bbp_host/docs/proving-run.md`, `BBP_DIR=/srv/lel/bbp`); `bbp card` and `bbp why` print JSON.
 4. Link the task from a card; `inbox_list` shows its escalations (cross-check `bbp inbox --dir /srv/lel/bbp --task <T>`); `inbox_act` on a toy escalation proves the board can write the log.
-5. As mill-board, under the unit (`systemd-run -p User=mill-board ...` with the drop-in's settings): `/usr/local/libexec/mill-board-bbp inbox --dir /srv/lel/bbp --task <t> --json yes` succeeds, and `sudo -n -u orch-runner /bin/cat /srv/lel/bbp/master` is refused. If sudo fails because `ProtectSystem=strict` leaves `/run/sudo` read-only, add `/run/sudo` to `ReadWritePaths`.
+5. As mill-board, under the unit (`systemd-run -p User=mill-board ...` with the drop-in's settings): `/usr/local/libexec/mill-board-bbp inbox --dir /srv/lel/bbp --task <t> --json yes` succeeds, `sudo -n -u orch-runner /bin/cat /srv/lel/bbp/master` is refused, and each of `mill-board-bbp inbox --dir /srv/lel/bbp --dir /tmp/x --task <t>`, `mill-board-bbp inbox --dir /tmp/x --task <t>` and `mill-board-bbp open --dir /srv/lel/bbp` exits 64 without running `bbp`. If sudo fails because `ProtectSystem=strict` leaves `/run/sudo` read-only, add `/run/sudo` to `ReadWritePaths`.
 
 ## Decision: which user runs Mill Board? (D132, Nano 2026-11-16T19:17Z)
-The inbox runs `bbp inbox` and `bbp human`, which need `master` (owner-only, `orch-runner`). Mill Board runs as its own user `mill-board`, not `orch-runner`, so the host-side Claude harness cannot read the board's tokens. It calls `bbp` as `orch-runner` through the wrapper and a sudoers rule limited to those two verbs on `/srv/lel/bbp`. The cost is the unit's `NoNewPrivileges=true`. Rejected: running as `orch-runner` (Nano's first choice, reversed); group-sharing `/srv/lel/bbp` with `master` 0640 (hands the board the master secret and needs group-writable log files).
+The inbox runs `bbp inbox` and `bbp human`, which need `master` (owner-only, `orch-runner`). Mill Board runs as its own user `mill-board`, not `orch-runner`, so the host-side Claude harness cannot read the board's tokens. It calls `bbp` as `orch-runner` through a root-owned guard script, the only command its sudoers rule allows; the guard admits those two verbs on `/srv/lel/bbp` and refuses a second `--dir`. The cost is the unit's `NoNewPrivileges=true`. Rejected: running as `orch-runner` (Nano's first choice, reversed); group-sharing `/srv/lel/bbp` with `master` 0640 (hands the board the master secret and needs group-writable log files).
 
 ## Drift found
 - Card says mux runs as `baileyrd`; design says `orch-runner`.
