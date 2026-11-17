@@ -191,7 +191,13 @@ fn unescape(text: &str) -> Option<String> {
                 if chars.next()? != '{' {
                     return None;
                 }
-                let hex: String = chars.by_ref().take_while(|&c| c != '}').collect();
+                let mut hex = String::new();
+                loop {
+                    match chars.next()? {
+                        '}' => break,
+                        c => hex.push(c),
+                    }
+                }
                 out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
             }
             _ => return None,
@@ -388,6 +394,8 @@ pub(crate) struct Palette {
     /// The first line shown.
     top: usize,
     asks: u64,
+    /// Text mid-composition (IME), shown after the query, not yet typed.
+    preedit: String,
 }
 
 impl Palette {
@@ -402,6 +410,16 @@ impl Palette {
         };
         p.reset();
         p
+    }
+
+    /// Set the composition in progress (empty when none).
+    pub(crate) fn set_preedit(&mut self, text: &str) {
+        self.preedit = text.to_owned();
+    }
+
+    /// The composition in progress.
+    pub(crate) fn preedit(&self) -> &str {
+        &self.preedit
     }
 
     /// The query, or the browse's filter.
@@ -1296,6 +1314,7 @@ mod tests {
             (20005, true, 2)
         );
         assert_eq!(unescape("a\\u{1b}b").as_deref(), Some("a\u{1b}b"));
+        assert_eq!(unescape("x\\u{61"), None, "unterminated escape");
         assert!(Listing::parse("").is_err());
     }
 

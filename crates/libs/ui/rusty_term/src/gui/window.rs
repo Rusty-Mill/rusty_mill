@@ -2551,6 +2551,13 @@ impl WindowState<'_> {
     /// Tell the IME where the text cursor is, so its candidate/composition popup
     /// appears at the terminal cursor rather than the window origin.
     fn update_ime_area(&self) {
+        if let (Some(window), Some((x, y, h))) = (&self.window, self.palette.input_area()) {
+            window.set_ime_cursor_area(
+                winit::dpi::PhysicalPosition::new(x as i32, y as i32),
+                winit::dpi::PhysicalSize::new(self.cell_w as u32, h as u32),
+            );
+            return;
+        }
         let (Some(window), Some(p)) = (&self.window, self.pane()) else {
             return;
         };
@@ -5476,6 +5483,7 @@ impl WindowState<'_> {
                 self.palette.open(entries);
             }
         }
+        self.update_ime_area();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -5659,6 +5667,9 @@ impl WindowState<'_> {
                 .listed(ask, Err("no block has the focus".into()));
             return;
         };
+        // The browse belongs to the block it lists, not the one the
+        // palette opened on (focus may have moved since).
+        self.palette_origin = Some(key);
         let proxy = self.proxy.clone();
         self.source.list_dir(
             key,
@@ -5964,6 +5975,13 @@ impl WindowState<'_> {
                 }
             }
             WindowEvent::Ime(ime) => match ime {
+                Ime::Preedit(text, _) if self.palette.is_open() => {
+                    // The palette field owns composition while it's open.
+                    self.palette.set_preedit(&text);
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
                 Ime::Preedit(text, _) => {
                     if let Some(p) = self.pane() {
                         p.grid.lock().ime_preedit = text;
@@ -5980,6 +5998,7 @@ impl WindowState<'_> {
                     // The palette owns composed text while it's open, and a
                     // popover or confirm drops it: neither reaches the shell.
                     if self.palette.is_open() {
+                        self.palette.set_preedit("");
                         let out = self.palette.key(palette::Key::Char(text.to_string()));
                         self.palette_out(out);
                         return;

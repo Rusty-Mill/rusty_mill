@@ -201,7 +201,8 @@ fn paint_input(
     let x = (PAD + ICON + GAP) * s;
     let base = mid + font.centre_drop(QUERY_PX * s);
     let query = p.query();
-    if query.is_empty() {
+    let pre = p.preedit();
+    if query.is_empty() && pre.is_empty() {
         let hint = if p.browsing() {
             "Filter this folder"
         } else {
@@ -212,9 +213,28 @@ fn paint_input(
         return;
     }
     let room = w - x - PAD * s;
-    let shown = font.fit_tail(query, Weight::Regular, QUERY_PX * s, room);
-    let used = out.text(font, &shown, Weight::Regular, QUERY_PX * s, x, base, c.text);
-    caret(out, x + used, mid, (c, s));
+    let both = format!("{query}{pre}");
+    let shown = font.fit_tail(&both, Weight::Regular, QUERY_PX * s, room);
+    let typed = shown.len().min(query.len());
+    let used = out.text(
+        font,
+        &shown[..typed],
+        Weight::Regular,
+        QUERY_PX * s,
+        x,
+        base,
+        c.text,
+    );
+    let more = out.text(
+        font,
+        &shown[typed..],
+        Weight::Regular,
+        QUERY_PX * s,
+        x + used,
+        base,
+        c.muted,
+    );
+    caret(out, x + used + more, mid, (c, s));
 }
 
 fn caret(out: &mut Pixmap, x: f32, mid: f32, (c, s): (&Chrome, f32)) {
@@ -447,6 +467,14 @@ impl PaletteUi {
         }
     }
 
+    /// The composition in progress, drawn after the query.
+    pub(crate) fn set_preedit(&mut self, text: &str) {
+        if let Some(open) = &mut self.open {
+            open.palette.set_preedit(text);
+            open.painted = None;
+        }
+    }
+
     /// A key; what the window does next, or `None` when closed.
     pub(crate) fn key(&mut self, key: Key) -> Option<Out> {
         let open = self.open.as_mut()?;
@@ -515,6 +543,17 @@ impl PaletteUi {
             (TOP * scale).round() as usize,
         );
         open.painted = Some((look, painted, at));
+    }
+
+    /// Where the query field's text starts (window px: x, y, height), for
+    /// the IME candidate window; `None` until painted.
+    pub(crate) fn input_area(&self) -> Option<(usize, usize, usize)> {
+        let ((_, s, _), _, at) = self.open.as_ref()?.painted.as_ref()?;
+        Some((
+            at.0 + ((PAD + ICON + GAP) * s).round() as usize,
+            at.1,
+            (INPUT_H * s).round() as usize,
+        ))
     }
 
     /// The last painting and its place, while open.
