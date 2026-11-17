@@ -1270,6 +1270,13 @@ impl BodyState {
         }
     }
 
+    /// Where this window's taking over of block `key` stands, for a block
+    /// whose owner decides who types (D64); `None` for an open block.
+    pub(crate) fn take_of(&self, key: u64) -> Option<Take> {
+        self.owned(key)?;
+        Some(self.takes.get(&key).copied().unwrap_or_default())
+    }
+
     fn branch(&mut self, cwd: &str, read: fn(&Path) -> Option<String>) -> Option<String> {
         if let Some((branch, at)) = self.branches.get(cwd)
             && at.elapsed() < BRANCH_TTL

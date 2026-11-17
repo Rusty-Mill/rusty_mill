@@ -40,6 +40,8 @@ mod motion;
 mod mouse;
 mod pace;
 mod paint;
+mod palette;
+mod palette_view;
 mod popover;
 mod prefix;
 mod render;

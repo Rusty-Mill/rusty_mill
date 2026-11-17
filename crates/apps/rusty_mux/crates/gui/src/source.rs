@@ -38,10 +38,12 @@ use rusty_mux_client::attach::{
 use rusty_mux_client::checkpoint::{HistoryReceiver, Receiver};
 use rusty_mux_client::older::Older;
 use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Side, Size, WindowId};
+use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Features, Launch, Message, Program, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
-    Act, BlockInfo, Detached, Dir, Feed, Link, Notice, PaneIo, Remote, Session, Source, Take, Tree,
+    Act, BlockInfo, Detached, Dir, Feed, Link, ListDone, Listed, Notice, PaneIo, Remote, Session,
+    Source, Take, Tree,
 };
 
 use crate::headers::{Call, Effect, Headers};
@@ -68,11 +70,14 @@ pub const GUI: Features = CONTROL
 
 /// What a block's connection asks for: the panes' features, and the input
 /// gate's grants and lease requests, so an owner-only block can be taken
-/// over (handoff D153). The TUI's [`PANE`] stays as it is.
+/// over (handoff D153), and folder listings, for the palette's directory
+/// browse (D78). The TUI's [`PANE`] stays as it is.
 pub const BLOCK: Features = PANE
     .union(Features::INPUT_GATE)
     .union(Features::LEASE_REQUESTS)
-    .union(Features::BACKGROUND_HISTORY);
+    .union(Features::BACKGROUND_HISTORY)
+    .union(Features::BLOCK_CALL)
+    .union(Features::DIR_LISTING);
 
 /// Never set: the handshakes here are not cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -355,6 +360,15 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct MuxSource(Arc<State>);
 
 impl MuxSource {
+    /// Pane `key`'s block connection, while the window has it open.
+    fn pane(&self, key: u64) -> Option<Arc<Block>> {
+        self.0
+            .shown()
+            .blocks
+            .get(&key)
+            .and_then(std::sync::Weak::upgrade)
+    }
+
     /// Carries out the user's take-over `act` on pane `key`'s block
     /// (gui-design D64, handoff D153).
     fn take(&self, key: u64, act: Act) {
@@ -396,6 +410,17 @@ impl Source for MuxSource {
             // The server's own terminal answers the program's queries.
             answers_queries: false,
         })
+    }
+
+    fn lists(&self, key: u64) -> bool {
+        self.pane(key).is_some_and(|b| b.lists)
+    }
+
+    fn list_dir(&self, key: u64, path: Option<String>, done: ListDone) {
+        match self.pane(key) {
+            Some(block) => block.list_dir(path, done),
+            None => done(Err("the block is not open".into())),
+        }
     }
 
     fn focus(&self, key: u64) {
@@ -1070,6 +1095,10 @@ struct Block {
     /// heard last.
     to_window: Mutex<Option<SyncSender<Feed>>>,
     told: Mutex<Option<Take>>,
+    /// The server lists folders on this connection (`terminal.list-dir`).
+    lists: bool,
+    /// Who waits for a listing, by request number.
+    listings: Mutex<HashMap<u64, ListDone>>,
 }
 
 /// Why a block's reader stopped reading a connection.
@@ -1106,6 +1135,10 @@ impl Block {
             requests: opened.features.contains(Features::LEASE_REQUESTS),
             to_window: Mutex::new(None),
             told: Mutex::new(None),
+            lists: opened
+                .features
+                .contains(Features::BLOCK_CALL.union(Features::DIR_LISTING)),
+            listings: Mutex::new(HashMap::new()),
         });
         shared.send(|req| Message::Attach { req, block });
         let (tx, feed) = std::sync::mpsc::sync_channel(FEED_AHEAD);
@@ -1151,6 +1184,42 @@ impl Block {
         // A failed send ends the reader too, which ends the pane.
         let _ = conn.send(&make(req));
         req
+    }
+
+    /// Asks the server to list `path` (the block's folder when `None`) and
+    /// calls `done` with the answer, or with why there is none.
+    fn list_dir(&self, path: Option<String>, done: ListDone) {
+        let block = self.block;
+        let mut done = Some(done);
+        self.send(|req| {
+            if let Some(done) = done.take() {
+                lock(&self.listings).insert(req, done);
+            }
+            Message::BlockCall {
+                req,
+                block,
+                method: "terminal.list-dir".into(),
+                args: path
+                    .map(|p| ("path".into(), Value::Text(p)))
+                    .into_iter()
+                    .collect(),
+            }
+        });
+    }
+
+    /// Answers every waiting listing with `why`: its connection is gone.
+    fn fail_listings(&self, why: &str) {
+        let waiting: Vec<_> = lock(&self.listings).drain().collect();
+        for (_, done) in waiting {
+            done(Err(why.into()));
+        }
+    }
+
+    /// Hands a listing's answer to whoever waits for `req`; whether
+    /// someone did.
+    fn listed(&self, req: u64, answer: Listed) -> bool {
+        let done = lock(&self.listings).remove(&req);
+        done.map(|done| done(answer)).is_some()
     }
 
     /// Asks for the lease when `wanted`, or gives it back when not.
@@ -1223,6 +1292,7 @@ impl Block {
         feed: &SyncSender<Feed>,
     ) {
         while let Read::Lost = self.read_one(&mut conn, feed) {
+            self.fail_listings("the connection to the server was lost");
             match revived.recv() {
                 Ok(next) => conn = next,
                 Err(_) => break,
@@ -1230,6 +1300,7 @@ impl Block {
         }
         // The feed ends with the reader, which ends the pane.
         *lock(&self.to_window) = None;
+        self.fail_listings("the block ended");
     }
 
     /// Reads one connection into feed steps; the screen comes first, as
@@ -1319,6 +1390,13 @@ impl Block {
                     ..
                 } if b == block && client == self.client => {
                     self.update(|lease, send| lease.granted(until.is_some(), send));
+                    continue;
+                }
+                Message::Text { req, text } => {
+                    self.listed(req, Ok(text));
+                    continue;
+                }
+                Message::Failed { req, reason, .. } if self.listed(req, Err(reason.clone())) => {
                     continue;
                 }
                 Message::Done { req, .. } => {
