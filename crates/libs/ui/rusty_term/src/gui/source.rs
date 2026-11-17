@@ -229,7 +229,26 @@ pub trait Source {
     /// The user asked to stop trying ("Stop trying"); the source says
     /// [`Link::Down`].
     fn stop(&self);
+    /// Whether the source can list a folder on pane `key`'s host for the
+    /// command palette's directory browse (gui-design D78). A source that
+    /// can't hides the rows.
+    fn lists(&self, _key: u64) -> bool {
+        false
+    }
+    /// Lists `path` (the pane's folder when `None`) on pane `key`'s host,
+    /// and calls `done` once, from any thread, with the listing text
+    /// ([`super::palette::Listing::parse`]) or why it failed. Not called
+    /// when [`Source::lists`] is `false`.
+    fn list_dir(&self, _key: u64, _path: Option<String>, done: ListDone) {
+        done(Err("this source lists no folders".into()));
+    }
 }
+
+/// A folder listing's text, or why the host refused it.
+pub type Listed = Result<String, String>;
+
+/// What a source calls once with a folder listing.
+pub type ListDone = Box<dyn FnOnce(Listed) + Send>;
 
 /// How an attached window's source reaches its server (gui-design D62,
 /// handoff D110).

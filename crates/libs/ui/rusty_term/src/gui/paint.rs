@@ -355,6 +355,10 @@ pub(crate) mod icons {
     pub(crate) const BRANCH: &str =
         "M5 3v10M5 13a1.8 1.8 0 1 0 0 .1M11 3a1.8 1.8 0 1 0 0 .1M11 4.8c0 4-6 3-6 6.2";
     pub(crate) const EYE: &str = "M1.8 8s2.3-4.2 6.2-4.2S14.2 8 14.2 8s-2.3 4.2-6.2 4.2S1.8 8 1.8 8zM8 6.3a1.7 1.7 0 1 0 0 3.4 1.7 1.7 0 0 0 0-3.4z";
+    /// The palette's search box and a folder row's way in (gui-design D77,
+    /// D78).
+    pub(crate) const SEARCH: &str = "M7 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8M10 10l3.5 3.5";
+    pub(crate) const CHEVRON_RIGHT: &str = "M6 4l4 4-4 4";
     pub(crate) const CHECK: &str = "M3.5 8.5l3 3 6-7";
     pub(crate) const ALERT: &str = "M8 2.5l6 10.5H2zM8 7v3M8 11.5h.1";
     pub(crate) const CROSS: &str = "M4.5 4.5l7 7M11.5 4.5l-7 7";
