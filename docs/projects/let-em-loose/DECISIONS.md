@@ -139,8 +139,8 @@ Precise contracts used by this guide:
 | D129 | Lost designs not needed for M1; #1402 builder-session rebuild waits until after the first run | [stated] 2026-11-12 (general, M1) |
 | D130 | M1 design steps approved as one batch of runbooks and config (changes D25 for M1) | [stated] 2026-11-12 (general, M1) |
 | D131 | Deploy on BaileyAi authorised for M1 (protocol host, orch, Mill Board inbox); BaileyAi confirmed as host; #1092 released | [stated] 2026-11-13 (general, M1) |
-| D132 | `rusty_orch lens breaker` is a read-only report with no reset | [default] 2026-11-17 (#758) |
-| D133 | orch maps `sensitive_paths` to launcher `hide` via agents.json, and `real_data` to `bbp dry-run` | [default] 2026-11-17 (#758) |
+| D137 | `rusty_orch lens breaker` is a read-only report with no reset | [default] 2026-11-17 (#758) |
+| D138 | orch maps `sensitive_paths` to launcher `hide` via agents.json, and `real_data` to `bbp dry-run` | [default] 2026-11-17 (#758) |
 
 ## D1. Lenses, not stages
 
@@ -1282,7 +1282,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:general:m1-baileyai-deploy-authorised
 **Source.** Nano, Millwright project thread message `cmsg_01632CBKCXsWe6RyFWvE9dovEkaSZSapKW11x6su2fCt41`, 2026-11-13T23:27:31Z, project thread `cmsg_01632CBKCXsWe6RyFWvE9dov5LxGS7LhnBwjYdXbAXf7nm`, verbatim: "1. Done 2. Yes BaileyAi". Answers Millwright L2. Confirms D53; releases D128's hold; D127, D130. Not lifted: #1092's design is approved only as D130's batch; work on Nano's machines goes as a paste-ready prompt (D94); paid model calls, schema or API changes and the other ask-first items still go to Nano; review and merge gates unchanged. Numbered D131 after D130.
 
-## D132. `rusty_orch lens breaker` is a read-only report with no reset
+## D137. `rusty_orch lens breaker` is a read-only report with no reset
 
 **Decision.** `rusty_orch lens breaker [--task T] [--json]` (card #758 item 2) is read-only and has no `reset`. It prints the lens config's breaker (`mode`, `window_calls`, `window_usd`, `min_score_move`), the task's meter calls and spend (a read-only orch-store read), the taint table's counts per class, and whether the task is paused, with the latest `task_paused` reason and detail from BBP. Would-trips are not recomputed: they are in the runner log (S8). Resuming a paused task stays the human's `resumed(open)`, and a new `lens run` opens a new window.
 **Why.** D86 and 598-build/PLAN.md make the command a read-only report. S8 keeps no breaker table and the meter stores only per-task totals, so there is no window to reset or replay; adding either would be new design under D127.
@@ -1291,7 +1291,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:758:lens-breaker-report
 **Source.** let-em-loose-expert, 2026-11-17, for the #758 build session (PR #1764). D86; PLAN PR 3 and S8; `orch-store/src/meters.rs`.
 
-## D133. orch maps `sensitive_paths` to launcher `hide` via agents.json, and `real_data` to `bbp dry-run`
+## D138. orch maps `sensitive_paths` to launcher `hide` via agents.json, and `real_data` to `bbp dry-run`
 
 **Decision.** Card #758 item 3, inside D62's approved Factory keys. The only path from orch to the host's filtered view is orch-bbp's `agents.json` (`materialize`, read by `bbp mod --agents` into `HarnessSandbox.hide`). So `orch_bbp::Sandbox` gains `hide` (passed through unchanged, omitted when empty), and `orch_bbp::Config` gains `sensitive_paths` (globs), copied into the `hide` of every confined pool agent. With non-empty `sensitive_paths`, load refuses a pool agent with no `sandbox` (fail closed); glob and root checks stay the host's (`confine.rs`). `real_data` (`{name: abs_path}`, names `[a-z0-9_-]+`, absolute paths) sits beside it, validated at load, and maps to `bbp dry-run --name N --data a=/p,b=/q --work DIR -- PROGRAM ARGS` (comma-separated, B4) through one thin orch pass-through that prints only bbp's summary (plan path and line count), never the plan. `lens run` is unchanged: it launches no harness and reads only through `bbp mcp`, so its data boundary is the classes and taint of item 1.
 **Why.** Putting each key where it is consumed is the most reversible choice; the host already does the filtering, refusal and dry-run confinement (#1499).

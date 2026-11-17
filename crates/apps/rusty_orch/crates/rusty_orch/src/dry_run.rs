@@ -1,4 +1,4 @@
-//! `rusty_orch dry-run` (#598, Let Em Loose #758 item 3, D133): a dry run
+//! `rusty_orch dry-run` (#598, Let Em Loose #758 item 3, D138): a dry run
 //! over the BBP config's `real_data` roots, through `bbp dry-run`.
 //!
 //! The program runs confined by the host with no network, reading the

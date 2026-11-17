@@ -70,12 +70,12 @@ pub struct Config {
     /// Unset keeps BBP's default of 60 s.
     #[rusty_serde(default)]
     pub end_grace_secs: Option<u64>,
-    /// #598 (D62, D133): globs of paths no harness may see or touch. Each
+    /// #598 (D62, D138): globs of paths no harness may see or touch. Each
     /// pool member's sandbox `hide` gains them at launch, so its workspace
     /// is BBP's filtered copy; every pool member must then be confined.
     #[rusty_serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sensitive_paths: Vec<String>,
-    /// #598 (D62, D133): the real data roots a dry run may read, by name
+    /// #598 (D62, D138): the real data roots a dry run may read, by name
     /// (`[a-z0-9_-]+`, absolute paths). Only [`dry_run_args`] uses them.
     #[rusty_serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub real_data: BTreeMap<String, String>,
@@ -278,7 +278,7 @@ pub(crate) mod path_json {
 }
 
 /// `bbp dry-run`'s arguments for a dry run named `name` of `program` over
-/// every `real_data` root, its plan under `work` (#598, D133). The roots go
+/// every `real_data` root, its plan under `work` (#598, D138). The roots go
 /// as one comma-separated `--data`, since BBP keeps only the last repeated
 /// flag.
 ///

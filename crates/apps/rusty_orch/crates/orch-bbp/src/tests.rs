@@ -703,7 +703,7 @@ fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
     )
     .unwrap();
     assert!(!agents.contains(&format!("{}\"", path("src"))), "{agents}");
-    // Every launcher hides the goal's sensitive paths (#598, D133).
+    // Every launcher hides the goal's sensitive paths (#598, D138).
     assert_eq!(
         agents.matches(r#""hide":["secrets/**"]"#).count(),
         c.roster.len(),

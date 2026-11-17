@@ -1,4 +1,4 @@
-//! `rusty_orch lens breaker` (#598, Let Em Loose #758 item 2, D132): a
+//! `rusty_orch lens breaker` (#598, Let Em Loose #758 item 2, D137): a
 //! read-only report on one task's cost breaker.
 //!
 //! The breaker's windows live only in a running `lens run` (598 PLAN S8),
