@@ -30,6 +30,7 @@ pub mod agents;
 pub mod args;
 pub mod cli;
 pub mod consolidate;
+pub mod dry_run;
 pub mod input;
 pub mod inspect;
 pub mod lens;

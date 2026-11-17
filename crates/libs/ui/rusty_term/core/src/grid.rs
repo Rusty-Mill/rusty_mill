@@ -26,8 +26,10 @@ mod stamp_tests;
 #[cfg(test)]
 mod trim_tests;
 pub use snapshot::SnapshotError;
+mod find;
 #[cfg(any(test, feature = "gui"))]
 mod frame;
+pub use find::TextHit;
 mod history;
 #[cfg(any(test, feature = "gui"))]
 mod view;

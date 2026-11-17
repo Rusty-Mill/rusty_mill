@@ -138,7 +138,9 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.clear",
             "terminal.shell",
             "terminal.report-status",
-            "terminal.history"
+            "terminal.history",
+            "terminal.prompts",
+            "terminal.find"
         ]
     );
     let control = ["terminal.size", "terminal.reset", "terminal.set-theme"];
@@ -152,6 +154,9 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             (_, _, "terminal.shell") => Features::BLOCK_CALL.union(Features::TERMINAL_SHELL),
             (_, _, "terminal.report-status") => Features::BLOCK_CALL.union(Features::AGENT_STATUS),
             (_, _, "terminal.history") => Features::BLOCK_CALL.union(Features::TERMINAL_HISTORY),
+            (_, _, "terminal.prompts" | "terminal.find") => {
+                Features::BLOCK_CALL.union(Features::TERMINAL_FIND)
+            }
             (_, _, "terminal.list-dir") => Features::BLOCK_CALL.union(Features::DIR_LISTING),
             _ => Features::BLOCK_CALL,
         };
@@ -348,7 +353,8 @@ fn optional_parameters_add_their_features_only_when_given() {
             "skip",
             "trim",
             "unwrap",
-            "vt"
+            "vt",
+            "limit"
         ]
     );
     let history = method("terminal.history").expect("history");

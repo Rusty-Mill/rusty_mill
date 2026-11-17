@@ -615,6 +615,9 @@ const fn status_part(name: &'static str, doc: &'static str) -> Param {
 /// What `terminal.history` needs.
 const TERMINAL_HISTORY: Features = Features::BLOCK_CALL.union(Features::TERMINAL_HISTORY);
 
+/// What `terminal.prompts` and `terminal.find` need.
+const TERMINAL_FIND: Features = Features::BLOCK_CALL.union(Features::TERMINAL_FIND);
+
 /// An optional parameter of `terminal.history`.
 const fn history(name: &'static str, ty: Ty, doc: &'static str) -> Param {
     Param {
@@ -623,6 +626,18 @@ const fn history(name: &'static str, ty: Ty, doc: &'static str) -> Param {
         doc,
         presence: Presence::Optional {
             needs: Features::TERMINAL_HISTORY,
+        },
+    }
+}
+
+/// An optional parameter of `terminal.find`.
+const fn find_param(name: &'static str, ty: Ty, doc: &'static str) -> Param {
+    Param {
+        name,
+        ty,
+        doc,
+        presence: Presence::Optional {
+            needs: Features::TERMINAL_FIND,
         },
     }
 }
@@ -1567,6 +1582,45 @@ pub static CATALOG: &[Method] = &[
         needs: TERMINAL_HISTORY,
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.history"),
+    },
+    Method {
+        name: "terminal.prompts",
+        doc: "Read where the shell's prompts started, by its OSC 133 or 633 `A` marks, \
+              over the block's scrollback and screen, oldest first: one line per prompt \
+              as `ROW<TAB>TEXT`. `ROW` counts from the top of the screen: 0 is its first \
+              row and -1 the row above it, so a row is negative in the scrollback. `TEXT` \
+              is the row, without trailing blanks. Empty until the shell sends marks, and \
+              only history still in the scrollback is covered, not what \
+              `terminal.history` reads.",
+        params: &[BLOCK],
+        needs: TERMINAL_FIND,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.prompts"),
+    },
+    Method {
+        name: "terminal.find",
+        doc: "Find text in the block's scrollback and screen, case-insensitively, across \
+              rows the program wrapped: one line per match, oldest first, as \
+              `ROW<TAB>COL<TAB>TEXT`. `ROW` counts as for `terminal.prompts`, `COL` is the \
+              cell column the match starts at (a wide character counts twice, `TEXT` is in \
+              characters) and `TEXT` the row, without trailing blanks; a match across a wrap \
+              shows its first row. Combining marks are not matched. A query over 1024 \
+              characters is refused, and the reply stops before it passes the reply budget. \
+              Only history still in the scrollback is searched, not what `terminal.history` \
+              reads.",
+        params: &[
+            BLOCK,
+            required("query", Ty::Text, "The text to find; empty finds nothing."),
+            find_param(
+                "limit",
+                Ty::Lines,
+                "How many matches to give at most, from the oldest; 100 when absent, at \
+                 most 10000.",
+            ),
+        ],
+        needs: TERMINAL_FIND,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.find"),
     },
     Method {
         name: "close-block",

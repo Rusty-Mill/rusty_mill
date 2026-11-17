@@ -18,21 +18,31 @@
 //! its round, and each pass starts by reading every lens's record into the
 //! line its context shows. A record that can't be read is logged and shown
 //! to nobody: it is informational and never holds a run up.
+//!
+//! The #598 guards ([`Guard`]): every post is tainted with the class of the
+//! context its provider was shown, the table is saved after each round and
+//! applied to every card and line, so a tainted claim goes only to
+//! providers cleared for it. The cost breaker judges each lens's fresh
+//! cards against the window it opened; its window lives in memory and
+//! starts again with each run (PLAN S8: no breaker table). An enforced
+//! trip, and a task ceiling, ask BBP to pause the task (`bbp pause`).
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use orch_core::AgentId;
+use orch_lens::breaker::{judge, Breaker, Mark, Outcome};
 use orch_lens::call::{Ctx, Models};
 use orch_lens::card::Card;
 use orch_lens::config::Tools;
 use orch_lens::context::{prefix, Line};
-use orch_lens::meter::Meter;
+use orch_lens::meter::{Meter, Stop};
 use orch_lens::record::{Review, Tally};
 use orch_lens::round::{round, Board, Halt, View};
 use orch_lens::schedule::State;
+use orch_lens::taint::Taints;
 use orch_lens::{LensConfig, Model};
 use orch_store::Store;
 use rusty_bbp::ArtId;
@@ -148,6 +158,13 @@ pub trait Seat {
     fn brief_id(&self) -> Option<ArtId>;
     /// The current brief's text.
     fn brief(&mut self) -> Result<String, String>;
+    /// Use `taints` for every card and line built from now on. `lenses`
+    /// are the lens ids the run's state has jobs for, so a lens since
+    /// removed from the config still counts as one (D139).
+    fn taint(&mut self, taints: &Taints, lenses: &BTreeSet<String>);
+    /// The task revision this seat's view is current to: of two views of
+    /// one claim, the higher revision's is the newer.
+    fn rev(&self) -> u64;
     fn cards(&self, config: &LensConfig) -> Vec<Card>;
     fn lines(&mut self, config: &LensConfig) -> Result<Vec<Line>, String>;
     fn board(&mut self) -> &mut dyn Board;
@@ -165,6 +182,12 @@ impl<R: Rpc> Seat for Session<R> {
     }
     fn brief(&mut self) -> Result<String, String> {
         Session::brief(self)
+    }
+    fn taint(&mut self, taints: &Taints, lenses: &BTreeSet<String>) {
+        Session::taint(self, taints, lenses);
+    }
+    fn rev(&self) -> u64 {
+        Session::rev(self)
     }
     fn cards(&self, config: &LensConfig) -> Vec<Card> {
         Session::cards(self, config)
@@ -202,6 +225,65 @@ pub enum Ended {
     MaxPasses,
     /// A round halted.
     Halted(Halt),
+    /// The enforced cost breaker tripped and the task was paused.
+    Paused(String),
+}
+
+/// A pause the runner asks BBP for (`bbp pause`, #598 C-R12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pause {
+    /// `breaker`, `spend_ceiling` or `call_ceiling`.
+    pub reason: &'static str,
+    pub detail: String,
+    /// The same op replays; a new run's ops are new, so a resumed task
+    /// still over its ceiling is paused again.
+    pub op: String,
+}
+
+/// The #598 guards: the cost breaker, the pause it and the task ceilings
+/// ask for, and the taint table with where it is saved.
+pub struct Guard<'a> {
+    pub breaker: Breaker,
+    /// This run's id, which names each pause op.
+    pub run: &'a str,
+    pub pause: &'a mut dyn FnMut(&Pause) -> Result<(), String>,
+    pub taints: &'a mut Taints,
+    pub save_taints: &'a mut dyn FnMut(&Taints) -> Result<(), String>,
+}
+
+impl Pause {
+    /// The pause for `reason` in run `run` at `calls` calls.
+    fn new(run: &str, reason: &'static str, detail: String, calls: u32) -> Self {
+        let op = format!("orch-{run}-{reason}-{calls}");
+        Self { reason, detail, op }
+    }
+}
+
+impl Guard<'_> {
+    fn pause(&mut self, reason: &'static str, detail: String, calls: u32) -> Result<(), String> {
+        (self.pause)(&Pause::new(self.run, reason, detail, calls))
+            .map_err(|e| format!("task not paused ({reason}): {e}"))
+    }
+
+    /// Raise the table by a round's posts and save it when it grew.
+    fn raise(&mut self, posted: &[(rusty_bbp::MsgId, orch_lens::DataClass)]) -> Result<(), String> {
+        if posted.is_empty() {
+            return Ok(());
+        }
+        for (id, class) in posted {
+            self.taints.raise(*id, *class);
+        }
+        (self.save_taints)(self.taints).map_err(|e| format!("taint table not saved: {e}"))
+    }
+}
+
+/// The BBP pause reason for a task ceiling.
+fn ceiling_reason(stop: Stop) -> Option<&'static str> {
+    match stop {
+        Stop::TaskSpend => Some("spend_ceiling"),
+        Stop::TaskCalls => Some("call_ceiling"),
+        Stop::Experiment => None,
+    }
 }
 
 /// Where blind review jobs go and each lens's track record comes from.
@@ -250,11 +332,37 @@ impl Prefixes {
     }
 }
 
+/// The task-wide claim set the breaker marks: every seat's cards merged
+/// by claim id, the newest revision's view of each claim winning. Lenses
+/// follow different domains, so one lens's view alone would count claims
+/// new to it as progress, and a stale seat's older score as a move.
+fn task_cards(seats: &BTreeMap<String, Box<dyn Seat>>, config: &LensConfig) -> Vec<Card> {
+    let mut by_rev: Vec<&dyn Seat> = seats.values().map(|s| s.as_ref()).collect();
+    by_rev.sort_by_key(|s| s.rev());
+    let mut all: BTreeMap<_, Card> = BTreeMap::new();
+    for seat in by_rev {
+        all.extend(seat.cards(config).into_iter().map(|c| (c.id, c)));
+    }
+    all.into_values().collect()
+}
+
+/// Every lens id the run's state has a job for, kept or in flight.
+pub(super) fn lens_history(state: &State) -> BTreeSet<String> {
+    let kept = state.progress.keys().map(|(lens, _)| lens);
+    let running = state.in_flight.iter().map(|k| &k.lens);
+    kept.chain(running).cloned().collect()
+}
+
 /// Run up to `max` passes over every lens until one starts no job. A lens
 /// without a seat is an error. Each job's outcome is written to `log`.
 /// `state` goes to `keep` after every lens's round, so a restart resumes
 /// from it; a failed keep is an error. The round's review rows are saved
 /// first, so no job is kept as done without its row.
+///
+/// The cost breaker is judged before each lens's round, never inside one:
+/// a round over many claims can run past `window_calls` before the next
+/// judgement, and the run's last round is not judged after it ends. The
+/// meter's task ceilings, checked before every call, are the only hard cap.
 #[allow(clippy::too_many_arguments)]
 pub fn passes(
     lenses: Lenses<'_>,
@@ -262,6 +370,7 @@ pub fn passes(
     keep: &mut dyn FnMut(&State) -> Result<(), String>,
     records: Records<'_>,
     metering: Metering<'_>,
+    mut guard: Guard<'_>,
     models: &mut dyn Models,
     max: u32,
     log: &mut String,
@@ -272,6 +381,12 @@ pub fn passes(
         prompts,
     } = lenses;
     let mut prefixes = Prefixes::default();
+    let mut window: Option<Mark> = None;
+    // Every view filled before the breaker's first mark, so no lens's
+    // claims first appear mid-window as progress.
+    for (id, seat) in seats.iter_mut() {
+        seat.refresh(config).map_err(|e| format!("{id}: {e}"))?;
+    }
     for pass in 1..=max {
         let tracks: BTreeMap<String, String> = match (records.read)() {
             Ok(t) => t.iter().map(|(l, t)| (l.clone(), t.line())).collect(),
@@ -287,10 +402,31 @@ pub fn passes(
                 .ok_or_else(|| format!("no BBP session for lens {}", lens.id))?;
             seat.refresh(config)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
+            seat.taint(guard.taints, &lens_history(state));
             prefixes
                 .update(&lens.id, seat.as_mut(), prompts)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
             let cards = seat.cards(config);
+            let calls = metering.meter.calls(metering.task);
+            let seen = task_cards(seats, config);
+            let now = Mark::of(calls, metering.meter.task_spent(metering.task), &seen);
+            let start = window.get_or_insert_with(|| now.clone());
+            match judge(&guard.breaker, start, &now) {
+                Outcome::Open => {}
+                Outcome::Healthy => window = Some(now),
+                Outcome::WouldTrip(detail) => {
+                    let _ = writeln!(log, "pass {pass} breaker would trip: {detail}");
+                    window = Some(now);
+                }
+                Outcome::Pause(detail) => {
+                    guard.pause("breaker", detail.clone(), calls)?;
+                    let _ = writeln!(log, "pass {pass} paused: {detail}");
+                    return Ok(Ended::Paused(detail));
+                }
+            }
+            let seat = seats
+                .get_mut(&lens.id)
+                .ok_or_else(|| format!("no BBP session for lens {}", lens.id))?;
             let lines = seat
                 .lines(config)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
@@ -324,6 +460,8 @@ pub fn passes(
             for r in &report.reviews {
                 (records.save)(r).map_err(|e| format!("track record not saved: {e}"))?;
             }
+            // Taints before state too: a job kept as done has tainted its posts.
+            guard.raise(&report.taints)?;
             keep(state).map_err(|e| format!("lens state not saved: {e}"))?;
             started += report.ran.len();
             for (key, end) in &report.ran {
@@ -341,6 +479,12 @@ pub fn passes(
                 );
             }
             if let Some(h) = report.halt {
+                if let Halt::Task(stop) = &h {
+                    if let Some(reason) = ceiling_reason(*stop) {
+                        let calls = metering.meter.calls(metering.task);
+                        guard.pause(reason, stop.to_string(), calls)?;
+                    }
+                }
                 return Ok(Ended::Halted(h));
             }
         }
@@ -351,15 +495,18 @@ pub fn passes(
     Ok(Ended::MaxPasses)
 }
 
-/// The command's result: the log on a clean end (quiet, the pass cap, or a
-/// task ceiling, which pauses the task by design), an error carrying the
+/// The command's result: the log on a clean end (quiet, the pass cap, a
+/// task ceiling or an enforced breaker trip, which pause the task by
+/// design), an error carrying the
 /// log when the runner itself failed (an unsaved meter, a refused post, a
 /// lens with no prefix).
 pub fn outcome(ended: &Ended, mut log: String) -> Result<String, String> {
     let _ = writeln!(log, "ended: {ended:?}");
     match ended {
         Ended::Halted(Halt::Unsaved(_) | Halt::Board(_) | Halt::NoPrefix(_)) => Err(log),
-        Ended::Quiet | Ended::MaxPasses | Ended::Halted(Halt::Task(_)) => Ok(log),
+        Ended::Quiet | Ended::MaxPasses | Ended::Halted(Halt::Task(_)) | Ended::Paused(_) => {
+            Ok(log)
+        }
     }
 }
 
@@ -466,6 +613,24 @@ pub fn run(o: &Options) -> Result<String, String> {
             .save_lens_review(&board, r)
             .map_err(|e| e.to_string())
     };
+    let mut taints = store
+        .borrow()
+        .load_taints(&board)
+        .map_err(|e| format!("taint table: {e}"))?;
+    let mut save_taints = |t: &Taints| {
+        store
+            .borrow_mut()
+            .save_taints(&board, t)
+            .map_err(|e| e.to_string())
+    };
+    let mut pause = |p: &Pause| pause_task(&o.bbp, &o.dir, &o.task, p);
+    let guard = Guard {
+        breaker: config.breaker,
+        run: &run,
+        pause: &mut pause,
+        taints: &mut taints,
+        save_taints: &mut save_taints,
+    };
     let mut read_records = || {
         let rows = store
             .borrow()
@@ -493,6 +658,7 @@ pub fn run(o: &Options) -> Result<String, String> {
         &mut keep,
         records,
         metering,
+        guard,
         &mut registry,
         o.max_passes,
         &mut log,
@@ -506,18 +672,49 @@ pub fn run(o: &Options) -> Result<String, String> {
             config: &config,
             state: &state,
             rules: &prompts.rules,
+            taints: &taints,
         };
         let metering = Metering {
             task: &o.task,
             meter: &mut meter,
             save: &mut save,
         };
-        if let Err(e) = kit.sweep(ordinary, &store, metering, &mut registry, &mut log) {
-            let _ = writeln!(log, "alien: {e}");
-            return Err(log);
+        let stopped = match kit.sweep(ordinary, &store, metering, &mut registry, &mut log) {
+            Ok(stopped) => stopped,
+            Err(e) => {
+                let _ = writeln!(log, "alien: {e}");
+                return Err(log);
+            }
+        };
+        // A task ceiling pauses the task, as it does in `passes`.
+        let ceiling = stopped.and_then(|s| Some((s, ceiling_reason(s)?)));
+        if let Some((stop, reason)) = ceiling {
+            let p = Pause::new(&run, reason, format!("alien: {stop}"), meter.calls(&o.task));
+            if let Err(e) = pause_task(&o.bbp, &o.dir, &o.task, &p) {
+                let _ = writeln!(log, "alien: task not paused ({reason}): {e}");
+                return Err(log);
+            }
+            let _ = writeln!(log, "alien: paused: {}", p.detail);
         }
     }
     outcome(&ended, log)
+}
+
+/// `bbp pause` for `p`. BBP answers a refusal (a task no longer open) as
+/// JSON on a zero exit, which is fine: the run ends either way.
+fn pause_task(bbp: &Path, dir: &Path, task: &str, p: &Pause) -> Result<(), String> {
+    let out = std::process::Command::new(bbp)
+        .arg("pause")
+        .arg("--dir")
+        .arg(dir)
+        .args(["--task", task, "--reason", p.reason, "--op", &p.op])
+        .args(["--detail", &p.detail])
+        .output()
+        .map_err(|e| format!("cannot run {}: {e}", bbp.display()))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -600,6 +797,7 @@ mod tests {
         /// cards reopened) to the second one.
         briefs: [(Option<ArtId>, &'static str); 2],
         revise_at: Option<u32>,
+        taints: Taints,
     }
 
     impl FakeSeat {
@@ -612,6 +810,7 @@ mod tests {
                 refresh_error: None,
                 briefs: [(Some(ArtId(1)), "intent"), (Some(ArtId(9)), "intent v2")],
                 revise_at: None,
+                taints: Taints::default(),
             }
         }
     }
@@ -647,12 +846,22 @@ mod tests {
         fn brief(&mut self) -> Result<String, String> {
             Ok(self.current().1.to_owned())
         }
+        fn taint(&mut self, taints: &Taints, _: &BTreeSet<String>) {
+            self.taints = taints.clone();
+        }
+        fn rev(&self) -> u64 {
+            u64::from(self.refreshes)
+        }
         fn cards(&self, config: &LensConfig) -> Vec<Card> {
             let built = self
                 .views
                 .iter()
                 .map(|(v, b)| Card::from_view(v, b, config));
-            self.cards.iter().cloned().chain(built).collect()
+            let mut cards: Vec<Card> = self.cards.iter().cloned().chain(built).collect();
+            for c in &mut cards {
+                self.taints.apply(c);
+            }
+            cards
         }
         fn lines(&mut self, _: &LensConfig) -> Result<Vec<Line>, String> {
             Ok(vec![])
@@ -756,6 +965,31 @@ mod tests {
         task_calls: u32,
         max: u32,
     ) -> (Result<Ended, String>, String) {
+        let mut pause = |_: &Pause| Ok(());
+        let mut taints = Taints::default();
+        let mut save_taints = |_: &Taints| Ok(());
+        let guard = Guard {
+            breaker: orch_lens::breaker::Breaker::default(),
+            run: "r",
+            pause: &mut pause,
+            taints: &mut taints,
+            save_taints: &mut save_taints,
+        };
+        go_guarded(state, keep, records, seats, echo, task_calls, max, guard)
+    }
+
+    /// [`go_with`] under `guard`.
+    #[allow(clippy::too_many_arguments)]
+    fn go_guarded(
+        state: &mut State,
+        keep: &mut dyn FnMut(&State) -> Result<(), String>,
+        records: Records<'_>,
+        seats: Vec<(&str, FakeSeat)>,
+        echo: &mut Echo,
+        task_calls: u32,
+        max: u32,
+        guard: Guard<'_>,
+    ) -> (Result<Ended, String>, String) {
         let cfg = config();
         let mut boxed: BTreeMap<String, Box<dyn Seat>> = seats
             .into_iter()
@@ -784,8 +1018,234 @@ mod tests {
             prompts: &prompts,
         };
         let mut log = String::new();
-        let ended = passes(lenses, state, keep, records, metering, echo, max, &mut log);
+        let ended = passes(
+            lenses, state, keep, records, metering, guard, echo, max, &mut log,
+        );
         (ended, log)
+    }
+
+    /// What a guarded run asked for and saved.
+    #[derive(Default)]
+    struct Guarded {
+        pauses: Vec<Pause>,
+        taints: Taints,
+        saves: u32,
+    }
+
+    /// Run `seats` under `breaker`, from `taints`, recording into a
+    /// [`Guarded`].
+    fn guarded(
+        seats: Vec<(&str, FakeSeat)>,
+        echo: &mut Echo,
+        task_calls: u32,
+        max: u32,
+        breaker: orch_lens::breaker::Breaker,
+        taints: Taints,
+    ) -> (Result<Ended, String>, String, Guarded) {
+        let mut g = Guarded {
+            taints,
+            ..Guarded::default()
+        };
+        let mut pauses = Vec::new();
+        let mut saves = 0;
+        let mut pause = |p: &Pause| {
+            pauses.push(p.clone());
+            Ok(())
+        };
+        let mut save_taints = |_: &Taints| {
+            saves += 1;
+            Ok(())
+        };
+        let guard = Guard {
+            breaker,
+            run: "r",
+            pause: &mut pause,
+            taints: &mut g.taints,
+            save_taints: &mut save_taints,
+        };
+        let mut save_review = |_: &Review| Ok(());
+        let mut read_records = || Ok(BTreeMap::new());
+        let records = Records {
+            save: &mut save_review,
+            read: &mut read_records,
+        };
+        let (ended, log) = go_guarded(
+            &mut State::default(),
+            &mut |_| Ok(()),
+            records,
+            seats,
+            echo,
+            task_calls,
+            max,
+            guard,
+        );
+        g.pauses = pauses;
+        g.saves = saves;
+        (ended, log, g)
+    }
+
+    fn enforcing(window_calls: u32) -> orch_lens::breaker::Breaker {
+        orch_lens::breaker::Breaker {
+            window_calls,
+            mode: orch_lens::breaker::Mode::Enforce,
+            ..orch_lens::breaker::Breaker::default()
+        }
+    }
+
+    #[test]
+    fn an_enforced_breaker_pauses_a_task_whose_claims_do_not_move() {
+        let mut e = echo(Ok(vec![counter()]));
+        let (ended, log, g) = guarded(two_seats(), &mut e, 10, 5, enforcing(2), Taints::default());
+        let Ok(Ended::Paused(detail)) = ended else {
+            panic!("paused: {ended:?}\n{log}")
+        };
+        assert!(detail.contains("no claim settled"), "{detail}");
+        assert_eq!(g.pauses.len(), 1);
+        let p = &g.pauses[0];
+        assert_eq!(p.reason, "breaker");
+        assert_eq!(p.detail, detail);
+        assert!(p.op.starts_with("orch-r-breaker-"), "{}", p.op);
+        assert!(outcome(&Ended::Paused(detail), log).is_ok());
+    }
+
+    /// Lenses that follow different domains see different claims. The
+    /// breaker marks every seat's claims together, so one lens's claims are
+    /// not progress when the next lens's turn comes (#758 review).
+    #[test]
+    fn lenses_with_disjoint_views_share_one_breaker_mark() {
+        let scored = |id: u64| Card {
+            score: 4,
+            ..card(id)
+        };
+        let seats = vec![
+            ("adversary", FakeSeat::new(vec![scored(7)])),
+            ("operator", FakeSeat::new(vec![scored(8)])),
+        ];
+        let mut e = echo(Ok(vec![counter()]));
+        // The window closes as the second lens starts: the first lens's
+        // claim must not read as moved from zero then.
+        let (ended, log, g) = guarded(seats, &mut e, 10, 5, enforcing(1), Taints::default());
+        assert!(matches!(ended, Ok(Ended::Paused(_))), "{ended:?}\n{log}");
+        assert_eq!(g.pauses.len(), 1);
+    }
+
+    /// Of two seats' views of one claim, the newer revision's wins, so a
+    /// seat that has not refreshed yet can't put back an older score.
+    #[test]
+    fn the_breaker_takes_each_claims_newest_view() {
+        let at = |score: i64, refreshes: u32| {
+            let mut seat = FakeSeat::new(vec![Card { score, ..card(7) }]);
+            seat.refreshes = refreshes;
+            Box::new(seat) as Box<dyn Seat>
+        };
+        let cfg = config();
+        for (fresh, stale) in [("a", "c"), ("c", "a")] {
+            let seats: BTreeMap<String, Box<dyn Seat>> =
+                BTreeMap::from([(fresh.to_owned(), at(0, 2)), (stale.to_owned(), at(4, 1))]);
+            let merged = task_cards(&seats, &cfg);
+            assert_eq!(merged.len(), 1);
+            assert_eq!(merged[0].score, 0, "{fresh} is newer");
+        }
+    }
+
+    #[test]
+    fn an_observing_breaker_logs_and_the_run_goes_on() {
+        let observe = orch_lens::breaker::Breaker {
+            window_calls: 2,
+            ..orch_lens::breaker::Breaker::default()
+        };
+        let mut e = echo(Ok(vec![counter()]));
+        let (ended, log, g) = guarded(two_seats(), &mut e, 10, 5, observe, Taints::default());
+        assert!(matches!(ended, Ok(Ended::Quiet)), "{ended:?}\n{log}");
+        assert!(log.contains("breaker would trip"), "{log}");
+        assert!(g.pauses.is_empty());
+    }
+
+    #[test]
+    fn a_task_ceiling_pauses_the_task() {
+        let mut e = echo(Ok(vec![counter()]));
+        let (ended, _, g) = guarded(
+            two_seats(),
+            &mut e,
+            1,
+            5,
+            orch_lens::breaker::Breaker::default(),
+            Taints::default(),
+        );
+        assert!(matches!(
+            ended,
+            Ok(Ended::Halted(Halt::Task(Stop::TaskCalls)))
+        ));
+        assert_eq!(g.pauses.len(), 1);
+        assert_eq!(g.pauses[0].reason, "call_ceiling");
+    }
+
+    #[test]
+    fn a_failed_pause_is_an_error() {
+        let mut pause = |_: &Pause| Err("bbp gone".to_owned());
+        let mut taints = Taints::default();
+        let mut save_taints = |_: &Taints| Ok(());
+        let guard = Guard {
+            breaker: enforcing(1),
+            run: "r",
+            pause: &mut pause,
+            taints: &mut taints,
+            save_taints: &mut save_taints,
+        };
+        let mut save_review = |_: &Review| Ok(());
+        let mut read_records = || Ok(BTreeMap::new());
+        let records = Records {
+            save: &mut save_review,
+            read: &mut read_records,
+        };
+        let mut e = echo(Ok(vec![counter()]));
+        let (ended, _) = go_guarded(
+            &mut State::default(),
+            &mut |_| Ok(()),
+            records,
+            two_seats(),
+            &mut e,
+            10,
+            5,
+            guard,
+        );
+        let err = ended.expect_err("a pause that failed stops the run");
+        assert!(err.contains("bbp gone"), "{err}");
+    }
+
+    #[test]
+    fn posts_are_tainted_and_the_table_is_saved() {
+        let mut e = echo(Ok(vec![counter()]));
+        let (ended, log, g) = guarded(
+            two_seats(),
+            &mut e,
+            10,
+            5,
+            orch_lens::breaker::Breaker::default(),
+            Taints::default(),
+        );
+        assert!(matches!(ended, Ok(Ended::Quiet)), "{ended:?}\n{log}");
+        assert!(g.saves > 0);
+        assert_eq!(
+            g.taints.of(MsgId(100)),
+            Some(orch_lens::DataClass::Internal)
+        );
+    }
+
+    #[test]
+    fn a_tainted_claim_goes_to_no_provider_below_its_class() {
+        let mut e = echo(Ok(vec![counter()]));
+        let tainted = Taints::from_entries([(7, orch_lens::DataClass::Sensitive)]);
+        let (_, log, _) = guarded(
+            two_seats(),
+            &mut e,
+            10,
+            5,
+            orch_lens::breaker::Breaker::default(),
+            tainted,
+        );
+        assert_eq!(e.1, 0, "no cloud provider is asked: {log}");
+        assert!(log.contains("skipped"), "{log}");
     }
 
     #[test]
@@ -1301,10 +1761,11 @@ mod tests {
     #[test]
     fn a_revised_intent_rebuilds_the_prefix_before_the_next_call() {
         let mut echo = echo(Ok(vec![counter()]));
-        // Revised (and the claim reopened) at the second pass's refresh.
+        // Revised (and the claim reopened) at the second pass's refresh,
+        // the third: the run refreshes every seat once before pass 1.
         let seats = ["adversary", "operator"].map(|lens| {
             let mut seat = FakeSeat::new(vec![card(7)]);
-            seat.revise_at = Some(2);
+            seat.revise_at = Some(3);
             (lens, seat)
         });
         let (ended, log) = go(seats.into(), &mut echo, 10, 20);

@@ -488,6 +488,28 @@ mod meters {
     }
 
     #[test]
+    fn a_meter_is_read_without_changing_the_store() {
+        let d = dir("meter_read_only");
+        Store::open(&d).expect("make");
+        assert_eq!(Store::read_meter(&d, "dedup").expect("no table"), None);
+        let snap = snapshot();
+        Store::open(&d)
+            .and_then(|mut s| s.save_meter("dedup", &snap))
+            .expect("saved");
+        let before = super::lens_records::files(&d);
+        let read = Store::read_meter(&d, "dedup")
+            .expect("read")
+            .expect("saved");
+        assert_eq!(read.tasks, snap.tasks);
+        assert_eq!(Store::read_meter(&d, "other").expect("read"), None);
+        assert_eq!(
+            super::lens_records::files(&d),
+            before,
+            "the read changed nothing"
+        );
+    }
+
+    #[test]
     fn a_meter_survives_reopening_and_restores_held_reservations_as_spent() {
         let d = dir("meter_reopen");
         let snap = snapshot();
@@ -732,6 +754,27 @@ mod taints {
         assert_eq!(s.load_taints("T").expect("load"), t);
         assert_eq!(s.load_taints("U").expect("load"), Taints::default());
     }
+
+    #[test]
+    fn a_taint_table_is_read_without_changing_the_store() {
+        let d = dir("taint_read_only");
+        assert!(Store::read_taints(&d, "T").is_err(), "no store, no lock");
+        let t = Taints::from_entries([(3, Sensitive)]);
+        Store::open(&d)
+            .and_then(|mut s| s.save_taints("T", &t))
+            .expect("saved");
+        let before = super::lens_records::files(&d);
+        assert_eq!(Store::read_taints(&d, "T").expect("read"), t);
+        assert_eq!(
+            Store::read_taints(&d, "U").expect("read"),
+            Taints::default()
+        );
+        assert_eq!(
+            super::lens_records::files(&d),
+            before,
+            "the read changed nothing"
+        );
+    }
 }
 
 mod watch {
@@ -946,7 +989,7 @@ mod lens_records {
     }
 
     /// Every file in `d` by name, with its bytes.
-    fn files(d: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    pub(super) fn files(d: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
         std::fs::read_dir(d)
             .expect("ls")
             .map(|e| {
