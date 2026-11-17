@@ -139,6 +139,11 @@ Precise contracts used by this guide:
 | D129 | Lost designs not needed for M1; #1402 builder-session rebuild waits until after the first run | [stated] 2026-11-12 (general, M1) |
 | D130 | M1 design steps approved as one batch of runbooks and config (changes D25 for M1) | [stated] 2026-11-12 (general, M1) |
 | D131 | Deploy on BaileyAi authorised for M1 (protocol host, orch, Mill Board inbox); BaileyAi confirmed as host; #1092 released | [stated] 2026-11-13 (general, M1) |
+| D132 | #1092: Mill Board runs as its own user (`mill-board`) on BaileyAi, reaching `bbp` through a narrow sudo rule | [stated] 2026-11-16 (1092, M1) |
+| D133 | Lens, domain and skill packs load lazily; a role is defined by its lens; the project expert becomes a domain knowledge pack (direction; design is post-first-run) | [stated] 2026-11-16 (general, #723) |
+| D134 | #1124: no paid runs for now; the first smoke run is local-only and no spend ceiling is authorised | [stated] 2026-11-16 (1124, 1166) |
+| D135 | #1123: Factory gets a top-level `lenses/` and `lens.json` | [stated] 2026-11-16 (1123) |
+| D136 | #1123: the operator lens loads no knowledge file in v0; its prompt stays flat (D34) | [stated] 2026-11-16 (1123) |
 | D137 | `rusty_orch lens breaker` is a read-only report with no reset | [default] 2026-11-17 (#758) |
 | D138 | orch maps `sensitive_paths` to launcher `hide` via agents.json, and `real_data` to `bbp dry-run` | [default] 2026-11-17 (#758) |
 | D139 | A lens post with no taint entry reads as `sensitive` (unknown ids from lost posts) | [default] 2026-11-17 (#758) |
@@ -1282,6 +1287,62 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_1592b43423844f33b090418ac5b6c46d
 **Key.** lel:general:m1-baileyai-deploy-authorised
 **Source.** Nano, Millwright project thread message `cmsg_01632CBKCXsWe6RyFWvE9dovEkaSZSapKW11x6su2fCt41`, 2026-11-13T23:27:31Z, project thread `cmsg_01632CBKCXsWe6RyFWvE9dov5LxGS7LhnBwjYdXbAXf7nm`, verbatim: "1. Done 2. Yes BaileyAi". Answers Millwright L2. Confirms D53; releases D128's hold; D127, D130. Not lifted: #1092's design is approved only as D130's batch; work on Nano's machines goes as a paste-ready prompt (D94); paid model calls, schema or API changes and the other ask-first items still go to Nano; review and merge gates unchanged. Numbered D131 after D130.
+
+## D132. #1092: Mill Board runs as its own user (`mill-board`) on BaileyAi, reaching `bbp` through a narrow sudo rule
+
+**Decision.** On BaileyAi Mill Board runs as its own system user `mill-board`, not `orch-runner` and not `baileyrd`. Its state and `board.env` live in `/var/lib/mill-board` (mill-board 0700, `board.env` 0600), so `orch-runner` and the Claude harness running as it cannot read `RUSTY_TICK_TOKEN` or the board's agent tokens. `/srv/lel/bbp` and `master` stay `orch-runner` 0700/0600. The inbox reaches `bbp` through a root-owned wrapper `/usr/local/libexec/mill-board-bbp` (`exec sudo -n -u orch-runner /usr/local/libexec/mill-board-bbp-guard "$@"`) set as `MILL_BOARD_BBP_BIN`. The sudoers rule allows only that guard as `orch-runner`, never `bbp` with an argument glob: `bbp` keeps the last of a repeated flag, so a glob rule would let a second `--dir` point anywhere. The guard admits only `inbox` or `human`, requires `--dir /srv/lel/bbp` as given by `bbp_cli.rs`, refuses any further `--dir`, and execs `bbp` (script in `1092-deploy-layout.md`). The unit drops `NoNewPrivileges=true` (sudo needs setuid) and keeps `/srv/lel/bbp` in `ReadWritePaths`.
+**Why.** Nano concurred that the board should not share `orch-runner` with the harness. The sudo rule keeps the master secret owner-only and every BBP write owned by `orch-runner`, and the guard limits the board to the two inbox verbs on one directory (a later `--dir` is refused, not just shadowed). `bbp_cli.rs` runs `<bin> inbox|human --dir <root> ...`, so the wrapper and guard need no code change. Review on #1763 (2026-11-17) found the first version, a glob rule on `bbp` itself, allowed a second `--dir`.
+**Rejected.** a) `orch-runner` (Nano's first tap, superseded): the host-side Claude harness could read the board's tokens. Group-sharing `/srv/lel/bbp` with `master` 0640: `bbp` would accept it (`master::load` only reads), but it gives the board the key to every execution token, needs group-writable log files against the host's owner-only contract (`write_private`, 0700 dirs), and mixes file owners in the log directory. Keeping `baileyrd`: that is Nano's login, not a user of the board's own.
+**Tag.** [stated] (own user) · [default] (name `mill-board`, sudo mechanism) · remind-me: mem_3551f80a018b47b7ae4c7055920fffe6
+**Key.** lel:1092:board-runs-as-own-user (was lel:1092:board-runs-as-orch-runner)
+**Source.** Nano, Millwright/coordinator chat `cmsg_01Y8j3ihrYW8jedySti37M9cTgXqQZPe3wekboPb1XGTKf`, 2026-11-16T19:17:15Z, verbatim "1. Concur", answering `cmsg_01Y8j3ihrYW8jedySti37M9cRTcDaiDypSf34EAPPbLppW` ("should Mill Board run as the orch-runner user? That would let the Claude harness read the board's tokens. I'd give Mill Board its own user."). Supersedes his tap on "a) orch-runner", 2026-11-16T16:15:00Z, card `cmsg_01632CBKCXsWe6RyFWvE9dovUsbPrkpu7L7hajGhXCVDa8` in thread `cmsg_01632CBKCXsWe6RyFWvE9dovKYDoFmtvXi6TAYDxoS9Gmq` (remind-me mem_056ed8754777410b9abf716a13542a80, now superseded). The user name and mechanism are the expert's defaults, 2026-11-17. Amended in place because D132 has not merged. Design in `1092-deploy-layout.md` (PR #1744). Within D130 and D131.
+
+## D133. Packs load lazily; a role is defined by its lens; the project expert becomes a domain knowledge pack
+
+**Decision.** Nano's direction, in his words: lens packs, skill packs and the rest are lazy-loaded. A role is defined by its lens. The project expert goes away and a project domain knowledge pack replaces it. Skill packs decide which packs load for a role: its domain pack, its lens pack, and skill packs matched to its traits, such as Rust. Ai Env Manager catalogs the packs. He gave no timing, format, location or build order, so this is direction, not a build instruction.
+**Reading (the caller's and the expert's, not Nano's words).**
+1. It is the design basis for #723 (role + overlay + knowledge composition). Under D127 that design waits until after the first run, and nothing is built from this yet.
+2. #1123 (v0 flat lens prompts, `1123-lens-prompts.md`) does not change for M1. Each `lenses/<id>.md` is a flat file orch injects verbatim (ADR-0021), and it stays valid as a future "lens pack" once a catalog exists. orch needs no resolver for M1. The factory `roles/_protocol.md` § Loading context (protocol, role, overlay, then only listed knowledge) is a precedent for lazy loading, but its roles are workflow roles, not lenses. How the two relate is #723 design.
+3. "Project expert replaced by a domain pack" does not retire `let-em-loose-expert` or the CLAUDE.md experts table now. The expert stays the answerer until a domain pack exists and Nano confirms the swap (open Q47). This is the expert's reading.
+4. It extends, and does not conflict with, the 2026-11-16 morning voice decision that skill packs are lazy-loaded, with a manifest and thin loader (remind-me `mem_7634e492a3cf428b8fd9732c87deba65`, `mem_362db0e220974f16b808cf1fa20530d5`). The new part is that the lens defines the role and a domain pack replaces the expert.
+5. Touchpoint for Ai Env Manager (its design belongs to its own expert): it catalogs the packs, and its manifest generation would have to say which lens, domain and trait packs a role loads. Where the pack files live is open (Q46).
+**Why.** It keeps the board model (roles as lenses, D8-style critic lenses) as the one definition of a role, and replaces a hand-written expert agent with data that a loader can attach on demand.
+**Rejected.** Reading it as a request to change #1123 or start #723 now (D127). Reading it as retiring the expert today.
+**Tag.** [stated] for the quoted direction; items 1-5 are readings · remind-me: mem_e0d4d0e7937a4adbaeaab4a7788e5f50
+**Key.** lel:general:packs-lazy-loaded-lens-defines-role
+**Source.** Nano, Millwright project thread message `cmsg_01632CBKCXsWe6RyFWvE9dovG75zPmnNVZB8k4NUGqW9h4`, 2026-11-16T16:53:53Z, verbatim: "So Lens, etc, Skill packs should be Lazy-loaded. A role is defined by the lens. The project expert goes away and is replaced by a project domain knowledge pack. Skill packs determines which packs load: its domain pack, lens pack, plus skill packs matched to its traits, such as Rust. Ai Env Manager catalogs the packs." Relates to D127, D130, #723, #1123, D19 (Factory is source of truth). Numbered D133 after D132.
+
+## D134. #1124: no paid runs for now; the first smoke run is local-only and no spend ceiling is authorised
+
+**Decision.** Asked which spend ceiling should apply to the paid half of the smoke run (A smoke only, B smoke + 1 stage-1 run, C full M2), Nano chose "No paid runs for now". No ceiling is authorised. The options in `1124-spend-estimate.md` § 5 stay on file for when he revisits.
+**Reading (the expert's, not Nano's words).**
+1. #1124's done-condition "declined paid runs" is met.
+2. The paid half of #1166 is deferred. The first smoke run uses local models only (Qwen3.6-35B-A3B and gpt-oss-120b via llama-swap), with no Claude or Codex lens call. "Paid" here follows the card's and D38's word: a flat-rate subscription call is held back too, until Nano names a ceiling.
+3. The M2 paid experiment (#600 stage-1 runs) has no ceiling and no paid run is authorised. D38's $200 / $25 / $40 still bind Phase B only, as before; nothing carries over to M2.
+4. Config is unchanged: v0 still refuses any nonzero price (ADR-0021).
+**Why.** It is Nano's answer to a decision card. It also removes the one ask-first item (paid model calls) that stood between the smoke-run plan and a first run.
+**Rejected.** Options A, B and C of the spend card. Treating "no paid runs" as only the dollar half and still running subscription Claude and Codex lenses.
+**Tag.** [stated] · remind-me: mem_ade5caad779242259f0a7c5b11ed64d3
+**Key.** lel:1124:no-paid-runs-for-now
+**Source.** Nano, Millwright project thread `cmsg_01632CBKCXsWe6RyFWvE9dovKYDoFmtvXi6TAYDxoS9Gmq`, tap on decision card `cmsg_01632CBKCXsWe6RyFWvE9dovEdZwxaX7X8V2c9ew2bfAKe`, 2026-11-16T17:20:01Z, question "Which spend ceiling should apply to the paid half of the smoke run?". Confirmed in words 2026-11-16T19:17:15Z, Millwright/coordinator chat `cmsg_01Y8j3ihrYW8jedySti37M9cTgXqQZPe3wekboPb1XGTKf`, "1. Concur", answering `cmsg_01Y8j3ihrYW8jedySti37M9cRTcDaiDypSf34EAPPbLppW` ("should paid model runs stay off for now? I'd say yes"). Relates to D38, D130, D131, D127, `1124-spend-estimate.md`. Numbered D134 after D133.
+
+## D135. #1123: Factory gets a top-level `lenses/` and `lens.json`
+
+**Decision.** Add `lens.json` and `lenses/{architect,research,adversary,operator}.md` at the top level of `baileyrd/Factory`, matching `prompt: "lenses/<id>.md"` in `STARTER`. They do not go under `roles/`, `knowledge/`, `standards/` or `overlays/`. Factory's `README.md` layout block gets one `lenses/` line. This answer is the Approver (Nano) approval that Factory's base-change rule requires.
+**Why.** D19 names Factory as the source of truth, and `lens.json` points at `lenses/<id>.md`. The layout can be undone by a PR. `tools.check` does not scan `lenses/`, so the rusty_mill fixture test is the only check on these files.
+**Rejected.** b) keep the lens files only in rusty_mill for v0; c) put them under `overlays/` as a let-em-loose overlay draft.
+**Tag.** [stated] · remind-me: mem_ef7ef639c5ea40e5842f0ee74cc142d6
+**Key.** lel:1123:factory-top-level-lenses
+**Source.** Nano, Let Em Loose project thread "Update Let Em Loose card statuses", message `cmsg_01WgyiM31RsSnZTgNuPX2VE4QN6xVQMjn5R66V99qaAV3F`, 2026-11-16T18:54:44Z, verbatim "1. Yes 2. No", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE4G61A94yPvYnAq2kXZprtE5`; repeated 2026-11-17T02:19:18Z (`cmsg_01WgyiM31RsSnZTgNuPX2VE4QtLAqh3fwqpLiBmAuUesYN`, "1. Yes. 2. No,"). ESCALATE 1 of `1123-lens-prompts.md`, option a. Builds on D19.
+
+## D136. #1123: the operator lens loads no knowledge file in v0; its prompt stays flat (D34)
+
+**Decision.** In v0 the operator lens does not load `factory/knowledge/linux-single-host-ops-expert.md`. Its prompt stays flat, written from D34. Loading knowledge waits for composition (#723), which comes after the first run (D127).
+**Why.** orch has no prompt composition, and appending the knowledge file would be new design during the D127 freeze. D133 sets the direction for lazy-loaded packs.
+**Rejected.** b) append the knowledge file to the operator prompt now.
+**Tag.** [stated] · remind-me: mem_69d5e68802c74fe29c21ff8c15684468
+**Key.** lel:1123:operator-lens-no-knowledge-v0
+**Source.** Nano, Let Em Loose project thread "Update Let Em Loose card statuses", message `cmsg_01WgyiM31RsSnZTgNuPX2VE4QN6xVQMjn5R66V99qaAV3F`, 2026-11-16T18:54:44Z, verbatim "1. Yes 2. No", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE4G61A94yPvYnAq2kXZprtE5`; repeated 2026-11-17T02:19:18Z (`cmsg_01WgyiM31RsSnZTgNuPX2VE4QtLAqh3fwqpLiBmAuUesYN`, "1. Yes. 2. No,"). ESCALATE 2 of `1123-lens-prompts.md`, option a. Relates to D34, D127, D133.
 
 ## D137. `rusty_orch lens breaker` is a read-only report with no reset
 
