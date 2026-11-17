@@ -1,4 +1,5 @@
 use super::*;
+use crate::{floats_text, parse_floats};
 
 fn size(cols: u16, rows: u16) -> Size {
     Size::new(cols, rows).expect("non-zero size")
@@ -1946,4 +1947,201 @@ fn a_block_launched_later_by_another_owner_is_not_watched() {
     mux.own(creator, mine, InputMode::OwnerOnly).expect("own");
     assert!(mux.block(mine).is_some_and(|b| b.is_watching(guest)));
     assert_eq!(mux.attach(guest, mine), Ok(()));
+}
+
+fn float_event(mux: &Mux, window: WindowId) -> Event {
+    Event::FloatsChanged {
+        window,
+        floats: mux.window(window).unwrap().floats().to_vec(),
+    }
+}
+
+fn rect(x: u8, y: u8, w: u8, h: u8) -> FloatRect {
+    FloatRect::new(x, y, w, h).expect("a float rect")
+}
+
+#[test]
+fn a_float_must_be_big_enough_and_inside_the_window() {
+    assert!(FloatRect::new(0, 0, 100, 100).is_ok());
+    for (x, y, w, h) in [
+        (0, 0, 9, 50),
+        (0, 0, 50, 9),
+        (51, 0, 50, 50),
+        (0, 51, 50, 50),
+    ] {
+        assert_eq!(
+            FloatRect::new(x, y, w, h),
+            Err(Error::BadFloat { x, y, w, h })
+        );
+    }
+}
+
+#[test]
+fn a_float_scales_to_cells_inside_the_window() {
+    let cells = rect(50, 50, 50, 50).cells(size(81, 25));
+    assert_eq!((cells.x, cells.y), (40, 12));
+    assert_eq!((cells.size.cols(), cells.size.rows()), (40, 12));
+    let tiny = rect(90, 90, 10, 10).cells(size(3, 2));
+    assert_eq!(
+        (tiny.x + tiny.size.cols(), tiny.y + tiny.size.rows()),
+        (3, 2)
+    );
+}
+
+#[test]
+fn floating_a_tiled_block_leaves_the_layout_and_takes_focus_rules() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.zoom(b).unwrap();
+    mux.take_events();
+    mux.place_float(b, rect(10, 10, 40, 40)).unwrap();
+    let w = mux.window(window).unwrap();
+    assert_eq!(layout_of(&mux, window).unwrap().blocks(), vec![a, c]);
+    assert_eq!(w.floats().len(), 1);
+    assert_eq!(w.detached().count(), 0);
+    assert_eq!(w.zoomed(), None);
+    // The focus was on `b`: it goes to the tile left in its place.
+    assert_eq!(w.focused(), Some(c));
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            layout_event(&mux, window),
+            float_event(&mux, window),
+            focus_event(window, c)
+        ]
+    );
+}
+
+#[test]
+fn floating_an_unfocused_or_last_tile_keeps_focus_where_it_can() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.focus_block(a).unwrap();
+    mux.place_float(c, rect(10, 10, 40, 40)).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(a));
+    mux.place_float(b, rect(10, 10, 40, 40)).unwrap();
+    mux.place_float(a, rect(10, 10, 40, 40)).unwrap();
+    // No tile is left, so focus stays on the float.
+    assert_eq!(mux.window(window).unwrap().focused(), Some(a));
+    assert!(mux.window(window).unwrap().layout().is_none());
+}
+
+#[test]
+fn a_float_moves_in_place_and_stacks() {
+    let (mut mux, _, window, [a, b, _]) = three();
+    mux.detach_block(a).unwrap();
+    mux.detach_block(b).unwrap();
+    mux.place_float(a, rect(0, 0, 30, 30)).unwrap();
+    mux.place_float(b, rect(5, 5, 30, 30)).unwrap();
+    let order = |mux: &Mux| -> Vec<BlockId> {
+        mux.window(window)
+            .unwrap()
+            .floats()
+            .iter()
+            .map(|f| f.block)
+            .collect()
+    };
+    assert_eq!(order(&mux), vec![a, b]);
+    mux.take_events();
+    mux.place_float(a, rect(20, 20, 30, 30)).unwrap();
+    assert_eq!(order(&mux), vec![a, b]);
+    assert_eq!(
+        mux.window(window).unwrap().floats()[0].at,
+        rect(20, 20, 30, 30)
+    );
+    assert_eq!(mux.take_events(), vec![float_event(&mux, window)]);
+    mux.place_float(a, rect(20, 20, 30, 30)).unwrap();
+    assert_eq!(mux.take_events(), vec![]);
+    mux.stack_float(a, true).unwrap();
+    assert_eq!(order(&mux), vec![b, a]);
+    mux.stack_float(a, true).unwrap();
+    mux.stack_float(a, false).unwrap();
+    assert_eq!(order(&mux), vec![a, b]);
+    let (_, _, _, [_, _, c]) = three();
+    assert!(matches!(
+        mux.stack_float(c, true),
+        Err(Error::UnknownBlock(_))
+    ));
+}
+
+#[test]
+fn stacking_a_block_that_does_not_float_is_refused() {
+    let (mut mux, _, _, [a, ..]) = three();
+    assert_eq!(mux.stack_float(a, true), Err(Error::NotFloating(a)));
+}
+
+#[test]
+fn a_float_can_take_focus_but_not_swap_or_resize() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.place_float(c, rect(10, 10, 40, 40)).unwrap();
+    mux.focus_block(c).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(c));
+    assert_eq!(mux.swap_blocks(a, c), Err(Error::Floating(c)));
+    assert!(
+        mux.resize_split(c, Axis::Rows, Share::new(30).unwrap())
+            .is_err()
+    );
+    mux.focus_block(b).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(b));
+}
+
+#[test]
+fn unfloating_by_detach_or_move_or_close() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.place_float(c, rect(10, 10, 40, 40)).unwrap();
+    mux.place_float(b, rect(30, 30, 40, 40)).unwrap();
+    mux.detach_block(c).unwrap();
+    assert_eq!(
+        mux.window(window).unwrap().detached().collect::<Vec<_>>(),
+        vec![c]
+    );
+    mux.move_block(c, Some(a), Side::Right).unwrap();
+    assert!(layout_of(&mux, window).unwrap().contains(c));
+    mux.take_events();
+    mux.close_block(b).unwrap();
+    let w = mux.window(window).unwrap();
+    assert!(w.floats().is_empty());
+    assert!(mux.take_events().contains(&float_event(&mux, window)));
+    assert_ne!(mux.window(window).unwrap().focused(), Some(b));
+}
+
+#[test]
+fn a_window_of_floats_alone_keeps_focus_on_one() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    for (i, id) in [a, b, c].into_iter().enumerate() {
+        mux.place_float(id, rect(i as u8 * 10, 0, 30, 30)).unwrap();
+    }
+    let w = mux.window(window).unwrap();
+    assert!(w.layout().is_none());
+    assert!(w.focused().is_some());
+    mux.close_block(w.focused().unwrap()).unwrap();
+    assert!(mux.window(window).unwrap().focused().is_some());
+}
+
+#[test]
+fn floats_survive_a_save_and_restore() {
+    let (mut mux, _, window, [a, ..]) = three();
+    mux.place_float(a, rect(10, 10, 40, 40)).unwrap();
+    let restored = Mux::restore(mux.save()).expect("restores");
+    assert_eq!(
+        restored.window(window).unwrap().floats(),
+        mux.window(window).unwrap().floats()
+    );
+}
+
+#[test]
+fn floats_round_trip_through_their_text_form() {
+    let (mut mux, _, window, [a, b, _]) = three();
+    mux.place_float(a, rect(1, 2, 30, 40)).unwrap();
+    mux.place_float(b, rect(50, 50, 50, 50)).unwrap();
+    let floats = mux.window(window).unwrap().floats().to_vec();
+    let text = floats_text(&floats);
+    assert_eq!(parse_floats(&text), Ok(floats));
+    assert_eq!(parse_floats(""), Ok(vec![]));
+    for bad in [
+        "x",
+        &format!("{a}@1,2,3"),
+        &format!("{a}@0,0,5,50"),
+        &format!("{text};{text}"),
+    ] {
+        assert!(parse_floats(bad).is_err(), "{bad}");
+    }
 }

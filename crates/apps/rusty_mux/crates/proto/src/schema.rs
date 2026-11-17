@@ -28,7 +28,8 @@
 use std::fmt;
 
 use rusty_mux_core::{
-    Axis, BlockId, ClientId, EntityId, InputMode, SessionId, Share, Side, Size, Toward, WindowId,
+    Axis, BlockId, ClientId, EntityId, FloatRect, InputMode, MIN_FLOAT, SessionId, Share, Side,
+    Size, Toward, WindowId,
 };
 use rusty_uuid::Uuid;
 
@@ -513,6 +514,27 @@ impl Args<'_> {
             Value::Lines(n) => Ok(*n),
             _ => Err(self.wrong(name, Ty::Lines)),
         }
+    }
+
+    /// The `x`, `y`, `width` and `height` parameters, in percent of the
+    /// window.
+    fn float_rect(&self) -> Result<FloatRect, CallError> {
+        let part = |name: &'static str| {
+            let n = self.number(name)?;
+            u8::try_from(n).map_err(|_| CallError::Invalid {
+                param: name,
+                why: format!("{n} is not a percent from 0 to 100"),
+            })
+        };
+        let (x, y, w, h) = (part("x")?, part("y")?, part("width")?, part("height")?);
+        FloatRect::new(x, y, w, h).map_err(|e| {
+            // Name the side that does not fit.
+            let wide = w >= MIN_FLOAT && u16::from(x) + u16::from(w) <= 100;
+            CallError::Invalid {
+                param: if wide { "height" } else { "width" },
+                why: e.to_string(),
+            }
+        })
     }
 
     /// The `percent` parameter, from 1 to 99.
@@ -1108,6 +1130,68 @@ pub static CATALOG: &[Method] = &[
             Ok(Message::DetachBlock {
                 req,
                 block: a.block()?,
+            })
+        },
+    },
+    Method {
+        name: "place-float",
+        doc: "Float a block over its window, on top, or move and resize one that floats. \
+              A tiled block leaves the layout; a float is at least 10% of the window \
+              wide and tall, inside it.",
+        params: &[
+            required("block", Ty::Id(Entity::Block), "The block to float."),
+            required(
+                "x",
+                Ty::Lines,
+                "Its left edge, in percent of the window's width.",
+            ),
+            required(
+                "y",
+                Ty::Lines,
+                "Its top edge, in percent of the window's height.",
+            ),
+            required("width", Ty::Lines, "Its width, in percent of the window's."),
+            required(
+                "height",
+                Ty::Lines,
+                "Its height, in percent of the window's.",
+            ),
+        ],
+        needs: Features::FLOATS.union(Features::LAYOUT_EDIT),
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::PlaceFloat {
+                req,
+                block: a.block()?,
+                at: a.float_rect()?,
+            })
+        },
+    },
+    Method {
+        name: "stack-float",
+        doc: "Show a floating block over the other floats of its window, or under them.",
+        params: &[
+            required("block", Ty::Id(Entity::Block), "The floating block."),
+            required("to", Ty::Text, "`top` to raise it, `bottom` to lower it."),
+        ],
+        needs: Features::FLOATS.union(Features::LAYOUT_EDIT),
+        returns: Returns::Nothing,
+        build: |req, a| {
+            let to = a.text("to")?;
+            let top = match to.as_str() {
+                "top" => true,
+                "bottom" => false,
+                other => {
+                    return Err(CallError::Invalid {
+                        param: "to",
+                        why: format!("`{other}` is not top or bottom"),
+                    });
+                }
+            };
+            Ok(Message::StackFloat {
+                req,
+                block: a.block()?,
+                top,
             })
         },
     },

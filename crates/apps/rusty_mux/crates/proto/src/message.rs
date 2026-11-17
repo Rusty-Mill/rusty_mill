@@ -1,8 +1,9 @@
 //! The messages and their field layouts.
 
 use rusty_mux_core::{
-    Axis, BlockId, ClientId, EntityId, Event, ExitStatus, InputMode, Layout, Principal, Progress,
-    Selection, SessionId, Share, Side, Size, TailscaleState, Toward, Transport, WindowId,
+    Axis, BlockId, ClientId, EntityId, Event, ExitStatus, Float, FloatRect, InputMode, Layout,
+    Principal, Progress, Selection, SessionId, Share, Side, Size, TailscaleState, Toward,
+    Transport, WindowId, floats_text, parse_floats,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::{Reader, Writer};
@@ -245,6 +246,13 @@ impl Features {
     /// goes in an event.
     pub const CLIPBOARD: Self = Self(1 << 48);
 
+    /// Floating layers (C42): [`Message::PlaceFloat`] and
+    /// [`Message::StackFloat`] float a block over its window (each needs
+    /// [`Features::LAYOUT_EDIT`] too), announced by
+    /// [`Event::FloatsChanged`] (skipped for a client without it) and
+    /// listed by [`Entry::Floats`]. Bit 49 is another capability's.
+    pub const FLOATS: Self = Self(1 << 50);
+
     /// The block methods `terminal.prompts` and `terminal.find` (C55): the
     /// rows where the shell's prompts started (OSC 133/633 `A`) and the rows
     /// holding a text, over the block's scrollback and screen. They travel as
@@ -345,6 +353,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::SHARING, "live sharing"),
     (Features::DIR_LISTING, "directory listing"),
     (Features::CLIPBOARD, "clipboard reads"),
+    (Features::FLOATS, "floating layers"),
     (Features::TERMINAL_FIND, "prompts and find in scrollback"),
 ];
 
@@ -529,6 +538,13 @@ pub enum Entry {
         /// `None` while no block is placed, or from a server without
         /// [`Features::FOCUS`].
         focused: Option<BlockId>,
+    },
+    /// A window's floating blocks (C42), back to front; sent after its
+    /// [`Entry::Window`], only while it has some and to a client with
+    /// [`Features::FLOATS`].
+    Floats {
+        window: WindowId,
+        floats: Vec<Float>,
     },
     Block {
         block: BlockId,
@@ -740,6 +756,21 @@ pub enum Message {
     DetachBlock {
         req: u64,
         block: BlockId,
+    },
+    /// Floats `block` over its window on top, or moves and resizes one that
+    /// floats; a tiled block leaves the layout. Negotiated with
+    /// [`Features::FLOATS`].
+    PlaceFloat {
+        req: u64,
+        block: BlockId,
+        at: FloatRect,
+    },
+    /// Raises a floating `block` over the others, or lowers it under them.
+    /// Negotiated with [`Features::FLOATS`].
+    StackFloat {
+        req: u64,
+        block: BlockId,
+        top: bool,
     },
     /// Moves `window` to place `index`, from 0, among its session's
     /// windows. Negotiated with [`Features::LAYOUT_EDIT`].
@@ -1087,8 +1118,12 @@ const HOLD: u32 = 60;
 const EXITED: u32 = 61;
 /// A [`TailscaleState`]: 1 running, 2 needs login, 3 stopped, 4 other (C27).
 const TAILSCALE: u32 = 62;
-// IDs 1..=TAILSCALE are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = TAILSCALE as usize;
+/// Floating blocks (C42) in the text form of [`rusty_mux_core::floats_text`].
+const FLOATS: u32 = 67;
+/// A [`Message::StackFloat`]'s end: 1 top, 0 bottom.
+const TOP: u32 = 68;
+// IDs 1..=TOP are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = TOP as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -1132,6 +1167,8 @@ mod ty {
     pub const SIGNAL_BLOCK: u8 = 0x28;
     pub const RELEASE_BLOCK: u8 = 0x29;
     pub const CLIPBOARD_REPLY: u8 = 0x2a;
+    pub const PLACE_FLOAT: u8 = 0x2e;
+    pub const STACK_FLOAT: u8 = 0x2f;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -1332,6 +1369,22 @@ impl Message {
                 ty::MOVE_BLOCK
             }
             M::DetachBlock { req, block } => req_block(out, *req, *block, ty::DETACH_BLOCK),
+            M::PlaceFloat { req, block, at } => {
+                let float = Float {
+                    block: *block,
+                    at: *at,
+                };
+                out.varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .bytes(FLOATS, float.to_string().as_bytes());
+                ty::PLACE_FLOAT
+            }
+            M::StackFloat { req, block, top } => {
+                out.varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .varint(TOP, u64::from(*top));
+                ty::STACK_FLOAT
+            }
             M::MoveWindow { req, window, index } => {
                 out.varint(REQ, *req)
                     .uuid(WINDOW, window.uuid())
@@ -1670,6 +1723,24 @@ impl Message {
             ty::DETACH_BLOCK => M::DetachBlock {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
+            },
+            ty::PLACE_FLOAT => M::PlaceFloat {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                at: f
+                    .string(FLOATS)?
+                    .parse::<Float>()
+                    .map(|float| float.at)
+                    .map_err(|_| f.invalid(FLOATS))?,
+            },
+            ty::STACK_FLOAT => M::StackFloat {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                top: match f.varint(TOP)? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(f.invalid(TOP)),
+                },
             },
             ty::MOVE_WINDOW => M::MoveWindow {
                 req: f.varint(REQ)?,
@@ -2093,6 +2164,7 @@ mod kind {
     pub const GRANT_CHANGED: u64 = 33;
     pub const TAILSCALE_STATUS_CHANGED: u64 = 34;
     pub const SHARE_CHANGED: u64 = 35;
+    pub const FLOATS_CHANGED: u64 = 36;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -2316,6 +2388,11 @@ fn put_event(out: &mut Out, event: &Event) {
                 .uuid(WINDOW, window.uuid());
             put_layout(out, layout.as_ref(), zoomed);
         }
+        E::FloatsChanged { window, ref floats } => {
+            out.varint(KIND, kind::FLOATS_CHANGED)
+                .uuid(WINDOW, window.uuid())
+                .bytes(FLOATS, floats_text(floats).as_bytes());
+        }
     }
 }
 
@@ -2523,8 +2600,16 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
             layout: get_layout(f)?,
             zoomed: f.opt(ZOOMED, block)?,
         },
+        kind::FLOATS_CHANGED => E::FloatsChanged {
+            window: window(f, WINDOW)?,
+            floats: get_floats(f)?,
+        },
         _ => return Err(f.invalid(KIND)),
     })
+}
+
+fn get_floats(f: &In<'_>) -> Result<Vec<Float>, Error> {
+    parse_floats(&f.string(FLOATS)?).map_err(|_| f.invalid(FLOATS))
 }
 
 mod entry {
@@ -2532,6 +2617,7 @@ mod entry {
     pub const WINDOW: u64 = 2;
     pub const BLOCK: u64 = 3;
     pub const CLIENT: u64 = 4;
+    pub const FLOATS: u64 = 5;
 }
 
 fn put_entry(out: &mut Out, entry: &Entry) {
@@ -2569,6 +2655,11 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             if let Some(block) = focused {
                 out.uuid(FOCUSED, block.uuid());
             }
+        }
+        Entry::Floats { window, floats } => {
+            out.varint(KIND, entry::FLOATS)
+                .uuid(WINDOW, window.uuid())
+                .bytes(FLOATS, floats_text(floats).as_bytes());
         }
         Entry::Block {
             block,
@@ -2645,6 +2736,10 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             layout: f.opt(LAYOUT, |_, _| get_layout(f))?.flatten(),
             zoomed: f.opt(ZOOMED, block)?,
             focused: f.opt(FOCUSED, block)?,
+        },
+        entry::FLOATS => Entry::Floats {
+            window: window(f, WINDOW)?,
+            floats: get_floats(f)?,
         },
         entry::BLOCK => Entry::Block {
             block: block(f, BLOCK)?,

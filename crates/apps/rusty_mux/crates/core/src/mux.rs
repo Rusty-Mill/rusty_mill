@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::names;
 use crate::{
-    Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Layout,
-    MAX_DEPTH, Owner, Principal, Progress, Selection, Session, SessionId, SessionShare, Share,
-    Side, Size, TailscaleState, Toward, Transport, Window, WindowId,
+    Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Float, FloatRect,
+    InputMode, Layout, MAX_DEPTH, Owner, Principal, Progress, Selection, Session, SessionId,
+    SessionShare, Share, Side, Size, TailscaleState, Toward, Transport, Window, WindowId,
 };
 
 /// The longest name any entity may have, in UTF-8 bytes. Names travel in
@@ -165,6 +165,7 @@ impl Mux {
                 layout: None,
                 zoomed: None,
                 focused: None,
+                floats: Vec::new(),
             },
         );
         self.events.push(Event::WindowCreated {
@@ -421,6 +422,10 @@ impl Mux {
     /// on its block, or moves to the block taking its place if it left.
     pub fn swap_blocks(&mut self, block: BlockId, other: BlockId) -> Result<(), Error> {
         let window = self.same_window(block, other)?;
+        let floating = |b| self.floats_of(window).iter().any(|f| f.block == b);
+        if let Some(b) = [block, other].into_iter().find(|b| floating(*b)) {
+            return Err(Error::Floating(b));
+        }
         let Some(mut layout) = self.layout_of(window).cloned() else {
             return Ok(());
         };
@@ -465,6 +470,7 @@ impl Mux {
                 rest.split(target, block, side)
             }
         };
+        self.unfloat(window, block);
         self.set_layout(window, layout, true, None);
         Ok(())
     }
@@ -474,6 +480,10 @@ impl Mux {
     /// back in or closed. A zoom on it ends. A detached block stays so.
     pub fn detach_block(&mut self, block: BlockId) -> Result<(), Error> {
         let window = self.window_of(block)?;
+        if self.unfloat(window, block) {
+            self.refocus(window, None);
+            return Ok(());
+        }
         let Some(parent) = self.windows.get_mut(&window) else {
             return Err(Error::UnknownWindow(window));
         };
@@ -486,6 +496,73 @@ impl Mux {
             parent.zoomed = None;
         }
         self.push_layout(window, heir);
+        Ok(())
+    }
+
+    /// Floats `block` over its window (C42), on top, at `at`; one that
+    /// floats already moves and resizes in place, keeping its depth. A
+    /// tiled block leaves the layout as in [`Self::detach_block`], a zoom
+    /// on it ends, and focus on it goes to the tile left in its place if
+    /// there is one.
+    pub fn place_float(&mut self, block: BlockId, at: FloatRect) -> Result<(), Error> {
+        let window = self.window_of(block)?;
+        let Some(w) = self.windows.get_mut(&window) else {
+            return Err(Error::UnknownWindow(window));
+        };
+        if let Some(f) = w.floats.iter_mut().find(|f| f.block == block) {
+            if f.at != at {
+                f.at = at;
+                self.announce_floats(window);
+            }
+            return Ok(());
+        }
+        let tiled = w.layout.as_ref().is_some_and(|l| l.contains(block));
+        let heir = w.layout.as_ref().and_then(|l| l.sibling(block));
+        if tiled {
+            w.layout = w.layout.take().and_then(|l| l.remove(block));
+            if w.zoomed == Some(block) {
+                w.zoomed = None;
+            }
+        }
+        w.floats.push(Float { block, at });
+        // Focus on the tile that floats goes to the tile left in its place,
+        // so a client that knows no floats never differs from the server.
+        let handed = tiled
+            && w.focused == Some(block)
+            && heir.is_some_and(|h| w.layout.as_ref().is_some_and(|l| l.contains(h)));
+        if tiled {
+            self.announce_layout(window);
+        }
+        self.announce_floats(window);
+        match handed {
+            true => self.set_focus(window, heir),
+            false => self.refocus(window, heir),
+        }
+        Ok(())
+    }
+
+    /// Raises a floating block over the others, or lowers it under them.
+    pub fn stack_float(&mut self, block: BlockId, top: bool) -> Result<(), Error> {
+        let window = self.window_of(block)?;
+        let Some(w) = self.windows.get_mut(&window) else {
+            return Err(Error::UnknownWindow(window));
+        };
+        let at = w
+            .floats
+            .iter()
+            .position(|f| f.block == block)
+            .ok_or(Error::NotFloating(block))?;
+        let edge = if top { w.floats.len() - 1 } else { 0 };
+        if at == edge {
+            return Ok(());
+        }
+        let float = w.floats.remove(at);
+        if top {
+            w.floats.push(float);
+        } else {
+            w.floats.insert(0, float);
+        }
+        self.announce_floats(window);
         Ok(())
     }
 
@@ -535,6 +612,10 @@ impl Mux {
         Ok(window)
     }
 
+    fn floats_of(&self, window: WindowId) -> &[Float] {
+        self.windows.get(&window).map_or(&[], |w| &w.floats)
+    }
+
     fn layout_of(&self, window: WindowId) -> Option<&Layout> {
         self.windows.get(&window).and_then(|w| w.layout.as_ref())
     }
@@ -569,19 +650,62 @@ impl Mux {
     /// once none is placed.
     fn push_layout(&mut self, window: WindowId, heir: Option<BlockId>) {
         self.announce_layout(window);
-        let Some(w) = self.windows.get_mut(&window) else {
+        self.refocus(window, heir);
+    }
+
+    /// Keeps the window's focus on a block it shows (C42: tiled or
+    /// floating); see [`Self::push_layout`] for where it goes otherwise.
+    fn refocus(&mut self, window: WindowId, heir: Option<BlockId>) {
+        let Some(w) = self.windows.get(&window) else {
             return;
         };
-        let Some(layout) = w.layout.as_ref() else {
-            return self.set_focus(window, None);
+        let shown = |b: &BlockId| {
+            w.layout.as_ref().is_some_and(|l| l.contains(*b))
+                || w.floats.iter().any(|f| f.block == *b)
         };
-        let kept = w.focused.filter(|b| layout.contains(*b));
+        let first = w
+            .layout
+            .as_ref()
+            .and_then(|l| l.blocks().first().copied())
+            .or_else(|| w.floats.last().map(|f| f.block));
         let focus = w
             .zoomed
-            .or(kept)
-            .or(heir.filter(|b| layout.contains(*b)))
-            .or_else(|| layout.blocks().first().copied());
+            .or(w.focused.filter(shown))
+            .or(heir.filter(shown))
+            .or(first);
         self.set_focus(window, focus);
+    }
+
+    /// Whether `window` shows `block`, tiled or floating.
+    fn shows(&self, window: WindowId, block: BlockId) -> bool {
+        self.windows.get(&window).is_some_and(|w| {
+            w.layout.as_ref().is_some_and(|l| l.contains(block))
+                || w.floats.iter().any(|f| f.block == block)
+        })
+    }
+
+    fn announce_floats(&mut self, window: WindowId) {
+        if let Some(w) = self.windows.get(&window) {
+            self.events.push(Event::FloatsChanged {
+                window,
+                floats: w.floats.clone(),
+            });
+        }
+    }
+
+    /// Takes `block` out of its window's floats, announcing it; whether
+    /// it was floating.
+    fn unfloat(&mut self, window: WindowId, block: BlockId) -> bool {
+        let Some(w) = self.windows.get_mut(&window) else {
+            return false;
+        };
+        let before = w.floats.len();
+        w.floats.retain(|f| f.block != block);
+        let gone = w.floats.len() != before;
+        if gone {
+            self.announce_floats(window);
+        }
+        gone
     }
 
     fn announce_layout(&mut self, window: WindowId) {
@@ -611,7 +735,7 @@ impl Mux {
     /// detached block is refused.
     pub fn focus_block(&mut self, block: BlockId) -> Result<(), Error> {
         let window = self.window_of(block)?;
-        if !self.layout_of(window).is_some_and(|l| l.contains(block)) {
+        if !self.shows(window, block) {
             return Err(Error::Detached(block));
         }
         let unzoom = self
@@ -893,6 +1017,7 @@ impl Mux {
             .window;
         let heir = self.layout_of(window).and_then(|l| l.sibling(block));
         self.remove_block(block);
+        self.unfloat(window, block);
         if let Some(parent) = self.windows.get_mut(&window) {
             parent.blocks.retain(|&b| b != block);
             parent.layout = parent.layout.take().and_then(|l| l.remove(block));
