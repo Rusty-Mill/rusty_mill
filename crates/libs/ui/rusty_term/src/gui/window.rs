@@ -2259,6 +2259,8 @@ impl WindowState<'_> {
     /// denial, so the program is never left waiting and never handed text
     /// the user did not allow (handoff D309).
     fn answer_clipboard_read(&mut self, id: u64, primary: bool) {
+        // Apply an OSC 52 set that came before the query first.
+        self.service_clipboard(id);
         let allowed = self.config.clipboard.unwrap_or_default() == ClipboardPolicy::ReadWrite;
         let text = match (allowed, primary) {
             (false, _) => None,

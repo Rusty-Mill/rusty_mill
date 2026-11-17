@@ -40,6 +40,7 @@ use rusty_mux_client::older::Older;
 use rusty_mux_core::{
     BlockId, ClientId, Event, Layout, Selection, SessionId, Side, Size, WindowId,
 };
+use rusty_mux_proto::MAX_CLIPBOARD;
 use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Features, Launch, Message, Program, Takeover};
 use rusty_term::backend::BackendHandle;
@@ -1461,7 +1462,11 @@ impl BackendHandle for PaneWriter {
         } else {
             Selection::Clipboard
         };
-        let data = text.map(String::into_bytes);
+        // Over the limit the server refuses the answer and the program would
+        // wait; deny it instead.
+        let data = text
+            .map(String::into_bytes)
+            .filter(|d| d.len() <= MAX_CLIPBOARD);
         self.0.send(|req| Message::ClipboardReply {
             req,
             block,
