@@ -139,7 +139,7 @@ Precise contracts used by this guide:
 | D129 | Lost designs not needed for M1; #1402 builder-session rebuild waits until after the first run | [stated] 2026-11-12 (general, M1) |
 | D130 | M1 design steps approved as one batch of runbooks and config (changes D25 for M1) | [stated] 2026-11-12 (general, M1) |
 | D131 | Deploy on BaileyAi authorised for M1 (protocol host, orch, Mill Board inbox); BaileyAi confirmed as host; #1092 released | [stated] 2026-11-13 (general, M1) |
-| D132 | #1092: Mill Board runs as `orch-runner` on BaileyAi for the inbox | [stated] 2026-11-16 (1092, M1) |
+| D132 | #1092: Mill Board runs as its own user (`mill-board`) on BaileyAi, reaching `bbp` through a narrow sudo rule | [stated] 2026-11-16 (1092, M1) |
 | D133 | Lens, domain and skill packs load lazily; a role is defined by its lens; the project expert becomes a domain knowledge pack (direction; design is post-first-run) | [stated] 2026-11-16 (general, #723) |
 | D134 | #1124: no paid runs for now; the first smoke run is local-only and no spend ceiling is authorised | [stated] 2026-11-16 (1124, 1166) |
 | D135 | #1123: Factory gets a top-level `lenses/` and `lens.json` | [stated] 2026-11-16 (1123) |
@@ -1285,15 +1285,14 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:general:m1-baileyai-deploy-authorised
 **Source.** Nano, Millwright project thread message `cmsg_01632CBKCXsWe6RyFWvE9dovEkaSZSapKW11x6su2fCt41`, 2026-11-13T23:27:31Z, project thread `cmsg_01632CBKCXsWe6RyFWvE9dov5LxGS7LhnBwjYdXbAXf7nm`, verbatim: "1. Done 2. Yes BaileyAi". Answers Millwright L2. Confirms D53; releases D128's hold; D127, D130. Not lifted: #1092's design is approved only as D130's batch; work on Nano's machines goes as a paste-ready prompt (D94); paid model calls, schema or API changes and the other ask-first items still go to Nano; review and merge gates unchanged. Numbered D131 after D130.
 
-## D132. #1092: Mill Board runs as `orch-runner` on BaileyAi for the inbox
+## D132. #1092: Mill Board runs as its own user (`mill-board`) on BaileyAi, reaching `bbp` through a narrow sudo rule
 
-**Decision.** On BaileyAi the Mill Board service runs as `orch-runner` (option a of `1092-deploy-layout.md` § Decision), so `bbp human` can read `master` in `/srv/lel/bbp`. The shipped unit's `baileyrd` user is overridden for this deploy. Rejected b and c stay out of the layout.
-**Known consequence.** The Claude harness runs host-side as `orch-runner` and is not sandboxed from the board. It can read the board's environment and files, so `RUSTY_TICK_TOKEN` and the board's agent tokens are readable by it. Nothing in the design stops that. Nano chose a) with this recorded in the doc; review by baileyrd on PR #1744 is where it is checked. Sandboxed pool members do not have this exposure.
-**Why.** Fewest parts and reversible: option a needs no group-shared secret and no sudo wrapper.
-**Rejected.** b) `baileyrd` with group-shared `/srv/lel/bbp` incl. `master` 0640 (needs a check that `bbp` accepts it; widens exposure of the secret). c) `baileyrd` with a narrow `sudo -u orch-runner` wrapper (drops the unit's `NoNewPrivileges=true`).
-**Tag.** [stated] · remind-me: mem_056ed8754777410b9abf716a13542a80
-**Key.** lel:1092:board-runs-as-orch-runner
-**Source.** Nano, tapped "a) orch-runner" on a decision card, 2026-11-16T16:15:00Z, Millwright project thread `cmsg_01632CBKCXsWe6RyFWvE9dovKYDoFmtvXi6TAYDxoS9Gmq`, card `cmsg_01632CBKCXsWe6RyFWvE9dovUsbPrkpu7L7hajGhXCVDa8`, question "Which user should run Mill Board on BaileyAi for the inbox?". Design in `1092-deploy-layout.md` (PR #1744). Within D130 (design batch) and D131 (deploy authorised). Numbered D132 after D130 on this branch; D131 is on `main` and not yet merged here.
+**Decision.** On BaileyAi Mill Board runs as its own system user `mill-board`, not `orch-runner` and not `baileyrd`. Its state and `board.env` live in `/var/lib/mill-board` (mill-board 0700, `board.env` 0600), so `orch-runner` and the Claude harness running as it cannot read `RUSTY_TICK_TOKEN` or the board's agent tokens. `/srv/lel/bbp` and `master` stay `orch-runner` 0700/0600. The inbox reaches `bbp` through a root-owned wrapper `/usr/local/libexec/mill-board-bbp` (`exec sudo -n -u orch-runner /opt/lel/current/bin/bbp "$@"`) set as `MILL_BOARD_BBP_BIN`, and a sudoers rule that allows only `bbp inbox --dir /srv/lel/bbp *` and `bbp human --dir /srv/lel/bbp *` as `orch-runner`. The unit drops `NoNewPrivileges=true` (sudo needs setuid) and keeps `/srv/lel/bbp` in `ReadWritePaths`.
+**Why.** Nano concurred that the board should not share `orch-runner` with the harness. The sudo rule keeps the master secret owner-only and every BBP write owned by `orch-runner`, and the board can do only the two inbox verbs on one directory. `bbp_cli.rs` runs `<bin> inbox|human --dir <root> ...`, so a wrapper needs no code change.
+**Rejected.** a) `orch-runner` (Nano's first tap, superseded): the host-side Claude harness could read the board's tokens. Group-sharing `/srv/lel/bbp` with `master` 0640: `bbp` would accept it (`master::load` only reads), but it gives the board the key to every execution token, needs group-writable log files against the host's owner-only contract (`write_private`, 0700 dirs), and mixes file owners in the log directory. Keeping `baileyrd`: that is Nano's login, not a user of the board's own.
+**Tag.** [stated] (own user) · [default] (name `mill-board`, sudo mechanism) · remind-me: mem_3551f80a018b47b7ae4c7055920fffe6
+**Key.** lel:1092:board-runs-as-own-user (was lel:1092:board-runs-as-orch-runner)
+**Source.** Nano, Millwright/coordinator chat `cmsg_01Y8j3ihrYW8jedySti37M9cTgXqQZPe3wekboPb1XGTKf`, 2026-11-16T19:17:15Z, verbatim "1. Concur", answering `cmsg_01Y8j3ihrYW8jedySti37M9cRTcDaiDypSf34EAPPbLppW` ("should Mill Board run as the orch-runner user? That would let the Claude harness read the board's tokens. I'd give Mill Board its own user."). Supersedes his tap on "a) orch-runner", 2026-11-16T16:15:00Z, card `cmsg_01632CBKCXsWe6RyFWvE9dovUsbPrkpu7L7hajGhXCVDa8` in thread `cmsg_01632CBKCXsWe6RyFWvE9dovKYDoFmtvXi6TAYDxoS9Gmq` (remind-me mem_056ed8754777410b9abf716a13542a80, now superseded). The user name and mechanism are the expert's defaults, 2026-11-17. Amended in place because D132 has not merged. Design in `1092-deploy-layout.md` (PR #1744). Within D130 and D131.
 
 ## D133. Packs load lazily; a role is defined by its lens; the project expert becomes a domain knowledge pack
 
@@ -1322,7 +1321,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Rejected.** Options A, B and C of the spend card. Treating "no paid runs" as only the dollar half and still running subscription Claude and Codex lenses.
 **Tag.** [stated] · remind-me: mem_ade5caad779242259f0a7c5b11ed64d3
 **Key.** lel:1124:no-paid-runs-for-now
-**Source.** Nano, Millwright project thread `cmsg_01632CBKCXsWe6RyFWvE9dovKYDoFmtvXi6TAYDxoS9Gmq`, tap on decision card `cmsg_01632CBKCXsWe6RyFWvE9dovEdZwxaX7X8V2c9ew2bfAKe`, 2026-11-16T17:20:01Z, question "Which spend ceiling should apply to the paid half of the smoke run?". Relates to D38, D130, D131, D127, `1124-spend-estimate.md`. Numbered D134 after D133.
+**Source.** Nano, Millwright project thread `cmsg_01632CBKCXsWe6RyFWvE9dovKYDoFmtvXi6TAYDxoS9Gmq`, tap on decision card `cmsg_01632CBKCXsWe6RyFWvE9dovEdZwxaX7X8V2c9ew2bfAKe`, 2026-11-16T17:20:01Z, question "Which spend ceiling should apply to the paid half of the smoke run?". Confirmed in words 2026-11-16T19:17:15Z, Millwright/coordinator chat `cmsg_01Y8j3ihrYW8jedySti37M9cTgXqQZPe3wekboPb1XGTKf`, "1. Concur", answering `cmsg_01Y8j3ihrYW8jedySti37M9cRTcDaiDypSf34EAPPbLppW` ("should paid model runs stay off for now? I'd say yes"). Relates to D38, D130, D131, D127, `1124-spend-estimate.md`. Numbered D134 after D133.
 
 ## D135. #1123: Factory gets a top-level `lenses/` and `lens.json`
 

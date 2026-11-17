@@ -11,7 +11,7 @@ Install to `/opt/lel/<git-sha>/bin/`, symlink `/opt/lel/current -> <git-sha>`. P
 - `orch-runner`: runs `rusty_orch`, `bbp mod`, harnesses; owns BBP dir, orch state, rootless podman `lel-codex`.
 - `baileyrd`: Nano's login; reads logs and the UI.
 - Mux: M1 deploys none. #600 builder sessions come after the first run (D129). When it lands it runs as `orch-runner` (mux-hosted-agents-design.md section 7), not `baileyrd` as the card says; the design wins.
-- Mill Board user: `orch-runner` (D132), see "Decision".
+- `mill-board`: system user (no login) for the Mill Board service (D132); owns `/var/lib/mill-board` 0700 (`board.env` 0600). Not in the `orch-runner` group. See "Decision".
 
 ## Directories (outside any source checkout and workload read roots)
 | Path | Owner / mode | Notes |
@@ -23,9 +23,13 @@ Install to `/opt/lel/<git-sha>/bin/`, symlink `/opt/lel/current -> <git-sha>`. P
 | `/srv/lel/{profiles,bbp,lens}.json` | orch-runner 0640 | profile set frozen at `bbp open` |
 | `/etc/let-em-loose/assertions.json` | root:orch-runner 0640 | read by `lens check`; only Nano writes it (`no_overage`, `host_cleared`, 30-day expiry) |
 | `~baileyrd/lel/machine-id` | existing, 444 | R5; ro bind-mount at `/etc/machine-id` in `lel-codex`; keep on recreate |
+| `/var/lib/mill-board` | mill-board 0700 | board state and `board.env` 0600; replaces `~baileyrd/.mill-board` |
+| `/usr/local/libexec/mill-board-bbp` | root 0755 | `exec sudo -n -u orch-runner /opt/lel/current/bin/bbp "$@"` |
+
+`/etc/sudoers.d/mill-board` (root 0440): `mill-board ALL=(orch-runner) NOPASSWD: /opt/lel/current/bin/bbp inbox --dir /srv/lel/bbp *, /opt/lel/current/bin/bbp human --dir /srv/lel/bbp *`
 
 ## systemd
-- `mill-board.service`: the shipped `crates/apps/rusty_mill_board/deploy/mill-board.service` plus a drop-in setting `MILL_BOARD_BBP_BIN=/opt/lel/current/bin/bbp`, `MILL_BOARD_BBP_ROOT=/srv/lel/bbp`, and `/srv/lel/bbp` in `ReadWritePaths` (`bbp human` writes the log). rusty_tick must already be up.
+- `mill-board.service`: the shipped unit plus a drop-in: `User=mill-board`, `EnvironmentFile=/var/lib/mill-board/board.env`, `ReadWritePaths=/var/lib/mill-board /srv/lel/bbp` (the `bbp human` child writes the log), `NoNewPrivileges=false` (sudo), `MILL_BOARD_BBP_BIN=/usr/local/libexec/mill-board-bbp`, `MILL_BOARD_BBP_ROOT=/srv/lel/bbp`. rusty_tick must already be up.
 - No `lel-orch.service`: `rusty_orch run` runs to completion, it is not a daemon. M1 starts runs by hand as orch-runner. A unit would be new design (D127).
 
 ## Network (plain HTTP, loopback)
@@ -38,17 +42,15 @@ Install to `/opt/lel/<git-sha>/bin/`, symlink `/opt/lel/current -> <git-sha>`. P
 ## Upgrades
 Drain, then flip: (1) no open tasks (`bbp inbox`; `rusty_orch run --cancel <reason>` for leftovers); (2) build to `/opt/lel/<new-sha>`; (3) `ln -sfn`; (4) `systemctl restart mill-board`; (5) run verification; (6) roll back by repointing `current`. Never flip mid-task (running tasks launch `bbp mcp` by name).
 
-## Verification (as orch-runner; no paid calls)
+## Verification (as orch-runner unless stated; no paid calls)
 1. `curl -fsS http://127.0.0.1:8787/health` returns `{"ok":true}`.
 2. `rusty_orch lens check /srv/lel/lens.json --assertions /etc/let-em-loose/assertions.json --repo <repo>` exits 0. An unavailable provider is a finding, not a deploy failure.
 3. `bbp open` a toy claims task on a throwaway repo (pattern: `crates/apps/rusty_bbp_host/docs/proving-run.md`, `BBP_DIR=/srv/lel/bbp`); `bbp card` and `bbp why` print JSON.
 4. Link the task from a card; `inbox_list` shows its escalations (cross-check `bbp inbox --dir /srv/lel/bbp --task <T>`); `inbox_act` on a toy escalation proves the board can write the log.
+5. As mill-board, under the unit (`systemd-run -p User=mill-board ...` with the drop-in's settings): `/usr/local/libexec/mill-board-bbp inbox --dir /srv/lel/bbp --task <t> --json yes` succeeds, and `sudo -n -u orch-runner /bin/cat /srv/lel/bbp/master` is refused. If sudo fails because `ProtectSystem=strict` leaves `/run/sudo` read-only, add `/run/sudo` to `ReadWritePaths`.
 
-## Decision: which user runs Mill Board? (Nano chose a, 2026-11-16, D132)
-The inbox runs `bbp human`, which writes the BBP log and needs `master` (owner-only for orch-runner). The shipped unit runs as `baileyrd` and cannot.
-- a) **CHOSEN (D132).** Run the board as `orch-runner` (recommended): fewest parts, reversible; board tokens (`RUSTY_TICK_TOKEN`, its agent tokens) become readable by anything running as `orch-runner`. Sandboxed pool members avoid that, but the Claude harness runs host-side as `orch-runner` and is not sandboxed from them. Nothing in this design keeps it away from the board's environment and files; pick a) only if that is acceptable, or prefer c).
-- b) Keep `baileyrd`, group-share `/srv/lel/bbp` incl. `master` 0640: needs a check that `bbp` accepts it; widens exposure of the secret.
-- c) Keep `baileyrd`, narrow `sudo -u orch-runner` fixed to `--dir /srv/lel/bbp`: drops the unit's `NoNewPrivileges=true`.
+## Decision: which user runs Mill Board? (D132, Nano 2026-11-16T19:17Z)
+The inbox runs `bbp inbox` and `bbp human`, which need `master` (owner-only, `orch-runner`). Mill Board runs as its own user `mill-board`, not `orch-runner`, so the host-side Claude harness cannot read the board's tokens. It calls `bbp` as `orch-runner` through the wrapper and a sudoers rule limited to those two verbs on `/srv/lel/bbp`. The cost is the unit's `NoNewPrivileges=true`. Rejected: running as `orch-runner` (Nano's first choice, reversed); group-sharing `/srv/lel/bbp` with `master` 0640 (hands the board the master secret and needs group-writable log files).
 
 ## Drift found
 - Card says mux runs as `baileyrd`; design says `orch-runner`.
