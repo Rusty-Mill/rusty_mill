@@ -59,18 +59,20 @@ pub struct Agent {
     /// `seen_ms` as last written to the file (not itself stored).
     #[serde(skip)]
     saved_ms: i64,
-    /// Loaded from the file and not used since: its last use may be up to [`SEEN_WRITE_MS`] later
-    /// than `seen_ms`, so stale selection adds that margin (not stored).
+    /// When the registry was loaded from the file, if the agent has not been used since (not
+    /// stored). The file can lag its real last use (hourly write-back, or failed writes), so
+    /// stale selection never counts such an agent as last used before the load.
     #[serde(skip)]
-    from_disk: bool,
+    loaded_ms: Option<i64>,
 }
 
 impl Agent {
-    /// The latest its last use can have been: `seen_ms` (or creation), plus the write-back lag
-    /// for an agent loaded from the file, so a lagging file never makes a used agent look stale.
+    /// The latest its last use can have been. Exact for an agent used since the load; for one
+    /// loaded and not used since, the load time, because the file may not have recorded uses
+    /// before the restart (so a used agent never looks stale because of a lagging file).
     fn last_use_upper_bound(&self) -> i64 {
-        let lag = if self.from_disk { SEEN_WRITE_MS } else { 0 };
-        self.seen_ms.max(self.created_ms) + lag
+        let known = self.seen_ms.max(self.created_ms);
+        self.loaded_ms.map_or(known, |at| known.max(at))
     }
 }
 
@@ -103,11 +105,11 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Open the registry kept in `path` (empty if the file is missing).
+    /// Open the registry kept in `path` (empty if the file is missing); `now` is the load time.
     ///
     /// # Errors
     /// If the file exists but cannot be read or parsed.
-    pub fn open(path: PathBuf) -> Result<Self, String> {
+    pub fn open(path: PathBuf, now: i64) -> Result<Self, String> {
         let agents = match std::fs::read_to_string(&path) {
             Ok(text) => {
                 serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?
@@ -118,7 +120,7 @@ impl Registry {
         let mut agents: BTreeMap<String, Agent> = agents;
         for a in agents.values_mut() {
             a.saved_ms = a.seen_ms;
-            a.from_disk = true;
+            a.loaded_ms = Some(now);
         }
         Ok(Self {
             agents,
@@ -158,7 +160,7 @@ impl Registry {
             grant,
             nickname: None,
             saved_ms: now,
-            from_disk: false,
+            loaded_ms: None,
         };
         if self.agents.insert(id.clone(), agent).is_some() {
             return Err("agent id collided; try again".into());
@@ -178,7 +180,7 @@ impl Registry {
         }
         let stale = now - agent.saved_ms > SEEN_WRITE_MS;
         agent.seen_ms = now;
-        agent.from_disk = false;
+        agent.loaded_ms = None;
         let grant = agent.grant.clone();
         if stale {
             match self.save() {
@@ -386,12 +388,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("agents.json");
-        let mut r = Registry::open(path.clone()).expect("open");
+        let mut r = Registry::open(path.clone(), 0).expect("open");
         let (a, ka) = r.register("c", Grant::default(), 0).expect("a");
         let (b, kb) = r.register("c", Grant::default(), 0).expect("b");
         assert!(r.revoke(&a).expect("revoke"));
         assert!(!r.revoke(&a).expect("again"));
-        let mut again = Registry::open(path).expect("reopen");
+        let mut again = Registry::open(path, 0).expect("reopen");
         assert!(again.verify("c", &a, &ka, 1).is_none());
         assert!(again.verify("c", &b, &kb, 1).is_some());
         std::fs::remove_dir_all(dir).ok();
@@ -448,12 +450,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("agents.json");
-        let mut r = Registry::open(path.clone()).expect("open");
+        let mut r = Registry::open(path.clone(), 0).expect("open");
         let (id, key) = r.register("c", Grant::default(), 0).expect("register");
         for h in 1..=72 {
             assert!(r.verify("c", &id, &key, h * H).is_some());
         }
-        let again = Registry::open(path).expect("reopen");
+        let again = Registry::open(path, 0).expect("reopen");
         assert!(
             again.stale(72 * H + 1, 24 * H).is_empty(),
             "used hourly for 3 days"
@@ -467,24 +469,46 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("agents.json");
-        let mut r = Registry::open(path.clone()).expect("open");
+        let mut r = Registry::open(path.clone(), 0).expect("open");
         let (id, key) = r.register("c", Grant::default(), 0).expect("register");
         // Used at exactly one hour: not written back (the lag is strict), so the file says 0.
         assert!(r.verify("c", &id, &key, H).is_some());
-        let mut again = Registry::open(path).expect("reopen");
+        let mut again = Registry::open(path, H + 1).expect("restart");
         assert!(
-            again.stale(2 * H + 1, 2 * H).is_empty(),
-            "idle for 1h+1ms, not over 2h"
+            again.stale(3 * H, 2 * H).is_empty(),
+            "not over 2h since the restart"
         );
         assert_eq!(
-            again.stale(3 * H + 1, 2 * H),
+            again.stale(3 * H + 2, 2 * H),
             vec![id.clone()],
             "idle over 2h"
         );
         assert!(again.verify("c", &id, &key, 3 * H).is_some());
         assert!(
-            again.stale(3 * H + 1, 2 * H).is_empty(),
+            again.stale(3 * H + 2, 2 * H).is_empty(),
             "exact again once used"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_failed_use_save_never_makes_a_used_agent_look_stale_after_a_restart() {
+        const H: i64 = 3600 * 1000;
+        let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("agents.json");
+        let mut r = Registry::open(path.clone(), 0).expect("open");
+        let (id, key) = r.register("c", Grant::default(), 0).expect("register");
+        // Writes fail while the agent is used at 5h; the file keeps saying 0.
+        r.path = Some(dir.join("gone").join("agents.json"));
+        assert!(r.verify("c", &id, &key, 5 * H).is_some());
+        let again = Registry::open(path, 6 * H).expect("restart");
+        assert!(again.stale(6 * H + 1, 2 * H).is_empty(), "used at 5h");
+        assert!(again.stale(8 * H, 2 * H).is_empty());
+        assert_eq!(
+            again.stale(8 * H + 1, 2 * H),
+            vec![id],
+            "idle over 2h since the restart"
         );
         std::fs::remove_dir_all(dir).ok();
     }
@@ -493,7 +517,7 @@ mod tests {
     fn a_failed_write_still_revokes_in_memory_and_says_to_retry() {
         let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
         std::fs::create_dir_all(&dir).expect("dir");
-        let mut r = Registry::open(dir.join("agents.json")).expect("open");
+        let mut r = Registry::open(dir.join("agents.json"), 0).expect("open");
         let (id, key) = r.register("c", Grant::default(), 0).expect("register");
         std::fs::remove_dir_all(&dir).expect("remove dir");
         let e = r.revoke_stale(10, 5, None).expect_err("write fails");
@@ -504,7 +528,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("restore dir");
         assert!(r.revoke_stale(12, 5, None).expect("retry").is_empty());
         assert!(!r.has_unsaved_revoke());
-        let mut again = Registry::open(dir.join("agents.json")).expect("reopen");
+        let mut again = Registry::open(dir.join("agents.json"), 0).expect("reopen");
         assert!(
             again.verify("c", &id, &key, 13).is_none(),
             "gone from the file"
@@ -517,7 +541,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("agents.json");
-        let mut r = Registry::open(path.clone()).expect("open");
+        let mut r = Registry::open(path.clone(), 0).expect("open");
         let qa = Grant {
             role: Some("qa".into()),
             projects: Some(vec!["rusty_term".into()]),
@@ -530,7 +554,7 @@ mod tests {
         };
         assert!(r.set_grant(&id, reviewer.clone()).expect("set"));
         assert!(!r.set_grant("c#nope00", reviewer.clone()).expect("unknown"));
-        let mut again = Registry::open(path).expect("reopen");
+        let mut again = Registry::open(path, 0).expect("reopen");
         assert_eq!(again.verify("c", &id, &key, 2), Some(reviewer));
         assert!(again.set_grant(&id, Grant::default()).expect("clear"));
         assert_eq!(again.verify("c", &id, &key, 3), Some(Grant::default()));
