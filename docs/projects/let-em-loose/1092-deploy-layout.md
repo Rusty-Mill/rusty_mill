@@ -50,7 +50,20 @@ exec /opt/lel/current/bin/bbp "$verb" --dir /srv/lel/bbp "$@"
 It accepts exactly the argv `bbp_cli.rs` builds (`inbox|human --dir <root> ...`), so the board needs no code change. The guarantee: as `orch-runner`, `mill-board` can run only `bbp inbox` and `bbp human`, only on `/srv/lel/bbp`.
 
 ## systemd
-- `mill-board.service`: the shipped unit plus a drop-in: `User=mill-board`, `EnvironmentFile=/var/lib/mill-board/board.env`, `ReadWritePaths=/var/lib/mill-board /srv/lel/bbp` (the `bbp human` child writes the log), `NoNewPrivileges=false` (sudo), `MILL_BOARD_BBP_BIN=/usr/local/libexec/mill-board-bbp`, `MILL_BOARD_BBP_ROOT=/srv/lel/bbp`. rusty_tick must already be up.
+- `mill-board.service`: the shipped unit plus the drop-in `/etc/systemd/system/mill-board.service.d/lel.conf` below. `EnvironmentFile=`, `ReadWritePaths=` and `ExecStart=` add to the shipped values, so each is cleared with an empty line first; otherwise the unit would still need `~baileyrd/.mill-board/board.env` and would keep running `/usr/local/bin/rusty_mill_board` after an upgrade flips `/opt/lel/current`. rusty_tick must already be up.
+  ```ini
+  [Service]
+  User=mill-board
+  EnvironmentFile=
+  EnvironmentFile=/var/lib/mill-board/board.env
+  ExecStart=
+  ExecStart=/opt/lel/current/bin/rusty_mill_board
+  ReadWritePaths=
+  ReadWritePaths=/var/lib/mill-board /srv/lel/bbp
+  NoNewPrivileges=false
+  Environment=MILL_BOARD_BBP_BIN=/usr/local/libexec/mill-board-bbp MILL_BOARD_BBP_ROOT=/srv/lel/bbp
+  ```
+  `ReadWritePaths` keeps `/srv/lel/bbp` because the `bbp human` child writes the log; `NoNewPrivileges=false` because sudo needs setuid.
 - No `lel-orch.service`: `rusty_orch run` runs to completion, it is not a daemon. M1 starts runs by hand as orch-runner. A unit would be new design (D127).
 
 ## Network (plain HTTP, loopback)
