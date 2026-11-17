@@ -84,6 +84,9 @@ pub struct AgentInfo {
 pub struct Registry {
     agents: BTreeMap<String, Agent>,
     path: Option<PathBuf>,
+    /// A revocation reached memory but not the file: the next [`revoke_stale`](Self::revoke_stale)
+    /// writes it even with nothing new to revoke.
+    unsaved_revoke: bool,
 }
 
 impl Registry {
@@ -106,6 +109,7 @@ impl Registry {
         Ok(Self {
             agents,
             path: Some(path),
+            unsaved_revoke: false,
         })
     }
 
@@ -244,14 +248,16 @@ impl Registry {
         if let Some(only) = only {
             ids.retain(|id| only.contains(id));
         }
-        if ids.is_empty() {
+        if ids.is_empty() && !self.unsaved_revoke {
             return Ok(ids);
         }
         for id in &ids {
             self.agents.remove(id);
         }
+        self.unsaved_revoke = true;
         self.save()
-            .map_err(|e| format!("{e} (revoked in memory; retry to make it durable)"))?;
+            .map_err(|e| format!("{e} (revoked in memory; run it again to make it durable)"))?;
+        self.unsaved_revoke = false;
         self.mark_saved();
         Ok(ids)
     }
@@ -442,8 +448,17 @@ mod tests {
         let (id, key) = r.register("c", Grant::default(), 0).expect("register");
         std::fs::remove_dir_all(&dir).expect("remove dir");
         let e = r.revoke_stale(10, 5, None).expect_err("write fails");
-        assert!(e.contains("retry"), "{e}");
+        assert!(e.contains("run it again"), "{e}");
         assert!(r.verify("c", &id, &key, 11).is_none(), "fails closed");
+        // Writable again: a retry with nothing new to revoke still makes it durable.
+        std::fs::create_dir_all(&dir).expect("restore dir");
+        assert!(r.revoke_stale(12, 5, None).expect("retry").is_empty());
+        let mut again = Registry::open(dir.join("agents.json")).expect("reopen");
+        assert!(
+            again.verify("c", &id, &key, 13).is_none(),
+            "gone from the file"
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
