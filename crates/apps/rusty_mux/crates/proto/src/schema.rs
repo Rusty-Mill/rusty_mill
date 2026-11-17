@@ -1296,6 +1296,34 @@ pub static CATALOG: &[Method] = &[
         build: |req, a| block_call(req, a, "terminal.size"),
     },
     Method {
+        name: "terminal.list-dir",
+        doc: "List a directory on the server's host for a directory browse, as text: the \
+              directory's resolved path on the first line, then one entry per line as \
+              `KIND<TAB>NAME`, `KIND` being `d` for a directory (or a link to one), `f` a \
+              file, `l` any other link, `o` anything else; directories first, then by name, \
+              and every name written as `terminal.process` writes a field. At most 1000 \
+              entries are listed. Then, each only when it applies: `+<TAB>N`, exactly N \
+              entries were left out; `><TAB>N`, the directory is too large to read whole, so \
+              at least N were left out; `!<TAB>N`, N entries could not be read. Read off \
+              the server's main thread and refused after 5 seconds. Refused to a \
+              watch-only client.",
+        params: &[
+            BLOCK,
+            Param {
+                name: "path",
+                ty: Ty::Text,
+                doc: "The directory, absolute or relative to the program's working directory; \
+                      by default the working directory itself.",
+                presence: Presence::Optional {
+                    needs: Features::DIR_LISTING,
+                },
+            },
+        ],
+        needs: Features::BLOCK_CALL.union(Features::DIR_LISTING),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.list-dir"),
+    },
+    Method {
         name: "terminal.reset",
         doc: "Reset the terminal as its program sending RIS would, ending any sequence it \
               left unfinished: the screen and its scrollback are cleared, and modes, \
