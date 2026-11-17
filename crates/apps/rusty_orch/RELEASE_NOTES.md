@@ -12,6 +12,8 @@ One entry per merged PR against `main`, newest first. No version tags yet.
   A task ceiling also pauses the task now.
 - What a lens posts is marked with the most sensitive data it could have
   seen, and those claims go only to models cleared for that data.
+- New `rusty_orch lens breaker`: a read-only report on a task's breaker
+  settings, calls and spend, taint counts, and whether it is paused.
 
 ## Half-limit erosion cleanups
 **2026-11-06**
