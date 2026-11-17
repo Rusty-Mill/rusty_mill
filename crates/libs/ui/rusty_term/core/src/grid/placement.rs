@@ -122,6 +122,26 @@ impl Grid {
         }
     }
 
+    /// Drop placements whose rows overlap screen rows `top..=bottom`, for a
+    /// scroll that moves cells without advancing the scroll count (a scroll
+    /// region, the alternate screen, insert/delete lines). Their footprint
+    /// can no longer be tracked, so they go rather than go stale.
+    pub(super) fn drop_placements_over(&mut self, top: usize, bottom: usize) {
+        if self.placements.is_empty() {
+            return;
+        }
+        let base = self.total_scrolled as isize;
+        let before = self.placements.len();
+        self.placements.retain(|p| {
+            let first = p.serial as isize - base;
+            let last = first + p.rows as isize - 1;
+            last < top as isize || first > bottom as isize
+        });
+        if self.placements.len() != before {
+            self.touch_images();
+        }
+    }
+
     /// The optional trailing checkpoint section: written only when there are
     /// placements, so a checkpoint without any is byte-identical to one from
     /// before placements existed and still decodes. Rows are written relative
@@ -309,5 +329,65 @@ mod tests {
         let mut bad = Grid::new(20, 5);
         bad.placements = g.placements().to_vec();
         assert!(bad.validate_placements().is_err());
+    }
+
+    #[test]
+    fn placements_leave_when_history_is_removed_or_cells_move_untracked() {
+        // History removed under a placement that already scrolled into it.
+        let (mut g, mut p) = fed(20, 5, PLACE);
+        p.advance(&mut g, b"\r\n\r\n\r\n\r\n\r\n\r\n\r\n");
+        assert_eq!(g.placements().len(), 1);
+        g.set_scrollback_max(0);
+        assert!(g.placements().is_empty(), "history trimmed away");
+        let (mut g, mut p) = fed(20, 5, PLACE);
+        p.advance(&mut g, b"\r\n\r\n\r\n\r\n\r\n\r\n\r\n");
+        p.advance(&mut g, b"\x1b[3J");
+        assert!(g.placements().is_empty(), "ED 3");
+        // A scroll region moves cells without history: the placement goes.
+        let (mut g, mut p) = fed(20, 8, b"\x1b[1;4r");
+        p.advance(&mut g, PLACE);
+        assert_eq!(g.placements().len(), 1);
+        p.advance(&mut g, b"\x1b[4;1H\n");
+        assert!(g.placements().is_empty(), "DECSTBM scroll");
+        // Insert line under it.
+        let (mut g, mut p) = fed(20, 8, PLACE);
+        p.advance(&mut g, b"\x1b[1;1H\x1b[L");
+        assert!(g.placements().is_empty(), "IL");
+        // Rows below the scrolled region are untouched.
+        let (mut g, mut p) = fed(20, 8, b"\x1b[6;8r\x1b[1;1H");
+        p.advance(&mut g, PLACE);
+        p.advance(&mut g, b"\x1b[8;1H\n");
+        assert_eq!(g.placements().len(), 1);
+    }
+
+    #[test]
+    fn leaving_the_alternate_screen_drops_its_placements() {
+        let (mut g, mut p) = fed(20, 5, b"\x1b[?1049h");
+        p.advance(&mut g, PLACE);
+        assert_eq!(g.placements().len(), 1);
+        p.advance(&mut g, b"\x1b[?1049l");
+        assert!(g.placements().is_empty());
+    }
+
+    #[test]
+    fn every_store_mutation_moves_the_stamp() {
+        let (mut g, mut p) = fed(20, 5, b"");
+        let mut last = g.image_stamp();
+        let mut step = |g: &Grid, what: &str| {
+            let now = g.image_stamp();
+            assert_ne!(now, last, "{what}");
+            last = now;
+        };
+        p.advance(&mut g, b"\x1b_Ga=t,f=32,s=1,v=1,i=9;/wAA/w==\x1b\\");
+        step(&g, "a=t");
+        p.advance(&mut g, b"\x1b_Ga=f,f=32,s=1,v=1,i=9;/wAA/w==\x1b\\");
+        step(&g, "a=f frame");
+        p.advance(&mut g, b"\x1b_Ga=a,i=9,s=3\x1b\\");
+        step(&g, "a=a");
+        g.advance_animations(std::time::Instant::now());
+        g.advance_animations(std::time::Instant::now() + std::time::Duration::from_secs(1));
+        step(&g, "frame advance");
+        p.advance(&mut g, b"\x1bc");
+        step(&g, "RIS empties a transmit-only store");
     }
 }

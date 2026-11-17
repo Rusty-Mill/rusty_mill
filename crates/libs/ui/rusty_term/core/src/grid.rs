@@ -2034,6 +2034,7 @@ impl Grid {
     /// columns) up one row. Partial-width scrolls never form scrollback.
     fn scroll_band_up(&mut self) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom.min(self.rows - 1));
+        self.drop_placements_over(top, bottom);
         let (l, r) = (self.left_margin, self.right_margin.min(self.cols - 1));
         let blank = self.erase_packed();
         for y in top..bottom {
@@ -2061,6 +2062,7 @@ impl Grid {
     /// mirror, for RI / SD).
     fn scroll_band_down(&mut self) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom.min(self.rows - 1));
+        self.drop_placements_over(top, bottom);
         let (l, r) = (self.left_margin, self.right_margin.min(self.cols - 1));
         let blank = self.erase_packed();
         for y in (top..bottom).rev() {
@@ -2389,6 +2391,10 @@ impl Grid {
         }
         let blank = self.erase_packed();
         self.screen[top..=bottom].rotate_left(1);
+        if top != 0 || bottom != self.rows - 1 || self.primary.is_some() {
+            // Not a history scroll: cells move but the scroll count does not.
+            self.drop_placements_over(top, bottom);
+        }
         // The line that left the top now sits at `bottom`.
         // Capture it into scrollback, but only for a full-screen scroll on the
         // primary buffer: partial-region scrolls (TUI apps using DECSTBM) and
@@ -3530,6 +3536,7 @@ impl Grid {
     /// [`Grid::clear_all`].
     pub(crate) fn clear_scrollback(&mut self) {
         self.scrollback.clear();
+        self.prune_placements();
         self.styles.request_sweep();
         self.touch_hist();
         self.prompt_marks.clear();
@@ -3738,6 +3745,7 @@ impl Grid {
             }
         }
         self.view_offset = self.view_offset.min(self.display_history_len());
+        self.prune_placements();
     }
 
     /// Seed the grid's default colors from the configured startup theme and
@@ -3982,6 +3990,7 @@ impl Grid {
                 );
             }
             self.reset_scroll_region();
+            self.clear_placements(); // the alternate screen's images go with it
             self.touch_all();
         }
     }
@@ -4083,6 +4092,7 @@ impl Grid {
         // the region bottom come round to the cursor row and are blanked.
         let blank = self.erase_packed();
         self.screen[cy..=self.scroll_bottom].rotate_right(n);
+        self.drop_placements_over(cy, self.scroll_bottom);
         self.prime_blank_row(blank);
         for line in &mut self.screen[cy..cy + n] {
             line.clear(&self.blank_row);
@@ -4126,6 +4136,7 @@ impl Grid {
         // round to the region bottom and are blanked.
         let blank = self.erase_packed();
         self.screen[cy..=self.scroll_bottom].rotate_left(n);
+        self.drop_placements_over(cy, self.scroll_bottom);
         self.prime_blank_row(blank);
         for line in &mut self.screen[self.scroll_bottom + 1 - n..=self.scroll_bottom] {
             line.clear(&self.blank_row);
@@ -4172,6 +4183,7 @@ impl Grid {
         // Rotate the region down by n and blank the n rows freed at its top.
         let blank = self.erase_packed();
         self.screen[top..=bottom].rotate_right(n);
+        self.drop_placements_over(top, bottom);
         self.prime_blank_row(blank);
         for line in &mut self.screen[top..top + n] {
             line.clear(&self.blank_row);
@@ -4275,6 +4287,9 @@ impl Grid {
     pub(crate) fn reset(&mut self) {
         self.bell = false;
         self.progress = None;
+        if !self.kitty_images.is_empty() {
+            self.touch_images(); // a reset empties the store too
+        }
         self.kitty_images.clear();
         self.kitty_virtual.clear();
         self.clear_placements();
@@ -4710,6 +4725,7 @@ impl Grid {
             pixels: base.into(),
             gap_ms: gap_ms.max(40),
         });
+        self.touch_images();
         true
     }
 
@@ -4721,7 +4737,9 @@ impl Grid {
         };
         img.playing = run && img.frames.len() > 1;
         img.last_advance = None;
-        img.frames.len() > 1
+        let animated = img.frames.len() > 1;
+        self.touch_images();
+        animated
     }
 
     /// Advance every playing animation to `now`, returning whether any frame
@@ -4743,6 +4761,7 @@ impl Grid {
             }
         }
         if changed {
+            self.touch_images();
             self.touch_all();
         }
         changed
