@@ -339,6 +339,13 @@ impl fmt::Display for CallError {
 
 impl std::error::Error for CallError {}
 
+/// The wall clock in unix ms, which a share's end is counted from.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 /// The method named `name`.
 pub fn method(name: &str) -> Option<&'static Method> {
     CATALOG.iter().find(|m| m.name == name)
@@ -867,6 +874,63 @@ pub static CATALOG: &[Method] = &[
         },
     },
     Method {
+        name: "share-session",
+        doc: "Share a session with another client (C14): it may attach to the session's blocks, \
+              now and later, and watch, but never types without a lease its owner grants. For \
+              the server's account or the session's creator, on a shared server. It ends after \
+              `seconds`, or when the client disconnects.",
+        params: &[
+            required("session", Ty::Id(Entity::Session), "The session to share."),
+            required(
+                "client",
+                Ty::Id(Entity::Client),
+                "The client to share it with; it must be allowed to attach.",
+            ),
+            required(
+                "seconds",
+                Ty::Lines,
+                "How long the share lasts, from 1 to 86400.",
+            ),
+        ],
+        needs: Features::SHARING,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            let seconds = u64::from(a.number("seconds")?);
+            Ok(Message::ShareSession {
+                req,
+                session: SessionId::from_uuid(a.uuid("session", Entity::Session)?),
+                client: ClientId::from_uuid(a.uuid("client", Entity::Client)?),
+                until: now_ms().saturating_add(seconds.saturating_mul(1000)),
+            })
+        },
+    },
+    Method {
+        name: "unshare-session",
+        doc: "End a client's share of a session: it is detached from the session's blocks at \
+              once. Same callers as `share-session`.",
+        params: &[
+            required(
+                "session",
+                Ty::Id(Entity::Session),
+                "The session to unshare.",
+            ),
+            required(
+                "client",
+                Ty::Id(Entity::Client),
+                "The client to unshare it from.",
+            ),
+        ],
+        needs: Features::SHARING,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::UnshareSession {
+                req,
+                session: SessionId::from_uuid(a.uuid("session", Entity::Session)?),
+                client: ClientId::from_uuid(a.uuid("client", Entity::Client)?),
+            })
+        },
+    },
+    Method {
         name: "split-block",
         doc: "Start a program, the server's shell unless `command` names one, in a new block \
               beside another, splitting its place in half; unzooms the window.",
@@ -1230,6 +1294,34 @@ pub static CATALOG: &[Method] = &[
         needs: TERMINAL_CONTROL,
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.size"),
+    },
+    Method {
+        name: "terminal.list-dir",
+        doc: "List a directory on the server's host for a directory browse, as text: the \
+              directory's resolved path on the first line, then one entry per line as \
+              `KIND<TAB>NAME`, `KIND` being `d` for a directory (or a link to one), `f` a \
+              file, `l` any other link, `o` anything else; directories first, then by name, \
+              and every name written as `terminal.process` writes a field. At most 1000 \
+              entries are listed. Then, each only when it applies: `+<TAB>N`, exactly N \
+              entries were left out; `><TAB>N`, the directory is too large to read whole, so \
+              at least N were left out; `!<TAB>N`, N entries could not be read. Read off \
+              the server's main thread and refused after 5 seconds. Refused to a \
+              watch-only client.",
+        params: &[
+            BLOCK,
+            Param {
+                name: "path",
+                ty: Ty::Text,
+                doc: "The directory, absolute or relative to the program's working directory; \
+                      by default the working directory itself.",
+                presence: Presence::Optional {
+                    needs: Features::DIR_LISTING,
+                },
+            },
+        ],
+        needs: Features::BLOCK_CALL.union(Features::DIR_LISTING),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.list-dir"),
     },
     Method {
         name: "terminal.reset",

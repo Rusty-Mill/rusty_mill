@@ -256,7 +256,7 @@ The `[keys]` section rebinds any window shortcut as `action = "chord"`. The
 actions are `copy`, `copy_or_send` (copy if there is a selection, else pass
 the key to the shell), `paste`, `new_tab`, `new_window`, `fold_output`,
 `close_tab`, `next_tab`, `prev_tab`, `open_config`, `open_settings`, `search`,
-`open_links`, `copy_mode`, `broadcast`, `split_right`, `split_down`,
+`open_links`, `command_palette` (Ctrl+Shift+P, `rusty-mux-gui` only), `copy_mode`, `broadcast`, `split_right`, `split_down`,
 `focus_next`, `focus_left`, `focus_right`, `focus_up`, `focus_down`,
 `resize_left`, `resize_right`, `resize_up`, `resize_down`, `zoom_pane`,
 `scroll_page_up`, `scroll_page_down`, `scroll_prompt_up`, `scroll_prompt_down`,

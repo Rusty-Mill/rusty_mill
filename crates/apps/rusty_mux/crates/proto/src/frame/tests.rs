@@ -448,6 +448,17 @@ fn every_message_round_trips() {
             client: ClientId::from_uuid(Uuid::new_v4()),
         },
         Message::RequestLease { req: 22, block },
+        Message::ShareSession {
+            req: 23,
+            session: SessionId::from_uuid(Uuid::new_v4()),
+            client: ClientId::from_uuid(Uuid::new_v4()),
+            until: 1_700_000_000_000,
+        },
+        Message::UnshareSession {
+            req: 24,
+            session: SessionId::from_uuid(Uuid::new_v4()),
+            client: ClientId::from_uuid(Uuid::new_v4()),
+        },
         Message::Shutdown { req: 23 },
         Message::SignalBlock {
             req: 24,
@@ -465,6 +476,22 @@ fn every_message_round_trips() {
             block,
             client: ClientId::from_uuid(Uuid::new_v4()),
             principal: Principal::unix(1000, Some("alice".into())).expect("valid"),
+        },
+        Message::ClipboardRead {
+            block,
+            selection: Selection::Primary,
+        },
+        Message::ClipboardReply {
+            req: 26,
+            block,
+            selection: Selection::Clipboard,
+            data: Some(b"text".to_vec()),
+        },
+        Message::ClipboardReply {
+            req: 27,
+            block,
+            selection: Selection::Clipboard,
+            data: None,
         },
     ];
     for message in messages {
@@ -501,6 +528,16 @@ fn every_event_round_trips() {
             window: None,
         },
         Event::ConfigReloaded,
+        Event::ShareChanged {
+            session: SessionId::from_uuid(Uuid::new_v4()),
+            client: ClientId::from_uuid(Uuid::new_v4()),
+            until: Some(1_700_000_000_000),
+        },
+        Event::ShareChanged {
+            session: SessionId::from_uuid(Uuid::new_v4()),
+            client: ClientId::from_uuid(Uuid::new_v4()),
+            until: None,
+        },
         Event::TailscaleStatusChanged {
             state: TailscaleState::Running,
             node: Some("box.t.ts.net".into()),

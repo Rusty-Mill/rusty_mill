@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use rusty_mux_core::TailscaleState;
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Mux, Principal, Side, Size,
-    Transport, WindowId,
+    BlockId, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Mux, Principal, Selection,
+    Side, Size, Transport, WindowId,
 };
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
@@ -31,6 +31,7 @@ use crate::datagram::Registry;
 use crate::echo::Waiting;
 use crate::history::History;
 use crate::keys;
+use crate::listing;
 use crate::outbox::Outbox;
 use crate::passed::{Fd, Passed};
 use crate::process;
@@ -103,7 +104,17 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::BACKGROUND_HISTORY)
     .union(Features::AGENT_LAUNCH)
     .union(Features::HOLD)
+    .union(Features::SHARING)
+    .union(Features::DIR_LISTING)
+    .union(Features::CLIPBOARD)
     .union(UNIX_ONLY);
+
+/// The most text a clipboard answer carries (C38's OSC 52 limit).
+const MAX_CLIPBOARD: usize = 1 << 20;
+
+/// How long a clipboard read waits for its answer before the next one is
+/// asked: a late answer would land as typed input in whatever runs next.
+const CLIPBOARD_WAIT: Duration = Duration::from_secs(30);
 
 /// Offered on Linux only: signal and release (C76) act on a Unix process
 /// group, and orch, their one client, runs there; the tailscale status
@@ -404,6 +415,10 @@ pub(crate) struct State {
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
     features: HashMap<ClientId, Features>,
+    /// The one clipboard read asked of a block's lease holder per selection
+    /// (`true` for primary), until it is answered or [`CLIPBOARD_WAIT`] ends
+    /// (C54). A reply that matches none is refused.
+    reads: HashMap<(BlockId, bool), (ClientId, Instant)>,
     /// Each `TAKEOVER` client's tokens.
     tokens: HashMap<ClientId, Tokens>,
     /// Clients whose connection ended within [`ORPHAN_GRACE`], each with
@@ -430,6 +445,9 @@ pub(crate) struct State {
     /// A reload is reading the file; one at a time, so a stalled
     /// filesystem holds one thread at most.
     reloading: bool,
+    /// What `terminal.list-dir` reads a directory with.
+    pub(crate) lister: listing::Lister,
+    listings: listing::Gate,
     /// Where sessions are saved across restarts, with `Config::state_dir`.
     store: Option<Store>,
     /// The event number the store last saved the model at.
@@ -477,6 +495,7 @@ impl State {
             blocks: HashMap::new(),
             clients: HashMap::new(),
             features: HashMap::new(),
+            reads: HashMap::new(),
             tokens: HashMap::new(),
             orphans: HashMap::new(),
             history: History::new(Uuid::new_v4(), HISTORY),
@@ -492,6 +511,8 @@ impl State {
             stopping: false,
             loader: crate::settings::reloader(),
             reloading: false,
+            lister: listing::lister(),
+            listings: listing::Gate::default(),
             store: None,
             saved_at: None,
             generation: 0,
@@ -545,6 +566,73 @@ impl State {
             let _ = done.send(());
         });
         Ok(Outcome::Later(finished))
+    }
+
+    /// `terminal.list-dir`: reads the directory on the blocking pool under
+    /// [`listing::DEADLINE`], in a task of its own, and answers once read
+    /// ([`Self::listed`]). The connection waits for it before its next
+    /// request; no other client, PTY or task waits.
+    fn list_dir(
+        &mut self,
+        shared: &Shared,
+        client: ClientId,
+        req: u64,
+        base: Option<String>,
+        path: Option<String>,
+    ) -> Result<oneshot::Receiver<()>, String> {
+        let cancel = self
+            .clients
+            .get(&client)
+            .map(|out| out.cancel().clone())
+            .ok_or("no such client")?;
+        let slot = self
+            .listings
+            .take()
+            .map_err(|e| format!("terminal.list-dir: {e}"))?;
+        let lister = self.lister.clone();
+        let work = rusty_tokio::spawn_blocking(move || {
+            // Held until the thread ends, not until the deadline.
+            let _slot = slot;
+            lister(base.as_deref(), path.as_deref())
+        });
+        let (done, finished) = oneshot::channel();
+        let weak = Rc::downgrade(shared);
+        rusty_tokio::task::spawn_local(async move {
+            let answer = match rusty_tokio::time::timeout(listing::DEADLINE, work).await {
+                Ok(Ok(listed)) => listed,
+                Ok(Err(e)) => Err(format!("the listing failed: {e}")),
+                Err(_) => Err("the listing timed out".into()),
+            };
+            if let Some(shared) = weak.upgrade() {
+                shared.borrow_mut().listed(client, &cancel, req, answer);
+            }
+            // The connection may have gone; nothing waits then.
+            let _ = done.send(());
+        });
+        Ok(finished)
+    }
+
+    /// A listing read `answer`; it goes to the connection that asked,
+    /// unless another took its client over, where `req` means nothing.
+    fn listed(
+        &mut self,
+        client: ClientId,
+        cancel: &Rc<Notify>,
+        req: u64,
+        answer: Result<String, String>,
+    ) {
+        let message = match answer {
+            Ok(text) => Message::Text { req, text },
+            Err(reason) => Message::Failed {
+                req,
+                reason: format!("terminal.list-dir: {reason}"),
+                code: None,
+            },
+        };
+        if self.served_by(client, cancel) {
+            self.send(client, &message);
+        }
+        self.flush();
     }
 
     /// A reload read `result`: a good config replaces the last and is
@@ -712,6 +800,8 @@ impl State {
     ) -> ClientId {
         let features = theirs.intersection(self.offered());
         let who = principal.clone();
+        // A takeover must not get a screen its time has run out on (C14).
+        self.mux.expire_grants(now_ms());
         let continued = takeover.and_then(|t| self.takes_over(t, &principal, features));
         let client = match continued {
             Some(client) => {
@@ -1036,6 +1126,22 @@ impl State {
             }
             Ok(Outcome::Write(write)) => Some(Pending::Write(write)),
             Ok(Outcome::Later(done)) => Some(Pending::Reload(done)),
+            Ok(Outcome::Listing { base, path }) => {
+                match this.list_dir(shared, client, req, base, path) {
+                    Ok(done) => Some(Pending::Reload(done)),
+                    Err(reason) => {
+                        this.send(
+                            client,
+                            &Message::Failed {
+                                req,
+                                reason,
+                                code: None,
+                            },
+                        );
+                        None
+                    }
+                }
+            }
             Err(Refusal { reason, code }) => {
                 this.send(client, &Message::Failed { req, reason, code });
                 None
@@ -1290,6 +1396,25 @@ impl State {
                 self.require(client, Features::INPUT_GATE, "grant-lease")
                     .and_then(|()| done(self.mux.grant(client, block, grantee, until, now_ms()))),
             ),
+            M::ShareSession {
+                req,
+                session,
+                client: guest,
+                until,
+            } => (
+                req,
+                self.require(client, Features::SHARING, "share-session")
+                    .and_then(|()| done(self.mux.share(client, session, guest, until, now_ms()))),
+            ),
+            M::UnshareSession {
+                req,
+                session,
+                client: guest,
+            } => (
+                req,
+                self.require(client, Features::SHARING, "unshare-session")
+                    .and_then(|()| done(self.mux.unshare(client, session, guest))),
+            ),
             M::RevokeLease {
                 req,
                 block,
@@ -1326,12 +1451,93 @@ impl State {
                 req,
                 Err("signal and release are supported on Linux only".into()),
             ),
+            M::ClipboardReply {
+                req,
+                block,
+                selection,
+                data,
+            } => (
+                req,
+                self.require(client, Features::CLIPBOARD, "a clipboard reply")
+                    .and_then(|()| self.clipboard_reply(client, req, block, selection, data)),
+            ),
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
                     .and_then(|()| self.open_datagram(client, req)),
             ),
             other => (0, Err(format!("not a client request: {other:?}").into())),
+        }
+    }
+
+    /// A lease holder's answer to a clipboard read (C54): the OSC 52 reply
+    /// the program asked for, written as the holder's input, so the lease
+    /// rule and the owner's report apply. A denial is an empty answer.
+    fn clipboard_reply(
+        &mut self,
+        client: ClientId,
+        req: u64,
+        block: BlockId,
+        selection: Selection,
+        data: Option<Vec<u8>>,
+    ) -> Result<Outcome, Refusal> {
+        let data = data.unwrap_or_default();
+        if data.len() > MAX_CLIPBOARD {
+            return Err(format!("a clipboard answer is at most {MAX_CLIPBOARD} bytes").into());
+        }
+        self.mux
+            .authorize_input(client, block)
+            .map_err(Refusal::from)?;
+        let key = (block, selection == Selection::Primary);
+        let waiting = self
+            .reads
+            .get(&key)
+            .is_some_and(|(asked, at)| *asked == client && at.elapsed() < CLIPBOARD_WAIT);
+        if !waiting {
+            return Err(format!("no {} read of block {block} is waiting", selection.name()).into());
+        }
+        self.reads.remove(&key);
+        let target = match selection {
+            Selection::Clipboard => 'c',
+            Selection::Primary => 'p',
+        };
+        let reply = format!(
+            "\x1b]52;{target};{}\x07",
+            rusty_base64::encode_standard(&data)
+        );
+        self.input(client, req, block, reply.into_bytes())
+    }
+
+    /// Asks `block`'s lease holder for each clipboard `reads` (C54), when
+    /// it can answer and is not behind on its output; otherwise the read
+    /// goes unanswered. The server never answers one itself.
+    fn ask_clipboard(&mut self, block: BlockId, reads: Vec<Selection>) {
+        let Some(holder) = self.mux.block(block).and_then(|b| b.lease()) else {
+            return;
+        };
+        let ready = self.has(holder, Features::CLIPBOARD)
+            && self
+                .clients
+                .get(&holder)
+                .is_some_and(|out| out.queued() <= INPUT_REPORT_LIMIT);
+        if !ready {
+            return;
+        }
+        // One read per selection at a time: a program looping on the query
+        // can't flood the holder, and its answer can't arrive late.
+        self.reads
+            .retain(|_, (_, at)| at.elapsed() < CLIPBOARD_WAIT);
+        for selection in reads {
+            let key = (block, selection == Selection::Primary);
+            if self
+                .reads
+                .get(&key)
+                .is_some_and(|(asked, _)| *asked == holder)
+            {
+                continue;
+            }
+            self.reads.insert(key, (holder, Instant::now()));
+            self.send(holder, &Message::ClipboardRead { block, selection });
         }
     }
 
@@ -1599,6 +1805,23 @@ impl State {
             }
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.pid())
                 .ok_or("the program's working directory is unknown")?,
+            "terminal.list-dir" => {
+                // It shows the host's files as the server's account, so it
+                // takes what typing into the block takes: the lease, which
+                // a watch-only grant (C14) never holds.
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                let base = terminal::pwd(&rt.grid, rt.pid());
+                let path = named.iter().find_map(|(n, v)| match (*n, v) {
+                    ("path", Value::Text(p)) => Some(p.as_str()),
+                    _ => None,
+                });
+                return Ok(Outcome::Listing {
+                    base,
+                    path: path.map(str::to_owned),
+                });
+            }
             "terminal.title" => rt.grid.title.clone(),
             "terminal.status" => rt.status.shown().bodies().join("\n"),
             "terminal.process" => {
@@ -1628,7 +1851,14 @@ impl State {
                 return Ok(Outcome::Done(None));
             }
             "terminal.modes" => terminal::modes(&rt.grid),
-            "terminal.report-status" => return self.report_status(block, &named),
+            "terminal.report-status" => {
+                // It writes the block's status, so a watch-only grant (C14)
+                // may not; a client without the lease still may (agent hooks).
+                if self.mux.block(block).is_some_and(|b| b.is_watching(client)) {
+                    return Err(rusty_mux_core::Error::NoLease { client, block }.into());
+                }
+                return self.report_status(block, &named);
+            }
             "terminal.shell" => {
                 // A held or restored block's program is gone (C78), and so
                 // is one whose child was just reaped, whichever is seen.
@@ -2302,6 +2532,9 @@ impl State {
     /// Feeds PTY output to the block's grid and tees it to attached clients.
     /// Returns the terminal's replies to queries, for the PTY.
     fn output(&mut self, block: BlockId, data: &[u8]) -> Vec<u8> {
+        // A watcher's time may be up with no request of its own to say so:
+        // it sees nothing more of the screen (C14).
+        self.mux.expire_grants(now_ms());
         // A mode change, such as echo turned off before a password prompt,
         // goes ahead of the output printed after it.
         self.check_echo(block);
@@ -2336,10 +2569,14 @@ impl State {
         for selection in terminal::take_clipboard(&mut rt.grid) {
             in_step("clipboard", self.mux.note_clipboard(block, selection));
         }
+        let reads = terminal::take_clipboard_reads(&mut rt.grid);
         // What a terminal host would relay, such as the bell; clients
         // already have the raw output.
         rt.grid.take_host_out();
         self.check_process(block, false);
+        if !reads.is_empty() {
+            self.ask_clipboard(block, reads);
+        }
         let frame = encode(&Message::Output {
             block,
             data: data.to_vec(),
@@ -2391,6 +2628,7 @@ impl State {
     /// [`Self::check_process`], names refreshed, and [`Self::check_echo`]
     /// for every block, then broadcasts.
     fn check_processes(&mut self) {
+        self.mux.expire_grants(now_ms());
         let blocks: Vec<BlockId> = self.blocks.keys().copied().collect();
         for block in blocks {
             self.check_process(block, true);
@@ -2647,6 +2885,7 @@ fn receives(features: Features, principal: &Principal, event: &Event) -> bool {
         Event::WindowMoved { .. } => Features::LAYOUT_EDIT,
         Event::FocusChanged { .. } => Features::FOCUS,
         Event::GrantChanged { .. } => Features::INPUT_GATE,
+        Event::ShareChanged { .. } => Features::SHARING,
         Event::TailscaleStatusChanged { .. } if !is_tailnet(principal) => return false,
         Event::TailscaleStatusChanged { .. } => Features::TAILSCALE_STATUS,
         _ => Features::NONE,
@@ -2776,6 +3015,12 @@ enum Outcome {
     /// Answered later, by the task the request started; resolves once it
     /// has.
     Later(oneshot::Receiver<()>),
+    /// `terminal.list-dir`, to be read off this thread: the directory
+    /// `path` names from `base`.
+    Listing {
+        base: Option<String>,
+        path: Option<String>,
+    },
 }
 
 /// The line count `param` holds, 0 when left out.
@@ -3218,6 +3463,206 @@ mod regression {
                 refused
                     .as_deref()
                     .is_some_and(|r| r.contains("owner_unreachable")),
+                "{refused:?}"
+            );
+        });
+    }
+
+    /// A watcher whose share ran out takes its connection over and gets no
+    /// screen: the attachment ended with the share (C14).
+    #[test]
+    fn a_takeover_after_a_shares_end_gets_no_screen() {
+        runtime().block_on(async {
+            let (shared, account, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _old_inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal.clone(),
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            let session = state.mux.sessions().next().unwrap().id();
+            let now = now_ms();
+            state
+                .mux
+                .share(account, session, guest, now + 40, now)
+                .unwrap();
+            state.mux.attach(guest, block).unwrap();
+            let takeover = Some(Takeover {
+                client: guest,
+                token: state.tokens[&guest].current,
+            });
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            let (out, _new_inbox, _) = outbox();
+            let again = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                features,
+                None,
+                takeover,
+            );
+            assert_eq!(again, guest);
+            assert_eq!(state.mux.client(guest).unwrap().attached(), None);
+        });
+    }
+
+    /// A watcher's share ends on time even when it sends nothing and the
+    /// program keeps printing: the next output is not sent to it (C14).
+    #[test]
+    fn output_after_a_shares_end_does_not_reach_the_watcher() {
+        runtime().block_on(async {
+            let (shared, account, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _guest_inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                Features::CHECKPOINT_V6,
+                None,
+                None,
+            );
+            let session = state.mux.sessions().next().unwrap().id();
+            let now = now_ms();
+            state
+                .mux
+                .share(account, session, guest, now + 40, now)
+                .unwrap();
+            state.mux.attach(guest, block).unwrap();
+            state.output(block, b"in time");
+            assert!(state.attached(block).contains(&guest));
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            state.output(block, b"too late");
+            assert!(!state.attached(block).contains(&guest));
+        });
+    }
+
+    /// A listing reads off the server's thread (C08): while the filesystem
+    /// stalls, another client is answered, and the stalled one is answered
+    /// once the read returns. One more than the gate allows is refused.
+    #[test]
+    fn a_stalled_listing_holds_up_no_other_client() {
+        runtime().block_on(async {
+            let (shared, _account, block, _inbox) = fixture();
+            let (go, wait) = std::sync::mpsc::channel::<()>();
+            let wait = std::sync::Mutex::new(wait);
+            shared.borrow_mut().lister = std::sync::Arc::new(move |_, _| {
+                wait.lock()
+                    .map_err(|e| e.to_string())?
+                    .recv()
+                    .map_err(|e| e.to_string())?;
+                Ok("/stalled\nd\tsub".into())
+            });
+            let features = Features::EVENT_SEQ
+                .union(Features::CHECKPOINT_V6)
+                .union(Features::BLOCK_CALL)
+                .union(Features::DIR_LISTING);
+            let (out, mut inbox, _) = outbox();
+            let client = shared.borrow_mut().connect(
+                out,
+                test_owner(),
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            {
+                let mut state = shared.borrow_mut();
+                state.mux.attach(client, block).unwrap();
+                state.mux.acquire_lease(client, block).unwrap();
+            }
+            let (other, mut others) = reload_client(&shared);
+            let call = |req| Message::BlockCall {
+                req,
+                block,
+                method: "terminal.list-dir".into(),
+                args: vec![("path".into(), Value::Text("/".into()))],
+            };
+            let Some(Pending::Reload(done)) = State::request(&shared, client, call(1)) else {
+                panic!("the connection must wait for the listing");
+            };
+            State::request(&shared, other, Message::Sync { req: 2 });
+            assert!(matches!(
+                reply_to(&mut others, 2).await,
+                Message::Done { .. }
+            ));
+            go.send(()).unwrap();
+            let answer = loop {
+                let frame = inbox.next().await.expect("a reply");
+                let message = rusty_mux_proto::decode(&frame).unwrap().unwrap().0;
+                if matches!(
+                    message,
+                    Message::Text { req: 1, .. } | Message::Failed { req: 1, .. }
+                ) {
+                    break message;
+                }
+            };
+            assert!(
+                matches!(&answer, Message::Text { text, .. } if text.starts_with("/stalled")),
+                "{answer:?}"
+            );
+            done.await.expect("finished");
+        });
+    }
+
+    /// A watch-only client may read a block but not write its status (C14).
+    #[test]
+    fn a_watcher_may_not_report_status_or_list_a_directory() {
+        runtime().block_on(async {
+            let (shared, account, block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            state.share_leases(test_owner());
+            let features = Features::CHECKPOINT_V6
+                .union(Features::BLOCK_CALL)
+                .union(Features::AGENT_STATUS)
+                .union(Features::DIR_LISTING);
+            let guest_principal = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _guest_inbox, _) = outbox();
+            let guest = state.connect(
+                out,
+                guest_principal,
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
+            let session = state.mux.sessions().next().unwrap().id();
+            let now = now_ms();
+            state
+                .mux
+                .share(account, session, guest, now + 60_000, now)
+                .unwrap();
+            let refused = state
+                .block_call(
+                    guest,
+                    1,
+                    block,
+                    "terminal.report-status",
+                    vec![("state".into(), Value::Text("idle".into()))],
+                )
+                .err()
+                .map(|r| r.reason);
+            assert!(
+                refused.as_deref().is_some_and(|r| r.contains("lease")),
+                "{refused:?}"
+            );
+            // Nor may it list the host's directories.
+            state.mux.attach(guest, block).unwrap();
+            let refused = state
+                .block_call(guest, 2, block, "terminal.list-dir", Vec::new())
+                .err()
+                .map(|r| r.reason);
+            assert!(
+                refused.as_deref().is_some_and(|r| r.contains("lease")),
                 "{refused:?}"
             );
         });

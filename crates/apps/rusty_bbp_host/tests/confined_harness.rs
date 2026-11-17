@@ -793,6 +793,8 @@ echo overwritten; echo overwritten >&2; exit 3"#;
 /// A Codex provider stand-in for a filtered author: plans on turn 1; on
 /// turn 2 reports what it sees, makes the flag say ok, and submits it, first
 /// on a base the copy never had (refused), then on its clone's `HEAD`.
+/// Later turns idle until the test cancels: exiting would forfeit them, and
+/// three quick forfeits pause the moderator before the cancel lands.
 const FILTERED_AUTHOR: &str = r##"#!/bin/sh
 cfg=$(for a in "$@"; do case "$a" in mcp_servers=*) printf '%s' "$a";; esac; done)
 relay=$(printf '%s' "$cfg" | sed -n 's/.*"BBP_MCP_RELAY"="\([^"]*\)".*/\1/p')
@@ -820,6 +822,7 @@ RPC
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"t2-c1","kind":"candidate","base":"$base","diffs":[3]}}}
 RPC
   ;;
+*) exec sleep 60 ;;
 esac
 "##;
 

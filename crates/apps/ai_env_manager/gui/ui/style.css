@@ -75,7 +75,7 @@ dialog::backdrop{background:var(--scrim)}
 .pr .d{color:var(--dim)}.group.refused .pr .d{color:var(--warn-text);font-family:inherit}
 .dlg-foot{padding:16px 28px 24px;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;align-items:center;gap:12px}
 .dlg-foot p{flex:1 1 240px;margin:0;font-size:13px}
-.ed-body{display:grid;grid-template-columns:220px minmax(0,1fr);min-height:0;flex:1}
+.ed-body{display:grid;grid-template-columns:220px minmax(0,1fr);min-height:0;flex:1 1 auto;overflow:auto}
 .ed-files{margin:0;padding:8px;list-style:none;overflow-y:auto;border-right:1px solid var(--line)}
 .ed-files button{width:100%;min-height:36px;padding:0 10px;border-color:transparent;background:transparent;text-align:left;font:12px var(--mono);font-weight:400;overflow-wrap:anywhere}
 .ed-files button[aria-current=true]{background:var(--accent-bg);border-color:var(--accent)}

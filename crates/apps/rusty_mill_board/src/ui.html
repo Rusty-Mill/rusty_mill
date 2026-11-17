@@ -76,7 +76,7 @@ header.top{display:flex;align-items:center;gap:6px;padding:0 14px;min-height:52p
 #nav1 .lbl{font-size:12px;font-weight:600;color:var(--mute);margin:0 2px 0 8px}
 #nav1 .lbl:first-child{margin-left:0}
 #nav1 .sep{width:1px;align-self:stretch;background:var(--line);margin:2px 6px}
-#repo{font-weight:600;padding:5px 8px;max-width:260px}
+#project{font-weight:600;padding:5px 8px;max-width:260px}
 #nav1 .item{border-radius:14px;padding:4px 10px;gap:7px;background:var(--card);border-color:var(--line);font-size:13px}
 #nav1 .item .n{font:700 14px/1 var(--num);color:var(--mute)}
 #nav1 .item.on{background:var(--ink);border-color:var(--ink);color:var(--card)}
@@ -106,6 +106,7 @@ header.top{display:flex;align-items:center;gap:6px;padding:0 14px;min-height:52p
 [data-kind=work][data-late]{--ink-fill:var(--cyan-wash);--ink-on:var(--ink);--sw:#7fcbec}
 [data-kind=done]{--ink-fill:var(--done);--ink-on:var(--ink);--sw:var(--done)}
 [data-kind=blocked]{--ink-fill:var(--red-fill);--ink-on:#fff;--sw:var(--red-fill)}
+[data-kind=parked]{--ink-fill:var(--done);--ink-on:var(--ink);--sw:var(--done)}
 
 /* The board. Columns scroll on their own; an empty one folds to a spine. */
 main{overflow:auto;padding:10px 14px 14px;min-height:0}
@@ -332,7 +333,7 @@ dialog h2{margin:0;font-size:18px}
   <nav class="views" aria-label="views">
     <button id="boardv" type="button" aria-pressed="true">Board</button>
     <button id="view" type="button" aria-pressed="false" title="The chosen project's roadmap">Roadmap</button>
-    <button id="metrics" type="button" aria-pressed="false" title="Metrics for the chosen repository or project, or the whole board">Metrics</button>
+    <button id="metrics" type="button" aria-pressed="false" title="Metrics for the chosen project, or the whole board">Metrics</button>
     <button id="archive" type="button" aria-pressed="false" title="Done cards set aside: archived, or done more than 14 days ago">Archive</button>
     <button id="decide" type="button" aria-pressed="false" hidden title="Decisions waiting for you: open BBP escalations">Decisions <span id="decide-n" class="badge"></span></button>
   </nav>
@@ -348,7 +349,7 @@ dialog h2{margin:0;font-size:18px}
   <button id="gear" type="button" class="icon" title="Settings" aria-label="settings"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   <button id="signout" type="button" class="icon" hidden title="Sign out" aria-label="sign out"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button>
 </header>
-<nav id="nav1" aria-label="repositories, projects and agents"></nav>
+<nav id="nav1" aria-label="projects and agents"></nav>
 <nav id="strip" class="strip" aria-label="columns" hidden></nav>
 <main id="board"></main>
 <dialog id="dlg"></dialog>
@@ -370,18 +371,17 @@ const working=()=>FLOW.columns.filter(c=>c.kind==="work").map(c=>c.id);
 let tok=null;
 const $=id=>document.getElementById(id);
 // `loaded`: the board has been read once. The cursor cannot say so: it is null on a board with no events yet.
-let cards=[],cursor=null,loaded=false,dlg=null,repos={},sel={repo:"",project:"",agent:""};
+let cards=[],cursor=null,loaded=false,dlg=null,repos={},sel={project:"",agent:""};
 /* Project statuses (board_projects' `status`, unlisted = active) and which the board shows: active by default,
    "" for every status. A chosen project is shown whatever its status. */
 const STATUSES=["active","experiment","paused","archived"];
 let pstatus={},statusSel="active";
 const statusOf=p=>Object.hasOwn(pstatus,p)?pstatus[p]:"active";
-const projects=()=>Object.values(repos).flat();
+const projects=()=>[...new Set(Object.values(repos).flat())];
 /* `default` is the Inbox: where a card that names no project lands (rusty_tick's Inbox list). Shown by that name only. */
 const INBOX="default",label=p=>p===INBOX?"Inbox":p;
-const repoOf=p=>Object.keys(repos).find(r=>repos[r].includes(p))||"";
 const statusShown=p=>p===sel.project||!statusSel||statusOf(p)===statusSel;
-const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project)&&statusShown(k.project)&&(!sel.agent||k.claim===sel.agent);
+const shown=k=>(!sel.project||k.project===sel.project)&&statusShown(k.project)&&(!sel.agent||k.claim===sel.agent);
 const count=f=>cards.filter(f).length;
 /* A Done card is shelved, off the board and in the Archive view, once archived or 14 days after it
    was done (closed without shipping: after its last change) or last restored. The server's
@@ -501,7 +501,7 @@ function ticket(k){
   const d=el("div",null,"card");
   d.append(...heading(k));
   const m=el("div",null,"meta");
-  if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");t.title=repoOf(k.project);m.append(t)}
+  if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");m.append(t)}
   if(k.claim){
     d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
     const t=el("span",null,"tag agent"+(working().includes(k.column)?" running":""));t.append(el("i",null,"dot"),nick(k.claim));t.title=k.claim;m.append(t);
@@ -581,7 +581,7 @@ function render(){
 let view=location.pathname==="/inbox"?"decisions":["roadmap","metrics","archive"].includes(pref("view"))?pref("view"):"board",mapSeq=0;
 // Each lane's columns, from the workflow's kinds (the server's Lane::of).
 const LANE_KIND={now:"work",next:"queue",later:"backlog",blocked:"blocked",shipped:"done"};
-const laneHint=l=>FLOW.columns.filter(c=>c.kind===LANE_KIND[l]).map(c=>c.label).join(", ")+(l==="shipped"?", last 30 days":"");
+const laneHint=l=>FLOW.columns.filter(c=>c.kind===LANE_KIND[l]||(l==="later"&&c.kind==="parked")).map(c=>c.label).join(", ")+(l==="shipped"?", last 30 days":"");
 const pressed=()=>{$("boardv").setAttribute("aria-pressed",view==="board");$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics");$("decide").setAttribute("aria-pressed",view==="decisions");$("archive").setAttribute("aria-pressed",view==="archive")};
 function setView(v){view=v;pref("view",v);pressed();render()}
 /* Roadmap: a timeline of the last ten weeks, the progress and recent activity under it, then the lanes.
@@ -607,8 +607,8 @@ function windowOf(scoped,stones){
 // The project the lanes are for: the chosen one, else the only one in scope, else none.
 function focusProject(){
   if(sel.project)return sel.project;
-  const scope=projects().filter(p=>!sel.repo||repoOf(p)===sel.repo);
-  return scope.length===1?scope[0]:"";
+  const all=projects();
+  return all.length===1?all[0]:"";
 }
 const planned=k=>["work","queue","blocked"].includes(kindOf(k.column));
 const overdue=k=>!isDone(k)&&k.target_ms!=null&&k.target_ms<dayStart(Date.now());
@@ -673,7 +673,7 @@ function projectRows(scoped,t0,stones){
     const sub=[[n("work"),"in progress"],[n("queue"),"next"],[n("blocked"),"blocked"]].filter(([v])=>v).map(([v,w])=>v+" "+w).join(" · ")||"all shipped";
     const late=t.open.filter(overdue).length;
     t.flag=[n("blocked")&&n("blocked")+" blocked",late&&late+" overdue"].filter(Boolean).join(" · ");
-    out.push({...t,label:label(p),sub,text:t.shipped.length+" shipped",right:t.pct+"%",title:label(p)+": "+t.pct+"% of planned work shipped",open:()=>pick(repoOf(p),p),rank:n("work")*3+n("blocked")*2+n("queue")});
+    out.push({...t,label:label(p),sub,text:t.shipped.length+" shipped",right:t.pct+"%",title:label(p)+": "+t.pct+"% of planned work shipped",open:()=>pick(p),rank:n("work")*3+n("blocked")*2+n("queue")});
   }
   return out.sort((a,z)=>z.rank-a.rank||a.label.localeCompare(z.label));
 }
@@ -734,7 +734,7 @@ function editStone(m,project){
 }
 /* Milestones change without card events (another session may add one), so while the roadmap is open
    the poll re-reads them every ten seconds and redraws when they differ from what is shown. */
-const stoneArgs=focus=>focus?{project:focus}:sel.repo?{repo:sel.repo}:{};
+const stoneArgs=focus=>focus?{project:focus}:{};
 let stonesSeen="",stonesAt=0;
 async function stonesChanged(){
   if(view!=="roadmap"||Date.now()-stonesAt<10000)return false;
@@ -753,7 +753,7 @@ async function renderRoadmap(){
   b.classList.remove("board","metrics","decisions","archive");b.classList.add("roadmap");
   const scoped=cards.filter(k=>shown(k)&&(!focus||k.project===focus));
   const w=windowOf(scoped,stones),top=el("div",null,"rm-top");top.append(insights(scoped,w.t0),activity(scoped));
-  const h=el("div",null,"rm-head");h.append(el("h3","Roadmap · "+(focus?label(focus):sel.repo||"all projects")));
+  const h=el("div",null,"rm-head");h.append(el("h3","Roadmap · "+(focus?label(focus):"all projects")));
   if(focus){const add=el("button","Add milestone");add.type="button";add.onclick=()=>editStone(null,focus);h.append(add)}
   b.replaceChildren(h,timeline(scoped,focus,w,stones),top);
   if(!map){renderSide();syncDialog();return}
@@ -793,7 +793,7 @@ function rows(list,max=Math.max(1,...list.map(r=>r.n))){
 }
 async function renderMetrics(){
   const seq=++mapSeq,b=$("board"),stale=()=>seq!==mapSeq||view!=="metrics";
-  const args=sel.project?{project:sel.project}:sel.repo?{repo:sel.repo}:{};
+  const args=sel.project?{project:sel.project}:{};
   let m;
   try{m=await api("board_metrics",args)}
   catch(e){if(!stale()){b.classList.remove("board","roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
@@ -805,7 +805,7 @@ async function renderMetrics(){
     const k=el("div",null,"kpi");k.append(el("b",String(v)),l);if(t)k.title=t;kpis.append(k);
   }
   b.classList.remove("board","roadmap","decisions","archive");b.classList.add("metrics");
-  const scope=sel.project?label(sel.project):sel.repo||"all projects";
+  const scope=sel.project?label(sel.project):"all projects";
   // Flow: cards added and shipped each week, side by side, the current week last.
   const wmax=Math.max(1,...m.weeks.flatMap(w=>[w.added,w.done,w.prototype]));
   const flow=panel("Flow","w8","cards created, shipped and done as prototypes per week, the current week last");
@@ -846,12 +846,9 @@ async function renderMetrics(){
   renderSide();syncDialog();
 }
 
-/* The scope bar: the repository, its projects as chips, then the agents holding claims.
+/* The scope bar: the project picker, projects as chips, then the agents holding claims.
    Everything here only narrows what the board shows. */
 function renderSide(){
-  // Every repository is offered, an empty one too (you may be about to add its first card), except the
-  // `default` repository when the Inbox is all it holds: the Inbox chip is it.
-  const names=Object.keys(repos).filter(r=>r!==INBOX||repos[r].length>1);
   const item=(text,n,on,fn,agent)=>{
     const b=el("button",null,"item"+(on?" on":""));b.type="button";b.setAttribute("aria-pressed",String(on));
     const name=el("span",null,"name");
@@ -859,29 +856,25 @@ function renderSide(){
     name.append(text);b.append(name,el("span",String(n),"n"));b.onclick=fn;return b};
   const n1=$("nav1");n1.replaceChildren();
   if(projects().length>1){
-    const r=el("select");r.id="repo";r.setAttribute("aria-label","repository");
-    r.append(new Option("All repositories · "+listed(()=>true),""));
-    for(const x of names)r.append(new Option(x+" · "+listed(k=>repoOf(k.project)===x),x));
-    r.value=sel.repo;r.onchange=()=>pick(r.value,"");
+    // Projects only, the Inbox among them: repositories are not a way to sort or filter the board.
+    const r=el("select");r.id="project";r.setAttribute("aria-label","project");
+    r.append(new Option("All projects · "+listed(()=>true),""));
+    for(const p of projects().filter(statusShown).sort((x,y)=>label(x).localeCompare(label(y))))r.append(new Option(label(p)+" · "+listed(k=>k.project===p),p));
+    r.value=sel.project;r.onchange=()=>pick(r.value);
     n1.append(r);
     // Which project statuses are on the board: committed (active) work unless asked.
     const st=el("select");st.id="pstatus";st.setAttribute("aria-label","project status");
     st.append(...STATUSES.map(x=>new Option(x[0].toUpperCase()+x.slice(1)+" projects",x)),new Option("All projects",""));
     st.value=statusSel;st.onchange=()=>{statusSel=st.value;pref("pstatus",statusSel);render()};
     n1.append(st);
-    // The Inbox is a project, not a repository: it shows and counts only cards with no other project.
-    // Listed only when this credential may see it, like every other entry here.
+    // The Inbox shows and counts only cards with no other project. Listed only when this credential
+    // may see it, like every other entry here.
     const chips=[];
-    if(projects().includes(INBOX))chips.push(item("Inbox",listed(k=>k.project===INBOX),sel.project===INBOX,()=>pick(repoOf(INBOX),INBOX)));
-    // The projects of the chosen repository, or of every repository, so one project's cards are a click
-    // away. A repository whose only project is its own is left out: it is the repository, chosen above.
-    // (A credential limited to some projects may see a repository with one other project: that one stays.)
-    const named=Object.entries(repos).filter(([x])=>!sel.repo||x===sel.repo)
-      .flatMap(([x,ps])=>ps.length===1&&ps[0]===x?[]:ps).filter(p=>p!==INBOX&&statusShown(p)).sort();
-    for(const p of named)chips.push(item(p,listed(k=>k.project===p),sel.project===p,()=>sel.project===p?pick(sel.repo,""):pick(repoOf(p),p)));
+    if(projects().includes(INBOX))chips.push(item("Inbox",listed(k=>k.project===INBOX),sel.project===INBOX,()=>pick(INBOX)));
+    for(const p of projects().filter(p=>p!==INBOX&&statusShown(p)).sort())chips.push(item(p,listed(k=>k.project===p),sel.project===p,()=>pick(sel.project===p?"":p)));
     if(chips.length)n1.append(el("i",null,"sep"),el("span","Projects","lbl"),...chips);
   }
-  // Agents: whoever holds a claim, with how many cards. A second filter, independent of the repository.
+  // Agents: whoever holds a claim, with how many cards. A second filter, independent of the project.
   const claims={};cards.forEach(k=>{if(k.claim)claims[k.claim]=(claims[k.claim]||0)+1});
   const agents=Object.keys(claims).sort();
   if(agents.length){
@@ -935,7 +928,7 @@ function renderArchive(){
   renderSide();syncDialog();
 }
 
-function pick(repo,project){sel={...sel,repo,project};pref("repo",repo);pref("project",project);render()}
+function pick(project){sel={...sel,project};pref("project",project);render()}
 function pickAgent(agent){sel={...sel,agent};render()}
 
 /* The card dialog is built once and then kept in step with the board without ever
@@ -949,7 +942,7 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
   const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),up:el("input","","up"),ms:el("select")};
-  for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(label(p),p)));f.p.append(g)}
+  projects().forEach(p=>f.p.append(new Option(label(p),p)));
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
   [5,3,1,0].forEach(v=>f.pr.append(new Option("Priority: "+PRIORITY[v],v)));
@@ -1208,12 +1201,13 @@ async function setting(op,args){return api(op,{...who(),...args})}
 async function openSettings(){
   try{cfg=await setting("settings_get")}
   catch(e){toast(e.status===403?"Settings need the admin capability.":e.message);return}
-  secret=null;reposDraft=reposGithub=null;flowDraft=null;tab="agents";drawSettings();if(!$("settings").open)$("settings").showModal();
+  secret=null;flowDraft=null;tab="agents";drawSettings();if(!$("settings").open)$("settings").showModal();
 }
 /* Settings fill the page: sections down the left, the chosen one on the right with what it is for. */
 const SECTIONS=[
   ["agents","Agents","Who may use the board. Each agent signs in with its own token and acts with one role, in all projects or a chosen few. Agents on a shared connector register themselves and are listed below."],
-  ["repos","Repositories","The repositories this board serves and their projects. A project owns the repository paths listed under it; each repository's own project owns the rest. Give a project the same name under two repositories to make it span both."],
+  ["repos","Repositories","The repositories this board serves, with an optional GitHub slug. Each repository's own project owns the paths no other project of it claims. Link projects to repositories under Projects."],
+  ["projects","Projects","Each project, its status, and the repositories it is linked to with the paths it owns there. Link a project to a second repository to make it span both."],
   ["roles","Roles","A role is a set of capabilities. Tick what each role may do; hover a capability for what it allows."],
   ["columns","Columns","The board's columns, their order and kind, and the moves between them with the capability each needs."],
   ["rules","Rules","Whether card moves follow the Columns moves and each role's capabilities."],
@@ -1226,13 +1220,13 @@ function drawSettings(){
   tabs.append(el("div","Settings","stitle"));
   for(const [id,label] of SECTIONS){
     const b=el("button",label,tab===id?"on":"");b.type="button";b.setAttribute("aria-current",tab===id?"page":"false");
-    b.onclick=()=>{tab=id;secret=null;reposDraft=reposGithub=null;flowDraft=null;drawSettings()};tabs.append(b)}
+    b.onclick=()=>{tab=id;secret=null;flowDraft=null;drawSettings()};tabs.append(b)}
   const close=el("button","Close","close");close.type="button";close.onclick=()=>d.close();tabs.append(close);
   const [,title,about]=SECTIONS.find(([id])=>id===tab),pane=el("div",null,"pane");
-  pane.append(el("h2",title),el("p",about,"lead"),{agents:agentsTab,repos:reposTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
+  pane.append(el("h2",title),el("p",about,"lead"),{agents:agentsTab,repos:reposTab,projects:projectsTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
   // Destructive actions read as such wherever a section puts them.
   pane.querySelectorAll("button").forEach(b=>{if(/^(Remove|Revoke|Turn sync off)/.test(b.textContent))b.classList.add("danger");
-    else if(/^(Save (roles|columns|repositories|and)|Add (agent|role|column)$)/.test(b.textContent))b.classList.add("primary")});
+    else if(/^(Save (roles|columns)|Add (agent|role|column)$)/.test(b.textContent))b.classList.add("primary")});
   box.append(tabs,pane);
   d.replaceChildren(box);
 }
@@ -1302,68 +1296,77 @@ function registeredAgents(){
     const r=el("td"),p=el("td");r.append(role);p.append(pick);
     const nm=el("td");nm.append(nk);tr.append(el("td",a.id),nm,el("td",a.connector),r,p,el("td",new Date(a.seen_ms).toLocaleString()),acts);tbl.append(tr);
   }
-  box.append(tbl,err,el("p","Left at the connector's role, and all projects, an agent acts as its connector. Any role chosen here is applied at once, even a wider one.","note"));
+  const stale=el("button","Revoke stale (unused over 24h)");stale.type="button";
+  stale.onclick=guard(err,async()=>{const d=await setting("settings_registered_agent_revoke_stale",{});if(d.unsaved&&!d.count){if(!confirm("An earlier revocation was not saved. Save it now?"))return;await setting("settings_registered_agent_revoke_stale",{revoke:true,ids:[]});return}if(!d.count){err.textContent="No registered agent is unused for over 24 hours.";return}if(!confirm("Revoke "+d.count+" agent(s) unused for over 24 hours? Their keys stop working; they can register again."))return;await setting("settings_registered_agent_revoke_stale",{revoke:true,ids:d.ids})});
+  box.append(tbl,stale,err,el("p","Left at the connector's role, and all projects, an agent acts as its connector. Any role chosen here is applied at once, even a wider one.","note"));
   return box;
 }
 
-/* The draft of the repositories tab survives redraws made while restructuring (add or remove a row)
-   and is dropped once saved or when leaving the tab. */
-let reposDraft=null,reposGithub=null;
+/* Repositories and Projects are two tabs over one registry (cfg.registry, the version 2 form). Each button
+   sends one change at once; the server validates the whole registry. */
+const registryWith=edit=>{const r=JSON.parse(JSON.stringify(cfg.registry));edit(r);return setting("settings_projects_set",{registry:r})};
 function reposTab(){
   const t=el("div"),err=el("div",null,"err");
   if(!cfg.files.projects)t.append(unwritable("--projects FILE"));
-  // repo -> [{name, paths}], without each repository's own project (it is implied).
-  reposDraft=reposDraft||Object.fromEntries(Object.entries(cfg.repos).map(([r,ps])=>[r,Object.entries(ps).filter(([n])=>n!==r).map(([n,paths])=>({name:n,paths:paths.join("\n")}))]));
-  // repo -> its GitHub slug ("" for none), kept like the draft until saved.
-  reposGithub=reposGithub||Object.fromEntries(Object.keys(cfg.repos).map(r=>[r,(cfg.registry.repos[r]||{}).github||""]));
-  const draft=reposDraft,gh=reposGithub,inputs=[];
+  for(const [r,info] of Object.entries(cfg.registry.repos)){
+    const fs=el("fieldset");fs.append(el("legend",r));
+    const slug=field("input",{value:info.github||"",size:26,placeholder:"owner/name on GitHub (optional)"}),
+          save=el("button","Save"),rm=el("button","Remove repository");
+    slug.setAttribute("aria-label",r+" GitHub repository");save.type=rm.type="button";
+    const linked=Object.entries(cfg.registry.projects).filter(([,p])=>r in p.repos).map(([n])=>n);
+    save.onclick=guard(err,()=>registryWith(x=>{const g=slug.value.trim();if(g)x.repos[r].github=g;else delete x.repos[r].github}));
+    rm.onclick=guard(err,()=>registryWith(x=>{delete x.repos[r]}));
+    const row=el("div",null,"row");row.append(slug,save);if(r!=="default")row.append(" ",rm);
+    fs.append(row,el("p",linked.length?"Linked projects: "+linked.join(", "):"No linked projects.","note"));t.append(fs);
+  }
+  const newr=field("input",{placeholder:"new repository name",size:22}),addr=el("button","+ repository");addr.type="button";
+  addr.onclick=guard(err,()=>registryWith(x=>{const n=newr.value.trim();if(n&&!(n in x.repos))x.repos[n]={}}));
+  const row=el("div",null,"row");row.append(newr,addr);t.append(row,err);
+  return t;
+}
+function projectsTab(){
+  const t=el("div"),err=el("div",null,"err"),repos=Object.keys(cfg.registry.repos);
+  if(!cfg.files.projects)t.append(unwritable("--projects FILE"));
   const statusSelect=name=>{
     const st=field("select",{});st.setAttribute("aria-label",name+" status");st.disabled=!cfg.files.project_status;
     st.append(...STATUSES.map(x=>new Option(x,x)));const ps=cfg.project_status||{};st.value=Object.hasOwn(ps,name)?ps[name]:"active";
     st.onchange=guard(err,()=>setting("settings_project_status_set",{project:name,status:st.value}));
     return st;
   };
-  // The same project name under several repositories is one project spanning them; its default
-  // repository is the one it had, else the first it appears under.
-  const collect=()=>{
-    const repos=Object.fromEntries(Object.keys(draft).map(r=>[r,gh[r]?{github:gh[r]}:{}])),projects={};
-    for(const [r,ps] of Object.entries(draft))for(const p of ps){
-      const paths=p.paths.split("\n").map(x=>x.trim()).filter(Boolean),e=projects[p.name]||=({repos:{}});e.repos[r]=paths}
-    for(const [n,e] of Object.entries(projects)){
-      const keys=Object.keys(e.repos);if(keys.length<2)continue;
-      const was=(cfg.registry.projects[n]||{}).default_repo;e.default_repo=keys.includes(was)?was:keys[0]}
-    return {version:2,repos,projects}};
-  const restructure=fn=>()=>{inputs.forEach(f=>f());fn();drawSettings()};   // keep what was typed, change the shape, redraw
-  for(const r of Object.keys(draft)){
-    const fs=el("fieldset");fs.append(el("legend",r));
-    const slug=field("input",{value:gh[r]||"",size:26,placeholder:"owner/name on GitHub (optional)"});
-    slug.setAttribute("aria-label",r+" GitHub repository");inputs.push(()=>{gh[r]=slug.value.trim()});
-    const ghrow=el("div",null,"row");ghrow.append(slug);fs.append(ghrow);
-    // A repository's own project is implied, so it is not in the draft; its status is set here (not the Inbox's).
-    if(r!==INBOX&&cfg.repos[r]&&Object.hasOwn(cfg.repos[r],r)){
-      const own=el("div",null,"row");own.append(el("span",r+" (repository project)"),statusSelect(r));fs.append(own);
-    }
-    for(const p of draft[r]){
-      const row=el("div",null,"row"),nm=field("input",{value:p.name,size:18,placeholder:"project name"}),
-            paths=field("textarea",{value:p.paths,placeholder:"one repository path per line, e.g. crates/apps/rocket_league"});
-      inputs.push(()=>{p.name=nm.value.trim();p.paths=paths.value});
-      const rm=el("button","Remove");rm.type="button";rm.onclick=restructure(()=>{draft[r]=draft[r].filter(x=>x!==p)});
-      row.append(nm,rm);
-      // A saved project's status applies at once, apart from the paths below.
-      if(cfg.repos[r]&&Object.hasOwn(cfg.repos[r],p.name))row.append(statusSelect(p.name));
-      fs.append(row,paths);
-    }
-    const addp=el("button","+ project"),rmr=el("button","Remove repository");addp.type=rmr.type="button";
-    addp.onclick=restructure(()=>draft[r].push({name:"",paths:""}));
-    rmr.onclick=restructure(()=>{delete draft[r]});
-    fs.append(addp);if(r!=="default")fs.append(" ",rmr);t.append(fs);   // `default` always exists
+  const lines=v=>v.split("\n").map(x=>x.trim()).filter(Boolean);
+  // A repository's own project is implied: it has a status, and no links to edit (not the Inbox's).
+  for(const r of repos)if(r!==INBOX&&!(r in cfg.registry.projects)){
+    const row=el("div",null,"row");row.append(el("span",r+" (repository project)"),statusSelect(r));t.append(row);
   }
-  const newr=field("input",{placeholder:"new repository name",size:22}),addr=el("button","+ repository"),save=el("button","Save repositories and projects");
-  addr.type=save.type="button";
-  addr.onclick=restructure(()=>{const n=newr.value.trim();if(n&&!(n in draft))draft[n]=[]});
-  save.onclick=guard(err,async()=>{inputs.forEach(f=>f());await setting("settings_projects_set",{registry:collect()});reposDraft=reposGithub=null});
-  const row=el("div",null,"row");row.append(newr,addr);
-  t.append(row,save,err);
+  for(const [name,p] of Object.entries(cfg.registry.projects)){
+    const fs=el("fieldset"),head=el("div",null,"row");fs.append(el("legend",name));head.append(statusSelect(name));
+    const rm=el("button","Remove project");rm.type="button";
+    rm.onclick=guard(err,()=>registryWith(x=>{delete x.projects[name]}));head.append(rm);fs.append(head);
+    const links=Object.keys(p.repos);
+    for(const r of links){
+      const row=el("div",null,"row"),paths=field("textarea",{value:p.repos[r].join("\n"),placeholder:"one repository path per line"});
+      paths.setAttribute("aria-label",name+" paths in "+r);
+      const save=el("button","Save paths"),un=el("button","Unlink");save.type=un.type="button";un.disabled=links.length<2;
+      un.title=links.length<2?"A project keeps at least one repository":"";
+      save.onclick=guard(err,()=>setting("settings_project_link",{project:name,repo:r,paths:lines(paths.value)}));
+      un.onclick=guard(err,()=>setting("settings_project_link",{project:name,repo:r,unlink:true}));
+      row.append(el("strong",r+(links.length>1&&p.default_repo===r?" (default)":"")),save," ",un);fs.append(row,paths);
+    }
+    const free=repos.filter(r=>!links.includes(r));
+    if(free.length){
+      const pick=field("select",{}),paths=field("textarea",{placeholder:"paths there, one per line (none: what no other project claims)"}),
+            link=el("button","Link repository");pick.setAttribute("aria-label",name+" repository to link");link.type="button";
+      pick.append(...free.map(r=>new Option(r,r)));
+      link.onclick=guard(err,()=>setting("settings_project_link",{project:name,repo:pick.value,paths:lines(paths.value)}));
+      const row=el("div",null,"row");row.append(pick,link);fs.append(row,paths);
+    }
+    t.append(fs);
+  }
+  const nm=field("input",{placeholder:"new project name",size:22}),pick=field("select",{}),
+        paths=field("textarea",{placeholder:"paths in that repository, one per line"}),add=el("button","+ project");
+  pick.setAttribute("aria-label","repository of the new project");add.type="button";pick.append(...repos.map(r=>new Option(r,r)));
+  add.onclick=guard(err,()=>registryWith(x=>{const n=nm.value.trim();if(n&&!(n in x.projects))x.projects[n]={repos:{[pick.value]:lines(paths.value)}}}));
+  const row=el("div",null,"row");row.append(nm,pick,add);t.append(row,paths,err);
   return t;
 }
 function rolesTab(){
@@ -1392,9 +1395,9 @@ function rolesTab(){
 }
 
 /* Columns and the moves between them. Edited as a draft and saved whole: the server checks it
-   (Backlog, Done and Blocked stay; a column that still holds cards cannot be removed). */
+   (Backlog, Done and Blocked stay, Parked is optional; a column that still holds cards cannot be removed). */
 let flowDraft=null;
-const KINDS={queue:"Queue: waits to be taken",work:"Work: claimed; leaving needs the claim",backlog:"Backlog",done:"Done",blocked:"Blocked"};
+const KINDS={queue:"Queue: waits to be taken",work:"Work: claimed; leaving needs the claim",backlog:"Backlog",done:"Done",blocked:"Blocked",parked:"Parked: outside active work"};
 function columnsTab(){
   const t=el("div"),err=el("div",null,"err"),ro=!cfg.files.workflow;
   if(ro)t.append(unwritable("--settings-dir DIR"));
@@ -1403,10 +1406,10 @@ function columnsTab(){
   const held=id=>count(k=>k.column===id);
   const cols=el("table"),ch=el("tr");["Column","Label","Kind","Cards",""].forEach(h=>ch.append(el("th",h)));cols.append(ch);
   d.columns.forEach((c,i)=>{
-    const tr=el("tr"),anchor=["backlog","done","blocked"].includes(c.kind);
+    const tr=el("tr"),fixed=["backlog","done","blocked","parked"].includes(c.kind),anchor=fixed&&c.kind!=="parked";   // Parked has a fixed kind but may be removed
     const lb=field("input",{value:c.label,size:18,disabled:ro});lb.setAttribute("aria-label","label of "+c.id);lb.oninput=()=>{c.label=lb.value};
-    const kind=anchor?el("span",KINDS[c.kind]):field("select",{disabled:ro});
-    if(!anchor){for(const k of ["queue","work"])kind.append(new Option(KINDS[k],k));kind.value=c.kind;kind.onchange=()=>{c.kind=kind.value}}
+    const kind=fixed?el("span",KINDS[c.kind]):field("select",{disabled:ro});
+    if(!fixed){for(const k of ["queue","work"])kind.append(new Option(KINDS[k],k));kind.value=c.kind;kind.onchange=()=>{c.kind=kind.value}}
     const ops=el("td");
     ops.append(btn("↑",()=>{if(i)[d.columns[i-1],d.columns[i]]=[d.columns[i],d.columns[i-1]]},"move left"),
       btn("↓",()=>{if(i<d.columns.length-1)[d.columns[i+1],d.columns[i]]=[d.columns[i],d.columns[i+1]]},"move right"));
@@ -1416,8 +1419,8 @@ function columnsTab(){
     tr.append(el("td",c.id),(()=>{const td=el("td");td.append(lb);return td})(),k,el("td",String(held(c.id))),ops);cols.append(tr);
   });
   const id=field("input",{placeholder:"new column id, e.g. design",size:20,disabled:ro}),nl=field("input",{placeholder:"label",size:14,disabled:ro});
-  const nk=field("select",{disabled:ro});for(const k of ["queue","work"])nk.append(new Option(KINDS[k],k));nk.value="work";
-  const add=btn("Add column",()=>{const v=id.value.trim();if(!v)return;
+  const nk=field("select",{disabled:ro});for(const k of ["queue","work","parked"])nk.append(new Option(KINDS[k],k));nk.value="work";
+  const add=btn("Add column",()=>{const v=nk.value==="parked"?"parked":id.value.trim();if(!v||d.columns.some(c=>c.id===v))return;
     const at=d.columns.findIndex(c=>c.kind==="done");d.columns.splice(at<0?d.columns.length:at,0,{id:v,label:nl.value.trim()||v,kind:nk.value})});
   const addRow=el("div",null,"row");addRow.append(id,nl,nk,add);
   const ids=d.columns.map(c=>c.id),caps=cfg.capabilities;
@@ -1527,15 +1530,11 @@ async function loadMeta(){
   // repo -> its projects. A credential limited to some projects hears only of those.
   const pj=await meta("board_projects",{repos:{}}),listed=pj.repos;pstatus=pj.status||{};
   repos=Object.fromEntries(Object.entries(listed).map(([r,p])=>[r,Object.keys(p)]));
-  if(sel.repo&&!(sel.repo in repos))sel={repo:"",project:"",agent:sel.agent};
   if(sel.project&&!projects().includes(sel.project))sel={...sel,project:""};
 }
 (async()=>{
   $("actor").value=pref("actor")||"";
-  await loadMeta();
-  const r=pref("repo"),p=pref("project"),ps=pref("pstatus");
-  if(ps!==null&&(ps===""||STATUSES.includes(ps)))statusSel=ps;
-  if(r in repos&&(!p||repos[r].includes(p)))sel={repo:r,project:p||"",agent:""};
+  // Wire the controls first: loadMeta sets the actor field, and a click after that must not hit a dead button.
   $("actor").onchange=()=>pref("actor",$("actor").value);$("role").onchange=()=>pref("role",$("role").value);
   $("gear").onclick=openSettings;
   $("view").onclick=()=>setView(view==="roadmap"?"board":"roadmap");
@@ -1544,9 +1543,13 @@ async function loadMeta(){
   $("archive").onclick=()=>setView(view==="archive"?"board":"archive");
   $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
   $("boardv").onclick=()=>setView("board");
-  // New cards go to the chosen project, else to the chosen repository's own project.
-  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project||sel.repo;if(!t){$("title").focus();return}$("title").value="";act("card_add",{title:t,...(project&&{project})})};
+  // New cards go to the chosen project, else to the Inbox.
+  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project;if(!t){$("title").focus();return}$("title").value="";act("card_add",{title:t,...(project&&{project})})};
   $("title").onkeydown=e=>{if(e.key==="Enter")$("add").click()};
+  await loadMeta();
+  const p=pref("project"),ps=pref("pstatus");
+  if(ps!==null&&(ps===""||STATUSES.includes(ps)))statusSel=ps;
+  if(p&&projects().includes(p))sel={project:p,agent:""};
   try{await refresh()}catch(e){toast(e.message)}
   poll();
 })();

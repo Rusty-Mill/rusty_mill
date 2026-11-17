@@ -334,6 +334,25 @@ struct RegisteredAgentId {
     id: String,
 }
 
+/// Which registered agents to forget as stale, and whether to do it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StaleRevoke {
+    /// Unused for more than this many hours (2 to 720; default 24: above the hour a last use may lag on disk).
+    #[serde(default = "default_stale_hours")]
+    older_than_hours: i64,
+    /// Revoke them. Without it nothing changes and the answer is only the count.
+    #[serde(default)]
+    revoke: bool,
+    /// With `revoke`: only these ids (a previewed list), and only if still stale.
+    #[serde(default)]
+    ids: Option<Vec<String>>,
+}
+
+fn default_stale_hours() -> i64 {
+    24
+}
+
 #[derive(Deserialize)]
 struct AppId {
     client_id: String,
@@ -347,6 +366,18 @@ struct ProjectsSet {
     /// The version 2 registry (see `Projects::parse`): repositories and spanning projects.
     #[serde(default)]
     registry: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct ProjectLink {
+    project: String,
+    repo: String,
+    /// Paths the project owns in `repo` (none: the share no other project of it claims).
+    #[serde(default)]
+    paths: Vec<String>,
+    /// Remove the link instead of making it.
+    #[serde(default)]
+    unlink: bool,
 }
 
 #[derive(Deserialize)]
@@ -441,6 +472,12 @@ pub fn tools() -> Vec<SettingsTool> {
             &["id"],
         ),
         tool(
+            "settings_registered_agent_revoke_stale",
+            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin). A dry run unless `revoke: true`: it returns `count`, the agent `ids` it would revoke and `unsaved` (a revocation that failed to write: call again with `revoke: true` to write it). After a board restart, nothing counts as stale until `older_than_hours` have passed since the start. Revoked agents can register again.",
+            json!({"older_than_hours": {"type": "integer", "description": "2-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}, "ids": {"type": "array", "items": {"type": "string"}, "description": "With revoke: only these previewed ids, and only if still stale."}}),
+            &[],
+        ),
+        tool(
             "settings_agent_update",
             "Change a token credential's role or project limit (needs admin): `{agent: {name, role?, projects?}}`; `projects: null` lifts the limit. You can only give what you hold.",
             json!({"agent": {"type": "object"}}),
@@ -457,6 +494,12 @@ pub fn tools() -> Vec<SettingsTool> {
             "Replace the projects registry (needs admin): either `repos` (repository -> project -> paths) or `registry` (the version 2 file: repositories with an optional `github` slug and projects spanning repositories). A project that cards still use cannot lose the repository they are in.",
             json!({"repos": {"type": "object"}, "registry": {"type": "object"}}),
             &[],
+        ),
+        tool(
+            "settings_project_link",
+            "Link a project to a repository (needs admin): `{project, repo, paths?}` makes the project span `repo` too, owning `paths` there (none: what no other project of it claims); linking again replaces the paths. `unlink: true` removes the link; a project keeps at least one repository.",
+            json!({"project": text, "repo": text, "paths": {"type": "array", "items": text}, "unlink": {"type": "boolean"}}),
+            &["project", "repo"],
         ),
         tool(
             "settings_roles_set",
@@ -600,6 +643,7 @@ impl Settings {
             "settings_agent_remove" => |s, _, a| s.agent_remove(&parse(a)?),
             "settings_agent_rotate" => |s, by, a| s.agent_rotate(by, &parse(a)?),
             "settings_projects_set" => |s, _, a| s.projects_set(&parse(a)?),
+            "settings_project_link" => |s, _, a| s.project_link(&parse(a)?),
             "settings_roles_set" => |s, by, a| s.roles_set(by, &parse(a)?),
             "settings_role_rename" => |s, _, a| s.role_rename(&parse(a)?),
             "settings_github_set" => |s, _, a| s.github_set(&parse(a)?),
@@ -611,6 +655,9 @@ impl Settings {
             }
             "settings_registered_agent_set" => |s, by, a| s.registered_agent_set(by, &parse(a)?),
             "settings_registered_agent_revoke" => |s, _, a| s.registered_agent_revoke(&parse(a)?),
+            "settings_registered_agent_revoke_stale" => {
+                |s, _, a| s.registered_agent_revoke_stale(&parse(a)?)
+            }
             "settings_app_revoke" => |s, _, a| s.app_revoke(&parse(a)?),
             _ => return None,
         };
@@ -953,6 +1000,28 @@ impl Settings {
         }
     }
 
+    /// Forget registered agents unused for `older_than_hours`: a dry run unless `revoke`.
+    fn registered_agent_revoke_stale(&self, a: &StaleRevoke) -> Res {
+        if !(2..=720).contains(&a.older_than_hours) {
+            return Err(refused("older_than_hours is 2 to 720".to_owned()));
+        }
+        let age_ms = a.older_than_hours * 3600 * 1000;
+        let ids = if a.revoke {
+            let ids = self.board.revoke_stale_agents(age_ms, a.ids.as_deref())?;
+            rusty_log::warn!(
+                count = ids.len(),
+                hours = a.older_than_hours,
+                "stale registered agents revoked"
+            );
+            ids
+        } else {
+            self.board.stale_agents(age_ms)
+        };
+        Ok(
+            json!({"dry_run": !a.revoke, "older_than_hours": a.older_than_hours, "count": ids.len(), "ids": ids, "unsaved": self.board.agents_unsaved()}),
+        )
+    }
+
     /// Sign an app out: drop its registration and every token it holds. It can sign in again.
     fn app_revoke(&self, a: &AppId) -> Res {
         let provider = self
@@ -1089,6 +1158,23 @@ impl Settings {
                 ));
             }
         };
+        self.apply_projects(path, new)
+    }
+
+    fn project_link(&self, a: &ProjectLink) -> Res {
+        let path = self.file(&self.files.projects)?;
+        let old = self.board.projects();
+        let new = if a.unlink {
+            old.without_link(&a.project, &a.repo)
+        } else {
+            old.with_link(&a.project, &a.repo, &a.paths)
+        }
+        .map_err(refused)?;
+        self.apply_projects(path, new)
+    }
+
+    /// Check `new` against the agents' project limits, then write and apply it together.
+    fn apply_projects(&self, path: PathBuf, new: Projects) -> Res {
         if let Some(creds) = &self.creds {
             let creds = creds.read().unwrap_or_else(PoisonError::into_inner);
             if let Some((who, p)) = creds.list().find_map(|i| {

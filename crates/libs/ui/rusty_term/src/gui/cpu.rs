@@ -480,13 +480,21 @@ pub(crate) fn draw_grid(
             continue;
         }
         let swapped = !on_status && (block_cursor(col, row) || inverted(col, row));
-        let base_fg = if swapped {
-            cell.bg
+        // Same resolution order as the glyph pass: cursor, selection, search.
+        let (base_fg, under_bg) = if !on_status && block_cursor(col, row) {
+            (cell.bg, grid.cursor_color)
+        } else if swapped {
+            (cell.bg, cell.fg)
         } else if !on_status && let Some(cur) = search_hl(col, row) {
-            search.pair(cur).1
+            let (bg, fg) = search.pair(cur);
+            (fg, bg)
         } else {
-            cell.fg
+            (cell.fg, cell.bg)
         };
+        // Decorations obey `minimum_contrast` like the glyph they sit on
+        // (the GPU path already does), against the same painted background.
+        let min = grid.min_contrast;
+        let base_fg = crate::core::ensure_contrast(base_fg, under_bg, min);
         let Some((x0, cw)) = cell_x(col, row) else {
             continue;
         };
@@ -503,7 +511,7 @@ pub(crate) fn draw_grid(
         };
         if underline {
             let color = if !swapped && !hovered && cell.flags & ATTR_UNDERLINE_COLOR != 0 {
-                cell.underline_color
+                crate::core::ensure_contrast(cell.underline_color, under_bg, min)
             } else {
                 base_fg
             };
@@ -1188,6 +1196,45 @@ mod tests {
         let mut buf = vec![0u32; w * h];
         render(&g, &[], &mut MockFont, &mut buf, w, h, true);
         assert_eq!(buf[6 * w], 0x0000FF);
+    }
+
+    #[test]
+    fn decorations_follow_minimum_contrast() {
+        // Dark grey underline/strike/overline and SGR 58 colour on black:
+        // with `minimum_contrast` they are lifted like the glyph (#690 T3).
+        for bytes in [
+            &b"\x1b[38;2;40;40;40m\x1b[4m "[..],
+            b"\x1b[38;2;40;40;40m\x1b[9m ",
+            b"\x1b[38;2;40;40;40m\x1b[53m ",
+            b"\x1b[38;2;255;255;255m\x1b[4m\x1b[58;2;40;40;40m ",
+        ] {
+            for (min, lifted) in [(1.0, false), (4.5, true)] {
+                let mut g = Grid::new(1, 1);
+                g.min_contrast = min;
+                AnsiParser::new().advance(&mut g, bytes);
+                let (w, h) = (4usize, 8usize);
+                let mut buf = vec![0u32; w * h];
+                render(&g, &[], &mut MockFont, &mut buf, w, h, true);
+                let ink = buf.iter().copied().find(|&px| px != 0).expect("a stripe");
+                let ratio = crate::core::contrast_ratio(ink, 0x000000);
+                assert_eq!(ratio >= 4.5, lifted, "{bytes:?} min {min}: {ink:06x}");
+            }
+        }
+    }
+
+    #[test]
+    fn block_cursor_decorations_contrast_against_the_cursor_colour() {
+        // Black cell, white block cursor, 7:1: the stripe is the cell bg
+        // (black) on the white cursor and must stay readable, not be lifted
+        // toward white against a background that isn't painted.
+        let mut g = Grid::new(1, 1);
+        g.min_contrast = 7.0;
+        g.cursor_color = 0xFFFFFF;
+        AnsiParser::new().advance(&mut g, b"\x1b[2 q\x1b[30m\x1b[4m \x1b[H"); // steady block, cursor back home
+        let (w, h) = (4usize, 8usize);
+        let mut buf = vec![0u32; w * h];
+        render(&g, &[], &mut MockFont, &mut buf, w, h, true);
+        assert_eq!(buf[6 * w], 0x000000, "underline on the white cursor");
     }
 
     /// A 4x8 render of a 1x1 grid after `bytes`.

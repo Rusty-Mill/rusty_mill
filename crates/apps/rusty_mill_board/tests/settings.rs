@@ -195,6 +195,31 @@ fn registered_agents_are_listed_and_an_unknown_one_cannot_be_revoked() {
         &json!({"id": "x/abcdef"}),
     );
     assert_eq!(status, 422);
+    // Stale revoke: a dry run by default, and the age is bounded.
+    let (status, out, text) = f.admin("settings_registered_agent_revoke_stale", &json!({}));
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(
+        (
+            out["dry_run"].clone(),
+            out["count"].clone(),
+            out["older_than_hours"].clone()
+        ),
+        (json!(true), json!(0), json!(24))
+    );
+    assert_eq!(out["unsaved"], json!(false));
+    for body in [
+        json!({"older_than_hours": 1}),
+        json!({"older_than_hours": 721}),
+        json!({"hours": 24}),
+    ] {
+        let (status, _, text) = f.admin("settings_registered_agent_revoke_stale", &body);
+        assert!(status == 422 || status == 400, "{body}: {status} {text}");
+    }
+    let (status, out, _) = f.admin(
+        "settings_registered_agent_revoke_stale",
+        &json!({"revoke": true}),
+    );
+    assert_eq!((status, out["dry_run"].clone()), (200, json!(false)));
     // Setting a grant: an unknown agent, and a role or project that does not exist, are refused.
     for body in [
         json!({"id": "x#abcdef", "agent_role": "builder"}),
@@ -219,11 +244,13 @@ fn only_an_admin_may_change_settings() {
         "settings_agent_remove",
         "settings_agent_rotate",
         "settings_projects_set",
+        "settings_project_link",
         "settings_roles_set",
         "settings_role_rename",
         "settings_github_set",
         "settings_github_clear",
         "settings_registered_agent_revoke",
+        "settings_registered_agent_revoke_stale",
         "settings_registered_agent_set",
         "settings_rules_set",
     ] {
@@ -811,6 +838,72 @@ fn a_registry_with_a_spanning_project_is_saved_read_back_and_kept_while_cards_us
     assert_eq!(
         std::fs::read_to_string(f.file("projects.json")).expect("read"),
         before
+    );
+}
+
+#[test]
+fn a_project_is_linked_to_a_repository_and_unlinked_again() {
+    let f = start("link");
+    let registry = json!({
+        "version": 2,
+        "repos": {"mill": {}, "py": {}},
+        "projects": {"tooling": {"repos": {"mill": [".github"]}}},
+    });
+    assert_eq!(
+        f.admin("settings_projects_set", &json!({"registry": registry}))
+            .0,
+        200
+    );
+    let link = |extra: Value| {
+        let mut body = json!({"project": "tooling", "repo": "py"});
+        body.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().cloned().unwrap_or_default());
+        f.admin("settings_project_link", &body)
+    };
+    let (status, _, text) = link(json!({"paths": ["ci"]}));
+    assert_eq!(status, 200, "{text}");
+    let on_disk = std::fs::read_to_string(f.file("projects.json")).expect("file");
+    assert!(
+        on_disk.contains("\"version\": 2") && on_disk.contains("\"ci\""),
+        "{on_disk}"
+    );
+    let (_, got, _) = f.admin("settings_get", &json!({}));
+    assert_eq!(
+        got["registry"]["projects"]["tooling"]["repos"]["py"],
+        json!(["ci"])
+    );
+    // Refused: an unknown repository; and a repository a card is in.
+    let (status, _, _) = f.admin(
+        "settings_project_link",
+        &json!({"project": "tooling", "repo": "nope"}),
+    );
+    assert_eq!(status, 422);
+    let (status, _, text) = f.admin(
+        "card_add",
+        &json!({"title": "t", "project": "tooling", "repo": "py"}),
+    );
+    assert_eq!(status, 200, "{text}");
+    let (status, _, text) = link(json!({"unlink": true}));
+    assert_eq!(
+        (status, text.contains("move the card")),
+        (422, true),
+        "{text}"
+    );
+    // The other link can go; the project keeps its last repository.
+    let (status, _, text) = f.admin(
+        "settings_project_link",
+        &json!({"project": "tooling", "repo": "mill", "unlink": true}),
+    );
+    assert_eq!(status, 200, "{text}");
+    let (status, _, text) = f.admin(
+        "settings_project_link",
+        &json!({"project": "tooling", "repo": "py", "unlink": true}),
+    );
+    assert_eq!(
+        (status, text.contains("only repository")),
+        (422, true),
+        "{text}"
     );
 }
 
@@ -1479,5 +1572,7 @@ fn settings_are_mcp_tools_except_those_that_carry_a_secret() {
         &f.admin,
         &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"settings_get","arguments":{}}}),
     );
-    assert!(got["structuredContent"]["roles"].is_object(), "{got}");
+    let text = got["content"][0]["text"].as_str().expect("text result");
+    let parsed: serde_json::Value = serde_json::from_str(text).expect("text is the JSON result");
+    assert!(parsed["roles"].is_object(), "{got}");
 }

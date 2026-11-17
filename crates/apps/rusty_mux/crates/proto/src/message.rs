@@ -228,6 +228,23 @@ impl Features {
     /// without it: a server on a tailnet says when its node changes state.
     pub const TAILSCALE_STATUS: Self = Self(1 << 45);
 
+    /// Live sharing (C14): [`Message::ShareSession`] and
+    /// [`Message::UnshareSession`] give a client watch-only grants on a
+    /// session's blocks, announced by [`Event::ShareChanged`] (skipped for
+    /// a client without it).
+    pub const SHARING: Self = Self(1 << 46);
+
+    /// `terminal.list-dir` (C08): a client's directory browse reads a
+    /// directory on the server's host.
+    pub const DIR_LISTING: Self = Self(1 << 47);
+
+    /// Clipboard reads (C54): a program's OSC 52 read is asked of the
+    /// block's input-lease holder as [`Message::ClipboardRead`], which
+    /// answers with [`Message::ClipboardReply`] if its own policy allows.
+    /// The server never answers a read for a client, and no clipboard text
+    /// goes in an event.
+    pub const CLIPBOARD: Self = Self(1 << 48);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -319,6 +336,9 @@ const NAMES: &[(Features, &str)] = &[
     (Features::HOLD, "hold on exit"),
     (Features::SIGNAL_RELEASE, "signal and release"),
     (Features::TAILSCALE_STATUS, "tailscale status"),
+    (Features::SHARING, "live sharing"),
+    (Features::DIR_LISTING, "directory listing"),
+    (Features::CLIPBOARD, "clipboard reads"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -762,6 +782,28 @@ pub enum Message {
         block: BlockId,
         client: ClientId,
     },
+    /// Shares `session` with `client` until `until`, unix ms on the server's
+    /// clock and at most a day ahead (C14): `client` may attach to its
+    /// blocks, present and future, and watch, but never takes a lease
+    /// without a [`Message::GrantLease`]. Replaces the client's earlier
+    /// share. Only a client of the server's account or of the session's
+    /// creator may send it, and only a shared server accepts it. Blocks
+    /// whose lease the sender may not grant are left out. Negotiated with
+    /// [`Features::SHARING`].
+    ShareSession {
+        req: u64,
+        session: SessionId,
+        client: ClientId,
+        until: u64,
+    },
+    /// Ends `client`'s share of `session`, and with it every watch it
+    /// holds there: it is detached at once. Same senders as
+    /// [`Message::ShareSession`]. Negotiated with [`Features::SHARING`].
+    UnshareSession {
+        req: u64,
+        session: SessionId,
+        client: ClientId,
+    },
     /// Asks the owner of owner-only `block` to grant this client its lease.
     /// Done once the owner has been told, which grants nothing: a grant
     /// shows as [`Event::GrantChanged`]. Refused for the owner itself, for
@@ -794,6 +836,17 @@ pub enum Message {
     ReleaseBlock {
         req: u64,
         block: BlockId,
+    },
+    /// Answers [`Message::ClipboardRead`] with `data`, the `selection`'s
+    /// text, or `None` to deny; a denial writes an empty answer to the
+    /// program. Accepted only from the block's lease holder, like input,
+    /// and only once for a read it was asked and has not answered.
+    /// Negotiated with [`Features::CLIPBOARD`].
+    ClipboardReply {
+        req: u64,
+        block: BlockId,
+        selection: Selection,
+        data: Option<Vec<u8>>,
     },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
@@ -906,6 +959,13 @@ pub enum Message {
         block: BlockId,
         client: ClientId,
         principal: Principal,
+    },
+    /// A program in `block` reads `selection` (OSC 52); sent to the block's
+    /// lease holder only, and never an event. Negotiated with
+    /// [`Features::CLIPBOARD`].
+    ClipboardRead {
+        block: BlockId,
+        selection: Selection,
     },
     /// The block's [`Echo`] changed, or the client just attached; it
     /// precedes the Output read after the change. Negotiated with
@@ -1060,8 +1120,11 @@ mod ty {
     pub const REVOKE_LEASE: u8 = 0x22;
     pub const REQUEST_LEASE: u8 = 0x23;
     pub const SHUTDOWN: u8 = 0x24;
+    pub const SHARE_SESSION: u8 = 0x25;
+    pub const UNSHARE_SESSION: u8 = 0x26;
     pub const SIGNAL_BLOCK: u8 = 0x28;
     pub const RELEASE_BLOCK: u8 = 0x29;
+    pub const CLIPBOARD_REPLY: u8 = 0x2a;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -1078,6 +1141,7 @@ mod ty {
     pub const INPUT_BATCH: u8 = 0x8e;
     pub const LEASE_REQUESTED: u8 = 0x8f;
     pub const HISTORY: u8 = 0x90;
+    pub const CLIPBOARD_READ: u8 = 0x91;
 }
 
 impl Message {
@@ -1216,6 +1280,18 @@ impl Message {
                 req_block(out, *req, *block, ty::SIGNAL_BLOCK)
             }
             M::ReleaseBlock { req, block } => req_block(out, *req, *block, ty::RELEASE_BLOCK),
+            M::ClipboardReply {
+                req,
+                block,
+                selection,
+                data,
+            } => {
+                out.varint(SELECTION, selection_wire(*selection));
+                if let Some(data) = data {
+                    out.bytes(DATA, data);
+                }
+                req_block(out, *req, *block, ty::CLIPBOARD_REPLY)
+            }
             M::ResizeSplit {
                 req,
                 block,
@@ -1284,6 +1360,28 @@ impl Message {
                     .varint(UNTIL, *until);
                 ty::GRANT_LEASE
             }
+            M::ShareSession {
+                req,
+                session,
+                client,
+                until,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(SESSION, session.uuid())
+                    .uuid(CLIENT, client.uuid())
+                    .varint(UNTIL, *until);
+                ty::SHARE_SESSION
+            }
+            M::UnshareSession {
+                req,
+                session,
+                client,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(SESSION, session.uuid())
+                    .uuid(CLIENT, client.uuid());
+                ty::UNSHARE_SESSION
+            }
             M::RevokeLease { req, block, client } => {
                 out.varint(REQ, *req)
                     .uuid(BLOCK, block.uuid())
@@ -1311,6 +1409,11 @@ impl Message {
                 out.uuid(BLOCK, block.uuid()).uuid(CLIENT, client.uuid());
                 put_principal(out, principal);
                 ty::LEASE_REQUESTED
+            }
+            M::ClipboardRead { block, selection } => {
+                out.uuid(BLOCK, block.uuid())
+                    .varint(SELECTION, selection_wire(*selection));
+                ty::CLIPBOARD_READ
             }
             M::Welcome {
                 features,
@@ -1531,6 +1634,12 @@ impl Message {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
             },
+            ty::CLIPBOARD_REPLY => M::ClipboardReply {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                selection: selection(&f)?,
+                data: f.opt(DATA, |f, id| f.bytes(id).map(<[u8]>::to_vec))?,
+            },
             ty::RESIZE_SPLIT => M::ResizeSplit {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
@@ -1580,6 +1689,17 @@ impl Message {
                 client: client(&f, CLIENT)?,
                 until: f.varint(UNTIL)?,
             },
+            ty::SHARE_SESSION => M::ShareSession {
+                req: f.varint(REQ)?,
+                session: session(&f, SESSION)?,
+                client: client(&f, CLIENT)?,
+                until: f.varint(UNTIL)?,
+            },
+            ty::UNSHARE_SESSION => M::UnshareSession {
+                req: f.varint(REQ)?,
+                session: session(&f, SESSION)?,
+                client: client(&f, CLIENT)?,
+            },
             ty::REVOKE_LEASE => M::RevokeLease {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
@@ -1594,6 +1714,10 @@ impl Message {
             ty::REQUEST_LEASE => M::RequestLease {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
+            },
+            ty::CLIPBOARD_READ => M::ClipboardRead {
+                block: block(&f, BLOCK)?,
+                selection: selection(&f)?,
             },
             ty::LEASE_REQUESTED => M::LeaseRequested {
                 block: block(&f, BLOCK)?,
@@ -1961,6 +2085,7 @@ mod kind {
     pub const FOCUS_CHANGED: u64 = 32;
     pub const GRANT_CHANGED: u64 = 33;
     pub const TAILSCALE_STATUS_CHANGED: u64 = 34;
+    pub const SHARE_CHANGED: u64 = 35;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -1997,6 +2122,18 @@ fn put_event(out: &mut Out, event: &Event) {
         } => {
             out.varint(KIND, kind::GRANT_CHANGED)
                 .uuid(BLOCK, block.uuid())
+                .uuid(CLIENT, client.uuid());
+            if let Some(until) = until {
+                out.varint(UNTIL, until);
+            }
+        }
+        E::ShareChanged {
+            session,
+            client,
+            until,
+        } => {
+            out.varint(KIND, kind::SHARE_CHANGED)
+                .uuid(SESSION, session.uuid())
                 .uuid(CLIENT, client.uuid());
             if let Some(until) = until {
                 out.varint(UNTIL, until);
@@ -2256,6 +2393,11 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         },
         kind::GRANT_CHANGED => E::GrantChanged {
             block: block(f, BLOCK)?,
+            client: client(f, CLIENT)?,
+            until: f.opt(UNTIL, In::varint)?,
+        },
+        kind::SHARE_CHANGED => E::ShareChanged {
+            session: session(f, SESSION)?,
             client: client(f, CLIENT)?,
             until: f.opt(UNTIL, In::varint)?,
         },

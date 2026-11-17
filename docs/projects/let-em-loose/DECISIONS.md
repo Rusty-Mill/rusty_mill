@@ -144,6 +144,9 @@ Precise contracts used by this guide:
 | D134 | #1124: no paid runs for now; the first smoke run is local-only and no spend ceiling is authorised | [stated] 2026-11-16 (1124, 1166) |
 | D135 | #1123: Factory gets a top-level `lenses/` and `lens.json` | [stated] 2026-11-16 (1123) |
 | D136 | #1123: the operator lens loads no knowledge file in v0; its prompt stays flat (D34) | [stated] 2026-11-16 (1123) |
+| D137 | `rusty_orch lens breaker` is a read-only report with no reset | [default] 2026-11-17 (#758) |
+| D138 | orch maps `sensitive_paths` to launcher `hide` via agents.json, and `real_data` to `bbp dry-run` | [default] 2026-11-17 (#758) |
+| D139 | A lens post with no taint entry reads as `sensitive` (unknown ids from lost posts) | [default] 2026-11-17 (#758) |
 
 ## D1. Lenses, not stages
 
@@ -1340,3 +1343,30 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_69d5e68802c74fe29c21ff8c15684468
 **Key.** lel:1123:operator-lens-no-knowledge-v0
 **Source.** Nano, Let Em Loose project thread "Update Let Em Loose card statuses", message `cmsg_01WgyiM31RsSnZTgNuPX2VE4QN6xVQMjn5R66V99qaAV3F`, 2026-11-16T18:54:44Z, verbatim "1. Yes 2. No", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE4G61A94yPvYnAq2kXZprtE5`; repeated 2026-11-17T02:19:18Z (`cmsg_01WgyiM31RsSnZTgNuPX2VE4QtLAqh3fwqpLiBmAuUesYN`, "1. Yes. 2. No,"). ESCALATE 2 of `1123-lens-prompts.md`, option a. Relates to D34, D127, D133.
+
+## D137. `rusty_orch lens breaker` is a read-only report with no reset
+
+**Decision.** `rusty_orch lens breaker <config> --bbp --dir --task --state --experiment` (card #758 item 2, every flag required) is read-only and has no `reset`. It prints one JSON line: the lens config's breaker (`mode`, `window_calls`, `window_micro_usd`, `min_score_move`), the task's meter calls and spend (a read-only orch-store read, restored as `lens run` restores it, so a reservation held at a crash counts), the taint table's counts per class, and whether the task is paused, with the latest `task_paused` reason and detail from BBP. Would-trips are not recomputed: they are in the runner log (S8). Resuming a paused task stays the human's `resumed(open)`, and a new `lens run` opens a new window.
+**Why.** D86 and 598-build/PLAN.md make the command a read-only report. S8 keeps no breaker table and the meter stores only per-task totals, so there is no window to reset or replay; adding either would be new design under D127.
+**Rejected.** A `reset` subcommand; persisting windows so past would-trips can be rebuilt.
+**Tag.** [default] · remind-me: mem_f27c9299e16a4296b20b69cbac7b212c
+**Key.** lel:758:lens-breaker-report
+**Source.** let-em-loose-expert, 2026-11-17, for the #758 build session (PR #1764). D86; PLAN PR 3 and S8; `orch-store/src/meters.rs`.
+
+## D138. orch maps `sensitive_paths` to launcher `hide` via agents.json, and `real_data` to `bbp dry-run`
+
+**Decision.** Card #758 item 3, inside D62's approved Factory keys. The only path from orch to the host's filtered view is orch-bbp's `agents.json` (`materialize`, read by `bbp mod --agents` into `HarnessSandbox.hide`). So `orch_bbp::Sandbox` gains `hide` (passed through unchanged, omitted when empty), and `orch_bbp::Config` gains `sensitive_paths` (globs), copied into the `hide` of every confined pool agent. With non-empty `sensitive_paths`, load refuses a pool agent with no `sandbox` (fail closed); glob and root checks stay the host's (`confine.rs`). `real_data` (`{name: abs_path}`, names `[a-z0-9_-]+`, absolute paths) sits beside it, validated at load, and maps to `bbp dry-run --name N --data a=/p,b=/q --work DIR -- PROGRAM ARGS` (comma-separated, B4) through one thin orch pass-through that prints only bbp's summary (plan path and line count), never the plan. `lens run` is unchanged: it launches no harness and reads only through `bbp mcp`, so its data boundary is the classes and taint of item 1.
+**Why.** Putting each key where it is consumed is the most reversible choice; the host already does the filtering, refusal and dry-run confinement (#1499).
+**Rejected.** Keys on the lens config (nothing there launches a harness or a dry run); hiding paths in `lens run`'s MCP reads (a host change); letting an unconfined agent run with `sensitive_paths` set.
+**Tag.** [default] · remind-me: mem_2c2213dcd287429e8d8c64398a3737f4
+**Key.** lel:758:sensitive-paths-real-data-mapping
+**Source.** let-em-loose-expert, 2026-11-17, for the #758 build session. D62; PLAN PR 3, S4, B4; `rusty_bbp_host/src/confine.rs` (`HarnessSandbox.hide`), `filtered.rs`, `dry_run.rs`, `bin/bbp.rs` (`dry-run` usage); `orch-bbp/src/lib.rs` (`materialize`), `orch-bbp/src/config.rs`.
+
+## D139. A lens post with no taint entry reads as `sensitive` (unknown ids from lost posts)
+
+**Decision.** Card #758 item 1, inside the approved taint rule (598-build/PLAN.md PR 3; D59, D62). Every landed lens post gets a taint entry. When a post's answer is lost twice (`PostError { unsure: true }`), its id is unknown and no entry can be written. This also happens when the run stops between a post and `save_taints`. So when a Session builds cards and lines, any message whose `from` is a lens principal and has no entry in the current taint table reads as `sensitive`. A lens principal is a configured one (lens ids and the alien id), a lens id the run's persisted state has jobs for (kept or in flight), or any author of a message the table has an entry for, since only lens posts are tainted. That keeps a lens that was later removed or renamed covered from the run's own history, independent of the current config. `from` is the session principal, which `Child::spawn` sets to the lens id through `BBP_PRINCIPAL`. The rule is checked when cards are built and never saved, so a post whose entry lands later reads at its real class. `partial` is unchanged, and the run still halts with `Halt::Board`.
+**Why.** It fails closed in the same round, after a crash and on every later run, with no new orch-store record, no BBP change and no new pause reason, so it adds no new design under D127. D86 already rules out inferring an unknown post's id.
+**Rejected.** Reading forward after an unsure post and tainting the lens's own new messages, because that covers only the same round. Persisting the unsure op and replaying it at the next start, because that is a new store record. Pausing the task on an unsure post, because that is a new pause reason and new behaviour. Leaving it as a documented gap, because it breaks D59's rule that sensitive data stays local. Matching on `from_role`, because it is `None` for human posts and depends on the roster.
+**Tag.** [default] · remind-me: mem_4c08e98488ae4605a4afe1e41af0e4f4
+**Key.** lel:758:unknown-lens-post-reads-sensitive
+**Source.** let-em-loose-expert, 2026-11-17, answering a Codex P1 finding on PR #1764 (`orch-lens/src/round.rs` `partial`). 598-build/PLAN.md, D59, D62, D86, D127. Numbered D139 after D138.

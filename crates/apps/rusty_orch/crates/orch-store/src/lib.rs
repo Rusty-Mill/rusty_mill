@@ -44,6 +44,9 @@ use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::record_blob::Fnv1a64;
 use rusty_multimodal_db_engine::durability::DurabilityError;
 use rusty_multimodal_db_engine::generic::query::{AllIds, GetById};
+use rusty_multimodal_db_engine::generic::traits::{
+    IndexedField, Record, ScannableField, SchemaTag,
+};
 use rusty_multimodal_db_engine::generic::GenericMmapStore;
 
 use assignments::{AssignmentRecord, LegacyAssignmentRecord};
@@ -649,19 +652,41 @@ impl Store {
     /// [`StoreError::Engine`] or [`StoreError::Corrupt`] when the table
     /// cannot be read.
     pub fn read_lens_reviews(dir: &Path, board: &str) -> Result<Vec<Review>, StoreError> {
-        let _lock = DirLock::acquire_existing(dir, LOCK_FILE).map_err(|e| match e {
-            DirLockError::Io(path, e) if e.kind() == std::io::ErrorKind::NotFound => {
-                StoreError::Missing(path)
-            }
-            e => e.into(),
-        })?;
-        let path = dir.join(LENS_RECORDS_FILE);
-        if !path.is_file() {
-            return Err(StoreError::Missing(path));
-        }
-        let records =
-            GenericMmapStore::<LensRecordRecord, ById, Revision>::read_portable_records(&path)?;
+        let records = read_table::<LensRecordRecord>(dir, LENS_RECORDS_FILE)?
+            .ok_or_else(|| StoreError::Missing(dir.join(LENS_RECORDS_FILE)))?;
         reviews(records, board)
+    }
+
+    /// [`Store::load_meter`] for the store in `dir`, read without changing
+    /// anything, as [`Store::read_lens_reviews`]. `None` when no meter was
+    /// saved under `experiment`, or the store has no meter table yet.
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::read_lens_reviews`], without the missing table.
+    pub fn read_meter(dir: &Path, experiment: &str) -> Result<Option<Snapshot>, StoreError> {
+        let records = read_table::<MeterRecord>(dir, METERS_FILE)?.unwrap_or_default();
+        let id = meters::key(experiment);
+        records
+            .into_iter()
+            .find(|r| r.id() == id)
+            .map(|r| r.into_snapshot(experiment))
+            .transpose()
+    }
+
+    /// [`Store::load_taints`] for the store in `dir`, read without changing
+    /// anything, as [`Store::read_lens_reviews`]; empty when none was saved.
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::read_lens_reviews`], without the missing table.
+    pub fn read_taints(dir: &Path, task: &str) -> Result<Taints, StoreError> {
+        let records = read_table::<TaintRecord>(dir, TAINTS_FILE)?.unwrap_or_default();
+        let id = taints::key(task);
+        records
+            .into_iter()
+            .find(|r| r.id() == id)
+            .map_or(Ok(Taints::default()), |r| r.into_taints(task))
     }
 
     /// BBP task `task`'s taint table; empty when none was saved.
@@ -726,6 +751,33 @@ fn merge(mut old: Review, row: &Review) -> Review {
     old.unsure |= row.unsure || (row.pending && old.pending);
     old.pending = row.pending;
     old
+}
+
+/// Every saved record of the table `file` in the store at `dir`, read under
+/// the directory's existing lock and recovered as [`Store::open`] would,
+/// writing nothing; `None` when the table file doesn't exist.
+fn read_table<R>(dir: &Path, file: &str) -> Result<Option<Vec<R>>, StoreError>
+where
+    R: IndexedField<ById, Id = i64>
+        + ScannableField<Revision, ScanValue = i64>
+        + SchemaTag
+        + Clone
+        + serde::Serialize
+        + serde::de::DeserializeOwned,
+{
+    let _lock = DirLock::acquire_existing(dir, LOCK_FILE).map_err(|e| match e {
+        DirLockError::Io(path, e) if e.kind() == std::io::ErrorKind::NotFound => {
+            StoreError::Missing(path)
+        }
+        e => e.into(),
+    })?;
+    let path = dir.join(file);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(
+        GenericMmapStore::<R, ById, Revision>::read_portable_records(&path)?,
+    ))
 }
 
 /// Every blind review job in `records` saved for `board`, sorted by lens,

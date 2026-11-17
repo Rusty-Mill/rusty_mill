@@ -1,4 +1,4 @@
-// Browser check of the scope bar: a repository picker, the projects as chips, then the agents;
+// Browser check of the scope bar: a project picker (projects only, never repositories), the projects as chips, then the agents;
 // filtering the board, adding into the selection, and moving a card between projects from its dialog.
 //
 //   cat > /tmp/p.json <<'J'
@@ -37,31 +37,25 @@ await page.waitForSelector(".card");
 await page.fill("#actor", "tester");
 const titles = async () => (await page.locator(".card b").allInnerTexts()).sort();
 const items = async (nav) => (await page.locator(`${nav} .item`).allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim());
-const repoButtons = () => items("#nav1");
-const repoOptions = async () => (await page.locator("#repo option").allInnerTexts()).map((t) => t.trim());
-const repo = (name) => page.selectOption("#repo", name);
+const projectOptions = async () => (await page.locator("#project option").allInnerTexts()).map((t) => t.trim());
+const pick = (name) => page.selectOption("#project", name);
 
-check((await titles()).length === 4, "all repositories show every card");
-check((await repoOptions()).join("|") === "All repositories · 4|rusty_mill · 3|super_board · 1", `the picker lists repositories with counts (${await repoOptions()})`);
-const rows = await repoButtons();
-check(rows.slice(0, 6).join("|") === "Inbox 0|orch 1|rl 1|rusty_mill 1|skills 1|super_board 0", `the Inbox first even when empty, then every project of a repository with several (${rows.slice(0, 6).join("|")})`);
-check(rows.slice(6).join("|") === "Everyone 1|claude 1", `agents holding claims are listed with their counts (${rows.slice(6).join("|")})`);
+check((await titles()).length === 4, "all projects show every card");
+check((await projectOptions()).join("|") === "All projects · 4|Inbox · 0|orch · 1|rl · 1|rusty_mill · 1|skills · 1|super_board · 0", `the picker lists projects only, with counts (${await projectOptions()})`);
+check((await page.locator("#repo").count()) === 0 && (await page.locator("#project optgroup").count()) === 0, "no repository picker or repository grouping");
+const rows = await items("#nav1");
+check(rows.slice(-2).join("|") === "Everyone 1|claude 1", `agents holding claims are listed with their counts (${rows.slice(-2).join("|")})`);
 
 const project = (name) => page.locator("#nav1 .item").filter({ hasText: new RegExp(`^${name}\\d`) });
 await project("skills").click();
 check((await titles()).join() === "Skills card", "choosing a project shows only its cards");
 await project("skills").click();
-check((await titles()).length === 1 && (await page.locator("#nav1 .item.on", { hasText: "skills" }).count()) === 0, "clicking the chosen project again clears it");
-await repo("");
-check((await titles()).length === 4, "All repositories clears it");
-
-
-await repo("super_board");
-check((await titles()).join() === "Skills card", "choosing a repository filters the board");
-await repo("rusty_mill");
-check((await titles()).join() === "Mill loose card,Orch card,RL card", "another repository, its three cards");
-const listed = (await repoButtons()).slice(1, -2).join("|");
-check(listed === "orch 1|rl 1|rusty_mill 1", `and the Projects list narrows to that repository's projects (${listed})`);
+check((await titles()).length === 4 && (await page.locator("#nav1 .item.on", { hasText: "skills" }).count()) === 0, "clicking the chosen project again clears it");
+await pick("");
+check((await titles()).length === 4, "All projects clears it");
+await pick("skills");
+check((await titles()).join() === "Skills card", "choosing a project in the picker filters the board");
+await pick("");
 
 await project("rl").click();
 check((await titles()).join() === "RL card", "choosing a project narrows further");
@@ -72,16 +66,17 @@ await page.click("#add");
 await page.waitForFunction(() => [...document.querySelectorAll(".card b")].some((b) => b.textContent === "Added under rl"));
 check((await api("board_list", { project: "rl" })).cards.some((c) => c.title === "Added under rl"), "a card added while a project is chosen belongs to it");
 
-await repo("rusty_mill");
+await pick("rusty_mill");
 await page.fill("#title", "Added under repo");
 await page.click("#add");
 await page.waitForFunction(() => [...document.querySelectorAll(".card b")].some((b) => b.textContent === "Added under repo"));
-const own = (await api("board_list", { project: "rusty_mill" })).cards.map((c) => c.title);
-check(own.includes("Added under repo"), "with only a repository chosen, it goes to the repository's own project");
-check((await page.locator(".card .tag.proj").count()) === 5, "chips name each card's project when several are shown");
+check((await api("board_list", { project: "rusty_mill" })).cards.some((c) => c.title === "Added under repo"), "a card added under the chosen project belongs to it");
+await pick("");
+check((await page.locator(".card .tag.proj").count()) === 6, "chips name each card's project when several are shown");
+await pick("rl");
 
 await page.locator(".card", { hasText: "Added under rl" }).click();
-check((await page.locator("#dlg optgroup").count()) === 3, "the dialog groups projects by repository");
+check((await page.locator("#dlg optgroup").count()) === 0, "the dialog lists projects flat, not grouped by repository");
 check((await page.locator("#dlg option[value=default]").innerText()) === "Inbox", "the default project is offered as the Inbox");
 await page.locator('#dlg select[aria-label="project"]').selectOption("skills");
 await sleep(600);
@@ -92,7 +87,8 @@ check(!(await titles()).includes("Added under rl"), "it leaves the filtered view
 
 await page.reload();
 await page.waitForSelector(".card");
-check((await page.inputValue("#repo")) === "rusty_mill", "the chosen repository is remembered");
+check((await page.inputValue("#project")) === "rl", "the chosen project is remembered");
+await pick("");
 
 // Each agent has one colour, shared by its card and its entry in the panel.
 const swatch = (loc) => loc.evaluate((e) => getComputedStyle(e).backgroundColor);
@@ -111,7 +107,7 @@ const board = (await api("board_list")).cards;
 for (const [title, actor] of [["Skills card", "codex"], ["Mill loose card", "gemini"], ["Added under repo", "mill-runner"], ["Orch card", "claude"]]) {
   await api("card_claim", { id: board.find((c) => c.title === title).id, actor, role: "builder" });
 }
-await repo("");
+await pick("");
 await page.waitForFunction(() => document.querySelectorAll("#nav1 .item .dot").length >= 4);
 const colours = await Promise.all(["claude", "codex", "gemini", "mill-runner"].map(dotOf));
 check(new Set(colours).size === 4, `four agents, four colours (${colours.join(" ")})`);

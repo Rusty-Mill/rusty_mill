@@ -55,7 +55,7 @@ const BUTTON_H: f32 = 28.0;
 const BUTTON_PAD: f32 = 12.0;
 const BUTTON_R: f32 = 6.0;
 /// Footer height, side padding, space between groups and before a label.
-const FOOT_H: f32 = 34.0;
+pub(crate) const FOOT_H: f32 = 34.0;
 const FOOT_PAD: f32 = 14.0;
 const FOOT_GAP: f32 = 16.0;
 const KEY_GAP: f32 = 6.0;
@@ -500,14 +500,22 @@ pub(crate) fn paint(
         out.border(r, 0.0, RING * s, c.accent);
     }
     if menu.kind == Kind::Switcher {
-        paint_footer(&mut out, panel, y, (c, s), font);
+        paint_footer(&mut out, panel, y, (c, s), font, &FOOTER);
     }
     out.border(panel, RADIUS * s, BORDER * s, c.line);
     Pop { pixmap: out, rows }
 }
 
-/// The switcher's footer from `y` down, its bottom corners the panel's.
-fn paint_footer(out: &mut Pixmap, panel: Rect, y: f32, (c, s): (&Chrome, f32), font: &mut UiText) {
+/// A footer of `keys` and what they do, from `y` down, its bottom
+/// corners the panel's.
+pub(crate) fn paint_footer(
+    out: &mut Pixmap,
+    panel: Rect,
+    y: f32,
+    (c, s): (&Chrome, f32),
+    font: &mut UiText,
+    keys: &[(&[&str], &str)],
+) {
     let foot = Rect {
         x: 0.0,
         y,
@@ -528,8 +536,8 @@ fn paint_footer(out: &mut Pixmap, panel: Rect, y: f32, (c, s): (&Chrome, f32), f
     let mid = y + BORDER * s + (FOOT_H - BORDER) * s / 2.0;
     let base = mid + font.centre_drop(DETAIL_PX * s);
     let mut x = FOOT_PAD * s;
-    for (keys, label) in FOOTER {
-        for k in keys {
+    for (caps, label) in keys {
+        for k in *caps {
             x += keycap(out, font, k, (x, mid), Cap::Plain, (c, s)) + KEY_GAP * s;
         }
         x += out.text(

@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use orch_lens::card::Card;
 use orch_lens::context::{Line, MAX_LINES};
 use orch_lens::round::{Board, PostError};
+use orch_lens::taint::Taints;
 use orch_lens::{LensConfig, Post};
 use rusty_bbp::{
     ArtId, ArtifactKind, ArtifactPayload, ArtifactRecord, Body, ClaimBody, ClaimStatus, ClaimView,
@@ -241,6 +242,18 @@ pub struct Session<R> {
     /// This run's id: with `posted`, it names each logical post.
     run: String,
     posted: u64,
+    /// What lenses' posts were tainted to (#598), applied to every card
+    /// and line this session builds: the run's table, plus `sensitive`
+    /// for every lens post it has no entry for (D139).
+    taints: Taints,
+    /// The run's taint table as last given.
+    given: Taints,
+    /// Every message read, by who posted it.
+    authors: BTreeMap<MsgId, String>,
+    /// The lens principals: the configured ones (lens ids and the
+    /// alien's) as of the last read, and those the run's state has jobs for.
+    lenses: BTreeSet<String>,
+    history: BTreeSet<String>,
 }
 
 /// A fresh run id, so a later run's posts never replay an earlier run's.
@@ -262,7 +275,50 @@ impl<R: Rpc> Session<R> {
             views: BTreeMap::new(),
             rev: Rev(0),
             brief: None,
+            taints: Taints::default(),
+            given: Taints::default(),
+            authors: BTreeMap::new(),
+            lenses: BTreeSet::new(),
+            history: BTreeSet::new(),
         }
+    }
+
+    /// Use `taints` for the cards and lines built from now on. A tainted
+    /// post raises its card, and the card's line, to at least its class.
+    pub fn taint(&mut self, taints: &Taints, lenses: &BTreeSet<String>) {
+        self.given = taints.clone();
+        self.history = lenses.clone();
+        self.fail_closed();
+    }
+
+    /// The given table, with every lens post it has no entry for read as
+    /// `sensitive` (D139): a post whose answer was lost, or that landed
+    /// just before a crash, has an unknown id and so no entry. Never saved,
+    /// so a post whose entry lands later reads at its real class. A lens
+    /// principal is a configured one, or any author of a post the table
+    /// has an entry for, or one the run's state has jobs for, so a lens
+    /// since removed or renamed still counts.
+    fn fail_closed(&mut self) {
+        let tainted = self
+            .authors
+            .iter()
+            .filter(|(id, _)| self.given.of(**id).is_some())
+            .map(|(_, who)| who);
+        let lenses: BTreeSet<&String> = self
+            .lenses
+            .iter()
+            .chain(&self.history)
+            .chain(tainted)
+            .collect();
+        let mut taints = self.given.clone();
+        let unknown = self
+            .authors
+            .iter()
+            .filter(|(id, who)| lenses.contains(who) && self.given.of(**id).is_none());
+        for (id, _) in unknown {
+            taints.raise(*id, orch_lens::DataClass::Sensitive);
+        }
+        self.taints = taints;
     }
 
     fn ask(&mut self, tool: &str, args: Value) -> Result<Response, String> {
@@ -275,7 +331,7 @@ impl<R: Rpc> Session<R> {
     /// next time rather than missed.
     pub fn refresh(&mut self, config: &LensConfig) -> Result<(), String> {
         let rev = self.refresh_card()?;
-        self.read_new()?;
+        self.read_new(config)?;
         let domains = self.domains(config);
         if domains.is_empty() {
             self.rev = rev;
@@ -299,7 +355,13 @@ impl<R: Rpc> Session<R> {
     }
 
     /// Read every message after the cursor, a page at a time.
-    fn read_new(&mut self) -> Result<(), String> {
+    fn read_new(&mut self, config: &LensConfig) -> Result<(), String> {
+        self.lenses = config
+            .lenses
+            .iter()
+            .map(|l| l.id.clone())
+            .chain(config.alien.iter().map(|a| a.id.clone()))
+            .collect();
         loop {
             let mut args = vec![("limit", PAGE.into())];
             if let Some(c) = self.cursor {
@@ -314,12 +376,14 @@ impl<R: Rpc> Session<R> {
                 return Err("read answered something else".to_owned());
             };
             for m in messages {
+                self.authors.insert(m.id, m.from.0.clone());
                 if let Body::Claim(b) = m.draft.body {
                     self.claims.insert(m.id, b);
                 }
             }
             self.cursor = next.or(self.cursor);
             if !more {
+                self.fail_closed();
                 return Ok(());
             }
         }
@@ -348,9 +412,16 @@ impl<R: Rpc> Session<R> {
             .values()
             .filter_map(|v| {
                 let body = self.claims.get(&v.id)?;
-                Some(Card::from_view(v, body, config))
+                let mut card = Card::from_view(v, body, config);
+                self.taints.apply(&mut card);
+                Some(card)
             })
             .collect()
+    }
+
+    /// The task revision this session's view is current to.
+    pub fn rev(&self) -> u64 {
+        self.rev.0
     }
 
     /// The task's brief as of the last refresh.
@@ -468,10 +539,25 @@ impl<R: Rpc> Session<R> {
                 .iter()
                 .map(|d| config.domain_class(d))
                 .max()
-                .unwrap_or(orch_lens::DataClass::Internal);
+                .unwrap_or(orch_lens::DataClass::Internal)
+                .max(self.tainted(id, config));
             out.extend(line.map(|text| Line { text, class }));
         }
         Ok(out)
+    }
+}
+
+impl<R: Rpc> Session<R> {
+    /// The class claim `id`'s taint lifts its line to: its card's, taints
+    /// applied, or the claim's own taint when its body is not read.
+    fn tainted(&self, id: MsgId, config: &LensConfig) -> orch_lens::DataClass {
+        let card = self.views.get(&id).zip(self.claims.get(&id)).map(|(v, b)| {
+            let mut card = Card::from_view(v, b, config);
+            self.taints.apply(&mut card);
+            card.class
+        });
+        card.or_else(|| self.taints.of(id))
+            .unwrap_or(orch_lens::DataClass::Public)
     }
 }
 
@@ -1002,6 +1088,106 @@ mod tests {
         let mut s = Session::new("adversary", Fake::default().on("task_card", rej), "r1");
         let err = s.refresh(&config()).expect_err("rejected");
         assert!(err.contains("reassigned"), "{err}");
+    }
+
+    #[test]
+    fn tainted_claims_raise_their_cards_and_lines() {
+        // Only lens posts are tainted: 7 is the adversary's, 8 a human's.
+        let by_lens = Message {
+            from: PrincipalId("adversary".to_owned()),
+            ..claim(7)
+        };
+        let fake = Fake::default()
+            .on("task_card", task_card(5))
+            .on("read", read(vec![by_lens, claim(8)], false))
+            .on(
+                "claims_delta",
+                Response::Claims(vec![
+                    view(7, ClaimStatus::Accepted, &[]),
+                    view(8, ClaimStatus::Accepted, &[]),
+                ]),
+            )
+            .on("claim_line", Response::Line(Some("msg:8".to_owned())))
+            .on("claim_line", Response::Line(Some("msg:7".to_owned())));
+        let cfg = config();
+        let mut s = Session::new("adversary", fake, "r1");
+        s.refresh(&cfg).expect("refresh");
+        s.taint(
+            &Taints::from_entries([(7, orch_lens::DataClass::Sensitive)]),
+            &BTreeSet::new(),
+        );
+        let classes: Vec<_> = s.cards(&cfg).iter().map(|c| (c.id.0, c.class)).collect();
+        assert_eq!(classes[0], (7, orch_lens::DataClass::Sensitive));
+        assert!(classes[1].1 < orch_lens::DataClass::Sensitive);
+        let lines = s.lines(&cfg).expect("lines");
+        let by_text: Vec<_> = lines.iter().map(|l| (l.text.as_str(), l.class)).collect();
+        assert_eq!(by_text[1], ("msg:7", orch_lens::DataClass::Sensitive));
+        assert!(by_text[0].1 < orch_lens::DataClass::Sensitive);
+    }
+
+    /// D139: a lens's post with no taint entry, such as one whose answer
+    /// was lost, reads as sensitive, in this session and in any later one.
+    /// A post with an entry keeps its class; a human's post is unaffected.
+    #[test]
+    fn a_lens_post_without_a_taint_entry_reads_as_sensitive() {
+        let from = |id: u64, who: &str| Message {
+            from: PrincipalId(who.to_owned()),
+            ..claim(id)
+        };
+        let cfg = config();
+        let session = || {
+            let fake = Fake::default()
+                .on("task_card", task_card(5))
+                .on(
+                    "read",
+                    read(
+                        vec![
+                            from(7, "adversary"),
+                            from(8, "adversary"),
+                            from(9, "nano"),
+                            from(10, "retired"),
+                            from(11, "retired"),
+                            from(12, "gone"),
+                        ],
+                        false,
+                    ),
+                )
+                .on(
+                    "claims_delta",
+                    Response::Claims(vec![
+                        view(7, ClaimStatus::Open, &[]),
+                        view(8, ClaimStatus::Open, &[]),
+                        view(9, ClaimStatus::Open, &[]),
+                        view(10, ClaimStatus::Open, &[]),
+                        view(11, ClaimStatus::Open, &[]),
+                        view(12, ClaimStatus::Open, &[]),
+                    ]),
+                );
+            let mut s = Session::new("adversary", fake, "r1");
+            s.refresh(&cfg).expect("refresh");
+            s
+        };
+        let class = |s: &Session<Fake>| -> Vec<_> {
+            s.cards(&cfg).iter().map(|c| (c.id.0, c.class)).collect()
+        };
+        let internal = orch_lens::DataClass::Internal;
+        let sensitive = orch_lens::DataClass::Sensitive;
+        // Before any table is given, and after a reload with only 8's entry.
+        assert_eq!(class(&session())[..2], [(7, sensitive), (8, sensitive)]);
+        let mut s = session();
+        let history = BTreeSet::from(["gone".to_owned()]);
+        s.taint(
+            &Taints::from_entries([(8, internal), (10, internal)]),
+            &history,
+        );
+        let got = class(&s);
+        assert_eq!(got[..2], [(7, sensitive), (8, internal)], "{got:?}");
+        assert!(got[2].1 < sensitive, "a human's post: {got:?}");
+        // "retired" is no longer configured, but its tainted post 10 marks
+        // it as a lens, so its entry-less post 11 still reads sensitive.
+        assert_eq!(got[3..5], [(10, internal), (11, sensitive)], "{got:?}");
+        // "gone" posted nothing tainted, but the run's state has its jobs.
+        assert_eq!(got[5], (12, sensitive), "{got:?}");
     }
 
     #[test]
