@@ -601,7 +601,8 @@ fn open_session_window(socket: &Path, session: SessionId) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 
-/// The first block of `session`'s first window, in the order listed.
+/// A block of `session` to show: the active window's first, else the first
+/// window with one, in the order listed.
 fn first_block(entries: &[Message], session: SessionId) -> Option<BlockId> {
     let entries = || {
         entries.iter().filter_map(|m| match m {
@@ -609,18 +610,27 @@ fn first_block(entries: &[Message], session: SessionId) -> Option<BlockId> {
             _ => None,
         })
     };
-    let window = entries().find_map(|e| match e {
+    let active = entries().find_map(|e| match e {
+        Entry::Session {
+            session: s, active, ..
+        } if *s == session => *active,
+        _ => None,
+    });
+    let windows = entries().filter_map(|e| match e {
         Entry::Window {
             window, session: s, ..
         } if *s == session => Some(*window),
         _ => None,
-    })?;
-    entries().find_map(|e| match e {
-        Entry::Block {
-            block, window: w, ..
-        } if *w == window => Some(*block),
-        _ => None,
-    })
+    });
+    let in_window = |window: WindowId| {
+        entries().find_map(|e| match e {
+            Entry::Block {
+                block, window: w, ..
+            } if *w == window => Some(*block),
+            _ => None,
+        })
+    };
+    active.into_iter().chain(windows).find_map(in_window)
 }
 
 /// The options a new window runs with, as this one was started: the
@@ -808,11 +818,14 @@ impl Events {
                 return Stop::Closed;
             }
             if let Message::Event {
-                event: Event::WindowCreated { .. } | Event::SessionCreated { .. },
+                event:
+                    Event::WindowCreated { .. }
+                    | Event::SessionCreated { .. }
+                    | Event::ClientConnected { .. },
                 ..
             } = message
             {
-                // Its name comes with its entry.
+                // Its name, or what a client can do, comes with its entry.
                 self.state.send(|req| Message::List { req });
             }
             if matches!(change, Change::Layout | Change::Shown) {
@@ -1611,7 +1624,11 @@ impl Drop for PaneWriter {
 mod tests {
     use std::ffi::OsString;
 
-    use super::forwarded;
+    use rusty_mux_core::{BlockId, InputMode, SessionId, Size, WindowId};
+    use rusty_mux_proto::{Entry, Message};
+    use rusty_uuid::Uuid;
+
+    use super::{first_block, forwarded};
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
@@ -1634,5 +1651,64 @@ mod tests {
             forwarded(given.into_iter()),
             args(&["--gpu", "--config", "a.toml", "--profile=work"])
         );
+    }
+
+    fn entry(entry: Entry) -> Message {
+        Message::Entry { req: 1, entry }
+    }
+
+    fn window(window: WindowId, session: SessionId) -> Message {
+        entry(Entry::Window {
+            window,
+            session,
+            name: String::new(),
+            layout: None,
+            zoomed: None,
+            focused: None,
+        })
+    }
+
+    fn block(block: BlockId, window: WindowId) -> Message {
+        entry(Entry::Block {
+            block,
+            window,
+            size: Size::new(80, 24).expect("a size"),
+            holder: None,
+            title: String::new(),
+            name: String::new(),
+            owner: None,
+            input: InputMode::Open,
+            exited: false,
+        })
+    }
+
+    #[test]
+    fn a_new_window_opens_the_active_window_else_the_first_one_with_a_block() {
+        let s = SessionId::from_uuid(Uuid::new_v4());
+        let [w1, w2] = [(); 2].map(|_| WindowId::from_uuid(Uuid::new_v4()));
+        let b = BlockId::from_uuid(Uuid::new_v4());
+        let session = |active| {
+            entry(Entry::Session {
+                session: s,
+                name: "s".into(),
+                active,
+                generated: false,
+            })
+        };
+        // The first window is empty: the block in the second is found.
+        let list = [session(None), window(w1, s), window(w2, s), block(b, w2)];
+        assert_eq!(first_block(&list, s), Some(b));
+        // With an active window, that one's block comes first.
+        let other = BlockId::from_uuid(Uuid::new_v4());
+        let list = [
+            session(Some(w2)),
+            window(w1, s),
+            window(w2, s),
+            block(other, w1),
+            block(b, w2),
+        ];
+        assert_eq!(first_block(&list, s), Some(b));
+        // No block anywhere.
+        assert_eq!(first_block(&[session(None), window(w1, s)], s), None);
     }
 }
