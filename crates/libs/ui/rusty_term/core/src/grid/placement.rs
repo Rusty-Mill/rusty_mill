@@ -169,8 +169,8 @@ impl Grid {
     }
 
     /// Read the trailing section into a freshly decoded grid. Anchors the
-    /// grid's scroll count at its retained history, so a placement above the
-    /// history this checkpoint carries (a split checkpoint) is dropped.
+    /// grid's scroll count at its retained history, or deeper if a placement
+    /// reaches above it. Validation then drops nothing that still shows.
     pub(crate) fn read_placements(&mut self, r: &mut crate::checkpoint::Reader<'_>) -> Result<()> {
         // The count is checked before anything is allocated for the list.
         let n: usize = crate::checkpoint::Wire::read(r)?;
@@ -181,7 +181,14 @@ impl Grid {
         for _ in 0..n {
             wire.push(<WirePlacement as crate::checkpoint::Wire>::read(r)?);
         }
-        self.total_scrolled = self.scrollback.len();
+        // Anchor so every serial is non-negative: a placement whose top rows
+        // were evicted (scrollback capped below its height) has a top above
+        // the retained history yet still shows on screen.
+        let deepest = wire.iter().map(|p| -i64::from(p.top)).max().unwrap_or(0);
+        self.total_scrolled = self
+            .scrollback
+            .len()
+            .max(usize::try_from(deepest).unwrap_or(0));
         let base = self.total_scrolled as i64;
         self.placements = wire
             .into_iter()
@@ -291,6 +298,30 @@ mod tests {
             p.advance(&mut g, PLACE);
         }
         assert_eq!(g.placements().len(), super::MAX_PLACEMENTS);
+    }
+
+    #[test]
+    fn a_full_checkpoint_keeps_a_placement_whose_top_row_was_evicted() {
+        let (mut g, mut p) = fed(20, 5, b"");
+        g.set_scrollback_max(0);
+        p.advance(&mut g, PLACE);
+        let mut cut = false;
+        for _ in 0..8 {
+            p.advance(&mut g, b"\n");
+            cut = g
+                .placements()
+                .first()
+                .is_some_and(|a| g.placement_top_row(a) < 0);
+            if cut || g.placements().is_empty() {
+                break;
+            }
+        }
+        assert!(cut, "a half-evicted placement stays tracked");
+        let bytes = checkpoint::encode_with_images(&g, &p).unwrap();
+        let (back, _) = checkpoint::decode(&bytes).unwrap();
+        assert_eq!(back.placements().len(), 1);
+        let (a, b) = (&g.placements()[0], &back.placements()[0]);
+        assert_eq!(g.placement_top_row(a), back.placement_top_row(b));
     }
 
     #[test]
