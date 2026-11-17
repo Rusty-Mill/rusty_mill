@@ -60,14 +60,33 @@ pub enum Action {
     },
     /// Open find in the focused block's scrollback.
     Find,
+    /// Focus the next block shown, floats last, wrapping: the way to a
+    /// float that overlaps the tile under it, which no direction reaches.
+    Cycle,
+    /// Float the focused block over the window (C42).
+    Float,
+    /// Raise (`true`) or lower the focused float.
+    Stack {
+        top: bool,
+    },
+    /// Move the focused float one step toward the direction.
+    Move(Dir),
     /// A key after the prefix that means nothing.
     Unknown,
 }
 
 impl Action {
+    /// Whether this moves the focus to another block.
+    pub fn moves_focus(&self) -> bool {
+        matches!(self, Action::Focus(_) | Action::Cycle)
+    }
+
     /// Whether this acts on the focused block, which must then be shown.
     pub fn on_focused_block(&self) -> bool {
-        !matches!(self, Action::Detach | Action::Focus(_) | Action::Unknown)
+        !matches!(
+            self,
+            Action::Detach | Action::Focus(_) | Action::Cycle | Action::Unknown
+        )
     }
 }
 
@@ -81,6 +100,8 @@ enum State {
     Escape,
     /// `ESC [`, or `ESC O` with application cursor keys, after the prefix.
     Arrow,
+    /// `m` after the prefix: a direction key follows.
+    Move,
 }
 
 /// Turns keyboard bytes into actions.
@@ -106,6 +127,7 @@ impl Keys {
                 State::Escape if b == b'[' || b == b'O' => self.go(State::Arrow, None),
                 State::Escape => self.go(State::Typing, Some(Action::Unknown)),
                 State::Arrow => self.go(State::Typing, Some(arrow(b))),
+                State::Move => self.go(State::Typing, Some(step(b))),
             };
             let Some(action) = action else {
                 continue;
@@ -154,11 +176,27 @@ impl Keys {
             b'}' => Action::Swap { next: true },
             b'D' => Action::DetachBlock,
             b'/' => Action::Find,
+            b'n' => Action::Cycle,
+            b'f' => Action::Float,
+            b'u' => Action::Stack { top: true },
+            b'U' => Action::Stack { top: false },
+            b'm' => return self.go(State::Move, None),
             b'[' => Action::Prompt { next: false },
             b']' => Action::Prompt { next: true },
             _ => Action::Unknown,
         };
         self.go(State::Typing, Some(action))
+    }
+}
+
+/// The direction key after `m`: vi keys; anything else means nothing.
+fn step(b: u8) -> Action {
+    match b {
+        b'h' => Action::Move(Dir::Left),
+        b'j' => Action::Move(Dir::Down),
+        b'k' => Action::Move(Dir::Up),
+        b'l' => Action::Move(Dir::Right),
+        _ => Action::Unknown,
     }
 }
 
@@ -193,6 +231,22 @@ mod tests {
                 Action::ToggleZoom,
                 Action::Input(b"b".to_vec()),
                 Action::Detach,
+            ]
+        );
+    }
+
+    #[test]
+    fn float_keys() {
+        let mut keys = Keys::default();
+        assert_eq!(
+            keys.feed(b"\x1dn\x1df\x1du\x1dU\x1dml\x1dmx"),
+            vec![
+                Action::Cycle,
+                Action::Float,
+                Action::Stack { top: true },
+                Action::Stack { top: false },
+                Action::Move(Dir::Right),
+                Action::Unknown,
             ]
         );
     }

@@ -26,3 +26,6 @@ Format: `- [ ] Q<n> (<date>, blocking? y/n): <question> — interim choice: <wha
 - [ ] Q89 (2026-11-17, n; C64): Should "Show in every window" ask for a confirm first ("Show {session} in {k} other windows?")? — interim choice: no confirm (it pushes at once; the waiting banner protects open confirms, D96).
 - [ ] Q90 (2026-11-17, n; C64): Should a window be able to opt out of pushes from its other windows? — interim choice: no opt-out.
 - [ ] Q91 (2026-11-17, n; C64): In the UI copy, should "window" mean an OS window (as now) while a mux tab keeps its name? — interim choice: "Window" is the OS window; tabs keep theirs.
+- [ ] Q86 (2026-11-17, n): Can a float be minimised (hidden to a chip in the strip, like a detached block D61), or only closed, lowered or detached? — interim choice: no minimise; lower to the back or close (D91).
+- [ ] Q87 (2026-11-17, n): Which keys after Ctrl-] move, resize, raise, lower and float or unfloat a block? — interim choice: TUI keys after Ctrl-] are `f` float, `n` next block, `u` raise, `U` lower, `m` + `h j k l` move, `H J K L` resize (handoff D325); the GUI reuses them with the mouse (D91).
+- [ ] Q88 (2026-11-17, n): Should a float snap to tile edges or the window edge while dragging? — interim choice: no snapping (D91).

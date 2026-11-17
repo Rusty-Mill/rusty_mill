@@ -127,7 +127,14 @@ pub(crate) fn records(manifest: &Manifest) -> Vec<SessionRecord> {
         name: w.name.clone(),
         layout: w.layout.as_ref().map(ToString::to_string),
         zoomed: w.zoomed.map(|b| to_uuid(b.uuid())),
-        focused: w.focused.map(|b| to_uuid(b.uuid())),
+        // Floats (C42) are not stored: the records are bincode, so a new
+        // field needs a schema bump (an owner call). A float comes back
+        // detached, and focus moves with it.
+        focused: w
+            .focused
+            .filter(|b| !w.floats.iter().any(|f| f.block == *b))
+            .or_else(|| w.layout.as_ref().and_then(|l| l.blocks().first().copied()))
+            .map(|b| to_uuid(b.uuid())),
         blocks: w.blocks.iter().map(block).collect(),
     };
     manifest
@@ -196,6 +203,7 @@ fn window(
         layout,
         zoomed: w.zoomed.map(block_id),
         focused: w.focused.map(block_id),
+        floats: Vec::new(),
         blocks,
     })
 }
@@ -248,5 +256,30 @@ mod tests {
         let mut bad = records(&manifest);
         bad[0].windows[0].blocks[0].cols = 0;
         assert!(super::manifest(bad).is_err());
+    }
+
+    /// D323: floats are not stored, so one comes back detached and focus
+    /// leaves it for a tile, which restore needs.
+    #[test]
+    fn a_float_is_saved_as_a_detached_block_with_focus_on_a_tile() {
+        use rusty_mux_core::{FloatRect, Mux};
+        let manifest = manifest_of_two_sessions();
+        let mut mux = Mux::restore(manifest.saved.clone()).unwrap();
+        let window = manifest.saved.sessions[0].windows[0].id;
+        let float = mux.window(window).unwrap().blocks()[0];
+        mux.place_float(float, FloatRect::new(10, 10, 40, 40).unwrap())
+            .unwrap();
+        mux.focus_block(float).unwrap();
+        let saved = Manifest {
+            saved: mux.save(),
+            started: manifest.started.clone(),
+        };
+        let back = super::manifest(records(&saved)).expect("restores");
+        let restored = Mux::restore(back.saved).expect("a valid model");
+        let w = restored.window(window).unwrap();
+        assert!(w.floats().is_empty());
+        assert!(w.detached().any(|b| b == float));
+        assert_ne!(w.focused(), Some(float));
+        assert!(w.focused().is_some());
     }
 }

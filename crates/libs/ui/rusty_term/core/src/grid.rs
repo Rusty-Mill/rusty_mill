@@ -19,12 +19,15 @@ use unicode_width::UnicodeWidthStr;
 use super::sixel::SixelImage;
 
 mod line;
+mod placement;
 mod snapshot;
 pub(crate) use line::Line;
 #[cfg(test)]
 mod stamp_tests;
 #[cfg(test)]
 mod trim_tests;
+pub(crate) use placement::Footprint;
+pub use placement::{MAX_PLACEMENTS, Placement};
 pub use snapshot::SnapshotError;
 mod find;
 #[cfg(any(test, feature = "gui"))]
@@ -751,9 +754,15 @@ pub struct Grid {
     #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     pub ime_preedit: String,
     /// Total lines ever scrolled into history — a stable serial anchoring
-    /// [`GridImage`]s so they track scroll/scrollback (windowed front-end only).
-    #[cfg(any(test, feature = "gui"))]
+    /// [`GridImage`]s and [`Placement`]s so they track scroll/scrollback.
     pub(crate) total_scrolled: usize,
+    /// Kitty images placed on the grid, headless: which stored image covers
+    /// which cells, anchored by serial. Bounded by [`MAX_PLACEMENTS`]; carried
+    /// by the checkpoint's optional trailing section. See [`Placement`].
+    pub(crate) placements: Vec<Placement>,
+    /// [`Grid::stamp`] taken when the stored images or placements last
+    /// changed (see [`Grid::image_stamp`]).
+    image_stamp: u64,
     /// Pixel images (Sixel/Kitty) drawn over their reserved half-block cells by
     /// the windowed CPU renderer; the TUI and GPU use the half-block cells.
     #[cfg(any(test, feature = "gui"))]
@@ -1516,8 +1525,9 @@ impl Grid {
             selection: None,
             #[cfg(any(test, feature = "gui"))]
             search: None,
-            #[cfg(any(test, feature = "gui"))]
             total_scrolled: 0,
+            placements: Vec::new(),
+            image_stamp: 0,
             #[cfg(any(test, feature = "gui"))]
             images: Vec::new(),
             host_out: Vec::new(),
@@ -2026,6 +2036,7 @@ impl Grid {
     /// columns) up one row. Partial-width scrolls never form scrollback.
     fn scroll_band_up(&mut self) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom.min(self.rows - 1));
+        self.drop_placements_over(top, bottom);
         let (l, r) = (self.left_margin, self.right_margin.min(self.cols - 1));
         let blank = self.erase_packed();
         for y in top..bottom {
@@ -2053,6 +2064,7 @@ impl Grid {
     /// mirror, for RI / SD).
     fn scroll_band_down(&mut self) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom.min(self.rows - 1));
+        self.drop_placements_over(top, bottom);
         let (l, r) = (self.left_margin, self.right_margin.min(self.cols - 1));
         let blank = self.erase_packed();
         for y in (top..bottom).rev() {
@@ -2096,7 +2108,7 @@ impl Grid {
     /// below it (xterm "sixel scrolling"). Shared by the Sixel and Kitty paths,
     /// which have no explicit-size concept of their own.
     pub fn render_image(&mut self, width: usize, height: usize, pixels: &[Option<u32>]) {
-        self.render_image_sized(width, height, pixels, None, None, true);
+        let _ = self.render_image_sized(width, height, pixels, None, None, true);
     }
 
     /// [`Self::render_image`], but honoring iTerm2's `File=` geometry hints:
@@ -2115,9 +2127,9 @@ impl Grid {
         target_cols: Option<usize>,
         target_rows: Option<usize>,
         preserve_aspect: bool,
-    ) {
+    ) -> Option<Footprint> {
         if width == 0 || height == 0 || pixels.len() < width * height {
-            return;
+            return None;
         }
         // Nearest-neighbor source sample for target pixel `(tx, ty)`.
         let sample = |tx: usize, ty: usize, tw: usize, th: usize| -> Option<u32> {
@@ -2205,6 +2217,13 @@ impl Grid {
         // `tw` already uses against `avail`.
         let max_cell_rows = self.rows.saturating_add(self.scrollback_max).max(1);
         let cell_rows = th.div_ceil(2).min(max_cell_rows);
+        let (start_scrolled, start_row) = (self.total_scrolled, self.cursor.1);
+        let footprint = Footprint {
+            serial: self.total_scrolled + self.cursor.1,
+            col: origin,
+            cols: tw.min(self.cols.saturating_sub(origin)),
+            rows: cell_rows,
+        };
         #[cfg(any(test, feature = "gui"))]
         self.store_image(width, height, pixels, origin, tw, cell_rows);
 
@@ -2224,6 +2243,12 @@ impl Grid {
             self.newline();
         }
         self.carriage_return();
+        // Each row either moved the cursor down or scrolled the screen into
+        // history. A scroll that did neither (alternate screen, scroll region)
+        // shifted the cells already drawn, so the anchor above is wrong.
+        let moved =
+            (self.cursor.1 - start_row.min(self.cursor.1)) + (self.total_scrolled - start_scrolled);
+        (moved == cell_rows).then_some(footprint)
     }
 
     /// Render a decoded Sixel image (delegates to [`Grid::render_image`]).
@@ -2374,6 +2399,10 @@ impl Grid {
         }
         let blank = self.erase_packed();
         self.screen[top..=bottom].rotate_left(1);
+        if top != 0 || bottom != self.rows - 1 || self.primary.is_some() {
+            // Not a history scroll: cells move but the scroll count does not.
+            self.drop_placements_over(top, bottom);
+        }
         // The line that left the top now sits at `bottom`.
         // Capture it into scrollback, but only for a full-screen scroll on the
         // primary buffer: partial-region scrolls (TUI apps using DECSTBM) and
@@ -2403,11 +2432,10 @@ impl Grid {
                     self.evict_fold_blocks();
                 }
             }
+            self.total_scrolled += 1;
+            self.prune_placements();
             #[cfg(any(test, feature = "gui"))]
-            {
-                self.total_scrolled += 1;
-                self.evict_scrolled_images();
-            }
+            self.evict_scrolled_images();
             // If the user is browsing history, advance the offset in step with
             // the incoming line so the viewed region stays put under new output.
             if self.view_offset > 0 {
@@ -3505,6 +3533,7 @@ impl Grid {
         }
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();
+        self.clear_placements();
         self.touch_all();
         self.cursor = (0, 0);
     }
@@ -3515,6 +3544,7 @@ impl Grid {
     /// [`Grid::clear_all`].
     pub(crate) fn clear_scrollback(&mut self) {
         self.scrollback.clear();
+        self.prune_placements();
         self.styles.request_sweep();
         self.touch_hist();
         self.prompt_marks.clear();
@@ -3723,6 +3753,7 @@ impl Grid {
             }
         }
         self.view_offset = self.view_offset.min(self.display_history_len());
+        self.prune_placements();
     }
 
     /// Seed the grid's default colors from the configured startup theme and
@@ -3805,6 +3836,7 @@ impl Grid {
         self.right_margin = cols.saturating_sub(1);
         #[cfg(any(test, feature = "gui"))]
         self.images.clear(); // serials/reflow change; drop placed images
+        self.clear_placements();
         let old_cols = self.cols;
         let clamp = |(x, y): (usize, usize)| (x.min(cols - 1), y.min(rows - 1));
         let blank = self.default_packed(); // a resize is not an erase: no BCE
@@ -3918,6 +3950,7 @@ impl Grid {
         }
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();
+        self.clear_placements();
         let fill = self.erase_packed();
         let alt = self.take_spare_screen(fill);
         self.primary = Some(SavedScreen {
@@ -3965,6 +3998,7 @@ impl Grid {
                 );
             }
             self.reset_scroll_region();
+            self.clear_placements(); // the alternate screen's images go with it
             self.touch_all();
         }
     }
@@ -4066,6 +4100,7 @@ impl Grid {
         // the region bottom come round to the cursor row and are blanked.
         let blank = self.erase_packed();
         self.screen[cy..=self.scroll_bottom].rotate_right(n);
+        self.drop_placements_over(cy, self.scroll_bottom);
         self.prime_blank_row(blank);
         for line in &mut self.screen[cy..cy + n] {
             line.clear(&self.blank_row);
@@ -4109,6 +4144,7 @@ impl Grid {
         // round to the region bottom and are blanked.
         let blank = self.erase_packed();
         self.screen[cy..=self.scroll_bottom].rotate_left(n);
+        self.drop_placements_over(cy, self.scroll_bottom);
         self.prime_blank_row(blank);
         for line in &mut self.screen[self.scroll_bottom + 1 - n..=self.scroll_bottom] {
             line.clear(&self.blank_row);
@@ -4155,6 +4191,7 @@ impl Grid {
         // Rotate the region down by n and blank the n rows freed at its top.
         let blank = self.erase_packed();
         self.screen[top..=bottom].rotate_right(n);
+        self.drop_placements_over(top, bottom);
         self.prime_blank_row(blank);
         for line in &mut self.screen[top..top + n] {
             line.clear(&self.blank_row);
@@ -4258,8 +4295,12 @@ impl Grid {
     pub(crate) fn reset(&mut self) {
         self.bell = false;
         self.progress = None;
+        if !self.kitty_images.is_empty() {
+            self.touch_images(); // a reset empties the store too
+        }
         self.kitty_images.clear();
         self.kitty_virtual.clear();
+        self.clear_placements();
         self.report_color_scheme = false;
         self.notif99_pending.clear();
         self.primary = None; // leave the alternate screen if active
@@ -4617,6 +4658,8 @@ impl Grid {
             playing: false,
             last_advance: None,
         });
+        self.touch_images();
+        self.prune_placements();
     }
 
     /// A stored image's current frame, cloned for placement.
@@ -4690,6 +4733,7 @@ impl Grid {
             pixels: base.into(),
             gap_ms: gap_ms.max(40),
         });
+        self.touch_images();
         true
     }
 
@@ -4701,7 +4745,9 @@ impl Grid {
         };
         img.playing = run && img.frames.len() > 1;
         img.last_advance = None;
-        img.frames.len() > 1
+        let animated = img.frames.len() > 1;
+        self.touch_images();
+        animated
     }
 
     /// Advance every playing animation to `now`, returning whether any frame
@@ -4723,6 +4769,7 @@ impl Grid {
             }
         }
         if changed {
+            self.touch_images();
             self.touch_all();
         }
         changed
@@ -4810,6 +4857,8 @@ impl Grid {
                 self.kitty_virtual.clear();
             }
         }
+        self.touch_images();
+        self.prune_placements();
     }
 
     /// Decode a Unicode placeholder cell (`U+10EEEE`) at viewport

@@ -2,7 +2,9 @@
 //! `--json`.
 
 use rusty_json::{Map, Value};
-use rusty_mux_core::{BlockId, Event, ExitStatus, InputMode, Layout, Principal, Progress, Size};
+use rusty_mux_core::{
+    BlockId, Event, ExitStatus, InputMode, Layout, Principal, Progress, Size, floats_text,
+};
 use rusty_mux_proto::{Cursor, Entry, Ownership};
 use rusty_uuid::Uuid;
 
@@ -212,6 +214,11 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             fields.push(("focused", focused.map_or(Field::Absent, |b| Id(b.uuid()))));
             ("window", window.uuid(), fields)
         }
+        Entry::Floats { window, floats } => (
+            "floats",
+            window.uuid(),
+            vec![("floats", Text(floats_text(floats)))],
+        ),
         Entry::Block {
             block,
             window,
@@ -489,6 +496,13 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
             fields.extend(layout_fields(layout.as_ref(), zoomed));
             ("layout-changed", fields)
         }
+        E::FloatsChanged { window, ref floats } => (
+            "floats-changed",
+            vec![
+                ("window", Id(window.uuid())),
+                ("floats", Text(floats_text(floats))),
+            ],
+        ),
     }
 }
 
@@ -696,6 +710,13 @@ mod tests {
                 window,
                 layout: Some(Layout::Block(block)),
                 zoomed: Some(block),
+            },
+            Event::FloatsChanged {
+                window,
+                floats: vec![rusty_mux_core::Float {
+                    block,
+                    at: rusty_mux_core::FloatRect::new(0, 0, 50, 50).unwrap(),
+                }],
             },
             Event::ClientConnectionChanged {
                 client,

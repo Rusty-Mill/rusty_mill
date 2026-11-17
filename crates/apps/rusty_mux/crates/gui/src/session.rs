@@ -461,6 +461,8 @@ impl Model {
                 }
                 Change::Strip
             }
+            // The GUI does not ask for floats (C42) until it draws them.
+            Entry::Floats { .. } => Change::None,
             Entry::Block {
                 block,
                 window,

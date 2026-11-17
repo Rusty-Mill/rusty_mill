@@ -10,6 +10,7 @@
 //! UDP association when the server offers one.
 
 pub mod find;
+pub mod floats;
 pub mod follow;
 pub mod keys;
 pub mod predict;

@@ -84,3 +84,38 @@ fn a_restored_session_has_no_creator() {
     assert!(restored.sessions().all(|s| s.creator().is_none()));
     assert!(restored.block(a).is_some());
 }
+
+/// C42: a float is a block of the window, out of the layout, once.
+#[test]
+fn refuses_a_float_that_is_tiled_repeated_or_foreign() {
+    use crate::{Float, FloatRect};
+    let float = |block| Float {
+        block,
+        at: FloatRect::new(0, 0, 50, 50).unwrap(),
+    };
+    let tiled = |s: &Saved| s.sessions[0].windows[0].layout.as_ref().unwrap().blocks()[0];
+    broken(|s| {
+        let b = tiled(s);
+        s.sessions[0].windows[0].floats = vec![float(b)];
+    });
+    broken(|s| s.sessions[0].windows[0].floats = vec![float(BlockId::random())]);
+    broken(|s| {
+        let w = &mut s.sessions[0].windows[0];
+        let loose = w.blocks.last().unwrap().id;
+        w.floats = vec![float(loose), float(loose)];
+    });
+}
+
+#[test]
+fn floats_restore_with_focus_on_one() {
+    use crate::FloatRect;
+    let (mut mux, a) = model();
+    let window = mux.block(a).unwrap().window();
+    mux.place_float(a, FloatRect::new(10, 10, 40, 40).unwrap())
+        .unwrap();
+    mux.focus_block(a).unwrap();
+    let saved = mux.save();
+    assert_eq!(Mux::restore(saved.clone()).unwrap().save(), saved);
+    assert_eq!(saved.sessions[0].windows[0].focused, Some(a));
+    assert_eq!(mux.window(window).unwrap().floats().len(), 1);
+}
