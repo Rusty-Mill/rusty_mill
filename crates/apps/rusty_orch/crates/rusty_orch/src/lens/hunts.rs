@@ -177,6 +177,10 @@ pub fn sweep(
             Ok(hunted) => {
                 hunter.record(&hunted)?;
                 logged(log, &hunted);
+                if let Some(stop) = hunted.stopped {
+                    let _ = writeln!(log, "alien: stopped in claim {}: {stop}", card.id.0);
+                    return Ok(Some(stop));
+                }
             }
             Err(Unrecorded::Stopped(stop)) => {
                 let _ = writeln!(log, "alien: stopped before claim {}: {stop}", card.id.0);
@@ -871,6 +875,21 @@ mod tests {
             s.reads.is_empty(),
             "nothing read for a claim nobody can hunt"
         );
+    }
+
+    /// A ceiling after the enumerate call still records the hunt, and the
+    /// sweep reports it so the task is paused.
+    #[test]
+    fn a_ceiling_mid_hunt_is_recorded_and_reported() {
+        let cards = vec![card(7), card(8)];
+        let mut seat = seat(cards.clone(), RS);
+        let mut hunter = FakeHunter::default();
+        let mut models = script(&[SUSPECT]);
+        let s = go(&settled(&cards), &mut seat, &mut hunter, &mut models, 1);
+        assert_eq!(s.result, Ok(Some(Stop::TaskCalls)), "{}", s.log);
+        assert_eq!(hunter.saved.len(), 1, "the hunt on claim 7 is kept");
+        assert!(s.log.contains("alien: stopped in claim 7"), "{}", s.log);
+        assert_eq!(seat.reads, [ArtId(57)], "claim 8 is not read");
     }
 
     #[test]
