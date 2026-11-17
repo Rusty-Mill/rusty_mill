@@ -4,6 +4,20 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Cost breaker and taint in lens runs
+**2026-11-17**
+
+- `rusty_orch lens run` now runs the cost breaker. In `observe` mode (the
+  default) it logs a would-trip; in `enforce` mode it pauses the task in BBP.
+  A task ceiling also pauses the task now.
+- What a lens posts is marked with the most sensitive data it could have
+  seen, and those claims go only to models cleared for that data.
+- New `rusty_orch lens breaker`: a read-only report on a task's breaker
+  settings, calls and spend, taint counts, and whether it is paused.
+- A BBP config's `sensitive_paths` are hidden from every agent harness,
+  and new `rusty_orch dry-run` runs a program over its `real_data` roots
+  without letting the plan leave the host.
+
 ## Half-limit erosion cleanups
 **2026-11-06**
 

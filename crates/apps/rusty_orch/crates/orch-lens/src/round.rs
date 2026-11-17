@@ -23,12 +23,14 @@ use rusty_bbp::{Direction, MsgId};
 
 use crate::call::{call, Ctx, End, Models};
 use crate::card::Card;
-use crate::config::LensConfig;
+use crate::class::DataClass;
+use crate::config::{LensConfig, Provider};
 use crate::context::{Line, Parts, Phase};
 use crate::meter::Stop;
 use crate::post::Post;
 use crate::record::Review;
 use crate::schedule::{schedule, Job, JobKey, Skipped, Slot, State};
+use crate::taint;
 
 /// Where answers go: the shared board.
 pub trait Board {
@@ -99,6 +101,9 @@ pub struct Report {
     pub skipped: Vec<Skipped>,
     /// Blind review jobs that ended, for the track record (#599).
     pub reviews: Vec<Review>,
+    /// Each post that landed, with the class of the context its lens was
+    /// shown (#598 taint): the shell raises its taint table by these.
+    pub taints: Vec<(MsgId, DataClass)>,
     pub halt: Option<Halt>,
 }
 
@@ -126,14 +131,20 @@ pub fn round(
         state.unservable(s);
     }
     let by_id: BTreeMap<MsgId, &Card> = view.cards.iter().map(|c| (c.id, c)).collect();
-    let mut ran = Vec::new();
-    let mut reviews = Vec::new();
+    let mut out = Report {
+        ran: Vec::new(),
+        skipped,
+        reviews: Vec::new(),
+        taints: Vec::new(),
+        halt: None,
+    };
     for job in &jobs {
         let Some(card) = by_id.get(&job.key.claim) else {
             continue;
         };
         let Some(prefix) = view.prefixes.get(&job.key.lens) else {
-            return report(ran, skipped, reviews, Halt::NoPrefix(job.key.lens.clone()));
+            out.halt = Some(Halt::NoPrefix(job.key.lens.clone()));
+            return out;
         };
         let lens = rusty_bbp::PrincipalId(job.key.lens.clone());
         let parts = Parts {
@@ -153,34 +164,30 @@ pub fn round(
             save: &mut *save,
         };
         let called = call(job, &parts, ctx, models);
-        let (row, halted) = settle(job, card, &called.end, state, board, &mut *ahead);
-        reviews.extend(row);
+        let (row, halted, landed) = settle(job, card, &called.end, state, board, &mut *ahead);
+        let class = seen(&parts, &called.end, providers);
+        out.taints.extend(landed.into_iter().map(|id| (id, class)));
+        out.reviews.extend(row);
         let halt = halted.or_else(|| called.unsaved.clone().map(Halt::Unsaved));
-        ran.push((job.key.clone(), called.end));
-        if let Some(h) = halt {
-            return report(ran, skipped, reviews, h);
+        out.ran.push((job.key.clone(), called.end));
+        if halt.is_some() {
+            out.halt = halt;
+            return out;
         }
     }
-    Report {
-        ran,
-        skipped,
-        reviews,
-        halt: None,
-    }
+    out
 }
 
-fn report(
-    ran: Vec<(JobKey, End)>,
-    skipped: Vec<Skipped>,
-    reviews: Vec<Review>,
-    halt: Halt,
-) -> Report {
-    Report {
-        ran,
-        skipped,
-        reviews,
-        halt: Some(halt),
-    }
+/// The highest class the answering provider could have been shown: the
+/// taint of everything it posted. A provider not in the config (never the
+/// case for an answer) is taken as cleared for everything, so the taint
+/// may overstate, never understate.
+fn seen(parts: &Parts<'_>, end: &End, providers: &BTreeMap<AgentId, Provider>) -> DataClass {
+    let clearance = match end {
+        End::Answered { provider, .. } => providers.get(provider).map(|p| p.max_class),
+        _ => None,
+    };
+    taint::of_context(parts, clearance.unwrap_or(DataClass::Sensitive))
 }
 
 /// The track-record row of a blind review job that ended with `items`
@@ -214,12 +221,12 @@ fn settle(
     state: &mut State,
     board: &mut dyn Board,
     ahead: Ahead<'_>,
-) -> (Option<Review>, Option<Halt>) {
+) -> (Option<Review>, Option<Halt>, Vec<MsgId>) {
     match end {
         End::Answered { provider, posts } => {
             if let Err(e) = write_ahead(job, ahead) {
                 state.abandon(job);
-                return (None, Some(Halt::Unsaved(e)));
+                return (None, Some(Halt::Unsaved(e)), Vec::new());
             }
             let ids = match post(board, &job.key.lens, posts) {
                 Ok(ids) => ids,
@@ -229,33 +236,33 @@ fn settle(
             if let (Slot::Review | Slot::LookHarder, Some(q)) = (job.key.slot, card.answers) {
                 state.attacked(q, card.id, card.epoch);
             }
-            (review(job, ids), None)
+            (review(job, ids.clone()), None, ids)
         }
         End::Failed { error, .. } => {
             state.failed(job);
             if !matches!(error, ClassifiedError::Permanent(_)) {
-                return (None, None);
+                return (None, None, Vec::new());
             }
             if let Err(e) = write_ahead(job, ahead) {
-                return (None, Some(Halt::Unsaved(e)));
+                return (None, Some(Halt::Unsaved(e)), Vec::new());
             }
-            (review(job, Vec::new()), None)
+            (review(job, Vec::new()), None, Vec::new())
         }
         End::Exhausted => {
             state.failed(job);
-            (None, None)
+            (None, None, Vec::new())
         }
         End::Stopped(Stop::Experiment) => {
             state.abandon(job);
-            (None, None)
+            (None, None, Vec::new())
         }
         End::Stopped(stop) => {
             state.abandon(job);
-            (None, Some(Halt::Task(*stop)))
+            (None, Some(Halt::Task(*stop)), Vec::new())
         }
         End::Unsaved(e) => {
             state.abandon(job);
-            (None, Some(Halt::Unsaved(e.clone())))
+            (None, Some(Halt::Unsaved(e.clone())), Vec::new())
         }
     }
 }
@@ -272,22 +279,23 @@ fn partial(
     posts: &[Post],
     e: PostError,
     state: &mut State,
-) -> (Option<Review>, Option<Halt>) {
+) -> (Option<Review>, Option<Halt>, Vec<MsgId>) {
     let halt = Some(Halt::Board(e.error));
     if e.posted.is_empty() && !e.unsure {
         state.abandon(job);
-        return (None, halt);
+        return (None, halt, Vec::new());
     }
     let landed = &posts[..e.posted.len().min(posts.len())];
     state.answered(job, provider, landed.len(), counters(landed));
     if let (Slot::Review | Slot::LookHarder, Some(q)) = (job.key.slot, card.answers) {
         state.attacked(q, card.id, card.epoch);
     }
-    let row = review(job, e.posted).map(|r| Review {
+    let landed = e.posted;
+    let row = review(job, landed.clone()).map(|r| Review {
         unsure: e.unsure,
         ..r
     });
-    (row, halt)
+    (row, halt, landed)
 }
 
 /// Save a blind review's row `pending` before anything else of the
@@ -515,6 +523,70 @@ mod tests {
 
     fn lenses_of<'a>(it: impl Iterator<Item = &'a str>) -> BTreeSet<&'a str> {
         it.collect()
+    }
+
+    #[test]
+    fn each_landed_post_is_tainted_by_what_its_provider_could_see() {
+        let cfg = config();
+        let mut meter = Meter::new(cfg.ceilings, 0);
+        let lines = [Line {
+            text: "real rows were read".to_owned(),
+            class: DataClass::Sensitive,
+        }];
+        let records = BTreeMap::new();
+        let prefixes = prefixes();
+        let view = View {
+            cards: &[plain(7)],
+            lines: &lines,
+            prefixes: &prefixes,
+            records: &records,
+        };
+        let ctx = Ctx {
+            task: "task-1",
+            providers: &cfg.providers,
+            meter: &mut meter,
+            save: &mut |_| Ok(()),
+        };
+        let mut board = Posted::default();
+        let report = round(
+            &cfg,
+            &view,
+            &mut State::default(),
+            ctx,
+            &mut Echo::new(Ok(vec![counter(7)])),
+            &mut board,
+            &mut |_| Ok(()),
+        );
+        assert_eq!(report.halt, None);
+        // Posts land as 100, 101, ... in the board's order; operator's first
+        // provider is `local` (cleared for sensitive), the others are cloud.
+        let by_lens: BTreeMap<&str, DataClass> = board
+            .posts
+            .iter()
+            .zip(&report.taints)
+            .map(|((lens, _), (_, class))| (lens.as_str(), *class))
+            .collect();
+        assert_eq!(by_lens["operator"], DataClass::Sensitive);
+        assert_eq!(by_lens["adversary"], DataClass::Internal);
+        assert_eq!(by_lens["research"], DataClass::Internal);
+        let ids: Vec<u64> = report.taints.iter().map(|(m, _)| m.0).collect();
+        assert_eq!(ids, [100, 101, 102]);
+    }
+
+    #[test]
+    fn a_post_that_landed_before_a_refusal_is_tainted_too() {
+        let out = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Ok(vec![counter(7), counter(7)])),
+            Posted {
+                refuse_after: Some(1),
+                ..Posted::default()
+            },
+        );
+        assert!(matches!(out.report.halt, Some(Halt::Board(_))));
+        assert_eq!(out.report.taints, [(MsgId(100), DataClass::Internal)]);
     }
 
     #[test]
