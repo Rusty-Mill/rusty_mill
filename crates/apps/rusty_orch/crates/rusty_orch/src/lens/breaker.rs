@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use orch_lens::breaker::{Breaker, Mode};
-use orch_lens::meter::Snapshot;
+use orch_lens::meter::Meter;
 use orch_lens::taint::Taints;
 use orch_lens::{DataClass, LensConfig};
 use orch_store::Store;
@@ -20,7 +20,7 @@ use rusty_serde::{Serialize, Value};
 
 use crate::args::ArgsError;
 
-pub const USAGE: &str = "usage: rusty_orch lens breaker <config.json> --bbp <bbp binary> --dir <bbp dir> --task <task>\n           --state <orch state dir> --experiment <name>\n\nPrint one JSON line on the task's cost breaker: the config's breaker, the task's\ncalls and spend on the experiment's meter, its taint table by class, and whether\nBBP holds it paused (with the latest pause's reason and detail). Read-only: a\nrunning `lens run` keeps its window in memory and logs would-trips itself.";
+pub const USAGE: &str = "usage: rusty_orch lens breaker <config.json> --bbp <bbp binary> --dir <bbp dir> --task <task>\n           --state <orch state dir> --experiment <name>\n\nPrint one JSON line on the task's cost breaker: the config's breaker, the task's\ncalls and spend on the experiment's meter, its taint table by class, and whether\nBBP holds it paused (with the latest pause's reason and detail). Read-only: a\nrunning `lens run` keeps its window in memory and logs would-trips itself, and\nholds the store's lock, so this fails until that run ends.";
 
 /// What to report on.
 #[derive(Debug, PartialEq, Eq)]
@@ -83,7 +83,10 @@ pub fn run(o: &Options) -> Result<String, String> {
         .map_err(|e| format!("cannot read {}: {e}", o.config.display()))?;
     let config = LensConfig::parse(&text).map_err(|e| format!("{}: {e}", o.config.display()))?;
     let board = super::run::board(&o.dir, &o.task)?;
-    let meter = Store::read_meter(&o.state, &o.experiment).map_err(|e| e.to_string())?;
+    let snapshot = Store::read_meter(&o.state, &o.experiment).map_err(|e| e.to_string())?;
+    // Restored as `lens run` restores it: a reservation still held counts
+    // as a call and as spent.
+    let meter = snapshot.map(|s| Meter::restore(config.ceilings, &s));
     let taints = Store::read_taints(&o.state, &board).map_err(|e| e.to_string())?;
     let pause = paused(&inbox(&o.bbp, &o.dir, &o.task)?)?;
     let report = Report::of(&config.breaker, &o.task, meter.as_ref(), &taints, pause);
@@ -113,7 +116,8 @@ pub struct Report {
     pub window_calls: u32,
     pub window_micro_usd: u64,
     pub min_score_move: u64,
-    /// The task's settled calls and spend on the experiment's meter.
+    /// The task's calls and spend on the experiment's meter, as `lens run`
+    /// would restore it: held reservations count.
     pub calls: u32,
     pub spent_micro_usd: u64,
     pub taints: ByClass,
@@ -126,13 +130,11 @@ impl Report {
     pub fn of(
         b: &Breaker,
         task: &str,
-        meter: Option<&Snapshot>,
+        meter: Option<&Meter>,
         taints: &Taints,
         pause: Option<Pause>,
     ) -> Self {
-        let (spent, calls) = meter
-            .and_then(|m| m.tasks.iter().find(|(t, _, _)| t == task))
-            .map_or((0, 0), |(_, spent, calls)| (*spent, *calls));
+        let (spent, calls) = meter.map_or((0, 0), |m| (m.task_spent(task), m.calls(task)));
         let mut by = ByClass::default();
         for (_, class) in taints.entries() {
             match class {
@@ -218,6 +220,7 @@ pub fn paused(json: &str) -> Result<Option<Pause>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orch_lens::meter::Snapshot;
 
     fn argv(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
@@ -248,15 +251,22 @@ mod tests {
         let snap = Snapshot {
             experiment_spent: 9,
             tasks: vec![("other".into(), 5, 2), ("t".into(), 1_500_000, 12)],
-            reserved: vec![],
+            // Held at a crash: `lens run` restores it as a settled call.
+            reserved: vec![("t".into(), 250_000)],
         };
+        let ceilings = orch_lens::meter::Ceilings {
+            experiment: 0,
+            task: 0,
+            task_calls: 0,
+        };
+        let meter = Meter::restore(ceilings, &snap);
         let taints = Taints::from_entries([
             (1, DataClass::Internal),
             (2, DataClass::Sensitive),
             (3, DataClass::Internal),
         ]);
-        let r = Report::of(&Breaker::default(), "t", Some(&snap), &taints, None);
-        assert_eq!((r.calls, r.spent_micro_usd), (12, 1_500_000));
+        let r = Report::of(&Breaker::default(), "t", Some(&meter), &taints, None);
+        assert_eq!((r.calls, r.spent_micro_usd), (13, 1_750_000));
         assert_eq!(
             r.taints,
             ByClass {

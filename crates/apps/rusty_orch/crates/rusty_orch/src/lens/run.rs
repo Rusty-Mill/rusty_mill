@@ -251,10 +251,17 @@ pub struct Guard<'a> {
     pub save_taints: &'a mut dyn FnMut(&Taints) -> Result<(), String>,
 }
 
+impl Pause {
+    /// The pause for `reason` in run `run` at `calls` calls.
+    fn new(run: &str, reason: &'static str, detail: String, calls: u32) -> Self {
+        let op = format!("orch-{run}-{reason}-{calls}");
+        Self { reason, detail, op }
+    }
+}
+
 impl Guard<'_> {
     fn pause(&mut self, reason: &'static str, detail: String, calls: u32) -> Result<(), String> {
-        let op = format!("orch-{}-{reason}-{calls}", self.run);
-        (self.pause)(&Pause { reason, detail, op })
+        (self.pause)(&Pause::new(self.run, reason, detail, calls))
             .map_err(|e| format!("task not paused ({reason}): {e}"))
     }
 
@@ -351,6 +358,11 @@ pub(super) fn lens_history(state: &State) -> BTreeSet<String> {
 /// `state` goes to `keep` after every lens's round, so a restart resumes
 /// from it; a failed keep is an error. The round's review rows are saved
 /// first, so no job is kept as done without its row.
+///
+/// The cost breaker is judged before each lens's round, never inside one:
+/// a round over many claims can run past `window_calls` before the next
+/// judgement, and the run's last round is not judged after it ends. The
+/// meter's task ceilings, checked before every call, are the only hard cap.
 #[allow(clippy::too_many_arguments)]
 pub fn passes(
     lenses: Lenses<'_>,
@@ -667,9 +679,22 @@ pub fn run(o: &Options) -> Result<String, String> {
             meter: &mut meter,
             save: &mut save,
         };
-        if let Err(e) = kit.sweep(ordinary, &store, metering, &mut registry, &mut log) {
-            let _ = writeln!(log, "alien: {e}");
-            return Err(log);
+        let stopped = match kit.sweep(ordinary, &store, metering, &mut registry, &mut log) {
+            Ok(stopped) => stopped,
+            Err(e) => {
+                let _ = writeln!(log, "alien: {e}");
+                return Err(log);
+            }
+        };
+        // A task ceiling pauses the task, as it does in `passes`.
+        let ceiling = stopped.and_then(|s| Some((s, ceiling_reason(s)?)));
+        if let Some((stop, reason)) = ceiling {
+            let p = Pause::new(&run, reason, format!("alien: {stop}"), meter.calls(&o.task));
+            if let Err(e) = pause_task(&o.bbp, &o.dir, &o.task, &p) {
+                let _ = writeln!(log, "alien: task not paused ({reason}): {e}");
+                return Err(log);
+            }
+            let _ = writeln!(log, "alien: paused: {}", p.detail);
         }
     }
     outcome(&ended, log)

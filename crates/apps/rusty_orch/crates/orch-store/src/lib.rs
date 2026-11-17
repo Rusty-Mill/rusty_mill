@@ -753,8 +753,6 @@ fn merge(mut old: Review, row: &Review) -> Review {
     old
 }
 
-/// Every blind review job in `records` saved for `board`, sorted by lens,
-/// claim, epoch and kind.
 /// Every saved record of the table `file` in the store at `dir`, read under
 /// the directory's existing lock and recovered as [`Store::open`] would,
 /// writing nothing; `None` when the table file doesn't exist.
@@ -782,6 +780,8 @@ where
     ))
 }
 
+/// Every blind review job in `records` saved for `board`, sorted by lens,
+/// claim, epoch and kind.
 fn reviews(
     records: impl IntoIterator<Item = LensRecordRecord>,
     board: &str,
