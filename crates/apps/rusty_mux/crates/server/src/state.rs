@@ -107,6 +107,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::SHARING)
     .union(Features::DIR_LISTING)
     .union(Features::CLIPBOARD)
+    .union(Features::TERMINAL_FIND)
     .union(UNIX_ONLY);
 
 /// The most text a clipboard answer carries (C38's OSC 52 limit).
@@ -1782,6 +1783,18 @@ impl State {
             "terminal.format" => terminal::format(&rt.grid, capture(&named), REPLY_MAX)
                 .ok_or_else(|| format!("{method} reply exceeds {REPLY_MAX} bytes"))?,
             "terminal.history" => history(rt.spool.as_ref(), &rt.grid, &named)?,
+            "terminal.prompts" => terminal::prompts(&rt.grid),
+            "terminal.find" => {
+                let query = match named.iter().find(|(name, _)| *name == "query") {
+                    Some((_, Value::Text(query))) => query,
+                    _ => return Err(format!("{method}: missing query").into()),
+                };
+                let limit = match lines(&named, "limit") {
+                    0 => terminal::FIND_DEFAULT,
+                    n => n,
+                };
+                terminal::find(&rt.grid, query, limit)
+            }
             "terminal.send-keys" => {
                 self.mux
                     .authorize_input(client, block)
