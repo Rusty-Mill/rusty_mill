@@ -391,10 +391,13 @@ pub(crate) struct Palette {
 }
 
 impl Palette {
-    /// Opens on `entries`, the first row selected.
-    pub(crate) fn open(entries: Vec<Entry>) -> Self {
+    /// Opens on `entries`, the first row selected, numbering folder
+    /// requests after `asks`, so an answer meant for an earlier palette
+    /// never matches a later one.
+    pub(crate) fn open(entries: Vec<Entry>, asks: u64) -> Self {
         let mut p = Palette {
             entries,
+            asks,
             ..Palette::default()
         };
         p.reset();
@@ -413,6 +416,11 @@ impl Palette {
             Load::Ready(l) => Some(&l.path),
             _ => b.at.as_deref(),
         }
+    }
+
+    /// The last folder request number used.
+    pub(crate) fn asks(&self) -> u64 {
+        self.asks
     }
 
     /// Whether the list is a folder's (D78 footer and header).
@@ -774,10 +782,21 @@ impl Palette {
 
     /// Backspace on an empty filter: up one level (D78).
     fn up(&mut self) -> Out {
-        let Some(Load::Ready(list)) = self.browse.as_ref().map(|b| &b.load) else {
-            return Out::Stay;
+        let here = match self.browse.as_ref() {
+            Some(Browse {
+                load: Load::Ready(list),
+                ..
+            }) => Some(list.path.clone()),
+            // A refused folder still goes up from where it was asked.
+            Some(Browse {
+                load: Load::Failed(..),
+                at,
+                ..
+            }) => at.clone(),
+            _ => None,
         };
-        parent(&list.path).map_or(Out::Stay, |p| self.read(Some(p)))
+        here.and_then(|h| parent(&h))
+            .map_or(Out::Stay, |p| self.read(Some(p)))
     }
 
     fn start_browse(&mut self, insert: bool) -> Out {
@@ -991,7 +1010,7 @@ mod tests {
     }
 
     fn browsing(insert: bool) -> Palette {
-        let mut p = Palette::open(entries());
+        let mut p = Palette::open(entries(), 0);
         let id = if insert { "Insert" } else { "Go" };
         type_in(&mut p, id);
         let Out::List { ask, path } = p.key(Key::Enter) else {
@@ -1024,7 +1043,7 @@ mod tests {
 
     #[test]
     fn an_empty_query_shows_every_group_in_order() {
-        let p = Palette::open(entries());
+        let p = Palette::open(entries(), 0);
         let lines = p.lines();
         let heads: Vec<_> = lines
             .iter()
@@ -1048,19 +1067,19 @@ mod tests {
                 current: false,
             })
             .collect();
-        assert_eq!(labels(&Palette::open(many)).len(), FIRST);
+        assert_eq!(labels(&Palette::open(many, 0)).len(), FIRST);
     }
 
     #[test]
     fn equal_matches_keep_their_list_order() {
-        let mut p = Palette::open(entries());
+        let mut p = Palette::open(entries(), 0);
         type_in(&mut p, "spl");
         assert_eq!(labels(&p), ["Split right", "Split down"]);
     }
 
     #[test]
     fn typing_filters_and_the_best_group_goes_first() {
-        let mut p = Palette::open(entries());
+        let mut p = Palette::open(entries(), 0);
         type_in(&mut p, "logs");
         assert_eq!(labels(&p), ["build-logs"]);
         assert!(matches!(&p.lines()[0], Line::Head(h) if h == "Windows"));
@@ -1069,7 +1088,7 @@ mod tests {
 
     #[test]
     fn no_match_says_so_and_picks_nothing() {
-        let mut p = Palette::open(entries());
+        let mut p = Palette::open(entries(), 0);
         type_in(&mut p, "zzz");
         assert!(matches!(&p.lines()[..], [Line::Note(n)] if n.title == "No match for \"zzz\""));
         assert_eq!(p.pick(), None);
@@ -1084,7 +1103,7 @@ mod tests {
     fn up_and_down_wrap_and_skip_disabled_rows() {
         let mut list = entries();
         list[1].enabled = false;
-        let mut p = Palette::open(list);
+        let mut p = Palette::open(list, 0);
         p.key(Key::Down);
         assert_eq!(p.pick(), Some(Pick::Run(Id::Cmd(Cmd::Settings))));
         p.key(Key::Up);
@@ -1096,14 +1115,14 @@ mod tests {
 
     #[test]
     fn enter_runs_an_action_and_esc_closes() {
-        let mut p = Palette::open(entries());
+        let mut p = Palette::open(entries(), 0);
         assert_eq!(p.key(Key::Enter), Out::Run(Id::Cmd(Cmd::SplitRight)));
         assert_eq!(p.key(Key::Esc), Out::Close);
     }
 
     #[test]
     fn an_update_keeps_the_selection_on_its_row() {
-        let mut p = Palette::open(entries());
+        let mut p = Palette::open(entries(), 0);
         p.key(Key::Down);
         let mut next = entries();
         next.insert(0, cmd(Cmd::NewWindow, "New window"));
@@ -1212,6 +1231,37 @@ mod tests {
         assert!(
             matches!(&lines[..], [Line::Note(n)] if n.alert && n.title == "Can't read /home/me/docs")
         );
+    }
+
+    #[test]
+    fn backspace_leaves_a_refused_folder_for_its_parent() {
+        let mut p = browsing(false);
+        select(&mut p, "docs/");
+        let Out::List { ask, .. } = p.key(Key::Tab) else {
+            panic!("no listing asked");
+        };
+        p.listed(ask, Err("permission denied".into()));
+        let Out::List { path, .. } = p.key(Key::Backspace) else {
+            panic!("backspace stayed");
+        };
+        assert_eq!(path.as_deref(), Some("/home/me"));
+    }
+
+    #[test]
+    fn a_new_palette_numbers_its_requests_after_the_last() {
+        let mut first = Palette::open(entries(), 0);
+        type_in(&mut first, "Go");
+        let Out::List { ask: old, .. } = first.key(Key::Enter) else {
+            panic!("no listing asked");
+        };
+        let mut second = Palette::open(entries(), first.asks());
+        type_in(&mut second, "Go");
+        let Out::List { ask: new, .. } = second.key(Key::Enter) else {
+            panic!("no listing asked");
+        };
+        assert_ne!(old, new);
+        second.listed(old, Ok("/stale".into()));
+        assert!(matches!(&second.lines()[..], [Line::Note(n)] if n.spinner));
     }
 
     #[test]
@@ -1356,7 +1406,7 @@ mod tests {
         let many: Vec<Entry> = (0..30)
             .map(|i| cmd(Cmd::Settings, &format!("row {i}")))
             .collect();
-        let mut p = Palette::open(many);
+        let mut p = Palette::open(many, 0);
         type_in(&mut p, "row");
         for _ in 0..12 {
             p.key(Key::Down);

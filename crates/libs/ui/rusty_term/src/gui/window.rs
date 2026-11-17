@@ -647,6 +647,8 @@ struct WindowState<'a> {
     confirm: Option<Confirm>,
     /// The command palette and its directory browse (gui-design D77, D78).
     palette: PaletteUi,
+    /// The block that had the focus when the palette opened.
+    palette_origin: Option<u64>,
     /// The trusted link origins (C63, D69-D72).
     links: link_policy::Policy,
     /// The effective config; refreshed on live reload so new tabs follow it.
@@ -4916,6 +4918,11 @@ impl WindowState<'_> {
 
     /// The palette's rows now, when it is open (D77: they update live).
     fn refresh_palette(&mut self) {
+        // A browse belongs to the block it began on: a listing of one
+        // block's host must never be typed into another (D78).
+        if self.palette.browsing() && self.focused() != self.palette_origin {
+            self.palette.close();
+        }
         if self.palette.is_open() {
             let entries = self.palette_entries();
             self.palette.update(entries);
@@ -4930,6 +4937,7 @@ impl WindowState<'_> {
         };
         if tab.layout.ids().contains(&key) {
             tab.focus = key;
+            self.refresh_palette();
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
@@ -5464,6 +5472,7 @@ impl WindowState<'_> {
                 self.popover.close();
                 self.confirm = None;
                 let entries = self.palette_entries();
+                self.palette_origin = self.focused();
                 self.palette.open(entries);
             }
         }
@@ -5968,6 +5977,16 @@ impl WindowState<'_> {
                     if let Some(p) = self.pane() {
                         p.grid.lock().ime_preedit.clear();
                     }
+                    // The palette owns composed text while it's open, and a
+                    // popover or confirm drops it: neither reaches the shell.
+                    if self.palette.is_open() {
+                        let out = self.palette.key(palette::Key::Char(text.to_string()));
+                        self.palette_out(out);
+                        return;
+                    }
+                    if self.popover_open() {
+                        return;
+                    }
                     // The find bar owns composed text while it's open — mirror
                     // `search_key`'s `Key::Character` arm above instead of
                     // leaking the committed IME text into the background
@@ -6358,6 +6377,7 @@ impl<'a> App<'a> {
             popover: Popover::new().ok_or("the interface font failed to parse")?,
             confirm: None,
             palette: PaletteUi::new().ok_or("the interface font failed to parse")?,
+            palette_origin: None,
             links: load_trust(),
             config: self.config.clone(),
             config_path: self.config_path.clone(),

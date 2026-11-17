@@ -395,6 +395,8 @@ type Look = (Chrome, f32, usize);
 pub(crate) struct PaletteUi {
     text: UiText,
     open: Option<Open>,
+    /// The last folder request number any palette used.
+    asks: u64,
 }
 
 struct Open {
@@ -409,6 +411,7 @@ impl PaletteUi {
         Some(Self {
             text: UiText::embedded()?,
             open: None,
+            asks: 0,
         })
     }
 
@@ -417,15 +420,23 @@ impl PaletteUi {
     }
 
     pub(crate) fn open(&mut self, entries: Vec<Entry>) {
+        self.close();
         self.open = Some(Open {
-            palette: Palette::open(entries),
+            palette: Palette::open(entries, self.asks),
             hover: None,
             painted: None,
         });
     }
 
     pub(crate) fn close(&mut self) {
-        self.open = None;
+        if let Some(open) = self.open.take() {
+            self.asks = open.palette.asks();
+        }
+    }
+
+    /// Whether the open palette is browsing a folder.
+    pub(crate) fn browsing(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| o.palette.browsing())
     }
 
     /// The rows' new state (D77: the list updates live).
@@ -539,7 +550,7 @@ mod tests {
 
     #[test]
     fn the_panel_is_560_wide_and_rows_are_hittable() {
-        let p = Palette::open(entries(3));
+        let p = Palette::open(entries(3), 0);
         let painted = paint_at(&p, 1.0);
         assert_eq!(painted.pop.pixmap.width, 560);
         let (rect, line) = painted.pop.rows[0];
@@ -549,11 +560,11 @@ mod tests {
 
     #[test]
     fn a_long_list_is_capped_at_eight_rows() {
-        let few = paint_at(&Palette::open(entries(3)), 1.0);
-        let many = paint_at(&Palette::open(entries(40)), 1.0);
+        let few = paint_at(&Palette::open(entries(3), 0), 1.0);
+        let many = paint_at(&Palette::open(entries(40), 0), 1.0);
         assert!(many.pop.pixmap.height > few.pop.pixmap.height);
-        let shorter = paint_at(&Palette::open(entries(5)), 1.0);
-        let taller = paint_at(&Palette::open(entries(60)), 1.0);
+        let shorter = paint_at(&Palette::open(entries(5), 0), 1.0);
+        let taller = paint_at(&Palette::open(entries(60), 0), 1.0);
         assert!(taller.pop.pixmap.height >= shorter.pop.pixmap.height);
         assert!(
             f32::from(taller.pop.pixmap.height as u16)
@@ -563,13 +574,16 @@ mod tests {
 
     #[test]
     fn the_browse_adds_a_path_line_and_folder_rows_have_a_chevron() {
-        let mut p = Palette::open(vec![Entry {
-            id: Id::GoTo,
-            label: "Go to directory".into(),
-            detail: String::new(),
-            enabled: true,
-            current: false,
-        }]);
+        let mut p = Palette::open(
+            vec![Entry {
+                id: Id::GoTo,
+                label: "Go to directory".into(),
+                detail: String::new(),
+                enabled: true,
+                current: false,
+            }],
+            0,
+        );
         let plain = paint_at(&p, 1.0).pop.pixmap.height;
         let Out::List { ask, .. } = p.key(Key::Enter) else {
             panic!("no listing asked");
@@ -586,8 +600,33 @@ mod tests {
     }
 
     #[test]
+    fn requests_stay_unique_across_openings() {
+        let go = || {
+            vec![Entry {
+                id: Id::GoTo,
+                label: "Go".into(),
+                detail: String::new(),
+                enabled: true,
+                current: false,
+            }]
+        };
+        let mut ui = PaletteUi::new().expect("font");
+        ui.open(go());
+        let Some(Out::List { ask: old, .. }) = ui.key(Key::Enter) else {
+            panic!("no listing asked");
+        };
+        ui.close();
+        ui.open(go());
+        let Some(Out::List { ask: new, .. }) = ui.key(Key::Enter) else {
+            panic!("no listing asked");
+        };
+        assert_ne!(old, new);
+        assert!(ui.browsing());
+    }
+
+    #[test]
     fn a_larger_scale_scales_the_panel() {
-        let p = Palette::open(entries(3));
+        let p = Palette::open(entries(3), 0);
         let one = paint_at(&p, 1.0);
         let two = paint_at(&p, 2.0);
         assert_eq!(two.pop.pixmap.width, 2 * one.pop.pixmap.width);
