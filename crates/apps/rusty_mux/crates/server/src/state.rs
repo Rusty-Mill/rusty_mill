@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use rusty_mux_core::TailscaleState;
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Mux, Principal, Side, Size,
-    Transport, WindowId,
+    BlockId, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Mux, Principal, Selection,
+    Side, Size, Transport, WindowId,
 };
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
@@ -106,7 +106,15 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::HOLD)
     .union(Features::SHARING)
     .union(Features::DIR_LISTING)
+    .union(Features::CLIPBOARD)
     .union(UNIX_ONLY);
+
+/// The most text a clipboard answer carries (C38's OSC 52 limit).
+const MAX_CLIPBOARD: usize = 1 << 20;
+
+/// How long a clipboard read waits for its answer before the next one is
+/// asked: a late answer would land as typed input in whatever runs next.
+const CLIPBOARD_WAIT: Duration = Duration::from_secs(30);
 
 /// Offered on Linux only: signal and release (C76) act on a Unix process
 /// group, and orch, their one client, runs there; the tailscale status
@@ -407,6 +415,10 @@ pub(crate) struct State {
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
     features: HashMap<ClientId, Features>,
+    /// The one clipboard read asked of a block's lease holder per selection
+    /// (`true` for primary), until it is answered or [`CLIPBOARD_WAIT`] ends
+    /// (C54). A reply that matches none is refused.
+    reads: HashMap<(BlockId, bool), (ClientId, Instant)>,
     /// Each `TAKEOVER` client's tokens.
     tokens: HashMap<ClientId, Tokens>,
     /// Clients whose connection ended within [`ORPHAN_GRACE`], each with
@@ -483,6 +495,7 @@ impl State {
             blocks: HashMap::new(),
             clients: HashMap::new(),
             features: HashMap::new(),
+            reads: HashMap::new(),
             tokens: HashMap::new(),
             orphans: HashMap::new(),
             history: History::new(Uuid::new_v4(), HISTORY),
@@ -1438,12 +1451,93 @@ impl State {
                 req,
                 Err("signal and release are supported on Linux only".into()),
             ),
+            M::ClipboardReply {
+                req,
+                block,
+                selection,
+                data,
+            } => (
+                req,
+                self.require(client, Features::CLIPBOARD, "a clipboard reply")
+                    .and_then(|()| self.clipboard_reply(client, req, block, selection, data)),
+            ),
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
                     .and_then(|()| self.open_datagram(client, req)),
             ),
             other => (0, Err(format!("not a client request: {other:?}").into())),
+        }
+    }
+
+    /// A lease holder's answer to a clipboard read (C54): the OSC 52 reply
+    /// the program asked for, written as the holder's input, so the lease
+    /// rule and the owner's report apply. A denial is an empty answer.
+    fn clipboard_reply(
+        &mut self,
+        client: ClientId,
+        req: u64,
+        block: BlockId,
+        selection: Selection,
+        data: Option<Vec<u8>>,
+    ) -> Result<Outcome, Refusal> {
+        let data = data.unwrap_or_default();
+        if data.len() > MAX_CLIPBOARD {
+            return Err(format!("a clipboard answer is at most {MAX_CLIPBOARD} bytes").into());
+        }
+        self.mux
+            .authorize_input(client, block)
+            .map_err(Refusal::from)?;
+        let key = (block, selection == Selection::Primary);
+        let waiting = self
+            .reads
+            .get(&key)
+            .is_some_and(|(asked, at)| *asked == client && at.elapsed() < CLIPBOARD_WAIT);
+        if !waiting {
+            return Err(format!("no {} read of block {block} is waiting", selection.name()).into());
+        }
+        self.reads.remove(&key);
+        let target = match selection {
+            Selection::Clipboard => 'c',
+            Selection::Primary => 'p',
+        };
+        let reply = format!(
+            "\x1b]52;{target};{}\x07",
+            rusty_base64::encode_standard(&data)
+        );
+        self.input(client, req, block, reply.into_bytes())
+    }
+
+    /// Asks `block`'s lease holder for each clipboard `reads` (C54), when
+    /// it can answer and is not behind on its output; otherwise the read
+    /// goes unanswered. The server never answers one itself.
+    fn ask_clipboard(&mut self, block: BlockId, reads: Vec<Selection>) {
+        let Some(holder) = self.mux.block(block).and_then(|b| b.lease()) else {
+            return;
+        };
+        let ready = self.has(holder, Features::CLIPBOARD)
+            && self
+                .clients
+                .get(&holder)
+                .is_some_and(|out| out.queued() <= INPUT_REPORT_LIMIT);
+        if !ready {
+            return;
+        }
+        // One read per selection at a time: a program looping on the query
+        // can't flood the holder, and its answer can't arrive late.
+        self.reads
+            .retain(|_, (_, at)| at.elapsed() < CLIPBOARD_WAIT);
+        for selection in reads {
+            let key = (block, selection == Selection::Primary);
+            if self
+                .reads
+                .get(&key)
+                .is_some_and(|(asked, _)| *asked == holder)
+            {
+                continue;
+            }
+            self.reads.insert(key, (holder, Instant::now()));
+            self.send(holder, &Message::ClipboardRead { block, selection });
         }
     }
 
@@ -2475,10 +2569,14 @@ impl State {
         for selection in terminal::take_clipboard(&mut rt.grid) {
             in_step("clipboard", self.mux.note_clipboard(block, selection));
         }
+        let reads = terminal::take_clipboard_reads(&mut rt.grid);
         // What a terminal host would relay, such as the bell; clients
         // already have the raw output.
         rt.grid.take_host_out();
         self.check_process(block, false);
+        if !reads.is_empty() {
+            self.ask_clipboard(block, reads);
+        }
         let frame = encode(&Message::Output {
             block,
             data: data.to_vec(),

@@ -238,6 +238,13 @@ impl Features {
     /// directory on the server's host.
     pub const DIR_LISTING: Self = Self(1 << 47);
 
+    /// Clipboard reads (C54): a program's OSC 52 read is asked of the
+    /// block's input-lease holder as [`Message::ClipboardRead`], which
+    /// answers with [`Message::ClipboardReply`] if its own policy allows.
+    /// The server never answers a read for a client, and no clipboard text
+    /// goes in an event.
+    pub const CLIPBOARD: Self = Self(1 << 48);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -331,6 +338,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::TAILSCALE_STATUS, "tailscale status"),
     (Features::SHARING, "live sharing"),
     (Features::DIR_LISTING, "directory listing"),
+    (Features::CLIPBOARD, "clipboard reads"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -829,6 +837,17 @@ pub enum Message {
         req: u64,
         block: BlockId,
     },
+    /// Answers [`Message::ClipboardRead`] with `data`, the `selection`'s
+    /// text, or `None` to deny; a denial writes an empty answer to the
+    /// program. Accepted only from the block's lease holder, like input,
+    /// and only once for a read it was asked and has not answered.
+    /// Negotiated with [`Features::CLIPBOARD`].
+    ClipboardReply {
+        req: u64,
+        block: BlockId,
+        selection: Selection,
+        data: Option<Vec<u8>>,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -940,6 +959,13 @@ pub enum Message {
         block: BlockId,
         client: ClientId,
         principal: Principal,
+    },
+    /// A program in `block` reads `selection` (OSC 52); sent to the block's
+    /// lease holder only, and never an event. Negotiated with
+    /// [`Features::CLIPBOARD`].
+    ClipboardRead {
+        block: BlockId,
+        selection: Selection,
     },
     /// The block's [`Echo`] changed, or the client just attached; it
     /// precedes the Output read after the change. Negotiated with
@@ -1098,6 +1124,7 @@ mod ty {
     pub const UNSHARE_SESSION: u8 = 0x26;
     pub const SIGNAL_BLOCK: u8 = 0x28;
     pub const RELEASE_BLOCK: u8 = 0x29;
+    pub const CLIPBOARD_REPLY: u8 = 0x2a;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -1114,6 +1141,7 @@ mod ty {
     pub const INPUT_BATCH: u8 = 0x8e;
     pub const LEASE_REQUESTED: u8 = 0x8f;
     pub const HISTORY: u8 = 0x90;
+    pub const CLIPBOARD_READ: u8 = 0x91;
 }
 
 impl Message {
@@ -1252,6 +1280,18 @@ impl Message {
                 req_block(out, *req, *block, ty::SIGNAL_BLOCK)
             }
             M::ReleaseBlock { req, block } => req_block(out, *req, *block, ty::RELEASE_BLOCK),
+            M::ClipboardReply {
+                req,
+                block,
+                selection,
+                data,
+            } => {
+                out.varint(SELECTION, selection_wire(*selection));
+                if let Some(data) = data {
+                    out.bytes(DATA, data);
+                }
+                req_block(out, *req, *block, ty::CLIPBOARD_REPLY)
+            }
             M::ResizeSplit {
                 req,
                 block,
@@ -1369,6 +1409,11 @@ impl Message {
                 out.uuid(BLOCK, block.uuid()).uuid(CLIENT, client.uuid());
                 put_principal(out, principal);
                 ty::LEASE_REQUESTED
+            }
+            M::ClipboardRead { block, selection } => {
+                out.uuid(BLOCK, block.uuid())
+                    .varint(SELECTION, selection_wire(*selection));
+                ty::CLIPBOARD_READ
             }
             M::Welcome {
                 features,
@@ -1589,6 +1634,12 @@ impl Message {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
             },
+            ty::CLIPBOARD_REPLY => M::ClipboardReply {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                selection: selection(&f)?,
+                data: f.opt(DATA, |f, id| f.bytes(id).map(<[u8]>::to_vec))?,
+            },
             ty::RESIZE_SPLIT => M::ResizeSplit {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
@@ -1663,6 +1714,10 @@ impl Message {
             ty::REQUEST_LEASE => M::RequestLease {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
+            },
+            ty::CLIPBOARD_READ => M::ClipboardRead {
+                block: block(&f, BLOCK)?,
+                selection: selection(&f)?,
             },
             ty::LEASE_REQUESTED => M::LeaseRequested {
                 block: block(&f, BLOCK)?,

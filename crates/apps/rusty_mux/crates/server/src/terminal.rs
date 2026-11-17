@@ -325,6 +325,14 @@ pub(crate) fn take_clipboard(grid: &mut Grid) -> Vec<Selection> {
     clipboard.into_iter().chain(primary).collect()
 }
 
+/// The selections the block's program asked to read (OSC 52 `?`) since the
+/// last call, clipboard first.
+pub(crate) fn take_clipboard_reads(grid: &mut Grid) -> Vec<Selection> {
+    let clipboard = std::mem::take(&mut grid.clipboard_query).then_some(Selection::Clipboard);
+    let primary = std::mem::take(&mut grid.clipboard_query_primary).then_some(Selection::Primary);
+    clipboard.into_iter().chain(primary).collect()
+}
+
 /// The working directory URI (OSC 7) and title a block last announced, to
 /// tell when either changes.
 #[derive(Debug, Default)]
