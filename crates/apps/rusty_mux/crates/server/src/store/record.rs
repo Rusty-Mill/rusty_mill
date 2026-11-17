@@ -127,7 +127,14 @@ pub(crate) fn records(manifest: &Manifest) -> Vec<SessionRecord> {
         name: w.name.clone(),
         layout: w.layout.as_ref().map(ToString::to_string),
         zoomed: w.zoomed.map(|b| to_uuid(b.uuid())),
-        focused: w.focused.map(|b| to_uuid(b.uuid())),
+        // Floats (C42) are not stored: the records are bincode, so a new
+        // field needs a schema bump (an owner call). A float comes back
+        // detached, and focus moves with it.
+        focused: w
+            .focused
+            .filter(|b| !w.floats.iter().any(|f| f.block == *b))
+            .or_else(|| w.layout.as_ref().and_then(|l| l.blocks().first().copied()))
+            .map(|b| to_uuid(b.uuid())),
         blocks: w.blocks.iter().map(block).collect(),
     };
     manifest
@@ -196,6 +203,7 @@ fn window(
         layout,
         zoomed: w.zoomed.map(block_id),
         focused: w.focused.map(block_id),
+        floats: Vec::new(),
         blocks,
     })
 }

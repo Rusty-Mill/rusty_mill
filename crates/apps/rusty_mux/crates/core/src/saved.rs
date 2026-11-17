@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::{
-    Block, BlockId, Float, InputMode, Layout, MAX_DEPTH, MAX_NAME, Mux, Session, SessionId, Size, Window,
-    WindowId,
+    Block, BlockId, Float, InputMode, Layout, MAX_DEPTH, MAX_NAME, Mux, Session, SessionId, Size,
+    Window, WindowId,
 };
 
 /// Every session, in creation order.
@@ -211,10 +211,13 @@ fn check_window(w: &SavedWindow) -> Result<(), RestoreError> {
     once.sort_unstable();
     once.dedup();
     if once.len() != floating.len() || !floating.iter().all(|b| owns(b) && !placed.contains(b)) {
-        return Err(RestoreError("a float repeats, is tiled or is of another window"));
+        return Err(RestoreError(
+            "a float repeats, is tiled or is of another window",
+        ));
     }
     if w.zoomed.is_some_and(|z| !placed.contains(&z))
-        || w.focused.is_some_and(|f| !placed.contains(&f) && !floating.contains(&f))
+        || w.focused
+            .is_some_and(|f| !placed.contains(&f) && !floating.contains(&f))
     {
         return Err(RestoreError("zoomed or focused block not shown"));
     }

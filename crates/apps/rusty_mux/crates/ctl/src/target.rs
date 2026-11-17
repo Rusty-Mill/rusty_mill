@@ -36,7 +36,7 @@ pub(crate) fn resolve(
     spec: &str,
     session: Option<Uuid>,
 ) -> Result<Uuid, Miss> {
-    let nodes: Vec<Node<'_>> = entries.iter().map(node).collect();
+    let nodes: Vec<Node<'_>> = entries.iter().filter_map(node).collect();
     let chain = chain(entity);
     let segments: Vec<&str> = spec.split('/').collect();
     let Some(start) = chain.len().checked_sub(segments.len()) else {
@@ -62,8 +62,8 @@ fn chain(entity: Entity) -> &'static [Entity] {
     }
 }
 
-fn node(entry: &Entry) -> Node<'_> {
-    match entry {
+fn node(entry: &Entry) -> Option<Node<'_>> {
+    Some(match entry {
         Entry::Session { session, name, .. } => Node {
             entity: Entity::Session,
             id: session.uuid(),
@@ -98,7 +98,9 @@ fn node(entry: &Entry) -> Node<'_> {
             parent: None,
             name: Some(name),
         },
-    }
+        // A window's floats are part of its entry, not a target.
+        Entry::Floats { .. } => return None,
+    })
 }
 
 /// Whether `node` is `ancestor` or below it.

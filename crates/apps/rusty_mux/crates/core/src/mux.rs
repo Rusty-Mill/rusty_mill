@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::names;
 use crate::{
     Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Float, FloatRect,
-    InputMode, Layout, MAX_DEPTH, Owner, Principal, Progress, Selection, Session, SessionId, SessionShare, Share,
-    Side, Size, TailscaleState, Toward, Transport, Window, WindowId,
+    InputMode, Layout, MAX_DEPTH, Owner, Principal, Progress, Selection, Session, SessionId,
+    SessionShare, Share, Side, Size, TailscaleState, Toward, Transport, Window, WindowId,
 };
 
 /// The longest name any entity may have, in UTF-8 bytes. Names travel in
@@ -650,7 +650,8 @@ impl Mux {
             return;
         };
         let shown = |b: &BlockId| {
-            w.layout.as_ref().is_some_and(|l| l.contains(*b)) || w.floats.iter().any(|f| f.block == *b)
+            w.layout.as_ref().is_some_and(|l| l.contains(*b))
+                || w.floats.iter().any(|f| f.block == *b)
         };
         let first = w
             .layout

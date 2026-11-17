@@ -107,6 +107,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::SHARING)
     .union(Features::DIR_LISTING)
     .union(Features::CLIPBOARD)
+    .union(Features::FLOATS)
     .union(UNIX_ONLY);
 
 /// The most text a clipboard answer carries (C38's OSC 52 limit).
@@ -1272,6 +1273,22 @@ impl State {
                     self.edit(client, "detach-block", |mux| mux.detach_block(block))
                 }),
             ),
+            M::PlaceFloat { req, block, at } => (
+                req,
+                self.owns(client, [block]).and_then(|()| {
+                    self.edit_needing(Features::FLOATS, client, "place-float", |mux| {
+                        mux.place_float(block, at)
+                    })
+                }),
+            ),
+            M::StackFloat { req, block, top } => (
+                req,
+                self.owns(client, [block]).and_then(|()| {
+                    self.edit_needing(Features::FLOATS, client, "stack-float", |mux| {
+                        mux.stack_float(block, top)
+                    })
+                }),
+            ),
             M::MoveWindow { req, window, index } => (
                 req,
                 self.edit(client, "move-window", |mux| mux.move_window(window, index)),
@@ -1574,12 +1591,22 @@ impl State {
         what: &str,
         edit: impl FnOnce(&mut Mux) -> Result<(), rusty_mux_core::Error>,
     ) -> Result<Outcome, Refusal> {
-        self.require(client, Features::LAYOUT_EDIT, what)
-            .and_then(|()| {
-                edit(&mut self.mux)
-                    .map(|()| Outcome::Done(None))
-                    .map_err(Refusal::from)
-            })
+        self.edit_needing(Features::LAYOUT_EDIT, client, what, edit)
+    }
+
+    /// A layout change for a client that negotiated `feature`.
+    fn edit_needing(
+        &mut self,
+        feature: Features,
+        client: ClientId,
+        what: &str,
+        edit: impl FnOnce(&mut Mux) -> Result<(), rusty_mux_core::Error>,
+    ) -> Result<Outcome, Refusal> {
+        self.require(client, feature, what).and_then(|()| {
+            edit(&mut self.mux)
+                .map(|()| Outcome::Done(None))
+                .map_err(Refusal::from)
+        })
     }
 
     /// Sends `signal` to `block`'s program group, for its owner (C76).
@@ -1980,6 +2007,12 @@ impl State {
                     zoomed: window.zoomed(),
                     focused: window.focused(),
                 });
+                if !window.floats().is_empty() && self.has(client, Features::FLOATS) {
+                    entries.push(Entry::Floats {
+                        window: window.id(),
+                        floats: window.floats().to_vec(),
+                    });
+                }
                 for block in window.blocks().iter().filter_map(|b| self.mux.block(*b)) {
                     entries.push(Entry::Block {
                         block: block.id(),
@@ -2876,6 +2909,7 @@ fn receives(features: Features, principal: &Principal, event: &Event) -> bool {
         | Event::BlockRenamed { .. }
         | Event::ClientRenamed { .. } => Features::LABELS,
         Event::LayoutChanged { .. } => Features::LAYOUT,
+        Event::FloatsChanged { .. } => Features::FLOATS,
         Event::ClientConnectionChanged { .. } => Features::IDENTITY,
         Event::ClipboardWritten { .. } | Event::StatusRemoved { .. } => {
             Features::MORE_PROGRAM_EVENTS

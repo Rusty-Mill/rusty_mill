@@ -3,7 +3,10 @@
 //! or detached, never two at once. The server keeps the floats back to
 //! front; clients draw them in that order, each at its own size.
 
-use crate::{BlockId, Error, Rect, Size};
+use std::fmt;
+use std::str::FromStr;
+
+use crate::{BlockId, Error, ParseError, Rect, Size};
 
 /// The least a float's width or height may be, in percent of the window,
 /// so a float stays big enough to grab.
@@ -73,4 +76,56 @@ fn span(at: u8, len: u8, total: u16) -> (u16, u16) {
 pub struct Float {
     pub block: BlockId,
     pub at: FloatRect,
+}
+
+/// `block@x,y,w,h`: a block id, then its [`FloatRect`] in percent.
+impl fmt::Display for Float {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let at = self.at;
+        write!(f, "{}@{},{},{},{}", self.block, at.x, at.y, at.w, at.h)
+    }
+}
+
+impl FromStr for Float {
+    type Err = ParseError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let (id, rect) = text.split_once('@').ok_or(ParseError)?;
+        let block = BlockId::from_uuid(id.parse().map_err(|_| ParseError)?);
+        let mut parts = rect
+            .split(',')
+            .map(|n| n.parse::<u8>().map_err(|_| ParseError));
+        let mut next = || parts.next().unwrap_or(Err(ParseError));
+        let (x, y, w, h) = (next()?, next()?, next()?, next()?);
+        if parts.next().is_some() {
+            return Err(ParseError);
+        }
+        let at = FloatRect::new(x, y, w, h).map_err(|_| ParseError)?;
+        Ok(Self { block, at })
+    }
+}
+
+/// Floats as the wire carries them: each in its text form, joined by `;`,
+/// back to front; empty for none.
+pub fn floats_text(floats: &[Float]) -> String {
+    let texts: Vec<String> = floats.iter().map(Float::to_string).collect();
+    texts.join(";")
+}
+
+/// Floats from [`floats_text`]; refuses a block listed twice.
+pub fn parse_floats(text: &str) -> Result<Vec<Float>, ParseError> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let floats = text
+        .split(';')
+        .map(str::parse)
+        .collect::<Result<Vec<Float>, _>>()?;
+    let mut blocks: Vec<BlockId> = floats.iter().map(|f| f.block).collect();
+    blocks.sort_unstable();
+    blocks.dedup();
+    if blocks.len() != floats.len() {
+        return Err(ParseError);
+    }
+    Ok(floats)
 }

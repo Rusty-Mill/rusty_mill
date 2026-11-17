@@ -1,6 +1,6 @@
 use rusty_mux_core::{
-    Axis, BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
-    SessionId, Share, Side, Size, TailscaleState, Toward, Transport, WindowId,
+    Axis, BlockId, ClientId, EntityId, Event, ExitStatus, Float, FloatRect, Layout, Principal,
+    Progress, Selection, SessionId, Share, Side, Size, TailscaleState, Toward, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::Writer;
@@ -199,6 +199,16 @@ fn every_message_round_trips() {
         },
         Message::Entry {
             req: 18,
+            entry: Entry::Floats {
+                window,
+                floats: vec![Float {
+                    block,
+                    at: FloatRect::new(0, 0, 100, 100).expect("a float rect"),
+                }],
+            },
+        },
+        Message::Entry {
+            req: 18,
             entry: Entry::Window {
                 window,
                 session,
@@ -343,6 +353,21 @@ fn every_message_round_trips() {
             side: Side::Left,
         },
         Message::DetachBlock { req: 30, block },
+        Message::PlaceFloat {
+            req: 70,
+            block,
+            at: FloatRect::new(5, 10, 40, 90).expect("a float rect"),
+        },
+        Message::StackFloat {
+            req: 71,
+            block,
+            top: true,
+        },
+        Message::StackFloat {
+            req: 72,
+            block,
+            top: false,
+        },
         Message::MoveWindow {
             req: 31,
             window,
@@ -657,6 +682,23 @@ fn every_event_round_trips() {
             window,
             layout: None,
             zoomed: None,
+        },
+        Event::FloatsChanged {
+            window,
+            floats: vec![
+                Float {
+                    block: BlockId::from_uuid(Uuid::new_v4()),
+                    at: FloatRect::new(0, 0, 100, 100).expect("a float rect"),
+                },
+                Float {
+                    block,
+                    at: FloatRect::new(0, 0, 100, 100).expect("a float rect"),
+                },
+            ],
+        },
+        Event::FloatsChanged {
+            window,
+            floats: vec![],
         },
         Event::ClipboardWritten {
             block,
