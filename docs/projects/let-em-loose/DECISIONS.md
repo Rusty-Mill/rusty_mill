@@ -147,6 +147,7 @@ Precise contracts used by this guide:
 | D137 | `rusty_orch lens breaker` is a read-only report with no reset | [default] 2026-11-17 (#758) |
 | D138 | orch maps `sensitive_paths` to launcher `hide` via agents.json, and `real_data` to `bbp dry-run` | [default] 2026-11-17 (#758) |
 | D139 | A lens post with no taint entry reads as `sensitive` (unknown ids from lost posts) | [default] 2026-11-17 (#758) |
+| D140 | One paid lens run approved for 2026-11-17 (`--max-passes 5`, default call cap); supersedes D134 for that run only | [stated] 2026-11-17 (1124) |
 
 ## D1. Lenses, not stages
 
@@ -1370,3 +1371,13 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_4c08e98488ae4605a4afe1e41af0e4f4
 **Key.** lel:758:unknown-lens-post-reads-sensitive
 **Source.** let-em-loose-expert, 2026-11-17, answering a Codex P1 finding on PR #1764 (`orch-lens/src/round.rs` `partial`). 598-build/PLAN.md, D59, D62, D86, D127. Numbered D139 after D138.
+
+## D140. One paid lens run approved for 2026-11-17 (`--max-passes 5`, default call cap); supersedes D134 for that run only
+
+**Decision.** Nano approved ONE live paid `rusty_orch lens run` on 2026-11-17. The run is `rusty_orch lens run --max-passes 5` with the default call cap (`task_calls`, STARTER 400). This supersedes D134's "no paid runs" for that single run only. D134 stands for every other run; any further paid call, a second run included, is ask-first again. Dollar caps (`experiment_usd`, `task_usd`) do not enforce in v0, because the meter charges 0 per call (ADR-0021). The "$25" the user stated is a report threshold only. "Board directory" means the BBP directory `/srv/lel/bbp` (user-confirmed).
+**Why.** Nano's own words in the saved chat: after "Lens runner declared done 2026-11-05; a live paid run needed your approval and none is recorded. Make it today?" and the sequence "dry-run, live run capped at five passes, read the board", he answered "Yes, let's do it now." The goal is to see models use the BBP board and find what breaks (`mem_f2c87231f0fa4845952dad1fa237712e`).
+**Rejected.** Reading it as a ceiling for later runs. Reading it as a dollar cap (nothing enforces one). Treating the subscription Claude lens as cleared: `/etc/let-em-loose/assertions.json` has `no_overage` for codex only (checked 2026-11-03, lapses about 2026-12-03) and none for claude; Q50 asks Nano which providers may be paid.
+**Caveats.** The `--max-passes 5` and call-cap limits come from the chat sequence and the user's relay, not from Nano's "Yes" alone. The run intent (the rusty_mux SSH host launcher brief) is the user's relay; the chat has Claude suggesting it and Nano sending Orca screenshots, but Nano has not confirmed the brief as the task. The run is still blocked on #1092 (deploy: no `bbp`, `/opt/lel`, `/srv/lel/bbp`) and #1123 (no real `lens.json`); ask-first gates for deployment still apply.
+**Tag.** [stated] · remind-me: mem_76131c8f54154cbd8e93a0edbb4cd4d7
+**Key.** lel:1124:one-paid-lens-run-2026-11-17
+**Source.** Nano, claude.ai chat 2026-11-17, remind-me capture `cap_675c3da34b0946cdb0900aec848a07ba` (dialog `mem_307a8af289f84ce1b918249ea0691ab6`), noted first in `mem_f2c87231f0fa4845952dad1fa237712e`; relayed by the user (baileyrd) in Claude Code the same day, who gave these references. Relates to D134, D38, ADR-0021, `1124-spend-estimate.md`. Numbered D140 after D139.
