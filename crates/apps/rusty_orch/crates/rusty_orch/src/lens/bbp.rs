@@ -250,9 +250,10 @@ pub struct Session<R> {
     given: Taints,
     /// Every message read, by who posted it.
     authors: BTreeMap<MsgId, String>,
-    /// The configured lens principals (lens ids and the alien's), as of
-    /// the last read.
+    /// The lens principals: the configured ones (lens ids and the
+    /// alien's) as of the last read, and those the run's state has jobs for.
     lenses: BTreeSet<String>,
+    history: BTreeSet<String>,
 }
 
 /// A fresh run id, so a later run's posts never replay an earlier run's.
@@ -278,13 +279,15 @@ impl<R: Rpc> Session<R> {
             given: Taints::default(),
             authors: BTreeMap::new(),
             lenses: BTreeSet::new(),
+            history: BTreeSet::new(),
         }
     }
 
     /// Use `taints` for the cards and lines built from now on. A tainted
     /// post raises its card, and the card's line, to at least its class.
-    pub fn taint(&mut self, taints: &Taints) {
+    pub fn taint(&mut self, taints: &Taints, lenses: &BTreeSet<String>) {
         self.given = taints.clone();
+        self.history = lenses.clone();
         self.fail_closed();
     }
 
@@ -293,15 +296,20 @@ impl<R: Rpc> Session<R> {
     /// just before a crash, has an unknown id and so no entry. Never saved,
     /// so a post whose entry lands later reads at its real class. A lens
     /// principal is a configured one, or any author of a post the table
-    /// has an entry for, so a lens since removed or renamed still counts
-    /// once one of its posts was tainted.
+    /// has an entry for, or one the run's state has jobs for, so a lens
+    /// since removed or renamed still counts.
     fn fail_closed(&mut self) {
         let tainted = self
             .authors
             .iter()
             .filter(|(id, _)| self.given.of(**id).is_some())
             .map(|(_, who)| who);
-        let lenses: BTreeSet<&String> = self.lenses.iter().chain(tainted).collect();
+        let lenses: BTreeSet<&String> = self
+            .lenses
+            .iter()
+            .chain(&self.history)
+            .chain(tainted)
+            .collect();
         let mut taints = self.given.clone();
         let unknown = self
             .authors
@@ -409,6 +417,11 @@ impl<R: Rpc> Session<R> {
                 Some(card)
             })
             .collect()
+    }
+
+    /// The task revision this session's view is current to.
+    pub fn rev(&self) -> u64 {
+        self.rev.0
     }
 
     /// The task's brief as of the last refresh.
@@ -1099,10 +1112,10 @@ mod tests {
         let cfg = config();
         let mut s = Session::new("adversary", fake, "r1");
         s.refresh(&cfg).expect("refresh");
-        s.taint(&Taints::from_entries([(
-            7,
-            orch_lens::DataClass::Sensitive,
-        )]));
+        s.taint(
+            &Taints::from_entries([(7, orch_lens::DataClass::Sensitive)]),
+            &BTreeSet::new(),
+        );
         let classes: Vec<_> = s.cards(&cfg).iter().map(|c| (c.id.0, c.class)).collect();
         assert_eq!(classes[0], (7, orch_lens::DataClass::Sensitive));
         assert!(classes[1].1 < orch_lens::DataClass::Sensitive);
@@ -1134,6 +1147,7 @@ mod tests {
                             from(9, "nano"),
                             from(10, "retired"),
                             from(11, "retired"),
+                            from(12, "gone"),
                         ],
                         false,
                     ),
@@ -1146,6 +1160,7 @@ mod tests {
                         view(9, ClaimStatus::Open, &[]),
                         view(10, ClaimStatus::Open, &[]),
                         view(11, ClaimStatus::Open, &[]),
+                        view(12, ClaimStatus::Open, &[]),
                     ]),
                 );
             let mut s = Session::new("adversary", fake, "r1");
@@ -1160,13 +1175,19 @@ mod tests {
         // Before any table is given, and after a reload with only 8's entry.
         assert_eq!(class(&session())[..2], [(7, sensitive), (8, sensitive)]);
         let mut s = session();
-        s.taint(&Taints::from_entries([(8, internal), (10, internal)]));
+        let history = BTreeSet::from(["gone".to_owned()]);
+        s.taint(
+            &Taints::from_entries([(8, internal), (10, internal)]),
+            &history,
+        );
         let got = class(&s);
         assert_eq!(got[..2], [(7, sensitive), (8, internal)], "{got:?}");
         assert!(got[2].1 < sensitive, "a human's post: {got:?}");
         // "retired" is no longer configured, but its tainted post 10 marks
         // it as a lens, so its entry-less post 11 still reads sensitive.
-        assert_eq!(got[3..], [(10, internal), (11, sensitive)], "{got:?}");
+        assert_eq!(got[3..5], [(10, internal), (11, sensitive)], "{got:?}");
+        // "gone" posted nothing tainted, but the run's state has its jobs.
+        assert_eq!(got[5], (12, sensitive), "{got:?}");
     }
 
     #[test]

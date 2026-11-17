@@ -339,7 +339,7 @@ impl Kit {
             rules,
             taints,
         } = ordinary;
-        self.seat.taint(taints);
+        self.seat.taint(taints, &super::run::lens_history(state));
         let mut shelf = Shelf {
             store,
             task: metering.task,
@@ -575,7 +575,10 @@ mod tests {
         fn brief(&mut self) -> Result<String, String> {
             Ok("intent".to_owned())
         }
-        fn taint(&mut self, _: &orch_lens::taint::Taints) {}
+        fn taint(&mut self, _: &orch_lens::taint::Taints, _: &std::collections::BTreeSet<String>) {}
+        fn rev(&self) -> u64 {
+            0
+        }
         fn cards(&self, _: &LensConfig) -> Vec<Card> {
             self.cards.clone()
         }

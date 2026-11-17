@@ -28,7 +28,7 @@
 //! trip, and a task ceiling, ask BBP to pause the task (`bbp pause`).
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -158,8 +158,13 @@ pub trait Seat {
     fn brief_id(&self) -> Option<ArtId>;
     /// The current brief's text.
     fn brief(&mut self) -> Result<String, String>;
-    /// Use `taints` for every card and line built from now on.
-    fn taint(&mut self, taints: &Taints);
+    /// Use `taints` for every card and line built from now on. `lenses`
+    /// are the lens ids the run's state has jobs for, so a lens since
+    /// removed from the config still counts as one (D139).
+    fn taint(&mut self, taints: &Taints, lenses: &BTreeSet<String>);
+    /// The task revision this seat's view is current to: of two views of
+    /// one claim, the higher revision's is the newer.
+    fn rev(&self) -> u64;
     fn cards(&self, config: &LensConfig) -> Vec<Card>;
     fn lines(&mut self, config: &LensConfig) -> Result<Vec<Line>, String>;
     fn board(&mut self) -> &mut dyn Board;
@@ -178,8 +183,11 @@ impl<R: Rpc> Seat for Session<R> {
     fn brief(&mut self) -> Result<String, String> {
         Session::brief(self)
     }
-    fn taint(&mut self, taints: &Taints) {
-        Session::taint(self, taints);
+    fn taint(&mut self, taints: &Taints, lenses: &BTreeSet<String>) {
+        Session::taint(self, taints, lenses);
+    }
+    fn rev(&self) -> u64 {
+        Session::rev(self)
     }
     fn cards(&self, config: &LensConfig) -> Vec<Card> {
         Session::cards(self, config)
@@ -318,21 +326,24 @@ impl Prefixes {
 }
 
 /// The task-wide claim set the breaker marks: every seat's cards merged
-/// by claim id, `fresh`'s winning since it was just refreshed. Lenses
+/// by claim id, the newest revision's view of each claim winning. Lenses
 /// follow different domains, so one lens's view alone would count claims
-/// new to it as progress.
-fn task_cards(
-    seats: &BTreeMap<String, Box<dyn Seat>>,
-    fresh: &str,
-    config: &LensConfig,
-) -> Vec<Card> {
-    let others = seats.iter().filter(|(id, _)| id.as_str() != fresh);
-    let latest = seats.get(fresh).into_iter();
+/// new to it as progress, and a stale seat's older score as a move.
+fn task_cards(seats: &BTreeMap<String, Box<dyn Seat>>, config: &LensConfig) -> Vec<Card> {
+    let mut by_rev: Vec<&dyn Seat> = seats.values().map(|s| s.as_ref()).collect();
+    by_rev.sort_by_key(|s| s.rev());
     let mut all: BTreeMap<_, Card> = BTreeMap::new();
-    for seat in others.map(|(_, s)| s).chain(latest) {
+    for seat in by_rev {
         all.extend(seat.cards(config).into_iter().map(|c| (c.id, c)));
     }
     all.into_values().collect()
+}
+
+/// Every lens id the run's state has a job for, kept or in flight.
+pub(super) fn lens_history(state: &State) -> BTreeSet<String> {
+    let kept = state.progress.keys().map(|(lens, _)| lens);
+    let running = state.in_flight.iter().map(|k| &k.lens);
+    kept.chain(running).cloned().collect()
 }
 
 /// Run up to `max` passes over every lens until one starts no job. A lens
@@ -379,13 +390,13 @@ pub fn passes(
                 .ok_or_else(|| format!("no BBP session for lens {}", lens.id))?;
             seat.refresh(config)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
-            seat.taint(guard.taints);
+            seat.taint(guard.taints, &lens_history(state));
             prefixes
                 .update(&lens.id, seat.as_mut(), prompts)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
             let cards = seat.cards(config);
             let calls = metering.meter.calls(metering.task);
-            let seen = task_cards(seats, &lens.id, config);
+            let seen = task_cards(seats, config);
             let now = Mark::of(calls, metering.meter.task_spent(metering.task), &seen);
             let start = window.get_or_insert_with(|| now.clone());
             match judge(&guard.breaker, start, &now) {
@@ -810,8 +821,11 @@ mod tests {
         fn brief(&mut self) -> Result<String, String> {
             Ok(self.current().1.to_owned())
         }
-        fn taint(&mut self, taints: &Taints) {
+        fn taint(&mut self, taints: &Taints, _: &BTreeSet<String>) {
             self.taints = taints.clone();
+        }
+        fn rev(&self) -> u64 {
+            u64::from(self.refreshes)
         }
         fn cards(&self, config: &LensConfig) -> Vec<Card> {
             let built = self
@@ -1088,6 +1102,25 @@ mod tests {
         let (ended, log, g) = guarded(seats, &mut e, 10, 5, enforcing(1), Taints::default());
         assert!(matches!(ended, Ok(Ended::Paused(_))), "{ended:?}\n{log}");
         assert_eq!(g.pauses.len(), 1);
+    }
+
+    /// Of two seats' views of one claim, the newer revision's wins, so a
+    /// seat that has not refreshed yet can't put back an older score.
+    #[test]
+    fn the_breaker_takes_each_claims_newest_view() {
+        let at = |score: i64, refreshes: u32| {
+            let mut seat = FakeSeat::new(vec![Card { score, ..card(7) }]);
+            seat.refreshes = refreshes;
+            Box::new(seat) as Box<dyn Seat>
+        };
+        let cfg = config();
+        for (fresh, stale) in [("a", "c"), ("c", "a")] {
+            let seats: BTreeMap<String, Box<dyn Seat>> =
+                BTreeMap::from([(fresh.to_owned(), at(0, 2)), (stale.to_owned(), at(4, 1))]);
+            let merged = task_cards(&seats, &cfg);
+            assert_eq!(merged.len(), 1);
+            assert_eq!(merged[0].score, 0, "{fresh} is newer");
+        }
     }
 
     #[test]
