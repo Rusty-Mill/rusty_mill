@@ -250,6 +250,9 @@ pub struct Ordinary<'a> {
     pub config: &'a LensConfig,
     pub state: &'a State,
     pub rules: &'a str,
+    /// The task's taint table (#598): a tainted claim is shown only to
+    /// providers cleared for its class.
+    pub taints: &'a orch_lens::taint::Taints,
 }
 
 /// What `lens run --alien` opens before any pass, so a missing piece fails
@@ -334,7 +337,9 @@ impl Kit {
             config,
             state,
             rules,
+            taints,
         } = ordinary;
+        self.seat.taint(taints);
         let mut shelf = Shelf {
             store,
             task: metering.task,
@@ -570,6 +575,7 @@ mod tests {
         fn brief(&mut self) -> Result<String, String> {
             Ok("intent".to_owned())
         }
+        fn taint(&mut self, _: &orch_lens::taint::Taints) {}
         fn cards(&self, _: &LensConfig) -> Vec<Card> {
             self.cards.clone()
         }

@@ -4,6 +4,15 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Cost breaker and taint in lens runs
+**2026-11-17**
+
+- `rusty_orch lens run` now runs the cost breaker. In `observe` mode (the
+  default) it logs a would-trip; in `enforce` mode it pauses the task in BBP.
+  A task ceiling also pauses the task now.
+- What a lens posts is marked with the most sensitive data it could have
+  seen, and those claims go only to models cleared for that data.
+
 ## Half-limit erosion cleanups
 **2026-11-06**
 

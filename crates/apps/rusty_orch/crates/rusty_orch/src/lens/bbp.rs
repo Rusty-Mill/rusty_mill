@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use orch_lens::card::Card;
 use orch_lens::context::{Line, MAX_LINES};
 use orch_lens::round::{Board, PostError};
+use orch_lens::taint::Taints;
 use orch_lens::{LensConfig, Post};
 use rusty_bbp::{
     ArtId, ArtifactKind, ArtifactPayload, ArtifactRecord, Body, ClaimBody, ClaimStatus, ClaimView,
@@ -241,6 +242,9 @@ pub struct Session<R> {
     /// This run's id: with `posted`, it names each logical post.
     run: String,
     posted: u64,
+    /// What lenses' posts were tainted to (#598), applied to every card
+    /// and line this session builds.
+    taints: Taints,
 }
 
 /// A fresh run id, so a later run's posts never replay an earlier run's.
@@ -262,7 +266,14 @@ impl<R: Rpc> Session<R> {
             views: BTreeMap::new(),
             rev: Rev(0),
             brief: None,
+            taints: Taints::default(),
         }
+    }
+
+    /// Use `taints` for the cards and lines built from now on. A tainted
+    /// post raises its card, and the card's line, to at least its class.
+    pub fn taint(&mut self, taints: &Taints) {
+        self.taints = taints.clone();
     }
 
     fn ask(&mut self, tool: &str, args: Value) -> Result<Response, String> {
@@ -348,7 +359,9 @@ impl<R: Rpc> Session<R> {
             .values()
             .filter_map(|v| {
                 let body = self.claims.get(&v.id)?;
-                Some(Card::from_view(v, body, config))
+                let mut card = Card::from_view(v, body, config);
+                self.taints.apply(&mut card);
+                Some(card)
             })
             .collect()
     }
@@ -468,10 +481,25 @@ impl<R: Rpc> Session<R> {
                 .iter()
                 .map(|d| config.domain_class(d))
                 .max()
-                .unwrap_or(orch_lens::DataClass::Internal);
+                .unwrap_or(orch_lens::DataClass::Internal)
+                .max(self.tainted(id, config));
             out.extend(line.map(|text| Line { text, class }));
         }
         Ok(out)
+    }
+}
+
+impl<R: Rpc> Session<R> {
+    /// The class claim `id`'s taint lifts its line to: its card's, taints
+    /// applied, or the claim's own taint when its body is not read.
+    fn tainted(&self, id: MsgId, config: &LensConfig) -> orch_lens::DataClass {
+        let card = self.views.get(&id).zip(self.claims.get(&id)).map(|(v, b)| {
+            let mut card = Card::from_view(v, b, config);
+            self.taints.apply(&mut card);
+            card.class
+        });
+        card.or_else(|| self.taints.of(id))
+            .unwrap_or(orch_lens::DataClass::Public)
     }
 }
 
@@ -1002,6 +1030,36 @@ mod tests {
         let mut s = Session::new("adversary", Fake::default().on("task_card", rej), "r1");
         let err = s.refresh(&config()).expect_err("rejected");
         assert!(err.contains("reassigned"), "{err}");
+    }
+
+    #[test]
+    fn tainted_claims_raise_their_cards_and_lines() {
+        let fake = Fake::default()
+            .on("task_card", task_card(5))
+            .on("read", read(vec![claim(7), claim(8)], false))
+            .on(
+                "claims_delta",
+                Response::Claims(vec![
+                    view(7, ClaimStatus::Accepted, &[]),
+                    view(8, ClaimStatus::Accepted, &[]),
+                ]),
+            )
+            .on("claim_line", Response::Line(Some("msg:8".to_owned())))
+            .on("claim_line", Response::Line(Some("msg:7".to_owned())));
+        let cfg = config();
+        let mut s = Session::new("adversary", fake, "r1");
+        s.refresh(&cfg).expect("refresh");
+        s.taint(&Taints::from_entries([(
+            7,
+            orch_lens::DataClass::Sensitive,
+        )]));
+        let classes: Vec<_> = s.cards(&cfg).iter().map(|c| (c.id.0, c.class)).collect();
+        assert_eq!(classes[0], (7, orch_lens::DataClass::Sensitive));
+        assert!(classes[1].1 < orch_lens::DataClass::Sensitive);
+        let lines = s.lines(&cfg).expect("lines");
+        let by_text: Vec<_> = lines.iter().map(|l| (l.text.as_str(), l.class)).collect();
+        assert_eq!(by_text[1], ("msg:7", orch_lens::DataClass::Sensitive));
+        assert!(by_text[0].1 < orch_lens::DataClass::Sensitive);
     }
 
     #[test]
