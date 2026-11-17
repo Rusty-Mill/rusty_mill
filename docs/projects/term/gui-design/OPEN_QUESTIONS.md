@@ -23,3 +23,6 @@ Format: `- [ ] Q<n> (<date>, blocking? y/n): <question> — interim choice: <wha
 - [ ] Q74 (2026-11-16, n): Theme settings page: add an in-app colour customizer (16 palette + fg/bg/cursor/selection), or only pick, preview and pair themes? — interim choice: pick, preview and pair only; edit the theme file by hand (D73).
 - [ ] Q75 (2026-11-16, n): Are "materials" only opacity plus blur, or named pane styles (glass, comfortable, compact)? — interim choice: opacity plus blur only (D75).
 - [ ] Q76 (2026-11-16, y for T7 only): Should custom post-process shaders ship, and if so WGSL only or GLSL via naga glsl-in (new dependency feature, lockfile change)? — interim choice: T7 not started; WGSL with no new dependency if built (D75).
+- [ ] Q89 (2026-11-17, n; C64): Should "Show in every window" ask for a confirm first ("Show {session} in {k} other windows?")? — interim choice: no confirm (it pushes at once; the waiting banner protects open confirms, D96).
+- [ ] Q90 (2026-11-17, n; C64): Should a window be able to opt out of pushes from its other windows? — interim choice: no opt-out.
+- [ ] Q91 (2026-11-17, n; C64): In the UI copy, should "window" mean an OS window (as now) while a mux tab keeps its name? — interim choice: "Window" is the OS window; tabs keep theirs.
