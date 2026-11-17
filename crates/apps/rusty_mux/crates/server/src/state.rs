@@ -1789,10 +1789,13 @@ impl State {
                     Some((_, Value::Text(query))) => query,
                     _ => return Err(format!("{method}: missing query").into()),
                 };
-                let limit = match lines(&named, "limit") {
-                    0 => terminal::FIND_DEFAULT,
-                    n => n,
-                };
+                let limit = named
+                    .iter()
+                    .find_map(|(name, value)| match value {
+                        Value::Lines(n) if *name == "limit" => Some(*n),
+                        _ => None,
+                    })
+                    .unwrap_or(terminal::FIND_DEFAULT);
                 terminal::find(&rt.grid, query, limit)
             }
             "terminal.send-keys" => {

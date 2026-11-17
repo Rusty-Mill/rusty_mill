@@ -29,9 +29,16 @@ fn is_trailer(cell: &Cell) -> bool {
 impl Grid {
     /// The absolute rows (counted as for [`Grid::line_text`]) where a shell
     /// prompt started (OSC 133 or 633 `A`), oldest first. Those that scrolled
-    /// out of the retained history are gone.
+    /// out of the retained history are gone. Under the alternate screen only the
+    /// scrollback's marks count: the saved primary screen's rows aren't readable.
     pub fn prompt_marks(&self) -> &[usize] {
-        &self.prompt_marks
+        if self.primary.is_none() {
+            return &self.prompt_marks;
+        }
+        let kept = self
+            .prompt_marks
+            .partition_point(|&abs| abs < self.scrollback_len());
+        &self.prompt_marks[..kept]
     }
 
     /// Every match of `query` in the history and on the screen, oldest
@@ -136,5 +143,15 @@ mod tests {
             "\x1b]133;A\x07one\r\n\x1b]133;A\x07two\r\n\x1b]133;A\x07tri",
         );
         assert_eq!(g.prompt_marks(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn prompt_marks_on_the_screen_hide_under_the_alternate_screen() {
+        let g = grid(
+            8,
+            2,
+            "\x1b]133;A\x07one\r\n\x1b]133;A\x07two\r\n\x1b]133;A\x07tri\x1b[?1049h",
+        );
+        assert_eq!(g.prompt_marks(), [0]);
     }
 }

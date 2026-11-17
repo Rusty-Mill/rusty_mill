@@ -85,6 +85,11 @@ fn prompts_and_find_read_the_blocks_scrollback_and_screen() {
             .count(),
         1
     );
+    let zero = [
+        ("query", Value::Text("o".to_owned())),
+        ("limit", Value::Lines(0)),
+    ];
+    assert_eq!(text(&mut client, block, "terminal.find", &zero), "");
     let none = [("query", Value::Text("absent-text".to_owned()))];
     assert_eq!(text(&mut client, block, "terminal.find", &none), "");
 }
