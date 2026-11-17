@@ -133,8 +133,9 @@ impl Listing {
             .next()
             .filter(|p| !p.is_empty())
             .ok_or("the server named no folder")?;
+        let path = unescape(path).ok_or("the server named its folder badly")?;
         let mut out = Listing {
-            path: unescape(path),
+            path: plain_path(path),
             ..Listing::default()
         };
         for line in lines {
@@ -147,29 +148,33 @@ impl Listing {
                 "l" => Kind::Link,
                 "o" => Kind::Other,
                 "+" | ">" => {
-                    out.more += rest.parse().unwrap_or(0);
+                    out.more = out.more.saturating_add(rest.parse().unwrap_or(0));
                     out.at_least |= kind == ">";
                     continue;
                 }
                 "!" => {
-                    out.unreadable += rest.parse().unwrap_or(0);
+                    out.unreadable = out.unreadable.saturating_add(rest.parse().unwrap_or(0));
                     continue;
                 }
                 _ => continue,
             };
-            out.items.push((kind, unescape(rest)));
+            match unescape(rest) {
+                Some(name) => out.items.push((kind, name)),
+                None => out.unreadable = out.unreadable.saturating_add(1),
+            }
         }
         Ok(out)
     }
 
     /// Entries not shown: left out by the server or unreadable.
     fn hidden(&self) -> usize {
-        self.more + self.unreadable
+        self.more.saturating_add(self.unreadable)
     }
 }
 
-/// Undoes the server's escaping: `\\`, `\t`, `\n`, `\r` and `\u{HEX}`.
-fn unescape(text: &str) -> String {
+/// Undoes the server's escaping: `\\`, `\t`, `\n`, `\r` and `\u{HEX}`;
+/// `None` for an escape it doesn't know, which the server never writes.
+fn unescape(text: &str) -> Option<String> {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
@@ -177,19 +182,22 @@ fn unescape(text: &str) -> String {
             out.push(c);
             continue;
         }
-        match chars.next() {
-            Some('t') => out.push('\t'),
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('u') => {
-                let hex: String = chars.by_ref().skip(1).take_while(|&c| c != '}').collect();
-                out.extend(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32));
+        match chars.next()? {
+            't' => out.push('\t'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            '\\' => out.push('\\'),
+            'u' => {
+                if chars.next()? != '{' {
+                    return None;
+                }
+                let hex: String = chars.by_ref().take_while(|&c| c != '}').collect();
+                out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
             }
-            Some(c) => out.push(c),
-            None => out.push('\\'),
+            _ => return None,
         }
     }
-    out
+    Some(out)
 }
 
 /// Where `query` matches a label, for ranking and for lighting letters.
@@ -354,8 +362,8 @@ pub(crate) enum Key {
 enum Load {
     Reading,
     Ready(Listing),
-    /// Why it failed, and the path asked for.
-    Failed(String),
+    /// The path asked for, and why the host refused.
+    Failed(String, String),
 }
 
 /// A directory browse (D78).
@@ -517,13 +525,12 @@ impl Palette {
                 let at = b.at.as_deref().unwrap_or("the folder");
                 return vec![note(format!("Reading {at}"), None, false, true)];
             }
-            Load::Failed(path) => {
-                return vec![note(
-                    format!("Can't read {path}"),
-                    Some("Check the folder exists and you may open it."),
-                    true,
-                    false,
-                )];
+            Load::Failed(path, why) => {
+                let hint = match why.is_empty() {
+                    true => "Check the folder exists and you may open it.",
+                    false => why.as_str(),
+                };
+                return vec![note(format!("Can't read {path}"), Some(hint), true, false)];
             }
             Load::Ready(list) => list,
         };
@@ -532,11 +539,18 @@ impl Palette {
         } else {
             "Folders"
         };
-        let item = |pick, label: &str, at: Vec<usize>, folder| {
+        let item = |pick: Pick, label: &str, at: Vec<usize>, folder| {
+            let path = match &pick {
+                Pick::Here => Some(list.path.clone()),
+                Pick::Up => parent(&list.path),
+                Pick::Entry(_, name) => Some(join(&list.path, name)),
+                Pick::Run(_) => None,
+            };
+            let typable = path.is_none_or(|p| quote(&p).is_some());
             Line::Item(Item {
+                detail: if typable { "" } else { "Can't type this name" }.into(),
                 pick,
                 label: label.into(),
-                detail: String::new(),
                 at,
                 enabled: true,
                 current: false,
@@ -736,7 +750,9 @@ impl Palette {
         let Some(path) = path else {
             return Out::Stay;
         };
-        let quoted = quote(&path);
+        let Some(quoted) = quote(&path) else {
+            return Out::Stay;
+        };
         Out::Type(match b.insert {
             true => quoted,
             false => format!("cd {quoted}"),
@@ -795,7 +811,7 @@ impl Palette {
         };
         b.load = match listed.and_then(|text| Listing::parse(&text)) {
             Ok(list) => Load::Ready(list),
-            Err(_) => Load::Failed(b.at.clone().unwrap_or_else(|| "the folder".into())),
+            Err(why) => Load::Failed(b.at.clone().unwrap_or_else(|| "the folder".into()), why),
         };
         self.reset();
     }
@@ -812,9 +828,27 @@ fn fits(lines: &[Line], from: usize, to: usize) -> bool {
     used <= PAGE as f32 * 40.0
 }
 
-/// Whether `path` is a Windows path (a drive or a UNC share).
+/// Whether `path` is a Windows path: a drive (`X:` then a separator or
+/// the end) or a UNC share.
 fn windows(path: &str) -> bool {
-    path.starts_with("\\\\") || path.as_bytes().get(1) == Some(&b':')
+    let b = path.as_bytes();
+    path.starts_with("\\\\")
+        || (b.len() >= 2
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && matches!(b.get(2), None | Some(b'\\' | b'/')))
+}
+
+/// `path` without a verbatim prefix: `\\?\C:\x` as `C:\x` and
+/// `\\?\UNC\h\s` as `\\h\s`, which `cd` and [`parent`] understand.
+fn plain_path(path: String) -> String {
+    if let Some(rest) = path.strip_prefix("\\\\?\\UNC\\") {
+        return format!("\\\\{rest}");
+    }
+    match path.strip_prefix("\\\\?\\") {
+        Some(rest) if windows(rest) => rest.to_owned(),
+        _ => path,
+    }
 }
 
 fn sep(path: &str) -> char {
@@ -846,25 +880,35 @@ fn join(path: &str, name: &str) -> String {
     }
 }
 
-/// `path` as one shell word for the server's path style (D78): single
+/// `path` as one shell word for the host's path style (D78): single
 /// quotes on POSIX when it has more than plain characters, double quotes
-/// on Windows when it has a space or a character cmd reads.
-pub(crate) fn quote(path: &str) -> String {
+/// on Windows when it has a space or a character cmd reads. `None` when
+/// no quoting is safe without knowing the shell: any control character
+/// (it would reach the pty as a key), or on Windows one of `$`, a
+/// backtick, `%`, `!` or `"`, which PowerShell, Git Bash or cmd read
+/// inside double quotes.
+pub(crate) fn quote(path: &str) -> Option<String> {
+    if path.chars().any(char::is_control) {
+        return None;
+    }
     if windows(path) {
-        let plain = !path.contains([' ', '&', '(', ')', '^', '%', '!', ',', ';', '=']);
-        return match plain {
+        if path.contains(['$', '`', '%', '!', '"']) {
+            return None;
+        }
+        let plain = !path.contains([' ', '&', '(', ')', '^', ',', ';', '=', '\'']);
+        return Some(match plain {
             true => path.to_owned(),
             false => format!("\"{path}\""),
-        };
+        });
     }
     let plain = !path.is_empty()
         && path
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
-    match plain {
+    Some(match plain {
         true => path.to_owned(),
         false => format!("'{}'", path.replace('\'', "'\\''")),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1124,11 +1168,13 @@ mod tests {
         select(&mut p, "README.md");
         assert_eq!(p.pick(), Some(Pick::Entry(Kind::File, "README.md".into())));
         assert_eq!(p.key(Key::Enter), Out::Type("/home/me/README.md".into()));
-        assert_eq!(quote("/a b/it's"), "'/a b/it'\\''s'");
-        assert_eq!(quote("/plain/dir-1.txt"), "/plain/dir-1.txt");
-        assert_eq!(quote("/x*"), "'/x*'");
-        assert_eq!(quote("C:\\Program Files\\x"), "\"C:\\Program Files\\x\"");
-        assert_eq!(quote("C:\\dev"), "C:\\dev");
+        let q = |p| quote(p).expect("typable");
+        assert_eq!(q("/a b/it's"), "'/a b/it'\\''s'");
+        assert_eq!(q("/plain/dir-1.txt"), "/plain/dir-1.txt");
+        assert_eq!(q("/x*"), "'/x*'");
+        assert_eq!(q("/$(touch x)"), "'/$(touch x)'");
+        assert_eq!(q("C:\\Program Files\\x"), "\"C:\\Program Files\\x\"");
+        assert_eq!(q("C:\\dev"), "C:\\dev");
     }
 
     #[test]
@@ -1199,8 +1245,82 @@ mod tests {
             (list.more, list.at_least, list.unreadable),
             (20005, true, 2)
         );
-        assert_eq!(unescape("a\\u{1b}b"), "a\u{1b}b");
+        assert_eq!(unescape("a\\u{1b}b").as_deref(), Some("a\u{1b}b"));
         assert!(Listing::parse("").is_err());
+    }
+
+    #[test]
+    fn a_name_that_would_run_or_press_a_key_is_never_typed() {
+        for bad in [
+            "/x\rtouch pwned\r",
+            "/x\ny",
+            "/x\u{1b}[31m",
+            "/x\u{7f}",
+            "/x\u{85}",
+            "/x\ty",
+            "C:\\x\\$(calc)",
+            "C:\\x\\a`id`",
+            "C:\\x\\%PATH%",
+            "C:\\x\\a!b",
+            "C:\\x\\a\"b",
+        ] {
+            assert_eq!(quote(bad), None, "{bad:?}");
+        }
+        assert_eq!(quote("C:\\x\\a'b").as_deref(), Some("\"C:\\x\\a'b\""));
+    }
+
+    #[test]
+    fn a_hostile_listed_name_is_marked_and_enter_types_nothing() {
+        let mut p = browsing(true);
+        p.listed(p.asks, Ok("/h\nf\tx\\rtouch pwned\\r\nd\tok".into()));
+        select(&mut p, "x\rtouch pwned\r");
+        let lines = p.lines();
+        assert!(
+            matches!(&lines[p.selected_line()], Line::Item(i) if i.detail == "Can't type this name")
+        );
+        assert_eq!(p.key(Key::Enter), Out::Stay);
+        select(&mut p, "ok/");
+        assert_eq!(p.key(Key::Enter), Out::Type("/h/ok".into()));
+    }
+
+    #[test]
+    fn a_posix_path_with_a_colon_second_is_not_a_drive() {
+        assert!(!windows("/:proj"));
+        assert!(!windows("a:b"));
+        assert!(windows("C:"));
+        assert!(windows("c:/x"));
+        assert!(windows("\\\\host\\share"));
+        assert_eq!(join("/:proj", "x"), "/:proj/x");
+        assert_eq!(parent("/:proj/x"), Some("/:proj".into()));
+    }
+
+    #[test]
+    fn a_verbatim_windows_path_is_read_plain() {
+        // As the server writes it: each backslash doubled.
+        let wire = |p: &str| format!("{}\nd\ty", p.replace('\\', "\\\\"));
+        let list = Listing::parse(&wire(r"\\?\C:\dev\x")).expect("parsed");
+        assert_eq!(list.path, r"C:\dev\x");
+        let unc = Listing::parse(&wire(r"\\?\UNC\h\s\d")).expect("parsed");
+        assert_eq!(unc.path, r"\\h\s\d");
+        assert_eq!(parent(&list.path), Some(r"C:\dev".into()));
+    }
+
+    #[test]
+    fn a_bad_escape_or_count_is_one_unreadable_entry_not_a_swallowed_line() {
+        let list =
+            Listing::parse("/a\nd\tx\\uZZ\nd\tok\n!\t18446744073709551615\n+\t5").expect("parsed");
+        assert_eq!(list.items, [(Kind::Dir, "ok".to_owned())]);
+        assert_eq!(list.unreadable, usize::MAX);
+        assert_eq!(list.hidden(), usize::MAX);
+        assert!(Listing::parse("/a\\q").is_err());
+    }
+
+    #[test]
+    fn a_refusal_shows_the_hosts_reason() {
+        let mut p = browsing(false);
+        p.listed(p.asks, Err("terminal.list-dir: permission denied".into()));
+        assert!(matches!(&p.lines()[..], [Line::Note(n)]
+            if n.hint.as_deref() == Some("terminal.list-dir: permission denied")));
     }
 
     #[test]
