@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use platform_windows::WindowsUnixStream as UnixStream;
-use rusty_mux_core::{BlockId, ClientId, Layout, SessionId, Size, WindowId};
+use rusty_mux_core::{BlockId, ClientId, Float, Layout, SessionId, Size, WindowId};
 use rusty_mux_proto::{Entry, Features, Launch, Message, Takeover};
 use rusty_uuid::Uuid;
 
@@ -42,7 +42,8 @@ pub const CONTROL: Features = Features::CHECKPOINT_V6
     .union(Features::LAYOUT_EDIT)
     .union(Features::FOCUS)
     .union(Features::ACTIVE_WINDOW)
-    .union(Features::SESSION_NAMES);
+    .union(Features::SESSION_NAMES)
+    .union(Features::FLOATS);
 
 /// What a block's connection asks for. `TERMINAL_CONTROL` tells the
 /// server this client's copy of the terminal can be reset safely.
@@ -269,6 +270,9 @@ pub struct Shape {
     /// The session's active window, from a server with
     /// [`Features::ACTIVE_WINDOW`].
     pub active: Option<WindowId>,
+    /// The window's floating blocks, back to front, from a server with
+    /// [`Features::FLOATS`].
+    pub floats: Vec<Float>,
 }
 
 /// What `window` shows, from a List's `entries`; `None` when the window
@@ -289,7 +293,7 @@ pub fn shape_of(entries: Vec<Message>, window: WindowId) -> Option<Shape> {
 
 /// [`shape_of`], short of the session's active window.
 pub fn window_shape(entries: &[Message], window: WindowId) -> Option<Shape> {
-    entries.iter().cloned().find_map(|m| match m {
+    let mut shape = entries.iter().cloned().find_map(|m| match m {
         Message::Entry {
             entry:
                 Entry::Window {
@@ -306,10 +310,21 @@ pub fn window_shape(entries: &[Message], window: WindowId) -> Option<Shape> {
             zoomed,
             focused,
             session: Some(session),
-            active: None,
+            ..Shape::default()
         }),
         _ => None,
-    })
+    })?;
+    shape.floats = entries
+        .iter()
+        .find_map(|m| match m {
+            Message::Entry {
+                entry: Entry::Floats { window: w, floats },
+                ..
+            } if *w == window => Some(floats.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    Some(shape)
 }
 
 /// The next message on `conn`, due `by`. Each read waits at most

@@ -24,5 +24,5 @@ Format: `- [ ] Q<n> (<date>, blocking? y/n): <question> — interim choice: <wha
 - [ ] Q75 (2026-11-16, n): Are "materials" only opacity plus blur, or named pane styles (glass, comfortable, compact)? — interim choice: opacity plus blur only (D75).
 - [ ] Q76 (2026-11-16, y for T7 only): Should custom post-process shaders ship, and if so WGSL only or GLSL via naga glsl-in (new dependency feature, lockfile change)? — interim choice: T7 not started; WGSL with no new dependency if built (D75).
 - [ ] Q86 (2026-11-17, n): Can a float be minimised (hidden to a chip in the strip, like a detached block D61), or only closed, lowered or detached? — interim choice: no minimise; lower to the back or close (D91).
-- [ ] Q87 (2026-11-17, n): Which keys after Ctrl-] move, resize, raise, lower and float or unfloat a block? — interim choice: pick with the C42 wire names; chosen in the C42 PR (D91).
+- [ ] Q87 (2026-11-17, n): Which keys after Ctrl-] move, resize, raise, lower and float or unfloat a block? — interim choice: TUI keys after Ctrl-] are `f` float, `u` raise, `U` lower, `m` + `h j k l` move, `H J K L` resize (handoff D325); the GUI reuses them with the mouse (D91).
 - [ ] Q88 (2026-11-17, n): Should a float snap to tile edges or the window edge while dragging? — interim choice: no snapping (D91).

@@ -5,7 +5,7 @@
 use std::fmt::Write as _;
 
 use rusty_mux_client::style::Style;
-use rusty_mux_core::{BlockId, Rect, Size};
+use rusty_mux_core::{BlockId, FloatRect, Rect, Size};
 use rusty_term_core::{ATTR_REVERSE, ATTR_UNDERLINE, AnsiParser, Cell, Grid, WIDE_TRAILER};
 
 use crate::keys::Dir;
@@ -60,6 +60,85 @@ pub struct View<'a> {
     pub rect: Rect,
     pub grid: Option<&'a Grid>,
     pub overlay: Option<Overlay>,
+    /// A float, drawn over the tiles in a border with its header row.
+    pub float: bool,
+}
+
+/// The least a float's box is, border included: a header row, a grid row
+/// and the bottom border (D90).
+const FLOAT_MIN: (u16, u16) = (12, 4);
+
+/// Where a float at `at` shows its block's grid on a screen of `area`: its
+/// box (see [`FloatRect::cells`], at least [`FLOAT_MIN`] and inside the
+/// screen) less the one-cell border. `None` when the screen is too small
+/// for a float.
+pub fn float_inner(at: FloatRect, area: Size) -> Option<Rect> {
+    if area.cols() < FLOAT_MIN.0 || area.rows() < FLOAT_MIN.1 {
+        return None;
+    }
+    let outer = at.cells(area);
+    let (cols, rows) = (
+        outer.size.cols().max(FLOAT_MIN.0),
+        outer.size.rows().max(FLOAT_MIN.1),
+    );
+    let x = outer.x.min(area.cols() - cols);
+    let y = outer.y.min(area.rows() - rows);
+    let size = Size::new(cols - 2, rows - 2).ok()?;
+    Some(Rect {
+        x: x + 1,
+        y: y + 1,
+        size,
+    })
+}
+
+/// Whether `(x, y)` is in `inner` or its border ring.
+fn ringed(inner: Rect, x: u16, y: u16) -> bool {
+    let (x, y) = (u32::from(x), u32::from(y));
+    let (left, top) = (u32::from(inner.x), u32::from(inner.y));
+    let (right, bottom) = (
+        left + u32::from(inner.size.cols()),
+        top + u32::from(inner.size.rows()),
+    );
+    x + 1 >= left && x <= right && y + 1 >= top && y <= bottom
+}
+
+/// The float glyph and word its header row shows, so a float is never told
+/// by colour alone (D89).
+const FLOAT_TITLE: &str = " ◇ float ";
+
+/// Draws the border ring around `inner`: rounded, the header row on top
+/// (D90), in [`FOCUS`] when `focused`. The ring is marked covered so no
+/// divider is drawn over it.
+fn border(frame: &mut Frame, covered: &mut [bool], inner: Rect, focused: bool) {
+    let plain = Style::of(&Cell::blank());
+    let style = match focused {
+        true => Style { fg: FOCUS, ..plain },
+        false => plain,
+    };
+    let (left, top) = (inner.x - 1, inner.y - 1);
+    let (right, bottom) = (inner.x + inner.size.cols(), inner.y + inner.size.rows());
+    let mut title = FLOAT_TITLE.chars();
+    for y in top..=bottom {
+        for x in left..=right {
+            let edge_x = x == left || x == right;
+            let edge_y = y == top || y == bottom;
+            if !edge_x && !edge_y {
+                continue;
+            }
+            let ch = match (edge_x, edge_y, y == top, x == left) {
+                (true, true, true, true) => '╭',
+                (true, true, true, false) => '╮',
+                (true, true, false, true) => '╰',
+                (true, true, false, false) => '╯',
+                (true, false, ..) => '│',
+                (false, true, true, _) if x > left && x < right => title.next().unwrap_or('─'),
+                _ => '─',
+            };
+            let i = frame.index(x, y);
+            frame.cells[i] = Glyph::plain(ch, style);
+            covered[i] = true;
+        }
+    }
 }
 
 impl Frame {
@@ -147,6 +226,9 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
                 covered[frame.index(x + dx, y + dy)] = true;
             }
         }
+        if view.float {
+            border(&mut frame, &mut covered, view.rect, view.block == focused);
+        }
         if let Some(grid) = view.grid {
             draw(&mut frame, view.rect, grid);
             // A prediction sits at the live cursor: never over history.
@@ -158,6 +240,15 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
                 frame.cursor = shown.and(ahead).or(shown);
                 frame.cursor_colour = chosen_cursor(grid);
             }
+        }
+    }
+    // A float drawn over the focused tile hides its cursor.
+    if let Some((cx, cy)) = frame.cursor {
+        let under = views
+            .iter()
+            .any(|v| v.float && v.block != focused && ringed(v.rect, cx, cy));
+        if under {
+            frame.cursor = None;
         }
     }
     // A window showing no block is blank, not one big divider.
@@ -530,6 +621,7 @@ mod tests {
                 rect,
                 grid: Some(grid),
                 overlay: None,
+                float: false,
             })
             .collect();
         let frame = compose(size(9, 5), &views, id(2));
@@ -556,6 +648,7 @@ mod tests {
             size: size(4, 2),
         };
         let views = [View {
+            float: false,
             block: id(1),
             rect,
             grid: Some(&g),
@@ -574,6 +667,7 @@ mod tests {
         AnsiParser::new().advance(&mut g, input.as_bytes());
         let drawn = |g: &Grid| {
             let views = [View {
+                float: false,
                 block: id(1),
                 rect: Rect {
                     x: 0,
@@ -607,6 +701,7 @@ mod tests {
             size: size(6, 3),
         };
         let views = [View {
+            float: false,
             block: id(1),
             rect,
             grid: Some(&g),
@@ -631,6 +726,7 @@ mod tests {
             size: size(2, 1),
         };
         let views = [View {
+            float: false,
             block: id(1),
             rect,
             grid: Some(&wide),
@@ -642,6 +738,7 @@ mod tests {
             ..rect
         };
         let views = [View {
+            float: false,
             block: id(1),
             rect: whole,
             grid: Some(&wide),
@@ -663,6 +760,7 @@ mod tests {
             compose(
                 size(4, 2),
                 &[View {
+                    float: false,
                     block: id(1),
                     rect,
                     grid: Some(g),
@@ -695,6 +793,7 @@ mod tests {
         };
         let frame = |g, focused| {
             let views = [View {
+                float: false,
                 block: id(1),
                 rect,
                 grid: Some(g),
@@ -733,6 +832,7 @@ mod tests {
         };
         let screen = |a: &Grid, focused| {
             let views = [(1, &plain, 0), (2, a, 5), (3, &blue, 10)].map(|(n, g, x)| View {
+                float: false,
                 block: id(n),
                 rect: rect(x),
                 grid: Some(g),
@@ -764,6 +864,7 @@ mod tests {
             size: size(4, 2),
         };
         let views = [View {
+            float: false,
             block: id(1),
             rect,
             grid: Some(&typed),
@@ -799,6 +900,7 @@ mod tests {
             size: size(3, 1),
         };
         let views = [View {
+            float: false,
             block: id(1),
             rect,
             grid: Some(&wide),
@@ -915,5 +1017,73 @@ mod tests {
         assert_eq!(neighbor(&rects, id(3), Dir::Left), Some(id(1)));
         assert_eq!(neighbor(&rects, id(1), Dir::Left), None);
         assert_eq!(neighbor(&rects, id(9), Dir::Left), None);
+    }
+
+    fn float_over_tile(focused: BlockId) -> Frame {
+        let tile = grid(14, 4, "xx");
+        let float = grid(10, 2, "hi");
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            size: size(14, 4),
+        };
+        let inner = Rect {
+            x: 2,
+            y: 1,
+            size: size(10, 2),
+        };
+        let views = [
+            View {
+                float: false,
+                block: id(1),
+                rect: whole,
+                grid: Some(&tile),
+                overlay: None,
+            },
+            View {
+                float: true,
+                block: id(2),
+                rect: inner,
+                grid: Some(&float),
+                overlay: None,
+            },
+        ];
+        compose(size(14, 4), &views, focused)
+    }
+
+    #[test]
+    fn a_float_is_drawn_over_the_tile_in_a_titled_border() {
+        let frame = float_over_tile(id(2));
+        assert_eq!(text(&frame, 0), "x╭ ◇ float ─╮ ");
+        assert_eq!(text(&frame, 1), " │hi        │ ");
+        assert_eq!(text(&frame, 2), " │          │ ");
+        assert_eq!(text(&frame, 3), " ╰──────────╯ ");
+    }
+
+    #[test]
+    fn the_cursor_is_the_focused_blocks_and_a_float_hides_the_one_under_it() {
+        // The tile's cursor, at (2, 0), lies under the float's border.
+        assert_eq!(float_over_tile(id(1)).cursor, None);
+        assert_eq!(float_over_tile(id(2)).cursor, Some((4, 1)));
+    }
+
+    #[test]
+    fn a_float_keeps_to_its_least_size_and_the_screen() {
+        let at = |x, y, w, h| FloatRect::new(x, y, w, h).unwrap();
+        let inner = |at, cols, rows| float_inner(at, size(cols, rows)).map(|r| (r.x, r.y, r.size));
+        // 25% of 40x10 is (10, 2), 50% is 20x5: border off, 18x3.
+        assert_eq!(
+            inner(at(25, 25, 50, 50), 40, 10),
+            Some((11, 3, size(18, 3)))
+        );
+        // Too small for the least size: grown, and moved off the edge.
+        assert_eq!(inner(at(0, 0, 10, 10), 40, 10), Some((1, 1, size(10, 2))));
+        assert_eq!(
+            inner(at(90, 90, 10, 10), 40, 10),
+            Some((29, 7, size(10, 2)))
+        );
+        // No room for a header and a row.
+        assert_eq!(inner(at(0, 0, 100, 100), 11, 10), None);
+        assert_eq!(inner(at(0, 0, 100, 100), 40, 3), None);
     }
 }
