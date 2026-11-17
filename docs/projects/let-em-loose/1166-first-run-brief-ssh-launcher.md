@@ -1,7 +1,7 @@
-# #1166 First paid lens run: task brief (SSH host launcher)
+# #1166 Second paid lens run: task brief (SSH host launcher)
 
-Status: brief only, saved 2026-11-17 for the #1166 smoke-run plan card. It is the intent for the first run. It changes nothing in `1166-smoke-run.md`, whose toy brief (`sweep v0.1-smoke`) still stands for the local-only smoke run (D134). Whether this brief replaces the toy brief for the first run is for Nano to say (see "Open" below).
-Source: pasted by the owner in the Claude Code session of 2026-11-17, with Nano's approval of one paid lens run that day (relayed, voice, claude.ai chat). Copy it to `brief.md` of the task dir (`/srv/lel/toy/brief.md` in the 1166 layout) when the run is opened.
+Status: brief only, saved 2026-11-17 for the #1166 smoke-run plan card. Per Nano's Q50 answer (relayed 2026-11-17) it is the intent for the **second** paid run; the first run (the smoke run) uses the toy `sweep v0.1-smoke` brief in `1166-smoke-run.md`, unchanged. This file changes nothing in that plan.
+Source: pasted by the owner in the Claude Code session of 2026-11-17, with Nano's approval of one paid lens run that day (relayed, voice, claude.ai chat). Copy it to the second run's own task dir `brief.md` when that run is opened; do not overwrite the toy `/srv/lel/toy/brief.md`.
 
 ## Intent (the brief, verbatim)
 
@@ -28,9 +28,10 @@ Out of scope
 - Hand-rolled parser or a dependency? Default is no new dependency.
 
 ## Run rules (from the owner)
-- One live run, `--max-passes 5`, default call cap. Dollar caps do not enforce in v0.
+- Same limits as the first run: `--max-passes 5`, default call cap. Dollar caps do not enforce in v0.
+- Paid providers: codex; claude only once its `no_overage` entry exists.
 - Output is a board of claims only: no cards, no code.
 
 ## Open
-- Brief fits `bbp open --mode claims` as written, but it has no "Never" or "Irreversible" lines as the toy brief does. Nothing here is irreversible; the lenses will say so or not.
+- The brief has no "Never" or "Irreversible" lines as the toy brief does. Nothing here is irreversible; the lenses will say so or not.
 - Its work area is `rusty_mux` (expert: `rusty-term-expert`), not Let Em Loose.
