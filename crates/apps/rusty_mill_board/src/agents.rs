@@ -231,6 +231,11 @@ impl Registry {
             .collect()
     }
 
+    /// A revocation reached memory but not the file; [`revoke_stale`](Self::revoke_stale) flushes it.
+    pub fn has_unsaved_revoke(&self) -> bool {
+        self.unsaved_revoke
+    }
+
     /// Remove the [`stale`](Self::stale) agents with one write: all of them, or only those of
     /// `only` that are still stale (an agent used since a preview is kept). The ids removed.
     ///
@@ -450,9 +455,11 @@ mod tests {
         let e = r.revoke_stale(10, 5, None).expect_err("write fails");
         assert!(e.contains("run it again"), "{e}");
         assert!(r.verify("c", &id, &key, 11).is_none(), "fails closed");
+        assert!(r.has_unsaved_revoke());
         // Writable again: a retry with nothing new to revoke still makes it durable.
         std::fs::create_dir_all(&dir).expect("restore dir");
         assert!(r.revoke_stale(12, 5, None).expect("retry").is_empty());
+        assert!(!r.has_unsaved_revoke());
         let mut again = Registry::open(dir.join("agents.json")).expect("reopen");
         assert!(
             again.verify("c", &id, &key, 13).is_none(),

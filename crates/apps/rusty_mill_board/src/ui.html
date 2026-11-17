@@ -1305,7 +1305,7 @@ function registeredAgents(){
     const nm=el("td");nm.append(nk);tr.append(el("td",a.id),nm,el("td",a.connector),r,p,el("td",new Date(a.seen_ms).toLocaleString()),acts);tbl.append(tr);
   }
   const stale=el("button","Revoke stale (unused over 24h)");stale.type="button";
-  stale.onclick=guard(err,async()=>{const d=await setting("settings_registered_agent_revoke_stale",{});if(!d.count){err.textContent="No registered agent is unused for over 24 hours.";return}if(!confirm("Revoke "+d.count+" agent(s) unused for over 24 hours? Their keys stop working; they can register again."))return;await setting("settings_registered_agent_revoke_stale",{revoke:true,ids:d.ids})});
+  stale.onclick=guard(err,async()=>{const d=await setting("settings_registered_agent_revoke_stale",{});if(d.unsaved&&!d.count){if(!confirm("An earlier revocation was not saved. Save it now?"))return;await setting("settings_registered_agent_revoke_stale",{revoke:true,ids:[]});return}if(!d.count){err.textContent="No registered agent is unused for over 24 hours.";return}if(!confirm("Revoke "+d.count+" agent(s) unused for over 24 hours? Their keys stop working; they can register again."))return;await setting("settings_registered_agent_revoke_stale",{revoke:true,ids:d.ids})});
   box.append(tbl,stale,err,el("p","Left at the connector's role, and all projects, an agent acts as its connector. Any role chosen here is applied at once, even a wider one.","note"));
   return box;
 }

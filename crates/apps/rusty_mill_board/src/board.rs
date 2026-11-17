@@ -383,6 +383,11 @@ impl<S: Store> Board<S> {
         self.agents().stale(self.now_ms(), age_ms)
     }
 
+    /// Whether a stale revocation is waiting to be written to the registry file.
+    pub fn agents_unsaved(&self) -> bool {
+        self.agents().has_unsaved_revoke()
+    }
+
     /// Remove registered agents unused for more than `age_ms` (only those in `only`, if given);
     /// the ids removed.
     ///

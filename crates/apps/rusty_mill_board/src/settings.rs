@@ -473,7 +473,7 @@ pub fn tools() -> Vec<SettingsTool> {
         ),
         tool(
             "settings_registered_agent_revoke_stale",
-            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin). A dry run unless `revoke: true`: it returns `count` and the agent `ids` it would revoke. Revoked agents can register again.",
+            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin). A dry run unless `revoke: true`: it returns `count`, the agent `ids` it would revoke and `unsaved` (a revocation that failed to write: call again with `revoke: true` to write it). Revoked agents can register again.",
             json!({"older_than_hours": {"type": "integer", "description": "2-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}, "ids": {"type": "array", "items": {"type": "string"}, "description": "With revoke: only these previewed ids, and only if still stale."}}),
             &[],
         ),
@@ -1018,7 +1018,7 @@ impl Settings {
             self.board.stale_agents(age_ms)
         };
         Ok(
-            json!({"dry_run": !a.revoke, "older_than_hours": a.older_than_hours, "count": ids.len(), "ids": ids}),
+            json!({"dry_run": !a.revoke, "older_than_hours": a.older_than_hours, "count": ids.len(), "ids": ids, "unsaved": self.board.agents_unsaved()}),
         )
     }
 

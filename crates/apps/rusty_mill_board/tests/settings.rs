@@ -206,6 +206,7 @@ fn registered_agents_are_listed_and_an_unknown_one_cannot_be_revoked() {
         ),
         (json!(true), json!(0), json!(24))
     );
+    assert_eq!(out["unsaved"], json!(false));
     for body in [
         json!({"older_than_hours": 1}),
         json!({"older_than_hours": 721}),
