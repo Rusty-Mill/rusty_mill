@@ -261,8 +261,8 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
     }
     // A float drawn over the focused tile hides its cursor.
     if let Some((cx, cy)) = frame.cursor {
-        let above = views.iter().skip_while(|v| v.block != focused).skip(1);
-        let under = above.into_iter().any(|v| v.float && ringed(v.rect, cx, cy));
+        let mut above = views.iter().skip_while(|v| v.block != focused).skip(1);
+        let under = above.any(|v| v.float && ringed(v.rect, cx, cy));
         if under {
             frame.cursor = None;
         }
@@ -1099,6 +1099,7 @@ mod tests {
             Some((29, 7, size(10, 2)))
         );
         // No room for a header and a row.
+        assert_eq!(inner(at(0, 0, 100, 100), 12, 4), Some((1, 1, size(10, 2))));
         assert_eq!(inner(at(0, 0, 100, 100), 11, 10), None);
         assert_eq!(inner(at(0, 0, 100, 100), 40, 3), None);
     }

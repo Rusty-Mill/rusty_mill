@@ -2200,7 +2200,7 @@ mod client {
                 focus = old.focus;
                 floats = old.floats;
                 for block in old.leaving {
-                    if !leaving.contains(&block) {
+                    if !leaving.contains(&block) && !staying.contains(&block) {
                         leaving.push(block);
                     }
                 }
@@ -2218,13 +2218,34 @@ mod client {
             }
         }
 
-        /// Takes the window's new floats. The layout change that took a
-        /// block out for floating came first: the block is no longer one
-        /// that is leaving.
+        /// Takes the window's new floats. Told with a layout change, they
+        /// come after it (a block floated is no longer one that is leaving)
+        /// or before it (a float closed or put back in the layout): a float
+        /// no longer one, and in no layout yet, is held like a dropped tile
+        /// until it has drained or the layout names it.
         fn refloat(&mut self, floats: Vec<Float>) {
             let Some(pending) = self.pending.as_mut() else {
-                self.floats = floats;
-                return self.sync();
+                let dropped: Vec<BlockId> = self
+                    .floats
+                    .iter()
+                    .map(|f| f.block)
+                    .filter(|b| !floats.iter().any(|f| f.block == *b))
+                    .filter(|b| self.panes.get(b).is_some_and(|p| !p.closed))
+                    .filter(|b| !self.layout.as_ref().is_some_and(|l| l.blocks().contains(b)))
+                    .collect();
+                if dropped.is_empty() {
+                    self.floats = floats;
+                    return self.sync();
+                }
+                self.pending = Some(Pending {
+                    layout: self.layout.clone(),
+                    zoomed: self.zoomed,
+                    floats: Some(floats),
+                    focus: None,
+                    by: Instant::now() + GRACE,
+                    leaving: dropped,
+                });
+                return;
             };
             pending
                 .leaving
@@ -2405,16 +2426,7 @@ mod client {
                 Action::Resize(_) | Action::Swap { .. } | Action::DetachBlock if !self.editing => {
                     bell()
                 }
-                Action::Cycle => {
-                    let shown = self.visible();
-                    let at = shown.iter().position(|(b, _)| *b == focus);
-                    let next = shown.get(at.map_or(0, |i| (i + 1) % shown.len()));
-                    match next {
-                        Some((block, _)) if *block != focus => self.focus_on(*block),
-                        _ => bell(),
-                    }
-                    self.sync();
-                }
+                Action::Cycle => self.cycle(),
                 Action::Float | Action::Stack { .. } | Action::Move(_)
                     if !self.editing || !self.floating =>
                 {
@@ -2542,6 +2554,18 @@ mod client {
                 }
                 None => {}
             }
+        }
+
+        /// Focuses the next block shown, wrapping.
+        fn cycle(&mut self) {
+            let focus = self.focus;
+            let shown = self.visible();
+            let at = shown.iter().position(|(b, _)| *b == focus);
+            match shown.get(at.map_or(0, |i| (i + 1) % shown.len())) {
+                Some((block, _)) if *block != focus => self.focus_on(*block),
+                _ => bell(),
+            }
+            self.sync();
         }
 
         /// The place of `block` if it floats.
@@ -2792,7 +2816,7 @@ mod client {
             // A window whose blocks are all detached from its layout shows
             // nothing until one is moved back; a closed one ends the client.
             let empty_window = self.layouts && self.inspect && self.window.is_some() && !self.gone;
-            if visible.is_empty() && !empty_window {
+            if visible.is_empty() && !empty_window && self.floats.is_empty() {
                 self.end(Ended::Closed);
                 return;
             }
@@ -3903,6 +3927,27 @@ mod client {
             assert_eq!(app.floats.len(), 1);
             let shown: Vec<BlockId> = app.visible().iter().map(|(k, _)| *k).collect();
             assert_eq!(shown, vec![b, a]);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_float_closed_or_returned_is_held_until_the_layout_tells() {
+            let (mut app, _inbox, [_control, _a, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            let at = FloatRect::new(20, 20, 60, 60).expect("a float");
+            app.layout = Some(Layout::Block(b));
+            app.floats = vec![Float { block: a, at }];
+            app.sync();
+            assert!(app.panes.contains_key(&a), "its connection is open");
+            // Told first that it floats no more: not detached yet.
+            app.refloat(Vec::new());
+            assert!(app.panes.contains_key(&a), "the connection is kept");
+            assert!(app.pending.as_ref().is_some_and(|p| p.leaving.contains(&a)));
+            // The layout then takes it back: it stays.
+            let layout: Layout = format!("cols50({a},{b})").parse().expect("a layout");
+            app.relayout(Some(layout), None);
+            assert!(app.pending.is_none());
+            assert!(app.panes.contains_key(&a), "no flicker, no lost lease");
         }
 
         #[cfg(unix)]
