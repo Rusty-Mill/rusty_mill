@@ -49,6 +49,7 @@ pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
     w.put(HEADER)?;
     grid.write(&mut w)?;
     parser.write(&mut w)?;
+    grid.write_placements(&mut w)?;
     Ok(w.bytes)
 }
 
@@ -60,9 +61,13 @@ pub fn decode(data: &[u8]) -> Result<(Grid, AnsiParser)> {
         return Err(Error("checkpoint header/version/size"));
     }
     let mut r = Reader::new(&data[HEADER.len()..], MAX_DECODED);
-    let grid = Grid::read(&mut r)?;
+    let mut grid = Grid::read(&mut r)?;
     let parser = AnsiParser::read(&mut r)?;
+    if !r.bytes.is_empty() {
+        grid.read_placements(&mut r)?;
+    }
     grid.validate_checkpoint()?;
+    grid.validate_placements()?;
     grid.validate_cell_styles()?;
     parser.validate_checkpoint()?;
     if !r.bytes.is_empty() {
@@ -90,6 +95,7 @@ pub fn encode_split(
     w.put(HEADER)?;
     grid.write_from(&mut w, split)?;
     parser.write(&mut w)?;
+    grid.write_placements(&mut w)?;
     Ok((w.bytes, grid.history_batches(split, batch_bytes)?))
 }
 
@@ -918,7 +924,15 @@ mod tests {
             ("collect_program_status", "host configuration"),
             ("program_status", "pending host status signals"),
             ("ime_preedit", "GUI input composition"),
-            ("total_scrolled", "GUI overlay image anchor"),
+            (
+                "total_scrolled",
+                "re-anchored at the retained history on decode; placements are written relative to the screen",
+            ),
+            (
+                "placements",
+                "optional trailing section after the parser (write_placements)",
+            ),
+            ("image_stamp", "rebuilt image change stamp"),
             (
                 "images",
                 "GUI-only pixel overlays; headless cells/store are encoded",

@@ -212,12 +212,13 @@ fn decode(t: &Transmission) -> Option<(usize, usize, Vec<Option<u32>>)> {
 fn place(t: &Transmission, g: &mut Grid, w: usize, h: usize, px: &[Option<u32>]) {
     if t.virt {
         g.kitty_virtual_place(t.id, t.cols, t.rows);
-    } else if t.cols != 0 || t.rows != 0 {
-        let c = (t.cols != 0).then_some(t.cols);
-        let r = (t.rows != 0).then_some(t.rows);
-        g.render_image_sized(w, h, px, c, r, true);
-    } else {
-        g.render_image(w, h, px);
+        return;
+    }
+    let c = (t.cols != 0).then_some(t.cols);
+    let r = (t.rows != 0).then_some(t.rows);
+    let footprint = g.render_image_sized(w, h, px, c, r, true);
+    if let (Some(f), true) = (footprint, t.id != 0) {
+        g.place_image(t.id, f.serial, f.col, f.cols, f.rows);
     }
 }
 

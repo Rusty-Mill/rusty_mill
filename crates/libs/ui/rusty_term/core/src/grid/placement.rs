@@ -1,0 +1,300 @@
+//! Headless Kitty image placements.
+//!
+//! The windowed front-end overlays pixel images ([`super::GridImage`]) on the
+//! cells they cover, but only with the `gui` feature, and the overlay is not
+//! part of a checkpoint. A mux server's grid has neither. A [`Placement`] is
+//! the small always-on record of the same fact for images that live in the
+//! Kitty store: stored image `image` covers `cols` x `rows` cells whose top
+//! row is anchored at `serial` (see [`super::Grid`]'s `total_scrolled`), so it
+//! scrolls with its text. Pixels stay in the store; a placement holds none.
+//!
+//! Sixel, iTerm2 and store-less Kitty images keep only their half-block
+//! cells here, exactly as before.
+
+use super::Grid;
+use crate::checkpoint::{Error, Result, Writer, fields};
+
+/// The most placements a grid keeps; the oldest is dropped first.
+pub const MAX_PLACEMENTS: usize = 64;
+
+/// A stored Kitty image placed on the grid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placement {
+    /// Id of the image in the Kitty store.
+    pub image: u32,
+    /// Stable scroll position of the top cell row.
+    pub serial: usize,
+    /// Leftmost cell column.
+    pub col: usize,
+    /// Footprint in cells.
+    pub cols: usize,
+    pub rows: usize,
+}
+
+/// A placement as checkpointed: `top` is the top row relative to the live
+/// screen's first row.
+struct WirePlacement {
+    image: u32,
+    top: i32,
+    col: usize,
+    cols: usize,
+    rows: usize,
+}
+fields!(WirePlacement, [image, top, col, cols, rows]);
+
+/// Where `render_image_sized` put an image: the cells it covers.
+pub(crate) struct Footprint {
+    pub serial: usize,
+    pub col: usize,
+    pub cols: usize,
+    pub rows: usize,
+}
+
+impl Grid {
+    /// The images placed on the grid, oldest first.
+    pub fn placements(&self) -> &[Placement] {
+        &self.placements
+    }
+
+    /// `(grid id, stamp)` of the last change to a stored image or placement:
+    /// equal across two looks only if neither changed between them, so a
+    /// mux delta can skip images that did not move.
+    pub fn image_stamp(&self) -> (u64, u64) {
+        (self.id, self.image_stamp)
+    }
+
+    /// The viewport row of `p`'s top cell: negative when scrolled partly
+    /// above the view, as [`Grid::image_top_row`].
+    pub fn placement_top_row(&self, p: &Placement) -> isize {
+        let off = self.view_offset.min(self.scrollback.len());
+        p.serial as isize - self.total_scrolled as isize + off as isize
+    }
+
+    pub(super) fn touch_images(&mut self) {
+        self.stamp += 1;
+        self.image_stamp = self.stamp;
+    }
+
+    /// Record that stored image `image` now covers `cols` x `rows` cells from
+    /// `(col, serial)`. Ignored if the image is not in the store.
+    pub(crate) fn place_image(
+        &mut self,
+        image: u32,
+        serial: usize,
+        col: usize,
+        cols: usize,
+        rows: usize,
+    ) {
+        if !self.kitty_images.iter().any(|i| i.id == image) || cols == 0 || rows == 0 {
+            return;
+        }
+        if self.placements.len() >= MAX_PLACEMENTS {
+            self.placements.remove(0);
+        }
+        self.placements.push(Placement {
+            image,
+            serial,
+            col,
+            cols,
+            rows,
+        });
+        self.touch_images();
+    }
+
+    /// Drop placements whose image left the store, or whose rows left the
+    /// retained scrollback; stamp if any went.
+    pub(super) fn prune_placements(&mut self) {
+        let oldest = self.total_scrolled.saturating_sub(self.scrollback.len());
+        let before = self.placements.len();
+        let store = &self.kitty_images;
+        self.placements
+            .retain(|p| p.serial + p.rows > oldest && store.iter().any(|i| i.id == p.image));
+        if self.placements.len() != before {
+            self.touch_images();
+        }
+    }
+
+    /// Drop every placement (clear, resize, alternate screen, reset).
+    pub(super) fn clear_placements(&mut self) {
+        if !self.placements.is_empty() {
+            self.placements.clear();
+            self.touch_images();
+        }
+    }
+
+    /// The optional trailing checkpoint section: written only when there are
+    /// placements, so a checkpoint without any is byte-identical to one from
+    /// before placements existed and still decodes. Rows are written relative
+    /// to the live screen's top (negative = in scrollback), because the
+    /// absolute `total_scrolled` count is not carried.
+    pub(crate) fn write_placements(&self, w: &mut Writer) -> Result<()> {
+        if self.placements.is_empty() {
+            return Ok(());
+        }
+        let wire: Vec<WirePlacement> = self
+            .placements
+            .iter()
+            .map(|p| WirePlacement {
+                image: p.image,
+                top: i32::try_from(p.serial as i64 - self.total_scrolled as i64)
+                    .unwrap_or(i32::MIN),
+                col: p.col,
+                cols: p.cols,
+                rows: p.rows,
+            })
+            .collect();
+        crate::checkpoint::Wire::write(&wire, w)
+    }
+
+    /// Read the trailing section into a freshly decoded grid. Anchors the
+    /// grid's scroll count at its retained history, so a placement above the
+    /// history this checkpoint carries (a split checkpoint) is dropped.
+    pub(crate) fn read_placements(&mut self, r: &mut crate::checkpoint::Reader<'_>) -> Result<()> {
+        let wire: Vec<WirePlacement> = crate::checkpoint::Wire::read(r)?;
+        self.total_scrolled = self.scrollback.len();
+        let base = self.total_scrolled as i64;
+        self.placements = wire
+            .into_iter()
+            .filter_map(|p| {
+                Some(Placement {
+                    image: p.image,
+                    serial: usize::try_from(base + i64::from(p.top)).ok()?,
+                    col: p.col,
+                    cols: p.cols,
+                    rows: p.rows,
+                })
+            })
+            .collect();
+        self.touch_images();
+        Ok(())
+    }
+
+    /// Placements must name a stored image, stay within the cap, and have a
+    /// sane footprint.
+    pub(crate) fn validate_placements(&self) -> Result<()> {
+        let bad = self.placements.len() > MAX_PLACEMENTS
+            || self.placements.iter().any(|p| {
+                p.cols == 0
+                    || p.rows == 0
+                    || p.col >= self.cols
+                    || p.col.saturating_add(p.cols) > self.cols
+                    || p.rows > self.rows.saturating_add(self.scrollback_max)
+                    || p.serial > self.total_scrolled.saturating_add(self.rows)
+                    || !self.kitty_images.iter().any(|i| i.id == p.image)
+            });
+        if bad {
+            return Err(Error("placement bounds"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{AnsiParser, Grid, checkpoint};
+
+    /// `a=T` of a 1x2 image with id 7 at the cursor, 4 cells wide, then `X`.
+    const PLACE: &[u8] = b"\x1b_Ga=T,f=32,s=1,v=2,i=7,c=4,r=2;/wAA//8AAP8=\x1b\\X";
+
+    fn fed(cols: usize, rows: usize, data: &[u8]) -> (Grid, AnsiParser) {
+        let (mut g, mut p) = (Grid::new(cols, rows), AnsiParser::new());
+        p.advance(&mut g, data);
+        (g, p)
+    }
+
+    #[test]
+    fn a_stored_kitty_image_leaves_a_placement() {
+        let (g, _) = fed(20, 10, PLACE);
+        let [p] = g.placements() else {
+            panic!("one placement, got {:?}", g.placements())
+        };
+        assert_eq!((p.image, p.col, p.serial), (7, 0, 0));
+        assert!((1..=4).contains(&p.cols) && p.rows >= 1);
+    }
+
+    #[test]
+    fn images_without_an_id_leave_only_cells() {
+        let (g, _) = fed(20, 10, b"\x1b_Ga=T,f=32,s=1,v=1;/wAA/w==\x1b\\");
+        assert!(g.placements().is_empty());
+    }
+
+    #[test]
+    fn the_stamp_moves_only_when_images_change() {
+        let (mut g, mut p) = fed(20, 10, b"");
+        let before = g.image_stamp();
+        p.advance(&mut g, b"plain text\r\n");
+        assert_eq!(g.image_stamp(), before);
+        p.advance(&mut g, PLACE);
+        assert_ne!(g.image_stamp(), before);
+        let placed = g.image_stamp();
+        p.advance(&mut g, b"more text");
+        assert_eq!(g.image_stamp(), placed);
+    }
+
+    #[test]
+    fn a_placement_scrolls_with_its_text_and_drops_with_its_rows() {
+        let (mut g, mut p) = fed(20, 5, PLACE);
+        g.set_scrollback_max(8);
+        let top = |g: &Grid| g.placement_top_row(&g.placements()[0]);
+        assert_eq!(top(&g), 0);
+        p.advance(&mut g, b"\r\n\r\n\r\n\r\n\r\n");
+        assert!(top(&g) < 0, "scrolled into history");
+        p.advance(&mut g, "\r\n".repeat(40).as_bytes());
+        assert!(g.placements().is_empty(), "rows left the scrollback");
+    }
+
+    #[test]
+    fn deleting_or_evicting_the_image_drops_its_placement() {
+        let (mut g, mut p) = fed(20, 10, PLACE);
+        p.advance(&mut g, b"\x1b_Ga=d,d=I,i=7\x1b\\");
+        assert!(g.placements().is_empty());
+        let (mut g, mut p) = fed(20, 10, PLACE);
+        p.advance(&mut g, b"\x1b[2J");
+        assert!(g.placements().is_empty());
+    }
+
+    #[test]
+    fn placements_are_bounded() {
+        let (mut g, mut p) = fed(20, 10, b"");
+        for _ in 0..(super::MAX_PLACEMENTS + 5) {
+            p.advance(&mut g, PLACE);
+        }
+        assert_eq!(g.placements().len(), super::MAX_PLACEMENTS);
+    }
+
+    #[test]
+    fn a_checkpoint_carries_placements_and_stays_compatible_without() {
+        let (g, p) = fed(20, 5, PLACE);
+        let (back, _) = checkpoint::decode(&checkpoint::encode(&g, &p).unwrap()).unwrap();
+        assert_eq!(back.placements(), g.placements());
+        let (mut g, mut p) = fed(20, 5, PLACE);
+        p.advance(&mut g, b"\r\n\r\n\r\n\r\n\r\n\r\n");
+        let (back, _) = checkpoint::decode(&checkpoint::encode(&g, &p).unwrap()).unwrap();
+        let (a, b) = (&g.placements()[0], &back.placements()[0]);
+        assert_eq!(g.placement_top_row(a), back.placement_top_row(b));
+        // No placements: bytes are what a build without this section wrote.
+        let (g, p) = fed(20, 5, b"hi");
+        let bytes = checkpoint::encode(&g, &p).unwrap();
+        assert!(
+            checkpoint::decode(&bytes)
+                .unwrap()
+                .0
+                .placements()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_hostile_trailing_section_is_rejected() {
+        let (g, p) = fed(20, 5, PLACE);
+        let mut bytes = checkpoint::encode(&g, &p).unwrap();
+        // The last field written is the final placement's `rows`: blow it up.
+        let n = bytes.len();
+        bytes[n - 8..].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(checkpoint::decode(&bytes).is_err());
+        // A placement whose image is not in the store.
+        let mut bad = Grid::new(20, 5);
+        bad.placements = g.placements().to_vec();
+        assert!(bad.validate_placements().is_err());
+    }
+}
