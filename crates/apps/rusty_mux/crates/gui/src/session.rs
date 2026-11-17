@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use rusty_mux_core::{BlockId, ClientId, Event, Layout, Principal, SessionId, WindowId};
 use rusty_mux_proto::{Entry, Message};
-use rusty_term::gui::source::{Session, SessionChoice, WindowTab};
+use rusty_term::gui::source::{Peer, Session, SessionChoice, WindowTab};
 
 use crate::keys::Keys;
 use crate::tree::tree;
@@ -64,6 +64,8 @@ struct Client {
     name: String,
     /// The block whose output it receives, if any.
     attached: Option<BlockId>,
+    /// It can be asked to show a session (C64).
+    showable: bool,
 }
 
 /// What an event changed for the GUI window.
@@ -111,6 +113,8 @@ pub struct Model {
     /// The shown session's name once a reconnect found it gone (handoff
     /// D114): nothing is shown until another session is picked.
     ended: Option<String>,
+    /// This window's own control client, to leave it out of its peers.
+    me: Option<ClientId>,
 }
 
 impl Model {
@@ -149,6 +153,7 @@ impl Model {
             clients: HashMap::new(),
             follows_active,
             ended: None,
+            me: None,
         };
         for m in entries {
             if let Some(e) = entry(m) {
@@ -174,6 +179,7 @@ impl Model {
             clients: HashMap::new(),
             follows_active: self.follows_active,
             ended: self.ended.clone(),
+            me: self.me,
         };
         for e in entries.iter().filter_map(entry) {
             model.take(e);
@@ -345,6 +351,70 @@ impl Model {
                 .collect(),
             // The source fills these in when it can put one back.
             detached: Vec::new(),
+            peers: self.peers(keys.peers),
+        }
+    }
+
+    /// Says which client is this window's own (C64).
+    pub fn set_me(&mut self, me: ClientId) {
+        self.me = Some(me);
+    }
+
+    /// The account's windows that can be asked to show a session, this one
+    /// left out (C64, gui-design D94): "Window {n}", n counting them with
+    /// this one in the order of their ids, then the client's name when it
+    /// has one. A client of another account, or one that can't show, is
+    /// no window of this one; with no principal known there are none.
+    fn windows_of_account(&self) -> Vec<(ClientId, usize)> {
+        let mine = self
+            .me
+            .and_then(|me| self.clients.get(&me))
+            .and_then(|c| c.principal.as_ref());
+        let Some(mine) = mine else {
+            return Vec::new();
+        };
+        let mut ids: Vec<ClientId> = self
+            .clients
+            .iter()
+            .filter(|(_, c)| c.showable && c.principal.as_ref() == Some(mine))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.uuid());
+        ids.into_iter()
+            .enumerate()
+            .map(|(i, id)| (id, i + 1))
+            .collect()
+    }
+
+    fn peers(&self, keys: &mut Keys<ClientId>) -> Vec<Peer> {
+        self.windows_of_account()
+            .into_iter()
+            .filter(|(id, _)| Some(*id) != self.me)
+            .map(|(id, n)| Peer {
+                key: keys.key(id),
+                label: self.window_label(id, n),
+            })
+            .collect()
+    }
+
+    /// "Window {n}", with `client`'s name after it when it has one.
+    fn window_label(&self, client: ClientId, n: usize) -> String {
+        match self.clients.get(&client).map(|c| c.name.as_str()) {
+            Some(name) if !name.is_empty() => format!("Window {n}, {name}"),
+            _ => format!("Window {n}"),
+        }
+    }
+
+    /// What a push from `client` calls the window it came from (C64).
+    pub fn window_name(&self, client: ClientId) -> String {
+        let n = self
+            .windows_of_account()
+            .into_iter()
+            .find(|(id, _)| *id == client)
+            .map(|(_, n)| n);
+        match n {
+            Some(n) => self.window_label(client, n),
+            None => self.client_name(client),
         }
     }
 
@@ -415,12 +485,14 @@ impl Model {
                 principal,
                 name,
                 attached,
+                showable,
                 ..
             } => {
                 let c = Client {
                     principal: principal.clone(),
                     name: name.clone(),
                     attached: *attached,
+                    showable: *showable == Some(true),
                 };
                 self.clients.insert(*client, c);
                 Change::Strip
@@ -730,6 +802,7 @@ impl Model {
 
 /// The keys the window knows the server's ids by.
 pub struct StripKeys<'a> {
+    pub peers: &'a mut Keys<ClientId>,
     pub sessions: &'a mut Keys<SessionId>,
     pub windows: &'a mut Keys<WindowId>,
     pub blocks: &'a mut Keys,
@@ -854,6 +927,7 @@ mod tests {
 
     fn strip(m: &Model) -> rusty_term::gui::source::Session {
         m.session(&mut StripKeys {
+            peers: &mut Keys::default(),
             sessions: &mut Keys::default(),
             windows: &mut Keys::default(),
             blocks: &mut Keys::default(),
@@ -1337,5 +1411,51 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!((out[0].block, out[0].name.as_str()), (b[1], "htop"));
         assert_eq!(out[0].since, None, "detached before this client saw");
+    }
+
+    fn client_entry(client: ClientId, principal: &str, name: &str, showable: bool) -> Entry {
+        Entry::Client {
+            client,
+            name: name.into(),
+            attached: None,
+            principal: Some(Principal::unix(1000, Some(principal.into())).expect("valid")),
+            transport: None,
+            showable: Some(showable),
+        }
+    }
+
+    #[test]
+    fn peers_are_the_accounts_other_windows_numbered_with_this_one() {
+        let [s, ..] = ids(SessionId::from_uuid);
+        let mut m = model(s, &ids(WindowId::from_uuid), &ids(BlockId::from_uuid));
+        let [me, other, tool] = ids(ClientId::from_uuid);
+        m.set_me(me);
+        m.take(&client_entry(me, "a", "", true));
+        m.take(&client_entry(other, "a", "laptop", true));
+        // A client that can't show is no window.
+        m.take(&client_entry(tool, "a", "", false));
+        let mut keys = Keys::default();
+        let peers = m.peers(&mut keys);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(keys.id(peers[0].key), Some(other));
+        let n = m.windows_of_account();
+        assert_eq!(n.len(), 2, "this window counts too");
+        assert!(peers[0].label.starts_with("Window "));
+        assert!(peers[0].label.ends_with(", laptop"));
+        assert_eq!(m.window_name(other), peers[0].label);
+        // Unknown to the list: the plain client name.
+        assert_eq!(m.window_name(tool), "a");
+    }
+
+    #[test]
+    fn another_accounts_clients_are_no_windows_and_with_no_me_there_are_none() {
+        let [s, ..] = ids(SessionId::from_uuid);
+        let mut m = model(s, &ids(WindowId::from_uuid), &ids(BlockId::from_uuid));
+        let [me, guest, _] = ids(ClientId::from_uuid);
+        m.take(&client_entry(me, "a", "", true));
+        m.take(&client_entry(guest, "b", "", true));
+        assert!(m.peers(&mut Keys::default()).is_empty(), "me unknown");
+        m.set_me(me);
+        assert!(m.peers(&mut Keys::default()).is_empty());
     }
 }

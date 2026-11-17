@@ -107,6 +107,29 @@ pub struct Session {
     /// The shown window's detached blocks (gui-design F6, D61), newest
     /// first; empty when the source can't put one back.
     pub detached: Vec<Detached>,
+    /// The account's other windows that can be asked to show a session
+    /// (C64, gui-design D94), in the order they are numbered; empty when
+    /// the source can't ask.
+    pub peers: Vec<Peer>,
+}
+
+/// Another window of the account (C64).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Peer {
+    /// The source's key for the window.
+    pub key: u64,
+    /// "Window {n}", with the client's name when it has one (gui-design
+    /// D94).
+    pub label: String,
+}
+
+/// Whom to ask to show a session (C64).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Show {
+    /// One other window, by [`Peer::key`].
+    Window(u64),
+    /// Every other window of the account.
+    All,
 }
 
 /// A block taken out of the shown window's layout, still running.
@@ -219,6 +242,16 @@ pub trait Source {
     fn switch(&self, key: u64);
     /// The user asked for a new window in the session.
     fn new_window(&self);
+    /// The user asked other windows to show session `key` (C64, gui-design
+    /// D93); `false` for a source that can't.
+    fn show_in(&self, _key: u64, _to: Show) -> bool {
+        false
+    }
+    /// The user asked for session `key` in a new window of its own (C64,
+    /// gui-design D93); `false` for a source that can't.
+    fn open_window(&self, _key: u64) -> bool {
+        false
+    }
     /// The user asked to change the layout (gui-design F2, F7; handoff
     /// D104). The source sends it on; the window shows the result when the
     /// source lays it out.
@@ -348,6 +381,13 @@ impl Remote {
     /// (gui-design D63).
     pub fn notice(&self, notice: Option<Notice>) -> bool {
         self.0.send_event(UserEvent::Notice(notice)).is_ok()
+    }
+
+    /// Another window, `by`, asks this one to show session `key` (C64,
+    /// gui-design D95, D96): the window switches and says so, or waits
+    /// while a confirm, the palette or a link prompt is open.
+    pub fn shown(&self, key: u64, by: String) -> bool {
+        self.0.send_event(UserEvent::Shown(key, by)).is_ok()
     }
 
     /// Show `session` on the top strip.
