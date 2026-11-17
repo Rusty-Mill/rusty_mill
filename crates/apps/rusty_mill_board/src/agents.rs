@@ -59,6 +59,19 @@ pub struct Agent {
     /// `seen_ms` as last written to the file (not itself stored).
     #[serde(skip)]
     saved_ms: i64,
+    /// Loaded from the file and not used since: its last use may be up to [`SEEN_WRITE_MS`] later
+    /// than `seen_ms`, so stale selection adds that margin (not stored).
+    #[serde(skip)]
+    from_disk: bool,
+}
+
+impl Agent {
+    /// The latest its last use can have been: `seen_ms` (or creation), plus the write-back lag
+    /// for an agent loaded from the file, so a lagging file never makes a used agent look stale.
+    fn last_use_upper_bound(&self) -> i64 {
+        let lag = if self.from_disk { SEEN_WRITE_MS } else { 0 };
+        self.seen_ms.max(self.created_ms) + lag
+    }
 }
 
 /// A registered agent as listed: everything but its key.
@@ -105,6 +118,7 @@ impl Registry {
         let mut agents: BTreeMap<String, Agent> = agents;
         for a in agents.values_mut() {
             a.saved_ms = a.seen_ms;
+            a.from_disk = true;
         }
         Ok(Self {
             agents,
@@ -144,6 +158,7 @@ impl Registry {
             grant,
             nickname: None,
             saved_ms: now,
+            from_disk: false,
         };
         if self.agents.insert(id.clone(), agent).is_some() {
             return Err("agent id collided; try again".into());
@@ -163,6 +178,7 @@ impl Registry {
         }
         let stale = now - agent.saved_ms > SEEN_WRITE_MS;
         agent.seen_ms = now;
+        agent.from_disk = false;
         let grant = agent.grant.clone();
         if stale {
             match self.save() {
@@ -226,7 +242,7 @@ impl Registry {
     pub fn stale(&self, now: i64, age_ms: i64) -> Vec<String> {
         self.agents
             .iter()
-            .filter(|(_, a)| now - a.seen_ms.max(a.created_ms) > age_ms)
+            .filter(|(_, a)| now - a.last_use_upper_bound() > age_ms)
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -441,6 +457,34 @@ mod tests {
         assert!(
             again.stale(72 * H + 1, 24 * H).is_empty(),
             "used hourly for 3 days"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_lagging_file_never_makes_a_used_agent_look_stale_after_a_restart() {
+        const H: i64 = 3600 * 1000;
+        let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("agents.json");
+        let mut r = Registry::open(path.clone()).expect("open");
+        let (id, key) = r.register("c", Grant::default(), 0).expect("register");
+        // Used at exactly one hour: not written back (the lag is strict), so the file says 0.
+        assert!(r.verify("c", &id, &key, H).is_some());
+        let mut again = Registry::open(path).expect("reopen");
+        assert!(
+            again.stale(2 * H + 1, 2 * H).is_empty(),
+            "idle for 1h+1ms, not over 2h"
+        );
+        assert_eq!(
+            again.stale(3 * H + 1, 2 * H),
+            vec![id.clone()],
+            "idle over 2h"
+        );
+        assert!(again.verify("c", &id, &key, 3 * H).is_some());
+        assert!(
+            again.stale(3 * H + 1, 2 * H).is_empty(),
+            "exact again once used"
         );
         std::fs::remove_dir_all(dir).ok();
     }
