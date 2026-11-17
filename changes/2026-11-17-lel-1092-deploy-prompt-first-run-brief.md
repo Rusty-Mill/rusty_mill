@@ -13,4 +13,5 @@ changelog: Let Em Loose #1092 paste-ready deploy prompt for bbp and the BBP dire
 - **Added:** `docs/projects/let-em-loose/1166-smoke-resume.sh`: resumes an interrupted smoke run (waits for a surviving `lens run`, never starts a second beside it, resumes detached, reads back). Not yet run.
 - **Added:** D143 to D146 in `DECISIONS.md` and Q51, Q52 in `handoff/OPEN_QUESTIONS.md`: D127's "first run" is a clean #1166 pass (Nano), and smoke run 1 (local-only, 2026-11-17) is recorded as a result in `1166-smoke-run.md`, which also corrects its prediction that a refused post is non-fatal.
 - **Added:** D147 in `DECISIONS.md`: the llama.cpp rebuild (D145) and the Qwen reasoning budget are held until the rerun's per-pass log shows which proposal slot failed; D145 now records the root cause.
+- **Changed:** the llama-swap address is a placeholder (`<llama-swap-host>:<port>`) in these docs; `1166-smoke-run.sh` and `1166-smoke-resume.sh` take it from the required `LLAMA_SWAP` variable, and `1166-smoke-run.sh` resolves its own directory before `cd /`.
 - **Known limitations:** docs only. The Claude `no_overage` entry in `assertions.json` is still Nano's to write.
