@@ -63,6 +63,6 @@ chip, D23 zoom, D50 program output is not chrome). No new frame is needed unless
 Added to `handoff/OPEN_QUESTIONS.md`. Each has an interim choice, so no slice waits except S2 and S4's wire.
 
 - **Q92 (security):** who may read image bytes, and does an owner-only block hide its images? Recommended: follow screen visibility.
-- **Q93 (wire):** how do bytes reach a client? Recommended: descriptors on the stream, bytes by `blob_read`.
+- **Q93 (wire), answered:** Nano chose descriptors on the stream and bytes by `blob_read` (card tap, 2026-11-17T14:13:26Z).
 - **Q94 (budgets):** keep the core caps per block (8 images, 16 Mi pixels), add a 256 MiB server-wide cap with oldest-block eviction, and cap a `blob_read` reply at 16 MiB with paging.
 - **Look (gui-design, non-blocking):** when an image cannot be shown, show nothing (default D100), a small placeholder line, or a placeholder plus a header badge? Recommended: nothing.
