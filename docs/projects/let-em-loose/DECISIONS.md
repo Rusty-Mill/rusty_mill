@@ -149,6 +149,7 @@ Precise contracts used by this guide:
 | D139 | A lens post with no taint entry reads as `sensitive` (unknown ids from lost posts) | [default] 2026-11-17 (#758) |
 | D140 | One paid lens run approved for 2026-11-17 (`--max-passes 5`, default call cap); supersedes D134 for that run only | [stated] 2026-11-17 (1124) |
 | D141 | Run 1 toy `sweep` smoke run stays local-only; run 2 SSH host launcher brief is paid (codex now, claude after its `no_overage` entry) | [stated] 2026-11-17 (1124, 1166) |
+| D142 | #1092: `/srv/lel` paths stay `container_file_t` on BaileyAi; no relabel before run 1 | [default] 2026-11-17 (1092) |
 
 ## D1. Lenses, not stages
 
@@ -1393,3 +1394,13 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_2357f42a0f9c42ea8a1b7b4fddf537db
 **Key.** lel:1124:two-paid-runs-codex-first
 **Source.** Nano, typed into a Claude Code session on BaileyAi, 2026-11-17, saved verbatim by the coordinator as remind-me `mem_efab3121ffc64728a2ee6ba8ec5a5f9d` (speaker Nano). Builds on D140 (`lel:1124:one-paid-lens-run-2026-11-17`), D134, ADR-0021, `1166-smoke-run.md`. Amendment: remind-me `mem_c5696762bdfb44f6aa7a169beceee027`. Numbered D141 after D140.
+
+## D142. #1092: `/srv/lel` paths stay `container_file_t` on BaileyAi; no relabel before run 1
+
+**Decision.** `/srv/lel/bbp`, `/srv/lel/orch-state`, `/srv/lel/lenses` and `/srv/lel/lens.json` keep the SELinux type `container_file_t`. Nothing is relabelled before run 1 (#1166). The `var_t` that the deploy prompt told the operator to expect was wrong. On BaileyAi `matchpathcon` returns `container_file_t` as the policy default for these paths (a local fcontext rule on `/srv/lel`), so the labels are as intended. `restorecon -Rv` printed "not reset as customized by admin" because `container_file_t` is a customizable type, and `restorecon -F` would change nothing.
+**Why.** Run 1 and `lens check` run as `orch-runner` started with `sudo -u orch-runner` from `baileyrd`'s shell, which is `unconfined_t`; llama-swap is `unconfined_t` too, and `unconfined_t` reads `container_file_t`. `lel-codex` mounts only `/srv/lel/machine-id`, `/srv/lel/experiment` and a volume, so no confined service touches these paths yet. Facts checked on the host by the coordinator, 2026-11-17.
+**Revisit when.** (a) The `mill-board` systemd service (D132) is deployed: its wrapper runs `bbp` as `orch-runner` through sudo, so check that `/srv/lel/bbp` is readable and writable in the resulting domain. (b) Run 1 shows an AVC denial (`ausearch -m avc`). The `bbp open` sandbox probe (user namespaces or SELinux) is the first place a label problem would show. The fix then is a `semanage fcontext -a -t <type> '/srv/lel/bbp(/.*)?'` rule followed by `restorecon -Rv /srv/lel/bbp`, not `restorecon` alone (the policy default is `container_file_t`, so it is a no-op). Never run `restorecon` on `/srv/lel` or `/srv/lel/experiment` (the `lel-codex` bind mounts). The deploy and smoke-run prompts (`1092-deploy-prompt-bbp-and-board-dir.md`, `1166-smoke-run-prompt.md`) still expect `var_t` and should be corrected.
+**Rejected.** Relabelling to `var_t` now: a local policy change with no reader that needs it, and `restorecon` could not do it anyway. Running `restorecon -F`: no effect.
+**Tag.** [default] · remind-me: mem_f02b0b40230741e89e0a16de2496d4dd
+**Key.** lel:1092:srv-lel-labels-container-file-t
+**Source.** let-em-loose-expert, 2026-11-17, answering the coordinator for Nano. D131 (deploy on BaileyAi), D132 (`mill-board` service, not yet deployed), `1092-deploy-layout.md`, `1092-deploy-prompt-bbp-and-board-dir.md`. Numbered D142 after D141.

@@ -8,6 +8,8 @@ Assumes the #1092 deploy is done (`/opt/lel/current/bin/{bbp,rusty_orch}`, `/srv
 
 Not guessed, read from code: `bbp open` flags (`crates/apps/rusty_bbp_host/src/bin/bbp.rs` header), the profile set and roster JSON shapes (`profiles.rs`, `holdout.rs`, `rusty_bbp/src/role.rs`), the claims `post` arguments (`rusty_bbp_host/src/mcp/claims.rs`, `lens/bbp.rs` `post_args`). Command output shapes (`bbp card`, `bbp mcp` `Posted`, `bbp human`) were observed on a throwaway task.
 
+**How to run it.** Copy each fenced block from this file with a clipboard paste into a shell, not into an editor or a `cat >` file: the first #1092 run's pasted script picked up stray `OB` characters (terminal arrow or scroll events). If a block fails with "command not found" on a line starting `OB`, that is why. Every `orch-runner` call below runs from `/`, since it cannot enter `~/dev/rusty_mill`. The `/srv/lel/*` labels are `container_file_t` by policy on BaileyAi; do not run `restorecon -F` there.
+
 ## 0. Session variables and a pre-flight
 
 ```bash
@@ -117,10 +119,11 @@ $R tee /srv/lel/toy/roster.json >/dev/null <<'EOF'
 ]
 EOF
 
-# SELinux: /srv/lel is container_file_t and the new subtree inherited it. Reset ONLY /srv/lel/toy.
-# NEVER restorecon /srv/lel or /srv/lel/experiment (lel-codex bind mounts). lel-codex is not touched.
-sudo restorecon -Rv /srv/lel/toy
-ls -dZ /srv/lel/toy /srv/lel/toy/repo /srv/lel/toy/holdout   # expect var_t, not container_file_t
+# SELinux: the policy default under /srv/lel is container_file_t (checked with matchpathcon on BaileyAi,
+# 2026-11-17), so the new subtree already has the intended label. No restorecon: it would skip it
+# ("customized by admin") and never run it on /srv/lel or /srv/lel/experiment (lel-codex mounts).
+matchpathcon /srv/lel/toy
+ls -dZ /srv/lel/toy /srv/lel/toy/repo /srv/lel/toy/holdout   # expect container_file_t
 ```
 
 Open isolation rule (`holdout.rs`): the holdout root must share no directory with the build read roots or the repo. `/srv/lel/toy/holdout` and `/srv/lel/toy/repo` are siblings, and the build roots are `/bin /usr /lib /lib64`, so it passes. The only sandbox read roots needed here are those four: nothing is built or run in this task (section 6), and `/srv/lel/bbp` and `/srv/lel/toy` need no sandbox read access.
@@ -247,4 +250,4 @@ Claude writes `1166-smoke-run-record.md` from these (outcome, calls and tokens p
 - **Lenses post nothing, or opinion only, or malformed JSON.** Then A never reaches 12 (criterion 4). A finding.
 - **Holdout never runs here.** Only staged, hashed and validated at open. By code reading, the sandboxed run supports the suite: `TMPDIR` is set to a writable scratch directory beside the checkout (`runner.rs:486-502`), landlock grants every handled right including make-symlink, make-dir and remove on writable roots (`platform-linux/src/sys/security.rs:112-127`), and `mktemp`, `touch`, `ln`, `rm` and `grep` live under the readable `/bin` and `/usr`. Still to confirm in the first #600 builder run: that the host's coreutils are GNU (`touch -d '40 days ago'` and `touch -h -d`).
 - **Card link refused.** The link needs the `Build` capability on the connector's role, and a card that already has a different execution refuses a second link; the inbox cross-check against `bbp inbox` still holds without it.
-- **Wrong label.** If `ls -dZ /srv/lel/toy` still says `container_file_t`, orch-runner host processes may be denied; re-run `sudo restorecon -Rv /srv/lel/toy` only.
+- **Labels.** `container_file_t` under `/srv/lel` is the policy default here, and runs started with `sudo -u orch-runner` from baileyrd's shell are `unconfined_t`, which reads it. If an AVC denial names one of these paths, report it; do not run `restorecon` on `/srv/lel`.
