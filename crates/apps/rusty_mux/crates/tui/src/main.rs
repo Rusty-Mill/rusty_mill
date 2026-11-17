@@ -2016,13 +2016,13 @@ mod client {
             for Aimed { at, action } in held {
                 match action {
                     Action::Detach => return self.detach(),
-                    Action::Focus(_) if self.visible().iter().any(|(b, _)| *b == at) => {
+                    action
+                        if action.moves_focus() && self.visible().iter().any(|(b, _)| *b == at) =>
+                    {
                         self.focus_on(at);
                         self.sync();
                     }
-                    action if at == self.focus && !matches!(action, Action::Focus(_)) => {
-                        self.act(action)
-                    }
+                    action if at == self.focus && !action.moves_focus() => self.act(action),
                     _ => bell(),
                 }
             }
@@ -2364,10 +2364,11 @@ mod client {
                 .iter()
                 .chain(self.standby.held())
                 .rev()
-                .find(|aimed| matches!(aimed.action, Action::Focus(_)))
+                .find(|aimed| aimed.action.moves_focus())
                 .map_or(self.focus, |aimed| aimed.at);
             let at = match &action {
                 Action::Focus(dir) => screen::neighbor(&self.visible(), focus, *dir)?,
+                Action::Cycle => self.next_shown(focus)?,
                 _ => focus,
             };
             Some(Aimed { at, action })
@@ -2556,14 +2557,20 @@ mod client {
             }
         }
 
+        /// The block shown after `from`, wrapping; `None` when it is the
+        /// only one.
+        fn next_shown(&self, from: BlockId) -> Option<BlockId> {
+            let shown = self.visible();
+            let at = shown.iter().position(|(b, _)| *b == from);
+            let (next, _) = shown.get(at.map_or(0, |i| (i + 1) % shown.len()))?;
+            (*next != from).then_some(*next)
+        }
+
         /// Focuses the next block shown, wrapping.
         fn cycle(&mut self) {
-            let focus = self.focus;
-            let shown = self.visible();
-            let at = shown.iter().position(|(b, _)| *b == focus);
-            match shown.get(at.map_or(0, |i| (i + 1) % shown.len())) {
-                Some((block, _)) if *block != focus => self.focus_on(*block),
-                _ => bell(),
+            match self.next_shown(self.focus) {
+                Some(block) => self.focus_on(block),
+                None => bell(),
             }
             self.sync();
         }
@@ -2693,7 +2700,9 @@ mod client {
                 }
                 Event::WindowClosed { window } if Some(window) == self.window => {
                     self.gone = true;
-                    self.relayout(None, None)
+                    self.relayout(None, None);
+                    // The window's floats close with it; no event says so.
+                    self.refloat(Vec::new());
                 }
                 Event::FocusChanged { window, block } if Some(window) == self.window => {
                     let focus = self.follow.told(block);
@@ -3948,6 +3957,53 @@ mod client {
             app.relayout(Some(layout), None);
             assert!(app.pending.is_none());
             assert!(app.panes.contains_key(&a), "no flicker, no lost lease");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_closed_window_takes_its_floats_with_it() {
+            let (mut app, _inbox, [_control, _a, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            let at = FloatRect::new(20, 20, 60, 60).expect("a float");
+            app.window = Some(window_id(7));
+            app.layout = Some(Layout::Block(b));
+            app.floats = vec![Float { block: a, at }];
+            app.sync();
+            app.on_control(Message::Event {
+                seq: None,
+                event: Event::WindowClosed {
+                    window: window_id(7),
+                },
+            });
+            assert!(app.pending.is_some(), "held until the blocks drain");
+            for block in [a, b] {
+                app.drained(block);
+            }
+            app.settle();
+            assert!(app.floats.is_empty());
+            assert!(app.visible().is_empty());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_held_cycle_is_aimed_and_replayed_with_the_keys_after_it() {
+            let (mut app, _inbox, [_control, _a_far, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            let at = FloatRect::new(20, 20, 60, 60).expect("a float");
+            app.layout = Some(Layout::Block(b));
+            app.floats = vec![Float { block: a, at }];
+            app.focus = b;
+            app.sync();
+            let aimed = app.aim(Action::Cycle).expect("a block to cycle to");
+            assert_eq!(aimed.at, a);
+            app.replay(vec![
+                aimed,
+                Aimed {
+                    at: a,
+                    action: Action::Input(b"x".to_vec()),
+                },
+            ]);
+            assert_eq!(app.focus, a);
         }
 
         #[cfg(unix)]

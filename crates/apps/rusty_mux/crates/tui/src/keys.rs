@@ -76,6 +76,11 @@ pub enum Action {
 }
 
 impl Action {
+    /// Whether this moves the focus to another block.
+    pub fn moves_focus(&self) -> bool {
+        matches!(self, Action::Focus(_) | Action::Cycle)
+    }
+
     /// Whether this acts on the focused block, which must then be shown.
     pub fn on_focused_block(&self) -> bool {
         !matches!(

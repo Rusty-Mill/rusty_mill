@@ -127,12 +127,27 @@ fn border(frame: &mut Frame, covered: &mut [bool], inner: Rect, focused: bool) {
     if inner.x == 0 || inner.y == 0 || right >= frame.area.cols() || bottom >= frame.area.rows() {
         return;
     }
+    let (left, top) = (inner.x - 1, inner.y - 1);
+    // A wide glyph the ring cuts leaves a half cell outside it: blanked.
+    for y in top..=bottom {
+        let trailer = |x: u16| x < frame.area.cols() && frame.cells[frame.index(x, y)].trailer;
+        let mut blank = Vec::new();
+        if left > 0 && trailer(left) {
+            blank.push(left - 1);
+        }
+        if trailer(right + 1) {
+            blank.push(right + 1);
+        }
+        for x in blank {
+            let i = frame.index(x, y);
+            frame.cells[i] = Glyph::blank();
+        }
+    }
     let plain = Style::of(&Cell::blank());
     let style = match focused {
         true => Style { fg: FOCUS, ..plain },
         false => plain,
     };
-    let (left, top) = (inner.x - 1, inner.y - 1);
     let mut title = FLOAT_TITLE.chars();
     for y in top..=bottom {
         for x in left..=right {
@@ -1165,5 +1180,46 @@ mod tests {
         }];
         let frame = compose(size(14, 4), &views, id(1));
         assert_eq!(text(&frame, 0).get(..2), Some("ab"));
+    }
+
+    #[test]
+    fn a_float_edge_cutting_a_wide_glyph_leaves_no_half_cell() {
+        // Wide glyphs at columns 0-1 and 11-12 of a 14-wide row: the ring
+        // (columns 1 to 12) cuts both.
+        let tile = grid(14, 4, "漢          漢");
+        let inner = Rect {
+            x: 2,
+            y: 1,
+            size: size(10, 2),
+        };
+        let g = grid(10, 2, "");
+        let views = [
+            View {
+                float: false,
+                block: id(1),
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    size: size(14, 4),
+                },
+                grid: Some(&tile),
+                overlay: None,
+            },
+            View {
+                float: true,
+                block: id(2),
+                rect: inner,
+                grid: Some(&g),
+                overlay: None,
+            },
+        ];
+        let frame = compose(size(14, 4), &views, id(2));
+        let row = frame.row(0);
+        assert_eq!((row[0].ch, row[0].trailer), (' ', false), "the cut leader");
+        assert_eq!(
+            (row[13].ch, row[13].trailer),
+            (' ', false),
+            "the orphan trailer"
+        );
     }
 }
