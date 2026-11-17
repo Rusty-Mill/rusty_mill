@@ -11,6 +11,7 @@
 #   3. then it reads everything back.
 # It does not re-seed, re-open or re-stage. Everything is logged to ~/smoke-1/resume-<time>.log.
 set -euo pipefail
+unset CDPATH   # a set CDPATH makes `cd` print the directory
 
 TASK=${TASK:-smoke-1}
 OUT=$HOME/$TASK

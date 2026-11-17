@@ -3,6 +3,7 @@
 #   bash docs/projects/let-em-loose/1092-deploy.sh
 # Idempotent: safe to run again. Never touches /srv/lel/experiment or lel-codex.
 set -euo pipefail
+unset CDPATH   # a set CDPATH makes `cd` print the directory
 
 REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 SHA=$(git -C "$REPO" rev-parse --short HEAD)

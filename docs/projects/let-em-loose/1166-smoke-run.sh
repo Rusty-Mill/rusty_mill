@@ -14,7 +14,8 @@ LOG=$OUT/script-$(date -u +%Y%m%dT%H%M%SZ).log
 exec > >(tee -a "$LOG") 2>&1
 echo "log: $LOG"
 
-HERE=$(cd "$(dirname "$0")" && pwd)   # before cd /, so a relative $0 still resolves
+unset CDPATH   # a set CDPATH makes `cd` print the directory and corrupts $(cd ... && pwd)
+HERE=$(cd -- "$(dirname -- "$0")" && pwd)   # before cd /, so a relative $0 still resolves
 LLAMA_SWAP=${LLAMA_SWAP:?set to the llama-swap host:port}   # e.g. LLAMA_SWAP=<llama-swap-host>:<port>
 cd /
 R="sudo -H -u orch-runner"   # orch-runner cannot enter baileyrd's directories: every call below runs from /

@@ -10,6 +10,7 @@
 #   1166-seed-inbox.sh DIR TASK BRIEF_ART_ID [BIN]
 # R (default: sudo -H -u orch-runner) is the prefix for every bbp call; R= runs it as the current user (tests).
 set -euo pipefail
+unset CDPATH   # a set CDPATH makes `cd` print the directory
 
 D=${1:?usage: 1166-seed-inbox.sh DIR TASK BRIEF_ART_ID [BIN]}
 TASK=${2:?task}

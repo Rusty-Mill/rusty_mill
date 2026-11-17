@@ -10,9 +10,14 @@
 # Interrupted? TASK=<id> LLAMA_SWAP=<llama-swap-host>:<port> bash docs/projects/let-em-loose/1166-smoke-resume.sh waits for the run and reads back.
 set -euo pipefail
 
+unset CDPATH   # a set CDPATH makes `cd` print the directory and corrupts $(cd ... && pwd)
 export TASK=${TASK:-smoke-2}
+# The address is passed to 1166-smoke-run.sh by export, so a plain shell variable works too, and a missing one stops here,
+# before the guards and the staging, not after.
+: "${LLAMA_SWAP:?set LLAMA_SWAP to the llama-swap host:port, e.g. LLAMA_SWAP=<llama-swap-host>:<port>}"
+export LLAMA_SWAP
 BIN=${LEL_BIN:-/opt/lel/current/bin}   # LEL_BIN and GUARD_ONLY=1 exist to test the guards
-HERE=$(cd "$(dirname "$0")" && pwd)
+HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 
 [ -x "$BIN/rusty_orch" ] || { echo "STOP: $BIN/rusty_orch is missing: run 1092-deploy.sh" >&2; exit 1; }
 [ "$TASK" != smoke-1 ] || { echo "STOP: smoke-1 is run 1's task; use a new id" >&2; exit 1; }
