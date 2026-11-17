@@ -1,6 +1,6 @@
 # TLS listener (card #506): design note
 
-Status: Accepted-pending-PR-confirmation. Nano answered the three questions (rusty_term DECISIONS D235-D237, 2026-11-13) but has not yet confirmed on PR #1656. Slice 1 (server side) is built on card #506 (see Built below). Owner gates apply before any code: a `rusty_tls` change,
+Status: Accepted. Nano answered the three questions (rusty_term DECISIONS D235-D237, 2026-11-13) and confirmed them 2026-11-17 (D319). Slice 1 (server side) is built on card #506 (see Built below). Owner gates apply before any code: a `rusty_tls` change,
 a new dependency, or a new crate; each capability row needs its own go.
 
 ## Context
