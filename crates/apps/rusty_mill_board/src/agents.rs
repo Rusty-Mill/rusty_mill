@@ -21,8 +21,9 @@ pub const MAX_PER_CONNECTOR: usize = 64;
 pub const IDLE_MS: i64 = 30 * 24 * 3600 * 1000;
 /// Longest nickname, in characters.
 pub const MAX_NICKNAME: usize = 40;
-/// How stale `seen_ms` may get before a use is written back to the file.
-const SEEN_WRITE_MS: i64 = 24 * 3600 * 1000;
+/// How stale the *saved* `seen_ms` may get before a use is written back to the file. Stale
+/// cleanup reads `seen_ms` after a restart, so this bounds its error.
+const SEEN_WRITE_MS: i64 = 3600 * 1000;
 
 /// What one registered agent may do instead of its connector's role and projects. A field left
 /// `None` falls back to the connector's.
@@ -55,6 +56,9 @@ pub struct Agent {
     /// A display name an admin gave it (never an identity: claims and history keep the id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
+    /// `seen_ms` as last written to the file (not itself stored).
+    #[serde(skip)]
+    saved_ms: i64,
 }
 
 /// A registered agent as listed: everything but its key.
@@ -95,6 +99,10 @@ impl Registry {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(e) => return Err(format!("{}: {e}", path.display())),
         };
+        let mut agents: BTreeMap<String, Agent> = agents;
+        for a in agents.values_mut() {
+            a.saved_ms = a.seen_ms;
+        }
         Ok(Self {
             agents,
             path: Some(path),
@@ -131,6 +139,7 @@ impl Registry {
             seen_ms: now,
             grant,
             nickname: None,
+            saved_ms: now,
         };
         if self.agents.insert(id.clone(), agent).is_some() {
             return Err("agent id collided; try again".into());
@@ -148,11 +157,14 @@ impl Registry {
         if !ok {
             return None;
         }
-        let stale = now - agent.seen_ms > SEEN_WRITE_MS;
+        let stale = now - agent.saved_ms > SEEN_WRITE_MS;
         agent.seen_ms = now;
         let grant = agent.grant.clone();
-        if stale && let Err(e) = self.save() {
-            rusty_log::warn!(error = %e, "could not record agent use");
+        if stale {
+            match self.save() {
+                Ok(()) => self.mark_saved(),
+                Err(e) => rusty_log::warn!(error = %e, "could not record agent use"),
+            }
         }
         Some(grant)
     }
@@ -215,24 +227,58 @@ impl Registry {
             .collect()
     }
 
-    /// Remove every [`stale`](Self::stale) agent with one write; the ids removed.
+    /// Remove the [`stale`](Self::stale) agents with one write: all of them, or only those of
+    /// `only` that are still stale (an agent used since a preview is kept). The ids removed.
     ///
     /// # Errors
-    /// If the file cannot be written; nothing is removed then.
-    pub fn revoke_stale(&mut self, now: i64, age_ms: i64) -> Result<Vec<String>, String> {
-        let ids = self.stale(now, age_ms);
+    /// If the file cannot be written. Memory then follows the file, which a failure after the
+    /// atomic replace may already have changed; if the file cannot be read, nothing is removed.
+    pub fn revoke_stale(
+        &mut self,
+        now: i64,
+        age_ms: i64,
+        only: Option<&[String]>,
+    ) -> Result<Vec<String>, String> {
+        let mut ids = self.stale(now, age_ms);
+        if let Some(only) = only {
+            ids.retain(|id| only.contains(id));
+        }
         if ids.is_empty() {
             return Ok(ids);
         }
-        let kept = self.agents.clone();
+        let before = self.agents.clone();
         for id in &ids {
             self.agents.remove(id);
         }
-        if let Err(e) = self.save() {
-            self.agents = kept;
-            return Err(e);
+        match self.save() {
+            Ok(()) => {
+                self.mark_saved();
+                Ok(ids)
+            }
+            Err(e) => {
+                self.agents = self.reconcile(before);
+                Err(e)
+            }
         }
-        Ok(ids)
+    }
+
+    /// `before`, cut to the agents the file still holds (all of them if it cannot be read).
+    fn reconcile(&self, mut before: BTreeMap<String, Agent>) -> BTreeMap<String, Agent> {
+        let on_disk = self
+            .path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| serde_json::from_str::<BTreeMap<String, Agent>>(&t).ok());
+        if let Some(disk) = on_disk {
+            before.retain(|id, _| disk.contains_key(id));
+        }
+        before
+    }
+
+    fn mark_saved(&mut self) {
+        for a in self.agents.values_mut() {
+            a.saved_ms = a.seen_ms;
+        }
     }
 
     /// Every agent without its key.
@@ -361,11 +407,50 @@ mod tests {
             "a dry run removes nothing"
         );
         assert_eq!(r.list().len(), 3, "a dry run removes nothing");
-        let gone = r.revoke_stale(now + 1, DAY).expect("revoke");
+        let gone = r.revoke_stale(now + 1, DAY, None).expect("revoke");
         assert_eq!(gone.len(), 2);
         assert!(r.verify("c", &used, &ku, now + 2).is_some());
         assert!(r.verify("c", &edge, &ke, now + 2).is_none());
-        assert!(r.revoke_stale(now + 2, DAY).expect("none").is_empty());
+        assert!(r.revoke_stale(now + 2, DAY, None).expect("none").is_empty());
+    }
+
+    #[test]
+    fn only_the_previewed_agents_are_revoked_and_a_since_used_one_is_kept() {
+        const DAY: i64 = 24 * 3600 * 1000;
+        let mut r = Registry::default();
+        let (a, _) = r.register("c", Grant::default(), 0).expect("a");
+        let (b, kb) = r.register("c", Grant::default(), 0).expect("b");
+        let (c, _) = r.register("c", Grant::default(), 0).expect("c");
+        let now = DAY + 1;
+        let preview = r.stale(now, DAY);
+        assert_eq!(preview.len(), 3);
+        assert!(
+            r.verify("c", &b, &kb, now).is_some(),
+            "used after the preview"
+        );
+        let only = [a.clone(), b.clone()];
+        let gone = r.revoke_stale(now + 1, DAY, Some(&only)).expect("revoke");
+        assert_eq!(gone, vec![a]);
+        assert!(r.list().iter().any(|x| x.id == b) && r.list().iter().any(|x| x.id == c));
+    }
+
+    #[test]
+    fn continuous_use_is_written_back_so_a_restart_does_not_make_it_look_stale() {
+        const H: i64 = 3600 * 1000;
+        let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("agents.json");
+        let mut r = Registry::open(path.clone()).expect("open");
+        let (id, key) = r.register("c", Grant::default(), 0).expect("register");
+        for h in 1..=72 {
+            assert!(r.verify("c", &id, &key, h * H).is_some());
+        }
+        let again = Registry::open(path).expect("reopen");
+        assert!(
+            again.stale(72 * H + 1, 24 * H).is_empty(),
+            "used hourly for 3 days"
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -375,7 +460,7 @@ mod tests {
         let mut r = Registry::open(dir.join("agents.json")).expect("open");
         let (id, key) = r.register("c", Grant::default(), 0).expect("register");
         std::fs::remove_dir_all(&dir).expect("remove dir");
-        assert!(r.revoke_stale(10, 5).is_err());
+        assert!(r.revoke_stale(10, 5, None).is_err());
         assert!(r.verify("c", &id, &key, 11).is_some());
     }
 

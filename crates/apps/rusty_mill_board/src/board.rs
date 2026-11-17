@@ -383,13 +383,18 @@ impl<S: Store> Board<S> {
         self.agents().stale(self.now_ms(), age_ms)
     }
 
-    /// Remove every registered agent unused for more than `age_ms`; the ids removed.
+    /// Remove registered agents unused for more than `age_ms` (only those in `only`, if given);
+    /// the ids removed.
     ///
     /// # Errors
     /// If the registry file cannot be written.
-    pub fn revoke_stale_agents(&self, age_ms: i64) -> Result<Vec<String>, BoardError> {
+    pub fn revoke_stale_agents(
+        &self,
+        age_ms: i64,
+        only: Option<&[String]>,
+    ) -> Result<Vec<String>, BoardError> {
         self.agents()
-            .revoke_stale(self.now_ms(), age_ms)
+            .revoke_stale(self.now_ms(), age_ms, only)
             .map_err(BoardError::Storage)
     }
 

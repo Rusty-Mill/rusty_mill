@@ -344,6 +344,9 @@ struct StaleRevoke {
     /// Revoke them. Without it nothing changes and the answer is only the count.
     #[serde(default)]
     revoke: bool,
+    /// With `revoke`: only these ids (a previewed list), and only if still stale.
+    #[serde(default)]
+    ids: Option<Vec<String>>,
 }
 
 fn default_stale_hours() -> i64 {
@@ -471,7 +474,7 @@ pub fn tools() -> Vec<SettingsTool> {
         tool(
             "settings_registered_agent_revoke_stale",
             "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago, default 24 (needs admin). A dry run unless `revoke: true`: it returns `count` and the agent `ids` it would revoke. Revoked agents can register again.",
-            json!({"older_than_hours": {"type": "integer", "description": "1-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}}),
+            json!({"older_than_hours": {"type": "integer", "description": "1-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}, "ids": {"type": "array", "items": {"type": "string"}, "description": "With revoke: only these previewed ids, and only if still stale."}}),
             &[],
         ),
         tool(
@@ -1004,7 +1007,7 @@ impl Settings {
         }
         let age_ms = a.older_than_hours * 3600 * 1000;
         let ids = if a.revoke {
-            let ids = self.board.revoke_stale_agents(age_ms)?;
+            let ids = self.board.revoke_stale_agents(age_ms, a.ids.as_deref())?;
             rusty_log::warn!(
                 count = ids.len(),
                 hours = a.older_than_hours,
