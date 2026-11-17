@@ -1,6 +1,6 @@
 //! Changes to the model, in the order they happened.
 
-use crate::{BlockId, ClientId, Layout, Principal, SessionId, Size, Transport, WindowId};
+use crate::{BlockId, ClientId, Float, Layout, Principal, SessionId, Size, Transport, WindowId};
 
 /// One change made by [`Mux`](crate::Mux).
 ///
@@ -169,6 +169,14 @@ pub enum Event {
         /// `None` once the window has no blocks.
         layout: Option<Layout>,
         zoomed: Option<BlockId>,
+    },
+    /// The window's floating blocks (C42) changed: one floated, moved,
+    /// resized, raised, lowered, or stopped floating or closed. Back to
+    /// front, every float; it follows the [`Event::LayoutChanged`] that a
+    /// block leaving the layout causes.
+    FloatsChanged {
+        window: WindowId,
+        floats: Vec<Float>,
     },
     /// The server read its config again and now starts new blocks as it
     /// says.

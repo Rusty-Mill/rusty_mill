@@ -57,6 +57,18 @@ pub enum Error {
     },
     /// The block is detached: it is in no layout, so nothing goes beside it.
     Detached(BlockId),
+    /// A float (C42) is at least a tenth of the window wide and tall, and
+    /// inside it, in whole percent.
+    BadFloat {
+        x: u8,
+        y: u8,
+        w: u8,
+        h: u8,
+    },
+    /// The block floats (C42), so it is in no split to swap or resize.
+    Floating(BlockId),
+    /// The block does not float.
+    NotFloating(BlockId),
     /// A block cannot go beside itself.
     SameBlock(BlockId),
     /// The window shows blocks, so a block placed in it needs one to go
@@ -156,6 +168,13 @@ impl fmt::Display for Error {
                 write!(f, "blocks {block} and {other} are in different windows")
             }
             Self::Detached(block) => write!(f, "block {block} is detached from the layout"),
+            Self::BadFloat { x, y, w, h } => write!(
+                f,
+                "float {w}x{h} at {x},{y} must be at least {}% wide and tall, inside the window",
+                crate::MIN_FLOAT
+            ),
+            Self::Floating(block) => write!(f, "block {block} floats, not tiled"),
+            Self::NotFloating(block) => write!(f, "block {block} does not float"),
             Self::SameBlock(block) => write!(f, "block {block} cannot go beside itself"),
             Self::Placed(window) => {
                 write!(f, "window {window} shows blocks: name one to go beside")

@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{BlockId, ClientId, Error, Layout, Principal, SessionId, Transport, WindowId};
+use crate::{BlockId, ClientId, Error, Float, Layout, Principal, SessionId, Transport, WindowId};
 
 /// A terminal size in cells. Both dimensions are at least 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -98,9 +98,11 @@ pub struct Window {
     pub(crate) layout: Option<Layout>,
     /// One of the blocks in `layout`, never a detached one.
     pub(crate) zoomed: Option<BlockId>,
-    /// One of the blocks in `layout`, the zoomed one if any; `None` only
-    /// while none is placed.
+    /// One of the blocks in `layout` or `floats`, the zoomed one if any;
+    /// `None` only while none is placed.
     pub(crate) focused: Option<BlockId>,
+    /// Floating blocks (C42), back to front; none is in `layout`.
+    pub(crate) floats: Vec<Float>,
 }
 
 impl Window {
@@ -133,6 +135,12 @@ impl Window {
             .iter()
             .copied()
             .filter(|b| !self.layout.as_ref().is_some_and(|l| l.contains(*b)))
+            .filter(|b| !self.floats.iter().any(|f| f.block == *b))
+    }
+
+    /// Its floating blocks (C42), back to front.
+    pub fn floats(&self) -> &[Float] {
+        &self.floats
     }
 
     /// The block shown alone, over the whole window, if any.

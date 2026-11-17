@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::{
-    Block, BlockId, InputMode, Layout, MAX_DEPTH, MAX_NAME, Mux, Session, SessionId, Size, Window,
+    Block, BlockId, Float, InputMode, Layout, MAX_DEPTH, MAX_NAME, Mux, Session, SessionId, Size, Window,
     WindowId,
 };
 
@@ -38,6 +38,8 @@ pub struct SavedWindow {
     pub layout: Option<Layout>,
     pub zoomed: Option<BlockId>,
     pub focused: Option<BlockId>,
+    /// Floating blocks (C42), back to front.
+    pub floats: Vec<Float>,
     /// In creation order.
     pub blocks: Vec<SavedBlock>,
 }
@@ -90,6 +92,7 @@ impl Mux {
             layout: w.layout.clone(),
             zoomed: w.zoomed,
             focused: w.focused,
+            floats: w.floats.clone(),
             blocks: w
                 .blocks
                 .iter()
@@ -153,6 +156,7 @@ impl Mux {
             layout: w.layout,
             zoomed: w.zoomed,
             focused: w.focused,
+            floats: w.floats,
         };
         self.windows.insert(w.id, window);
     }
@@ -202,11 +206,19 @@ fn check_window(w: &SavedWindow) -> Result<(), RestoreError> {
     if unique.len() != placed.len() || placed.iter().any(deep) {
         return Err(RestoreError("layout repeats a block or nests too deep"));
     }
-    let in_layout = |b: Option<BlockId>| b.is_none_or(|b| placed.contains(&b));
-    if !in_layout(w.zoomed) || !in_layout(w.focused) {
-        return Err(RestoreError("zoomed or focused block not in layout"));
+    let floating: Vec<BlockId> = w.floats.iter().map(|f| f.block).collect();
+    let mut once = floating.clone();
+    once.sort_unstable();
+    once.dedup();
+    if once.len() != floating.len() || !floating.iter().all(|b| owns(b) && !placed.contains(b)) {
+        return Err(RestoreError("a float repeats, is tiled or is of another window"));
     }
-    if w.focused.is_none() != placed.is_empty() {
+    if w.zoomed.is_some_and(|z| !placed.contains(&z))
+        || w.focused.is_some_and(|f| !placed.contains(&f) && !floating.contains(&f))
+    {
+        return Err(RestoreError("zoomed or focused block not shown"));
+    }
+    if w.focused.is_none() != (placed.is_empty() && floating.is_empty()) {
         return Err(RestoreError("focus does not match layout"));
     }
     if w.zoomed.is_some_and(|z| w.focused != Some(z)) {

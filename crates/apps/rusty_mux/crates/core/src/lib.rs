@@ -28,6 +28,7 @@
 mod entity;
 mod error;
 mod event;
+mod float;
 mod id;
 mod identity;
 mod layout;
@@ -37,6 +38,7 @@ mod saved;
 
 pub use entity::{Block, Client, InputMode, Owner, Session, SessionShare, Size, Window};
 pub use error::Error;
+pub use float::{Float, FloatRect, MIN_FLOAT};
 pub use event::{Event, ExitStatus, Progress, Selection, TailscaleState};
 pub use id::{BlockId, ClientId, EntityId, SessionId, WindowId};
 pub use identity::{Principal, Transport};
