@@ -1576,3 +1576,47 @@ fn settings_are_mcp_tools_except_those_that_carry_a_secret() {
     let parsed: serde_json::Value = serde_json::from_str(text).expect("text is the JSON result");
     assert!(parsed["roles"].is_object(), "{got}");
 }
+
+#[test]
+fn a_refused_card_write_is_recorded_with_its_reason_and_never_its_token() {
+    let f = start("refusals");
+    let (_, made, text) = f.admin("card_add", &json!({"title": "needs evidence"}));
+    let card = made["card"]["id"].as_str().expect(&text).to_owned();
+    let token = f.add_agent("watcher", "reviewer");
+    let link = json!({"id": card, "links": ["https://github.com/o/r/pull/1"]});
+    let (status, _, text) = call(f.addr, &token, "card_evidence", &link);
+    assert_eq!(
+        status, 403,
+        "a reviewer holds none of close, merge or triage: {text}"
+    );
+    // A read that fails is not a write the owner has to chase.
+    let _ = call(f.addr, &token, "card_get", &json!({"id": "#99999"}));
+
+    let (status, out, text) = f.admin("settings_audit", &json!({"limit": 50}));
+    assert_eq!(status, 200, "{text}");
+    let seen: Vec<&Value> = out["records"]
+        .as_array()
+        .expect("records")
+        .iter()
+        .filter(|r| r["op"] == "card_evidence")
+        .collect();
+    assert_eq!(seen.len(), 1, "{text}");
+    assert_eq!(seen[0]["result"], "denied");
+    assert_eq!(seen[0]["actor"], "watcher");
+    assert_eq!(seen[0]["card"], json!(card));
+    assert!(
+        seen[0]["why"].as_str().is_some_and(|w| w.contains("Close")),
+        "{text}"
+    );
+    assert!(
+        !text.contains(&token) && !text.contains("pull/1"),
+        "no secret or argument: {text}"
+    );
+    assert!(
+        out["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .all(|r| r["op"] != "card_get")
+    );
+}

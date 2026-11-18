@@ -55,7 +55,14 @@ pub fn server_with(
         let mut tool = Tool::new(op.name, input);
         tool.description = Some(op.description.to_owned());
         let board = Arc::clone(&board);
-        builder = add(builder, tool, &flight, move |i, a| op.call(&board, i, a));
+        let refusals = settings.clone();
+        builder = add(builder, tool, &flight, move |i, a| {
+            let out = op.call(&board, i, a.clone());
+            if let (Err(e), Some(settings)) = (&out, &refusals) {
+                settings.audit_refusal(i, op.name, &a, e);
+            }
+            out
+        });
     }
     if let Some(settings) = &settings {
         for t in tools() {

@@ -840,6 +840,53 @@ impl Settings {
         }
     }
 
+    /// Record a board operation that was refused or failed, in the same file `settings_audit`
+    /// reads: who, which operation, the card it named and why. Never its arguments, which may hold
+    /// a key. Reads are skipped: only a refused write is a person's or an agent's puzzle later.
+    pub fn audit_refusal(
+        &self,
+        identity: Option<&Identity>,
+        op: &str,
+        args: &Value,
+        err: &CallError,
+    ) {
+        if op.starts_with("board_") || matches!(op, "card_get" | "card_trace" | "inbox_list") {
+            return;
+        }
+        let text = |k: &str| {
+            args.get(k)
+                .and_then(Value::as_str)
+                .map(|s| s.chars().take(64).collect::<String>())
+        };
+        let actor = text("agent_id")
+            .or_else(|| text("actor"))
+            .or_else(|| identity.map(|i| i.actor.clone()));
+        let (result, why) = match err {
+            CallError::BadArgs(why) => ("bad_args", why.clone()),
+            CallError::Board(
+                e @ (BoardError::Forbidden(_)
+                | BoardError::ForbiddenAny(_)
+                | BoardError::OutOfScope(_)),
+            ) => ("denied", e.to_string()),
+            CallError::Board(e) => ("refused", e.to_string()),
+        };
+        let line = json!({
+            "at_ms": self.board.now_ms(),
+            "actor": actor,
+            "via_connector": identity.is_some_and(|i| i.connector),
+            "op": op,
+            "card": text("id"),
+            "result": result,
+            "why": why,
+        });
+        let Some(path) = &self.files.audit else {
+            return;
+        };
+        if let Err(e) = append_line(path, &line.to_string()) {
+            rusty_log::warn!(error = %e, "could not write the refusal record");
+        }
+    }
+
     /// The newest `limit` audit records, oldest first.
     fn audit_read(&self, a: &AuditRead) -> Res {
         let path = self.file(&self.files.audit)?;
