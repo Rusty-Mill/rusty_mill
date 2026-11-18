@@ -980,7 +980,9 @@ function show(id){
   // Evidence (card_evidence): links showing the work shipped; a Done card counts as shipped only with one.
   f.ei.placeholder="https://github.com/…/pull/N";f.ei.setAttribute("aria-label","evidence link");
   const addEv=el("button","Add evidence");addEv.type="button";
-  addEv.onclick=async()=>{const v=f.ei.value.trim();if(v&&await act("card_evidence",{id,links:[v]}))f.ei.value=""};
+  // One request at a time; the box is cleared only if it still holds what was sent, so a link typed meanwhile is kept.
+  addEv.onclick=async()=>{const v=f.ei.value.trim();if(!v||addEv.disabled)return;addEv.disabled=true;
+    try{if(await act("card_evidence",{id,links:[v]})&&f.ei.value.trim()===v)f.ei.value=""}finally{addEv.disabled=false}};
   f.ei.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();addEv.click()}};
   const evRow=el("div",null,"evid");evRow.append(el("label","Evidence "),f.ei,addEv,f.ev);
   const copy=el("button","Copy prompt");copy.type="button";
@@ -1579,10 +1581,20 @@ async function loadMeta(){
   $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
   $("boardv").onclick=()=>setView("board");
   // New cards go to the chosen project, else to the Inbox.
-  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project;if(!t){$("title").focus();return}
-    const body=$("nbody").value.trim(),tags=$("ntags").value.split(",").map(x=>x.trim()).filter(Boolean),parent=$("nparent").value.trim();
-    act("card_add",{title:t,...(project&&{project}),...(body&&{body}),...(tags.length&&{tags}),...(parent&&{parent})},null,
-      ()=>{$("title").value=$("nbody").value=$("ntags").value=$("nparent").value="";$("more").open=false})};
+  // One add at a time (a double click or a repeated Enter would make two cards); a field is cleared only if it
+  // still holds what was sent, so a draft started while the request ran is kept.
+  $("add").onclick=async()=>{const b=$("add"),t=$("title").value.trim(),project=sel.project;
+    if(b.disabled)return;if(!t){$("title").focus();return}
+    const snap={nbody:$("nbody").value,ntags:$("ntags").value,nparent:$("nparent").value},
+      body=snap.nbody.trim(),tags=snap.ntags.split(",").map(x=>x.trim()).filter(Boolean),parent=snap.nparent.trim();
+    b.disabled=true;
+    try{
+      const r=await act("card_add",{title:t,...(project&&{project}),...(body&&{body}),...(tags.length&&{tags}),...(parent&&{parent})});
+      if(!r)return;
+      if($("title").value.trim()===t)$("title").value="";
+      for(const k in snap)if($(k).value===snap[k])$(k).value="";
+      if(!["title","nbody","ntags","nparent"].some(k=>$(k).value))$("more").open=false;
+    }finally{b.disabled=false}};
   $("title").onkeydown=e=>{if(e.key==="Enter")$("add").click()};
   await loadMeta();
   const p=pref("project"),ps=pref("pstatus");
