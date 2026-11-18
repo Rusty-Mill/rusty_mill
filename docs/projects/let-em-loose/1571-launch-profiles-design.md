@@ -1,6 +1,6 @@
 # Agent launch profiles: design (card #1571)
 
-Let Em Loose, 2026-11-18. Status: **draft, Nano gates.** Security-sensitive (credentials, isolation).
+Let Em Loose, 2026-11-18. Status: **approved** by Nano 2026-11-18 (DECISIONS.md D160; v0 isolation D161; file location D162). Security-sensitive (credentials, isolation).
 
 ## 0. What it builds on
 
@@ -151,18 +151,18 @@ uncontained agents for this phase (`mem_931824b0`); the jail (D101) closes it.
 5. GitHub minter (needs the per-agent App keys on the host).
 6. `agent_user`, after the host writes. remind-me minter once it has scoped tokens.
 
-## 7. Questions for Nano
+## 7. Decided
 
-1. **v0 isolation.** The card says start with a dedicated user; that needs four BaileyAi host writes and
-   still leaves orch's minting keys readable. Options: (a) `same_user` now, `agent_user` when the host
-   writes are approved; (b) `agent_user` now, approve the host writes; (c) a separate uid holds the minting
-   keys and hands orch only minted tokens. **Recommend (a)**: no host writes, no worse than today, the
-   jail closes the gap.
-2. **Where profile files live.** (a) Factory; (b) agent files in pack-validation with agent-stack-spec,
-   project needs in each repo's manifest; (c) this monorepo. **Recommend (a)** for v0 (orch already reads
-   Factory; `resolve` doesn't care where files come from).
-3. **Approve the design** (composition, env delivery, no service credentials in the jail, hooks
-   deferred, build order).
+Nano answered on 2026-11-18 (Let Em Loose project chat, `cmsg_01WgyiM31RsSnZTgNuPX2VE4YGppB9nnPb7JnUCwC3s2Yq`).
+
+1. **v0 isolation: `same_user`** (D161, "Concur"). Agents run as Nano's user now; `agent_user` follows when
+   the four BaileyAi host writes are approved; the jail closes the minting-key gap. Rejected: `agent_user`
+   now; a separate uid holding the minting keys.
+2. **Profile files live in Factory** (D162, "Concur"): `factory/agent-profiles/*.json` and
+   `factory/project-profiles/*.json`. Rejected: pack-validation plus repo manifests; this monorepo.
+3. **Design approved as written** (D160, "Yes"): composition, env delivery, no service credentials in the
+   jail, hooks deferred, build order. Ask-first steps inside it (host writes, dependency bumps) still need
+   their own approval.
 
 Non-blocking, to the right owners: which per-agent GitHub App mints for which agent (Millwright); scoped
 tokens for remind-me (rusty-remind-me card).
