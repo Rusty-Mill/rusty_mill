@@ -161,6 +161,8 @@ Precise contracts used by this guide:
 | D151 | #1166: the first-run bar is met through reviewer prompt wording (support only when the brief supports the claim); Q54 resolved for now | [stated] 2026-11-17 (1166) |
 | D152 | #1166: no host change; rerun smoke-4 after the prompt fixes alone (D147 hold stays) | [stated] 2026-11-17 (1166) |
 | D153 | #1166: the Qwen reasoning budget (`--reasoning-budget 2048`) is the one host change allowed before smoke-5; the llama.cpp rebuild stays held | [stated] 2026-11-17 (1166) |
+| D154 | #1166 smoke-4: Nano drops claim 6 (grounded score 0, deviates from the brief); Q has no accepted or chosen candidate | [stated] 2026-11-18 (1166) |
+| D155 | Standing rule: every run's read-back includes the grounding audit before Nano acts on an escalated claim | [stated] 2026-11-18 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1520,3 +1522,21 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_674628bd3ea1445480debdb36683290f
 **Key.** lel:1166:qwen-reasoning-budget-then-smoke-5
 **Source.** Nano, answer dialog in the Claude Code session on BaileyAi, 2026-11-17, saved verbatim as `mem_1c343b7650f94eb3bf7cf89344acb380` (speaker Nano). Narrows D152; confirms D147's one-at-a-time rule. Numbered D153 after D152.
+
+## D154. #1166 smoke-4: Nano drops claim 6 (grounded score 0, deviates from the brief); Q has no accepted or chosen candidate
+
+**Decision.** Nano: "I am dropping claim 6 on smoke-4: grounded score 0 and it deviates from the brief." Claim 6 (`local-high`, escalated `irreversible` at board score 14 against the strict line 12) is dropped by his own human action. Q on smoke-4 therefore has no accepted or chosen candidate, so section 9.3 stays unmet by this run (D143).
+**Why.** The grounding audit (see Q53 and `1166-smoke-run.md` Run 4 result): of the five votes only msg 10 and msg 14 rest on the brief (grounded score 0, or +4 without msg 14), and only one grounded support author (the adversary) against the two the accept line needs. The claim also deviates from brief line 5 (Q58).
+**Rejected.** `claim 6 accept`, `choose 1 6`.
+**Tag.** [stated] · remind-me: mem_ca29e164a4d5443e932187d5dc258b10
+**Key.** lel:1166:drop-claim-6-smoke-4
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_3bb04ac898ca4e4eb0fdb8f2d3c61739` (speaker Nano). Relates to D143, D151, Q53, Q58. Numbered D154 after D153.
+
+## D155. Standing rule: every run's read-back includes the grounding audit before Nano acts on an escalated claim
+
+**Decision.** Nano: "From now on, produce this same grounding audit in the read-back of every run, before I act on any escalated claim." For each vote on an escalated claim the audit quotes the exact brief sentence the note relies on, or marks the vote ungrounded, and checks specifically whether the brief itself says the technical wording the note attributes to it. It gives the score three ways: all votes (the board's), grounded only (with repeats), and one vote per author (latest and first). The audit judgement stays with Claude; the coordinator's script collects the evidence bundle (brief text, the claim, each vote with its note and citation).
+**Why.** In smoke-4 the board's 14 counted votes that repeat the claim's own wording, cite a claim as a run that never happened, or attribute wording to a brief that does not contain it (Q53). Nano wants to act on what the brief supports.
+**Rejected.** Acting on the board score alone.
+**Tag.** [stated] · remind-me: mem_4c73b1961a914fd985493a4652e4b18e
+**Key.** lel:1166:grounding-audit-in-every-readback
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_3bb04ac898ca4e4eb0fdb8f2d3c61739` (speaker Nano). Relates to D154, Q53. Numbered D155 after D154.
