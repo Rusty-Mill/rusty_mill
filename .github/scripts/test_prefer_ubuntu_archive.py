@@ -115,7 +115,7 @@ class SetupWiringTests(unittest.TestCase):
     def test_runs_only_on_hosted_linux_before_apt_update(self) -> None:
         action = (ACTION / "action.yml").read_text(encoding="utf-8")
         step = action.split("    - name: Prefer official Ubuntu archive", 1)[1].split("\n    # rusty_term", 1)[0]
-        self.assertIn("if: runner.os == 'Linux' && runner.environment == 'github-hosted'", step)
+        self.assertIn("if: inputs.native != 'false' && runner.os == 'Linux' && runner.environment == 'github-hosted'", step)
         self.assertIn('sudo python3 "${{ github.action_path }}/prefer_ubuntu_archive.py"', step)
         self.assertNotIn("continue-on-error", step)
         # The cache helper owns APT update/install now. Check both the first

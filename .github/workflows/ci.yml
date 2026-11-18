@@ -525,6 +525,7 @@ jobs:
         timeout-minutes: 15
         with:
           components: clippy
+          native: ${{ matrix.scope.native }}
           cache-shared-key: clippy-${{ matrix.os }}
 
       # rusty_journal is built on io_uring, a Linux-only kernel interface --
@@ -589,6 +590,7 @@ jobs:
       - uses: ./.github/actions/setup-build-env
         timeout-minutes: 15
         with:
+          native: ${{ matrix.scope.native }}
           cache-shared-key: test-${{ matrix.os }}
 
       - uses: ./.github/actions/select-packages

@@ -18,6 +18,19 @@ from collections.abc import Iterable
 # have one shard; full sweeps retain the existing single scope and three shards.
 MAX_COMPONENTS = 128
 
+# Crates whose build needs the apt packages in setup-build-env's
+# native-packages.txt (X11/wayland, GTK/WebKit/Tauri, D-Bus/keyring, ALSA,
+# protoc). A lane whose packages cannot reach one skips that install, which
+# is a mirror download that has timed out CI. Other `-sys` crates in the
+# workspace (ring, aws-lc, sqlite, zstd, openssl) build from bundled source
+# or against libraries already on the runner image.
+NATIVE_CRATES = re.compile(
+    r"alsa-sys|cpal|libdbus-sys|dbus|dbus-secret-service|keyring|tauri|tray-icon"
+    r"|libappindicator.*|(gtk|gdk|glib|gio|gobject|atk|pango|cairo)(-sys|-sys-rs)?"
+    r"|gdk.*-sys|webkit2gtk.*|javascriptcore-rs-sys|soup3-sys|x11.*|xkb.*|wayland-.*"
+    r"|rusty_a2a|rusty_gui"
+)
+
 
 def component_name(manifest: str, workspace_root: str) -> str:
     """Return a stable lane for a workspace manifest, independent of the diff."""
@@ -33,8 +46,29 @@ def component_name(manifest: str, workspace_root: str) -> str:
     return component if re.fullmatch(r"[A-Za-z0-9_.-]+", component) else "workspace-other"
 
 
+def needs_native(metadata: dict, names: Iterable[str]) -> bool:
+    """True when any named package's dependency closure includes a NATIVE_CRATES crate."""
+    by_id = {package["id"]: package["name"] for package in metadata["packages"]}
+    deps = {node["id"]: [d["pkg"] for d in node["deps"]] for node in metadata["resolve"]["nodes"]}
+    wanted = set(names)
+    stack = [i for i in metadata["workspace_members"] if by_id[i] in wanted]
+    seen = set(stack)
+    while stack:
+        node = stack.pop()
+        if NATIVE_CRATES.fullmatch(by_id[node]):
+            return True
+        for dep in deps.get(node, []):
+            if dep not in seen:
+                seen.add(dep)
+                stack.append(dep)
+    return False
+
+
 def component_scopes(metadata: dict, selected: Iterable[str]) -> list[dict[str, str]]:
-    """Partition exactly the selected packages; reject unknown package names."""
+    """Partition exactly the selected packages; reject unknown package names.
+
+    Each scope carries `native` ("true"/"false"): whether its lane must install
+    the native apt packages (see NATIVE_CRATES)."""
     members = set(metadata["workspace_members"])
     packages = {
         package["name"]: package
@@ -54,7 +88,11 @@ def component_scopes(metadata: dict, selected: Iterable[str]) -> list[dict[str, 
         # limit. A coarser lane costs parallelism, never coverage.
         groups = {"scoped-workspace": sorted(selected)}
     return [
-        {"component": component, "packages": " ".join(names)}
+        {
+            "component": component,
+            "packages": " ".join(names),
+            "native": str(needs_native(metadata, names)).lower(),
+        }
         for component, names in sorted(groups.items())
     ]
 
