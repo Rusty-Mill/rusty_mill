@@ -446,11 +446,16 @@ impl MilestoneStore for SqliteStore {
 
     fn save_milestone(&self, current: &Milestone, next: &Milestone) -> Result<u64, BoardError> {
         let at = int(current.rev)?;
+        let successor = current
+            .rev
+            .checked_add(1)
+            .ok_or_else(|| BoardError::Storage("milestone revision exhausted".into()))?;
+        let to = int(successor)?;
         let db = self.db()?;
         let n = db
             .as_raw()
             .execute(
-                "UPDATE milestones SET project = ?2, title = ?3, target_ms = ?4, done_ms = ?5, rev = rev + 1
+                "UPDATE milestones SET project = ?2, title = ?3, target_ms = ?4, done_ms = ?5, rev = ?7
                  WHERE id = ?1 AND rev = ?6",
                 params![
                     current.id.to_string(),
@@ -458,12 +463,13 @@ impl MilestoneStore for SqliteStore {
                     next.title,
                     next.target_ms,
                     next.done_ms,
-                    at
+                    at,
+                    to
                 ],
             )
             .map_err(storage)?;
         if n == 1 {
-            return Ok(current.rev + 1);
+            return Ok(successor);
         }
         let exists = db
             .as_raw()

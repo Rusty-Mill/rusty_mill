@@ -234,6 +234,29 @@ fn milestones_save_by_compare_and_swap() {
 }
 
 #[test]
+fn a_milestone_at_the_last_revision_is_kept_not_advanced() {
+    let path = file("lastrev");
+    let store = SqliteStore::open(&path).expect("open");
+    let m = Milestone::new("rl", "Beta", 10).expect("milestone");
+    store.add_milestone(&m).expect("add");
+    Connection::open(&path)
+        .expect("raw")
+        .execute("UPDATE milestones SET rev = ?1", [i64::MAX])
+        .expect("set");
+    let at = store.milestone(m.id).expect("read").expect("there");
+    let next = Milestone {
+        title: "Beta 2".into(),
+        ..at.clone()
+    };
+    assert!(matches!(
+        store.save_milestone(&at, &next),
+        Err(BoardError::Storage(_))
+    ));
+    let kept = store.milestone(m.id).expect("read").expect("there");
+    assert_eq!((kept.title.as_str(), kept.rev), ("Beta", i64::MAX as u64));
+}
+
+#[test]
 fn a_newer_schema_is_refused_not_downgraded() {
     let path = file("newer");
     drop(SqliteStore::open(&path).expect("open"));
