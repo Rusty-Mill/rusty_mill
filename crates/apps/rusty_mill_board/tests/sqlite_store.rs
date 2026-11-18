@@ -333,3 +333,55 @@ fn a_number_beyond_sqlites_range_is_an_error_not_a_clamp() {
     ));
     assert_eq!(store.get(a.id), Ok(None));
 }
+
+#[test]
+fn an_unreadable_event_id_is_an_error_not_an_empty_log() {
+    let path = file("badid");
+    let store = SqliteStore::open(&path).expect("open");
+    add(&store, &card("a", 1));
+    Connection::open(&path)
+        .expect("raw")
+        .execute("UPDATE events SET id = 'zzz'", [])
+        .expect("corrupt");
+    assert!(matches!(store.last_event_id(), Err(BoardError::Storage(_))));
+    assert!(matches!(
+        store.insert(
+            &card("b", 2),
+            Event::of(&card("b", 2), EventKind::Created, "t")
+        ),
+        Err(BoardError::Storage(_))
+    ));
+}
+
+#[test]
+fn a_card_number_is_unique_and_milestones_come_back_in_id_order() {
+    let store = SqliteStore::open_in_memory().expect("open");
+    let numbered = |t: &str, at| Card {
+        number: Some(1),
+        ..card(t, at)
+    };
+    let (a, b) = (numbered("a", 1), numbered("b", 2));
+    add(&store, &a);
+    assert!(
+        store
+            .insert(&b, Event::of(&b, EventKind::Created, "t"))
+            .is_err(),
+        "two cards cannot share a number"
+    );
+    assert_eq!(store.get(b.id), Ok(None));
+    let ms: Vec<_> = (0..4)
+        .map(|i| Milestone::new("rl", &format!("m{i}"), i).expect("milestone"))
+        .collect();
+    for m in &ms {
+        store.add_milestone(m).expect("add");
+    }
+    let ids: Vec<_> = store
+        .milestones()
+        .expect("all")
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    let mut sorted = ids.clone();
+    sorted.sort_by_key(|i| i.to_string());
+    assert_eq!(ids, sorted);
+}

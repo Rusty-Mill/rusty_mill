@@ -35,7 +35,7 @@ fn migrations() -> Migrations {
             updated_ms INTEGER NOT NULL,
             doc TEXT NOT NULL
         );
-        CREATE INDEX cards_number ON cards (number);
+        CREATE UNIQUE INDEX cards_number ON cards (number);
         CREATE INDEX cards_col ON cards (col);
         CREATE INDEX cards_project_col ON cards (project, col);
         CREATE INDEX cards_created ON cards (created_ms, id);
@@ -62,6 +62,11 @@ fn migrations() -> Migrations {
 /// Cards, events, reserved numbers and milestones in one SQLite file.
 pub struct SqliteStore {
     conn: Mutex<Connection>,
+}
+
+/// Parse a stored id; a malformed one is a storage error, never a skipped row.
+fn uuid(s: &str) -> Result<Uuid, BoardError> {
+    Uuid::parse_str(s).map_err(storage)
 }
 
 fn storage(e: impl Display) -> BoardError {
@@ -163,7 +168,7 @@ impl SqliteStore {
         let last: Option<String> = tx
             .query_row("SELECT MAX(id) FROM events", [], |r| r.get(0))
             .map_err(storage)?;
-        event.id = next_event_id(last.and_then(|s| Uuid::parse_str(&s).ok()));
+        event.id = next_event_id(last.as_deref().map(uuid).transpose()?);
         tx.execute(
             "INSERT INTO events (id, card, col, at_ms, doc) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -237,10 +242,7 @@ impl Store for SqliteStore {
             .map_err(storage)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage)?;
-        Ok(rows
-            .iter()
-            .filter_map(|s| Uuid::parse_str(s).ok())
-            .collect())
+        rows.iter().map(|s| uuid(s)).collect()
     }
 
     fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
@@ -281,7 +283,7 @@ impl Store for SqliteStore {
             .as_raw()
             .query_row("SELECT MAX(id) FROM events", [], |r| r.get(0))
             .map_err(storage)?;
-        Ok(last.and_then(|s| Uuid::parse_str(&s).ok()))
+        last.as_deref().map(uuid).transpose()
     }
 
     fn holds_event(&self, id: Uuid) -> Result<bool, BoardError> {
@@ -357,10 +359,7 @@ impl Store for SqliteStore {
             .map_err(storage)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage)?;
-        Ok(rows
-            .iter()
-            .filter_map(|s| Uuid::parse_str(s).ok())
-            .collect())
+        rows.iter().map(|s| uuid(s)).collect()
     }
 
     fn durable(&self) -> bool {
@@ -389,7 +388,9 @@ impl MilestoneStore for SqliteStore {
         let db = self.db()?;
         let mut stmt = db
             .as_raw()
-            .prepare_cached("SELECT id, project, title, target_ms, done_ms, rev FROM milestones")
+            .prepare_cached(
+                "SELECT id, project, title, target_ms, done_ms, rev FROM milestones ORDER BY id",
+            )
             .map_err(storage)?;
         let rows = stmt
             .query_map([], milestone_of)
@@ -399,7 +400,7 @@ impl MilestoneStore for SqliteStore {
         rows.into_iter()
             .map(|(id, m, rev)| {
                 Ok(Milestone {
-                    id: Uuid::parse_str(&id).map_err(storage)?,
+                    id: uuid(&id)?,
                     rev: uint(rev)?,
                     ..m
                 })
