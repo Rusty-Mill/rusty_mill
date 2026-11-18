@@ -166,6 +166,7 @@ Precise contracts used by this guide:
 | D156 | #1166 smoke-5: the architect prompt must say every claim sets `answers` to the question's id; a prompt bug fix | [default] 2026-11-18 (1166) |
 | D157 | #1166: keep the D143 bar (criterion 3 not reworded); build D156 and rerun as smoke-6; the all-dropped BBP rule returns to Nano only if candidates keep dropping | [stated] 2026-11-18 (1166) |
 | D158 | The grounding audit (D155) also covers candidates the board dropped, as a read-only report | [stated] 2026-11-18 (1166) |
+| D159 | D143 criterion 3 for an audit-rescued candidate: one reopen, a lens run, then Nano's `choose` counts (D158 stays) | [stated] 2026-11-18 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1572,3 +1573,14 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_e8160b3d28624f2ca91300fbceb8eac2
 **Key.** lel:1166:grounding-audit-covers-dropped-claims
 **Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved as `mem_928dc8aca99743ffb756ee87a6e1b0ff` (speaker Nano). Extends D155; relates to Q53, Q59. Numbered D158 after D157.
+
+## D159. D143 criterion 3 for an audit-rescued candidate: one reopen, a lens run, then Nano's `choose` counts (D158 stays)
+
+**Decision.** Nano: "b, with a limit. A human choose of an audit-rescued candidate counts toward criterion 3 only if a lens run after `reopen` leaves the candidate Open or accepted. One reopen per candidate. If the lenses drop it again on votes the audit shows are ungrounded, then (a) applies: I choose it, and the audit is recorded as the reason in the run record." This sets how D143's criterion 3 is read for a candidate dropped on ungrounded votes. D158 stays.
+**Procedure.** (1) The read-back's grounding audit shows a candidate was dropped on ungrounded votes. (2) Nano reopens it, once per candidate (`bbp human ... claim N reopen`); reopen is refused if a dep is closed, and if the claim's budget is exhausted `budget_extended` must be recorded first. (3) A lens run on the same task (the resume script) reviews it afresh in the new epoch. (4) If the candidate is Open or accepted afterwards, Nano's `choose` counts toward criterion 3. (5) If the lenses drop it again on votes the audit shows ungrounded, Nano's `choose` counts anyway, with the audit recorded as the reason in the run record. (6) If it is dropped again on grounded votes, it does not count, and the bar is not met by that candidate.
+**Where the reason is recorded.** `bbp human` has no reason or note field that Nano knows of, so "recorded as the reason in the run record" means the run record: `1166-smoke-run.md` (the Run N result) and the grounding audit file, not a board field.
+**Why.** A human override counts only if the lens loop confirms the candidate, or drops it again on votes the audit shows ungrounded; one reopen per candidate bounds it. D143's "clean pass" keeps its meaning that the lens loop works.
+**Rejected.** a) counting any human choose; c) never counting a human choose (a lens-driven survivor only).
+**Tag.** [stated] · remind-me: mem_49f619c6e57a417daf2e0ec6e80490e0
+**Key.** lel:1166:audit-rescued-candidate-reopen-then-choose
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_af1925dad3d74a6c9d84f8f67b19bfc3` (speaker Nano). Refines D143 and D158; relates to C-R8 in the claims addendum. Numbered D159 after D158.
