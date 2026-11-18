@@ -1503,6 +1503,7 @@ The first three were approved first. The last three were added to Q35 after that
 ## D152. #1166: no host change; rerun smoke-4 after the prompt fixes alone (D147 hold stays)
 
 **Decision.** Nano, call 2 of the same answer: option b, "No host change. Rerun after the prompt fixes alone." D147's hold stays: the llama.cpp rebuild (D145) and the Qwen reasoning budget are not applied. The rerun is smoke-4 after the prompt fixes alone: D148 (the orch re-read, done), and D149, D150 and the reviewer wording of D151, all in the Factory PR. If the empty replies at the 4096-token cap recur, that is the evidence for the reasoning budget, one change at a time.
+**Condition recurred 2026-11-17 (smoke-4):** three empty Qwen replies again, and they cost the third candidate (run 4 result). Applying any host change is still Nano's call (not yet answered).
 **Why.** One change at a time: the prompt fixes get measured alone before any host change.
 **Rejected.** a) applying the Qwen reasoning budget first; c) also rebuilding llama.cpp (no new evidence in smoke-3).
 **Tag.** [stated] · remind-me: mem_4fc7c5f64a84458a9fbdf43dc3fd84ce
