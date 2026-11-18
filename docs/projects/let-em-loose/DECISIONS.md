@@ -165,6 +165,7 @@ Precise contracts used by this guide:
 | D155 | Standing rule: every run's read-back includes the grounding audit before Nano acts on an escalated claim | [stated] 2026-11-18 (1166) |
 | D156 | #1166 smoke-5: the architect prompt must say every claim sets `answers` to the question's id; a prompt bug fix | [default] 2026-11-18 (1166) |
 | D157 | #1166: keep the D143 bar (criterion 3 not reworded); build D156 and rerun as smoke-6; the all-dropped BBP rule returns to Nano only if candidates keep dropping | [stated] 2026-11-18 (1166) |
+| D158 | The grounding audit (D155) also covers candidates the board dropped, as a read-only report | [stated] 2026-11-18 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1562,3 +1563,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_708b09f2022e4622b7d060153b9ed72a
 **Key.** lel:1166:keep-first-run-bar-fix-and-rerun-smoke-6
 **Source.** Nano, answer dialog in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_96800eda3fae4f51b07672e908a68ccc` (speaker Nano). Confirms D143; builds on D151, D156. Numbered D157 after D156.
+
+## D158. The grounding audit (D155) also covers candidates the board dropped, as a read-only report
+
+**Decision.** Nano, answering Q59: "Q59: yes. Extend 1166-grounding.sh to audit candidates the board dropped, not only escalated claims. Put it in its own PR." D155 is extended: every run's read-back audits escalated AND dropped claims, with the same method (quote the brief sentence each vote relies on or mark it ungrounded; the score three ways), as a read-only report. Q59 is closed.
+**Why.** A drop on ungrounded votes decides whether Q has a survivor: on smoke-5, claim 7 was dropped by ungrounded votes (msgs 10 and 14) and would have stayed Open at a grounded -4, above the -8 drop line.
+**Rejected.** Auditing escalated claims only.
+**Tag.** [stated] · remind-me: mem_e8160b3d28624f2ca91300fbceb8eac2
+**Key.** lel:1166:grounding-audit-covers-dropped-claims
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved as `mem_928dc8aca99743ffb756ee87a6e1b0ff` (speaker Nano). Extends D155; relates to Q53, Q59. Numbered D158 after D157.
