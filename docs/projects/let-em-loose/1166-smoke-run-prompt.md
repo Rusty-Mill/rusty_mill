@@ -8,6 +8,10 @@ Assumes the #1092 deploy is done (`/opt/lel/current/bin/{bbp,rusty_orch}`, `/srv
 
 Not guessed, read from code: `bbp open` flags (`crates/apps/rusty_bbp_host/src/bin/bbp.rs` header), the profile set and roster JSON shapes (`profiles.rs`, `holdout.rs`, `rusty_bbp/src/role.rs`), the claims `post` arguments (`rusty_bbp_host/src/mcp/claims.rs`, `lens/bbp.rs` `post_args`). Command output shapes (`bbp card`, `bbp mcp` `Posted`, `bbp human`) were observed on a throwaway task.
 
+## Grounding audit before you act (D155)
+
+Every read-back writes `~/smoke-N/grounding.md` (`1166-grounding.sh`): the brief numbered, each vote on every escalated claim with its note and what it cites, mechanical flags (a vote citing a claim as a run, citing itself or the question), wording a note shares with the claim but the brief lacks, and the scores for every vote, the latest vote per author and the first vote per author. Send it to Claude **before you tap anything**: Claude writes the audit from it (the exact brief sentence each note relies on, or ungrounded; the grounded-only scores; any way the claim departs from the brief).
+
 ## Rerun after run 1 (one command)
 
 Run 1 is recorded (D143, Q52): it is not a clean pass. The rerun uses a fresh task, the inbox fixture, a detached lens run and the read-back, and needs rusty_orch built from the merged fixes (#1781, #1783). When those have merged, or you have not deployed since:

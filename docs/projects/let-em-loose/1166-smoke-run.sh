@@ -223,6 +223,9 @@ $R $BIN/bbp why    --dir $D --task "$TASK" --claim "$A"   | tee "$OUT/why-A.json
 $R $BIN/bbp why    --dir $D --task "$TASK" --claim "$A2"  | tee "$OUT/why-A2.json"
 $R $BIN/bbp inbox  --dir $D --task "$TASK" --json yes     | tee "$OUT/inbox.json"
 $R $BIN/rusty_orch lens record --bbp $BIN/bbp --dir $D --task "$TASK" --state /srv/lel/orch-state | tee "$OUT/lens-record.txt"
+# Grounding bundle (Nano's standing rule, D155): the evidence for the audit of every vote on an escalated claim.
+bash "$HERE/1166-grounding.sh" "$D" "$TASK" "$OUT/grounding.md" "$BIN" > /dev/null || echo "WARNING: the grounding bundle failed: do not act on an escalated claim until it is produced"
+echo "grounding bundle: $OUT/grounding.md (Claude writes the audit from it BEFORE you act on any escalated claim)"
 echo "--- AVC denials (none expected)"
 sudo ausearch -m avc -ts recent 2>/dev/null | tail -20 | tee "$OUT/avc.txt" || true
 
@@ -230,6 +233,7 @@ cat <<EOF
 
 === Done. Nothing is deleted at any point. Files are in $OUT
 Next, by hand:
+  0. Do NOT act on an escalated claim yet: send Claude $OUT/grounding.md first; the grounding audit (D155) comes before any tap.
   1. Inbox: A2 (msg $A2, the fixture claim) is escalated 'irreversible': tap Reject on it in the Mill Board inbox. A (msg $A)
      is the lens-judged one: it may have been dropped by the lenses or escalated; act on it only if it is in the inbox.
      CLI fallback: sudo -H -u orch-runner $BIN/bbp human --dir $D --task $TASK --dry-run yes claim $A2 drop, then without --dry-run.
