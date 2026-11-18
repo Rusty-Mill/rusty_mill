@@ -49,8 +49,8 @@ mod completion;
 mod config;
 mod conn;
 mod hosts;
-#[cfg(any(unix, windows))]
 mod overview;
+#[cfg(any(unix, windows))]
 mod own;
 mod render;
 mod ssh;
