@@ -54,7 +54,9 @@ use platform_windows::WindowsUnixStream as UnixStream;
 use rusty_json::{Map, Value};
 use rusty_mux_core::{BlockId, ClientId, Event, InputMode, Size, WindowId};
 use rusty_mux_proto::older::Older;
-use rusty_mux_proto::{BlockSignal, Cursor, Features, Launch, Message, Program, Takeover, encode};
+use rusty_mux_proto::{
+    AgentMeta, BlockSignal, Cursor, Features, Launch, Message, Program, Takeover, encode,
+};
 use rusty_uuid::Uuid;
 
 use crate::conn::{Conn, connect};
@@ -142,12 +144,21 @@ impl Request {
         match self {
             Self::Launch { launch, .. } => {
                 let gate = launch.input == InputMode::OwnerOnly;
-                gate.then(|| lacks(GATE, NO_GATE)).flatten().or_else(|| {
-                    launch
-                        .hold
-                        .then(|| lacks(Features::HOLD, NO_HOLD))
-                        .flatten()
-                })
+                gate.then(|| lacks(GATE, NO_GATE))
+                    .flatten()
+                    .or_else(|| {
+                        launch
+                            .hold
+                            .then(|| lacks(Features::HOLD, NO_HOLD))
+                            .flatten()
+                    })
+                    .or_else(|| {
+                        launch
+                            .agent
+                            .is_some()
+                            .then(|| lacks(Features::AGENT_META, NO_META))
+                            .flatten()
+                    })
             }
             Self::Grant { .. } | Self::Revoke { .. } => lacks(GATE, NO_GATE),
             Self::Close { .. } => None,
@@ -165,6 +176,7 @@ impl Request {
 
 const NO_GATE: &str = "the server cannot gate input";
 const NO_HOLD: &str = "the server cannot hold a block after its program exits";
+const NO_META: &str = "the server cannot record an agent, role and card on a block";
 const NO_SIGNAL: &str = "the server cannot signal or release a block";
 
 /// A request sent and not yet answered, with the caller's id.
@@ -478,6 +490,7 @@ fn open(
         .union(GATE)
         .union(AGENT)
         .union(Features::HOLD)
+        .union(Features::AGENT_META)
         .union(Features::SIGNAL_RELEASE)
         .union(Features::LEASE_REQUESTS);
     conn.send(&Message::Hello {
@@ -757,7 +770,35 @@ fn launch(value: &Value) -> Result<Launch, String> {
                 .ok_or_else(|| format!("`fds` must be a count from 0 to {MAX_FDS}"))?,
         },
         hold,
+        agent: agent_meta(value)?,
     })
+}
+
+/// The `agent`, `role` and `card` a launch names: all three or none.
+fn agent_meta(value: &Value) -> Result<Option<AgentMeta>, String> {
+    let text = |key: &str| match value.get(key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_str()
+            .map(|s| Some(s.to_owned()))
+            .ok_or_else(|| format!("`{key}` must be text")),
+    };
+    match (text("agent")?, text("role")?, text("card")?) {
+        (None, None, None) => Ok(None),
+        (Some(agent), Some(role), Some(card)) => {
+            let meta = AgentMeta { agent, role, card };
+            meta.is_valid()
+                .then_some(meta)
+                .ok_or_else(|| {
+                    format!(
+                        "`agent`, `role` and `card` must each be 1 to {} printable bytes",
+                        AgentMeta::MAX_LEN
+                    )
+                })
+                .map(Some)
+        }
+        _ => Err("`agent`, `role` and `card` go together".into()),
+    }
 }
 
 /// The exact environment a launch names, if it names one.
