@@ -1,6 +1,6 @@
 # Archive dismissed agent blocks (card #1570)
 
-Status: design, proposed. Source: Nano, voice, 2026-11-18 (remind-me mem_2faddab4, a decision; card #1570). Nano gates it. Pack ids to reserve: handoff D339, Q98.
+Status: design, proposed; not authorized to build. Source: Nano, voice, 2026-11-18 (remind-me mem_2faddab4, a decision; card #1570). Nano gates it. Pack ids to reserve: handoff D339, Q98.
 
 ## Lifecycle
 
@@ -34,7 +34,9 @@ A store record type, a recall call (ctl and wire) behind a Features bit, and a d
 2. Replay in a held block (cloud-buildable; the GUI header is a GUI slice).
 3. Export to remind-me (owner gate, after 1 and 2).
 
-## Open questions (non-blocking; recommendation is the default)
+## Open questions (proposed only; implementation gated until Nano's answer is recorded)
+
+Every item below is a recommendation, not an authorized default. Nano gates this design (card tag `needs-nano`). Wire, security, privacy, retention and export behaviour must not be built until his answer is recorded in the pack by the expert.
 
 - **Q98a** Where does the archive live? a) mux state dir with an optional cap, exported to remind-me on dismiss; b) orch owns it, mux streams; c) remind-me only. **Recommend a**: the mux holds the grid, history and exit code, and D74 already gates the dir.
 - **Q98b** Secrets: a) mark `sensitive`, exclude from export and labels, no redaction; b) pattern redaction plus the mark; c) never export transcripts. **Recommend a**: pattern redaction misses things.

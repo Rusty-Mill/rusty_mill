@@ -1,6 +1,6 @@
 # Workspace explorer (card #1573)
 
-Status: design, proposed. Source: Nano, voice, 2026-11-18 (remind-me mem_797b5707, card #1573). Nano gates it.
+Status: design, proposed; not authorized to build. Source: Nano, voice, 2026-11-18 (remind-me mem_797b5707, card #1573). Nano gates it.
 Pack ids to reserve: handoff D337, Q96; gui-design D95, Q93.
 
 ## What
@@ -33,7 +33,9 @@ A server call for tree and touched files needs a message and a Features bit: a p
 2. TUI text tree (cloud-buildable).
 3. GUI panel on the D60 panel tokens (needs a Windows GUI build; not cloud-buildable).
 
-## Open questions (non-blocking; recommendation is the default)
+## Open questions (proposed only; implementation gated until Nano's answer is recorded)
+
+Every item below is a recommendation, not an authorized default. Nano gates this design (card tag `needs-nano`). Wire, security, privacy, retention and export behaviour must not be built until his answer is recorded in the pack by the expert.
 
 - **Q96** Wire call or local-only? a) wire call scoped to the block's workspace, works remote; b) local-only first. **Recommend a**: the mux is often remote and `list-dir` already shows the pattern.
 - Panel look goes to `rusty-term-design-expert`.

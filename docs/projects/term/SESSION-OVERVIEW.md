@@ -1,6 +1,6 @@
 # Session overview (card #1572)
 
-Status: design, proposed. Source: Nano, voice, 2026-11-18 (remind-me mem_757c3b59, card #1572 body and comment). Nano gates it.
+Status: design, proposed; not authorized to build. Source: Nano, voice, 2026-11-18 (remind-me mem_757c3b59, card #1572 body and comment). Nano gates it.
 Pack ids to reserve: handoff D336, Q95; gui-design D94, Q92 (re-check main on the day).
 
 ## What
@@ -48,7 +48,9 @@ Block metadata is new `Launch` fields plus a list/event field behind a new Featu
 
 AGENT-HOSTING C46/C75-C78; D82, D87, D105-D107; gui-design D14, D44, D45-D49, D53-D58 (Let Em Loose tab; this view replaces the phase-lane drawing), D60, D61, D64. C21 run markers are not built: treat them as a prerequisite or fold them in.
 
-## Open questions (non-blocking; recommendation is the default)
+## Open questions (proposed only; implementation gated until Nano's answer is recorded)
+
+Every item below is a recommendation, not an authorized default. Nano gates this design (card tag `needs-nano`). Wire, security, privacy, retention and export behaviour must not be built until his answer is recorded in the pack by the expert.
 
 - **Q95** How are agent, role, card and project set? a) new `Launch` fields plus a Features bit; b) packed into the label string; c) board-side only, the GUI asks orch. **Recommend a**: structured, and lease/lens display needs it. Owner gate on the wire change.
 - Layout, tile look and zoom feel go to `rusty-term-design-expert` before any GUI slice.
