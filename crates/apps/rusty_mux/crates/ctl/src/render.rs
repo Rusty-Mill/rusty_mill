@@ -214,6 +214,15 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             fields.push(("focused", focused.map_or(Field::Absent, |b| Id(b.uuid()))));
             ("window", window.uuid(), fields)
         }
+        Entry::Agent { block, meta } => (
+            "agent",
+            block.uuid(),
+            vec![
+                ("agent", Text(meta.agent.clone())),
+                ("role", Text(meta.role.clone())),
+                ("card", Text(meta.card.clone())),
+            ],
+        ),
         Entry::Floats { window, floats } => (
             "floats",
             window.uuid(),

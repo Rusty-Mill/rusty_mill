@@ -452,6 +452,7 @@ impl Args<'_> {
             env: None,
             fds: 0,
             hold: false,
+            agent: None,
         })
     }
 
