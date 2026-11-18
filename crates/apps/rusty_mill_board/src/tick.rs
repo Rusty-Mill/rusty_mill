@@ -277,6 +277,14 @@ struct BoardDoc {
     execution: Option<ExecutionLink>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     prompt: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    acceptance: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    scope: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    why: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -302,6 +310,10 @@ impl BoardDoc {
             synced_text: card.synced_text,
             execution: card.execution.clone(),
             prompt: card.prompt.clone(),
+            acceptance: card.acceptance.clone(),
+            scope: card.scope.clone(),
+            why: card.why.clone(),
+            summary: card.summary.clone(),
             target_ms: card.target_ms,
             external_refs: card
                 .external_refs
@@ -340,7 +352,7 @@ impl BoardDoc {
             .map_err(|e| BoardError::Storage(format!("board document: {e}")))?;
         if bytes.len() > MAX_DOC_BYTES {
             return Err(BoardError::Invalid(
-                "the card's prompt and links are larger than 64 KiB once stored",
+                "the card's prompt, fields and links are larger than 64 KiB once stored",
             ));
         }
         Ok(body)
@@ -545,6 +557,10 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         title: task.title,
         body: task.notes,
         prompt: doc.prompt,
+        acceptance: doc.acceptance,
+        scope: doc.scope,
+        why: doc.why,
+        summary: doc.summary,
         column,
         claim,
         tags,

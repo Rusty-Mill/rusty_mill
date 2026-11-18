@@ -1161,6 +1161,7 @@ pub fn ops() -> Vec<Op> {
                     body: a.body.as_deref(),
                     tags: a.tags,
                     prompt: a.prompt.as_deref(),
+                    ..Edit::default()
                 };
                 card(b.edit_at(card_ref(b, &a.id)?, &who, a.rev, &edit)?)
             },

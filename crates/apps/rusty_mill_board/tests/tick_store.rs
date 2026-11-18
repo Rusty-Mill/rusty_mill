@@ -1876,3 +1876,67 @@ fn external_refs_are_stored_camel_case_and_read_back() {
         seen.external_refs
     );
 }
+
+#[test]
+fn typed_fields_round_trip_through_the_board_document_and_obey_their_caps() {
+    let (board, _tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let fields = |a: &'static str, w: &'static str| Edit {
+        acceptance: Some(a),
+        why: Some(w),
+        ..Edit::default()
+    };
+    board
+        .edit_at(card.id, &human, None, &fields("done when green", "because"))
+        .expect("set");
+    let read = board.get(card.id).expect("get");
+    assert_eq!(
+        (read.acceptance.as_str(), read.why.as_str()),
+        ("done when green", "because")
+    );
+    assert!(read.scope.is_empty() && read.summary.is_empty());
+
+    // Empty clears one field and leaves the others.
+    board
+        .edit_at(card.id, &human, None, &fields("", "because"))
+        .expect("clear");
+    let read = board.get(card.id).expect("get");
+    assert_eq!(
+        (read.acceptance.as_str(), read.why.as_str()),
+        ("", "because")
+    );
+
+    // Each cap holds at its size and refuses one byte more, writing nothing.
+    for (cap, set) in [
+        (
+            1200,
+            (|t| Edit {
+                acceptance: Some(t),
+                ..Edit::default()
+            }) as fn(&str) -> Edit<'_>,
+        ),
+        (800, |t| Edit {
+            scope: Some(t),
+            ..Edit::default()
+        }),
+        (600, |t| Edit {
+            why: Some(t),
+            ..Edit::default()
+        }),
+        (320, |t| Edit {
+            summary: Some(t),
+            ..Edit::default()
+        }),
+    ] {
+        let fits = "x".repeat(cap);
+        board
+            .edit_at(card.id, &human, None, &set(&fits))
+            .expect("at the cap");
+        let over = "x".repeat(cap + 1);
+        assert!(matches!(
+            board.edit_at(card.id, &human, None, &set(&over)),
+            Err(BoardError::Invalid(_))
+        ));
+    }
+}
