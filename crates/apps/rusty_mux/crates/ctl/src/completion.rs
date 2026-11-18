@@ -93,6 +93,7 @@ const COMMAND_WORDS: &[(&str, &[&str])] = &[
     ),
     ("bridge", &[]),
     ("own", &[]),
+    ("overview", &[]),
     ("server", &["stop"]),
     ("api", &["list", "describe", "llms"]),
     ("help", &[]),
