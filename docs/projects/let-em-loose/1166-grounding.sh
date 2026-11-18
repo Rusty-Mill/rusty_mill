@@ -121,16 +121,21 @@ for cid, status in audited:
         ch = s["change"]
         if isinstance(ch, dict) and "Status" in ch:
             rule = ch["Status"]["rule"]
-    items = []
+    # The board scores only the votes of the claim's CURRENT epoch (a `reopen` starts a new one); a vote that scored in
+    # an earlier epoch is listed apart and is not in any score below.
+    epoch = steps[-1]["epoch"]
+    items, earlier = [], []
     dormant = 0
     for s in steps:
         ch = s["change"]
         if isinstance(ch, dict) and "Evidence" in ch:
-            ev = ch["Evidence"]
-            if ev["scoring"]:
+            ev = dict(ch["Evidence"], epoch=s["epoch"])
+            if not ev["scoring"]:
+                dormant += 1
+            elif s["epoch"] == epoch:
                 items.append(ev)
             else:
-                dormant += 1
+                earlier.append(ev)
     flagged_rows, hint_items = [], []
     out = []
     author = w["author"]
@@ -142,7 +147,7 @@ for cid, status in audited:
     out.append(f"- text: {w['body']['text']}")
     out.append(f"- author {author}, answers {answers}, stakes {w['body']['stakes']}, reversible {str(w['body']['reversible']).lower()}")
     out.append(f"- the board's rule that fired: {json.dumps(rule)}")
-    out.append(f"- scoring votes: {len(items)}; dormant votes posted after the status change (not scored): {dormant}\n")
+    out.append(f"- current epoch {epoch}; scoring votes in it: {len(items)}; votes from earlier epochs (not scored now): {len(earlier)}; dormant votes posted after the status change (not scored): {dormant}\n")
     out.append("| msg | author | dir | kind | str | delta | cites | flags | wording shared with the claim but absent from the brief |")
     out.append("|---|---|---|---|---|---|---|---|---|")
     ctext = words(w["body"]["text"])
@@ -166,6 +171,13 @@ for cid, status in audited:
     out.append("")
     out += notes
     out.append("")
+    if earlier:
+        out.append("Votes from earlier epochs (they scored then; the board no longer counts them):\n")
+        for it in sorted(earlier, key=lambda i: i["msg"]):
+            m = msgs.get(it["msg"])
+            b = body(m) if m else {}
+            out.append(f"- msg:{it['msg']} (epoch {it['epoch']}, {it['author']}, {it['direction']}, {it['delta']:+d}): \"{b.get('note', '')}\"")
+        out.append("")
     total = sum(i["delta"] for i in items)
     def per_author(pick):
         by = {}
