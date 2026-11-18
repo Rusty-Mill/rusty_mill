@@ -58,6 +58,8 @@ header.top{display:flex;align-items:center;gap:6px;padding:0 14px;min-height:52p
 .badge{display:inline-grid;place-items:center;min-width:19px;height:19px;padding:0 5px;border-radius:10px;background:var(--mag);color:#fff;font:700 12px/1 var(--num);letter-spacing:.02em}
 .badge:empty{display:none}
 .quick{display:flex;gap:6px;margin-left:auto;align-items:center}
+.more{position:relative}.more summary{cursor:pointer;color:var(--mute);font-size:13px;padding:0 4px}
+.morebox{position:absolute;right:0;top:calc(100% + 6px);z-index:6;display:grid;gap:6px;width:min(340px,92vw);padding:10px;background:var(--card);border:1px solid var(--line2);border-radius:6px;box-shadow:0 12px 30px -10px rgb(0 0 0 / .35)}
 .top input,.top select{background:#262b31;border-color:var(--rail-line);color:var(--rail-ink)}
 .top input::placeholder{color:var(--rail-mute)}
 .top #title{width:min(24vw,260px)}
@@ -323,6 +325,7 @@ dialog h2{margin:0;font-size:18px}
   .board>.col.spine{flex:none;align-items:stretch}.spine h2{writing-mode:horizontal-tb;transform:none;flex-direction:row}
   .strip{flex-wrap:wrap}
 }
+.evid{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center}.evid input{flex:1;min-width:12ch}.evid .evidence{flex-basis:100%;font-size:13px;overflow-wrap:anywhere}
 .prompt{display:grid;grid-template-columns:1fr auto;gap:4px 8px;align-items:center}.prompt textarea{grid-column:1/-1;font-family:ui-monospace,monospace}
 </style>
 </head>
@@ -338,6 +341,11 @@ dialog h2{margin:0;font-size:18px}
   </nav>
   <div class="quick">
     <input id="title" placeholder="New card title" aria-label="new card title">
+    <details id="more" class="more"><summary>Details</summary><div class="morebox">
+      <textarea id="nbody" rows="4" placeholder="Description" aria-label="new card description"></textarea>
+      <input id="ntags" placeholder="tags, comma separated" aria-label="new card tags">
+      <input id="nparent" placeholder="#parent (the card it is split from)" aria-label="new card parent">
+    </div></details>
     <button id="add" type="button" class="primary"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>Add card</button>
   </div>
   <div class="who">
@@ -511,6 +519,7 @@ function ticket(k){
   else if(work||k.claim)m.append(el("span",ago(k.updated_ms)));
   m.append(...rollTag(k),...tagChips(k));
   if(k.issue)m.append(el("span","issue #"+k.issue));
+  if(k.evidence?.length)m.append(el("span","evidence "+k.evidence.length));
   if(k.comments.length)m.append(el("span",k.comments.length+(k.comments.length===1?" comment":" comments")));
   d.append(m);
   // What waits on you: a decision on this card, or a gate it stands at.
@@ -935,7 +944,7 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),up:el("input","","up"),ms:el("select")};
+  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),ev:el("div",null,"evidence"),ei:el("input"),dp:el("input"),rl:el("input"),sb:el("input"),mv:el("select"),up:el("input","","up"),ms:el("select")};
   projects().forEach(p=>f.p.append(new Option(label(p),p)));
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
@@ -950,10 +959,26 @@ function show(id){
   f.up.onchange=()=>act("card_plan",{id,parent:f.up.value.trim()||null});
   f.ms.setAttribute("aria-label","milestone");f.ms.title="The milestone this card counts towards";
   f.ms.onchange=()=>act("card_plan",{id,milestone:f.ms.value||null});
+  // Card lists (card_plan): by number, comma separated; each field replaces its list, empty clears it.
+  for(const [x,key,name,tip]of[[f.dp,"deps","Waits on","Cards that must be Done before this one is taken"],[f.rl,"related","Related","Cards worth reading alongside this one"],[f.sb,"superseded_by","Superseded by","Newer cards that replace this one; it is never handed out"]]){
+    x.placeholder="#1, #2";x.setAttribute("aria-label",name.toLowerCase());x.title=tip;
+    x.onchange=()=>act("card_plan",{id,[key]:cardList(x.value)});
+  }
+  // Move to (card_move): the same op a drag calls; the board refuses a move the role may not make, with its reason.
+  f.mv.setAttribute("aria-label","move to");
+  f.mv.onchange=()=>{const to=f.mv.value;f.mv.value="";if(to)act("card_move",{id,to})};
   loadStones(f,k.project);
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
   // The prompt: instructions for whoever takes the card, kept apart from the description.
   f.q.rows=4;f.q.placeholder="Prompt for whoever takes this card";f.q.setAttribute("aria-label","prompt");
+  // Evidence (card_evidence): links showing the work shipped; a Done card counts as shipped only with one.
+  f.ei.placeholder="https://github.com/…/pull/N";f.ei.setAttribute("aria-label","evidence link");
+  const addEv=el("button","Add evidence");addEv.type="button";
+  // One request at a time; the box is cleared only if it still holds what was sent, so a link typed meanwhile is kept.
+  addEv.onclick=async()=>{const v=f.ei.value.trim();if(!v||addEv.disabled)return;addEv.disabled=true;
+    try{if(await act("card_evidence",{id,links:[v]})&&f.ei.value.trim()===v)f.ei.value=""}finally{addEv.disabled=false}};
+  f.ei.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();addEv.click()}};
+  const evRow=el("div",null,"evid");evRow.append(el("label","Evidence "),f.ei,addEv,f.ev);
   const copy=el("button","Copy prompt");copy.type="button";
   copy.onclick=async()=>{try{await navigator.clipboard.writeText(f.q.value);toast("Prompt copied")}catch{toast("Copy failed")}};
   const promptRow=el("div","","prompt");promptRow.append(el("label","Prompt "),copy,f.q);
@@ -973,7 +998,8 @@ function show(id){
   const form=el("form");form.method="dialog";const head=el("div",null,"dhead");if(k.number)head.append(el("span","#"+k.number,"num"));head.append(f.meta);
   const plan=el("div",null,"plan");plan.append(f.pr,el("span","Target","meta"),f.due);
   const links=el("div",null,"plan");links.append(el("span","Parent","meta"),f.up,el("span","Milestone","meta"),f.ms);
-  form.append(head,f.tr,f.banner,f.t,f.b,promptRow,f.g,plan,links,...(projects().length>1?[f.p]:[]),row,f.ex,f.cm,f.ci);
+  const lists=el("div",null,"plan");lists.append(el("span","Waits on","meta"),f.dp,el("span","Related","meta"),f.rl,el("span","Superseded by","meta"),f.sb);
+  form.append(head,f.tr,f.banner,f.t,f.b,promptRow,f.g,plan,links,lists,evRow,f.mv,...(projects().length>1?[f.p]:[]),row,f.ex,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
@@ -999,6 +1025,9 @@ async function loadStones(f,project){
   syncDialog();
 }
 // The chain up to the root (each a link) and the children's progress, kept in step with the board.
+// Card ids as "#12, #15" for a field, and back: numbers or ids are accepted by the op.
+const numList=ids=>(ids??[]).map(i=>{const c=byId(i);return c?.number?"#"+c.number:i}).join(", ");
+const cardList=v=>v.split(/[\s,]+/).filter(Boolean);
 function traceLine(k){
   const up=chain(k),list=kids(k),out=[];
   const go=c=>{const b=el("button",cardName(c));b.type="button";b.onclick=()=>show(c.id);return b};
@@ -1038,10 +1067,18 @@ function syncDialog(){
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",nick(c.by)+": "),el("span",c.text));return d}));
   f.ex.replaceChildren(...refLines(k));
+  if(f.mv.dataset.col!==k.column){
+    f.mv.dataset.col=k.column;
+    const to=[...FLOW.transitions.filter(m=>m.from===k.column).map(m=>[m.to,m.gate]),...(isDone(k)||k.column==="blocked"||FLOW.transitions.some(m=>m.from===k.column&&m.to==="blocked")?[]:[["blocked",false]])];
+    f.mv.replaceChildren(new Option("Move to…",""),...to.map(([c,g])=>new Option(colLabel(c)+(g?" (approval)":""),c)));
+    f.mv.hidden=to.length===0;
+  }
+  f.ev.replaceChildren(...(k.evidence??[]).map(l=>{const d=el("div"),a=el("a",l);a.href=l;a.target="_blank";a.rel="noopener noreferrer";d.append(a);return d}));
   const theirs=snap(k);
   if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
   if(document.activeElement!==f.due)f.due.value=k.target_ms?isoDay(k.target_ms):"";
   f.tr.replaceChildren(...traceLine(k));
+  for(const [x,key]of[[f.dp,"deps"],[f.rl,"related"],[f.sb,"superseded_by"]])if(document.activeElement!==x)x.value=numList(k[key]);
   if(document.activeElement!==f.up){const p=k.parent&&byId(k.parent);f.up.value=p?.number?"#"+p.number:k.parent??""}
   if(f.ms.dataset.project&&f.ms.dataset.project!==k.project)loadStones(f,k.project);
   else if(document.activeElement!==f.ms)f.ms.value=k.milestone??"";
@@ -1559,7 +1596,20 @@ async function loadMeta(){
   $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
   $("boardv").onclick=()=>setView("board");
   // New cards go to the chosen project, else to the Inbox.
-  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project;if(!t){$("title").focus();return}$("title").value="";act("card_add",{title:t,...(project&&{project})})};
+  // One add at a time (a double click or a repeated Enter would make two cards); a field is cleared only if it
+  // still holds what was sent, so a draft started while the request ran is kept.
+  $("add").onclick=async()=>{const b=$("add"),t=$("title").value.trim(),project=sel.project;
+    if(b.disabled)return;if(!t){$("title").focus();return}
+    const snap={nbody:$("nbody").value,ntags:$("ntags").value,nparent:$("nparent").value},
+      body=snap.nbody.trim(),tags=snap.ntags.split(",").map(x=>x.trim()).filter(Boolean),parent=snap.nparent.trim();
+    b.disabled=true;
+    try{
+      const r=await act("card_add",{title:t,...(project&&{project}),...(body&&{body}),...(tags.length&&{tags}),...(parent&&{parent})});
+      if(!r)return;
+      if($("title").value.trim()===t)$("title").value="";
+      for(const k in snap)if($(k).value===snap[k])$(k).value="";
+      if(!["title","nbody","ntags","nparent"].some(k=>$(k).value))$("more").open=false;
+    }finally{b.disabled=false}};
   $("title").onkeydown=e=>{if(e.key==="Enter")$("add").click()};
   await loadMeta();
   const p=pref("project"),ps=pref("pstatus");

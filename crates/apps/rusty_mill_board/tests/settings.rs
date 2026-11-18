@@ -1576,3 +1576,122 @@ fn settings_are_mcp_tools_except_those_that_carry_a_secret() {
     let parsed: serde_json::Value = serde_json::from_str(text).expect("text is the JSON result");
     assert!(parsed["roles"].is_object(), "{got}");
 }
+
+#[test]
+fn a_refused_card_write_is_recorded_with_its_reason_and_never_its_token() {
+    let f = start("refusals");
+    let (_, made, text) = f.admin("card_add", &json!({"title": "needs evidence"}));
+    let card = made["card"]["id"].as_str().expect(&text).to_owned();
+    let token = f.add_agent("watcher", "reviewer");
+    let link = json!({"id": card, "links": ["https://github.com/o/r/pull/1"]});
+    let (status, _, text) = call(f.addr, &token, "card_evidence", &link);
+    assert_eq!(
+        status, 403,
+        "a reviewer holds none of close, merge or triage: {text}"
+    );
+    // A read that fails is not a write the owner has to chase.
+    let _ = call(f.addr, &token, "card_get", &json!({"id": "#99999"}));
+
+    let (status, out, text) = f.admin("settings_audit", &json!({"limit": 50}));
+    assert_eq!(status, 200, "{text}");
+    let seen: Vec<&Value> = out["records"]
+        .as_array()
+        .expect("records")
+        .iter()
+        .filter(|r| r["op"] == "card_evidence")
+        .collect();
+    assert_eq!(seen.len(), 1, "{text}");
+    assert_eq!(seen[0]["result"], "denied");
+    assert_eq!(seen[0]["actor"], "watcher");
+    assert_eq!(seen[0]["card"], json!(card));
+    assert!(
+        seen[0]["why"].as_str().is_some_and(|w| w.contains("Close")),
+        "{text}"
+    );
+    assert!(
+        !text.contains(&token) && !text.contains("pull/1"),
+        "no secret or argument: {text}"
+    );
+    assert!(
+        out["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .all(|r| r["op"] != "card_get")
+    );
+}
+
+#[test]
+fn a_refusal_is_attributed_to_the_credential_and_the_claim_is_kept_apart() {
+    let f = start("refusal_actor");
+    let token = f.add_agent("watcher", "reviewer");
+    let (_, made, text) = f.admin("card_add", &json!({"title": "t"}));
+    let card = made["card"]["id"].as_str().expect(&text).to_owned();
+    // The credential fixes the actor, so naming another is refused: and recorded as a claim only.
+    let (status, _, _) = call(
+        f.addr,
+        &token,
+        "card_comment",
+        &json!({"id": card, "text": "hi", "actor": "nano"}),
+    );
+    assert_eq!(status, 422);
+    let (_, out, text) = f.admin("settings_audit", &json!({"limit": 50}));
+    let rec = out["records"]
+        .as_array()
+        .expect("records")
+        .iter()
+        .find(|r| r["op"] == "card_comment")
+        .unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(
+        rec["actor"], "watcher",
+        "the verified credential, not the claim"
+    );
+    assert_eq!(rec["claimed_actor"], "nano");
+}
+
+#[test]
+fn a_malformed_argument_never_reaches_the_record_through_its_reason() {
+    let f = start("refusal_args");
+    let token = f.add_agent("dev", "builder");
+    let marker = "SECRET-MARKER-9f3a";
+    // A string where a list belongs: serde's own message would quote it.
+    let (status, _, text) = call(
+        f.addr,
+        &token,
+        "card_add",
+        &json!({"title": "t", "tags": marker}),
+    );
+    assert_eq!(status, 400, "{text}");
+    let (_, out, text) = f.admin("settings_audit", &json!({"limit": 50}));
+    assert!(!text.contains(marker), "{text}");
+    let rec = out["records"]
+        .as_array()
+        .expect("records")
+        .iter()
+        .find(|r| r["op"] == "card_add")
+        .unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(rec["result"], "bad_args");
+    assert_eq!(rec["why"], "the arguments did not parse");
+}
+
+#[test]
+fn refusal_records_stop_at_the_size_cap() {
+    let f = start("refusal_cap");
+    let token = f.add_agent("watcher", "reviewer");
+    let path = f.file("settings-audit.jsonl");
+    let junk = "x".repeat(1023) + "\n";
+    let mut file = std::fs::File::create(&path).expect("file");
+    for _ in 0..rusty_mill_board::settings::MAX_REFUSAL_FILE / 1024 {
+        file.write_all(junk.as_bytes()).expect("fill");
+    }
+    drop(file);
+    let before = std::fs::metadata(&path).expect("meta").len();
+    let link = json!({"id": "#1", "links": ["https://github.com/o/r/pull/1"]});
+    let (status, _, _) = call(f.addr, &token, "card_evidence", &link);
+    assert!(status >= 400);
+    assert_eq!(
+        std::fs::metadata(&path).expect("meta").len(),
+        before,
+        "nothing appended past the cap"
+    );
+}
