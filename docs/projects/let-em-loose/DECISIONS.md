@@ -164,6 +164,7 @@ Precise contracts used by this guide:
 | D154 | #1166 smoke-4: Nano drops claim 6 (grounded score 0, deviates from the brief); Q has no accepted or chosen candidate | [stated] 2026-11-18 (1166) |
 | D155 | Standing rule: every run's read-back includes the grounding audit before Nano acts on an escalated claim | [stated] 2026-11-18 (1166) |
 | D156 | #1166 smoke-5: the architect prompt must say every claim sets `answers` to the question's id; a prompt bug fix | [default] 2026-11-18 (1166) |
+| D157 | #1166: keep the D143 bar (criterion 3 not reworded); build D156 and rerun as smoke-6; the all-dropped BBP rule returns to Nano only if candidates keep dropping | [stated] 2026-11-18 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1551,3 +1552,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_4d7f8d98e2a443aebeac21dab81d31c2
 **Key.** lel:1166:architect-prompt-answers-field
 **Source.** let-em-loose-expert, 2026-11-18, from the coordinator's smoke-5 evidence. D149, D150, D127. Numbered D156 after D155.
+
+## D157. #1166: keep the D143 bar (criterion 3 not reworded); build D156 and rerun as smoke-6; the all-dropped BBP rule returns to Nano only if candidates keep dropping
+
+**Decision.** After smoke-5, where both candidates were legitimately dropped and Q stayed Open, Nano chose option a, "Keep the bar, fix and rerun": D143 stays as written (the first run is a clean #1166 pass with a settled Q). Criterion 3 of `1166-smoke-run.md` section 9 is NOT reworded. D156 (architect prompt: set `answers` to the question's id on every claim) is being built as a Factory prompt line, so three candidates stand and one may survive. The rerun is smoke-6. Only if candidates keep dropping legitimately after that does the BBP rule for an all-dropped question (D151 option b; ask-first) go back to Nano. This sets the meaning of D143 for now.
+**Why.** The two losses so far are prompt-fixable, and three candidates give a survivor a real chance.
+**Rejected.** b) rewording criterion 3 so that a legitimately all-dropped Q counts; c) requesting the BBP rule now.
+**Tag.** [stated] · remind-me: mem_708b09f2022e4622b7d060153b9ed72a
+**Key.** lel:1166:keep-first-run-bar-fix-and-rerun-smoke-6
+**Source.** Nano, answer dialog in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_96800eda3fae4f51b07672e908a68ccc` (speaker Nano). Confirms D143; builds on D151, D156. Numbered D157 after D156.
