@@ -142,6 +142,37 @@ pub struct Session {
     /// (C64, gui-design D94), in the order they are numbered; empty when
     /// the source can't ask.
     pub peers: Vec<Peer>,
+    /// The session's blocks by the card their agent works (D336, gui-design
+    /// D97); `None` when the source can't tell who works a block, which
+    /// hides the session overview.
+    pub overview: Option<Vec<OverviewCard>>,
+}
+
+/// One card of the session overview: the blocks worked for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverviewCard {
+    /// The card's id; `None` for the blocks with no card.
+    pub card: Option<String>,
+    pub tiles: Vec<OverviewTile>,
+}
+
+/// A block as the session overview's tile shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverviewTile {
+    /// Its pane key.
+    pub key: u64,
+    /// The source's key for the window it is in.
+    pub window: u64,
+    /// The agent's name, else the block's name or title; empty for neither.
+    pub name: String,
+    /// The agent's role; empty for a block no agent works.
+    pub role: String,
+    /// The program has ended and the block is held.
+    pub exited: bool,
+    /// The block is out of its window's layout.
+    pub detached: bool,
+    /// The client holding its input, when that isn't this window.
+    pub holder: Option<String>,
 }
 
 /// Another window of the account (C64).

@@ -49,6 +49,8 @@ use super::floats::{self, Dir4, Grab};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::motion;
+use super::overview::{self, Card, Tile};
+use super::overview_view::OverviewUi;
 use super::pace::Pacer;
 use super::palette::{self, Cmd, Entry, Id, Out};
 use super::palette_view::PaletteUi;
@@ -179,6 +181,7 @@ fn attached_scene<'a>(
     popover: &'a Popover,
     confirm: Option<&'a Confirm>,
     palette: &'a PaletteUi,
+    overview: &'a OverviewUi,
 ) -> Scene<'a> {
     let body = body.painted();
     Scene {
@@ -190,7 +193,8 @@ fn attached_scene<'a>(
         pop: popover
             .painted()
             .or_else(|| confirm.and_then(Confirm::painted))
-            .or_else(|| palette.painted()),
+            .or_else(|| palette.painted())
+            .or_else(|| overview.painted()),
     }
 }
 
@@ -296,6 +300,8 @@ enum MenuKind {
     Settings,
     /// Open the command palette (gui-design D45 b).
     Palette,
+    /// Show the session overview (gui-design D97).
+    Overview,
     /// Open the config file in the user's editor.
     EditConfig,
 }
@@ -723,6 +729,8 @@ struct WindowState<'a> {
     palette: PaletteUi,
     /// The block that had the focus when the palette opened.
     palette_origin: Option<u64>,
+    /// The session overview (gui-design D97).
+    overview: OverviewUi,
     /// The trusted link origins (C63, D69-D72).
     links: link_policy::Policy,
     /// The effective config; refreshed on live reload so new tabs follow it.
@@ -1330,6 +1338,7 @@ impl WindowState<'_> {
             confirm.repaint(tokens, scale, view);
         }
         self.palette.repaint(tokens, scale, view);
+        self.overview.repaint(tokens, scale, view);
         let oy = self.grid_oy();
         // The command dock renders as one more (synthetic, unfocused) pane
         // right of the pane area. Built before the renderer is borrowed and
@@ -1361,6 +1370,7 @@ impl WindowState<'_> {
                 &self.popover,
                 self.confirm.as_ref(),
                 &self.palette,
+                &self.overview,
             );
             renderer.render(
                 &[],
@@ -1542,6 +1552,7 @@ impl WindowState<'_> {
             &self.popover,
             self.confirm.as_ref(),
             &self.palette,
+            &self.overview,
         );
         // Each float's frame, pane and veil, back to front (gui-design D89).
         let mut float_frames: Vec<(u64, PaneFrame)> = float_snaps
@@ -3689,6 +3700,7 @@ impl WindowState<'_> {
             }
             MenuKind::Settings => self.open_settings(),
             MenuKind::Palette => self.open_palette(),
+            MenuKind::Overview => self.toggle_overview(),
             MenuKind::EditConfig => {
                 self.overlay = None;
                 self.open_config();
@@ -5275,6 +5287,113 @@ impl WindowState<'_> {
         self.popover.update(rows);
     }
 
+    /// The session overview's cards as it shows them now (gui-design D97):
+    /// the source's, with each block's header state and the focus; `None`
+    /// when the source can't tell who works a block.
+    fn overview_cards(&self) -> Option<Vec<Card>> {
+        let focus = self.focused();
+        let cards = self.strip.session().overview.clone()?;
+        Some(
+            cards
+                .into_iter()
+                .map(|c| Card {
+                    card: c.card,
+                    tiles: c
+                        .tiles
+                        .into_iter()
+                        .map(|src| Tile {
+                            lead: self.body.lead(src.key),
+                            state: self.body.state(src.key),
+                            focused: focus == Some(src.key),
+                            src,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        )
+    }
+
+    /// Show the session overview, or leave it (gui-design D97). Without
+    /// the server telling who works a block there is none to show.
+    fn toggle_overview(&mut self) {
+        self.set_armed(false);
+        if self.overview.is_open() {
+            self.overview.close();
+        } else if let Some(cards) = self.overview_cards() {
+            self.popover.close();
+            self.confirm = None;
+            self.palette.close();
+            let online = !self.offline();
+            self.overview.open(cards, online);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// The overview's tiles now, while it is open (D60: updates live).
+    fn refresh_overview(&mut self) {
+        if !self.overview.is_open() {
+            return;
+        }
+        match self.overview_cards() {
+            Some(cards) => self.overview.update(cards, !self.offline()),
+            None => self.overview.close(),
+        }
+    }
+
+    /// A key while the overview is open: arrows move, Enter opens, Esc
+    /// closes; the chord's `o` toggles it, so does the palette's action.
+    fn overview_key(&mut self, key: &Key) {
+        use winit::keyboard::NamedKey;
+        let mapped = match key {
+            Key::Named(NamedKey::ArrowUp) => overview::Key::Up,
+            Key::Named(NamedKey::ArrowDown) => overview::Key::Down,
+            Key::Named(NamedKey::ArrowLeft) => overview::Key::Left,
+            Key::Named(NamedKey::ArrowRight) => overview::Key::Right,
+            Key::Named(NamedKey::Enter) => overview::Key::Enter,
+            Key::Named(NamedKey::Escape) => overview::Key::Esc,
+            _ => return,
+        };
+        let out = self.overview.key(mapped);
+        self.overview_out(out);
+    }
+
+    /// Carry out what the overview asked for: a tile shows its window and
+    /// takes the focus when it is laid out there; a click off the view
+    /// closes it.
+    fn overview_out(&mut self, out: Option<overview::Out>) {
+        match out {
+            None | Some(overview::Out::Stay) => {}
+            Some(overview::Out::Close) => self.overview.close(),
+            Some(overview::Out::Open {
+                key,
+                window,
+                detached,
+            }) => {
+                self.overview.close();
+                let shown = self
+                    .strip
+                    .session()
+                    .windows
+                    .iter()
+                    .any(|w| w.key == window && w.shown);
+                if !shown {
+                    self.source.select(window);
+                } else if !detached
+                    && let Some(tab) = self.tabs.get_mut(self.active)
+                    && (tab.layout.ids().contains(&key) || self.floats.iter().any(|f| f.key == key))
+                {
+                    tab.focus = key;
+                    self.tell_focus();
+                }
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// The palette's rows now, when it is open (D77: they update live).
     fn refresh_palette(&mut self) {
         // A browse belongs to the block it began on: a listing of one
@@ -5286,6 +5405,7 @@ impl WindowState<'_> {
             let entries = self.palette_entries();
             self.palette.update(entries);
         }
+        self.refresh_overview();
     }
 
     /// The source moved the focus to `key`.
@@ -5383,6 +5503,7 @@ impl WindowState<'_> {
             Command::Detach => self.closed = true,
             Command::Float => self.float_focused(),
             Command::Stack { top } => self.stack_focused(top),
+            Command::Overview => self.toggle_overview(),
             Command::Next => self.focus_next_shown(),
             Command::MoveMode => {
                 // Only a source that floats has a float to move.
@@ -5759,6 +5880,12 @@ impl WindowState<'_> {
             label: "Command palette".to_string(),
             kind: MenuKind::Palette,
         }];
+        if self.strip.session().overview.is_some() {
+            items.push(MenuItem {
+                label: "Session overview".to_string(),
+                kind: MenuKind::Overview,
+            });
+        }
         items.extend(menu_items());
         items
     }
@@ -5769,6 +5896,10 @@ impl WindowState<'_> {
         use winit::keyboard::NamedKey;
         if self.palette.is_open() {
             self.palette_key(key);
+            return;
+        }
+        if self.overview.is_open() {
+            self.overview_key(key);
             return;
         }
         if self.confirm.is_some() {
@@ -5954,13 +6085,17 @@ impl WindowState<'_> {
 
     /// Whether a popover is open.
     fn popover_open(&self) -> bool {
-        self.popover_kind().is_some() || self.confirm.is_some() || self.palette.is_open()
+        self.popover_kind().is_some()
+            || self.confirm.is_some()
+            || self.palette.is_open()
+            || self.overview.is_open()
     }
 
     /// The pointer moved to `(x, y)`: light the row under it.
     fn popover_hover(&mut self, x: f64, y: f64) {
         let changed = self.popover.hover(x, y)
             || self.palette.hover(x, y)
+            || self.overview.hover(x, y)
             || self.confirm.as_mut().is_some_and(|c| c.hover(x, y));
         if let (true, Some(window)) = (changed, &self.window) {
             window.request_redraw();
@@ -5973,6 +6108,11 @@ impl WindowState<'_> {
     fn popover_click(&mut self, x: f64, y: f64) {
         if self.palette.is_open() {
             self.palette_click(x, y);
+            return;
+        }
+        if self.overview.is_open() {
+            let out = self.overview.click(x, y);
+            self.overview_out(out);
             return;
         }
         if let Some(confirm) = &self.confirm {
@@ -6006,6 +6146,7 @@ impl WindowState<'_> {
             false => {
                 self.popover.close();
                 self.confirm = None;
+                self.overview.close();
                 let entries = self.palette_entries();
                 self.palette_origin = self.focused();
                 self.palette.open(entries);
@@ -6058,6 +6199,18 @@ impl WindowState<'_> {
                 self.config_path.is_some(),
             ),
         ];
+        if session.overview.is_some() {
+            let label = if self.overview.is_open() {
+                "Close session overview"
+            } else {
+                "Session overview"
+            };
+            let at = out
+                .iter()
+                .position(|e| e.id == Id::Cmd(Cmd::Switcher))
+                .map_or(out.len(), |i| i + 1);
+            out.insert(at, act(Cmd::Overview, label, true));
+        }
         match take {
             Some(super::source::Take::Held) => {
                 out.push(act(Cmd::GiveBack, "Give back", online));
@@ -6171,6 +6324,7 @@ impl WindowState<'_> {
             Id::Cmd(Cmd::FocusDown) => self.focus_block_dir(0, 1),
             Id::Cmd(Cmd::NewWindow) => self.source.new_window(),
             Id::Cmd(Cmd::Switcher) => self.toggle_popover(Kind::Switcher),
+            Id::Cmd(Cmd::Overview) => self.toggle_overview(),
             Id::Cmd(Cmd::Settings) => self.open_settings(),
             Id::Cmd(Cmd::ReloadConfig) => self.reload_config(),
             Id::Cmd(Cmd::TakeOver) => {
@@ -6965,6 +7119,7 @@ impl<'a> App<'a> {
             shown_wait: None,
             palette: PaletteUi::new().ok_or("the interface font failed to parse")?,
             palette_origin: None,
+            overview: OverviewUi::new().ok_or("the interface font failed to parse")?,
             links: load_trust(),
             config: self.config.clone(),
             config_path: self.config_path.clone(),

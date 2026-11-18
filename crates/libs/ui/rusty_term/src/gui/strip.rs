@@ -569,6 +569,7 @@ mod tests {
             sessions: Vec::new(),
             detached: Vec::new(),
             peers: Vec::new(),
+            overview: None,
         }
     }
 

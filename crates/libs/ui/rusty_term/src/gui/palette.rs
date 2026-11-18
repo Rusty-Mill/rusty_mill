@@ -29,6 +29,8 @@ pub(crate) enum Cmd {
     FocusDown,
     NewWindow,
     Switcher,
+    /// Show or leave the session overview (gui-design D97).
+    Overview,
     Settings,
     ReloadConfig,
     TakeOver,

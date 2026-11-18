@@ -42,6 +42,8 @@ pub(crate) enum Command {
     Move(Dir4),
     /// Resize the focused float one step (`H J K L`).
     Resize(Dir4),
+    /// Show or leave the session overview (`o`, gui-design D97).
+    Overview,
     /// Type a Ctrl-] into the focused block.
     Type,
     /// Leave the mode without a command (Esc).
@@ -119,6 +121,7 @@ fn char_command(c: &str) -> Command {
         "f" => Command::Float,
         "u" => Command::Stack { top: true },
         "U" => Command::Stack { top: false },
+        "o" => Command::Overview,
         "n" => Command::Next,
         "m" => Command::MoveMode,
         "H" => Command::Resize(Dir4::Left),
@@ -167,6 +170,7 @@ mod tests {
         assert_eq!(ch("z"), Command::Zoom);
         assert_eq!(ch("x"), Command::Close);
         assert_eq!(ch("d"), Command::Detach);
+        assert_eq!(ch("o"), Command::Overview);
         assert_eq!(ch("h"), Command::Focus(-1, 0));
         assert_eq!(ch("j"), Command::Focus(0, 1));
         let arrow = Key::Named(NamedKey::ArrowUp);

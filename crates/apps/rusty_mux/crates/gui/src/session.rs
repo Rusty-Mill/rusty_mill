@@ -8,8 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use rusty_mux_core::{BlockId, ClientId, Event, Float, Layout, Principal, SessionId, WindowId};
-use rusty_mux_proto::{Entry, Message};
-use rusty_term::gui::source::{Peer, Session, SessionChoice, WindowTab};
+use rusty_mux_proto::{AgentMeta, Entry, Message};
+use rusty_term::gui::source::{
+    OverviewCard, OverviewTile, Peer, Session, SessionChoice, WindowTab,
+};
 
 use crate::keys::Keys;
 use crate::tree::tree;
@@ -53,6 +55,12 @@ struct Blk {
     title: String,
     /// When this client saw it leave its window's layout, if it did.
     detached: Option<Instant>,
+    /// Who works it, when the server says (D336).
+    agent: Option<AgentMeta>,
+    /// Its program ended and the server holds the block (C78).
+    exited: bool,
+    /// Whose input lease it is.
+    holder: Option<ClientId>,
 }
 
 /// A detached block of the shown window (gui-design D61).
@@ -126,6 +134,9 @@ pub struct Model {
     ended: Option<String>,
     /// This window's own control client, to leave it out of its peers.
     me: Option<ClientId>,
+    /// The server tells who works each block ([`Features::AGENT_META`]),
+    /// so the session overview has something to group by.
+    knows_agents: bool,
 }
 
 impl Model {
@@ -165,6 +176,7 @@ impl Model {
             follows_active,
             ended: None,
             me: None,
+            knows_agents: false,
         };
         for m in entries {
             if let Some(e) = entry(m) {
@@ -191,6 +203,7 @@ impl Model {
             follows_active: self.follows_active,
             ended: self.ended.clone(),
             me: self.me,
+            knows_agents: self.knows_agents,
         };
         for e in entries.iter().filter_map(entry) {
             model.take(e);
@@ -414,7 +427,66 @@ impl Model {
             // The source fills these in when it can put one back.
             detached: Vec::new(),
             peers: self.peers(keys.peers),
+            overview: self.knows_agents.then(|| self.overview(keys)),
         }
+    }
+
+    /// Says whether the server tells who works each block.
+    pub fn set_knows_agents(&mut self, knows: bool) {
+        self.knows_agents = knows;
+    }
+
+    /// The shown session's blocks grouped by the card their agent works
+    /// (D336), in order of first appearance, the blocks with no card last;
+    /// the same grouping as `rusty-mux-ctl overview`.
+    fn overview(&self, keys: &mut StripKeys<'_>) -> Vec<OverviewCard> {
+        let mut cards: Vec<OverviewCard> = Vec::new();
+        for id in self.session_blocks() {
+            let Some(b) = self.blocks.get(&id) else {
+                continue;
+            };
+            let name = match &b.agent {
+                Some(m) => m.agent.clone(),
+                None if b.name.is_empty() => b.title.clone(),
+                None => b.name.clone(),
+            };
+            let tile = OverviewTile {
+                key: keys.blocks.key(id),
+                window: keys.windows.key(b.window),
+                name,
+                role: b.agent.as_ref().map(|m| m.role.clone()).unwrap_or_default(),
+                exited: b.exited,
+                detached: b.detached.is_some() || !self.laid_out(id),
+                holder: b
+                    .holder
+                    .filter(|h| Some(*h) != self.me)
+                    .map(|h| self.client_name(h)),
+            };
+            let card = b
+                .agent
+                .as_ref()
+                .map(|m| m.card.as_str())
+                .filter(|c| !c.is_empty());
+            match cards.iter_mut().find(|c| c.card.as_deref() == card) {
+                Some(c) => c.tiles.push(tile),
+                None => cards.push(OverviewCard {
+                    card: card.map(str::to_owned),
+                    tiles: vec![tile],
+                }),
+            }
+        }
+        cards.sort_by_key(|c| c.card.is_none());
+        cards
+    }
+
+    /// Whether `block` is in its window's layout or floats.
+    fn laid_out(&self, block: BlockId) -> bool {
+        self.windows.iter().any(|w| {
+            w.layout
+                .as_ref()
+                .is_some_and(|l| l.blocks().contains(&block))
+                || w.floats.iter().any(|f| f.block == block)
+        })
     }
 
     /// Says which client is this window's own (C64).
@@ -530,21 +602,34 @@ impl Model {
                 Change::Strip
             }
             Entry::Floats { window, floats } => self.floated(*window, floats),
-            // The GUI does not ask for AGENT_META yet (the session overview does).
-            Entry::Agent { .. } => Change::None,
+            Entry::Agent { block, meta } => match self.blocks.get_mut(block) {
+                Some(b) if b.agent.as_ref() != Some(meta) => {
+                    b.agent = Some(meta.clone());
+                    Change::Strip
+                }
+                _ => Change::None,
+            },
             Entry::Block {
                 block,
                 window,
                 name,
                 title,
+                exited,
+                holder,
                 ..
             } => {
-                let detached = self.blocks.get(block).and_then(|b| b.detached);
+                let old = self.blocks.get(block);
+                let detached = old.and_then(|b| b.detached);
+                // An Agent entry follows its block's, so what is known stays.
+                let agent = old.and_then(|b| b.agent.clone());
                 let blk = Blk {
                     window: *window,
                     name: name.clone(),
                     title: title.clone(),
                     detached,
+                    agent,
+                    exited: *exited,
+                    holder: *holder,
                 };
                 match self.blocks.insert(*block, blk.clone()) {
                     Some(was) if was == blk => Change::None,
@@ -664,10 +749,27 @@ impl Model {
                     name: String::new(),
                     title: String::new(),
                     detached: None,
+                    agent: None,
+                    exited: false,
+                    holder: None,
                 };
                 self.blocks.insert(*block, blk);
                 Change::None
             }
+            Event::ProgramExited { block, .. } => match self.blocks.get_mut(block) {
+                Some(b) if !b.exited => {
+                    b.exited = true;
+                    Change::Strip
+                }
+                _ => Change::None,
+            },
+            Event::LeaseChanged { block, holder } => match self.blocks.get_mut(block) {
+                Some(b) if b.holder != *holder => {
+                    b.holder = *holder;
+                    Change::Strip
+                }
+                _ => Change::None,
+            },
             Event::BlockRenamed { block, name } => match self.blocks.get_mut(block) {
                 Some(b) => {
                     b.name.clone_from(name);
@@ -899,7 +1001,7 @@ mod tests {
     use super::{Change, Model, StripKeys};
     use crate::keys::Keys;
     use rusty_mux_core::{BlockId, ClientId, Event, Layout, Principal, SessionId, WindowId};
-    use rusty_mux_proto::{Entry, Message};
+    use rusty_mux_proto::{AgentMeta, Entry, Message};
     use rusty_uuid::Uuid;
 
     fn ids<T>(f: impl Fn(Uuid) -> T) -> [T; 3] {
@@ -1316,6 +1418,61 @@ mod tests {
         });
         assert!(m.switch(s));
         assert_eq!(m.shown(), w[2]);
+    }
+
+    #[test]
+    fn the_overview_groups_the_shown_sessions_blocks_by_card() {
+        let (s, w, b) = (
+            SessionId::from_uuid(Uuid::new_v4()),
+            ids(WindowId::from_uuid),
+            ids(BlockId::from_uuid),
+        );
+        let mut m = model(s, &w, &b);
+        assert_eq!(strip(&m).overview, None, "the server never said");
+        m.set_knows_agents(true);
+        let meta = |agent: &str, role: &str, card: &str| AgentMeta {
+            agent: agent.into(),
+            role: role.into(),
+            card: card.into(),
+        };
+        m.take(&Entry::Agent {
+            block: b[0],
+            meta: meta("ann", "builder", "#7"),
+        });
+        m.take(&Entry::Agent {
+            block: b[2],
+            meta: meta("bob", "reviewer", "#7"),
+        });
+        // A block of another session is not in this one's overview.
+        let s2 = SessionId::from_uuid(Uuid::new_v4());
+        let (w2, b2) = (
+            WindowId::from_uuid(Uuid::new_v4()),
+            BlockId::from_uuid(Uuid::new_v4()),
+        );
+        second(&mut m, s2, w2, b2, false);
+        m.take(&Entry::Agent {
+            block: b2,
+            meta: meta("cy", "builder", "#9"),
+        });
+        let cards = strip(&m).overview.expect("known");
+        let shape: Vec<_> = cards
+            .iter()
+            .map(|c| {
+                let names: Vec<_> = c
+                    .tiles
+                    .iter()
+                    .map(|t| (t.name.as_str(), t.role.as_str()))
+                    .collect();
+                (c.card.as_deref(), names)
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (Some("#7"), vec![("ann", "builder"), ("bob", "reviewer")]),
+                (None, vec![("", "")]),
+            ]
+        );
     }
 
     #[test]
