@@ -8,7 +8,7 @@ A read-only side panel scoped to the session's workspace (the repo or worktree t
 
 - Tree, with a badge or colour per agent on files that agent's block has touched.
 - Actions: copy path, reveal/cd in a block, open in an external editor. **No editing, no LSP, no file tabs.** Term stays a terminal.
-- Scope: the session workspace by default. Selecting a card in the [session overview](SESSION-OVERVIEW.md) widens it to every worktree that card's blocks touch (a library crate and its consumers).
+- Scope: the session workspace only. The server call (D337) never leaves it, and selecting a card does not widen it. **Deferred:** showing every worktree a card's blocks touch (a library crate and its consumers) needs its own decision on how to cross workspaces, for example one session-scoped call per workspace, aggregated by the client. Nano's card asks for it; it is not authorized by D337.
 - TUI: a text tree plus a touched-by list.
 
 ## Data
