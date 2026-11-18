@@ -230,7 +230,7 @@ impl Provider {
     /// Load a registered client from the state file.
     pub fn get_client(&self, client_id: &str) -> Option<ClientInformation> {
         let record = self.store.get_client(client_id)?;
-        rusty_json::from_value(record).ok()
+        ClientInformation::from_value(&record).ok()
     }
 
     /// Persist a dynamically registered client.
@@ -259,9 +259,7 @@ impl Provider {
             client_name: metadata.client_name,
             extra: metadata.extra,
         };
-        let record = rusty_json::to_value(&info)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        self.store.put_client(&client_id, record)?;
+        self.store.put_client(&client_id, info.to_value())?;
         Ok(info)
     }
 

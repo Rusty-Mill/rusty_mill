@@ -454,21 +454,18 @@ impl Endpoints {
     // -- /register (RFC 7591) -------------------------------------------------------
 
     fn register(&self, body: &[u8]) -> Response {
-        let metadata: ClientMetadata = match rusty_json::from_slice(body) {
+        let metadata = match ClientMetadata::from_slice(body) {
             Ok(metadata) => metadata,
             Err(e) => {
                 let body = json!({
                     "error": "invalid_client_metadata",
-                    "error_description": e.to_string(),
+                    "error_description": e,
                 });
                 return Response::json(400, &body);
             }
         };
         match self.provider.register_client(metadata) {
-            Ok(info) => match rusty_json::to_value(&info) {
-                Ok(body) => Response::json(201, &body),
-                Err(e) => server_error("registration could not be encoded", &e),
-            },
+            Ok(info) => Response::json(201, &info.to_value()),
             Err(RegisterError::Invalid(err)) => {
                 let body =
                     json!({ "error": err.error, "error_description": err.error_description });
@@ -560,12 +557,14 @@ impl Form {
     /// The name of the first repeated parameter.
     fn parse(input: &[u8]) -> Result<Self, String> {
         let mut fields = HashMap::new();
-        for (key, value) in rusty_url::form_urlencoded::parse(input) {
-            let key = key.into_owned();
+        for pair in input.split(|&b| b == b'&').filter(|p| !p.is_empty()) {
+            let at = pair.iter().position(|&b| b == b'=');
+            let (key, value) = at.map_or((pair, &b""[..]), |i| (&pair[..i], &pair[i + 1..]));
+            let key = decode_form_bytes(key);
             if fields.contains_key(&key) {
                 return Err(key);
             }
-            fields.insert(key, value.into_owned());
+            fields.insert(key, decode_form_bytes(value));
         }
         Ok(Self(fields))
     }
@@ -573,6 +572,28 @@ impl Form {
     fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(String::as_str)
     }
+}
+
+/// Percent-decode one form component from raw bytes, `+` as a space. Escapes
+/// are resolved before any UTF-8 reading, so an escaped and a raw byte may
+/// make up one character; only then is invalid UTF-8 replaced.
+fn decode_form_bytes(input: &[u8]) -> String {
+    let hex = |b: Option<&u8>| b.and_then(|&b| char::from(b).to_digit(16));
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let (byte, used) = match input[i] {
+            b'+' => (b' ', 1),
+            b'%' => match (hex(input.get(i + 1)), hex(input.get(i + 2))) {
+                (Some(hi), Some(lo)) => (u8::try_from(hi * 16 + lo).unwrap_or(b'%'), 3),
+                _ => (b'%', 1),
+            },
+            other => (other, 1),
+        };
+        out.push(byte);
+        i += used;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Run `handler` on the decoded `input`, or refuse a repeated parameter
@@ -606,12 +627,9 @@ fn token_error(status: u16, error: &str, description: &str) -> Response {
 }
 
 fn token_success(tokens: &TokenResponse) -> Response {
-    match rusty_json::to_value(tokens) {
-        Ok(body) => Response::json(200, &body)
-            .with_header(NO_STORE)
-            .with_header(NO_CACHE),
-        Err(e) => server_error("tokens could not be encoded", &e),
-    }
+    Response::json(200, &tokens.to_value())
+        .with_header(NO_STORE)
+        .with_header(NO_CACHE)
 }
 
 fn server_error(what: &str, error: &dyn std::fmt::Display) -> Response {
@@ -628,7 +646,7 @@ fn expired() -> Response {
 
 /// Percent-encode one query component, form style (space as `+`).
 fn urlencode_component(s: &str) -> String {
-    rusty_url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+    rusty_percent::encode(s).replace("%20", "+")
 }
 
 /// Append `params` to `base`'s query string, keeping any query it already
@@ -809,6 +827,25 @@ mod tests {
         assert_eq!(r.status, 400);
         assert_eq!(json_of(r)["error"], "invalid_request");
         assert_eq!(header(r, "location"), "", "a refusal never redirects");
+    }
+
+    #[test]
+    fn form_decoding_handles_escapes_plus_and_bare_names() {
+        let form = Form::parse(b"a=x+y%26z&&b&c%5Fd=%E2%9C%93").unwrap();
+        assert_eq!(form.get("a"), Some("x y&z"));
+        assert_eq!(form.get("b"), Some(""));
+        assert_eq!(form.get("c_d"), Some("\u{2713}"));
+        assert_eq!(Form::parse(b"k=1&k%3D=2").map(|_| ()), Ok(()));
+        // An escaped byte and a raw byte can form one character.
+        let mixed = Form::parse(b"r=https%3A%2F%2Fx%2F%C3\xA9").unwrap();
+        assert_eq!(mixed.get("r"), Some("https://x/\u{e9}"));
+        assert_eq!(Form::parse(b"r=%zz%4").unwrap().get("r"), Some("%zz%4"));
+        assert_eq!(Form::parse(b"k=1&k=2").err(), Some("k".to_string()));
+    }
+
+    #[test]
+    fn query_components_encode_space_as_plus_and_reserved_as_escapes() {
+        assert_eq!(urlencode_component("a b&c=d/é"), "a+b%26c%3Dd%2F%C3%A9");
     }
 
     #[test]
