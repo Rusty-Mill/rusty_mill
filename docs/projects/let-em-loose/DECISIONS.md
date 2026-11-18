@@ -160,6 +160,7 @@ Precise contracts used by this guide:
 | D150 | #1166 smoke-3: the architect prompt also says one claim post per reply, no evidence post; a prompt bug fix | [default] 2026-11-17 (1166) |
 | D151 | #1166: the first-run bar is met through reviewer prompt wording (support only when the brief supports the claim); Q54 resolved for now | [stated] 2026-11-17 (1166) |
 | D152 | #1166: no host change; rerun smoke-4 after the prompt fixes alone (D147 hold stays) | [stated] 2026-11-17 (1166) |
+| D153 | #1166: the Qwen reasoning budget (`--reasoning-budget 2048`) is the one host change allowed before smoke-5; the llama.cpp rebuild stays held | [stated] 2026-11-17 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1503,8 +1504,19 @@ The first three were approved first. The last three were added to Q35 after that
 ## D152. #1166: no host change; rerun smoke-4 after the prompt fixes alone (D147 hold stays)
 
 **Decision.** Nano, call 2 of the same answer: option b, "No host change. Rerun after the prompt fixes alone." D147's hold stays: the llama.cpp rebuild (D145) and the Qwen reasoning budget are not applied. The rerun is smoke-4 after the prompt fixes alone: D148 (the orch re-read, done), and D149, D150 and the reviewer wording of D151, all in the Factory PR. If the empty replies at the 4096-token cap recur, that is the evidence for the reasoning budget, one change at a time.
+**Condition recurred 2026-11-17 (smoke-4):** three empty Qwen replies again, and they cost the third candidate (run 4 result). Applying any host change is still Nano's call (not yet answered).
 **Why.** One change at a time: the prompt fixes get measured alone before any host change.
 **Rejected.** a) applying the Qwen reasoning budget first; c) also rebuilding llama.cpp (no new evidence in smoke-3).
 **Tag.** [stated] · remind-me: mem_4fc7c5f64a84458a9fbdf43dc3fd84ce
 **Key.** lel:1166:no-host-change-rerun-smoke-4
 **Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-17, saved verbatim as `mem_176bc02b805a480b9806b8e3ee0945a3` (speaker Nano), call 2. Confirms D147's hold. Numbered D152 after D151.
+
+## D153. #1166: the Qwen reasoning budget (`--reasoning-budget 2048`) is the one host change allowed before smoke-5; the llama.cpp rebuild stays held
+
+**Decision.** After smoke-4 Nano chose option a, "Qwen reasoning budget only": add `--reasoning-budget 2048` to the `qwen3.6-35b-a3b` entry in `~/llama/config.yaml` (untested), then rerun as smoke-5. This lifts D152's no-host-change hold for exactly that one change. D147's one-change-at-a-time stays, and the llama.cpp rebuild (D145) stays held; the gpt-oss HTTP 500s cost only absorbed calls. Smoke-5 is judged on the same section 9 criteria.
+**Why.** Empty Qwen replies (`reply is not JSON: unexpected end of input`) recurred in smoke-3 (3) and smoke-4 (3) and cost the third candidate in smoke-4; the llama-swap log shows four Qwen generations of exactly 4096 tokens, orch's output cap. That is strong evidence, not proof, that thinking consumes the cap.
+**Note.** llama-server accepts the budget per request (`reasoning_budget_tokens` in the request body, `tools/server/server-common.cpp`), so the effect can be tested with free local calls before the config is edited (the coordinator is running that test). Claim 6 in Nano's inbox (smoke-4) is his own call: `bbp human ... claim 6 accept`, or `choose 1 6`.
+**Rejected.** b) no host change; c) rebuilding llama.cpp first.
+**Tag.** [stated] · remind-me: mem_674628bd3ea1445480debdb36683290f
+**Key.** lel:1166:qwen-reasoning-budget-then-smoke-5
+**Source.** Nano, answer dialog in the Claude Code session on BaileyAi, 2026-11-17, saved verbatim as `mem_1c343b7650f94eb3bf7cf89344acb380` (speaker Nano). Narrows D152; confirms D147's one-at-a-time rule. Numbered D153 after D152.
