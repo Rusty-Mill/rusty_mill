@@ -1,6 +1,6 @@
 # Archive dismissed agent blocks (card #1570)
 
-Status: design, proposed; not authorized to build. Source: Nano, voice, 2026-11-18 (remind-me mem_2faddab4, a decision; card #1570). Nano gates it. Pack ids to reserve: handoff D339, Q98.
+Status: design; archive and secrets accepted (handoff D339, Nano 2026-11-18). Export to remind-me is its own slice behind the owner gate. Source: Nano, voice, 2026-11-18 (remind-me mem_2faddab4, a decision; card #1570).
 
 ## Lifecycle
 
@@ -8,7 +8,7 @@ Launch on card take, running (agent holds the lease), held on exit (C78: output 
 
 ## Archive record
 
-Transcript (C45/C70 screen and history format), exit code, start/end, agent identity, model, card id, session/project, who dismissed and why, and a label (good/bad, or the card outcome) plus a `sensitive` mark.
+Transcript (C45/C70 screen and history format), exit code, start/end, agent identity, model, card id, session/project, who dismissed and why, and a label (good/bad, or the card outcome) plus a `sensitive` mark. The archive step scans the transcript and sets `sensitive` on any hit; nothing relies on someone remembering (D339).
 
 Recall: by card, project or date range through `rusty-mux-ctl archive list|show|replay` and the switcher. Replay opens the record read-only in a held block in the same session (C78, REPLAY.md, RTCP v6). The [session overview](../term/SESSION-OVERVIEW.md) links to a card's archived runs.
 
@@ -21,12 +21,14 @@ Recall: by card, project or date range through `rusty-mux-ctl archive list|show|
 ## Constraints
 
 - D75 deletes the spool when a block closes. Dismiss must copy history into the archive first.
-- D74: the state dir holds screens unencrypted and owner-only. D74 covers the existing restore state only. It does **not** authorize indefinite archive retention or transcript export; both need Nano's recorded answer (Q98).
+- D74: the state dir holds screens unencrypted and owner-only. D74 covers the existing restore state only. D339 settles where the archive lives (below); transcript export stays its own gated slice.
+- Location (D339): the mux state dir, not loaded at startup, covered by backups. No redaction (it gives false confidence).
+- Export: a `sensitive` record still exports metadata and exit code so the card keeps its evidence; the transcript stays out of export and labels.
 - Retention: keep all; a size cap with oldest-first eviction only when Nano sets one.
 
-## Wire (not allocated here)
+## Wire (D339)
 
-A store record type, a recall call (ctl and wire) behind a Features bit, and a dismiss message carrying card id, evidence links and label. The remind-me export is a new dependency edge and an outside write: owner gate. Redaction is security-relevant.
+A store record type, a recall call (ctl and wire) behind a Features bit, and a dismiss message carrying card id, evidence links and label. The remind-me export is a new dependency edge and an outside write: owner gate. The sensitive scan is security-relevant.
 
 ## Order
 
@@ -34,9 +36,6 @@ A store record type, a recall call (ctl and wire) behind a Features bit, and a d
 2. Replay in a held block (cloud-buildable; the GUI header is a GUI slice).
 3. Export to remind-me (owner gate, after 1 and 2).
 
-## Open questions (proposed only; implementation gated until Nano's answer is recorded)
+## Decided
 
-Every item below is a recommendation, not an authorized default. Nano gates this design (card tag `needs-nano`). Wire, security, privacy, retention and export behaviour must not be built until his answer is recorded in the pack by the expert.
-
-- **Q98a** Where does the archive live? a) mux state dir with an optional cap, exported to remind-me on dismiss; b) orch owns it, mux streams; c) remind-me only. **Recommend a**: the mux holds the grid, history and exit code, and D74 already gates the dir.
-- **Q98b** Secrets: a) mark `sensitive`, exclude from export and labels, no redaction; b) pattern redaction plus the mark; c) never export transcripts. **Recommend a**: pattern redaction misses things.
+- **Q98** (D339, Nano 2026-11-18): archive in the mux state dir, not loaded at startup, backup-covered; no redaction; scan at archive time and mark `sensitive` on any hit; still export metadata and exit code. Export to remind-me is its own slice.

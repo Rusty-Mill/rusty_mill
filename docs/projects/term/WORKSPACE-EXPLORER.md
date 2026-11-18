@@ -1,7 +1,6 @@
 # Workspace explorer (card #1573)
 
-Status: design, proposed; not authorized to build. Source: Nano, voice, 2026-11-18 (remind-me mem_797b5707, card #1573). Nano gates it.
-Pack ids to reserve: handoff D337, Q96; gui-design D95, Q93.
+Status: design; server call accepted (handoff D337, Nano 2026-11-18). The wire slice still passes the owner gate when its PR is opened. Source: Nano, voice, 2026-11-18 (remind-me mem_797b5707, card #1573).
 
 ## What
 
@@ -23,9 +22,9 @@ A read-only side panel scoped to the session's workspace (the repo or worktree t
 
 The mux has no worktree or git state today. Touched-file data is a new server call.
 
-## Wire (not allocated here)
+## Wire (D337)
 
-A server call for tree and touched files needs a message and a Features bit: a protocol and security change (reads under the workspace root only, no path escape, owner gate). Alternative: the GUI reads its own host filesystem, which needs no wire change but only works locally.
+A server call limited to list, stat and touched-by, scoped to the session workspace. No file contents: opening is the editor's job. Paths are canonicalised so a symlink cannot escape the workspace. New message plus a Features bit (next free on main); old peers see it, so the same owner gate as D336 applies when its PR is opened.
 
 ## Order
 
@@ -33,9 +32,7 @@ A server call for tree and touched files needs a message and a Features bit: a p
 2. TUI text tree (cloud-buildable).
 3. GUI panel on the D60 panel tokens (needs a Windows GUI build; not cloud-buildable).
 
-## Open questions (proposed only; implementation gated until Nano's answer is recorded)
+## Decided
 
-Every item below is a recommendation, not an authorized default. Nano gates this design (card tag `needs-nano`). Wire, security, privacy, retention and export behaviour must not be built until his answer is recorded in the pack by the expert.
-
-- **Q96** Wire call or local-only? a) wire call scoped to the block's workspace, works remote; b) local-only first. **Recommend a**: the mux is often remote and `list-dir` already shows the pattern.
+- **Q96** (D337, Nano 2026-11-18): wire call, list/stat/touched-by only, canonicalised paths, same gate as Q95.
 - Panel look goes to `rusty-term-design-expert`.
