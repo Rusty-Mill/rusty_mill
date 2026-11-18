@@ -68,13 +68,14 @@ fn storage(e: impl Display) -> BoardError {
     BoardError::Storage(e.to_string())
 }
 
-/// A revision or count as SQLite's integer; saturates rather than wrapping.
-fn int(n: u64) -> i64 {
-    i64::try_from(n).unwrap_or(i64::MAX)
+/// A revision or number as SQLite's integer. Out of range is an error, never a clamp: two
+/// distinct revisions must not alias.
+fn int(n: u64) -> Result<i64, BoardError> {
+    i64::try_from(n).map_err(|_| storage(format!("{n} is out of range")))
 }
 
-fn uint(n: i64) -> u64 {
-    u64::try_from(n).unwrap_or(0)
+fn uint(n: i64) -> Result<u64, BoardError> {
+    u64::try_from(n).map_err(|_| storage(format!("{n} is out of range")))
 }
 
 fn card_of(doc: &str) -> Result<Card, BoardError> {
@@ -121,27 +122,33 @@ impl SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
         let id = card.id.to_string();
-        let number = card.number.map(int);
+        let number = card.number.map(int).transpose()?;
+        let rev = int(card.rev)?;
         let col = card.column.to_string();
         if insert {
             let n = tx
                 .execute(
                     "INSERT OR IGNORE INTO cards (id, number, rev, col, project, created_ms, updated_ms, doc)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![id, number, int(card.rev), col, card.project, card.created_ms, card.updated_ms, doc],
+                    params![id, number, rev, col, card.project, card.created_ms, card.updated_ms, doc],
                 )
                 .map_err(storage)?;
             if n == 0 {
                 return Err(BoardError::Conflict);
             }
         } else {
-            let n = tx
-                .execute(
-                    "UPDATE cards SET number = ?2, rev = ?3, col = ?4, project = ?5, updated_ms = ?6, doc = ?7
-                     WHERE id = ?1 AND rev = ?8",
-                    params![id, number, int(card.rev), col, card.project, card.updated_ms, doc, int(card.rev.saturating_sub(1))],
-                )
-                .map_err(storage)?;
+            // A replacement is exactly one revision on: revision 0 has no predecessor, so it
+            // never matches (as MemStore), only tells a missing card from a stale one below.
+            let n = match card.rev.checked_sub(1) {
+                None => 0,
+                Some(prev) => tx
+                    .execute(
+                        "UPDATE cards SET number = ?2, rev = ?3, col = ?4, project = ?5, updated_ms = ?6, doc = ?7
+                         WHERE id = ?1 AND rev = ?8",
+                        params![id, number, rev, col, card.project, card.updated_ms, doc, int(prev)?],
+                    )
+                    .map_err(storage)?,
+            };
             if n == 0 {
                 let exists = tx
                     .query_row("SELECT 1 FROM cards WHERE id = ?1", [&id], |_| Ok(()))
@@ -198,7 +205,7 @@ impl Store for SqliteStore {
     fn numbered(&self, number: u64) -> Result<Vec<Card>, BoardError> {
         self.cards(
             "SELECT doc FROM cards WHERE number = ?1 ORDER BY created_ms, id",
-            [int(number)],
+            [int(number)?],
         )
     }
 
@@ -302,14 +309,16 @@ impl Store for SqliteStore {
                 r.get(0)
             })
             .map_err(storage)?;
-        let next = int(uint(top).max(floor)).saturating_add(1);
+        let next = int(uint(top)?.max(floor))?
+            .checked_add(1)
+            .ok_or_else(|| storage("card numbers are exhausted"))?;
         tx.execute(
             "INSERT INTO numbers (number, card) VALUES (?1, ?2)",
             params![next, card.to_string()],
         )
         .map_err(storage)?;
         tx.commit().map_err(storage)?;
-        Ok(uint(next))
+        uint(next)
     }
 
     fn highest_reserved(&self) -> Result<u64, BoardError> {
@@ -320,7 +329,7 @@ impl Store for SqliteStore {
                 r.get(0)
             })
             .map_err(storage)?;
-        Ok(uint(top))
+        uint(top)
     }
 
     fn health(&self) -> Result<(), BoardError> {
@@ -359,7 +368,7 @@ impl Store for SqliteStore {
     }
 }
 
-fn milestone_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Milestone)> {
+fn milestone_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Milestone, i64)> {
     let id: String = r.get(0)?;
     Ok((
         id,
@@ -369,8 +378,9 @@ fn milestone_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Milestone)> 
             title: r.get(2)?,
             target_ms: r.get(3)?,
             done_ms: r.get(4)?,
-            rev: uint(r.get(5)?),
+            rev: 0,
         },
+        r.get(5)?,
     ))
 }
 
@@ -387,9 +397,10 @@ impl MilestoneStore for SqliteStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage)?;
         rows.into_iter()
-            .map(|(id, m)| {
+            .map(|(id, m, rev)| {
                 Ok(Milestone {
                     id: Uuid::parse_str(&id).map_err(storage)?,
+                    rev: uint(rev)?,
                     ..m
                 })
             })
@@ -407,7 +418,14 @@ impl MilestoneStore for SqliteStore {
             )
             .optional()
             .map_err(storage)?;
-        Ok(row.map(|(_, m)| Milestone { id, ..m }))
+        row.map(|(_, m, rev)| {
+            Ok(Milestone {
+                id,
+                rev: uint(rev)?,
+                ..m
+            })
+        })
+        .transpose()
     }
 
     fn add_milestone(&self, m: &Milestone) -> Result<u64, BoardError> {
@@ -427,6 +445,7 @@ impl MilestoneStore for SqliteStore {
     }
 
     fn save_milestone(&self, current: &Milestone, next: &Milestone) -> Result<u64, BoardError> {
+        let at = int(current.rev)?;
         let db = self.db()?;
         let n = db
             .as_raw()
@@ -439,7 +458,7 @@ impl MilestoneStore for SqliteStore {
                     next.title,
                     next.target_ms,
                     next.done_ms,
-                    int(current.rev)
+                    at
                 ],
             )
             .map_err(storage)?;

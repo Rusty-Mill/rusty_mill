@@ -247,3 +247,66 @@ fn a_newer_schema_is_refused_not_downgraded() {
     ));
     let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
 }
+
+#[test]
+fn a_replacement_must_be_exactly_one_revision_on_as_in_the_in_memory_store() {
+    let (sql, mem) = (
+        SqliteStore::open_in_memory().expect("open"),
+        MemStore::default(),
+    );
+    let a = card("a", 1);
+    for s in [&sql as &dyn Store, &mem] {
+        add(s, &a);
+        // Revision 0 has no predecessor: it must not overwrite the card at revision 0.
+        let same = Card {
+            title: "changed".into(),
+            ..a.clone()
+        };
+        assert_eq!(
+            s.replace(&same, Event::of(&same, EventKind::Edited, "t")),
+            Err(BoardError::Conflict)
+        );
+        let skip = Card {
+            rev: a.rev + 2,
+            ..a.clone()
+        };
+        assert_eq!(
+            s.replace(&skip, Event::of(&skip, EventKind::Edited, "t")),
+            Err(BoardError::Conflict)
+        );
+        assert_eq!(s.get(a.id).expect("get").expect("there").title, "a");
+        let ghost = card("ghost", 2);
+        assert_eq!(
+            s.replace(&ghost, Event::of(&ghost, EventKind::Edited, "t")),
+            Err(BoardError::NotFound(ghost.id))
+        );
+    }
+    assert_eq!(
+        sql.events_since(None, 10).expect("sql").len(),
+        1,
+        "a refused write leaves no event"
+    );
+}
+
+#[test]
+fn a_number_beyond_sqlites_range_is_an_error_not_a_clamp() {
+    let store = SqliteStore::open_in_memory().expect("open");
+    assert!(matches!(
+        store.numbered(u64::MAX),
+        Err(BoardError::Storage(_))
+    ));
+    assert!(matches!(
+        store.reserve_number(Uuid::nil(), u64::MAX),
+        Err(BoardError::Storage(_))
+    ));
+    let a = card("a", 1);
+    let far = Card {
+        number: Some(u64::MAX),
+        ..a.clone()
+    };
+    assert!(matches!(
+        store.insert(&far, Event::of(&far, EventKind::Created, "t")),
+        Err(BoardError::Storage(_))
+    ));
+    assert_eq!(store.get(a.id), Ok(None));
+}
