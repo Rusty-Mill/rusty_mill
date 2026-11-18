@@ -36,6 +36,8 @@ rusty_oauth_server = { workspace = true, features = ["serve"] }
 rusty_crypto_key = { workspace = true }
 rusty_rand = { workspace = true }
 rusty_atomic_file = { workspace = true }
+# The board's own SQLite store (ADR-0007): the workspace wrapper, so pragmas and migrations are shared.
+rusty_sqlite = { workspace = true }
 clap = { workspace = true }
 rusty_request = { workspace = true }
 rusty_tokio = { workspace = true }
