@@ -366,6 +366,7 @@ dialog h2{margin:0;font-size:18px}
    Until read, the original seven, so the board draws at once. */
 let FLOW={columns:[["backlog","Backlog","backlog"],["ready","Ready","queue"],["building","Building","work"],["qa","QA","work"],
   ["review","Review","work"],["done","Done","done"],["blocked","Blocked","blocked"]].map(([id,label,kind])=>({id,label,kind})),transitions:[]};
+let ROLES={};
 const colLabel=id=>FLOW.columns.find(c=>c.id===id)?.label??id;
 const working=()=>FLOW.columns.filter(c=>c.kind==="work").map(c=>c.id);
 let tok=null;
@@ -969,7 +970,12 @@ function show(id){
   btn("Save",save).classList.add("primary");btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
   // Archive or Restore, for a Done card; syncDialog keeps the label in step with the board.
   f.ar=el("button");f.ar.type="button";f.ar.onclick=()=>{const c=cards.find(x=>x.id===id);if(c)act(shelved(c)?"card_restore":"card_archive",{id})};row.append(f.ar);
-  btn("Close",()=>$("dlg").close());
+  // Close card = card_close (an unstarted card, dropped with a reason); Dismiss only hides this dialog.
+  f.cr=el("select");f.cr.setAttribute("aria-label","close reason");
+  [["wont_do","Won't do"],["duplicate","Duplicate"],["superseded","Superseded"]].forEach(([v,t])=>f.cr.append(new Option(t,v)));
+  f.cc=btn("Close card",()=>closeCard(id));f.cc.title="Close this unstarted card without shipping it (needs triage)";
+  f.cw=el("span",null,"meta");row.append(f.cr,f.cw);
+  btn("Dismiss",()=>$("dlg").close());
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
   const form=el("form");form.method="dialog";const head=el("div",null,"dhead");if(k.number)head.append(el("span","#"+k.number,"num"));head.append(f.meta);
   const plan=el("div",null,"plan");plan.append(f.pr,el("span","Target","meta"),f.due);
@@ -977,6 +983,19 @@ function show(id){
   form.append(head,f.tr,f.banner,f.t,f.b,promptRow,f.g,plan,links,...(projects().length>1?[f.p]:[]),row,f.ex,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
+}
+// Close card: shown to a role holding triage on a card in backlog or a queue; a started or blocked
+// card says why it cannot be closed instead. Confirmed once, then card_close (the MCP's) does it.
+function closeState(k,f){
+  const can=(ROLES[$("role").value]??[]).includes("triage"),open=["backlog","queue"].includes(kindOf(k.column));
+  const why=isDone(k)?"":open?"":"Cannot be closed: it is "+(kindOf(k.column)==="blocked"?"blocked":"started")+". Started work ships or is blocked; only unstarted cards can be closed.";
+  f.cc.hidden=f.cr.hidden=isDone(k)||!open||!can;f.cw.textContent=why;
+}
+async function closeCard(id){
+  const k=byId(id),f=dlg?.f;if(!k||!f)return;
+  const r=f.cr.value,t=f.cr.selectedOptions[0].text;
+  if(!confirm("Close "+cardName(k)+" as \""+t+"\"? It goes to Done as dropped work, not shipped."))return;
+  await act("card_close",{id,reason:r},null,c=>toast("Closed: "+cardName(k)+" is now in "+colLabel(c.card.column)));
 }
 // The milestone picker: the project's open milestones, and the linked one even once reached.
 async function loadStones(f,project){
@@ -1022,6 +1041,7 @@ function syncDialog(){
   // Display-only parts follow the board; the inputs are never rebuilt.
   f.meta.textContent=colLabel(k.column)+(k.archived_ms!=null?" · archived":"")+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
   f.ar.hidden=!isDone(k);f.ar.textContent=shelved(k)?"Restore":"Archive";
+  closeState(k,f);
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",nick(c.by)+": "),el("span",c.text));return d}));
   f.ex.replaceChildren(...refLines(k));
@@ -1518,7 +1538,7 @@ function githubTab(){
 // Board metadata: on failure carry on with a fallback, but say why, so a refusal is not an empty panel.
 const meta=(op,fallback)=>api(op).catch(e=>{toast(op+" failed: "+e.message);return fallback});
 async function loadMeta(){
-  const roles=Object.keys((await meta("board_roles",{roles:{human:1}})).roles);
+  ROLES=(await meta("board_roles",{roles:{human:1}})).roles;const roles=Object.keys(ROLES);
   const cur=$("role").value;$("role").replaceChildren(...roles.map(r=>new Option(r,r)));
   $("role").value=roles.includes(cur)?cur:(pref("role")&&roles.includes(pref("role"))?pref("role"):(roles.includes("human")?"human":roles[0]));
   FLOW=await meta("board_columns",FLOW);
