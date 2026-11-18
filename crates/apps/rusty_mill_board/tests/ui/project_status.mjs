@@ -27,10 +27,10 @@ page.on("pageerror", (e) => errors.push(String(e)));
 await page.goto(`${BASE}/#token=${TOKEN}`);
 await page.waitForSelector(".card");
 const titles = async () => (await page.locator(".card b").allInnerTexts()).sort();
-const chips = async () => (await page.locator("#nav1 .item .name").allInnerTexts()).map((t) => t.trim());
+const chips = async () => (await page.locator("#project option").allInnerTexts()).map((t) => t.split(" · ")[0].trim());
 
 check((await titles()).join() === "lab card,rl card", `active projects only by default (${await titles()})`);
-check(!(await chips()).includes("orch"), "a paused project has no chip by default");
+check(!(await chips()).includes("orch"), "a paused project is not in the picker by default");
 await page.selectOption("#pstatus", "paused");
 check((await titles()).join() === "orch card", `the picker shows paused projects (${await titles()})`);
 await page.selectOption("#pstatus", "");

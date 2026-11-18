@@ -28,12 +28,12 @@ await page.goto(BASE);
 await page.waitForSelector(".card");
 await page.fill("#actor", "tester");
 const titles = async () => (await page.locator(".card b").allInnerTexts()).sort();
-const rows = [...await page.locator("#project option").allInnerTexts(), ...await page.locator("#nav1 .item").allInnerTexts()].map((t) => t.replace(/\s+/g, " ").trim());
+const rows = (await page.locator("#project option").allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim());
 
-check(rows.join("|") === "All projects · 2|Inbox · 1|rl · 1|Inbox 1|rl 1", `the Inbox counts only its own cards, and the picker lists projects, not the repository (${rows.join("|")})`);
+check(rows.join("|") === "All projects · 2|Inbox · 1|rl · 1", `the Inbox counts only its own cards, and the picker lists projects, not the repository (${rows.join("|")})`);
 check((await page.locator(".card", { hasText: "Unsorted card" }).locator(".tag.proj").innerText()) === "Inbox", "an Inbox card's chip says Inbox");
 
-await page.locator("#nav1 .item", { hasText: "Inbox" }).click();
+await page.selectOption("#project", "default");
 check((await titles()).join() === "Unsorted card", "choosing the Inbox shows only cards with no other project");
 await page.fill("#title", "Added in Inbox");
 await page.click("#add");
