@@ -985,7 +985,7 @@ impl GpuCore {
             search: SearchColors::default(),
         };
         self.append_grid(&mut frame, &pane, &mut PaneRows::default(), font);
-        self.draw_frame(view, &frame, 0x000000);
+        self.draw_frame(view, &frame, Some(0x000000));
     }
 
     /// Append the chrome bar's cells, drawn in the UI font `ui`. Every
@@ -1559,11 +1559,45 @@ impl GpuCore {
         for (pixmap, (x, y)) in scene.over {
             self.append_pixmap(&mut frame, pixmap, (*x, top + y));
         }
-        if let Some((pixmap, at)) = scene.pop {
-            self.append_pixmap(&mut frame, pixmap, at);
+        if scene.floats.is_empty() {
+            // Nothing is over the tiles: what goes over them draws with them.
+            self.append_top(&mut frame, scene, top);
+            self.draw_frame(view, &frame, Some(bg));
+            self.spare = frame;
+            return;
         }
-        self.draw_frame(view, &frame, bg);
+        self.draw_frame(view, &frame, Some(bg));
+        // Each float is drawn over what is there: its frame, which hides the
+        // tiles and floats under it, then its pane and veil. Images draw after
+        // the cells of a pass, so the frame and the pane take one pass each.
+        for layer in scene.floats {
+            frame.clear();
+            self.append_pixmap(&mut frame, layer.chrome, (layer.at.0, top + layer.at.1));
+            self.draw_frame(view, &frame, None);
+            frame.clear();
+            if let Some(pane) = &layer.pane {
+                self.append_panes(&mut frame, std::slice::from_ref(pane), font, divider, false);
+            }
+            if let Some((veil, (x, y))) = layer.veil {
+                self.append_pixmap(&mut frame, veil, (*x, top + y));
+            }
+            self.draw_frame(view, &frame, None);
+        }
+        frame.clear();
+        self.append_top(&mut frame, scene, top);
+        self.draw_frame(view, &frame, None);
         self.spare = frame;
+    }
+
+    /// Append what goes over everything: `scene`'s `top` pixmaps and its
+    /// popover.
+    fn append_top(&mut self, frame: &mut FrameLists, scene: Scene, top: usize) {
+        for (pixmap, (x, y)) in scene.top {
+            self.append_pixmap(frame, pixmap, (*x, top + y));
+        }
+        if let Some((pixmap, at)) = scene.pop {
+            self.append_pixmap(frame, pixmap, at);
+        }
     }
 
     /// Append an attached window's top strip or body: its pixels as one
@@ -1742,7 +1776,7 @@ impl GpuCore {
 
     /// Submit the frame: base cells (opaque), overlay glyphs (blended), then
     /// image quads (blended, grouped by texture), clearing to `clear`.
-    fn draw_frame(&mut self, view: &wgpu::TextureView, frame: &FrameLists, clear: u32) {
+    fn draw_frame(&mut self, view: &wgpu::TextureView, frame: &FrameLists, clear: Option<u32>) {
         let (device, queue) = (&self.device, &self.queue);
         let base = self
             .base_buf
@@ -1754,11 +1788,15 @@ impl GpuCore {
         let images = self
             .img_buf
             .upload(device, queue, bytemuck::cast_slice(&img_insts));
-        let c = wgpu::Color {
-            r: ((clear >> 16) & 0xff) as f64 / 255.0,
-            g: ((clear >> 8) & 0xff) as f64 / 255.0,
-            b: (clear & 0xff) as f64 / 255.0,
-            a: self.opacity as f64,
+        // `None` draws over what the last pass left.
+        let load = match clear {
+            Some(clear) => wgpu::LoadOp::Clear(wgpu::Color {
+                r: ((clear >> 16) & 0xff) as f64 / 255.0,
+                g: ((clear >> 8) & 0xff) as f64 / 255.0,
+                b: (clear & 0xff) as f64 / 255.0,
+                a: self.opacity as f64,
+            }),
+            None => wgpu::LoadOp::Load,
         };
         let mut encoder = self
             .device
@@ -1772,7 +1810,7 @@ impl GpuCore {
                     view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(c),
+                        load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],

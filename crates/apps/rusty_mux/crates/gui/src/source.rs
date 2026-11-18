@@ -18,7 +18,7 @@
 //! grace it tries on the TUI's schedule; after, or when the server let the
 //! client go, it waits for the user's Retry, which attaches anew.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Shutdown;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -37,15 +37,19 @@ use rusty_mux_client::attach::{
 };
 use rusty_mux_client::checkpoint::{HistoryReceiver, Receiver};
 use rusty_mux_client::older::Older;
-use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Side, Size, WindowId};
+use rusty_mux_core::{
+    BlockId, ClientId, Event, Layout, Selection, SessionId, Side, Size, WindowId,
+};
+use rusty_mux_proto::MAX_CLIPBOARD;
 use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Entry, Features, Launch, Message, Program, ShowTo, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
-    Act, BlockInfo, Detached, Dir, Feed, Link, ListDone, Listed, Notice, PaneIo, Remote, Session,
-    Show, Source, Take, Tree,
+    Act, BlockInfo, Detached, Dir, Feed, Float as Pane, Link, ListDone, Listed, Notice, PaneIo,
+    Remote, Session, Show, Source, Take, Tree,
 };
 
+use crate::floats;
 use crate::headers::{Call, Effect, Headers};
 use crate::keys::Keys;
 use crate::lease::{Ask as LeaseAsk, Lease};
@@ -56,7 +60,8 @@ use crate::tree::tree;
 /// for the strip and who each client is, to count them, and block calls
 /// and the events that say a block's folder, status or foreground program
 /// changed, for its header (handoff D105), and launches, for a block that
-/// runs a chosen program or starts in a chosen folder. A server without
+/// runs a chosen program or starts in a chosen folder. Floats (C42), for
+/// blocks drawn over the layout, which the window draws and edits. A server without
 /// some grants the rest, and the chrome shows less.
 pub const GUI: Features = CONTROL
     .union(Features::LABELS)
@@ -67,12 +72,14 @@ pub const GUI: Features = CONTROL
     .union(Features::PROCESS)
     .union(Features::MORE_PROGRAM_EVENTS)
     .union(Features::LAUNCH)
+    .union(Features::FLOATS)
     .union(Features::SHOW_SESSION);
 
 /// What a block's connection asks for: the panes' features, and the input
 /// gate's grants and lease requests, so an owner-only block can be taken
 /// over (handoff D153), and folder listings, for the palette's directory
-/// browse (D78). The TUI's [`PANE`] stays as it is.
+/// browse (D78). [`PANE`] asks for clipboard reads (C54), which the
+/// window answers by its policy.
 pub const BLOCK: Features = PANE
     .union(Features::INPUT_GATE)
     .union(Features::LEASE_REQUESTS)
@@ -166,6 +173,9 @@ pub fn attach_with(
         tells_focus: welcomed.features.contains(Features::FOCUS),
         edits_layout: welcomed.features.contains(Features::LAYOUT_EDIT),
         selects: follows_active,
+        floats: welcomed.features.contains(Features::FLOATS),
+        edits: Mutex::new(HashSet::new()),
+        opened: Mutex::new(HashSet::new()),
         calls_blocks,
         shows: welcomed.features.contains(Features::SHOW_SESSION),
         session: Mutex::new(model.session_id()),
@@ -182,6 +192,8 @@ pub fn attach_with(
         let focus = shown.keys.key(block);
         shown.focus = Some(focus);
         shown.window = Some(model.shown());
+        // Not the stand-in `layout`: a float-only window has no tile.
+        shown.tiled = model.view().0.map(Layout::blocks).unwrap_or_default();
         (first, focus)
     };
     state.tell_focus(block);
@@ -240,6 +252,15 @@ struct State {
     edits_layout: bool,
     /// The server takes `SelectWindow` and tells the active window.
     selects: bool,
+    /// The server floats blocks (C42): the window draws and edits them.
+    floats: bool,
+    /// The requests that place a float, until they are answered: one the
+    /// server refuses tells the window where the float is, so it snaps back.
+    edits: Mutex<HashSet<u64>>,
+    /// The `Sync`s sent after a pane opened, until answered: its client is
+    /// this window's from then, which changes who a header calls another
+    /// client holding input.
+    opened: Mutex<HashSet<u64>>,
     /// The server answers `BlockCall`, which the headers read with.
     calls_blocks: bool,
     /// The server takes `ShowSession` (C64).
@@ -275,6 +296,18 @@ struct Shown {
     focus: Option<u64>,
     /// The server window shown.
     window: Option<WindowId>,
+    /// The shown window's tiled blocks: a float or a detached block is
+    /// none, and the server takes only a tile to place a block beside.
+    tiled: Vec<BlockId>,
+}
+
+/// The block a reattached one goes beside: the `focused` block if it is a
+/// tile, else the first tile, else none, which the server fills an empty or
+/// float-only window for (C42).
+fn anchor(tiled: &[BlockId], focused: Option<BlockId>) -> Option<BlockId> {
+    focused
+        .filter(|b| tiled.contains(b))
+        .or_else(|| tiled.first().copied())
 }
 
 impl State {
@@ -322,6 +355,24 @@ impl State {
     fn ask(&self, ask: Ask) {
         // No reader: the window is closing anyway.
         let _ = lock(&self.asks).send(ask);
+    }
+
+    /// The server floats blocks and lets this client edit the layout: the
+    /// window may move them.
+    fn edits_floats(&self) -> bool {
+        self.floats && self.edits_layout
+    }
+
+    /// A place the window waits on that goes nowhere: tells the window where
+    /// its floats are by an answered no-op, so the one dropped there snaps
+    /// back instead of staying where it was let go.
+    fn floats_told_again(&self, act: &Act) {
+        if matches!(act, Act::Place { .. }) {
+            self.send(|req| {
+                lock(&self.edits).insert(req);
+                Message::Sync { req }
+            });
+        }
     }
 
     /// Sends a request on the control connection, returning its number;
@@ -376,6 +427,40 @@ impl MuxSource {
             .and_then(std::sync::Weak::upgrade)
     }
 
+    /// Carries out the user's float `act` on pane `key`'s block (C42,
+    /// gui-design D91): the window follows the `FloatsChanged` it causes. A
+    /// place the server refuses is told back, so the float snaps to where it is.
+    fn float(&self, key: u64, act: Act) {
+        let block = self.0.shown().keys.id(key);
+        let (true, Some(block)) = (self.0.edits_floats(), block) else {
+            return self.0.floats_told_again(&act);
+        };
+        match act {
+            Act::Float(_) => {
+                if let Some(at) = floats::first() {
+                    self.0.send(|req| Message::PlaceFloat { req, block, at });
+                }
+            }
+            Act::Place { at, .. } => {
+                match floats::rect(at) {
+                    // Told before it is sent: a refusal can come back before
+                    // `send` does, and one not found here would be lost.
+                    Some(at) => {
+                        self.0.send(|req| {
+                            lock(&self.0.edits).insert(req);
+                            Message::PlaceFloat { req, block, at }
+                        });
+                    }
+                    None => self.0.floats_told_again(&act),
+                }
+            }
+            Act::Stack { top, .. } => {
+                self.0.send(|req| Message::StackFloat { req, block, top });
+            }
+            _ => {}
+        }
+    }
+
     /// Carries out the user's take-over `act` on pane `key`'s block
     /// (gui-design D64, handoff D153).
     fn take(&self, key: u64, act: Act) {
@@ -411,12 +496,27 @@ impl Source for MuxSource {
         shown.blocks.retain(|_, b| b.strong_count() > 0);
         shown.blocks.insert(key, Arc::downgrade(&pane.0));
         pane.0.want_lease(shown.focus == Some(key));
+        let serves_clipboard = pane.0.clipboard;
+        drop(shown);
+        // A lease event may have come before the pane was known as this
+        // window's: its headers are read again once everything sent so far is
+        // answered.
+        // Recorded before it is sent: the answer can come back first.
+        self.0.send(|req| {
+            lock(&self.0.opened).insert(req);
+            Message::Sync { req }
+        });
         Ok(PaneIo {
             writer: Box::new(pane),
             feed: Box::new(feed.into_iter()),
             // The server's own terminal answers the program's queries.
             answers_queries: false,
+            serves_clipboard,
         })
+    }
+
+    fn floating(&self) -> bool {
+        self.0.floats
     }
 
     fn lists(&self, key: u64) -> bool {
@@ -453,16 +553,30 @@ impl Source for MuxSource {
         if let Act::TakeOver(key) | Act::CancelAsk(key) | Act::GiveBack(key) = act {
             return self.take(key, act);
         }
-        let (block, window, focused) = {
+        if let Act::Float(key) | Act::Place { key, .. } | Act::Stack { key, .. } = act {
+            return self.float(key, act);
+        }
+        let (block, window, focused, tiled) = {
             let shown = self.0.shown();
             let key = match act {
                 Act::Split { key, .. } | Act::Zoom(key) | Act::Close(key) | Act::Reattach(key) => {
                     Some(key)
                 }
-                Act::Unzoom | Act::TakeOver(_) | Act::CancelAsk(_) | Act::GiveBack(_) => None,
+                Act::Unzoom
+                | Act::TakeOver(_)
+                | Act::CancelAsk(_)
+                | Act::GiveBack(_)
+                | Act::Float(_)
+                | Act::Place { .. }
+                | Act::Stack { .. } => None,
             };
             let focused = shown.focus.and_then(|k| shown.keys.id(k));
-            (key.and_then(|k| shown.keys.id(k)), shown.window, focused)
+            (
+                key.and_then(|k| shown.keys.id(k)),
+                shown.window,
+                focused,
+                shown.tiled.clone(),
+            )
         };
         self.0.try_send(|req| match act {
             Act::Split { dir, .. } => block.map(|block| Message::Split {
@@ -477,14 +591,20 @@ impl Source for MuxSource {
             Act::Zoom(_) => block.map(|block| Message::Zoom { req, block }),
             Act::Close(_) => block.map(|block| Message::CloseBlock { req, block }),
             Act::Unzoom => window.map(|window| Message::Unzoom { req, window }),
-            // Beside the focused block; the server fills an empty window.
+            // Beside the focused tile, else the first; the server fills an
+            // empty window.
             Act::Reattach(_) => block.map(|block| Message::MoveBlock {
                 req,
                 block,
-                beside: focused,
+                beside: anchor(&tiled, focused),
                 side: Side::Right,
             }),
-            Act::TakeOver(_) | Act::CancelAsk(_) | Act::GiveBack(_) => None,
+            Act::TakeOver(_)
+            | Act::CancelAsk(_)
+            | Act::GiveBack(_)
+            | Act::Float(_)
+            | Act::Place { .. }
+            | Act::Stack { .. } => None,
         });
     }
 
@@ -604,6 +724,8 @@ fn open_session_window(socket: &Path, session: SessionId) -> Result<(), String> 
 /// A laid-out block of `session` to show: the active window's first, else the
 /// first window with one, in the order listed. A detached block is not one:
 /// its window has no layout (a server that can ask for this always sends it).
+/// Nor is a float: the new window does not ask for floats (C42), so a session
+/// with only floating blocks has none to show, and the ask is refused.
 fn first_block(entries: &[Message], session: SessionId) -> Option<BlockId> {
     let entries = || {
         entries.iter().filter_map(|m| match m {
@@ -704,8 +826,11 @@ fn create_window(socket: &Path, session: SessionId, launch: Launch) -> Result<()
 /// What the control connection tells the window.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Out {
-    /// Show this layout; `None` closes the window, and comes last.
-    Layout(Option<Tree>),
+    /// Show this layout with these floats over it, back to front; `None`
+    /// closes the window, and comes last.
+    Layout(Option<Tree>, Vec<Pane>),
+    /// Only the floats changed (C42): every float of the shown window.
+    Floats(Vec<Pane>),
     /// Another client moved the focus to this pane.
     Focus(u64),
     /// Show this pane alone, or every pane with `None`; follows the
@@ -761,7 +886,8 @@ impl Events {
     pub fn follow(self, remote: Remote) {
         std::thread::spawn(move || {
             self.run(|out| match out {
-                Out::Layout(t) => remote.layout(t),
+                Out::Layout(t, floats) => remote.layout(t, floats),
+                Out::Floats(floats) => remote.floats(floats),
                 Out::Focus(k) => remote.focus(k),
                 Out::Zoom(k) => remote.zoom(k),
                 Out::Empty => remote.empty(),
@@ -780,6 +906,7 @@ impl Events {
     /// every change.
     pub fn run(mut self, mut out: impl FnMut(Out) -> bool) {
         if !(out(Out::Session(self.session()))
+            && out(Out::Floats(self.floats()))
             && out(Out::Zoom(self.zoomed()))
             && out(Out::Notice(self.notice())))
         {
@@ -795,7 +922,7 @@ impl Events {
             }
         };
         if stop == Stop::Gone {
-            out(Out::Layout(None));
+            out(Out::Layout(None, Vec::new()));
         }
     }
 
@@ -811,6 +938,25 @@ impl Events {
                 if !out(Out::Shown(key, self.model.window_name(*by))) {
                     return Stop::Closed;
                 }
+            }
+            // A sync that fails is answered too, and forgotten.
+            if let Message::Failed { req, .. } = &message {
+                lock(&self.state.opened).remove(req);
+            }
+            if let Message::Done { req, .. } = &message
+                && lock(&self.state.opened).remove(req)
+                && !out(Out::Blocks(self.blocks()))
+            {
+                return Stop::Closed;
+            }
+            // A place the window waits on is answered with where its floats
+            // are: a refusal, or an answer with no change to follow, leaves
+            // the one dropped there where the server has it (D91).
+            if let Message::Failed { req, .. } | Message::Done { req, .. } = &message
+                && lock(&self.state.edits).remove(req)
+                && !out(Out::Floats(self.floats()))
+            {
+                return Stop::Closed;
             }
             let change = match &message {
                 Message::Event { event, .. } => self.model.apply(event),
@@ -841,6 +987,11 @@ impl Events {
                 Change::None => true,
                 Change::Strip => out(Out::Session(self.session())),
                 Change::Holders => out(Out::Blocks(self.blocks())),
+                // The strip follows: a block that goes between a tile, a float
+                // and the detached list changes its thumbnail and that list.
+                Change::Floats => {
+                    out(Out::Floats(self.floats())) && out(Out::Session(self.session()))
+                }
                 // The strip follows: the thumbnail and detached blocks.
                 Change::Layout => self.layout(out) && out(Out::Session(self.session())),
                 Change::Focus(block) => {
@@ -1185,13 +1336,20 @@ impl Events {
     /// ends the GUI window, unless its blocks are detached (D61).
     fn layout(&self, out: &mut impl FnMut(Out) -> bool) -> bool {
         let (layout, focused) = self.model.view();
-        let shown = layout.map(|l| tree(l, &mut self.state.shown().keys));
-        self.keep_focus_in(layout.map(Layout::blocks).unwrap_or_default(), focused);
+        let floats = self.floats();
+        let tiled = layout.map(|l| tree(l, &mut self.state.shown().keys));
+        self.keep_focus_in(self.model.shown_blocks(), focused);
+        self.state.shown().tiled = layout.map(Layout::blocks).unwrap_or_default();
+        // A window of floats alone is alive: the first float stands for the
+        // tile under them, which draws nothing, as it floats (C42).
+        let shown = tiled.or_else(|| floats.first().map(|f| Tree::Pane(f.key)));
         if shown.is_none() && !self.model.detached().is_empty() {
             return out(Out::Empty);
         }
         let ended = shown.is_none();
-        out(Out::Layout(shown)) && !ended && out(Out::Zoom(self.zoomed()))
+        // With the layout, so a block that goes from a tile to a float keeps
+        // its pane.
+        out(Out::Layout(shown, floats)) && !ended && out(Out::Zoom(self.zoomed()))
     }
 
     /// Keeps the focus Reattach places beside on a block `laid_out`:
@@ -1210,6 +1368,15 @@ impl Events {
             .filter(|b| laid_out.contains(b))
             .or_else(|| laid_out.first().copied());
         shown.focus = block.map(|b| shown.keys.key(b));
+    }
+
+    /// The shown window's floats as the window knows them; none from a
+    /// server that does not float.
+    fn floats(&self) -> Vec<Pane> {
+        match self.state.floats {
+            true => floats::panes(&self.model.floats(), &mut self.state.shown().keys),
+            false => Vec::new(),
+        }
     }
 
     /// The pane the shown window shows alone, if any.
@@ -1254,6 +1421,9 @@ struct Block {
     told: Mutex<Option<Take>>,
     /// The server lists folders on this connection (`terminal.list-dir`).
     lists: bool,
+    /// The server asks this connection's client for clipboard reads
+    /// (C54), so the window answers them, not the pane's own grid.
+    clipboard: bool,
     /// Who waits for a listing, by request number.
     listings: Mutex<HashMap<u64, ListDone>>,
 }
@@ -1296,6 +1466,7 @@ impl Block {
                 .features
                 .contains(Features::BLOCK_CALL.union(Features::DIR_LISTING)),
             listings: Mutex::new(HashMap::new()),
+            clipboard: opened.features.contains(Features::CLIPBOARD),
         });
         shared.send(|req| Message::Attach { req, block });
         let (tx, feed) = std::sync::mpsc::sync_channel(FEED_AHEAD);
@@ -1512,6 +1683,12 @@ impl Block {
                     }
                 }
                 Message::Output { block: b, data } if b == block => Feed::Bytes(data),
+                Message::ClipboardRead {
+                    block: b,
+                    selection,
+                } if b == block => Feed::ClipboardRead {
+                    primary: selection == Selection::Primary,
+                },
                 Message::Event {
                     event: Event::BlockResized { block: b, size },
                     ..
@@ -1594,6 +1771,35 @@ impl BackendHandle for PaneWriter {
         Ok(())
     }
 
+    /// Answers the block's lease holder's read (C54); the server refuses it
+    /// from anyone else.
+    fn clipboard_reply(&mut self, primary: bool, text: Option<String>) {
+        let block = self.0.block;
+        let selection = if primary {
+            Selection::Primary
+        } else {
+            Selection::Clipboard
+        };
+        // Over the limit the server refuses the answer and the program would
+        // wait; deny it instead.
+        let data = text.map(String::into_bytes).filter(|d| {
+            let fits = d.len() <= MAX_CLIPBOARD;
+            if !fits {
+                eprintln!(
+                    "rusty-mux-gui: clipboard answer of {} bytes denied (over the limit)",
+                    d.len()
+                );
+            }
+            fits
+        });
+        self.0.send(|req| Message::ClipboardReply {
+            req,
+            block,
+            selection,
+            data,
+        });
+    }
+
     fn try_clone(&self) -> std::io::Result<Box<dyn BackendHandle>> {
         Err(std::io::Error::other("a block has one writer"))
     }
@@ -1631,7 +1837,7 @@ mod tests {
     use rusty_mux_proto::{Entry, Message};
     use rusty_uuid::Uuid;
 
-    use super::{first_block, forwarded};
+    use super::{anchor, first_block, forwarded};
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
@@ -1729,7 +1935,56 @@ mod tests {
             block(b, w2),
         ];
         assert_eq!(first_block(&list, s), Some(b));
+        // Floats are no block to show: a tile beside them is, floats alone are not.
+        let float = |window, block| {
+            entry(Entry::Floats {
+                window,
+                floats: vec![rusty_mux_core::Float {
+                    block,
+                    at: rusty_mux_core::FloatRect::new(10, 10, 40, 40).expect("a float"),
+                }],
+            })
+        };
+        let list = [
+            session(None),
+            laid(w1, s, Some(b)),
+            float(w1, other),
+            block(b, w1),
+            block(other, w1),
+        ];
+        assert_eq!(first_block(&list, s), Some(b), "mixed");
+        let list = [
+            session(None),
+            window(w1, s),
+            float(w1, other),
+            block(other, w1),
+        ];
+        assert_eq!(first_block(&list, s), None, "floats only");
         // No block anywhere.
         assert_eq!(first_block(&[session(None), window(w1, s)], s), None);
+    }
+
+    fn blocks() -> [BlockId; 3] {
+        std::array::from_fn(|_| BlockId::from_uuid(Uuid::new_v4()))
+    }
+
+    #[test]
+    fn a_reattached_block_goes_beside_the_focused_tile() {
+        let b = blocks();
+        assert_eq!(anchor(&[b[0], b[1]], Some(b[1])), Some(b[1]));
+    }
+
+    #[test]
+    fn a_focused_float_is_no_anchor_the_first_tile_is() {
+        let b = blocks();
+        assert_eq!(anchor(&[b[0], b[1]], Some(b[2])), Some(b[0]));
+        assert_eq!(anchor(&[b[0]], None), Some(b[0]), "no focus at all");
+    }
+
+    #[test]
+    fn a_window_with_no_tile_has_no_anchor() {
+        let b = blocks();
+        assert_eq!(anchor(&[], Some(b[0])), None, "floats alone");
+        assert_eq!(anchor(&[], None), None);
     }
 }

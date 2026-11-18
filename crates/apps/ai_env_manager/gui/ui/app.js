@@ -126,6 +126,10 @@ function render() {
   }
   $("grid").hidden = rows.length === 0;
   $("empty").hidden = rows.length !== 0;
+  const none = view.rows.length === 0;
+  $("empty-msg").textContent = none ? "No skills found. Choose a folder to search." : "No skills match.";
+  $("clear").hidden = none;
+  $("choose2").hidden = !none;
   $("sub").textContent = `${view.rows.length} skills across ${view.tools.join(", ")}`;
   const skipped = view.skipped.map((s) => `${s.path}: ${s.reason}`);
   $("skipped").textContent = skipped.length ? `Skipped: ${skipped.join("; ")}` : "";
@@ -169,6 +173,16 @@ async function preview(entry, enable) {
 }
 
 $("q").addEventListener("input", render);
+async function chooseFolder() {
+  try {
+    $("error").hidden = true;
+    if (await invoke("choose_folder")) await refresh();
+  } catch (e) {
+    showError(e);
+  }
+}
+$("choose").addEventListener("click", chooseFolder);
+$("choose2").addEventListener("click", chooseFolder);
 $("clear").addEventListener("click", () => { $("q").value = ""; filter = "all"; render(); });
 $("theme").addEventListener("click", toggleTheme);
 media.addEventListener("change", applyTheme);

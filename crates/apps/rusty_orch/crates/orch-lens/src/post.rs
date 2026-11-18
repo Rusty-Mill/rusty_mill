@@ -2,8 +2,9 @@
 //!
 //! Every adapter runs [`parse`] on the model's text, so one rule holds for
 //! all providers: unknown fields, kinds or directions are refused, support
-//! must carry executed or cited evidence ("agreement costs evidence"), and
-//! a job may only post where its [`Allowed`] says.
+//! must carry cited evidence ("agreement costs evidence"), executed evidence
+//! is refused (only the runner writes it, D144), and a job may only post
+//! where its [`Allowed`] says.
 
 use std::collections::BTreeSet;
 
@@ -78,11 +79,11 @@ A claim: {{\"kind\": \"claim\", \"text\": one sentence, \"domains\": [1 to {MAX_
 \"stakes\": \"low\", \"medium\" or \"high\", \"reversible\": true or false, and optionally \"deps\": [up to {MAX_DEPS} claim ids], \
 \"answers\": a question's id, \"supersedes\": a claim's id, \"refs\": [references]}}.\n\
 Evidence: {{\"kind\": \"evidence\", \"claim\": the claim's id, \"direction\": \"support\" or \"counter\", \
-\"evidence_kind\": \"executed\", \"cited\" or \"opinion\", \"strength\": 1 to 3 (executed is always 1), \
+\"evidence_kind\": \"cited\" or \"opinion\", \"strength\": 1 to 3, \
 \"evidence\": [references], and optionally \"note\": why}}.\n\
 A reference is \"msg:N\" for a message or \"art:N\" for an artifact. \
-Claim and question ids (\"claim\", \"deps\", \"answers\", \"supersedes\") are bare numbers: 7 for msg:7. Support must be executed or cited, never opinion. \
-Executed and cited evidence cite at least one reference. Text and notes are at most {MAX_TEXT} characters. No other fields.\n\
+Claim and question ids (\"claim\", \"deps\", \"answers\", \"supersedes\") are bare numbers: 7 for msg:7. Support must be cited, never opinion. \
+Cited evidence cites at least one reference. Text and notes are at most {MAX_TEXT} characters. No other fields.\n\
 Example: {EXAMPLE}\n"
     )
 }
@@ -261,21 +262,26 @@ fn evidence(m: &Map, rule: &EvidenceRule) -> Result<Post, String> {
         return Err(format!("direction {direction:?} is not allowed here"));
     }
     let kind = evidence_kind(string(m, "evidence_kind")?)?;
+    if kind == EvidenceKind::Executed {
+        // Only the runner writes executed evidence, as a test report. A lens
+        // that posts it is refused by the board (EvidenceRequired) and a
+        // refused post halts the run, so it is refused here instead: the
+        // reply fails as a malformed one and the job moves on (D144).
+        return Err("executed evidence is written by the runner; use cited or opinion".to_owned());
+    }
     if direction == Direction::Support && kind == EvidenceKind::Opinion {
-        return Err("support must be executed or cited, not opinion".to_owned());
+        return Err("support must be cited, not opinion".to_owned());
     }
     let cites = refs(m, "evidence")?;
     if kind != EvidenceKind::Opinion && cites.is_empty() {
-        return Err("executed or cited evidence must cite an artifact or message".to_owned());
+        return Err("cited evidence must cite an artifact or message".to_owned());
     }
     let strength = m
         .get("strength")
         .and_then(Value::as_u64)
         .ok_or("strength: 1 to 3 required")?;
-    let strength = match (kind, strength) {
-        (EvidenceKind::Executed, 1) => 1,
-        (EvidenceKind::Executed, _) => return Err("executed evidence has strength 1".to_owned()),
-        (_, 1..=3) => strength as u8,
+    let strength = match strength {
+        1..=3 => strength as u8,
         _ => return Err("strength: 1 to 3 required".to_owned()),
     };
     let note = match m.get("note") {
@@ -547,7 +553,7 @@ mod tests {
             (
                 COUNTER.replace("counter", "support"),
                 attack(7),
-                "support must be executed or cited",
+                "support must be cited",
             ),
             (
                 ev(r#""evidence_kind":"cited","strength":1"#),
@@ -555,9 +561,14 @@ mod tests {
                 "must cite",
             ),
             (
+                ev(r#""evidence_kind":"executed","strength":1,"evidence":["msg:2"]"#),
+                attack(7),
+                "written by the runner",
+            ),
+            (
                 ev(r#""evidence_kind":"executed","strength":2,"evidence":["art:4"]"#),
                 attack(7),
-                "strength 1",
+                "written by the runner",
             ),
             (
                 ev(r#""evidence_kind":"opinion","strength":4"#),

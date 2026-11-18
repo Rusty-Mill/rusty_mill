@@ -12,6 +12,9 @@ use crate::field::{In, Out};
 use crate::schema::Value;
 use crate::{Error, args, varint};
 
+/// The most bytes a clipboard answer (`ClipboardReply`) carries (C38's OSC 52 limit).
+pub const MAX_CLIPBOARD: usize = 1 << 20;
+
 /// Optional protocol capabilities. Each peer sends its own; the session uses
 /// the intersection. Continuation checkpoints require explicit opt-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

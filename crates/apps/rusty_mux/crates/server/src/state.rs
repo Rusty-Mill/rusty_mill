@@ -14,6 +14,7 @@ use rusty_mux_core::{
     BlockId, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Mux, Principal, Selection,
     Side, Size, Transport, WindowId,
 };
+use rusty_mux_proto::MAX_CLIPBOARD;
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
 use rusty_mux_proto::{
@@ -118,9 +119,6 @@ const OFFERED: Features = Features::CHECKPOINT_V6
 /// What a float edit needs: floating takes a block out of the layout, as a
 /// detach does.
 const FLOATS_EDIT: Features = Features::FLOATS.union(Features::LAYOUT_EDIT);
-
-/// The most text a clipboard answer carries (C38's OSC 52 limit).
-const MAX_CLIPBOARD: usize = 1 << 20;
 
 /// How long a clipboard read waits for its answer before the next one is
 /// asked: a late answer would land as typed input in whatever runs next.
@@ -2755,9 +2753,6 @@ impl State {
         // already have the raw output.
         rt.grid.take_host_out();
         self.check_process(block, false);
-        if !reads.is_empty() {
-            self.ask_clipboard(block, reads);
-        }
         let frame = encode(&Message::Output {
             block,
             data: data.to_vec(),
@@ -2768,6 +2763,11 @@ impl State {
                 .into_iter()
                 .for_each(|c| self.send_frame(c, frame.clone())),
             Err(err) => eprintln!("rusty-mux-server: encoding output of block {block}: {err}"),
+        }
+        // After the output, so a holder has the bytes (an OSC 52 set before
+        // the query) before it is asked.
+        if !reads.is_empty() {
+            self.ask_clipboard(block, reads);
         }
         self.flush();
         replies

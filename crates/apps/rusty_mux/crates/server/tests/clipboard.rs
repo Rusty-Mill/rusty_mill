@@ -199,10 +199,17 @@ fn a_program_looping_on_the_query_asks_the_holder_once() {
         block,
         b"for i in 1 2 3 4 5; do printf '\\033]52;c;?\\007'; done; echo DONE_$((1+1))\r",
     );
+    // The read follows the output that holds the query, so wait for a
+    // later marker before counting.
     let mut reads = 0;
-    while !holder.saw(block, "DONE_2") {
+    let mut marked = false;
+    while !holder.saw(block, "MARK_4") {
         if let Message::ClipboardRead { .. } = holder.recv() {
             reads += 1;
+        }
+        if !marked && holder.saw(block, "DONE_2") {
+            marked = true;
+            holder.input(block, b"echo MARK_$((2+2))\r");
         }
     }
     assert_eq!(reads, 1, "one outstanding read at a time");

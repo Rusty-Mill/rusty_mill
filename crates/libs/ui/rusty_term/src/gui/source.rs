@@ -33,6 +33,12 @@ pub enum Feed {
     /// Where this window's taking over of an owner-only block stands
     /// (gui-design D64, handoff D153); first sent once the source can ask.
     Take(Take),
+    /// The pane's program reads a selection (OSC 52 `?`) and this window
+    /// holds the block's input lease, so it is asked (C54, handoff D309,
+    /// D310). The window answers by its `clipboard` policy through
+    /// [`BackendHandle::clipboard_reply`]; only a pane whose
+    /// [`PaneIo::serves_clipboard`] is set gets these.
+    ClipboardRead { primary: bool },
 }
 
 /// Where this window stands on typing into an owner-only block, whose
@@ -71,6 +77,11 @@ pub struct PaneIo {
     /// Whether the window answers the program's queries (DA, DSR). A mux
     /// server's own terminal already does, so its blocks say `false`.
     pub answers_queries: bool,
+    /// The source delivers the program's clipboard reads as
+    /// [`Feed::ClipboardRead`] and takes the answer, so the window does not
+    /// answer one from the pane's own grid as well: it would be answered
+    /// twice, once unasked (C54, handoff D312).
+    pub serves_clipboard: bool,
 }
 
 /// A window's panes as a source lays them out: leaves are the source's pane
@@ -85,6 +96,26 @@ pub enum Tree {
         a: Box<Tree>,
         b: Box<Tree>,
     },
+}
+
+/// Where a float sits, in whole percent of the body from its top left
+/// (mux C42; gui-design D89). A source may refuse a place it can't keep;
+/// the window never asks for one under 10% wide or tall or outside the
+/// body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FloatAt {
+    pub x: u8,
+    pub y: u8,
+    pub w: u8,
+    pub h: u8,
+}
+
+/// A pane that floats over the tiled layout, and where.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Float {
+    /// Its pane key.
+    pub key: u64,
+    pub at: FloatAt,
 }
 
 /// What an attached window's top strip shows of its source's session
@@ -262,6 +293,12 @@ pub trait Source {
     /// The user asked to stop trying ("Stop trying"); the source says
     /// [`Link::Down`].
     fn stop(&self);
+    /// Whether the source floats panes (mux C42): the window then draws
+    /// the floats it is told and offers the float keys and mouse. A source
+    /// that doesn't is never told of any.
+    fn floating(&self) -> bool {
+        false
+    }
     /// Whether the source can list a folder on pane `key`'s host for the
     /// command palette's directory browse (gui-design D78). A source that
     /// can't hides the rows.
@@ -324,6 +361,15 @@ pub enum Act {
     CancelAsk(u64),
     /// Give pane `key`'s input back; the grant stays the owner's to end.
     GiveBack(u64),
+    /// Float pane `key` over the layout, where the source first puts a
+    /// float (mux C42, gui-design D91).
+    Float(u64),
+    /// Move and resize float `key` to `at`, sent when a drag ends or a
+    /// key steps it. The window shows the place the source tells next, so
+    /// one it refuses snaps back.
+    Place { key: u64, at: FloatAt },
+    /// Raise float `key` over the others (`top`) or lower it under them.
+    Stack { key: u64, top: bool },
 }
 
 /// The source's way into a running window, from any thread. Each call is
@@ -340,9 +386,20 @@ pub struct Notice {
 }
 
 impl Remote {
-    /// Show `tree`; `None` closes the window (the source's window is gone).
-    pub fn layout(&self, tree: Option<Tree>) -> bool {
-        self.0.send_event(UserEvent::Layout(tree)).is_ok()
+    /// Show `tree` with `floats` over it, back to front (mux C42); `None`
+    /// closes the window (the source's window is gone). A float is a pane
+    /// `tree` doesn't hold: told with the layout, a block that goes from
+    /// one to the other keeps its pane.
+    pub fn layout(&self, tree: Option<Tree>, floats: Vec<Float>) -> bool {
+        self.0.send_event(UserEvent::Layout(tree, floats)).is_ok()
+    }
+
+    /// Show these floats, back to front, over the layout (mux C42): every
+    /// float of the window, each time, when only they changed. A float is a
+    /// pane the layout doesn't hold: its pane opens here, and closes when a
+    /// later [`Remote::layout`] or this leaves it out.
+    pub fn floats(&self, floats: Vec<Float>) -> bool {
+        self.0.send_event(UserEvent::Floats(floats)).is_ok()
     }
 
     /// Move the focus to pane `key`, as another client did.

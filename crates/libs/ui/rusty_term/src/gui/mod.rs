@@ -29,6 +29,7 @@ mod chrome;
 mod confirm;
 mod cpu;
 mod damage;
+mod floats;
 mod font;
 #[cfg(feature = "gui-gpu")]
 mod gpu;

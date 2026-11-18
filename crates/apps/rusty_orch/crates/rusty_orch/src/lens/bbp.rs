@@ -346,7 +346,24 @@ impl<R: Rpc> Session<R> {
         ]);
         match self.ask("claims_delta", args)? {
             Response::Claims(views) => {
+                // A candidate that answers a question does not mark the
+                // question changed, so the delta leaves the question's view
+                // with the candidates it had; and `attack_ready` needs two.
+                // Re-read each question the seat already follows (D148).
+                let stale: BTreeSet<MsgId> = views
+                    .iter()
+                    .filter_map(|v| self.claims.get(&v.id).and_then(|b| b.answers))
+                    .filter(|q| self.views.contains_key(q) && views.iter().all(|v| v.id != *q))
+                    .collect();
                 self.views.extend(views.into_iter().map(|v| (v.id, v)));
+                for q in stale {
+                    match self.ask("claim_card", map(vec![("claim", q.0.into())]))? {
+                        Response::Claims(fresh) => {
+                            self.views.extend(fresh.into_iter().map(|v| (v.id, v)));
+                        }
+                        other => return Err(format!("claim_card answered {other:?}")),
+                    }
+                }
             }
             other => return Err(format!("claims_delta answered {other:?}")),
         }
@@ -1029,6 +1046,76 @@ mod tests {
             r#"["dedup"]"#,
             "* is every domain seen"
         );
+    }
+
+    /// A candidate that answers a question does not mark the question changed,
+    /// so the delta omits it and its cached view keeps no candidates; the seat
+    /// must re-read the question, or `attack_ready` never sees two candidates.
+    #[test]
+    fn a_new_candidate_makes_the_seat_re_read_its_question() {
+        fn question(id: u64) -> Message {
+            msg(
+                id,
+                MessageKind::Claim,
+                Body::Claim(ClaimBody {
+                    text: "How should sweep decide?".to_owned(),
+                    domains: vec!["dedup".to_owned()],
+                    deps: vec![],
+                    answers: None,
+                    supersedes: None,
+                    stakes: Stakes::Low,
+                    reversible: true,
+                }),
+            )
+        }
+        fn candidate(id: u64, answers: u64) -> Message {
+            msg(
+                id,
+                MessageKind::Claim,
+                Body::Claim(ClaimBody {
+                    text: format!("candidate {id}"),
+                    domains: vec!["dedup".to_owned()],
+                    deps: vec![],
+                    answers: Some(MsgId(answers)),
+                    supersedes: None,
+                    stakes: Stakes::Low,
+                    reversible: true,
+                }),
+            )
+        }
+        let with = |ids: &[u64]| {
+            let mut v = view(1, ClaimStatus::Open, &[]);
+            v.candidates = ids.iter().map(|i| MsgId(*i)).collect();
+            v
+        };
+        let fake = Fake::default()
+            .on("task_card", task_card(5))
+            .on("read", read(vec![question(1)], false))
+            .on("claims_delta", Response::Claims(vec![with(&[])]))
+            .on("task_card", task_card(9))
+            .on("read", read(vec![candidate(2, 1), candidate(3, 1)], false))
+            // The delta carries the two candidates and not the question.
+            .on(
+                "claims_delta",
+                Response::Claims(vec![
+                    view(2, ClaimStatus::Open, &[]),
+                    view(3, ClaimStatus::Open, &[]),
+                ]),
+            )
+            .on("claim_card", Response::Claims(vec![with(&[2, 3])]));
+        let cfg = config();
+        let mut s = Session::new("adversary", fake, "r1");
+        s.refresh(&cfg).expect("first");
+        s.refresh(&cfg).expect("second");
+        let asked = s.rpc.args("claim_card");
+        assert_eq!(asked.len(), 1, "one re-read, for the question only");
+        assert_eq!(word(asked[0], "claim"), "1");
+        let cards = s.cards(&cfg);
+        let q = cards
+            .iter()
+            .find(|c| c.id == MsgId(1))
+            .expect("question card");
+        assert_eq!(q.candidates, [MsgId(2), MsgId(3)]);
     }
 
     #[test]

@@ -69,7 +69,7 @@ It accepts exactly the argv `bbp_cli.rs` builds (`inbox|human --dir <root> ...`)
 ## Network (plain HTTP, loopback)
 - Board to tick: `MILL_BOARD_TICK_URL=http://127.0.0.1:8788` + `RUSTY_TICK_TOKEN`. Board listens `127.0.0.1:8787` (`MILL_BOARD_HTTP`); set `MILL_BOARD_ALLOWED_HOSTS`.
 - orch to board (only with `--card`): `--board http://127.0.0.1:8787`, env `RUSTY_ORCH_BOARD_TOKEN/ACTOR/ROLE` (role with Build; its own agent token, created once in Settings).
-- orch to llama-swap: `base_url` in the lens config (`openai-http`; refuses non-loopback/non-RFC1918). Port unverified: 8080 appears only in tests; confirm on the host.
+- orch to llama-swap: `base_url` in the lens config (`openai-http`; refuses non-loopback/non-RFC1918). Checked on BaileyAi 2026-11-17: llama-swap answers only on the LAN at `<llama-swap-host>:<port>` (not loopback), and serves `qwen3.6-35b-a3b` (lowercase), `gpt-oss-120b`, `qwen3-vl-30b-a3b`, `qwen3.6-35b-a3b-rocm`; see the deploy prompt step 3b.
 - Claude/Codex: subscription logins only, no API keys in env. Codex only via `podman exec lel-codex`; Claude host-side as orch-runner.
 - The board must run where `bbp` runs (#595 I3).
 
