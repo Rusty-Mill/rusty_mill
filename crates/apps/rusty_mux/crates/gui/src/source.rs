@@ -42,11 +42,11 @@ use rusty_mux_core::{
 };
 use rusty_mux_proto::MAX_CLIPBOARD;
 use rusty_mux_proto::schema::Value;
-use rusty_mux_proto::{Features, Launch, Message, Program, Takeover};
+use rusty_mux_proto::{Entry, Features, Launch, Message, Program, ShowTo, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
     Act, BlockInfo, Detached, Dir, Feed, Float as Pane, Link, ListDone, Listed, Notice, PaneIo,
-    Remote, Session, Source, Take, Tree,
+    Remote, Session, Show, Source, Take, Tree,
 };
 
 use crate::floats;
@@ -72,7 +72,8 @@ pub const GUI: Features = CONTROL
     .union(Features::PROCESS)
     .union(Features::MORE_PROGRAM_EVENTS)
     .union(Features::LAUNCH)
-    .union(Features::FLOATS);
+    .union(Features::FLOATS)
+    .union(Features::SHOW_SESSION);
 
 /// What a block's connection asks for: the panes' features, and the input
 /// gate's grants and lease requests, so an owner-only block can be taken
@@ -159,7 +160,8 @@ pub fn attach_with(
     };
     let entries = req.call(|req| Message::List { req })?;
     let follows_active = welcomed.features.contains(Features::ACTIVE_WINDOW);
-    let model = Model::from_list(&entries, block, local_host(), follows_active)?;
+    let mut model = Model::from_list(&entries, block, local_host(), follows_active)?;
+    model.set_me(welcomed.client);
     let calls_blocks = welcomed.features.contains(Features::BLOCK_CALL);
     let next = req.next;
     let layout = model.view().0.cloned().unwrap_or(Layout::Block(block));
@@ -175,6 +177,7 @@ pub fn attach_with(
         edits: Mutex::new(HashSet::new()),
         opened: Mutex::new(HashSet::new()),
         calls_blocks,
+        shows: welcomed.features.contains(Features::SHOW_SESSION),
         session: Mutex::new(model.session_id()),
         switch: Mutex::new(None),
         shown: Mutex::new(Shown::default()),
@@ -260,6 +263,8 @@ struct State {
     opened: Mutex<HashSet<u64>>,
     /// The server answers `BlockCall`, which the headers read with.
     calls_blocks: bool,
+    /// The server takes `ShowSession` (C64).
+    shows: bool,
     /// The session shown, where a new window goes.
     session: Mutex<SessionId>,
     /// The session the user picked, for the events reader to show.
@@ -284,6 +289,8 @@ struct Shown {
     windows: Keys<WindowId>,
     /// The switcher's keys for the server's sessions.
     sessions: Keys<SessionId>,
+    /// The actions menu's keys for the account's other windows (C64).
+    peers: Keys<ClientId>,
     /// Each open pane's block connection, kept weakly: the window owns it.
     blocks: HashMap<u64, std::sync::Weak<Block>>,
     focus: Option<u64>,
@@ -620,6 +627,44 @@ impl Source for MuxSource {
         self.0.ask(Ask::Stop);
     }
 
+    /// Asks the other windows to show session `key` (C64).
+    fn show_in(&self, key: u64, to: Show) -> bool {
+        if !self.0.shows {
+            return false;
+        }
+        let (session, to) = {
+            let shown = self.0.shown();
+            let to = match to {
+                Show::All => Some(ShowTo::Others),
+                Show::Window(peer) => shown.peers.id(peer).map(ShowTo::Client),
+            };
+            (shown.sessions.id(key), to)
+        };
+        let (Some(session), Some(to)) = (session, to) else {
+            return false;
+        };
+        self.0.send(|req| Message::ShowSession { req, session, to });
+        true
+    }
+
+    /// Opens session `key` in a window of its own: another `rusty-mux-gui`
+    /// on that session's first block (C64).
+    fn open_window(&self, key: u64) -> bool {
+        let Some(session) = self.0.shown().sessions.id(key) else {
+            return false;
+        };
+        let socket = self.0.socket.clone();
+        std::thread::Builder::new()
+            .name("mux-open-window".into())
+            .spawn(move || {
+                if let Err(e) = open_session_window(&socket, session) {
+                    eprintln!("rusty-mux-gui: open in new window: {e}");
+                }
+            })
+            .map_err(|e| eprintln!("rusty-mux-gui: open in new window: {e}"))
+            .is_ok()
+    }
+
     /// Creates a window with one block and selects it, on a connection of
     /// its own so the UI never waits for the server.
     fn new_window(&self) {
@@ -640,6 +685,104 @@ impl Source for MuxSource {
             eprintln!("rusty-mux-gui: new window: {e}");
         }
     }
+}
+
+/// Starts a `rusty-mux-gui` on the first block of `session`'s first window
+/// (C64), with the options this one runs with.
+fn open_session_window(socket: &Path, session: SessionId) -> Result<(), String> {
+    let stream = connect(socket)?;
+    let mut conn = Conn::new(stream);
+    conn.send(&Message::Hello {
+        version: Some(rusty_mux_proto::VERSION.into()),
+        features: Features::CHECKPOINT_V6.union(Features::INSPECT),
+        resume: None,
+        takeover: None,
+    })
+    .map_err(|e| e.to_string())?;
+    let mut req = Requests {
+        conn: &mut conn,
+        next: 1,
+        by: Some(Instant::now() + HANDSHAKE),
+        cancel: &NEVER,
+    };
+    req.welcome()?;
+    let entries = req.call(|req| Message::List { req })?;
+    let block = first_block(&entries, session).ok_or("the session has no block to show")?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    std::process::Command::new(exe)
+        .args(forwarded(std::env::args_os().skip(1)))
+        .arg(socket)
+        .arg(block.to_string())
+        .spawn()
+        .map(|mut child| {
+            // Reaped when it ends, so it never lingers as a zombie.
+            std::thread::spawn(move || child.wait());
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// A laid-out block of `session` to show: the active window's first, else the
+/// first window with one, in the order listed. A detached block is not one:
+/// its window has no layout (a server that can ask for this always sends it).
+/// Nor is a float: the new window does not ask for floats (C42), so a session
+/// with only floating blocks has none to show, and the ask is refused.
+fn first_block(entries: &[Message], session: SessionId) -> Option<BlockId> {
+    let entries = || {
+        entries.iter().filter_map(|m| match m {
+            Message::Entry { entry, .. } => Some(entry),
+            _ => None,
+        })
+    };
+    let active = entries().find_map(|e| match e {
+        Entry::Session {
+            session: s, active, ..
+        } if *s == session => *active,
+        _ => None,
+    });
+    let windows = entries().filter_map(|e| match e {
+        Entry::Window {
+            window, session: s, ..
+        } if *s == session => Some(*window),
+        _ => None,
+    });
+    let in_window = |window: WindowId| {
+        entries().find_map(|e| match e {
+            Entry::Window {
+                window: w,
+                layout: Some(layout),
+                ..
+            } if *w == window => layout.blocks().first().copied(),
+            _ => None,
+        })
+    };
+    active.into_iter().chain(windows).find_map(in_window)
+}
+
+/// The options a new window runs with, as this one was started: the
+/// renderer, the config file and the profile.
+fn forwarded(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let mut out = Vec::new();
+    let mut args = args;
+    while let Some(arg) = args.next() {
+        let Some(text) = arg.to_str() else {
+            continue;
+        };
+        match text {
+            "--" => break,
+            "--gpu" => out.push(arg),
+            // Options this window keeps to itself still take their value.
+            "--cwd" => {
+                args.next();
+            }
+            "--config" | "--profile" => {
+                out.push(arg);
+                out.extend(args.next());
+            }
+            _ if text.starts_with("--config=") || text.starts_with("--profile=") => out.push(arg),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Creates a window in `session` with one block, and makes it active.
@@ -706,6 +849,9 @@ pub enum Out {
     /// The shown session, named, ended while the connection was away:
     /// show no block until another is picked (handoff D114).
     Ended(String),
+    /// Another window, named, asked this one to show the session with this
+    /// key (C64).
+    Shown(u64, String),
 }
 
 /// Why the events reader stopped following the session.
@@ -750,6 +896,7 @@ impl Events {
                 Out::Link(l) => remote.link(l),
                 Out::Notice(n) => remote.notice(n),
                 Out::Ended(name) => remote.ended(name),
+                Out::Shown(key, by) => remote.shown(key, by),
             })
         });
     }
@@ -786,6 +933,12 @@ impl Events {
             if !self.headed(&message, out) {
                 return Stop::Closed;
             }
+            if let Message::SessionShown { session, by } = &message {
+                let key = self.state.shown().sessions.key(*session);
+                if !out(Out::Shown(key, self.model.window_name(*by))) {
+                    return Stop::Closed;
+                }
+            }
             // A sync that fails is answered too, and forgotten.
             if let Message::Failed { req, .. } = &message {
                 lock(&self.state.opened).remove(req);
@@ -814,11 +967,14 @@ impl Events {
                 return Stop::Closed;
             }
             if let Message::Event {
-                event: Event::WindowCreated { .. } | Event::SessionCreated { .. },
+                event:
+                    Event::WindowCreated { .. }
+                    | Event::SessionCreated { .. }
+                    | Event::ClientConnected { .. },
                 ..
             } = message
             {
-                // Its name comes with its entry.
+                // Its name, or what a client can do, comes with its entry.
                 self.state.send(|req| Message::List { req });
             }
             if matches!(change, Change::Layout | Change::Shown) {
@@ -997,7 +1153,7 @@ impl Events {
             takeover,
             features,
             version,
-            ..
+            client,
         } = req.welcome()?;
         // A new connection, perhaps to an upgraded server: told afresh.
         self.older = Older::check(GUI, features, version.as_deref());
@@ -1005,6 +1161,8 @@ impl Events {
         let next = req.next;
         let writer = Conn::new(clone(&stream)?);
         self.install((conn, writer), takeover, next, &entries);
+        // A new client: the old one is no window of this one.
+        self.model.set_me(client);
         Ok(())
     }
 
@@ -1151,6 +1309,7 @@ impl Events {
     fn session(&self) -> Session {
         let shown = &mut *self.state.shown();
         let mut session = self.model.session(&mut StripKeys {
+            peers: &mut shown.peers,
             sessions: &mut shown.sessions,
             windows: &mut shown.windows,
             blocks: &mut shown.keys,
@@ -1672,8 +1831,138 @@ impl Drop for PaneWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::ffi::OsString;
+
+    use rusty_mux_core::{BlockId, InputMode, SessionId, Size, WindowId};
+    use rusty_mux_proto::{Entry, Message};
     use rusty_uuid::Uuid;
+
+    use super::{anchor, first_block, forwarded};
+
+    fn args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn a_new_window_keeps_the_renderer_config_and_profile_but_not_the_target() {
+        let given = args(&[
+            "--gpu",
+            "--config",
+            "a.toml",
+            "--profile=work",
+            "--cwd",
+            "--gpu",
+            "/run/mux.sock",
+            "--",
+            "vim",
+        ]);
+        assert_eq!(
+            forwarded(given.into_iter()),
+            args(&["--gpu", "--config", "a.toml", "--profile=work"])
+        );
+    }
+
+    fn entry(entry: Entry) -> Message {
+        Message::Entry { req: 1, entry }
+    }
+
+    fn window(window: WindowId, session: SessionId) -> Message {
+        laid(window, session, None)
+    }
+
+    fn laid(window: WindowId, session: SessionId, shown: Option<BlockId>) -> Message {
+        entry(Entry::Window {
+            window,
+            session,
+            name: String::new(),
+            layout: shown.map(rusty_mux_core::Layout::Block),
+            zoomed: None,
+            focused: None,
+        })
+    }
+
+    fn block(block: BlockId, window: WindowId) -> Message {
+        entry(Entry::Block {
+            block,
+            window,
+            size: Size::new(80, 24).expect("a size"),
+            holder: None,
+            title: String::new(),
+            name: String::new(),
+            owner: None,
+            input: InputMode::Open,
+            exited: false,
+        })
+    }
+
+    #[test]
+    fn a_new_window_opens_the_active_window_else_the_first_one_with_a_block() {
+        let s = SessionId::from_uuid(Uuid::new_v4());
+        let [w1, w2] = [(); 2].map(|_| WindowId::from_uuid(Uuid::new_v4()));
+        let b = BlockId::from_uuid(Uuid::new_v4());
+        let session = |active| {
+            entry(Entry::Session {
+                session: s,
+                name: "s".into(),
+                active,
+                generated: false,
+            })
+        };
+        // The first window is empty: the block in the second is found.
+        let list = [
+            session(None),
+            window(w1, s),
+            laid(w2, s, Some(b)),
+            block(b, w2),
+        ];
+        assert_eq!(first_block(&list, s), Some(b));
+        // With an active window, that one's block comes first.
+        let other = BlockId::from_uuid(Uuid::new_v4());
+        let list = [
+            session(Some(w2)),
+            laid(w1, s, Some(other)),
+            laid(w2, s, Some(b)),
+            block(other, w1),
+            block(b, w2),
+        ];
+        assert_eq!(first_block(&list, s), Some(b));
+        // A detached block is skipped for a laid-out one in another window.
+        let list = [
+            session(Some(w1)),
+            laid(w1, s, None),
+            block(other, w1),
+            laid(w2, s, Some(b)),
+            block(b, w2),
+        ];
+        assert_eq!(first_block(&list, s), Some(b));
+        // Floats are no block to show: a tile beside them is, floats alone are not.
+        let float = |window, block| {
+            entry(Entry::Floats {
+                window,
+                floats: vec![rusty_mux_core::Float {
+                    block,
+                    at: rusty_mux_core::FloatRect::new(10, 10, 40, 40).expect("a float"),
+                }],
+            })
+        };
+        let list = [
+            session(None),
+            laid(w1, s, Some(b)),
+            float(w1, other),
+            block(b, w1),
+            block(other, w1),
+        ];
+        assert_eq!(first_block(&list, s), Some(b), "mixed");
+        let list = [
+            session(None),
+            window(w1, s),
+            float(w1, other),
+            block(other, w1),
+        ];
+        assert_eq!(first_block(&list, s), None, "floats only");
+        // No block anywhere.
+        assert_eq!(first_block(&[session(None), window(w1, s)], s), None);
+    }
 
     fn blocks() -> [BlockId; 3] {
         std::array::from_fn(|_| BlockId::from_uuid(Uuid::new_v4()))

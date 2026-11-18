@@ -18,7 +18,8 @@ use rusty_mux_proto::MAX_CLIPBOARD;
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
 use rusty_mux_proto::{
-    Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Ownership, Takeover, encode,
+    Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Ownership, ShowTo, Takeover,
+    encode,
 };
 use rusty_mux_status::{Parts, Status};
 use rusty_term_core::{AnsiParser, Grid};
@@ -110,6 +111,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::SHARING)
     .union(Features::DIR_LISTING)
     .union(Features::CLIPBOARD)
+    .union(Features::SHOW_SESSION)
     .union(Features::FLOATS)
     .union(Features::TERMINAL_FIND)
     .union(UNIX_ONLY);
@@ -121,6 +123,11 @@ const FLOATS_EDIT: Features = Features::FLOATS.union(Features::LAYOUT_EDIT);
 /// How long a clipboard read waits for its answer before the next one is
 /// asked: a late answer would land as typed input in whatever runs next.
 const CLIPBOARD_WAIT: Duration = Duration::from_secs(30);
+
+/// The most `ShowSession` requests one client may make in [`SHOW_PERIOD`]
+/// (C64): a client can't flood the windows of its account.
+const SHOW_LIMIT: usize = 4;
+const SHOW_PERIOD: Duration = Duration::from_secs(1);
 
 /// Offered on Linux only: signal and release (C76) act on a Unix process
 /// group, and orch, their one client, runs there; the tailscale status
@@ -425,6 +432,9 @@ pub(crate) struct State {
     /// (`true` for primary), until it is answered or [`CLIPBOARD_WAIT`] ends
     /// (C54). A reply that matches none is refused.
     reads: HashMap<(BlockId, bool), (ClientId, Instant)>,
+    /// When each client last asked a window to show a session, within
+    /// [`SHOW_PERIOD`] (C64).
+    shows: HashMap<ClientId, Vec<Instant>>,
     /// Each `TAKEOVER` client's tokens.
     tokens: HashMap<ClientId, Tokens>,
     /// Clients whose connection ended within [`ORPHAN_GRACE`], each with
@@ -502,6 +512,7 @@ impl State {
             clients: HashMap::new(),
             features: HashMap::new(),
             reads: HashMap::new(),
+            shows: HashMap::new(),
             tokens: HashMap::new(),
             orphans: HashMap::new(),
             history: History::new(Uuid::new_v4(), HISTORY),
@@ -1104,6 +1115,7 @@ impl State {
         }
         self.features.remove(&client);
         self.tokens.remove(&client);
+        self.shows.remove(&client);
         self.forget_keys(client);
         if let Err(err) = self.mux.disconnect(client) {
             eprintln!("rusty-mux-server: model out of step on disconnect: {err}");
@@ -1504,6 +1516,11 @@ impl State {
                 self.require(client, Features::CLIPBOARD, "a clipboard reply")
                     .and_then(|()| self.clipboard_reply(client, req, block, selection, data)),
             ),
+            M::ShowSession { req, session, to } => (
+                req,
+                self.require(client, Features::SHOW_SESSION, "show-session")
+                    .and_then(|()| self.show_session(client, session, to)),
+            ),
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
@@ -1511,6 +1528,67 @@ impl State {
             ),
             other => (0, Err(format!("not a client request: {other:?}").into())),
         }
+    }
+
+    /// Asks the other clients of `client`'s account to show `session`
+    /// (C64). Nothing changes here: each target hears
+    /// [`Message::SessionShown`], outside the event history so a reconnect
+    /// never repeats it, and attaches or not as it chooses. A target behind
+    /// on its output is skipped, as a clipboard read is.
+    fn show_session(
+        &mut self,
+        client: ClientId,
+        session: rusty_mux_core::SessionId,
+        to: ShowTo,
+    ) -> Result<Outcome, Refusal> {
+        let me = self
+            .mux
+            .client(client)
+            .ok_or(Error::UnknownClient(client))?
+            .principal()
+            .clone();
+        if self.mux.session(session).is_none() {
+            return Err(Error::UnknownSession(session).into());
+        }
+        let asked = self.shows.entry(client).or_default();
+        asked.retain(|at| at.elapsed() < SHOW_PERIOD);
+        if asked.len() >= SHOW_LIMIT {
+            return Err(format!("at most {SHOW_LIMIT} show-session requests a second").into());
+        }
+        asked.push(Instant::now());
+        let same = |this: &Self, id: ClientId| {
+            id != client
+                && this.has(id, Features::SHOW_SESSION)
+                && this.mux.client(id).is_some_and(|c| *c.principal() == me)
+        };
+        let targets: Vec<ClientId> = match to {
+            ShowTo::Client(target) if same(self, target) => vec![target],
+            ShowTo::Client(_) => {
+                return Err("that client can't be asked: it is another account's, \
+                            this one, or can't show sessions"
+                    .into());
+            }
+            ShowTo::Others => {
+                let all: Vec<ClientId> = self.mux.clients().map(|c| c.id()).collect();
+                all.into_iter().filter(|id| same(self, *id)).collect()
+            }
+        };
+        for target in targets {
+            let ready = self
+                .clients
+                .get(&target)
+                .is_some_and(|out| out.queued() <= INPUT_REPORT_LIMIT);
+            if ready {
+                self.send(
+                    target,
+                    &Message::SessionShown {
+                        session,
+                        by: client,
+                    },
+                );
+            }
+        }
+        Ok(Outcome::Done(None))
     }
 
     /// A lease holder's answer to a clipboard read (C54): the OSC 52 reply
@@ -1774,6 +1852,20 @@ impl State {
             }
         }
         Ok(fds)
+    }
+
+    /// A client's entry in a listing: with its principal, transport and
+    /// whether it can be asked to show a session, which a client without
+    /// [`Features::IDENTITY`] skips.
+    fn client_entry(&self, client: &rusty_mux_core::Client) -> Entry {
+        Entry::Client {
+            client: client.id(),
+            name: client.name().to_owned(),
+            attached: client.attached(),
+            principal: Some(client.principal().clone()),
+            transport: Some(client.transport()),
+            showable: Some(self.has(client.id(), Features::SHOW_SESSION)),
+        }
     }
 
     /// Whether `client` negotiated `feature`.
@@ -2097,7 +2189,7 @@ impl State {
             .get(&client)
             .is_some_and(|f| f.contains(Features::LABELS))
         {
-            entries.extend(self.mux.clients().map(client_entry));
+            entries.extend(self.mux.clients().map(|c| self.client_entry(c)));
         }
         let mut messages: Vec<Message> = entries
             .into_iter()
@@ -2116,7 +2208,7 @@ impl State {
         let messages = [
             Message::Entry {
                 req,
-                entry: client_entry(me),
+                entry: self.client_entry(me),
             },
             Message::Done { req, created: None },
         ];
@@ -3009,18 +3101,6 @@ pub(crate) fn test_owner() -> Principal {
     Principal::unix(1000, Some("tester".into())).expect("valid")
 }
 
-/// A client's entry in a listing: with its principal and transport, which
-/// a client without [`Features::IDENTITY`] skips.
-fn client_entry(client: &rusty_mux_core::Client) -> Entry {
-    Entry::Client {
-        client: client.id(),
-        name: client.name().to_owned(),
-        attached: client.attached(),
-        principal: Some(client.principal().clone()),
-        transport: Some(client.transport()),
-    }
-}
-
 /// Reports a model call that fails only if the server's state and the
 /// model's disagree.
 /// Announces the status records that ended, then a state change, if any.
@@ -3522,6 +3602,42 @@ mod regression {
                 takeover,
             );
             assert_eq!(again, client, "the token still works for its owner");
+        });
+    }
+
+    /// A window is never asked by a client of another account (C64): not
+    /// by name, and not as one of "every other window".
+    #[test]
+    fn show_session_never_reaches_another_principal() {
+        runtime().block_on(async {
+            let (shared, asker, _block, _inbox) = fixture();
+            let mut state = shared.borrow_mut();
+            let session = state.mux.create_session("t").unwrap();
+            let features = Features::CHECKPOINT_V6.union(Features::SHOW_SESSION);
+            state.features.insert(asker, features);
+            let stranger = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _theirs_inbox, _) = outbox();
+            let theirs = state.connect(out, stranger, Transport::Socket, features, None, None);
+            let (out, _mine_inbox, _) = outbox();
+            let mine = state.connect(out, test_owner(), Transport::Socket, features, None, None);
+
+            let queued = |state: &State, id: ClientId| state.clients[&id].queued();
+            let (theirs_before, mine_before) = (queued(&state, theirs), queued(&state, mine));
+            // By name: refused, and nothing is sent.
+            let named = state.show_session(asker, session, ShowTo::Client(theirs));
+            assert!(named.is_err());
+            assert_eq!(queued(&state, theirs), theirs_before);
+            // To every other window: done, and only the same account hears.
+            assert!(state.show_session(asker, session, ShowTo::Others).is_ok());
+            assert_eq!(
+                queued(&state, theirs),
+                theirs_before,
+                "the stranger heard it"
+            );
+            assert!(
+                queued(&state, mine) > mine_before,
+                "the same account did not"
+            );
         });
     }
 

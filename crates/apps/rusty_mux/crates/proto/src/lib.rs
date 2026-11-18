@@ -41,5 +41,5 @@ pub use error::Error;
 pub use frame::{MAX_FRAME, decode, encode};
 pub use message::{
     BlockSignal, Code, Cursor, DatagramKey, ECHO_GRACE, Echo, Entry, Features, Launch,
-    MAX_CLIPBOARD, Message, Ownership, Program, Takeover,
+    MAX_CLIPBOARD, Message, Ownership, Program, ShowTo, Takeover,
 };

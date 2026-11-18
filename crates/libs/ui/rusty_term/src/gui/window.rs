@@ -57,7 +57,7 @@ use super::prefix::{self, Command};
 use super::render::{CpuRenderer, FloatLayer, PaneFrame, Renderer, Scene, SearchColors, blend};
 use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
-use super::source::{Act, Feed, Float, FloatAt, Listed, PaneIo, Remote, Source, Tree};
+use super::source::{Act, Feed, Float, FloatAt, Listed, PaneIo, Remote, Show, Source, Tree};
 use super::strip::{self, Spot, StripState};
 use super::{link_policy, link_trust};
 use crate::backend::BackendHandle;
@@ -158,6 +158,8 @@ pub(crate) enum UserEvent {
     Ended(String),
     /// An info notice for the banner ([`Remote::notice`]).
     Notice(Option<super::source::Notice>),
+    /// Another window asked this one to show a session ([`Remote::shown`]).
+    Shown(u64, String),
     /// Where taking pane `id`'s owner-only block over stands
     /// ([`super::source::Feed::Take`]).
     Take(u64, super::source::Take),
@@ -711,6 +713,12 @@ struct WindowState<'a> {
     popover: Popover,
     /// An attached window's open take-over confirm (gui-design F3, D64).
     confirm: Option<Confirm>,
+    /// What the open actions menu's rows do, and the session they are for
+    /// (C64, gui-design D93).
+    actions: (u64, Vec<popover::ShowAction>),
+    /// A session another window asked this one to show while a confirm or
+    /// the palette was open, and who asked (gui-design D96).
+    shown_wait: Option<(u64, String)>,
     /// The command palette and its directory browse (gui-design D77, D78).
     palette: PaletteUi,
     /// The block that had the focus when the palette opened.
@@ -5259,6 +5267,9 @@ impl WindowState<'_> {
         let rows = match self.popover_kind() {
             Some(Kind::Switcher) => self.switcher_rows(session),
             Some(Kind::Detached) => self.detached_rows(session),
+            // The actions don't change under it; a session that goes ends
+            // the menu with its switcher.
+            Some(Kind::Actions) => return,
             None => return,
         };
         self.popover.update(rows);
@@ -5598,12 +5609,112 @@ impl WindowState<'_> {
                     x.round() as usize,
                 )
             }
+            Kind::Actions => return self.open_actions(self.actions.0),
         };
         if rows.is_empty() {
             return;
         }
         let menu = Menu { kind, header, rows };
         self.popover.open(menu, (x, top));
+    }
+
+    /// Open the actions menu for session `key` where the switcher was
+    /// (C64, gui-design D93).
+    fn open_actions(&mut self, key: u64) {
+        let session = self.strip.session();
+        let Some(choice) = session.sessions.iter().find(|s| s.key == key) else {
+            return;
+        };
+        let header = choice.name.clone();
+        let (acts, rows) = popover::actions(&session.sessions, &session.peers);
+        let s = self.scale_factor as f32;
+        let at = (
+            (popover::SWITCHER_X * s).round() as usize,
+            (popover::TOP * s).round() as usize,
+        );
+        self.actions = (key, acts);
+        self.popover.open(
+            Menu {
+                kind: Kind::Actions,
+                header,
+                rows,
+            },
+            at,
+        );
+    }
+
+    /// Carry out action `i` of the actions menu (C64): ask other windows,
+    /// or open a new one. Moving the session shown leaves this window on
+    /// the next session.
+    fn run_session_action(&mut self, i: usize) {
+        let (key, acts) = &self.actions;
+        let (key, Some(act)) = (*key, acts.get(i).copied()) else {
+            return;
+        };
+        let source = &self.source;
+        let asked = match act {
+            popover::ShowAction::OpenNew => source.open_window(key),
+            popover::ShowAction::All => source.show_in(key, Show::All),
+            popover::ShowAction::MoveTo(peer) => source.show_in(key, Show::Window(peer)),
+        };
+        if !asked {
+            return;
+        }
+        if let popover::ShowAction::MoveTo(_) = act {
+            let session = self.strip.session();
+            let current = session.sessions.iter().any(|s| s.key == key && s.current);
+            let next = session.sessions.iter().find(|s| s.key != key && s.can_show);
+            if let (true, Some(next)) = (current, next) {
+                self.source.switch(next.key);
+            }
+        }
+    }
+
+    /// Another window asked this one to show session `key` (C64, gui-design
+    /// D95, D96). It switches and says who asked; while a confirm or the
+    /// palette is open it waits, so a take-over decision is never cut off.
+    fn on_shown(&mut self, key: u64, by: String) {
+        if self.confirm.is_some() || self.palette.is_open() {
+            let name = self.session_name(key);
+            self.shown_wait = Some((key, by.clone()));
+            self.show_notice(Some(super::source::Notice {
+                title: format!("{by} wants to show {name}"),
+                detail: "It opens when this closes.".to_owned(),
+            }));
+            return;
+        }
+        self.show_shown(key, &by);
+    }
+
+    /// Switch to session `key` and say who asked.
+    fn show_shown(&mut self, key: u64, by: &str) {
+        let name = self.session_name(key);
+        self.popover.close();
+        self.source.switch(key);
+        self.show_notice(Some(super::source::Notice {
+            title: format!("{by} opened {name}"),
+            detail: String::new(),
+        }));
+    }
+
+    /// A session's name as the switcher lists it.
+    fn session_name(&self, key: u64) -> String {
+        self.strip
+            .session()
+            .sessions
+            .iter()
+            .find(|s| s.key == key)
+            .map_or_else(|| "a session".to_owned(), |s| s.name.clone())
+    }
+
+    /// Open what waited for a confirm or the palette to close (D96).
+    fn settle_shown(&mut self) {
+        if self.confirm.is_some() || self.palette.is_open() {
+            return;
+        }
+        if let Some((key, by)) = self.shown_wait.take() {
+            self.show_shown(key, &by);
+        }
     }
 
     /// The switcher's rows: the server's sessions, then the menu's items.
@@ -5669,6 +5780,18 @@ impl WindowState<'_> {
             Key::Named(NamedKey::ArrowUp) => popover.step(false),
             Key::Named(NamedKey::ArrowDown) => popover.step(true),
             Key::Named(NamedKey::Escape) => popover.close(),
+            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Tab)
+                if popover.kind() == Some(Kind::Switcher) =>
+            {
+                // The selected session's actions across windows (D93).
+                let Some(Pick::Session(key)) = popover.selected() else {
+                    return;
+                };
+                self.open_actions(key);
+            }
+            Key::Named(NamedKey::ArrowLeft) if popover.kind() == Some(Kind::Actions) => {
+                self.open_popover(Kind::Switcher);
+            }
             Key::Named(NamedKey::Enter) => {
                 let picked = popover.selected();
                 self.popover_pick(picked);
@@ -5704,6 +5827,7 @@ impl WindowState<'_> {
             Pick::Reattach(key) => {
                 self.source.act(Act::Reattach(key));
             }
+            Pick::Act(i) => self.run_session_action(i),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -6837,6 +6961,8 @@ impl<'a> App<'a> {
             body: BodyState::new().ok_or("the interface font failed to parse")?,
             popover: Popover::new().ok_or("the interface font failed to parse")?,
             confirm: None,
+            actions: (0, Vec::new()),
+            shown_wait: None,
             palette: PaletteUi::new().ok_or("the interface font failed to parse")?,
             palette_origin: None,
             links: load_trust(),
@@ -6936,6 +7062,7 @@ impl ApplicationHandler<UserEvent> for App<'_> {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if let Some(w) = self.windows.iter_mut().find(|w| w.window_id() == Some(id)) {
             w.on_window_event(event);
+            w.settle_shown();
         }
         self.reap_and_spawn(event_loop);
     }
@@ -7005,6 +7132,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::Ended(name) => {
                 if let Some(w) = self.windows.first_mut() {
                     w.show_ended(name);
+                }
+            }
+            UserEvent::Shown(key, by) => {
+                if let Some(w) = self.windows.first_mut() {
+                    w.on_shown(key, by);
                 }
             }
             UserEvent::Notice(notice) => {

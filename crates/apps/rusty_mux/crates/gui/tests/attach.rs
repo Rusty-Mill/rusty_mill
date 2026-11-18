@@ -20,7 +20,7 @@ use rusty_mux_core::{BlockId, InputMode, Side, Size};
 use rusty_mux_gui::source::{Out, attach};
 use rusty_mux_proto::{Entry, Features, Launch, Message};
 use rusty_mux_server::{Config, ConsoleHost, serve};
-use rusty_term::gui::source::{Act, Dir, Feed, Link, PaneIo, Source, Take, Tree};
+use rusty_term::gui::source::{Act, Dir, Feed, Link, PaneIo, Show, Source, Take, Tree};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::{Builder, LocalOptions};
 
@@ -1348,4 +1348,47 @@ fn a_place_that_changes_nothing_or_goes_nowhere_still_tells_the_floats() {
     };
     assert_eq!(told.len(), 1);
     assert_eq!(told[0].at, at);
+}
+
+#[test]
+fn a_window_asks_another_to_show_a_session_and_the_asked_hears_who() {
+    let socket = start_server();
+    let a = attach(&socket, None).expect("a");
+    let (a_tx, a_outs) = channel();
+    let a_events = a.events;
+    std::thread::spawn(move || a_events.run(|out| a_tx.send(out).is_ok()));
+    // A second session for the first window to hand over.
+    let mut other = control(&socket);
+    let mut req = Requests {
+        conn: &mut other,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    req.welcome().expect("welcome");
+    req.create(Size::new(80, 24).expect("a size"), "other")
+        .expect("a second session");
+    let b = attach(&socket, None).expect("b");
+    let (b_tx, b_outs) = channel();
+    let b_events = b.events;
+    std::thread::spawn(move || b_events.run(|out| b_tx.send(out).is_ok()));
+
+    // Each sees the other as a window, and the session to hand over.
+    let (peer, session) = loop {
+        let s = next_session(&a_outs);
+        let session = s.sessions.iter().find(|c| c.name == "other");
+        if let (Some(p), Some(c)) = (s.peers.first(), session) {
+            break (p.clone(), c.key);
+        }
+    };
+    assert!(peer.label.starts_with("Window "), "{}", peer.label);
+
+    assert!(a.source.show_in(session, Show::Window(peer.key)));
+    let Out::Shown(_, by) = next_out(&b_outs, |o| matches!(o, Out::Shown(..))) else {
+        unreachable!()
+    };
+    assert!(by.starts_with("Window "), "{by}");
+
+    assert!(a.source.show_in(session, Show::All));
+    next_out(&b_outs, |o| matches!(o, Out::Shown(..)));
 }

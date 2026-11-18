@@ -9,7 +9,8 @@ use super::*;
 use crate::field::Out;
 use crate::schema::Value;
 use crate::{
-    BlockSignal, Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Program, Takeover,
+    BlockSignal, Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Program, ShowTo,
+    Takeover,
 };
 use rusty_mux_core::InputMode;
 
@@ -265,6 +266,7 @@ fn every_message_round_trips() {
                 attached: Some(block),
                 principal: Some(Principal::unix(1000, Some("alice".into())).expect("valid")),
                 transport: Some(Transport::Datagram),
+                showable: Some(true),
             },
         },
         Message::Entry {
@@ -275,6 +277,7 @@ fn every_message_round_trips() {
                 attached: None,
                 principal: None,
                 transport: None,
+                showable: None,
             },
         },
         Message::Entry {
@@ -285,6 +288,7 @@ fn every_message_round_trips() {
                 attached: None,
                 principal: Some(Principal::new("sid:S-1-5-21-1", "").expect("valid")),
                 transport: Some(Transport::Socket),
+                showable: Some(false),
             },
         },
         Message::Whoami { req: 18 },
@@ -511,6 +515,20 @@ fn every_message_round_trips() {
             block,
             selection: Selection::Clipboard,
             data: Some(b"text".to_vec()),
+        },
+        Message::ShowSession {
+            req: 28,
+            session,
+            to: ShowTo::Client(ClientId::from_uuid(Uuid::new_v4())),
+        },
+        Message::ShowSession {
+            req: 29,
+            session,
+            to: ShowTo::Others,
+        },
+        Message::SessionShown {
+            session,
+            by: ClientId::from_uuid(Uuid::new_v4()),
         },
         Message::ClipboardReply {
             req: 27,

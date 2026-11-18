@@ -12,7 +12,7 @@ use super::blocks::{Glyph, Ink, ink, paint_glyph};
 use super::chrome::Chrome;
 use super::paint::{Pixmap, Rect, icons, mix};
 use super::ribbon::{Cap, keycap};
-use super::source::SessionChoice;
+use super::source::{Peer, SessionChoice};
 use super::text::{UiText, Weight};
 use std::time::Duration;
 
@@ -78,6 +78,8 @@ pub(crate) enum Kind {
     Switcher,
     /// The detached blocks (D61).
     Detached,
+    /// What to do with one session across windows (C64, D93).
+    Actions,
 }
 
 /// A popover's content: a header over rows.
@@ -97,6 +99,17 @@ pub(crate) enum Row {
     Item(String),
     /// A detached block to reattach.
     Detached(DetachedRow),
+    /// A session action across windows (C64, D93, D94).
+    Act(ActRow),
+}
+
+/// An action row: its label over a slate detail line, dimmed to 45 % when
+/// it can't be picked (D93: "No other windows", "Only session").
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ActRow {
+    pub label: String,
+    pub detail: Option<String>,
+    pub enabled: bool,
 }
 
 /// A detached block as its row shows it (D61).
@@ -118,6 +131,8 @@ pub(crate) enum Pick {
     Item(usize),
     /// Put the block with this key back in the layout.
     Reattach(u64),
+    /// Run action `i` of the actions menu (C64).
+    Act(usize),
 }
 
 /// A painted popover: its pixels and each row's box, by row.
@@ -148,6 +163,7 @@ enum RowId {
     Session(u64),
     Item(String),
     Detached(u64),
+    Act(String),
 }
 
 impl Row {
@@ -156,6 +172,7 @@ impl Row {
             Row::Session(s) => RowId::Session(s.key),
             Row::Item(label) => RowId::Item(label.clone()),
             Row::Detached(d) => RowId::Detached(d.key),
+            Row::Act(a) => RowId::Act(a.label.clone()),
         }
     }
 
@@ -164,6 +181,7 @@ impl Row {
         match self {
             Row::Session(s) => s.can_show,
             Row::Item(_) | Row::Detached(_) => true,
+            Row::Act(a) => a.enabled,
         }
     }
 
@@ -172,6 +190,8 @@ impl Row {
             Row::Session(_) => ROW_H,
             Row::Item(_) => ITEM_H,
             Row::Detached(_) => DETACHED_H,
+            Row::Act(a) if a.detail.is_some() => ROW_H,
+            Row::Act(_) => ITEM_H,
         }
     }
 }
@@ -184,7 +204,7 @@ impl Menu {
     fn width(&self) -> f32 {
         match self.kind {
             Kind::Switcher => SWITCHER_W,
-            Kind::Detached => DETACHED_W,
+            Kind::Detached | Kind::Actions => DETACHED_W,
         }
     }
 
@@ -202,7 +222,7 @@ impl Menu {
         let rows: f32 = self.rows.iter().map(Row::height).sum();
         let foot = match self.kind {
             Kind::Switcher => FOOT_H,
-            Kind::Detached => 0.0,
+            Kind::Detached | Kind::Actions => 0.0,
         };
         (2.0 * BORDER + HEAD_PAD.0 + HEAD_LINE + HEAD_PAD.2 + rows + rules as f32 * BORDER + foot)
             * s
@@ -253,7 +273,63 @@ pub(crate) fn pick(menu: &Menu, i: usize) -> Option<Pick> {
                 .count(),
         ),
         Row::Detached(d) => Pick::Reattach(d.key),
+        Row::Act(_) => Pick::Act(
+            menu.rows[..i]
+                .iter()
+                .filter(|r| matches!(r, Row::Act(_)) && r.enabled())
+                .count(),
+        ),
     })
+}
+
+/// What an actions row does (C64, gui-design D93).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShowAction {
+    /// Show the session in a new window of its own.
+    OpenNew,
+    /// Show it in window `key` and leave it here.
+    MoveTo(u64),
+    /// Show it in every other window.
+    All,
+}
+
+/// The actions menu's rows for session `key` (C64, gui-design D93, D94),
+/// each with what it does. With other windows, "Move to another window"
+/// is a row per window; with none it is one disabled row saying so, and
+/// so is "Only session" for the one session there is.
+pub(crate) fn actions(sessions: &[SessionChoice], peers: &[Peer]) -> (Vec<ShowAction>, Vec<Row>) {
+    let row = |label: &str, detail: Option<&str>, enabled| {
+        Row::Act(ActRow {
+            label: label.to_owned(),
+            detail: detail.map(str::to_owned),
+            enabled,
+        })
+    };
+    let mut acts = vec![ShowAction::OpenNew];
+    let mut rows = vec![row("Open in new window", None, true)];
+    if peers.is_empty() {
+        rows.push(row(
+            "Move to another window",
+            Some("No other windows"),
+            false,
+        ));
+    } else if sessions.len() < 2 {
+        rows.push(row("Move to another window", Some("Only session"), false));
+    } else {
+        for peer in peers {
+            acts.push(ShowAction::MoveTo(peer.key));
+            rows.push(row(&format!("Move to {}", peer.label), None, true));
+        }
+    }
+    if peers.is_empty() {
+        rows.push(row("Show in every window", Some("No other windows"), false));
+    } else {
+        acts.push(ShowAction::All);
+        rows.push(row("Show in every window", None, true));
+    }
+    // A disabled row has no action: `pick` skips it, so keep the lists
+    // aligned by counting enabled rows only.
+    (acts, rows)
 }
 
 /// An attached window's popover: closed, or open on a menu at a place,
@@ -492,6 +568,7 @@ pub(crate) fn paint(
             Row::Session(session) => paint_session(&mut out, session, r, hovered, (c, s), font),
             Row::Item(label) => paint_item(&mut out, label, r, hovered, (c, s), font),
             Row::Detached(d) => paint_detached(&mut out, d, r, hovered, (c, s), font),
+            Row::Act(a) => paint_act(&mut out, a, r, hovered, (c, s), font),
         }
         rows.push((r, i));
         y += row.height() * s;
@@ -662,6 +739,55 @@ fn paint_item(
     let base = r.y + r.h / 2.0 + font.centre_drop(NAME_PX * s);
     let x = r.x + ROW_PAD.0 * s;
     out.text(font, label, Weight::Regular, NAME_PX * s, x, base, c.text);
+}
+
+/// An action's row in `r`: its label, over its detail when it has one,
+/// shaded when it can't be picked.
+fn paint_act(
+    out: &mut Pixmap,
+    a: &ActRow,
+    r: Rect,
+    hovered: bool,
+    (c, s): (&Chrome, f32),
+    font: &mut UiText,
+) {
+    let hovered = hovered && a.enabled;
+    if hovered {
+        out.fill(r, 0.0, c.hover);
+    }
+    let under = if hovered { c.hover } else { c.raised };
+    let shade = |color: u32| {
+        if a.enabled {
+            color
+        } else {
+            mix(under, color, DISABLED)
+        }
+    };
+    let x = r.x + ROW_PAD.0 * s;
+    let right = r.x + r.w - ROW_PAD.1 * s;
+    match &a.detail {
+        Some(detail) => two_lines(
+            out,
+            (&a.label, detail),
+            r,
+            (x, right),
+            (shade(c.text), shade(c.muted)),
+            s,
+            font,
+        ),
+        None => {
+            let base = r.y + r.h / 2.0 + font.centre_drop(NAME_PX * s);
+            out.text(
+                font,
+                &a.label,
+                Weight::Regular,
+                NAME_PX * s,
+                x,
+                base,
+                shade(c.text),
+            );
+        }
+    }
 }
 
 /// A detached block's row in `r`: its lead glyph, its name over its state
@@ -892,5 +1018,75 @@ mod tests {
             "Working, detached 4 min ago"
         );
         assert_eq!(detached_detail("Done", d(7300)), "Done, detached 2 h ago");
+    }
+
+    fn choice(key: u64) -> SessionChoice {
+        SessionChoice {
+            key,
+            name: format!("s{key}"),
+            windows: 1,
+            clients: 1,
+            current: key == 1,
+            can_show: true,
+        }
+    }
+
+    fn peer(key: u64, n: u32) -> Peer {
+        Peer {
+            key,
+            label: format!("Window {n}"),
+        }
+    }
+
+    #[test]
+    fn with_other_windows_each_is_a_move_and_all_is_one_row() {
+        let (acts, rows) = actions(&[choice(1), choice(2)], &[peer(5, 2), peer(6, 3)]);
+        assert_eq!(
+            acts,
+            [
+                ShowAction::OpenNew,
+                ShowAction::MoveTo(5),
+                ShowAction::MoveTo(6),
+                ShowAction::All
+            ]
+        );
+        assert_eq!(rows.len(), 4);
+        let m = Menu {
+            kind: Kind::Actions,
+            header: "s1".into(),
+            rows,
+        };
+        assert_eq!(pick(&m, 0), Some(Pick::Act(0)));
+        assert_eq!(pick(&m, 3), Some(Pick::Act(3)));
+    }
+
+    #[test]
+    fn without_other_windows_move_and_show_all_are_disabled_with_a_reason() {
+        let (acts, rows) = actions(&[choice(1), choice(2)], &[]);
+        assert_eq!(acts, [ShowAction::OpenNew]);
+        let reasons: Vec<_> = rows
+            .iter()
+            .map(|r| match r {
+                Row::Act(a) => (a.enabled, a.detail.as_deref()),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                (true, None),
+                (false, Some("No other windows")),
+                (false, Some("No other windows"))
+            ]
+        );
+    }
+
+    #[test]
+    fn moving_the_only_session_is_disabled() {
+        let (acts, rows) = actions(&[choice(1)], &[peer(5, 2)]);
+        assert_eq!(acts, [ShowAction::OpenNew, ShowAction::All]);
+        assert!(
+            matches!(&rows[1], Row::Act(a) if !a.enabled && a.detail.as_deref() == Some("Only session"))
+        );
     }
 }
