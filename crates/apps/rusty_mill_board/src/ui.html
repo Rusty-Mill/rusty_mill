@@ -943,7 +943,7 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),ev:el("div",null,"evidence"),ei:el("input"),up:el("input","","up"),ms:el("select")};
+  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),ev:el("div",null,"evidence"),ei:el("input"),dp:el("input"),rl:el("input"),sb:el("input"),up:el("input","","up"),ms:el("select")};
   projects().forEach(p=>f.p.append(new Option(label(p),p)));
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
@@ -958,6 +958,11 @@ function show(id){
   f.up.onchange=()=>act("card_plan",{id,parent:f.up.value.trim()||null});
   f.ms.setAttribute("aria-label","milestone");f.ms.title="The milestone this card counts towards";
   f.ms.onchange=()=>act("card_plan",{id,milestone:f.ms.value||null});
+  // Card lists (card_plan): by number, comma separated; each field replaces its list, empty clears it.
+  for(const [x,key,name,tip]of[[f.dp,"deps","Waits on","Cards that must be Done before this one is taken"],[f.rl,"related","Related","Cards worth reading alongside this one"],[f.sb,"superseded_by","Superseded by","Newer cards that replace this one; it is never handed out"]]){
+    x.placeholder="#1, #2";x.setAttribute("aria-label",name.toLowerCase());x.title=tip;
+    x.onchange=()=>act("card_plan",{id,[key]:cardList(x.value)});
+  }
   loadStones(f,k.project);
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
   // The prompt: instructions for whoever takes the card, kept apart from the description.
@@ -982,7 +987,8 @@ function show(id){
   const form=el("form");form.method="dialog";const head=el("div",null,"dhead");if(k.number)head.append(el("span","#"+k.number,"num"));head.append(f.meta);
   const plan=el("div",null,"plan");plan.append(f.pr,el("span","Target","meta"),f.due);
   const links=el("div",null,"plan");links.append(el("span","Parent","meta"),f.up,el("span","Milestone","meta"),f.ms);
-  form.append(head,f.tr,f.banner,f.t,f.b,promptRow,f.g,plan,links,evRow,...(projects().length>1?[f.p]:[]),row,f.ex,f.cm,f.ci);
+  const lists=el("div",null,"plan");lists.append(el("span","Waits on","meta"),f.dp,el("span","Related","meta"),f.rl,el("span","Superseded by","meta"),f.sb);
+  form.append(head,f.tr,f.banner,f.t,f.b,promptRow,f.g,plan,links,lists,evRow,...(projects().length>1?[f.p]:[]),row,f.ex,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
@@ -995,6 +1001,9 @@ async function loadStones(f,project){
   syncDialog();
 }
 // The chain up to the root (each a link) and the children's progress, kept in step with the board.
+// Card ids as "#12, #15" for a field, and back: numbers or ids are accepted by the op.
+const numList=ids=>(ids??[]).map(i=>{const c=byId(i);return c?.number?"#"+c.number:i}).join(", ");
+const cardList=v=>v.split(/[\s,]+/).filter(Boolean);
 function traceLine(k){
   const up=chain(k),list=kids(k),out=[];
   const go=c=>{const b=el("button",cardName(c));b.type="button";b.onclick=()=>show(c.id);return b};
@@ -1038,6 +1047,7 @@ function syncDialog(){
   if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
   if(document.activeElement!==f.due)f.due.value=k.target_ms?isoDay(k.target_ms):"";
   f.tr.replaceChildren(...traceLine(k));
+  for(const [x,key]of[[f.dp,"deps"],[f.rl,"related"],[f.sb,"superseded_by"]])if(document.activeElement!==x)x.value=numList(k[key]);
   if(document.activeElement!==f.up){const p=k.parent&&byId(k.parent);f.up.value=p?.number?"#"+p.number:k.parent??""}
   if(f.ms.dataset.project&&f.ms.dataset.project!==k.project)loadStones(f,k.project);
   else if(document.activeElement!==f.ms)f.ms.value=k.milestone??"";
