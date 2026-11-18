@@ -158,6 +158,8 @@ Precise contracts used by this guide:
 | D148 | #1166 smoke-2: candidates never reviewed (stale question view) is an orch bug fix, re-read the question with `claim_card` | [default] 2026-11-17 (1166) |
 | D149 | #1166 smoke-2: the architect prompt must say a claim has no `evidence` field (use `refs`); a prompt bug fix | [default] 2026-11-17 (1166) |
 | D150 | #1166 smoke-3: the architect prompt also says one claim post per reply, no evidence post; a prompt bug fix | [default] 2026-11-17 (1166) |
+| D151 | #1166: the first-run bar is met through reviewer prompt wording (support only when the brief supports the claim); Q54 resolved for now | [stated] 2026-11-17 (1166) |
+| D152 | #1166: no host change; rerun smoke-4 after the prompt fixes alone (D147 hold stays) | [stated] 2026-11-17 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1457,7 +1459,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Rejected.** Applying the rebuild and the reasoning budget together before the rerun.
 **Tag.** [stated] · remind-me: mem_157ec68e43034d219af811c9735b1681
 **Key.** lel:1166:hold-host-changes-until-rerun-log
-**Condition met 2026-11-17 (smoke-3):** the per-pass log now names the failed slots (see `1166-smoke-run.md` Run 3 result). The hold itself is Nano's: no host change is applied until he says which, one at a time.
+**Condition met 2026-11-17 (smoke-3):** the per-pass log now names the failed slots (see `1166-smoke-run.md` Run 3 result). The hold stays: no host change is applied (D152).
 **Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-17, saved verbatim as `mem_7c2db8a737f0414898ce9e85a045f46e` (speaker Nano). Relates to D143, D144, D145, D146, Q52. Numbered D147 after D146.
 
 ## D148. #1166 smoke-2: candidates never reviewed (stale question view) is an orch bug fix, re-read the question with `claim_card`
@@ -1480,9 +1482,29 @@ The first three were approved first. The last three were added to Q35 after that
 
 ## D150. #1166 smoke-3: the architect prompt also says one claim post per reply, no evidence post; a prompt bug fix
 
-**Decision.** In smoke-3 `local-high`'s Propose(1) failed with `post 1: evidence is not allowed here`: the reply held a claim post and a second, evidence post. The architect proposal job allows only claims, so orch refused the whole reply, including the valid claim in post 0. This extends D149 (smoke-2 was an `evidence` field on a claim; this is an evidence post beside it: the same habit of attaching evidence, a different surface). The smallest fix is a **bug fix in the architect prompt** (Factory `lenses/architect.md`): one claim post per reply, no evidence post. Not done, because it is design: `parse` dropping posts the job may not make and keeping the allowed ones (it loosens the deliberate refuse-whole-reply rule). One run cannot say whether D149 shifted the form or it is chance.
+**Decision.** In smoke-3 `local-high`'s Propose(1) failed with `post 1: evidence is not allowed here`: the reply held a claim post and a second, evidence post. The architect proposal job allows only claims, so orch refused the whole reply, including the valid claim in post 0. This extends D149 (smoke-2 was an `evidence` field on a claim; this is an evidence post beside it: the same habit of attaching evidence, a different surface). The smallest fix is a **bug fix in the architect prompt** (Factory `lenses/architect.md`): "Reply with one claim post and no evidence post." Not done, because it is design: `parse` dropping posts the job may not make and keeping the allowed ones (it loosens the deliberate refuse-whole-reply rule). One run cannot say whether D149 shifted the form or it is chance. Nano: "Go on D150 as a Factory PR" (D151).
 **Why.** A prompt sentence adds no behaviour and is reversible; the pass-2 fallback already recovered the slot.
 **Rejected.** The parse change above.
 **Tag.** [default] · remind-me: mem_016934faf1a64c829986b883930c35e6
 **Key.** lel:1166:architect-prompt-one-claim-no-evidence-post
 **Source.** let-em-loose-expert, 2026-11-17, from the coordinator's smoke-3 evidence. D149, D127. Numbered D150 after D149.
+
+## D151. #1166: the first-run bar is met through reviewer prompt wording (support only when the brief supports the claim); Q54 resolved for now
+
+**Decision.** Asked how the first-run bar is met when the reviewers only attack, Nano chose option a: "Change the reviewer prompts so they also post support when a claim holds. Add one condition: support only when the reviewer can point to text in the brief that the claim satisfies, and post nothing when unsure." So the route to D143's clean pass is prompt wording, not a rule. Q54 is resolved for now. A BBP rule that escalates a question whose candidates all dropped stays unrequested and returns to Nano only if this fails on the rerun. This is not new design under D127; Nano approved the wording.
+**Implementation (Nano: "Go on D150 as a Factory PR. Put the reviewer wording in the same PR").** One Factory PR holding: D150, in the architect lens: "Reply with one claim post and no evidence post."; and in `lenses/adversary.md` and `lenses/operator.md`: "When a claim holds, say so: post support, but only if you can point to text in the brief that the claim satisfies. Cite the brief as `art:1` and quote that text in the note. If you are not sure, post nothing." The adversary's earlier "Support a claim only with a cited reason an attack failed" is replaced. Factory#3 is on main; the last deploy cloned Factory at 831268c.
+**Finding.** orch never shows a lens the brief's artifact id, so the wording hard-codes `art:1`. That holds for every task so far, because the brief is the task's first artifact; a revised brief would get another id. Whether orch should render the brief's id in the prefix is a small code change: Q55.
+**Why.** Smoke-3: four of four claims countered, no support ever posted, so nothing could reach accept. Prompt wording adds no behaviour and is reversible, and the "only with text in the brief, nothing when unsure" condition limits the risk of lenses supporting claims on opinion.
+**Rejected.** b) a BBP rule escalating a question whose candidates all dropped (BBP change, ask-first, new design); c) accepting the criterion as it stands.
+**Tag.** [stated] · remind-me: mem_bf4922601cd94e8ab11e614828d80c09
+**Key.** lel:1166:reviewer-support-wording-first-run-route
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-17, saved verbatim as `mem_176bc02b805a480b9806b8e3ee0945a3` (speaker Nano), call 1. Amends the route of D143 and D127; relates to D150, Q54, Q55. Numbered D151 after D150.
+
+## D152. #1166: no host change; rerun smoke-4 after the prompt fixes alone (D147 hold stays)
+
+**Decision.** Nano, call 2 of the same answer: option b, "No host change. Rerun after the prompt fixes alone." D147's hold stays: the llama.cpp rebuild (D145) and the Qwen reasoning budget are not applied. The rerun is smoke-4 after the prompt fixes alone: D148 (the orch re-read, done), and D149, D150 and the reviewer wording of D151, all in the Factory PR. If the empty replies at the 4096-token cap recur, that is the evidence for the reasoning budget, one change at a time.
+**Why.** One change at a time: the prompt fixes get measured alone before any host change.
+**Rejected.** a) applying the Qwen reasoning budget first; c) also rebuilding llama.cpp (no new evidence in smoke-3).
+**Tag.** [stated] · remind-me: mem_4fc7c5f64a84458a9fbdf43dc3fd84ce
+**Key.** lel:1166:no-host-change-rerun-smoke-4
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-17, saved verbatim as `mem_176bc02b805a480b9806b8e3ee0945a3` (speaker Nano), call 2. Confirms D147's hold. Numbered D152 after D151.
