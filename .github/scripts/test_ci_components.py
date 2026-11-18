@@ -28,10 +28,10 @@ class ComponentScopeTests(unittest.TestCase):
 
     def test_app_a_then_app_b_have_independent_lanes(self) -> None:
         self.assertEqual(self.scope("crates/apps/a/src/lib.rs"), [
-            {"component": "apps--a", "packages": "a"},
+            {"component": "apps--a", "packages": "a", "native": "false"},
         ])
         self.assertEqual(self.scope("crates/apps/b/src/lib.rs"), [
-            {"component": "apps--b", "packages": "b"},
+            {"component": "apps--b", "packages": "b", "native": "false"},
         ])
 
     def test_same_app_pushes_share_a_lane_even_when_package_sets_differ(self) -> None:
@@ -46,14 +46,22 @@ class ComponentScopeTests(unittest.TestCase):
     def test_shared_library_fans_out_to_all_transitive_consumers(self) -> None:
         scopes = self.scope("crates/libs/net/shared/src/lib.rs")
         self.assertEqual(scopes, [
-            {"component": "apps--a", "packages": "a a-core"},
-            {"component": "apps--b", "packages": "b"},
-            {"component": "libs--net", "packages": "shared"},
+            {"component": "apps--a", "packages": "a a-core", "native": "false"},
+            {"component": "apps--b", "packages": "b", "native": "false"},
+            {"component": "libs--net", "packages": "shared", "native": "false"},
         ])
 
     def test_cross_app_diff_preserves_the_union_without_duplicates(self) -> None:
         scopes = self.scope("crates/apps/a/src/lib.rs", "crates/apps/b/src/lib.rs")
         self.assertEqual([s["packages"] for s in scopes], ["a", "b"])
+
+    def test_native_only_when_the_closure_reaches_a_native_crate(self) -> None:
+        md = metadata({"gui": ("crates/apps/gui", ["gtk"]), "plain": ("crates/apps/plain", [])},
+                      external=["gtk"])
+        self.assertEqual(
+            [(s["packages"], s["native"]) for s in component_scopes(md, ["gui", "plain"])],
+            [("gui", "true"), ("plain", "false")],
+        )
 
     def test_component_order_is_stable_and_selection_is_not_broadened(self) -> None:
         self.assertEqual(component_scopes(self.metadata, ["b", "a", "b"]),
@@ -67,7 +75,7 @@ class ComponentScopeTests(unittest.TestCase):
     def test_unusual_directory_names_do_not_enter_shell_log_paths(self) -> None:
         md = metadata({"safe-package": ("crates/apps/app $(unsafe)", [])})
         self.assertEqual(component_scopes(md, ["safe-package"]), [
-            {"component": "workspace-other", "packages": "safe-package"},
+            {"component": "workspace-other", "packages": "safe-package", "native": "false"},
         ])
 
     def test_large_matrix_falls_back_without_dropping_packages(self) -> None:
@@ -118,7 +126,7 @@ class CoversMostOfWorkspaceTests(unittest.TestCase):
             self.assertEqual(run(most).returncode, 0)
             scoped = run("a", "--full-if-most")
             self.assertEqual(scoped.returncode, 0)
-            self.assertEqual(json.loads(scoped.stdout), [{"component": "apps--a", "packages": "a"}])
+            self.assertEqual(json.loads(scoped.stdout), [{"component": "apps--a", "packages": "a", "native": "false"}])
 
 
 if __name__ == "__main__":

@@ -249,7 +249,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertEqual(outputs["ci_only"], "false")
         self.assertEqual(outputs["packages"], "")
         self.assertEqual(outputs["shards"], "[1,2,3]")
-        self.assertEqual(json.loads(outputs["components"]), [{"component": "workspace", "packages": ""}])
+        self.assertEqual(json.loads(outputs["components"]), [{"component": "workspace", "packages": "", "native": "true"}])
         self.assertTrue(all(outputs[key] == "true" for key in SPECIALIZED_KEYS))
 
     def test_event_entrypoint_handles_manual_and_unusable_bases(self) -> None:
