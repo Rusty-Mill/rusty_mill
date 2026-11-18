@@ -306,7 +306,24 @@ pub struct Edit<'a> {
     pub tags: Option<Vec<String>>,
     /// New prompt; `""` clears it.
     pub prompt: Option<&'a str>,
+    /// New acceptance criteria; `""` clears them. At most [`MAX_ACCEPTANCE_BYTES`].
+    pub acceptance: Option<&'a str>,
+    /// New scope (out of scope included); `""` clears it. At most [`MAX_SCOPE_BYTES`].
+    pub scope: Option<&'a str>,
+    /// New reason the card exists; `""` clears it. At most [`MAX_WHY_BYTES`].
+    pub why: Option<&'a str>,
+    /// New one-paragraph summary; `""` clears it. At most [`MAX_SUMMARY_BYTES`].
+    pub summary: Option<&'a str>,
 }
+
+/// The longest `acceptance`, `scope`, `why` and `summary`, in bytes (#1568).
+pub const MAX_ACCEPTANCE_BYTES: usize = 1200;
+/// See [`MAX_ACCEPTANCE_BYTES`].
+pub const MAX_SCOPE_BYTES: usize = 800;
+/// See [`MAX_ACCEPTANCE_BYTES`].
+pub const MAX_WHY_BYTES: usize = 600;
+/// See [`MAX_ACCEPTANCE_BYTES`].
+pub const MAX_SUMMARY_BYTES: usize = 320;
 
 /// The longest prompt, in bytes. It is stored in the card's rusty_tick board document,
 /// which rusty_tick caps at 64 KiB, beside the links.
@@ -578,6 +595,18 @@ pub struct Card {
     /// read or copied whole. Empty when there are none.
     #[serde(default)]
     pub prompt: String,
+    /// What makes the card done, kept apart from the description. Empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub acceptance: String,
+    /// What the card covers and leaves out. Empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scope: String,
+    /// Why the card exists. Empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub why: String,
+    /// One short paragraph for a card face. Empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
     /// Current column.
     pub column: Column,
     /// Who holds the work, if anyone.
@@ -980,6 +1009,10 @@ impl Card {
             title: title.to_owned(),
             body: body.to_owned(),
             prompt: String::new(),
+            acceptance: String::new(),
+            scope: String::new(),
+            why: String::new(),
+            summary: String::new(),
             column: Column::BACKLOG,
             claim: None,
             tags,
@@ -1377,6 +1410,47 @@ impl Card {
             return Err(BoardError::Invalid("prompt is longer than 32 KiB"));
         }
         self.prompt = prompt.to_owned();
+        Ok(self)
+    }
+
+    /// Replace the typed text fields `edit` names; an empty one clears its field.
+    ///
+    /// # Errors
+    /// A field over its cap ([`MAX_ACCEPTANCE_BYTES`] and the others).
+    pub fn with_fields(mut self, edit: &Edit<'_>) -> Result<Self, BoardError> {
+        let slots: [(&Option<&str>, &mut String, usize, &'static str); 4] = [
+            (
+                &edit.acceptance,
+                &mut self.acceptance,
+                MAX_ACCEPTANCE_BYTES,
+                "acceptance is longer than 1200 bytes",
+            ),
+            (
+                &edit.scope,
+                &mut self.scope,
+                MAX_SCOPE_BYTES,
+                "scope is longer than 800 bytes",
+            ),
+            (
+                &edit.why,
+                &mut self.why,
+                MAX_WHY_BYTES,
+                "why is longer than 600 bytes",
+            ),
+            (
+                &edit.summary,
+                &mut self.summary,
+                MAX_SUMMARY_BYTES,
+                "summary is longer than 320 bytes",
+            ),
+        ];
+        for (new, slot, cap, refusal) in slots {
+            let Some(text) = new else { continue };
+            if text.len() > cap {
+                return Err(BoardError::Invalid(refusal));
+            }
+            *slot = (*text).to_owned();
+        }
         Ok(self)
     }
 

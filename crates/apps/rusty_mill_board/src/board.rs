@@ -1879,7 +1879,7 @@ impl<S: Store> Board<S> {
             title,
             body,
             tags,
-            prompt: None,
+            ..Edit::default()
         };
         self.edit_at(id, by, None, &edit)
     }
@@ -1902,10 +1902,11 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::Conflict);
             }
             let next = c.edit(edit.title, edit.body, edit.tags.clone(), now)?;
-            match edit.prompt {
-                Some(p) => next.with_prompt(p),
-                None => Ok(next),
-            }
+            let next = match edit.prompt {
+                Some(p) => next.with_prompt(p)?,
+                None => next,
+            };
+            next.with_fields(edit)
         })
     }
 
