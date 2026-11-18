@@ -1652,3 +1652,18 @@ fn agent_meta_is_all_three_texts_and_printable_or_malformed() {
         assert!(decode(&create(body)).is_err());
     }
 }
+
+#[test]
+fn agent_meta_refuses_bidi_and_zero_width_characters() {
+    let with = |c: char| AgentMeta {
+        agent: "claude".into(),
+        role: "builder".into(),
+        card: format!("#15{c}72"),
+    };
+    assert!(with('7').is_valid());
+    for c in [
+        '\u{200B}', '\u{200F}', '\u{202E}', '\u{2066}', '\u{2069}', '\u{FEFF}',
+    ] {
+        assert!(!with(c).is_valid(), "{c:?}");
+    }
+}
