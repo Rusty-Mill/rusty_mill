@@ -370,7 +370,7 @@ fn a_card_number_is_unique_and_milestones_come_back_in_id_order() {
     );
     assert_eq!(store.get(b.id), Ok(None));
     let ms: Vec<_> = (0..4)
-        .map(|i| Milestone::new("rl", &format!("m{i}"), i).expect("milestone"))
+        .map(|i| Milestone::new("rl", &format!("m{i}"), i + 1).expect("milestone"))
         .collect();
     for m in &ms {
         store.add_milestone(m).expect("add");
