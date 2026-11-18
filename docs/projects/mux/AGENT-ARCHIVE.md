@@ -21,7 +21,7 @@ Recall: by card, project or date range through `rusty-mux-ctl archive list|show|
 ## Constraints
 
 - D75 deletes the spool when a block closes. Dismiss must copy history into the archive first.
-- D74: the state dir holds screens unencrypted and owner-only.
+- D74: the state dir holds screens unencrypted and owner-only. D74 covers the existing restore state only. It does **not** authorize indefinite archive retention or transcript export; both need Nano's recorded answer (Q98).
 - Retention: keep all; a size cap with oldest-first eviction only when Nano sets one.
 
 ## Wire (not allocated here)

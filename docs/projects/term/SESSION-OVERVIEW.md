@@ -32,11 +32,11 @@ Keyboard: palette (C08) commands plus a prefix chord for up and down. Chord lett
 | agent, role/lens, card id, project per block | set at launch by the profile (LEL #1571) | **no** |
 | card state, card to block link | Mill Board `card_execution_link`, held board-side | board only |
 | waiting on human, progress line | agent self-report, display only, low trust | partial |
-| other sessions (level 1) | the client has one control connection scoped to one session (handoff D109) | **no** |
+| other sessions (level 1) | one `List` covers every session and its windows (handoff D109, `state.rs` `list`), already used by the GUI switcher | yes; only the per-session agent counts are missing (they follow from the block metadata) |
 
 ## Wire (not allocated here)
 
-Block metadata is new `Launch` fields plus a list/event field behind a new Features bit. Old peers see it, so it is an owner gate. Level 1 may need a server-wide session list. Free bits come from `proto/src/message.rs` only.
+Block metadata is new `Launch` fields plus a list/event field behind a new Features bit. Old peers see it, so it is an owner gate. Level 1 needs no new list call: session discovery exists (D109); only agent counts per session are new, derived from that metadata. Free bits come from `proto/src/message.rs` only.
 
 ## Order
 
