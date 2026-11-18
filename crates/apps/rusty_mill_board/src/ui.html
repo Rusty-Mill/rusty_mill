@@ -943,7 +943,7 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),ev:el("div",null,"evidence"),ei:el("input"),dp:el("input"),rl:el("input"),sb:el("input"),up:el("input","","up"),ms:el("select")};
+  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),ev:el("div",null,"evidence"),ei:el("input"),dp:el("input"),rl:el("input"),sb:el("input"),mv:el("select"),up:el("input","","up"),ms:el("select")};
   projects().forEach(p=>f.p.append(new Option(label(p),p)));
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
@@ -963,6 +963,9 @@ function show(id){
     x.placeholder="#1, #2";x.setAttribute("aria-label",name.toLowerCase());x.title=tip;
     x.onchange=()=>act("card_plan",{id,[key]:cardList(x.value)});
   }
+  // Move to (card_move): the same op a drag calls; the board refuses a move the role may not make, with its reason.
+  f.mv.setAttribute("aria-label","move to");
+  f.mv.onchange=()=>{const to=f.mv.value;f.mv.value="";if(to)act("card_move",{id,to})};
   loadStones(f,k.project);
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
   // The prompt: instructions for whoever takes the card, kept apart from the description.
@@ -988,7 +991,7 @@ function show(id){
   const plan=el("div",null,"plan");plan.append(f.pr,el("span","Target","meta"),f.due);
   const links=el("div",null,"plan");links.append(el("span","Parent","meta"),f.up,el("span","Milestone","meta"),f.ms);
   const lists=el("div",null,"plan");lists.append(el("span","Waits on","meta"),f.dp,el("span","Related","meta"),f.rl,el("span","Superseded by","meta"),f.sb);
-  form.append(head,f.tr,f.banner,f.t,f.b,promptRow,f.g,plan,links,lists,evRow,...(projects().length>1?[f.p]:[]),row,f.ex,f.cm,f.ci);
+  form.append(head,f.tr,f.banner,f.t,f.b,promptRow,f.g,plan,links,lists,evRow,f.mv,...(projects().length>1?[f.p]:[]),row,f.ex,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
@@ -1042,6 +1045,12 @@ function syncDialog(){
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",nick(c.by)+": "),el("span",c.text));return d}));
   f.ex.replaceChildren(...refLines(k));
+  if(f.mv.dataset.col!==k.column){
+    f.mv.dataset.col=k.column;
+    const to=[...FLOW.transitions.filter(m=>m.from===k.column).map(m=>[m.to,m.gate]),...(isDone(k)||k.column==="blocked"||FLOW.transitions.some(m=>m.from===k.column&&m.to==="blocked")?[]:[["blocked",false]])];
+    f.mv.replaceChildren(new Option("Move to…",""),...to.map(([c,g])=>new Option(colLabel(c)+(g?" (approval)":""),c)));
+    f.mv.hidden=to.length===0;
+  }
   f.ev.replaceChildren(...(k.evidence??[]).map(l=>{const d=el("div"),a=el("a",l);a.href=l;a.target="_blank";a.rel="noopener noreferrer";d.append(a);return d}));
   const theirs=snap(k);
   if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
