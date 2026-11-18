@@ -62,6 +62,21 @@ check(await dlg.locator("button", { hasText: "Close card" }).isHidden(), "a star
 check((await dlg.innerText()).includes("Cannot be closed"), "it explains why instead");
 check(await column(busy) === "building", "and the card is unchanged");
 
+// 4. If board_roles fails, capabilities are unknown: the dialog still renders, without Close card.
+const blind = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+const blindErrors = [];
+blind.on("pageerror", (e) => blindErrors.push(String(e)));
+await blind.route("**/api/board_roles", (r) => r.abort());
+await blind.goto(BASE);
+await blind.waitForSelector(".card");
+await blind.locator(".card", { hasText: "Busy card" }).first().click();
+check(await blind.locator("#dlg button", { hasText: "Dismiss" }).isVisible(), "with board_roles down the dialog still renders");
+const spare = (await api("card_add", { title: "Spare card" })).card;
+await blind.locator("#dlg button", { hasText: "Dismiss" }).click();
+await blind.locator(".card", { hasText: "Spare card" }).first().click();
+check(await blind.locator("#dlg button", { hasText: "Close card" }).isHidden(), "and an unstarted card shows no Close card (fails closed)");
+check(blindErrors.length === 0, "no page errors without roles" + (blindErrors.length ? ": " + blindErrors[0] : ""));
+
 check(errors.length === 0, "no page errors" + (errors.length ? ": " + errors[0] : ""));
 await browser.close();
 if (failures.length) { console.log(`\n${failures.length} failed`); process.exit(1); }

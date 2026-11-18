@@ -1538,7 +1538,9 @@ function githubTab(){
 // Board metadata: on failure carry on with a fallback, but say why, so a refusal is not an empty panel.
 const meta=(op,fallback)=>api(op).catch(e=>{toast(op+" failed: "+e.message);return fallback});
 async function loadMeta(){
-  ROLES=(await meta("board_roles",{roles:{human:1}})).roles;const roles=Object.keys(ROLES);
+  const got=(await meta("board_roles",{roles:{human:1}})).roles;const roles=Object.keys(got);
+  // Capabilities as arrays: the fallback above names roles only, and then nobody may close (fail closed).
+  ROLES=Object.fromEntries(roles.map(r=>[r,Array.isArray(got[r])?got[r]:[]]));
   const cur=$("role").value;$("role").replaceChildren(...roles.map(r=>new Option(r,r)));
   $("role").value=roles.includes(cur)?cur:(pref("role")&&roles.includes(pref("role"))?pref("role"):(roles.includes("human")?"human":roles[0]));
   FLOW=await meta("board_columns",FLOW);
