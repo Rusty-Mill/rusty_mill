@@ -167,7 +167,7 @@ Precise contracts used by this guide:
 | D157 | #1166: keep the D143 bar (criterion 3 not reworded); build D156 and rerun as smoke-6; the all-dropped BBP rule returns to Nano only if candidates keep dropping | [stated] 2026-11-18 (1166) |
 | D158 | The grounding audit (D155) also covers candidates the board dropped, as a read-only report | [stated] 2026-11-18 (1166) |
 | D159 | D143 criterion 3 for an audit-rescued candidate: one reopen, a lens run, then Nano's `choose` counts (D158 stays) | [stated] 2026-11-18 (1166) |
-| D160 | #1166: reword the A2 fixture as "Proposed action, not run" (seed claim A stays the control); does not close Q53 | [stated] 2026-11-18 (1166) |
+| D163 | #1166: reword the A2 fixture as "Proposed action, not run" (seed claim A stays the control); does not close Q53 | [stated] 2026-11-18 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1586,7 +1586,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1166:audit-rescued-candidate-reopen-then-choose
 **Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_af1925dad3d74a6c9d84f8f67b19bfc3` (speaker Nano). Refines D143 and D158; relates to C-R8 in the claims addendum. Numbered D159 after D158.
 
-## D160. #1166: reword the A2 fixture as "Proposed action, not run" (seed claim A stays the control); does not close Q53
+## D163. #1166: reword the A2 fixture as "Proposed action, not run" (seed claim A stays the control); does not close Q53
 
 **Decision.** Nano answered Q61: "Q61: yes. Reword A2 as 'Proposed action, not run: ...'. Also remove or rewrite 'after the dry-run list was reviewed': no dry-run list was reviewed, so the fixture itself states something that never happened. Leave seed claim A's wording unchanged, as the control. Record that this does not close Q53." The A2 text in `1166-seed-inbox.sh` becomes "Proposed action, not run: run `sweep --yes` on the toy data directory with DAYS 7." (built on branch `claude/lel-a2-wording`). It is a fixture choice within D146's scope: no threshold, roster or escalation rule changes. Seed claim A stays unchanged as the control, so the next run's evidence can compare the adversary's citations of msg 3 (A2) against msg 2 (A). Q61 is decided and closes once the PR is merged and deployed.
 **Why.** The adversary cited A2 (msg 3) as a test run in smoke-3 (msgs 7, 12, 14), smoke-4 (msgs 12, 13) and smoke-6 (msgs 11 and 14, computing `7*86400` from A2's "DAYS 7"), and the fixture itself asserted a dry-run review that never happened.
@@ -1594,4 +1594,4 @@ The first three were approved first. The last three were added to Q35 after that
 **Q53 stays OPEN.** This removes one trigger for invented citations. Invented runs, false "the brief mandates X" attributions and self or another-vote citations are separate.
 **Tag.** [stated] · remind-me: mem_9e4daa70bddd471d9ffc49e3020a5fb6
 **Key.** lel:1166:a2-fixture-reworded-proposed-not-run
-**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_0f6dd8deda1f4aceb7bfa9096941d65d` (speaker Nano). Relates to D146, Q53, Q61. Numbered D160 after D159.
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_0f6dd8deda1f4aceb7bfa9096941d65d` (speaker Nano). Relates to D146, Q53, Q61. Numbered D163 after D162 (D160 to D162 are the launch-profiles design in #1802).
