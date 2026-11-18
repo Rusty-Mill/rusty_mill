@@ -58,6 +58,8 @@ header.top{display:flex;align-items:center;gap:6px;padding:0 14px;min-height:52p
 .badge{display:inline-grid;place-items:center;min-width:19px;height:19px;padding:0 5px;border-radius:10px;background:var(--mag);color:#fff;font:700 12px/1 var(--num);letter-spacing:.02em}
 .badge:empty{display:none}
 .quick{display:flex;gap:6px;margin-left:auto;align-items:center}
+.more{position:relative}.more summary{cursor:pointer;color:var(--mute);font-size:13px;padding:0 4px}
+.morebox{position:absolute;right:0;top:calc(100% + 6px);z-index:6;display:grid;gap:6px;width:min(340px,92vw);padding:10px;background:var(--card);border:1px solid var(--line2);border-radius:6px;box-shadow:0 12px 30px -10px rgb(0 0 0 / .35)}
 .top input,.top select{background:#262b31;border-color:var(--rail-line);color:var(--rail-ink)}
 .top input::placeholder{color:var(--rail-mute)}
 .top #title{width:min(24vw,260px)}
@@ -340,6 +342,11 @@ dialog h2{margin:0;font-size:18px}
   </nav>
   <div class="quick">
     <input id="title" placeholder="New card title" aria-label="new card title">
+    <details id="more" class="more"><summary>Details</summary><div class="morebox">
+      <textarea id="nbody" rows="4" placeholder="Description" aria-label="new card description"></textarea>
+      <input id="ntags" placeholder="tags, comma separated" aria-label="new card tags">
+      <input id="nparent" placeholder="#parent (the card it is split from)" aria-label="new card parent">
+    </div></details>
     <button id="add" type="button" class="primary"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>Add card</button>
   </div>
   <div class="who">
@@ -1572,7 +1579,10 @@ async function loadMeta(){
   $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
   $("boardv").onclick=()=>setView("board");
   // New cards go to the chosen project, else to the Inbox.
-  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project;if(!t){$("title").focus();return}$("title").value="";act("card_add",{title:t,...(project&&{project})})};
+  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project;if(!t){$("title").focus();return}
+    const body=$("nbody").value.trim(),tags=$("ntags").value.split(",").map(x=>x.trim()).filter(Boolean),parent=$("nparent").value.trim();
+    act("card_add",{title:t,...(project&&{project}),...(body&&{body}),...(tags.length&&{tags}),...(parent&&{parent})},null,
+      ()=>{$("title").value=$("nbody").value=$("ntags").value=$("nparent").value="";$("more").open=false})};
   $("title").onkeydown=e=>{if(e.key==="Enter")$("add").click()};
   await loadMeta();
   const p=pref("project"),ps=pref("pstatus");
