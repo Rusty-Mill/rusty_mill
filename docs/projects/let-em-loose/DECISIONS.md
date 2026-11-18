@@ -165,6 +165,8 @@ Precise contracts used by this guide:
 | D155 | Standing rule: every run's read-back includes the grounding audit before Nano acts on an escalated claim | [stated] 2026-11-18 (1166) |
 | D156 | #1166 smoke-5: the architect prompt must say every claim sets `answers` to the question's id; a prompt bug fix | [default] 2026-11-18 (1166) |
 | D157 | #1166: keep the D143 bar (criterion 3 not reworded); build D156 and rerun as smoke-6; the all-dropped BBP rule returns to Nano only if candidates keep dropping | [stated] 2026-11-18 (1166) |
+| D158 | The grounding audit (D155) also covers candidates the board dropped, as a read-only report | [stated] 2026-11-18 (1166) |
+| D159 | D143 criterion 3 for an audit-rescued candidate: one reopen, a lens run, then Nano's `choose` counts (D158 stays) | [stated] 2026-11-18 (1166) |
 | D160 | #1571: Nano approves the agent launch profiles design as written (composition, env delivery, no service credentials in the jail, hooks deferred, build order) | [stated] 2026-11-18 (1571) |
 | D161 | #1571 v0 isolation is `same_user` (agents run as Nano's user); `agent_user` once the BaileyAi host writes are approved | [stated] 2026-11-18 (1571) |
 | D162 | #1571 profile files live in Factory (`factory/agent-profiles/*.json`, `factory/project-profiles/*.json`) | [stated] 2026-11-18 (1571) |
@@ -1521,7 +1523,7 @@ The first three were approved first. The last three were added to Q35 after that
 ## D153. #1166: the Qwen reasoning budget (`--reasoning-budget 2048`) is the one host change allowed before smoke-5; the llama.cpp rebuild stays held
 
 **Decision.** After smoke-4 Nano chose option a, "Qwen reasoning budget only": add `--reasoning-budget 2048` to the `qwen3.6-35b-a3b` entry in `~/llama/config.yaml` (untested), then rerun as smoke-5. This lifts D152's no-host-change hold for exactly that one change. D147's one-change-at-a-time stays, and the llama.cpp rebuild (D145) stays held; the gpt-oss HTTP 500s cost only absorbed calls. Smoke-5 is judged on the same section 9 criteria.
-**Result (smoke-5, 2026-11-18):** effective: 0 empty Qwen replies, against 3 in smoke-3 and 3 in smoke-4. The llama.cpp rebuild (D145) stays held: smoke-5 had 2 gpt-oss HTTP 500 `peg-native` transients, both absorbed.
+**Correction 2026-11-18 (smoke-6):** the earlier "effective: 0 empty Qwen replies" claim is withdrawn. In smoke-6 there were 7 empty Qwen replies and seven Qwen generations of exactly 4096 tokens in the llama-swap log. The flag was never active in smoke-5 or smoke-6: llama-swap (started 2026-11-16 19:01:54) was never restarted after `~/llama/config.yaml` was edited (mtime 2026-11-18 08:36:58), it keeps its config in memory, and the running Qwen llama-server (started 2026-11-18 10:38) has no `--reasoning-budget` in its arguments. So the budget is applied in the file but not loaded; Nano must run `systemctl --user restart llama-swap`. Smoke-5's 0 empties was chance (few Qwen calls), not proof. The per-request test (3 of 3 empty without, 6 of 6 valid with `reasoning_budget_tokens` 2048) stands. The llama.cpp rebuild (D145) stays held. Drift: a coordinator memory (`mem_e66abb6f86404568ac8605aa7ff51f79`) says the change was applied "with a llama-swap restart"; the process start times say otherwise.
 **Why.** Empty Qwen replies (`reply is not JSON: unexpected end of input`) recurred in smoke-3 (3) and smoke-4 (3) and cost the third candidate in smoke-4; the llama-swap log shows four Qwen generations of exactly 4096 tokens, orch's output cap. That is strong evidence, not proof, that thinking consumes the cap.
 **Note.** llama-server accepts the budget per request (`reasoning_budget_tokens` in the request body, `tools/server/server-common.cpp`), so the effect can be tested with free local calls before the config is edited (the coordinator is running that test). Claim 6 in Nano's inbox (smoke-4) is his own call: `bbp human ... claim 6 accept`, or `choose 1 6`.
 **Rejected.** b) no host change; c) rebuilding llama.cpp first.
@@ -1566,6 +1568,26 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1166:keep-first-run-bar-fix-and-rerun-smoke-6
 **Source.** Nano, answer dialog in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_96800eda3fae4f51b07672e908a68ccc` (speaker Nano). Confirms D143; builds on D151, D156. Numbered D157 after D156.
 
+## D158. The grounding audit (D155) also covers candidates the board dropped, as a read-only report
+
+**Decision.** Nano, answering Q59: "Q59: yes. Extend 1166-grounding.sh to audit candidates the board dropped, not only escalated claims. Put it in its own PR." D155 is extended: every run's read-back audits escalated AND dropped claims, with the same method (quote the brief sentence each vote relies on or mark it ungrounded; the score three ways), as a read-only report. Q59 is closed.
+**Why.** A drop on ungrounded votes decides whether Q has a survivor: on smoke-5, claim 7 was dropped by ungrounded votes (msgs 10 and 14) and would have stayed Open at a grounded -4, above the -8 drop line.
+**Rejected.** Auditing escalated claims only.
+**Tag.** [stated] · remind-me: mem_e8160b3d28624f2ca91300fbceb8eac2
+**Key.** lel:1166:grounding-audit-covers-dropped-claims
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved as `mem_928dc8aca99743ffb756ee87a6e1b0ff` (speaker Nano). Extends D155; relates to Q53, Q59. Numbered D158 after D157.
+
+## D159. D143 criterion 3 for an audit-rescued candidate: one reopen, a lens run, then Nano's `choose` counts (D158 stays)
+
+**Decision.** Nano: "b, with a limit. A human choose of an audit-rescued candidate counts toward criterion 3 only if a lens run after `reopen` leaves the candidate Open or accepted. One reopen per candidate. If the lenses drop it again on votes the audit shows are ungrounded, then (a) applies: I choose it, and the audit is recorded as the reason in the run record." This sets how D143's criterion 3 is read for a candidate dropped on ungrounded votes. D158 stays.
+**Procedure.** (1) The read-back's grounding audit shows a candidate was dropped on ungrounded votes. (2) Nano reopens it, once per candidate (`bbp human ... claim N reopen`); reopen is refused if a dep is closed, and if the claim's budget is exhausted `budget_extended` must be recorded first. (3) A lens run on the same task (the resume script) reviews it afresh in the new epoch. (4) If the candidate is Open or accepted afterwards, Nano's `choose` counts toward criterion 3. (5) If the lenses drop it again on votes the audit shows ungrounded, Nano's `choose` counts anyway, with the audit recorded as the reason in the run record. (6) If it is dropped again on grounded votes, it does not count, and the bar is not met by that candidate.
+**Where the reason is recorded.** `bbp human` has no reason or note field that Nano knows of, so "recorded as the reason in the run record" means the run record: `1166-smoke-run.md` (the Run N result) and the grounding audit file, not a board field.
+**Why.** A human override counts only if the lens loop confirms the candidate, or drops it again on votes the audit shows ungrounded; one reopen per candidate bounds it. D143's "clean pass" keeps its meaning that the lens loop works.
+**Rejected.** a) counting any human choose; c) never counting a human choose (a lens-driven survivor only).
+**Tag.** [stated] · remind-me: mem_49f619c6e57a417daf2e0ec6e80490e0
+**Key.** lel:1166:audit-rescued-candidate-reopen-then-choose
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_af1925dad3d74a6c9d84f8f67b19bfc3` (speaker Nano). Refines D143 and D158; relates to C-R8 in the claims addendum. Numbered D159 after D158.
+
 ## D160. #1571: Nano approves the agent launch profiles design as written (composition, env delivery, no service credentials in the jail, hooks deferred, build order)
 
 **Decision.** The design in `1571-launch-profiles-design.md` (PR #1802) is approved as written: an agent file (trust cap) and a project file (needs) compose purely into one C75 `Launch`; credentials are minted per launch, delivered in the exact env and revoked by each service; the jail gets no service credentials (D101); hooks are deferred; build order as its section 6. Question 3: "Approve the design". Nano: "3. Yes." This satisfies D25 for #1571. Ask-first items inside it (the BaileyAi host writes for `agent_user`, dependency bumps, public API changes) still need their own approval.
@@ -1573,7 +1595,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Rejected.** None offered.
 **Tag.** [stated] · remind-me: mem_556bfcda61f64e6aaa6cd38c230ca0f5
 **Key.** lel:1571:launch-profiles-design-approved
-**Source.** Nano, Let Em Loose project chat, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YGppB9nnPb7JnUCwC3s2Yq`, 2026-11-18T17:43:36Z: "1. Concur. 2. Concur. 3. Yes. 4. accept", answering in order the questions in thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42brap92o45tKyeDpvs4Be3` (~17:30Z). Item 4 answers #1563 and is recorded by its own thread, not here. Numbered D160 after D157; D158-D159 are taken on the unmerged branch `claude/lel-d158-d159-record`.
+**Source.** Nano, Let Em Loose project chat, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YGppB9nnPb7JnUCwC3s2Yq`, 2026-11-18T17:43:36Z: "1. Concur. 2. Concur. 3. Yes. 4. accept", answering in order the questions in thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42brap92o45tKyeDpvs4Be3` (~17:30Z). Item 4 answers #1563 and is recorded by its own thread, not here. Numbered D160, after D158-D159 (#1797).
 
 ## D161. #1571 v0 isolation is `same_user` (agents run as Nano's user); `agent_user` once the BaileyAi host writes are approved
 

@@ -16,10 +16,10 @@ Let Em Loose, 2026-11-18. Status: **approved** by Nano 2026-11-18 (DECISIONS.md 
 - **Mux side, built or approved:** C75 exact env and passed fds, C76 signal/release, C77 input gate,
   C78 hold, C46 ownership, the `orch-runner` account server (AGENT-HOSTING.md C79 item 4, D104 item 6).
   orch reaches the mux only as a `rusty-mux-ctl own` child (AGENT-HOSTING Gates).
-- **Launch metadata** D336 (`agent`, `role`, `card` on `Launch`; approved in principle, not built, wire
-  gate open) and **re-run** D338 (agent blocks re-run through orch and the profile, never by replaying
-  argv): rusty_term handoff, Nano 2026-11-18, on PR #1798 (unmerged). The **dismiss message** (card id,
-  evidence links, label) is a design line in `docs/projects/mux/AGENT-ARCHIVE.md` on the same PR; unbuilt.
+- **Launch metadata** D336 (`agent`, `role`, `card` on `Launch`; approved in principle; the wire slice is
+  open as PR #1800, owner gate) and **re-run** D338 (agent blocks re-run through orch and the profile, never by replaying
+  argv): rusty_term handoff, Nano 2026-11-18 (#1798). The **dismiss message** (card id,
+  evidence links, label) is a design line in `docs/projects/mux/AGENT-ARCHIVE.md`; unbuilt.
 - **Built on main** (rusty-term-expert, 2026-11-18): C46 `OWNERSHIP` bit 35, C77 `INPUT_GATE` 36, C75
   `AGENT_LAUNCH` 42, C78 `HOLD` 43, C76 `SIGNAL_RELEASE` 44, all through `rusty-mux-ctl own`.
 - **Existing launch path** D104 / mux-hosted-agents-design.md §2: orch prepares worktree, cgroup and token,
@@ -76,7 +76,7 @@ launch** (`own` passes only descriptors it inherited at startup, each once).
 | env (exact) | `PATH`, `HOME`, `LANG`, `TERM`, the project's `env`, and the minted credentials (§3). Nothing from orch's own environment, no `RUSTY_MUX_*` (ADR-0022/D107) |
 | fds | 3 and 4 under `jail` (D104); none otherwise |
 | `hold`, `input` | `true`, `owner-only` (D104) |
-| `agent`, `role`, `card` | agent name, lens, card (D336, once its wire slice is built) |
+| `agent`, `role`, `card` | agent name, lens, card (D336, once its wire slice, PR #1800, merges) |
 
 **Preflight** runs before the `Launch`, as the target user, with the plan's exact `PATH`: each toolchain
 `bin` must resolve and, where `min` is set, its `--version` must meet it. A miss refuses the launch with a
@@ -87,7 +87,7 @@ message naming the tool, posted as a card comment. Nothing starts half-equipped.
 **Credentials go in the exact `env` of the `Launch`, never in `argv`.** The mux persists `argv` (C45
 `Started`, unencrypted state dir D74) but never `env` (AGENT-HOSTING §C75). A descriptor-to-env shim
 would end with the same variables in the same process, so it adds a binary and buys nothing. If an agent
-echoes a token, the archive's transcript scan marks the record sensitive (D339, pending on #1798).
+echoes a token, the archive's transcript scan marks the record sensitive (D339).
 
 **Not in the jail.** Under `jail` the agent gets only D101's one token scoped to its lens and claim, in the
 existing `jail.json` `token` slot; board, push and PR go through the gateway. Putting service credentials
