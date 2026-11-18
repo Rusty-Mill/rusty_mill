@@ -167,6 +167,9 @@ Precise contracts used by this guide:
 | D157 | #1166: keep the D143 bar (criterion 3 not reworded); build D156 and rerun as smoke-6; the all-dropped BBP rule returns to Nano only if candidates keep dropping | [stated] 2026-11-18 (1166) |
 | D158 | The grounding audit (D155) also covers candidates the board dropped, as a read-only report | [stated] 2026-11-18 (1166) |
 | D159 | D143 criterion 3 for an audit-rescued candidate: one reopen, a lens run, then Nano's `choose` counts (D158 stays) | [stated] 2026-11-18 (1166) |
+| D160 | #1571: Nano approves the agent launch profiles design as written (composition, env delivery, no service credentials in the jail, hooks deferred, build order) | [stated] 2026-11-18 (1571) |
+| D161 | #1571 v0 isolation is `same_user` (agents run as Nano's user); `agent_user` once the BaileyAi host writes are approved | [stated] 2026-11-18 (1571) |
+| D162 | #1571 profile files live in Factory (`factory/agent-profiles/*.json`, `factory/project-profiles/*.json`) | [stated] 2026-11-18 (1571) |
 
 ## D1. Lenses, not stages
 
@@ -1584,3 +1587,30 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_49f619c6e57a417daf2e0ec6e80490e0
 **Key.** lel:1166:audit-rescued-candidate-reopen-then-choose
 **Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_af1925dad3d74a6c9d84f8f67b19bfc3` (speaker Nano). Refines D143 and D158; relates to C-R8 in the claims addendum. Numbered D159 after D158.
+
+## D160. #1571: Nano approves the agent launch profiles design as written (composition, env delivery, no service credentials in the jail, hooks deferred, build order)
+
+**Decision.** The design in `1571-launch-profiles-design.md` (PR #1802) is approved as written: an agent file (trust cap) and a project file (needs) compose purely into one C75 `Launch`; credentials are minted per launch, delivered in the exact env and revoked by each service; the jail gets no service credentials (D101); hooks are deferred; build order as its section 6. Question 3: "Approve the design". Nano: "3. Yes." This satisfies D25 for #1571. Ask-first items inside it (the BaileyAi host writes for `agent_user`, dependency bumps, public API changes) still need their own approval.
+**Why.** Profiles as data keep the later fold into the mux server a move, not a rewrite (`mem_b563d1346d6545ae9bb06a10707cf777`); the mux grants, each service revokes, orch holds both keys.
+**Rejected.** None offered.
+**Tag.** [stated] · remind-me: mem_556bfcda61f64e6aaa6cd38c230ca0f5
+**Key.** lel:1571:launch-profiles-design-approved
+**Source.** Nano, Let Em Loose project chat, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YGppB9nnPb7JnUCwC3s2Yq`, 2026-11-18T17:43:36Z: "1. Concur. 2. Concur. 3. Yes. 4. accept", answering in order the questions in thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42brap92o45tKyeDpvs4Be3` (~17:30Z). Item 4 answers #1563 and is recorded by its own thread, not here. Numbered D160, after D158-D159 (#1797).
+
+## D161. #1571 v0 isolation is `same_user` (agents run as Nano's user); `agent_user` once the BaileyAi host writes are approved
+
+**Decision.** v0 launch profiles run agents as Nano's own user (`same_user`). `agent_user` (`orch-runner`) follows once the four BaileyAi host writes are approved; the jail comes later. This departs from the card's "start with a dedicated user". Question 1: "v0 isolation: same_user now, agent_user once the host writes are approved". Nano: "1. Concur."
+**Why.** Agents sharing orch's uid can read the minting keys under `same_user` and `agent_user` alike until the jail exists, so a dedicated user now buys little and needs host writes; no worse than today.
+**Rejected.** b) `agent_user` now with the host writes approved; c) a separate uid holding the minting keys and handing orch only minted tokens.
+**Tag.** [stated] · remind-me: mem_3c3a28e44b9d4dc39ef02413c70ac818
+**Key.** lel:1571:v0-isolation-same-user
+**Source.** Nano, Let Em Loose project chat, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YGppB9nnPb7JnUCwC3s2Yq`, 2026-11-18T17:43:36Z: "1. Concur. 2. Concur. 3. Yes. 4. accept", answering in order the questions in thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42brap92o45tKyeDpvs4Be3` (~17:30Z). Item 4 answers #1563 and is recorded by its own thread, not here. Relates to D101, D104 and `mem_931824b0f5b042618d54ed84b2d3da8e` (no sandbox dependency). Numbered D161 after D160.
+
+## D162. #1571 profile files live in Factory (`factory/agent-profiles/*.json`, `factory/project-profiles/*.json`)
+
+**Decision.** For v0, agent profiles are `factory/agent-profiles/*.json` and project profiles are `factory/project-profiles/*.json`, in Factory. Question 2: "Profile files live in Factory". Nano: "2. Concur."
+**Why.** Orch already reads Factory, and `resolve` does not care where files come from, so the location is cheap to move later.
+**Rejected.** b) agent files in pack-validation with agent-stack-spec and project needs in each repo's manifest; c) this monorepo.
+**Tag.** [stated] · remind-me: mem_ad2c3b4877d64a0494d5bdfac712a55c
+**Key.** lel:1571:profile-files-in-factory
+**Source.** Nano, Let Em Loose project chat, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YGppB9nnPb7JnUCwC3s2Yq`, 2026-11-18T17:43:36Z: "1. Concur. 2. Concur. 3. Yes. 4. accept", answering in order the questions in thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42brap92o45tKyeDpvs4Be3` (~17:30Z). Item 4 answers #1563 and is recorded by its own thread, not here. Numbered D162 after D161.
