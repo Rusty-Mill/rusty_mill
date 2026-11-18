@@ -163,6 +163,8 @@ Precise contracts used by this guide:
 | D153 | #1166: the Qwen reasoning budget (`--reasoning-budget 2048`) is the one host change allowed before smoke-5; the llama.cpp rebuild stays held | [stated] 2026-11-17 (1166) |
 | D154 | #1166 smoke-4: Nano drops claim 6 (grounded score 0, deviates from the brief); Q has no accepted or chosen candidate | [stated] 2026-11-18 (1166) |
 | D155 | Standing rule: every run's read-back includes the grounding audit before Nano acts on an escalated claim | [stated] 2026-11-18 (1166) |
+| D156 | #1166 smoke-5: the architect prompt must say every claim sets `answers` to the question's id; a prompt bug fix | [default] 2026-11-18 (1166) |
+| D157 | #1166: keep the D143 bar (criterion 3 not reworded); build D156 and rerun as smoke-6; the all-dropped BBP rule returns to Nano only if candidates keep dropping | [stated] 2026-11-18 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1516,6 +1518,7 @@ The first three were approved first. The last three were added to Q35 after that
 ## D153. #1166: the Qwen reasoning budget (`--reasoning-budget 2048`) is the one host change allowed before smoke-5; the llama.cpp rebuild stays held
 
 **Decision.** After smoke-4 Nano chose option a, "Qwen reasoning budget only": add `--reasoning-budget 2048` to the `qwen3.6-35b-a3b` entry in `~/llama/config.yaml` (untested), then rerun as smoke-5. This lifts D152's no-host-change hold for exactly that one change. D147's one-change-at-a-time stays, and the llama.cpp rebuild (D145) stays held; the gpt-oss HTTP 500s cost only absorbed calls. Smoke-5 is judged on the same section 9 criteria.
+**Result (smoke-5, 2026-11-18):** effective: 0 empty Qwen replies, against 3 in smoke-3 and 3 in smoke-4. The llama.cpp rebuild (D145) stays held: smoke-5 had 2 gpt-oss HTTP 500 `peg-native` transients, both absorbed.
 **Why.** Empty Qwen replies (`reply is not JSON: unexpected end of input`) recurred in smoke-3 (3) and smoke-4 (3) and cost the third candidate in smoke-4; the llama-swap log shows four Qwen generations of exactly 4096 tokens, orch's output cap. That is strong evidence, not proof, that thinking consumes the cap.
 **Note.** llama-server accepts the budget per request (`reasoning_budget_tokens` in the request body, `tools/server/server-common.cpp`), so the effect can be tested with free local calls before the config is edited (the coordinator is running that test). Claim 6 in Nano's inbox (smoke-4) is his own call: `bbp human ... claim 6 accept`, or `choose 1 6`.
 **Rejected.** b) no host change; c) rebuilding llama.cpp first.
@@ -1540,3 +1543,22 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_4c73b1961a914fd985493a4652e4b18e
 **Key.** lel:1166:grounding-audit-in-every-readback
 **Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_3bb04ac898ca4e4eb0fdb8f2d3c61739` (speaker Nano). Relates to D154, Q53. Numbered D155 after D154.
+
+## D156. #1166 smoke-5: the architect prompt must say every claim sets `answers` to the question's id; a prompt bug fix
+
+**Decision.** In smoke-5 `local`'s Propose(0) failed Permanent with `post 0: a proposal must answer msg:1` (the claim had no `answers`), and pass 2 skipped the slot (`no cleared provider`), so again 2 candidates from 2 providers, the loss now by a parse refusal and not an empty reply. It is the third form of an architect reply being refused, after smoke-2 (`evidence` field, D149) and smoke-3 (`evidence` post, D150). The smallest fix is a **bug fix in the architect prompt** (Factory `lenses/architect.md`): set `answers` to the question's message id on every claim. Not done, because it is design: orch filling `answers` itself or relaxing the check. If a fourth refusal form appears, the pattern goes to Nano.
+**Why.** The protocol requires `answers` on a proposal and the prompt omits it; adding a sentence changes no behaviour and is reversible.
+**Rejected.** Orch defaulting `answers`; relaxing the check.
+**Tag.** [default] · remind-me: mem_4d7f8d98e2a443aebeac21dab81d31c2
+**Key.** lel:1166:architect-prompt-answers-field
+**Source.** let-em-loose-expert, 2026-11-18, from the coordinator's smoke-5 evidence. D149, D150, D127. Numbered D156 after D155.
+
+## D157. #1166: keep the D143 bar (criterion 3 not reworded); build D156 and rerun as smoke-6; the all-dropped BBP rule returns to Nano only if candidates keep dropping
+
+**Decision.** After smoke-5, where both candidates were dropped and Q stayed Open (the drops were later audited: claim 6 on grounded votes, claim 7 on ungrounded ones, see the correction below), Nano chose option a, "Keep the bar, fix and rerun": D143 stays as written (the first run is a clean #1166 pass with a settled Q). Criterion 3 of `1166-smoke-run.md` section 9 is NOT reworded. D156 (architect prompt: set `answers` to the question's id on every claim) is being built as a Factory prompt line, so three candidates stand and one may survive. The rerun is smoke-6. Only if candidates keep dropping legitimately after that does the BBP rule for an all-dropped question (D151 option b; ask-first) go back to Nano. This sets the meaning of D143 for now.
+**Why.** The two losses so far are prompt-fixable, and three candidates give a survivor a real chance.
+**Correction 2026-11-18.** The framing "both candidates legitimately dropped" was wrong. Nano's `bbp why --claim 1,6,7` and the D155 audit show claim 7 was dropped by ungrounded votes and would have stayed Open at a grounded -4, so the bar is reachable (Q59). Nano's choice stands (keep the bar, fix, rerun as smoke-6).
+**Rejected.** b) rewording criterion 3 so that a legitimately all-dropped Q counts; c) requesting the BBP rule now.
+**Tag.** [stated] · remind-me: mem_708b09f2022e4622b7d060153b9ed72a
+**Key.** lel:1166:keep-first-run-bar-fix-and-rerun-smoke-6
+**Source.** Nano, answer dialog in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_96800eda3fae4f51b07672e908a68ccc` (speaker Nano). Confirms D143; builds on D151, D156. Numbered D157 after D156.
