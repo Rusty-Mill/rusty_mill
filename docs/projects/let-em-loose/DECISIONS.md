@@ -157,6 +157,7 @@ Precise contracts used by this guide:
 | D147 | #1166: the llama.cpp rebuild and the Qwen reasoning budget are held until the rerun's per-pass log shows which slot failed (D145 fix held, not applied) | [stated] 2026-11-17 (1166) |
 | D148 | #1166 smoke-2: candidates never reviewed (stale question view) is an orch bug fix, re-read the question with `claim_card` | [default] 2026-11-17 (1166) |
 | D149 | #1166 smoke-2: the architect prompt must say a claim has no `evidence` field (use `refs`); a prompt bug fix | [default] 2026-11-17 (1166) |
+| D150 | #1166 smoke-3: the architect prompt also says one claim post per reply, no evidence post; a prompt bug fix | [default] 2026-11-17 (1166) |
 
 ## D1. Lenses, not stages
 
@@ -1456,6 +1457,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Rejected.** Applying the rebuild and the reasoning budget together before the rerun.
 **Tag.** [stated] · remind-me: mem_157ec68e43034d219af811c9735b1681
 **Key.** lel:1166:hold-host-changes-until-rerun-log
+**Condition met 2026-11-17 (smoke-3):** the per-pass log now names the failed slots (see `1166-smoke-run.md` Run 3 result). The hold itself is Nano's: no host change is applied until he says which, one at a time.
 **Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-17, saved verbatim as `mem_7c2db8a737f0414898ce9e85a045f46e` (speaker Nano). Relates to D143, D144, D145, D146, Q52. Numbered D147 after D146.
 
 ## D148. #1166 smoke-2: candidates never reviewed (stale question view) is an orch bug fix, re-read the question with `claim_card`
@@ -1475,3 +1477,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_ace006f513ab4737b5553b05f9ec4df5
 **Key.** lel:1166:architect-prompt-no-evidence-field
 **Source.** let-em-loose-expert, 2026-11-17, from the coordinator's smoke-2 evidence. D34, D127, D135, `1123-lens-prompts.md`. Numbered D149 after D148.
+
+## D150. #1166 smoke-3: the architect prompt also says one claim post per reply, no evidence post; a prompt bug fix
+
+**Decision.** In smoke-3 `local-high`'s Propose(1) failed with `post 1: evidence is not allowed here`: the reply held a claim post and a second, evidence post. The architect proposal job allows only claims, so orch refused the whole reply, including the valid claim in post 0. This extends D149 (smoke-2 was an `evidence` field on a claim; this is an evidence post beside it: the same habit of attaching evidence, a different surface). The smallest fix is a **bug fix in the architect prompt** (Factory `lenses/architect.md`): one claim post per reply, no evidence post. Not done, because it is design: `parse` dropping posts the job may not make and keeping the allowed ones (it loosens the deliberate refuse-whole-reply rule). One run cannot say whether D149 shifted the form or it is chance.
+**Why.** A prompt sentence adds no behaviour and is reversible; the pass-2 fallback already recovered the slot.
+**Rejected.** The parse change above.
+**Tag.** [default] · remind-me: mem_016934faf1a64c829986b883930c35e6
+**Key.** lel:1166:architect-prompt-one-claim-no-evidence-post
+**Source.** let-em-loose-expert, 2026-11-17, from the coordinator's smoke-3 evidence. D149, D127. Numbered D150 after D149.
