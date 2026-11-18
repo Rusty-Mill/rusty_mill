@@ -469,12 +469,26 @@ impl AgentMeta {
     pub const MAX_LEN: usize = 128;
 
     /// Whether every text is non-empty, at most [`Self::MAX_LEN`] bytes and
-    /// free of control characters, so it is safe to print in a header.
+    /// free of control and invisible formatting characters (bidi overrides
+    /// and isolates, zero-width marks), so it prints as written in a header.
     pub fn is_valid(&self) -> bool {
         [&self.agent, &self.role, &self.card]
             .into_iter()
-            .all(|t| !t.is_empty() && t.len() <= Self::MAX_LEN && !t.chars().any(char::is_control))
+            .all(|t| !t.is_empty() && t.len() <= Self::MAX_LEN && !t.chars().any(unprintable))
     }
+}
+
+/// A control character, or one that formats without showing.
+fn unprintable(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
 }
 
 /// What [`Message::SignalBlock`] may send (C76): a closed set, so no
