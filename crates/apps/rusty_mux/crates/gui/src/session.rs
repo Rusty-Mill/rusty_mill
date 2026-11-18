@@ -530,6 +530,8 @@ impl Model {
                 Change::Strip
             }
             Entry::Floats { window, floats } => self.floated(*window, floats),
+            // The GUI does not ask for AGENT_META yet (the session overview does).
+            Entry::Agent { .. } => Change::None,
             Entry::Block {
                 block,
                 window,

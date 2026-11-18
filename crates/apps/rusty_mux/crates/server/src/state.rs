@@ -18,8 +18,8 @@ use rusty_mux_proto::MAX_CLIPBOARD;
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
 use rusty_mux_proto::{
-    Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Ownership, ShowTo, Takeover,
-    encode,
+    AgentMeta, Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Ownership,
+    ShowTo, Takeover, encode,
 };
 use rusty_mux_status::{Parts, Status};
 use rusty_term_core::{AnsiParser, Grid};
@@ -114,6 +114,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::SHOW_SESSION)
     .union(Features::FLOATS)
     .union(Features::TERMINAL_FIND)
+    .union(Features::AGENT_META)
     .union(UNIX_ONLY);
 
 /// What a float edit needs: floating takes a block out of the layout, as a
@@ -242,6 +243,9 @@ struct BlockRt {
     /// Launched with `hold` (C78): the block stays, read-only, once its
     /// program exits.
     hold: bool,
+    /// Who works it, as its launcher named them (D336). Stored and echoed,
+    /// never acted on; not kept across a restart.
+    agent: Option<AgentMeta>,
     /// Its PTY was released (C76): read-only, with its program, if still
     /// running, left to its owner.
     released: bool,
@@ -330,6 +334,7 @@ impl BlockRt {
             spool: None,
             input_seq: 0,
             hold: false,
+            agent: None,
             released: false,
         }
     }
@@ -1845,6 +1850,9 @@ impl State {
         if launch.hold {
             self.require(client, Features::HOLD, "a held launch")?;
         }
+        if launch.agent.is_some() {
+            self.require(client, Features::AGENT_META, "a launch naming an agent")?;
+        }
         if launch.input == InputMode::OwnerOnly {
             self.require(client, Features::INPUT_GATE, "an owner-only launch")?;
             if !launch.own {
@@ -2181,6 +2189,14 @@ impl State {
                             .get(&block.id())
                             .is_some_and(|rt| rt.live.is_none()),
                     });
+                    if let Some(meta) = self.blocks.get(&block.id()).and_then(|rt| rt.agent.clone())
+                        && self.has(client, Features::AGENT_META)
+                    {
+                        entries.push(Entry::Agent {
+                            block: block.id(),
+                            meta,
+                        });
+                    }
                 }
             }
         }
@@ -2303,6 +2319,7 @@ impl State {
         );
         let mut rt = rt.screened(shared, grid, parser);
         rt.hold = launch.hold;
+        rt.agent = launch.agent.clone();
         self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
     }

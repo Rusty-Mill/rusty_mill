@@ -261,6 +261,11 @@ impl Features {
     /// listed by [`Entry::Floats`]. Bit 49 is another capability's.
     pub const FLOATS: Self = Self(1 << 50);
 
+    /// Who works a block (D336): [`Launch::agent`] names the agent, role and
+    /// card a block is launched for, and [`Entry::Agent`] lists them. The
+    /// server stores and echoes the three texts and never acts on them.
+    pub const AGENT_META: Self = Self(1 << 52);
+
     /// The block methods `terminal.prompts` and `terminal.find` (C55): the
     /// rows where the shell's prompts started (OSC 133/633 `A`) and the rows
     /// holding a text, over the block's scrollback and screen. They travel as
@@ -364,6 +369,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::SHOW_SESSION, "sessions across windows"),
     (Features::FLOATS, "floating layers"),
     (Features::TERMINAL_FIND, "prompts and find in scrollback"),
+    (Features::AGENT_META, "agent, role and card on blocks"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -444,6 +450,45 @@ pub struct Launch {
     /// Keep the block, read-only, once its program exits (C78).
     /// Negotiated with [`Features::HOLD`].
     pub hold: bool,
+    /// Who works the block (D336). Negotiated with [`Features::AGENT_META`].
+    pub agent: Option<AgentMeta>,
+}
+
+/// Who works a block, as the launcher names them (D336): the server keeps
+/// the texts and echoes them, and never branches on them. There is no
+/// project: the session is the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMeta {
+    pub agent: String,
+    pub role: String,
+    pub card: String,
+}
+
+impl AgentMeta {
+    /// The longest each text may be, in bytes.
+    pub const MAX_LEN: usize = 128;
+
+    /// Whether every text is non-empty, at most [`Self::MAX_LEN`] bytes and
+    /// free of control and invisible formatting characters (bidi overrides
+    /// and isolates, zero-width marks), so it prints as written in a header.
+    pub fn is_valid(&self) -> bool {
+        [&self.agent, &self.role, &self.card]
+            .into_iter()
+            .all(|t| !t.is_empty() && t.len() <= Self::MAX_LEN && !t.chars().any(unprintable))
+    }
+}
+
+/// A control character, or one that formats without showing.
+fn unprintable(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
 }
 
 /// What [`Message::SignalBlock`] may send (C76): a closed set, so no
@@ -555,6 +600,10 @@ pub enum Entry {
         window: WindowId,
         floats: Vec<Float>,
     },
+    /// Who works a block (D336); sent after its [`Entry::Block`], only for a
+    /// block launched with [`Launch::agent`] and to a client with
+    /// [`Features::AGENT_META`].
+    Agent { block: BlockId, meta: AgentMeta },
     Block {
         block: BlockId,
         window: WindowId,
@@ -1165,12 +1214,16 @@ const SHOWABLE: u32 = 70;
 /// A `ShowSession`'s mark that it asks every other window: 1; a request
 /// has this or a client, never neither (C64).
 const EVERY: u32 = 71;
+/// A launch's or agent entry's agent, role and card texts (D336).
+const AGENT: u32 = 72;
+const ROLE: u32 = 73;
+const CARD: u32 = 74;
 /// Floating blocks (C42) in the text form of [`rusty_mux_core::floats_text`].
 const FLOATS: u32 = 67;
 /// A [`Message::StackFloat`]'s end: 1 top, 0 bottom.
 const TOP: u32 = 68;
-// IDs 1..=EVERY are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = EVERY as usize;
+// IDs 1..=CARD are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = CARD as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -1969,6 +2022,9 @@ fn put_launch(out: &mut Out, launch: &Launch) {
     if launch.hold {
         out.varint(HOLD, 1);
     }
+    if let Some(meta) = &launch.agent {
+        put_meta(out, meta);
+    }
     put_input(out, launch.input);
     if let Some(env) = &launch.env {
         out.bytes(ENV, &strings(env.iter().flat_map(|(k, v)| [k, v])));
@@ -2028,7 +2084,34 @@ fn get_launch(f: &In<'_>) -> Result<Launch, Error> {
             Some(n) => u8::try_from(n).map_err(|_| f.invalid(FDS))?,
         },
         hold: f.opt(HOLD, In::varint)? == Some(1),
+        agent: get_meta(f)?,
     })
+}
+
+fn put_meta(out: &mut Out, meta: &AgentMeta) {
+    out.bytes(AGENT, meta.agent.as_bytes())
+        .bytes(ROLE, meta.role.as_bytes())
+        .bytes(CARD, meta.card.as_bytes());
+}
+
+/// All three texts or none; a partial or invalid set is malformed.
+fn get_meta(f: &In<'_>) -> Result<Option<AgentMeta>, Error> {
+    let Some(agent) = f.opt(AGENT, In::string)? else {
+        return match (f.opt(ROLE, In::string)?, f.opt(CARD, In::string)?) {
+            (None, None) => Ok(None),
+            _ => Err(f.invalid(AGENT)),
+        };
+    };
+    let meta = AgentMeta {
+        agent,
+        role: f.string(ROLE)?,
+        card: f.string(CARD)?,
+    };
+    if meta.is_valid() {
+        Ok(Some(meta))
+    } else {
+        Err(f.invalid(AGENT))
+    }
 }
 
 /// Name and value pairs; an odd count is malformed.
@@ -2693,6 +2776,7 @@ mod entry {
     pub const BLOCK: u64 = 3;
     pub const CLIENT: u64 = 4;
     pub const FLOATS: u64 = 5;
+    pub const AGENT: u64 = 6;
 }
 
 fn put_entry(out: &mut Out, entry: &Entry) {
@@ -2730,6 +2814,10 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             if let Some(block) = focused {
                 out.uuid(FOCUSED, block.uuid());
             }
+        }
+        Entry::Agent { block, meta } => {
+            out.varint(KIND, entry::AGENT).uuid(BLOCK, block.uuid());
+            put_meta(out, meta);
         }
         Entry::Floats { window, floats } => {
             out.varint(KIND, entry::FLOATS)
@@ -2815,6 +2903,10 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             layout: f.opt(LAYOUT, |_, _| get_layout(f))?.flatten(),
             zoomed: f.opt(ZOOMED, block)?,
             focused: f.opt(FOCUSED, block)?,
+        },
+        entry::AGENT => Entry::Agent {
+            block: block(f, BLOCK)?,
+            meta: get_meta(f)?.ok_or_else(|| f.invalid(AGENT))?,
         },
         entry::FLOATS => Entry::Floats {
             window: window(f, WINDOW)?,

@@ -49,6 +49,7 @@ mod completion;
 mod config;
 mod conn;
 mod hosts;
+mod overview;
 #[cfg(any(unix, windows))]
 mod own;
 mod render;
@@ -508,6 +509,7 @@ pub fn run_until(
         | Command::Watch { .. }
         | Command::Wait(_)
         | Command::Run(_)
+        | Command::Overview
         | Command::ServerStop => {}
     }
     let reached = match socket(&invocation, env, stop) {
@@ -768,6 +770,7 @@ fn execute(
             .map(|()| Exit::Ok),
         Command::Wait(wait) => session.wait(&wait.until),
         Command::Run(run) => session.run(run),
+        Command::Overview => session.overview(),
         Command::ServerStop => session.stop_server(),
         Command::Help(_)
         | Command::Api(_)
@@ -1050,6 +1053,20 @@ impl<S: io::Read + Write> Session<'_, S> {
                 Err(e) => return Err(e.into()),
             }
         }
+    }
+
+    /// `overview`: every block under the card its agent works on.
+    fn overview(&mut self) -> Result<Exit, Failure> {
+        let (features, _) = self.hello(Features::INSPECT.union(Features::AGENT_META), None)?;
+        let entries = self.list(features, 1)?;
+        let overview = overview::Overview::of(&entries, self.here);
+        let lines = if self.json {
+            overview.json()
+        } else {
+            overview.text()
+        };
+        lines.iter().try_for_each(|line| self.line(line))?;
+        Ok(Exit::Ok)
     }
 
     /// Sends a Sync numbered `req`, which the server needs to support.

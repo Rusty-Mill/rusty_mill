@@ -70,6 +70,8 @@ pub enum Command {
     Completion(Shell),
     /// Stops the server cleanly and waits until it has (C36b).
     ServerStop,
+    /// Blocks grouped by the card their agent works on (D336).
+    Overview,
 }
 
 /// `agent`: each verb but `hook` and `skill` acts on the chosen agents in
@@ -414,6 +416,8 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "bridge" => Err("bridge takes no arguments".into()),
         "own" if rest.is_empty() => Ok(Command::Own),
         "own" => Err("own takes no arguments".into()),
+        "overview" if rest.is_empty() => Ok(Command::Overview),
+        "overview" => Err("overview takes no arguments".into()),
         "server" => match rest {
             [verb] if verb == "stop" => Ok(Command::ServerStop),
             _ => Err("usage: server stop".into()),
@@ -1210,6 +1214,13 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "Hold one connection that owns every block it launches: JSON\n\
          \x20                  requests on stdin (launch, close), one JSON answer or\n\
          \x20                  owner event per line on stdout; ends at the end of stdin",
+    ),
+    (
+        "overview",
+        "List blocks by the card their agent works on, agents underneath:\n\
+         \x20                  overview, for the session it runs in, or every session\n\
+         \x20                  outside one (a server without agent metadata lists every\n\
+         \x20                  block under no card)",
     ),
     (
         "server",
