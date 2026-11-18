@@ -1218,8 +1218,9 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     (
         "overview",
         "List blocks by the card their agent works on, agents underneath:\n\
-         \x20                  overview (a server without agent metadata lists them all\n\
-         \x20                  under no card)",
+         \x20                  overview, for the session it runs in, or every session\n\
+         \x20                  outside one (a server without agent metadata lists every\n\
+         \x20                  block under no card)",
     ),
     (
         "server",

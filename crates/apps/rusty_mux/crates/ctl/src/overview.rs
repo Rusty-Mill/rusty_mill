@@ -1,9 +1,11 @@
 //! `overview`: the blocks of every session grouped by the card their agent
-//! works on (D336), so one look shows who is on what.
+//! works on (D336), so one look shows who is on what. It covers one session
+//! (the one it runs in); outside any session, every session.
 
 use rusty_json::Value;
-use rusty_mux_core::BlockId;
+use rusty_mux_core::{BlockId, WindowId};
 use rusty_mux_proto::{AgentMeta, Entry};
+use rusty_uuid::Uuid;
 
 /// A block as the overview shows it.
 #[derive(Debug, PartialEq, Eq)]
@@ -24,7 +26,16 @@ pub(crate) struct Overview<'a> {
 }
 
 impl<'a> Overview<'a> {
-    pub(crate) fn of(entries: &'a [Entry]) -> Self {
+    pub(crate) fn of(entries: &'a [Entry], session: Option<Uuid>) -> Self {
+        // A block belongs to the session of its window.
+        let in_scope = |window: WindowId| {
+            session.is_none_or(|s| {
+                entries.iter().any(|e| {
+                    matches!(e, Entry::Window { window: w, session: id, .. }
+                        if *w == window && id.uuid() == s)
+                })
+            })
+        };
         let agent = |id: BlockId| {
             entries.iter().find_map(|e| match e {
                 Entry::Agent { block, meta } if *block == id => Some(meta),
@@ -35,6 +46,7 @@ impl<'a> Overview<'a> {
         for entry in entries {
             let Entry::Block {
                 block,
+                window,
                 holder,
                 title,
                 name,
@@ -44,6 +56,9 @@ impl<'a> Overview<'a> {
             else {
                 continue;
             };
+            if !in_scope(*window) {
+                continue;
+            }
             let agent = agent(*block);
             let card = agent.map(|m| m.card.as_str()).filter(|c| !c.is_empty());
             let row = Row {
@@ -140,8 +155,7 @@ fn quote(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_mux_core::{InputMode, Size, WindowId};
-    use rusty_uuid::Uuid;
+    use rusty_mux_core::{InputMode, SessionId, Size};
 
     fn id(n: u8) -> Uuid {
         Uuid::from_bytes([n; 16])
@@ -183,7 +197,7 @@ mod tests {
             block(4, "", false),
             agent(4, "#8"),
         ];
-        let text = Overview::of(&entries).text();
+        let text = Overview::of(&entries, None).text();
         assert_eq!(text.len(), 3 + 4);
         assert_eq!(text[0], "card \"#7\" (2)");
         assert!(text[1].contains("agent=\"claude\" role=\"builder\""));
@@ -194,13 +208,40 @@ mod tests {
     }
 
     #[test]
+    fn a_session_scopes_it_to_the_blocks_of_its_windows() {
+        let window = |n: u8, session: u8| Entry::Window {
+            window: WindowId::from_uuid(id(n)),
+            session: SessionId::from_uuid(id(session)),
+            name: String::new(),
+            layout: None,
+            zoomed: None,
+            focused: None,
+        };
+        let mut other = block(5, "elsewhere", false);
+        if let Entry::Block { window, .. } = &mut other {
+            *window = WindowId::from_uuid(id(101));
+        }
+        let entries = [
+            window(100, 50),
+            window(101, 51),
+            block(1, "mine", false),
+            other,
+        ];
+        let mine = Overview::of(&entries, Some(id(50))).text();
+        assert_eq!(mine.len(), 2);
+        assert!(mine[1].contains("mine"));
+        assert_eq!(Overview::of(&entries, None).text().len(), 3);
+        assert!(Overview::of(&entries, Some(id(99))).text().is_empty());
+    }
+
+    #[test]
     fn json_is_one_object_per_card_with_null_for_none() {
         let entries = [
             block(1, "shell", false),
             block(2, "", false),
             agent(2, "#7"),
         ];
-        let lines = Overview::of(&entries).json();
+        let lines = Overview::of(&entries, None).json();
         assert_eq!(lines.len(), 2);
         let first = Value::from_json_str(&lines[0]).unwrap();
         assert_eq!(first.get("card"), Some(&Value::from("#7")));
@@ -210,9 +251,9 @@ mod tests {
 
     #[test]
     fn nothing_listed_prints_nothing_and_names_are_escaped() {
-        assert!(Overview::of(&[]).text().is_empty());
+        assert!(Overview::of(&[], None).text().is_empty());
         let entries = [block(1, "a\nb\x1b[31m", false)];
-        let text = Overview::of(&entries).text();
+        let text = Overview::of(&entries, None).text();
         assert_eq!(text.len(), 2);
         assert!(text[1].contains("a\\nb\\u{1b}[31m"));
     }

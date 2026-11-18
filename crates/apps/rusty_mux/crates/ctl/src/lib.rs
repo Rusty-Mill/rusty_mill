@@ -1059,7 +1059,7 @@ impl<S: io::Read + Write> Session<'_, S> {
     fn overview(&mut self) -> Result<Exit, Failure> {
         let (features, _) = self.hello(Features::INSPECT.union(Features::AGENT_META), None)?;
         let entries = self.list(features, 1)?;
-        let overview = overview::Overview::of(&entries);
+        let overview = overview::Overview::of(&entries, self.here);
         let lines = if self.json {
             overview.json()
         } else {
