@@ -1649,7 +1649,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Rejected.** None offered.
 **Tag.** [stated] · remind-me: mem_f885f3a1b16a415eb01506c3146e0c7f
 **Key.** lel:600:builder-claude-credential-subscription
-**Source.** Nano, Millwright project thread for card #1402, message `cmsg_01632CBKCXsWe6RyFWvE9dovEBkpMdZ4enJ2R7MBLywZXz`, 2026-11-19T18:13:22Z: "15 it uses my subscription", answering OPEN_QUESTIONS Q15 (card #1318). Relates to D101, D107, D134, D140, `1571-launch-profiles-design.md` (model provider row). Numbered D165: D163 and D164 are taken on PR #1813 (unmerged); D164 is copied below.
+**Source.** Nano, Millwright project thread for card #1402, message `cmsg_01632CBKCXsWe6RyFWvE9dovEBkpMdZ4enJ2R7MBLywZXz`, 2026-11-19T18:13:22Z: "15 it uses my subscription", answering OPEN_QUESTIONS Q15 (card #1318). Relates to D101, D107, D134, D140, `1571-launch-profiles-design.md` (model provider row). Numbered D165 because D163 and D164 were already taken (both now on main).
 **Confirmed.** Confirmed by name 2026-11-19 by Nano ("confirm D165, D166, D167"), thread message `cmsg_01632CBKCXsWe6RyFWvE9dovXnfgsvDuk5meRkwzs4GR7M`, 2026-11-19T18:57:26Z, answering the PR #1824 review.
 
 ## D166. #600 v0: the Claude CLI reads Nano's `~/.claude` login through a read-only jail root (written exception to D101, `same_user` v0, expires with the gateway #726)
