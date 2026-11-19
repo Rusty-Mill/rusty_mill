@@ -117,7 +117,9 @@ fn session(child: u32, wanted: &HashSet<u64>) -> Vec<Member> {
             if sockets.is_empty() {
                 return None;
             }
-            let proc = crate::process::lookup(pid)?;
+            // Confirm the session after the descriptors were read: a pid
+            // reused in between belongs to another block, and is dropped.
+            let proc = crate::process::lookup(pid).filter(|p| p.session == Some(child))?;
             Some(Member {
                 pid,
                 name: proc.name,
