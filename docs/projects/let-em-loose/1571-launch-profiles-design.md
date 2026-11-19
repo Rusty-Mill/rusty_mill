@@ -98,7 +98,7 @@ inside the jail would reverse D101, so a `jail` profile ignores the project's `c
 | Mill Board | `agent_enrol` child `orch.<card>` | the project's board projects | `agent_enrol_revoke` | merged #1664, not deployed; an admin must create the enrol role |
 | GitHub | installation token from the agent's own GitHub App (`mem_f85de011`) | one repo, listed permissions | `DELETE /installation/token`; 1 h TTL backstop | Apps exist; their keys must be on the host orch runs on |
 | remind-me | per-agent token | one project | its revoke | **no record of scoped tokens** (one read-write key today): a rusty-remind-me card |
-| Model provider | — | — | — | LEL Q15, still open; the profile carries none until it's answered |
+| Model provider | — | — | — | LEL Q15 answered (D165: Nano's subscription); under `jail` the v0 `same_user` exception (D166) lets the CLI read it, and the profile carries no credential. D101 applies again when the gateway lands |
 
 **Lifecycle.**
 1. *Launch:* mint every credential, record `(block, card, credential ids)` in orch-store, then `Launch`.
