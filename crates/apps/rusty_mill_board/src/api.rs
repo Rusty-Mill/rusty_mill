@@ -1185,7 +1185,6 @@ pub fn ops() -> Vec<Op> {
                     scope: a.scope.as_deref(),
                     why: a.why.as_deref(),
                     summary: a.summary.as_deref(),
-                    ..Edit::default()
                 };
                 card(b.edit_at(card_ref(b, &a.id)?, &who, a.rev, &edit)?)
             },
