@@ -64,9 +64,13 @@ Names approved in D66. Defaults:
 | `builders_per_claim` | 2 **[filled]** | Competing prototypes need at least two (card #600 scope). 1124's spend estimate notes the value isn't in the repo. |
 | `max_live_builders` | 2 **[filled]** | One claim's candidates at once; matches the agent slot count the design assumes. Nano sets the real number. |
 
-The wall clock is enforced twice, as D104 §3 says: orch sends SIGTERM, waits the
-60 s grace, then writes `cgroup.kill`; the cgroup holder does the same at the
-deadline if orch is dead.
+The wall clock is enforced on two separate paths (D104 §3, D108 item 1):
+
+- **Normal path, orch:** SIGTERM through `SignalBlock`, a 60 s grace, then
+  `cgroup.kill`.
+- **Crash path, the holder:** no grace and no signal. From the deadline it writes
+  `cgroup.kill` at every look that doesn't find the cgroup empty, and retries until
+  it is empty, then frees the slot.
 
 ## 4. `builder_session` table (#1404)
 
@@ -109,15 +113,23 @@ the check needs one, stop and escalate.
 
 Follows D104 and mux-hosted-agents-design §2; nothing new is decided here.
 
-1. **Admit** (section 2), take an agent slot.
+1. **Admit** (section 2).
 2. **Prepare.** Worktree, `cgroup-open` (D108), orch-minted token, `jail.json`
    written with `JailSpec` (D107).
-3. **Hold.** Cgroup holder with a dup of the slot fd (D108).
+3. **Hold.** Start the cgroup holder (`bbp slot-hold --cgroup`). The holder takes
+   the agent slot itself through the existing `slots.rs`; orch duplicates that open
+   file description with `pidfd_getfd` and passes it to the mux as fd 3 (D108
+   item 2, whose amendment assigns this hand-off to this slice). A refused
+   duplication (for example a Yama `ptrace_scope` of 2 or more) fails the launch
+   closed: never launch without fd 3. This replaces the design §2 order, where orch
+   took the slot first.
 4. **Open.** One `Launch` through a fresh `rusty-mux-ctl own` child (#1571 §2):
    program `lel-jail <jail.json>`, exact env with no `RUSTY_MUX_*` (D13, ADR-0022),
    fd 3 slot, fd 4 ACP socketpair, `hold: true`, `input: owner-only`.
-5. **Run.** ACP over fd 4, rendered to `acp.log`; the witness records the diff,
-   exec log and gateway log (D101).
+5. **Run.** ACP over fd 4, rendered to `acp.log` (a display aid, not a record).
+   The witness (upper-layer diff, exec log, gateway log, D101) is the #726 target
+   and is deferred with those layers (D104 item 7, section 7); the v0 slice
+   doesn't record it.
 6. **End.** SIGTERM via `SignalBlock`, 60 s grace, `cgroup.kill`, `Release` (never a
    mux kill), holder frees the slot.
 
