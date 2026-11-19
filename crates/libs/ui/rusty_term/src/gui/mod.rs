@@ -39,6 +39,8 @@ mod link_policy;
 mod link_trust;
 mod motion;
 mod mouse;
+mod overview;
+mod overview_view;
 mod pace;
 mod paint;
 mod palette;
