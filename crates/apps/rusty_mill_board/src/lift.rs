@@ -168,7 +168,15 @@ fn sections(body: &str) -> Vec<Section<'_>> {
     }
     for s in &mut out {
         let whole = &body[s.start..s.end];
-        s.text = whole.split_once('\n').map_or("", |(_, rest)| rest).trim();
+        // The text under the heading without its surrounding blank lines; the indentation of its
+        // first content line stays, so an indented code block lifts as it was written.
+        let rest = whole.split_once('\n').map_or("", |(_, rest)| rest);
+        let skip: usize = rest
+            .split_inclusive('\n')
+            .take_while(|l| l.trim().is_empty())
+            .map(str::len)
+            .sum();
+        s.text = rest[skip..].trim_end();
     }
     out
 }
@@ -323,7 +331,7 @@ fn lift_card(
             .parent
             .and_then(|p| by_id.get(&p))
             .and_then(|p| p.number);
-        if number.is_some_and(|n| s.text == format!("#{n}")) {
+        if number.is_some_and(|n| s.text.trim() == format!("#{n}")) {
             cut.push((s.start, s.end, true));
         }
     }
@@ -713,6 +721,17 @@ mod tests {
         save_record(&path, &[]).expect("save");
         assert!(save_record(&path, &[]).is_err());
         std::fs::remove_file(&path).expect("clean");
+    }
+
+    #[test]
+    fn lifted_text_keeps_the_indentation_of_its_first_line() {
+        let c = card(
+            "t",
+            "## Acceptance\n\n    first command\n    second command\n\n",
+        );
+        let p = lifted(&c);
+        let [l] = &p.lifts[..] else { panic!("{p:?}") };
+        assert_eq!(l.after.fields[0], "    first command\n    second command");
     }
 
     #[test]
