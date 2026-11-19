@@ -12,6 +12,11 @@ use crate::field::{In, Out};
 use crate::schema::Value;
 use crate::{Error, args, varint};
 
+/// The most bytes one [`Message::ForwardData`] carries (C81).
+pub const FORWARD_CHUNK: usize = 16 << 10;
+/// The bytes of a forward's data a sender may have unacknowledged, per
+/// direction (C81).
+pub const FORWARD_WINDOW: usize = 256 << 10;
 /// The most bytes a clipboard answer (`ClipboardReply`) carries (C38's OSC 52 limit).
 pub const MAX_CLIPBOARD: usize = 1 << 20;
 
@@ -208,6 +213,13 @@ impl Features {
     /// server offers it where it can read the sockets (Linux).
     pub const PORTS: Self = Self(1 << 39);
 
+    /// Port forwards (C81): the input-lease holder of a block opens a
+    /// tunnel to a loopback port of the server's host with
+    /// [`Message::OpenForward`], and [`Message::ForwardData`],
+    /// [`Message::ForwardAck`] and [`Message::CloseForward`] carry it, in
+    /// both directions, over the same connection.
+    pub const PORT_FORWARD: Self = Self(1 << 40);
+
     /// A clean stop on request (C36b): [`Message::Shutdown`] has the server
     /// answer, save its state, hang up owned blocks and release its name,
     /// then close every connection. Only the server's own account may ask.
@@ -376,6 +388,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::FLOATS, "floating layers"),
     (Features::TERMINAL_FIND, "prompts and find in scrollback"),
     (Features::PORTS, "listening ports of a block"),
+    (Features::PORT_FORWARD, "port forwards"),
     (Features::AGENT_META, "agent, role and card on blocks"),
 ];
 
@@ -975,6 +988,38 @@ pub enum Message {
         session: SessionId,
         to: ShowTo,
     },
+    /// Opens forward `id` (C81): a tunnel to `127.0.0.1:port` on the
+    /// server's host. Done means the forward is accepted; the connection
+    /// itself is made after, and a refused one ends with
+    /// [`Message::CloseForward`]. `id` is the client's own choice, unused
+    /// on this connection. Accepted from the block's input-lease holder
+    /// only, like input. Negotiated with [`Features::PORT_FORWARD`].
+    OpenForward {
+        req: u64,
+        block: BlockId,
+        port: u16,
+        id: u64,
+    },
+    /// Bytes of forward `id`, at most [`FORWARD_CHUNK`], in either
+    /// direction. The receiver gives the sender credit back with
+    /// [`Message::ForwardAck`]. Negotiated with [`Features::PORT_FORWARD`].
+    ForwardData {
+        id: u64,
+        data: Vec<u8>,
+    },
+    /// `n` bytes of forward `id`'s data were consumed, in either direction.
+    /// A sender has at most [`FORWARD_WINDOW`] bytes unacknowledged; one
+    /// that sends more has its forward closed.
+    ForwardAck {
+        id: u64,
+        n: u32,
+    },
+    /// Ends forward `id`, in either direction; the server says why, if it
+    /// can.
+    CloseForward {
+        id: u64,
+        reason: Option<String>,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -1225,12 +1270,16 @@ const EVERY: u32 = 71;
 const AGENT: u32 = 72;
 const ROLE: u32 = 73;
 const CARD: u32 = 74;
+/// A forward's id, the client's choice (C81).
+const FORWARD: u32 = 75;
+/// Bytes of credit a [`Message::ForwardAck`] gives back.
+const CREDIT: u32 = 76;
 /// Floating blocks (C42) in the text form of [`rusty_mux_core::floats_text`].
 const FLOATS: u32 = 67;
 /// A [`Message::StackFloat`]'s end: 1 top, 0 bottom.
 const TOP: u32 = 68;
-// IDs 1..=CARD are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = CARD as usize;
+// IDs 1..=CREDIT are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = CREDIT as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -1271,6 +1320,10 @@ mod ty {
     pub const SHUTDOWN: u8 = 0x24;
     pub const SHARE_SESSION: u8 = 0x25;
     pub const UNSHARE_SESSION: u8 = 0x26;
+    pub const OPEN_FORWARD: u8 = 0x27;
+    pub const FORWARD_DATA: u8 = 0x2b;
+    pub const FORWARD_ACK: u8 = 0x2c;
+    pub const CLOSE_FORWARD: u8 = 0x2d;
     pub const SIGNAL_BLOCK: u8 = 0x28;
     pub const RELEASE_BLOCK: u8 = 0x29;
     pub const CLIPBOARD_REPLY: u8 = 0x2a;
@@ -1433,6 +1486,30 @@ impl Message {
                 req_block(out, *req, *block, ty::SIGNAL_BLOCK)
             }
             M::ReleaseBlock { req, block } => req_block(out, *req, *block, ty::RELEASE_BLOCK),
+            M::OpenForward {
+                req,
+                block,
+                port,
+                id,
+            } => {
+                out.varint(PORT, (*port).into()).varint(FORWARD, *id);
+                req_block(out, *req, *block, ty::OPEN_FORWARD)
+            }
+            M::ForwardData { id, data } => {
+                out.varint(FORWARD, *id).bytes(DATA, data);
+                ty::FORWARD_DATA
+            }
+            M::ForwardAck { id, n } => {
+                out.varint(FORWARD, *id).varint(CREDIT, (*n).into());
+                ty::FORWARD_ACK
+            }
+            M::CloseForward { id, reason } => {
+                out.varint(FORWARD, *id);
+                if let Some(reason) = reason {
+                    out.bytes(REASON, reason.as_bytes());
+                }
+                ty::CLOSE_FORWARD
+            }
             M::ShowSession { req, session, to } => {
                 out.varint(REQ, *req).uuid(SESSION, session.uuid());
                 match to {
@@ -1814,6 +1891,24 @@ impl Message {
             ty::RELEASE_BLOCK => M::ReleaseBlock {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
+            },
+            ty::OPEN_FORWARD => M::OpenForward {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                port: u16::try_from(f.varint(PORT)?).map_err(|_| f.invalid(PORT))?,
+                id: f.varint(FORWARD)?,
+            },
+            ty::FORWARD_DATA => M::ForwardData {
+                id: f.varint(FORWARD)?,
+                data: f.bytes(DATA)?.to_vec(),
+            },
+            ty::FORWARD_ACK => M::ForwardAck {
+                id: f.varint(FORWARD)?,
+                n: u32::try_from(f.varint(CREDIT)?).map_err(|_| f.invalid(CREDIT))?,
+            },
+            ty::CLOSE_FORWARD => M::CloseForward {
+                id: f.varint(FORWARD)?,
+                reason: f.opt(REASON, |f, id| f.string(id))?,
             },
             ty::SHOW_SESSION => M::ShowSession {
                 req: f.varint(REQ)?,

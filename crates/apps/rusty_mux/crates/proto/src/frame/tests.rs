@@ -537,6 +537,25 @@ fn every_message_round_trips() {
             selection: Selection::Clipboard,
             data: None,
         },
+        Message::OpenForward {
+            req: 30,
+            block,
+            port: 8080,
+            id: 3,
+        },
+        Message::ForwardData {
+            id: 3,
+            data: b"GET /".to_vec(),
+        },
+        Message::ForwardAck { id: 3, n: 5 },
+        Message::CloseForward {
+            id: 3,
+            reason: Some("refused".into()),
+        },
+        Message::CloseForward {
+            id: 4,
+            reason: None,
+        },
     ];
     for message in messages {
         round_trip(message);
