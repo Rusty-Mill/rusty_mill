@@ -64,6 +64,11 @@ const REPLY_FRAME: usize = 64;
 /// Events kept for clients that reconnect.
 const HISTORY: usize = 4096;
 
+/// Every this many [`PROCESS_POLL`]s the listening ports of every block are
+/// read, and only while some client can be told of a change: a read walks
+/// `/proc`.
+const PORTS_EVERY: u8 = 4;
+
 /// How often every block's foreground process group and echo mode are
 /// checked, to see a job start or echo turned off that writes nothing;
 /// output checks its own block at once.
@@ -233,6 +238,8 @@ struct BlockRt {
     foreground: Option<process::Foreground>,
     /// Who echoes typing, as last announced.
     echo: Echo,
+    /// The listening ports last announced, as `terminal.ports` replies.
+    ports: String,
     /// Keys awaiting their echo ack.
     waiting: Waiting,
     /// How the program was started: for `terminal.shell` and the store.
@@ -332,6 +339,7 @@ impl BlockRt {
             seen: terminal::Seen::default(),
             foreground: None,
             echo: Echo::Unknown,
+            ports: String::new(),
             waiting: Waiting::default(),
             started,
             unsaved: true,
@@ -437,6 +445,8 @@ pub(crate) struct State {
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
     features: HashMap<ClientId, Features>,
+    /// Polls since the listening ports were last read, below [`PORTS_EVERY`].
+    ports_tick: u8,
     /// The one clipboard read asked of a block's lease holder per selection
     /// (`true` for primary), until it is answered or [`CLIPBOARD_WAIT`] ends
     /// (C54). A reply that matches none is refused.
@@ -520,6 +530,7 @@ impl State {
             blocks: HashMap::new(),
             clients: HashMap::new(),
             features: HashMap::new(),
+            ports_tick: 0,
             reads: HashMap::new(),
             shows: HashMap::new(),
             tokens: HashMap::new(),
@@ -2837,11 +2848,39 @@ impl State {
     fn check_processes(&mut self) {
         self.mux.expire_grants(now_ms());
         let blocks: Vec<BlockId> = self.blocks.keys().copied().collect();
+        let ports = self.ports_due();
         for block in blocks {
             self.check_process(block, true);
             self.check_echo(block);
+            if ports {
+                self.check_ports(block);
+            }
         }
         self.flush();
+    }
+
+    /// Whether this poll reads the listening ports: every [`PORTS_EVERY`]th
+    /// one, and only when a client could be told of a change.
+    fn ports_due(&mut self) -> bool {
+        self.ports_tick = (self.ports_tick + 1) % PORTS_EVERY;
+        self.ports_tick == 0 && self.features.values().any(|f| f.contains(Features::PORTS))
+    }
+
+    /// Announces the block's listening ports if they differ from the last
+    /// announcement.
+    fn check_ports(&mut self, block: BlockId) {
+        let Some(rt) = self.blocks.get_mut(&block) else {
+            return;
+        };
+        let Some(pid) = rt.live.as_ref().and_then(|l| l.process.pid()) else {
+            return;
+        };
+        let now = ports::text(&ports::listening(pid));
+        if now == rt.ports {
+            return;
+        }
+        rt.ports = now;
+        in_step("ports", self.mux.note_ports(block));
     }
 
     /// The block's output ended: stop serving its PTY, without aborting the
@@ -3079,6 +3118,7 @@ fn receives(features: Features, principal: &Principal, event: &Event) -> bool {
         | Event::ProgressChanged { .. }
         | Event::Notification { .. } => Features::PROGRAM_EVENTS,
         Event::ProcessChanged { .. } => Features::PROCESS,
+        Event::PortsChanged { .. } => Features::PORTS,
         Event::SessionRenamed { .. }
         | Event::WindowRenamed { .. }
         | Event::BlockRenamed { .. }

@@ -472,6 +472,7 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
             "status-removed",
             vec![("block", Id(block.uuid())), ("id", Text(id.clone()))],
         ),
+        E::PortsChanged { block } => ("ports-changed", vec![("block", Id(block.uuid()))]),
         E::ProcessChanged {
             block,
             pid,
@@ -694,6 +695,7 @@ mod tests {
                 title: "t".into(),
                 body: "b".into(),
             },
+            Event::PortsChanged { block },
             Event::ProcessChanged {
                 block,
                 pid: 42,
