@@ -69,6 +69,79 @@ fn migrations() -> Migrations {
     )
 }
 
+/// Every card in the board file at `path`, read without changing anything: the file is opened
+/// read-only (never created, no journal mode or migration), and one that is not at exactly this
+/// build's schema is refused rather than brought up to date. For plans that must write nothing.
+///
+/// # Errors
+/// [`BoardError::Storage`] if the file is missing, cannot be read, is not at this build's
+/// schema version, or has a `-wal` or `-shm` file beside it (a board is running).
+pub fn read_cards(path: impl AsRef<Path>) -> Result<Vec<Card>, BoardError> {
+    let path = path.as_ref();
+    // A `-wal` or `-shm` file means a board has the file open (or stopped uncleanly), and even a
+    // read-only reader updates the shared `-shm` index. Refuse rather than touch it.
+    for suffix in ["-wal", "-shm"] {
+        let mut side = path.as_os_str().to_owned();
+        side.push(suffix);
+        if Path::new(&side).exists() {
+            return Err(storage(format!(
+                "{} exists: stop the board (let it exit cleanly) before reading its file",
+                Path::new(&side).display()
+            )));
+        }
+    }
+    // `immutable=1`: no locks and no sidecars, so even a WAL-mode file is read without a `-shm`
+    // or `-wal` appearing beside it. Safe here because no sidecar exists to be ignored.
+    let conn = rusqlite::Connection::open_with_flags(
+        immutable_uri(path)?,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(storage)?;
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(storage)?;
+    let want = migrations().latest_version();
+    if version != want {
+        return Err(storage(format!(
+            "the board file is at schema {version}, this build reads {want}"
+        )));
+    }
+    let mut stmt = conn
+        .prepare("SELECT doc FROM cards ORDER BY created_ms, id")
+        .map_err(storage)?;
+    let docs = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage)?;
+    docs.iter().map(|d| card_of(d)).collect()
+}
+
+/// `path` as a SQLite `file:` URI that opens it immutable, percent-encoding all but the
+/// characters a URI path keeps.
+fn immutable_uri(path: &Path) -> Result<String, BoardError> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| storage("the path is not valid UTF-8"))?
+        .replace('\\', "/");
+    let mut uri = String::from("file:");
+    if !text.starts_with('/') {
+        uri.push('/');
+    }
+    for b in text.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'.' | b'_' | b'-' | b'~' | b':' => {
+                uri.push(char::from(b));
+            }
+            _ => uri.push_str(&format!("%{b:02X}")),
+        }
+    }
+    uri.push_str("?immutable=1");
+    Ok(uri)
+}
+
 /// What [`SqliteStore::import`] loads.
 pub struct Import<'a> {
     /// Every card, whole.

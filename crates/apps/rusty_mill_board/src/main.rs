@@ -440,6 +440,18 @@ fn run_backfill(cli: &Cli, store: &dyn Store) -> Result<(), String> {
     Ok(())
 }
 
+/// The dry run of `--lift-sections`: the plan on stdout, what stays in bodies on stderr.
+fn show_lift_plan(plan: &lift::Plan) -> Result<(), String> {
+    eprintln!("{}", json(&plan.left)?);
+    println!("{}", json(&plan.lifts)?);
+    eprintln!(
+        "dry run: {} card(s) would change, {} section(s) stay in their bodies; add --lift-record FILE to write",
+        plan.lifts.len(),
+        plan.left.len()
+    );
+    Ok(())
+}
+
 /// `--lift-sections` / `--undo-lift`: plan, apply or undo the lift of body sections.
 fn run_lift(cli: &Cli, store: &dyn Store) -> Result<(), String> {
     if let Some(path) = &cli.undo_lift {
@@ -452,16 +464,10 @@ fn run_lift(cli: &Cli, store: &dyn Store) -> Result<(), String> {
         return Ok(());
     }
     let plan = lift::plan(&store.list().map_err(|e| e.to_string())?);
-    eprintln!("{}", json(&plan.left)?);
     let Some(record) = &cli.lift_record else {
-        println!("{}", json(&plan.lifts)?);
-        eprintln!(
-            "dry run: {} card(s) would change, {} section(s) stay in their bodies; add --lift-record FILE to write",
-            plan.lifts.len(),
-            plan.left.len()
-        );
-        return Ok(());
+        return show_lift_plan(&plan);
     };
+    eprintln!("{}", json(&plan.left)?);
     let fail = |e: String| format!("--lift-record {}: {e}", record.display());
     lift::save_record(record, &plan.lifts)
         .map_err(|e| fail(format!("not saved, nothing written: {e}")))?;
@@ -549,6 +555,15 @@ fn run(cli: Cli) -> Result<(), String> {
     }
     if cli.migrate_from_tick {
         return run_migrate(&cli);
+    }
+    // A plan that writes nothing reads the file read-only: opening the store would create it and
+    // migrate its schema.
+    if let (true, None, Some(path), None) =
+        (cli.lift_sections, &cli.lift_record, &cli.db, &cli.tick_url)
+    {
+        let cards = rusty_mill_board::sqlite::read_cards(path)
+            .map_err(|e| format!("--db {}: {e}", path.display()))?;
+        return show_lift_plan(&lift::plan(&cards));
     }
     let (store, milestones) = open_stores(&cli)?;
     if cli.retag_columns.is_some() || cli.undo_retag.is_some() {
