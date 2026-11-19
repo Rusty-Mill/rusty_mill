@@ -1506,6 +1506,20 @@ impl<T: TickApi> TickStore<T> {
                 })
                 .map(|d| format!("comment document {} cannot be read", d.id)),
         );
+        let projects = self.projects()?;
+        let milestones: Vec<Task> =
+            self.collection(&format!("/tags/{MILESTONE_TAG}/tasks"), "tasks")?;
+        unreadable.extend(
+            milestones
+                .into_iter()
+                .filter(Task::is_milestone)
+                .filter_map(|t| {
+                    let id = t.id;
+                    Self::milestone_of(&projects, t)
+                        .is_none()
+                        .then(|| format!("milestone task {id} has an unreadable version"))
+                }),
+        );
         Ok(TickHistory {
             moves,
             reservations,

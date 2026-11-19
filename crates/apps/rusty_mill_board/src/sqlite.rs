@@ -7,7 +7,7 @@
 //! A card is stored whole as JSON (`doc`), beside the few columns the board queries by. A new
 //! card field therefore needs no migration, and what the domain wrote is what is read back.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -166,6 +166,10 @@ impl SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
         let id = card.id.to_string();
+        let before: Option<String> = tx
+            .query_row("SELECT col FROM cards WHERE id = ?1", [&id], |r| r.get(0))
+            .optional()
+            .map_err(storage)?;
         let number = card.number.map(int).transpose()?;
         let rev = int(card.rev)?;
         let col = card.column.to_string();
@@ -227,19 +231,14 @@ impl SqliteStore {
             ],
         )
         .map_err(storage)?;
+        // A card enters a column on creation and whenever its column differs from the one it
+        // had: compared with the stored card, not the last recorded move, so a card whose
+        // history is older than the move table (a migrated one) gains no row from an edit.
         let entered = event.column.to_string();
-        let prev: Option<String> = tx
-            .query_row(
-                "SELECT col FROM moves WHERE card = ?1 ORDER BY rowid DESC LIMIT 1",
-                [&id],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        if prev.as_deref() != Some(entered.as_str()) {
+        if before.as_deref() != Some(entered.as_str()) {
             tx.execute(
                 "INSERT INTO moves (card, from_col, col, at_ms) VALUES (?1, ?2, ?3, ?4)",
-                params![id, prev, entered, event.at_ms],
+                params![id, before, entered, event.at_ms],
             )
             .map_err(storage)?;
         }
@@ -295,15 +294,19 @@ impl SqliteStore {
             )
             .map_err(storage)?;
         }
+        let columns: BTreeMap<Uuid, String> = data
+            .cards
+            .iter()
+            .map(|c| (c.id, c.column.to_string()))
+            .collect();
         for (card, at_ms) in data.moves {
-            // The move history has no column: the card's own stands in, so the next real move
-            // is compared with the column the card is in now.
-            let Some(entered) = data.cards.iter().find(|c| c.id == *card) else {
+            // The move history has no column: the card's own stands in.
+            let Some(entered) = columns.get(card) else {
                 continue;
             };
             tx.execute(
                 "INSERT INTO moves (card, from_col, col, at_ms) VALUES (?1, NULL, ?2, ?3)",
-                params![card.to_string(), entered.column.to_string(), at_ms],
+                params![card.to_string(), entered, at_ms],
             )
             .map_err(storage)?;
         }

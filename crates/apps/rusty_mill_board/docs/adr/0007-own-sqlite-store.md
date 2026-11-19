@@ -16,7 +16,7 @@ The `Store` port (`src/store.rs`) already isolates all of this. `MemStore` and `
 Add a third adapter, `SqliteStore` (`src/sqlite.rs`), on the workspace's existing `rusqlite` 0.41 (`bundled`, `backup`). It adds no new dependency. The board becomes the only writer of its own file. Once the migration is verified, `TickStore` and its fake are deleted and rusty_tick is archived.
 
 ### Schema
-There is one file, `--db PATH`, defaulting to `~/.mill-board/board.db`. It uses WAL mode with `foreign_keys=ON`, and `user_version` holds the schema version, with migrations applied at startup in order.
+There is one file, `--db PATH` (no default: without `--db` the board is not on SQLite). It uses WAL mode with `foreign_keys=ON`, and `user_version` holds the schema version, with migrations applied at startup in order.
 
 | Table | Columns (keys) | Notes |
 |---|---|---|
@@ -43,10 +43,10 @@ Settings stay in their files (`--settings-dir`, ADR-0004): they are config, not 
 - The S2 observation machinery (`observe`, the comment window, the 5-minute reconcile) is no longer needed: the board is the only writer. Anyone who edits the file by hand must restart the board.
 
 ## Migration (B3, separately authorized)
-`rusty_mill_board migrate-from-tick --tick-url … --db NEW.db [--dry-run]` works as follows:
-1. **Export:** it reads through the existing `TickStore` read paths (tasks tagged `agent`, board docs, comments, `board_number` docs, milestones, `/moves`) and writes `NEW.db` in one transaction. It keeps ids, numbers, revs, `created_ms`/`updated_ms`, comment ids, authors and times, move history and unknown doc fields. Events are not migrated (tick keeps none), and the new log starts empty with a `resync` cursor.
-2. **Verify:** it reads both stores through the `Store` port and compares them card by card, and every field must be equal. It also compares counts per table, the highest reserved number and a checksum of the serialized cards. Any difference fails the run.
-3. **Dry run first:** the dry run runs against production tick and writes to `/tmp`. It changes nothing in tick. The result (counts and diff, expected to be zero) goes to Nano.
+`rusty_mill_board --migrate-from-tick --tick-url … --db NEW.db [--dry-run]` (a flag, not a subcommand; built in PR #1817) works as follows:
+1. **Export:** it reads through the existing `TickStore` read paths (tasks tagged `agent`, board docs, comments, `board_number` docs, milestones, `/moves`) and loads `NEW.db` in one transaction, in a staging file of the run's own that is published only if the read-back is exact (an existing `NEW.db` is refused). It keeps ids, numbers, revs, `created_ms`/`updated_ms`, comment ids, authors and times, and move history (card and time; tick records no column, so each carries the card's current column). **Departure:** unknown doc fields are not carried, since the `Store` port does not expose them; board and comment documents tick's own reader would skip, malformed reservations and an incomplete move history fail the run instead. Events are not migrated (tick keeps none), and the new log starts empty with a `resync` cursor.
+2. **Verify:** it reads both stores through the `Store` port and compares them card by card, and every field must be equal. It also compares milestones, every number reservation with its card, and every move with its time and repeats (the full comparison stands in for per-table counts and a checksum). Any difference fails the run.
+3. **Dry run first:** the dry run runs against production tick and copies into a private in-memory database, so nothing is written anywhere. It changes nothing in tick. The result (counts and diff, expected to be zero) goes to Nano.
 4. **Cutover:** stop the board, run the migration for real, start the board with `--db` instead of `--tick-url`, then check health and spot-check `card_get`, `board_list` and `board_events`. Tick stays running, read-only for the board, until archiving.
 
 ### Rollback

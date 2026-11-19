@@ -214,6 +214,18 @@ pub fn migrate_to_file<T: TickApi>(source: &TickStore<T>, path: &Path) -> Result
     if path.exists() {
         return Err(exists(path));
     }
+    // A log left beside a missing file would be replayed into the new one by SQLite.
+    for suffix in ["-wal", "-shm"] {
+        let mut stray = path.as_os_str().to_owned();
+        stray.push(suffix);
+        if Path::new(&stray).exists() {
+            return Err(format!(
+                "{} exists beside a missing {}: remove it or choose another path",
+                Path::new(&stray).display(),
+                path.display()
+            ));
+        }
+    }
     let mut name = path.as_os_str().to_owned();
     name.push(format!(".{}.partial", Uuid::new_v4().simple()));
     let partial = PathBuf::from(name);

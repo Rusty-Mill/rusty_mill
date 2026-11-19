@@ -2,7 +2,7 @@
 //! towards rusty_tick, and loud when the copy cannot be right.
 
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::domain::BoardError;
+use rusty_mill_board::domain::{BoardError, Card, Event, EventKind};
 use rusty_mill_board::domain::{Column, Span};
 use rusty_mill_board::migrate::{migrate, migrate_to_file};
 use rusty_mill_board::milestones::{Milestone, MilestoneStore};
@@ -464,4 +464,71 @@ fn verification_compares_every_move_and_reservation_not_just_who_moved() {
         assert_eq!(found.len(), 1, "{sql}: {found:?}");
         std::fs::remove_dir_all(dir).expect("cleanup");
     }
+}
+
+#[test]
+fn a_milestone_task_with_an_unreadable_version_is_reported_not_dropped() {
+    let source = altered(|path, body| {
+        if path.starts_with("/tags/milestone/tasks") {
+            body["tasks"].as_array_mut().expect("tasks").push(json!({
+                "id": "00000000-0000-4000-8000-000000000003", "title": "bad version",
+                "tags": ["milestone"], "status": "open", "etag": "x", "dueMs": 5,
+                "listId": "00000000-0000-0000-0000-000000000000", "notes": "",
+                "priority": 0, "sortOrder": 0, "createdMs": 1, "updatedMs": 1,
+                "deletedMs": null
+            }));
+        }
+    });
+    let target = SqliteStore::open_in_memory().expect("open");
+    let report = migrate(&source, &target).expect("report");
+    assert!(
+        report
+            .mismatches
+            .iter()
+            .any(|m| m.contains("milestone task")),
+        "{:?}",
+        report.mismatches
+    );
+    assert!(target.list().expect("list").is_empty(), "nothing written");
+}
+
+#[test]
+fn a_log_left_beside_a_missing_destination_is_refused() {
+    let dir = dir("stray");
+    let path = dir.join("board.db");
+    std::fs::write(dir.join("board.db-wal"), "stale").expect("write");
+    let (_tick, source) = seeded();
+    let err = migrate_to_file(&source, &path).expect_err("refused");
+    assert!(err.contains("-wal"), "{err}");
+    assert!(!path.exists());
+    std::fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
+fn an_edit_that_keeps_the_column_adds_no_move_to_a_migrated_card() {
+    let (_tick, source) = seeded();
+    let target = SqliteStore::open_in_memory().expect("open");
+    migrate(&source, &target).expect("migrate");
+    let before = target.moves().expect("moves").len();
+    let human = Roles::default().actor("nano", "human").expect("role");
+    let card = target.list().expect("list")[0].clone();
+    let edited = card.comment(&human, "later", 9_999).expect("comment");
+    target
+        .replace(&edited, Event::of(&edited, EventKind::Commented, "nano"))
+        .expect("replace");
+    assert_eq!(
+        target.moves().expect("moves").len(),
+        before,
+        "no new column entry"
+    );
+    // A real move still records one.
+    let moved = Card {
+        rev: edited.rev + 1,
+        column: Column::DONE,
+        ..edited.clone()
+    };
+    target
+        .replace(&moved, Event::of(&moved, EventKind::Moved, "nano"))
+        .expect("replace");
+    assert_eq!(target.moves().expect("moves").len(), before + 1);
 }

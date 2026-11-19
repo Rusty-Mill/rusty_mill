@@ -138,7 +138,7 @@ struct Cli {
     /// into a new --db file (never an existing one) and compare the copy; the file appears only if
     /// the copy is exact. Exit non-zero on any difference.
     /// rusty_tick is only read. Stop the board first, so nothing changes meanwhile.
-    #[arg(long, requires_all = ["tick_url", "db"], conflicts_with_all = ["export_projects", "retag_columns", "undo_retag", "backfill_evidence", "undo_backfill"])]
+    #[arg(long, requires_all = ["tick_url", "db"], conflicts_with_all = ["export_projects", "retag_columns", "undo_retag", "backfill_evidence", "undo_backfill", "http"])]
     migrate_from_tick: bool,
     /// With --migrate-from-tick: copy into a private in-memory database instead, so nothing
     /// is written anywhere, and print the same report.
