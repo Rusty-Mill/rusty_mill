@@ -89,3 +89,4 @@ Nano accepted these departures from the schema above on 2026-11-19 (decision car
 - `events` has `id, card, col, at_ms, doc`; `actor`, `kind` and `rev` live inside the JSON `doc`, not as columns.
 - `moves` is `card, from_col, col, at_ms`, written in the commit transaction, so it survives event pruning.
 - One connection behind a mutex, no read pool, no event pruning; scale ceilings are not measured.
+- A replace writes back any member of the stored card document this board does not know, as `TickStore` does (S5a).

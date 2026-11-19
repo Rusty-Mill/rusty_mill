@@ -407,3 +407,30 @@ fn moves_outlive_the_events_they_came_from() {
         "pruned events leave the move history intact"
     );
 }
+
+#[test]
+fn a_field_this_board_does_not_know_survives_a_replace() {
+    let path = file("unknown");
+    let store = SqliteStore::open(&path).expect("open");
+    let a = card("a", 1);
+    add(&store, &a);
+    let raw = Connection::open(&path).expect("raw");
+    raw.execute(
+        "UPDATE cards SET doc = json_set(doc, '$.laterField', json('[{\"kind\":\"newer\"}]'))",
+        [],
+    )
+    .expect("a newer board's field");
+    let next = moved(&a, Column::DONE, 2);
+    store
+        .replace(&next, Event::of(&next, EventKind::Moved, "t"))
+        .expect("replace");
+    let doc: String = raw
+        .query_row("SELECT doc FROM cards", [], |r| r.get(0))
+        .expect("doc");
+    let doc: serde_json::Value = serde_json::from_str(&doc).expect("json");
+    assert_eq!(doc["laterField"][0]["kind"], "newer", "written back");
+    assert_eq!(
+        store.get(a.id).expect("get").expect("there").column,
+        Column::DONE
+    );
+}

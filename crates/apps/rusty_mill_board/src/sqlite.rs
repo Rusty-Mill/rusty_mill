@@ -14,6 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusty_sqlite::rusqlite::{self, OptionalExtension, TransactionBehavior, params};
 use rusty_sqlite::{Connection, Migrations};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::domain::{BoardError, Card, Column, Event, Span, next_event_id};
@@ -96,6 +97,23 @@ fn card_of(doc: &str) -> Result<Card, BoardError> {
     serde_json::from_str(doc).map_err(storage)
 }
 
+/// `card`'s document with every member of `stored` this board does not know written back, so a
+/// newer board's fields survive an edit here (ADR-0007, S5a). A member is unknown when
+/// re-serializing the stored card does not produce it; a known one the edit cleared stays gone.
+fn with_unknown(card: &Card, stored: &str) -> Result<String, BoardError> {
+    let mut doc = serde_json::to_value(card).map_err(storage)?;
+    let raw: Value = serde_json::from_str(stored).map_err(storage)?;
+    let known = serde_json::to_value(card_of(stored)?).map_err(storage)?;
+    if let (Some(out), Some(raw), Some(known)) =
+        (doc.as_object_mut(), raw.as_object(), known.as_object())
+    {
+        for (key, value) in raw.iter().filter(|(k, _)| !known.contains_key(*k)) {
+            out.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    serde_json::to_string(&doc).map_err(storage)
+}
+
 impl SqliteStore {
     /// Open (creating if needed) the board's file and bring its schema up to date.
     ///
@@ -153,6 +171,14 @@ impl SqliteStore {
         } else {
             // A replacement is exactly one revision on: revision 0 has no predecessor, so it
             // never matches (as MemStore), only tells a missing card from a stale one below.
+            let stored: Option<String> = tx
+                .query_row("SELECT doc FROM cards WHERE id = ?1", [&id], |r| r.get(0))
+                .optional()
+                .map_err(storage)?;
+            let doc = match &stored {
+                Some(old) => with_unknown(card, old)?,
+                None => doc,
+            };
             let n = match card.rev.checked_sub(1) {
                 None => 0,
                 Some(prev) => tx
