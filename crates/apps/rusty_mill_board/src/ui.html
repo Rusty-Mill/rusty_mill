@@ -326,6 +326,8 @@ dialog h2{margin:0;font-size:18px}
   .strip{flex-wrap:wrap}
 }
 .evid{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center}.evid input{flex:1;min-width:12ch}.evid .evidence{flex-basis:100%;font-size:13px;overflow-wrap:anywhere}
+.sum{font-size:13px;color:var(--mute);margin:2px 0 4px;overflow-wrap:anywhere}
+.tf{display:grid;gap:2px}.tf>input,.tf>textarea{font:inherit}.tf summary{cursor:pointer;color:var(--mute)}.cnt.over{color:#b00020;font-weight:600}
 .prompt{display:grid;grid-template-columns:1fr auto;gap:4px 8px;align-items:center}.prompt textarea{grid-column:1/-1;font-family:ui-monospace,monospace}
 </style>
 </head>
@@ -461,7 +463,7 @@ async function act(op,args,failed,done){
 }
 function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
 // A card's heading: its board number in the corner, if it has one, then its title.
-const heading=k=>{const top=el("div",null,"top");if(k.number)top.append(el("span","#"+k.number,"num"));top.append(...priorityTag(k));return [top,el("b",k.title)]};
+const heading=k=>{const top=el("div",null,"top");if(k.number)top.append(el("span","#"+k.number,"num"));top.append(...priorityTag(k));return [top,el("b",k.title),...(k.summary?[el("div",k.summary,"sum")]:[])]};
 // rusty_tick's priority scale; 0 (none) shows no badge.
 const PRIORITY={5:"High",3:"Medium",1:"Low",0:"None"};
 const priorityTag=k=>k.priority?[el("span",PRIORITY[k.priority],"tag p"+k.priority)]:[];
@@ -936,15 +938,19 @@ function pickAgent(agent){sel={...sel,agent};render()}
 
 /* The card dialog is built once and then kept in step with the board without ever
    touching what the person is typing. `dlg.base` is the card as they last saw it. */
-const snap=k=>({rev:k.rev,title:k.title,body:k.body,prompt:k.prompt??"",tags:k.tags.join(", ")});
-const typed=()=>({title:dlg.f.t.value,body:dlg.f.b.value,prompt:dlg.f.q.value,tags:dlg.f.g.value});
-const sameText=(a,b)=>a.title===b.title&&a.body===b.body&&a.prompt===b.prompt&&a.tags===b.tags;
+// The typed fields (#1568) and their byte caps, as the MCP enforces them. Why sits in a collapsed section.
+const TYPED=[["summary","Summary",320],["acceptance","Acceptance",1200],["scope","Scope",800],["why","Why",600]];
+const bytes=v=>new TextEncoder().encode(v).length;
+const snap=k=>({rev:k.rev,title:k.title,body:k.body,prompt:k.prompt??"",tags:k.tags.join(", "),...Object.fromEntries(TYPED.map(([n])=>[n,k[n]??""]))});
+const typed=()=>({title:dlg.f.t.value,body:dlg.f.b.value,prompt:dlg.f.q.value,tags:dlg.f.g.value,...Object.fromEntries(TYPED.map(([n])=>[n,dlg.f.x[n].value]))});
+const sameText=(a,b)=>a.title===b.title&&a.body===b.body&&a.prompt===b.prompt&&a.tags===b.tags&&TYPED.every(([n])=>a[n]===b[n]);
+const overCap=t=>TYPED.filter(([n,,cap])=>bytes(t[n])>cap).map(([,l,cap])=>l+" is over "+cap+" bytes");
 const isoDay=ms=>{const d=new Date(ms);return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")};
-function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s.prompt;dlg.f.g.value=s.tags}
+function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s.prompt;dlg.f.g.value=s.tags;for(const[n]of TYPED){dlg.f.x[n].value=s[n];dlg.f.x[n].oninput()}}
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),ev:el("div",null,"evidence"),ei:el("input"),dp:el("input"),rl:el("input"),sb:el("input"),mv:el("select"),up:el("input","","up"),ms:el("select")};
+  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),ev:el("div",null,"evidence"),ei:el("input"),dp:el("input"),rl:el("input"),sb:el("input"),mv:el("select"),up:el("input","","up"),ms:el("select"),x:{}};
   projects().forEach(p=>f.p.append(new Option(label(p),p)));
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
@@ -979,6 +985,15 @@ function show(id){
     try{if(await act("card_evidence",{id,links:[v]})&&f.ei.value.trim()===v)f.ei.value=""}finally{addEv.disabled=false}};
   f.ei.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();addEv.click()}};
   const evRow=el("div",null,"evid");evRow.append(el("label","Evidence "),f.ei,addEv,f.ev);
+  // Typed fields: a labelled box with a live byte counter that turns red past the cap.
+  const typedRows=TYPED.map(([n,label,cap])=>{
+    const x=f.x[n]=el(n==="summary"?"input":"textarea");x.setAttribute("aria-label",n);if(n!=="summary")x.rows=3;
+    const c=el("span",null,"meta cnt");
+    x.oninput=()=>{const b=bytes(x.value);c.textContent=b+" / "+cap+" B";c.classList.toggle("over",b>cap);x.setAttribute("aria-invalid",b>cap)};
+    const w=el(n==="why"?"details":"div",null,"tf");
+    if(n==="why"){w.append(el("summary",label));w.append(x,c)}else w.append(el("label",label+" "),c,x);
+    return w;
+  });
   const copy=el("button","Copy prompt");copy.type="button";
   copy.onclick=async()=>{try{await navigator.clipboard.writeText(f.q.value);toast("Prompt copied")}catch{toast("Copy failed")}};
   const promptRow=el("div","","prompt");promptRow.append(el("label","Prompt "),copy,f.q);
@@ -999,7 +1014,7 @@ function show(id){
   const plan=el("div",null,"plan");plan.append(f.pr,el("span","Target","meta"),f.due);
   const links=el("div",null,"plan");links.append(el("span","Parent","meta"),f.up,el("span","Milestone","meta"),f.ms);
   const lists=el("div",null,"plan");lists.append(el("span","Waits on","meta"),f.dp,el("span","Related","meta"),f.rl,el("span","Superseded by","meta"),f.sb);
-  form.append(head,f.tr,f.banner,f.t,f.b,promptRow,f.g,plan,links,lists,evRow,f.mv,...(projects().length>1?[f.p]:[]),row,f.ex,f.cm,f.ci);
+  form.append(head,f.tr,f.banner,f.t,...typedRows.slice(0,1),f.b,...typedRows.slice(1),promptRow,f.g,plan,links,lists,evRow,f.mv,...(projects().length>1?[f.p]:[]),row,f.ex,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
@@ -1049,10 +1064,11 @@ function refLines(k){
   });
 }
 async function save(){
-  const d=dlg,t=typed();
+  const d=dlg,t=typed(),bad=overCap(t);
+  if(bad.length){d.f.banner.replaceChildren(el("div","Not saved: "+bad.join("; ")+"."));return}
   d.partial=null;d.note=false;
   // Partly saved (the task's fields, not the prompt): the refresh below must not read that as someone else's edit.
-  await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,prompt:t.prompt,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)},
+  await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,prompt:t.prompt,...Object.fromEntries(TYPED.map(([n])=>[n,t[n]])),tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)},
     e=>{if(e.savedRev!=null)d.partial=e.savedRev},
     r=>{if(dlg===d)d.base=snap(r.card)});   // before the refresh, so our own save is not read as theirs; the dialog may have moved on meanwhile
 }
