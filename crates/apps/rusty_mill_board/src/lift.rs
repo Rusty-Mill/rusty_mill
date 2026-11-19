@@ -413,15 +413,17 @@ pub fn save_record(path: &std::path::Path, lifts: &[Lift]) -> Result<(), String>
 }
 
 /// Whether `card` holds only the first step of a write the store keeps in two (rusty_tick saves
-/// the body, then the typed fields and links, and reports `PartlySaved` if the second fails):
-/// the lifted body with everything else as before. Both [`apply`] and [`undo`] take it as theirs,
-/// so the record that undoes a lift also finishes or reverses a half-written one.
+/// the body, then the typed fields and links, and reports `PartlySaved` if the second fails). That
+/// is the lifted body with everything else as before, or, after a failed [`undo`], the original
+/// body with everything else still lifted. [`apply`] and [`undo`] both take such a card as theirs,
+/// so the record that undoes a lift also finishes or reverses a half-written one either way.
 fn partial(card: &Card, l: &Lift) -> bool {
     let held = State::of(card);
-    held.body == l.after.body
-        && held.body != l.before.body
-        && held.fields == l.before.fields
-        && held.related == l.before.related
+    let rest = |s: &State| (s.fields.clone(), s.related.clone());
+    (held.body == l.after.body && held.body != l.before.body && rest(&held) == rest(&l.before))
+        || (held.body == l.before.body
+            && held.body != l.after.body
+            && rest(&held) == rest(&l.after))
 }
 
 /// Write each lift whose card is still at the planned revision. A card changed since is
@@ -659,6 +661,44 @@ mod tests {
             assert!(matches!(out[0], Outcome::Done { .. }), "{out:?}");
             let end = store.get(c.id).expect("get").expect("card");
             let want = if finish {
+                ("Because.", "## Objective\nx\n")
+            } else {
+                ("", c.body.as_str())
+            };
+            assert_eq!((end.why.as_str(), end.body.as_str()), want);
+        }
+    }
+
+    #[test]
+    fn a_failed_undo_is_finished_by_a_second_undo_or_redone_by_apply() {
+        for redo in [false, true] {
+            let inner = MemStore::default();
+            let c = card("t", "## Why\nBecause.\n\n## Objective\nx\n");
+            inner
+                .insert(&c, Event::of(&c, EventKind::Created, "t"))
+                .expect("insert");
+            let p = lifted(&c);
+            apply(&inner, &p.lifts, 5).expect("apply");
+            let store = Halves(inner);
+            // The undo writes the original body and loses the fields: the reverse half state.
+            assert!(matches!(
+                undo(&store, &p.lifts, 6),
+                Err(BoardError::PartlySaved { .. })
+            ));
+            let held = store.get(c.id).expect("get").expect("card");
+            assert_eq!(
+                (held.body.as_str(), held.why.as_str()),
+                (c.body.as_str(), "Because.")
+            );
+            let out = if redo {
+                apply(&store.0, &p.lifts, 7)
+            } else {
+                undo(&store.0, &p.lifts, 7)
+            }
+            .expect("recover");
+            assert!(matches!(out[0], Outcome::Done { .. }), "{out:?}");
+            let end = store.get(c.id).expect("get").expect("card");
+            let want = if redo {
                 ("Because.", "## Objective\nx\n")
             } else {
                 ("", c.body.as_str())

@@ -75,12 +75,17 @@ fn migrations() -> Migrations {
 ///
 /// # Errors
 /// [`BoardError::Storage`] if the file is missing, cannot be read, is not at this build's
-/// schema version, or has a `-wal` or `-shm` file beside it (a board is running).
+/// schema version, or has a `-wal`, `-shm` or `-journal` file beside it.
+///
+/// The file must already be stable and recovered: a board that exited cleanly leaves no sidecar.
+/// An immutable read ignores the log, so a sidecar means a board is running, or stopped
+/// uncleanly and has yet to recover; either way it is refused rather than read stale.
 pub fn read_cards(path: impl AsRef<Path>) -> Result<Vec<Card>, BoardError> {
-    let path = path.as_ref();
-    // A `-wal` or `-shm` file means a board has the file open (or stopped uncleanly), and even a
-    // read-only reader updates the shared `-shm` index. Refuse rather than touch it.
-    for suffix in ["-wal", "-shm"] {
+    // One resolved path for the sidecar checks and the open, so a relative path names the same
+    // file in both. A missing file fails here, and is never created.
+    let path = std::fs::canonicalize(path.as_ref()).map_err(storage)?;
+    let path = path.as_path();
+    for suffix in ["-wal", "-shm", "-journal"] {
         let mut side = path.as_os_str().to_owned();
         side.push(suffix);
         if Path::new(&side).exists() {

@@ -498,3 +498,29 @@ fn read_cards_refuses_a_missing_file_and_a_schema_that_is_not_this_builds() {
         assert_eq!(snapshot(&path), before, "refusing changed a file");
     }
 }
+
+#[test]
+fn read_cards_resolves_a_relative_path_once_and_refuses_a_rollback_journal() {
+    let path = file("read_relative");
+    {
+        let store = SqliteStore::open(&path).expect("open");
+        add(&store, &card("a", 1));
+    }
+    // The same file by a relative path: the sidecar checks and the open must agree on it.
+    let dir = path.parent().expect("dir");
+    let relative = std::path::Path::new("board.db");
+    let cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(dir).expect("cd");
+    let read = rusty_mill_board::sqlite::read_cards(relative);
+    let sidecar = std::path::Path::new("board.db-journal");
+    std::fs::write(sidecar, b"hot").expect("journal");
+    let refused = rusty_mill_board::sqlite::read_cards(relative);
+    std::env::set_current_dir(cwd).expect("back");
+    assert_eq!(read.expect("relative read").len(), 1);
+    assert!(
+        refused
+            .expect_err("journal")
+            .to_string()
+            .contains("-journal")
+    );
+}
