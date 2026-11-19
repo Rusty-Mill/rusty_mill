@@ -684,3 +684,34 @@ fn verification_notices_lost_source_data() {
         "{found:?}"
     );
 }
+
+#[test]
+fn typed_fields_are_copied_from_tick_into_sqlite() {
+    use rusty_mill_board::domain::Edit;
+    let tick = FakeTick::default();
+    let board = Board::new(TickStore::new(tick.clone()), Roles::default());
+    let source = TickStore::new(tick);
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "typed", "", vec![]).expect("add");
+    let set = Edit {
+        acceptance: Some("a"),
+        scope: Some("s"),
+        why: Some("w"),
+        summary: Some("m"),
+        ..Edit::default()
+    };
+    board.edit_at(card.id, &human, None, &set).expect("set");
+    let target = SqliteStore::open_in_memory().expect("open");
+    let report = migrate(&source, &target).expect("migrate");
+    assert!(report.exact(), "{:?}", report.mismatches);
+    let copied = target.get(card.id).expect("get").expect("card");
+    assert_eq!(
+        [
+            &copied.acceptance,
+            &copied.scope,
+            &copied.why,
+            &copied.summary
+        ],
+        ["a", "s", "w", "m"]
+    );
+}
