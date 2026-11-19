@@ -170,7 +170,6 @@ Precise contracts used by this guide:
 | D160 | #1571: Nano approves the agent launch profiles design as written (composition, env delivery, no service credentials in the jail, hooks deferred, build order) | [stated] 2026-11-18 (1571) |
 | D161 | #1571 v0 isolation is `same_user` (agents run as Nano's user); `agent_user` once the BaileyAi host writes are approved | [stated] 2026-11-18 (1571) |
 | D162 | #1571 profile files live in Factory (`factory/agent-profiles/*.json`, `factory/project-profiles/*.json`) | [stated] 2026-11-18 (1571) |
-| D164 | Smoke-7 is the first run under D143; the D127 design freeze lifts; builder sessions (#1402, #600) are released first | [stated] 2026-11-18 (1166, general) |
 | D165 | #600 builders: the Claude CLI in the v0 jail uses Nano's subscription (Q15) | [stated] 2026-11-19 (1318) |
 | D166 | #600 v0: the Claude CLI reads Nano's `~/.claude` login through a read-only jail root (written exception to D101, `same_user` v0, expires with the gateway #726) | [stated] 2026-11-19 (1318, 600) |
 | D167 | One paid run approved: the #1318 toy-claim acceptance run (2 builders, 45 min, one claim) after the Claude `no_overage` assertion is added; #1320 not approved | [stated] 2026-11-19 (1318) |
@@ -1618,15 +1617,6 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_ad2c3b4877d64a0494d5bdfac712a55c
 **Key.** lel:1571:profile-files-in-factory
 **Source.** Nano, Let Em Loose project chat, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YGppB9nnPb7JnUCwC3s2Yq`, 2026-11-18T17:43:36Z: "1. Concur. 2. Concur. 3. Yes. 4. accept", answering in order the questions in thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42brap92o45tKyeDpvs4Be3` (~17:30Z). Item 4 answers #1563 and is recorded by its own thread, not here. Numbered D162 after D161.
-
-## D164. Smoke-7 is the first run under D143; the D127 design freeze lifts; builder sessions (#1402, #600) are released first
-
-**Decision.** Nano confirmed that smoke-7 is "the first run" of D127, as D143 defined it (a clean #1166 pass). The board confirms every D143 and section 9 criterion: claim 6 Accepted by the lenses at rev 72 (AcceptLine, score 10, two support authors), Nano's `choose` on question 1 dropped claim 7 at rev 118, the fixture A2 was dropped by Nano at rev 121, the inbox is empty, `bbp verify` is clean, and there were three candidates from three providers. The D127 design freeze LIFTS. The first thing it releases is the #1402 builder-session design rebuild (D129) and #600, which M2 depends on. The packs design (#723, D133, Q46 to Q48) and the Survey and Intent lenses (#1456), with the other `bbp_factory` Backlog cards, stay for later. The open items stay open: Q53, Q51, Q55, Q56 to Q58, Q60, Q62.
-**Why.** Builder sessions are what the loop needs next, and D129 said they wait for the first run. Design approval, ask-first gates, spending and review/merge rules still apply to everything released.
-**Rejected.** b) the packs design first; c) the Survey and Intent lenses and the other Backlog cards first.
-**Tag.** [stated] · remind-me: mem_e2491f793d78419dbeeb0b764c33f4c4
-**Key.** lel:127:freeze-lifted-smoke-7-first-run
-**Source.** Nano, answer dialog in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_fff1f77dbd664befb0eb3945bd9c03b1` (speaker Nano). Lifts D127; applies D143; releases D129's wait. Numbered D164 after D163 on PR #1813 (D163 there is #1166's A2 fixture reword; not yet on this branch). Nano concurred that the repo's DECISIONS.md had drifted behind remind-me and should carry this entry: "Drift Concur", thread message `cmsg_01632CBKCXsWe6RyFWvE9dovTzYuW6bZ4tbi8CsUq1Q94V`, 2026-11-19T18:13:46Z.
 
 ## D165. #600 builders: the Claude CLI in the v0 jail uses Nano's subscription (Q15)
 

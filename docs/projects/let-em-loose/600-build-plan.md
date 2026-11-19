@@ -10,9 +10,9 @@ Where it fills a gap, it says so and marks it **[filled]**. D66's approval cover
 the §8 list named in section 7; nothing here adds to that list. Every **[filled]**
 item goes to Nano before the card that needs it is built (section 8).
 
-Drift noted: D164 (the freeze lift that releases #1402) is copied onto this
-branch from PR #1813, which holds D163 and D164 and isn't merged yet. Expect a
-trivial conflict in D164 when it merges (Nano concurred, 2026-11-19).
+Drift noted: D164 (the freeze lift that releases #1402) is carried by PR #1813
+(D163 and D164) and isn't in this branch; this PR's DECISIONS.md jumps from D162
+to D165 until #1813 merges.
 
 ## Ownership
 
