@@ -13,3 +13,4 @@ changelog: Mill Board has a one-off, dry-run-first command that lifts headed bod
 - **Changed:** lifted text keeps the indentation of its first line, so an indented code block lifts as written.
 - **Known limitations:** nothing is applied by this change; the apply waits for the owner's go, with the board stopped.
 - `sqlite::read_cards` strips the Windows `\\?\` prefix before building its URI and refuses verbatim UNC paths.
+- A lift record is refused off Unix, where its directory cannot be made durable; the record test checks the outcome for each platform.

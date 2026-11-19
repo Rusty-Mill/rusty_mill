@@ -718,9 +718,10 @@ mod tests {
     #[test]
     fn the_record_is_new_and_never_overwritten() {
         let path = std::env::temp_dir().join(format!("lift_record_{}.json", Uuid::new_v4()));
-        save_record(&path, &[]).expect("save");
+        // Off Unix the directory cannot be made durable, so a record is refused.
+        assert_eq!(save_record(&path, &[]).is_ok(), cfg!(unix));
         assert!(save_record(&path, &[]).is_err());
-        std::fs::remove_file(&path).expect("clean");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
