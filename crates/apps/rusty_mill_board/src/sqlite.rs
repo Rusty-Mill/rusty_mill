@@ -131,6 +131,14 @@ fn immutable_uri(path: &Path) -> Result<String, BoardError> {
         .to_str()
         .ok_or_else(|| storage("the path is not valid UTF-8"))?
         .replace('\\', "/");
+    // Windows `canonicalize` gives `\\?\C:\…`; SQLite needs `file:/C:/…`.
+    let text = match text.strip_prefix("//?/") {
+        Some(rest) if rest.starts_with("UNC/") => {
+            return Err(storage("a network (UNC) path is not supported"));
+        }
+        Some(rest) => rest.to_owned(),
+        None => text,
+    };
     let mut uri = String::from("file:");
     if !text.starts_with('/') {
         uri.push('/');
@@ -808,5 +816,28 @@ impl MilestoneStore for SqliteStore {
             Some(()) => BoardError::Conflict,
             None => BoardError::NotFound(current.id),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::immutable_uri;
+    use std::path::Path;
+
+    #[test]
+    fn a_windows_verbatim_path_loses_its_verbatim_prefix() {
+        let uri = immutable_uri(Path::new(r"\\?\C:\my board\b.db")).expect("uri");
+        assert_eq!(uri, "file:/C:/my%20board/b.db?immutable=1");
+    }
+
+    #[test]
+    fn a_unix_path_keeps_its_single_leading_slash() {
+        let uri = immutable_uri(Path::new("/srv/b.db")).expect("uri");
+        assert_eq!(uri, "file:/srv/b.db?immutable=1");
+    }
+
+    #[test]
+    fn a_verbatim_unc_path_is_refused() {
+        assert!(immutable_uri(Path::new(r"\\?\UNC\host\share\b.db")).is_err());
     }
 }

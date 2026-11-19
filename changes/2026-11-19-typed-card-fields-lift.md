@@ -12,3 +12,4 @@ changelog: Mill Board has a one-off, dry-run-first command that lifts headed bod
 - **Changed:** the record's directory is synced as well as the file before any card is written. A lift half-written by rusty_tick (body saved, fields not) is finished by a second apply and reversed by `--undo-lift`, and so is a half-failed undo. The dry run resolves a relative `--db` path once and also refuses a `-journal` beside the file. Headings indented up to three spaces end sections, and a resolved `## Prerequisites` loses only its codes line.
 - **Changed:** lifted text keeps the indentation of its first line, so an indented code block lifts as written.
 - **Known limitations:** nothing is applied by this change; the apply waits for the owner's go, with the board stopped.
+- `sqlite::read_cards` strips the Windows `\\?\` prefix before building its URI and refuses verbatim UNC paths.
