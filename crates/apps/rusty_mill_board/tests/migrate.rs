@@ -419,6 +419,7 @@ fn the_published_file_alone_is_the_whole_database() {
             .checkpoint()
             .is_ok()
     );
+    drop(copy); // Windows will not delete an open database
     std::fs::remove_dir_all(dir).expect("cleanup");
 }
 
@@ -463,6 +464,7 @@ fn verification_compares_every_move_and_reservation_not_just_who_moved() {
         let target = SqliteStore::open(&path).expect("reopen");
         let found = verify(&expected, &target).expect("verify");
         assert_eq!(found.len(), 1, "{sql}: {found:?}");
+        drop(target); // Windows will not delete an open database
         std::fs::remove_dir_all(dir).expect("cleanup");
     }
 }
