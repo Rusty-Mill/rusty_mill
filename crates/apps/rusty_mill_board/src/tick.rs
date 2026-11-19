@@ -1434,6 +1434,9 @@ pub struct TickHistory {
     pub moves: Vec<(Uuid, i64)>,
     /// Every card number ever reserved, and the card it was reserved for.
     pub reservations: Vec<(u64, Uuid)>,
+    /// Board and comment documents [`TickStore::list`] cannot read and so leaves out of a
+    /// card, one line each. A copy made from the cards alone would silently lack them.
+    pub unreadable: Vec<String>,
 }
 
 impl<T: TickApi> TickStore<T> {
@@ -1485,9 +1488,28 @@ impl<T: TickApi> TickStore<T> {
                 }
             })
             .collect::<Result<_, _>>()?;
+        let mut unreadable = Vec::new();
+        let boards: Vec<Doc> = self.collection("/docs/board", "docs")?;
+        unreadable.extend(
+            boards
+                .into_iter()
+                .filter(|d| serde_json::from_value::<BoardDoc>(d.body.clone()).is_err())
+                .map(|d| format!("board document {} cannot be read", d.id)),
+        );
+        let comments: Vec<Doc> = self.collection("/docs/comment", "docs")?;
+        unreadable.extend(
+            comments
+                .into_iter()
+                .filter(|d| {
+                    serde_json::from_value::<CommentBody>(d.body.clone())
+                        .map_or(true, |b| Uuid::parse_str(&b.task_id).is_err())
+                })
+                .map(|d| format!("comment document {} cannot be read", d.id)),
+        );
         Ok(TickHistory {
             moves,
             reservations,
+            unreadable,
         })
     }
 }

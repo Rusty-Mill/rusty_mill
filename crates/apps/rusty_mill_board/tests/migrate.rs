@@ -300,3 +300,40 @@ fn an_existing_destination_is_never_touched() {
     assert_eq!(std::fs::read_to_string(&path).expect("read"), "precious");
     std::fs::remove_dir_all(dir).expect("cleanup");
 }
+
+#[test]
+fn an_unreadable_board_or_comment_document_is_reported_and_nothing_is_written() {
+    for (kind, text) in [("board", "board document"), ("comment", "comment document")] {
+        let source = TickStore::new(Altered {
+            tick: seeded().0,
+            alter: if kind == "board" {
+                |path, body| {
+                    if path.starts_with("/docs/board") && !path.starts_with("/docs/board_number") {
+                        body["docs"].as_array_mut().expect("docs").push(
+                            json!({"id": "00000000-0000-4000-8000-000000000001", "body": {"deps": ["not-a-uuid"]}}),
+                        );
+                    }
+                }
+            } else {
+                |path, body| {
+                    if path.starts_with("/docs/comment") {
+                        body["docs"].as_array_mut().expect("docs").push(
+                            json!({"id": "00000000-0000-4000-8000-000000000002", "body": {"taskId": "nope"}}),
+                        );
+                    }
+                }
+            },
+        });
+        let target = SqliteStore::open_in_memory().expect("open");
+        let report = migrate(&source, &target).expect("report");
+        assert!(
+            report.mismatches.iter().any(|m| m.contains(text)),
+            "{kind}: {:?}",
+            report.mismatches
+        );
+        assert!(
+            target.list().expect("list").is_empty(),
+            "{kind}: nothing written"
+        );
+    }
+}

@@ -116,6 +116,7 @@ pub fn migrate<T: TickApi>(source: &TickStore<T>, target: &SqliteStore) -> Resul
                 )
             }),
     );
+    report.mismatches.extend(history.unreadable.iter().cloned());
     if !report.exact() {
         return Ok(report);
     }
