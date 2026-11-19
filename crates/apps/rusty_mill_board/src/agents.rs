@@ -22,7 +22,7 @@ pub const IDLE_MS: i64 = 30 * 24 * 3600 * 1000;
 /// Longest nickname, in characters.
 pub const MAX_NICKNAME: usize = 40;
 /// How stale the *saved* `seen_ms` may get before a use is written back to the file. Stale
-/// cleanup reads `seen_ms` after a restart, so this bounds its error.
+/// cleanup allows for this lag after a restart; it is below the 2-hour minimum stale age.
 const SEEN_WRITE_MS: i64 = 3600 * 1000;
 
 /// What one registered agent may do instead of its connector's role and projects. A field left
@@ -60,19 +60,20 @@ pub struct Agent {
     #[serde(skip)]
     saved_ms: i64,
     /// When the registry was loaded from the file, if the agent has not been used since (not
-    /// stored). The file can lag its real last use (hourly write-back, or failed writes), so
-    /// stale selection never counts such an agent as last used before the load.
+    /// stored). The file lags real use by at most [`SEEN_WRITE_MS`] while writes succeed.
     #[serde(skip)]
     loaded_ms: Option<i64>,
 }
 
 impl Agent {
     /// The latest its last use can have been. Exact for an agent used since the load; for one
-    /// loaded and not used since, the load time, because the file may not have recorded uses
-    /// before the restart (so a used agent never looks stale because of a lagging file).
+    /// loaded and not used since, its saved last use plus the write-back lag, but never after
+    /// the load. A use whose write failed (logged) can be missed: such an agent may be revoked
+    /// and must register again, which beats stale cleanup finding nothing after every restart.
     fn last_use_upper_bound(&self) -> i64 {
         let known = self.seen_ms.max(self.created_ms);
-        self.loaded_ms.map_or(known, |at| known.max(at))
+        self.loaded_ms
+            .map_or(known, |at| (known + SEEN_WRITE_MS).min(at).max(known))
     }
 }
 
@@ -476,7 +477,7 @@ mod tests {
         let mut again = Registry::open(path, H + 1).expect("restart");
         assert!(
             again.stale(3 * H, 2 * H).is_empty(),
-            "not over 2h since the restart"
+            "not over 2h since its last use"
         );
         assert_eq!(
             again.stale(3 * H + 2, 2 * H),
@@ -492,24 +493,49 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_use_save_never_makes_a_used_agent_look_stale_after_a_restart() {
+    fn a_restart_does_not_hide_agents_idle_long_before_it() {
+        const H: i64 = 3600 * 1000;
+        let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("agents.json");
+        let mut r = Registry::open(path.clone(), 0).expect("open");
+        let (idle, _) = r.register("c", Grant::default(), 0).expect("idle");
+        let (used, ku) = r.register("c", Grant::default(), 0).expect("used");
+        for h in 1..=72 {
+            assert!(r.verify("c", &used, &ku, h * H).is_some());
+        }
+        let again = Registry::open(path, 72 * H + 1).expect("restart");
+        assert_eq!(
+            again.stale(72 * H + 2, 24 * H),
+            vec![idle],
+            "idle for 3 days, found right after the restart; the hourly user is kept"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_failed_use_save_is_bounded_only_by_the_load() {
         const H: i64 = 3600 * 1000;
         let dir = std::env::temp_dir().join(format!("agents-{}", new_token().expect("rand")));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("agents.json");
         let mut r = Registry::open(path.clone(), 0).expect("open");
         let (id, key) = r.register("c", Grant::default(), 0).expect("register");
-        // Writes fail while the agent is used at 5h; the file keeps saying 0.
+        // Writes fail while the agent is used at 5h; the file keeps saying 0. Accepted risk
+        // (Nano, 2026-11-19): after a restart it counts as last used at 1h.
         r.path = Some(dir.join("gone").join("agents.json"));
         assert!(r.verify("c", &id, &key, 5 * H).is_some());
         let again = Registry::open(path, 6 * H).expect("restart");
-        assert!(again.stale(6 * H + 1, 2 * H).is_empty(), "used at 5h");
-        assert!(again.stale(8 * H, 2 * H).is_empty());
-        assert_eq!(
-            again.stale(8 * H + 1, 2 * H),
-            vec![id],
-            "idle over 2h since the restart"
-        );
+        assert!(again.stale(3 * H, 2 * H).is_empty());
+        assert_eq!(again.stale(3 * H + 1, 2 * H), vec![id]);
+        // Loaded just after registering: never counted as used after the load.
+        let dir2 = dir.join("b");
+        std::fs::create_dir_all(&dir2).expect("dir2");
+        let mut b = Registry::open(dir2.join("agents.json"), 0).expect("open b");
+        let (fresh, _) = b.register("c", Grant::default(), 0).expect("fresh");
+        let b = Registry::open(dir2.join("agents.json"), H / 2).expect("reload b");
+        assert!(b.stale(H / 2 + 2 * H, 2 * H).is_empty());
+        assert_eq!(b.stale(H / 2 + 2 * H + 1, 2 * H), vec![fresh]);
         std::fs::remove_dir_all(dir).ok();
     }
 
