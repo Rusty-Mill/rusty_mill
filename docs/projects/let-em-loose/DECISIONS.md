@@ -1628,6 +1628,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_f885f3a1b16a415eb01506c3146e0c7f
 **Key.** lel:600:builder-claude-credential-subscription
 **Source.** Nano, Millwright project thread for card #1402, message `cmsg_01632CBKCXsWe6RyFWvE9dovEBkpMdZ4enJ2R7MBLywZXz`, 2026-11-19T18:13:22Z: "15 it uses my subscription", answering OPEN_QUESTIONS Q15 (card #1318). Relates to D101, D107, D134, D140, `1571-launch-profiles-design.md` (model provider row). Numbered D165: D163 and D164 are taken on PR #1813 (unmerged); D164 is copied below.
+**Confirmed.** Confirmed by name 2026-11-19 by Nano ("confirm D165, D166, D167"), thread message `cmsg_01632CBKCXsWe6RyFWvE9dovXnfgsvDuk5meRkwzs4GR7M`, 2026-11-19T18:57:26Z, answering the PR #1824 review.
 
 ## D166. #600 v0: the Claude CLI reads Nano's `~/.claude` login through a read-only jail root (written exception to D101, `same_user` v0, expires with the gateway #726)
 
@@ -1637,6 +1638,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_c4e782acab594c2aa3cda4bf653f6aa2
 **Key.** lel:600:subscription-login-v0-exception-same-user
 **Source.** Nano, thread message `cmsg_01632CBKCXsWe6RyFWvE9dovNuNMU7fiwfx8bvmVJhWei4`, 2026-11-19T18:22:12Z: "concur", to the recommendation `cmsg_01632CBKCXsWe6RyFWvE9dov4g3WihbLKaDjCJDV35SQxg`. Follows D165; scoped by D161; limits D101 temporarily. Numbered D166 after D165 (D163 and D164 are on PR #1813).
+**Confirmed.** Confirmed by name 2026-11-19 by Nano ("confirm D165, D166, D167"), thread message `cmsg_01632CBKCXsWe6RyFWvE9dovXnfgsvDuk5meRkwzs4GR7M`, 2026-11-19T18:57:26Z, answering the PR #1824 review.
 
 ## D167. One paid run approved: the #1318 toy-claim acceptance run (2 builders, 45 min, one claim) after the Claude `no_overage` assertion is added; #1320 not approved
 
@@ -1647,3 +1649,4 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_77c0be9609544059ae911c7e2ccdb2f9
 **Key.** lel:1318:one-paid-run-toy-claim-acceptance
 **Source.** Nano, thread message `cmsg_01632CBKCXsWe6RyFWvE9dovNuNMU7fiwfx8bvmVJhWei4`, 2026-11-19T18:22:12Z: "concur", to `cmsg_01632CBKCXsWe6RyFWvE9dov4g3WihbLKaDjCJDV35SQxg`. Relates to D134, D140, D141, D165, `600-build-plan.md` section 4 defaults.
+**Confirmed.** Confirmed by name 2026-11-19 by Nano ("confirm D165, D166, D167"), thread message `cmsg_01632CBKCXsWe6RyFWvE9dovXnfgsvDuk5meRkwzs4GR7M`, 2026-11-19T18:57:26Z, answering the PR #1824 review.
