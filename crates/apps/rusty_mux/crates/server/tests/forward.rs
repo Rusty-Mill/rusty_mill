@@ -179,3 +179,33 @@ fn only_the_lease_holder_with_the_feature_may_open_one() {
         [Message::Failed { .. }]
     ));
 }
+
+#[test]
+fn a_reused_id_is_a_new_forward_and_the_old_one_stays_closed() {
+    let (first, first_ended) = echo();
+    let (second, _second_ended) = echo();
+    let mut client = Client::connect_with(&start_server(), FORWARD, None);
+    let block = block_for(&mut client);
+    open(&mut client, block, first, 1);
+    client.send(&Message::ForwardData {
+        id: 1,
+        data: b"a".to_vec(),
+    });
+    collect(&mut client, 1, 1);
+    client.send(&Message::CloseForward {
+        id: 1,
+        reason: None,
+    });
+    // The id is free at once, and the new forward is its own.
+    assert!(matches!(
+        open(&mut client, block, second, 1).as_slice(),
+        [Message::Done { .. }]
+    ));
+    client.send(&Message::ForwardData {
+        id: 1,
+        data: b"bb".to_vec(),
+    });
+    let (got, _) = collect(&mut client, 1, 2);
+    assert_eq!(got, b"bb");
+    assert!(first_ended.recv_timeout(PATIENCE).expect("ended"));
+}

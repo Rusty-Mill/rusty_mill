@@ -1592,7 +1592,7 @@ impl State {
             return Err("port 0 is no port".into());
         }
         let ends = self.forwards.open(client, id, block)?;
-        rusty_tokio::task::spawn_local(forward::run(Rc::downgrade(shared), client, id, port, ends));
+        rusty_tokio::task::spawn_local(forward::run(Rc::downgrade(shared), port, ends));
         Ok(Outcome::Done(None))
     }
 
@@ -1623,29 +1623,35 @@ impl State {
         }
     }
 
-    /// The task of forward `id` is done, because the target closed, failed,
-    /// or never answered.
-    pub(crate) fn forward_ended(&mut self, client: ClientId, id: u64, reason: Option<String>) {
-        self.end_forward(client, id, reason);
+    /// The task of forward `tag` is done, because the target closed, failed,
+    /// or never answered. A forward that is no longer this instance has
+    /// nothing to say.
+    pub(crate) fn forward_ended(&mut self, tag: forward::Tag, reason: Option<String>) {
+        if self.forwards.close_tag(tag) {
+            let id = tag.id;
+            self.send(tag.client, &Message::CloseForward { id, reason });
+        }
     }
 
-    /// The target got `n` bytes of the client's data: the client may send
-    /// that many more.
-    pub(crate) fn forward_wrote(&mut self, client: ClientId, id: u64, n: usize) {
-        self.forwards.wrote(client, id, n);
-        let n = u32::try_from(n).unwrap_or(u32::MAX);
-        self.send(client, &Message::ForwardAck { id, n });
+    /// The target got a chunk of `n` bytes of the client's data: the client
+    /// may send that many more.
+    pub(crate) fn forward_wrote(&mut self, tag: forward::Tag, n: usize) {
+        if self.forwards.wrote(tag, n) {
+            let n = u32::try_from(n).unwrap_or(u32::MAX);
+            self.send(tag.client, &Message::ForwardAck { id: tag.id, n });
+        }
     }
 
     /// How many bytes the target's side may send to the client now.
-    pub(crate) fn forward_credit(&self, client: ClientId, id: u64) -> usize {
-        self.forwards.credit(client, id)
+    pub(crate) fn forward_credit(&mut self, tag: forward::Tag) -> usize {
+        self.forwards.credit(tag)
     }
 
     /// Sends the client what the target wrote.
-    pub(crate) fn forward_sent(&mut self, client: ClientId, id: u64, data: Vec<u8>) {
-        self.forwards.sent(client, id, data.len());
-        self.send(client, &Message::ForwardData { id, data });
+    pub(crate) fn forward_sent(&mut self, tag: forward::Tag, data: Vec<u8>) {
+        if self.forwards.sent(tag, data.len()) {
+            self.send(tag.client, &Message::ForwardData { id: tag.id, data });
+        }
     }
 
     /// Closes the forwards whose client went, left the block, or lost an

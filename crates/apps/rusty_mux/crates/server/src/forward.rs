@@ -26,16 +26,32 @@ use crate::state::State;
 const PER_CLIENT: usize = 16;
 /// Forwards the server may have open.
 const PER_SERVER: usize = 64;
+/// Chunks a forward may have queued for the target, whatever their size, so
+/// the work bound holds as well as the byte bound.
+const MAX_QUEUED: usize = 64;
 /// How long the dial of the target may take.
 const CONNECT_WAIT: Duration = Duration::from_secs(5);
 
+/// Names one instance of a forward: a client may reuse an id once its forward
+/// closed, and a task or callback of the old instance must not touch the new
+/// one, so every callback carries the instance's `epoch`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Tag {
+    pub(crate) client: ClientId,
+    pub(crate) id: u64,
+    epoch: u64,
+}
+
 /// One open forward, as the state sees it.
 struct Open {
+    epoch: u64,
     block: BlockId,
     /// Bytes from the client to the target's writer.
     to_target: UnboundedSender<Vec<u8>>,
     /// Client bytes received and not yet written to the target.
     held: usize,
+    /// Chunks of those.
+    queued: usize,
     /// Bytes the server may still send to the client.
     credit: usize,
     /// Credit came back.
@@ -48,10 +64,12 @@ struct Open {
 #[derive(Default)]
 pub(crate) struct Forwards {
     open: HashMap<(ClientId, u64), Open>,
+    next_epoch: u64,
 }
 
 /// What [`Forwards::open`] hands the task that serves the forward.
 pub(crate) struct Ends {
+    tag: Tag,
     from_client: UnboundedReceiver<Vec<u8>>,
     wake: Rc<Notify>,
     stop: Rc<Notify>,
@@ -76,15 +94,24 @@ impl Forwards {
         }
         let (to_target, from_client) = unbounded_channel();
         let (wake, stop) = (Rc::new(Notify::new()), Rc::new(Notify::new()));
+        self.next_epoch += 1;
+        let tag = Tag {
+            client,
+            id,
+            epoch: self.next_epoch,
+        };
         let ends = Ends {
+            tag,
             from_client,
             wake: wake.clone(),
             stop: stop.clone(),
         };
         let entry = Open {
+            epoch: tag.epoch,
             block,
             to_target,
             held: 0,
+            queued: 0,
             credit: FORWARD_WINDOW,
             wake,
             stop,
@@ -100,24 +127,38 @@ impl Forwards {
         let Some(open) = self.open.get_mut(&(client, id)) else {
             return Ok(());
         };
-        if data.len() > FORWARD_CHUNK {
-            return Err(format!("a chunk is at most {FORWARD_CHUNK} bytes"));
+        if data.is_empty() || data.len() > FORWARD_CHUNK {
+            return Err(format!("a chunk is 1 to {FORWARD_CHUNK} bytes"));
+        }
+        if open.queued >= MAX_QUEUED {
+            return Err(format!("more than {MAX_QUEUED} chunks queued"));
         }
         if open.held + data.len() > FORWARD_WINDOW {
             return Err("more than the window sent".into());
         }
         open.held += data.len();
+        open.queued += 1;
         // The task ended: the close that follows tells the client.
         let _ = open.to_target.send(data);
         Ok(())
     }
 
-    /// The target got `n` bytes of the client's data; how many the client
-    /// may now send again.
-    pub(crate) fn wrote(&mut self, client: ClientId, id: u64, n: usize) {
-        if let Some(open) = self.open.get_mut(&(client, id)) {
-            open.held = open.held.saturating_sub(n);
-        }
+    /// The instance `tag` names, if it is still the open one.
+    fn of(&mut self, tag: Tag) -> Option<&mut Open> {
+        self.open
+            .get_mut(&(tag.client, tag.id))
+            .filter(|open| open.epoch == tag.epoch)
+    }
+
+    /// The target got one chunk of `n` bytes of the client's data, which
+    /// the client may send again. Whether the forward is still this one.
+    pub(crate) fn wrote(&mut self, tag: Tag, n: usize) -> bool {
+        let Some(open) = self.of(tag) else {
+            return false;
+        };
+        open.held = open.held.saturating_sub(n);
+        open.queued = open.queued.saturating_sub(1);
+        true
     }
 
     /// The client consumed `n` bytes of the server's data. An error is the
@@ -136,15 +177,23 @@ impl Forwards {
     }
 
     /// The bytes the server may send on the forward now.
-    pub(crate) fn credit(&self, client: ClientId, id: u64) -> usize {
-        self.open.get(&(client, id)).map_or(0, |o| o.credit)
+    pub(crate) fn credit(&mut self, tag: Tag) -> usize {
+        self.of(tag).map_or(0, |o| o.credit)
     }
 
-    /// Spends credit on `n` bytes sent to the client.
-    pub(crate) fn sent(&mut self, client: ClientId, id: u64, n: usize) {
-        if let Some(open) = self.open.get_mut(&(client, id)) {
-            open.credit = open.credit.saturating_sub(n);
-        }
+    /// Spends credit on `n` bytes sent to the client. Whether the forward
+    /// is still this one.
+    pub(crate) fn sent(&mut self, tag: Tag, n: usize) -> bool {
+        let Some(open) = self.of(tag) else {
+            return false;
+        };
+        open.credit = open.credit.saturating_sub(n);
+        true
+    }
+
+    /// Ends the instance `tag` names, if it is still the open one.
+    pub(crate) fn close_tag(&mut self, tag: Tag) -> bool {
+        self.of(tag).is_some() && self.close(tag.client, tag.id)
     }
 
     /// Forgets the forward and stops its task. Whether it was open.
@@ -179,34 +228,30 @@ impl Forwards {
     }
 }
 
-/// Serves forward `id` of `client`: dials `127.0.0.1:port`, then moves
-/// bytes both ways until either end closes. The state is told when the end
-/// came from here; a forward closed from the state ends silently.
-pub(crate) async fn run(
-    state: Weak<RefCell<State>>,
-    client: ClientId,
-    id: u64,
-    port: u16,
-    ends: Ends,
-) {
+/// Serves a forward: dials `127.0.0.1:port`, then moves bytes both ways
+/// until either end closes. The state is told when the end came from here;
+/// a forward closed from the state ends silently, and cancellation is
+/// checked before anything else.
+pub(crate) async fn run(state: Weak<RefCell<State>>, port: u16, ends: Ends) {
     let Ends {
+        tag,
         from_client,
         wake,
         stop,
     } = ends;
     let reason = rusty_tokio::select! {
+        biased;
         _ = stop.notified() => return,
-        result = pump(&state, client, id, port, from_client, &wake) => result.err(),
+        result = pump(&state, tag, port, from_client, &wake) => result.err(),
     };
     if let Some(state) = state.upgrade() {
-        state.borrow_mut().forward_ended(client, id, reason);
+        state.borrow_mut().forward_ended(tag, reason);
     }
 }
 
 async fn pump(
     state: &Weak<RefCell<State>>,
-    client: ClientId,
-    id: u64,
+    tag: Tag,
     port: u16,
     from_client: UnboundedReceiver<Vec<u8>>,
     wake: &Notify,
@@ -219,39 +264,35 @@ async fn pump(
             Err(_) => return Err("timed out".into()),
         };
     rusty_tokio::select! {
-        result = upstream(state, client, id, &stream, from_client) => result,
-        result = downstream(state, client, id, &stream, wake) => result,
+        result = upstream(state, tag, &stream, from_client) => result,
+        result = downstream(state, tag, &stream, wake) => result,
     }
 }
 
 /// Client to target: writes what arrives, then gives the client credit.
 async fn upstream(
     state: &Weak<RefCell<State>>,
-    client: ClientId,
-    id: u64,
+    tag: Tag,
     stream: &TcpStream,
     mut from_client: UnboundedReceiver<Vec<u8>>,
 ) -> Result<(), String> {
     while let Some(data) = from_client.recv().await {
         stream.write_all(&data).await.map_err(|e| e.to_string())?;
-        live(state)?
-            .borrow_mut()
-            .forward_wrote(client, id, data.len());
+        live(state)?.borrow_mut().forward_wrote(tag, data.len());
     }
     Ok(())
 }
 
 /// Target to client: reads only as much as the client has credit for.
 async fn downstream(
-    weak: &Weak<RefCell<State>>,
-    client: ClientId,
-    id: u64,
+    state: &Weak<RefCell<State>>,
+    tag: Tag,
     stream: &TcpStream,
     wake: &Notify,
 ) -> Result<(), String> {
     let mut buf = vec![0; FORWARD_CHUNK];
     loop {
-        let credit = live(weak)?.borrow().forward_credit(client, id);
+        let credit = live(state)?.borrow_mut().forward_credit(tag);
         if credit == 0 {
             wake.notified().await;
             continue;
@@ -263,9 +304,9 @@ async fn downstream(
         if n == 0 {
             return Ok(());
         }
-        live(weak)?
+        live(state)?
             .borrow_mut()
-            .forward_sent(client, id, buf[..n].to_vec());
+            .forward_sent(tag, buf[..n].to_vec());
     }
 }
 
@@ -292,35 +333,52 @@ mod tests {
     fn a_client_may_not_send_past_the_window() {
         let (me, b) = (client(), block());
         let mut forwards = Forwards::default();
-        let _ends = forwards.open(me, 1, b).unwrap();
+        let ends = forwards.open(me, 1, b).unwrap();
         let chunk = vec![0; FORWARD_CHUNK];
         for _ in 0..FORWARD_WINDOW / FORWARD_CHUNK {
             forwards.data(me, 1, chunk.clone()).unwrap();
         }
         assert!(forwards.data(me, 1, vec![0]).is_err());
         // Written bytes make room again.
-        forwards.wrote(me, 1, FORWARD_CHUNK);
+        assert!(forwards.wrote(ends.tag, FORWARD_CHUNK));
         forwards.data(me, 1, chunk).unwrap();
     }
 
     #[test]
-    fn a_chunk_is_at_most_the_chunk_size() {
+    fn a_chunk_is_one_to_the_chunk_size() {
         let (me, b) = (client(), block());
         let mut forwards = Forwards::default();
         let _ends = forwards.open(me, 1, b).unwrap();
         assert!(forwards.data(me, 1, vec![0; FORWARD_CHUNK + 1]).is_err());
+        assert!(
+            forwards.data(me, 1, Vec::new()).is_err(),
+            "empty chunks cost nothing"
+        );
+    }
+
+    #[test]
+    fn queued_chunks_are_bounded_whatever_their_size() {
+        let (me, b) = (client(), block());
+        let mut forwards = Forwards::default();
+        let ends = forwards.open(me, 1, b).unwrap();
+        for _ in 0..MAX_QUEUED {
+            forwards.data(me, 1, vec![0]).unwrap();
+        }
+        assert!(forwards.data(me, 1, vec![0]).is_err());
+        assert!(forwards.wrote(ends.tag, 1));
+        forwards.data(me, 1, vec![0]).unwrap();
     }
 
     #[test]
     fn credit_is_spent_by_sending_and_returned_by_acks_up_to_the_window() {
         let (me, b) = (client(), block());
         let mut forwards = Forwards::default();
-        let _ends = forwards.open(me, 1, b).unwrap();
-        assert_eq!(forwards.credit(me, 1), FORWARD_WINDOW);
-        forwards.sent(me, 1, 1000);
-        assert_eq!(forwards.credit(me, 1), FORWARD_WINDOW - 1000);
+        let ends = forwards.open(me, 1, b).unwrap();
+        assert_eq!(forwards.credit(ends.tag), FORWARD_WINDOW);
+        assert!(forwards.sent(ends.tag, 1000));
+        assert_eq!(forwards.credit(ends.tag), FORWARD_WINDOW - 1000);
         forwards.ack(me, 1, 1000).unwrap();
-        assert_eq!(forwards.credit(me, 1), FORWARD_WINDOW);
+        assert_eq!(forwards.credit(ends.tag), FORWARD_WINDOW);
         assert!(forwards.ack(me, 1, 1).is_err(), "acknowledged unsent bytes");
     }
 
@@ -330,8 +388,27 @@ mod tests {
         let mut forwards = Forwards::default();
         assert!(forwards.data(me, 9, vec![1]).is_ok());
         assert!(forwards.ack(me, 9, 5).is_ok());
-        assert_eq!(forwards.credit(me, 9), 0);
         assert!(!forwards.close(me, 9));
+    }
+
+    #[test]
+    fn a_stale_instance_cannot_touch_the_one_that_reused_its_id() {
+        let (me, b) = (client(), block());
+        let mut forwards = Forwards::default();
+        let old = forwards.open(me, 1, b).unwrap();
+        assert!(forwards.close(me, 1));
+        let new = forwards.open(me, 1, b).unwrap();
+        assert_ne!(old.tag, new.tag);
+        forwards.data(me, 1, vec![1, 2]).unwrap();
+        // Every callback of the old task finds it gone.
+        assert!(!forwards.wrote(old.tag, 2));
+        assert!(!forwards.sent(old.tag, 10));
+        assert_eq!(forwards.credit(old.tag), 0);
+        assert!(!forwards.close_tag(old.tag));
+        // And the new one is as it was.
+        assert_eq!(forwards.credit(new.tag), FORWARD_WINDOW);
+        assert!(forwards.wrote(new.tag, 2));
+        assert!(forwards.close_tag(new.tag));
     }
 
     #[test]
@@ -360,13 +437,13 @@ mod tests {
     fn retain_closes_what_it_rejects_and_a_client_closes_whole() {
         let (me, you, b, other) = (client(), client(), block(), block());
         let mut forwards = Forwards::default();
-        let _a = forwards.open(me, 1, b).unwrap();
+        let mine = forwards.open(me, 1, b).unwrap();
         let _b = forwards.open(me, 2, other).unwrap();
-        let _c = forwards.open(you, 1, b).unwrap();
+        let yours = forwards.open(you, 1, b).unwrap();
         let gone = forwards.retain(|_, block| block == b);
         assert_eq!(gone, vec![(me, 2)]);
         forwards.close_client(me);
-        assert_eq!(forwards.credit(me, 1), 0);
-        assert_eq!(forwards.credit(you, 1), FORWARD_WINDOW);
+        assert_eq!(forwards.credit(mine.tag), 0);
+        assert_eq!(forwards.credit(yours.tag), FORWARD_WINDOW);
     }
 }
