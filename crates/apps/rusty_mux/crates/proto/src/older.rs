@@ -6,8 +6,11 @@ use crate::Features;
 
 /// Features a current server grants only when started a certain way, so
 /// their absence says nothing about its version: UDP needs `--udp`, and the
-/// tailscale status event (C27) is offered on Linux only.
-const CONDITIONAL: Features = Features::DATAGRAM.union(Features::TAILSCALE_STATUS);
+/// tailscale status event (C27) and listening ports (C80) are offered on
+/// Linux only.
+const CONDITIONAL: Features = Features::DATAGRAM
+    .union(Features::TAILSCALE_STATUS)
+    .union(Features::PORTS);
 
 /// A server older than this client: what to tell the user, once per
 /// connection.
@@ -85,6 +88,13 @@ mod tests {
     fn the_tailscale_event_missing_says_nothing_about_age() {
         // A Windows server never offers it; that is not an older server.
         let asked = Features::LAYOUT.union(Features::TAILSCALE_STATUS);
+        assert_eq!(Older::check(asked, Features::LAYOUT, Some("0.1.0")), None);
+    }
+
+    #[test]
+    fn listening_ports_missing_says_nothing_about_age() {
+        // Only a Linux server reads them; a Windows one is not older.
+        let asked = Features::LAYOUT.union(Features::PORTS);
         assert_eq!(Older::check(asked, Features::LAYOUT, Some("0.1.0")), None);
     }
 
