@@ -1440,6 +1440,8 @@ pub struct TickHistory {
     /// Fields of a task's board document that this binary does not know, by task (ADR-0006,
     /// a newer board's fields): the migration carries them so nothing is lost.
     pub unknown_fields: Vec<(Uuid, serde_json::Map<String, Value>)>,
+    /// Each task's comment document ids, in the order its card lists the comments.
+    pub comment_ids: Vec<(Uuid, Vec<Uuid>)>,
 }
 
 impl<T: TickApi> TickStore<T> {
@@ -1506,15 +1508,22 @@ impl<T: TickApi> TickStore<T> {
             }
         }
         let comments: Vec<Doc> = self.collection("/docs/comment", "docs")?;
-        unreadable.extend(
-            comments
-                .into_iter()
-                .filter(|d| {
-                    serde_json::from_value::<CommentBody>(d.body.clone())
-                        .map_or(true, |b| Uuid::parse_str(&b.task_id).is_err())
-                })
-                .map(|d| format!("comment document {} cannot be read", d.id)),
-        );
+        let mut by_task: BTreeMap<Uuid, Vec<(i64, Uuid)>> = BTreeMap::new();
+        for d in comments {
+            let body = serde_json::from_value::<CommentBody>(d.body.clone()).ok();
+            match body.and_then(|b| Some((Uuid::parse_str(&b.task_id).ok()?, b.created_ms))) {
+                Some((task, at_ms)) => by_task.entry(task).or_default().push((at_ms, d.id)),
+                None => unreadable.push(format!("comment document {} cannot be read", d.id)),
+            }
+        }
+        // The order `comments()` gives a card: by time, ties in document order.
+        let comment_ids = by_task
+            .into_iter()
+            .map(|(task, mut ids)| {
+                ids.sort_by_key(|(at_ms, _)| *at_ms);
+                (task, ids.into_iter().map(|(_, id)| id).collect())
+            })
+            .collect();
         let projects = self.projects()?;
         let milestones: Vec<Task> =
             self.collection(&format!("/tags/{MILESTONE_TAG}/tasks"), "tasks")?;
@@ -1534,6 +1543,7 @@ impl<T: TickApi> TickStore<T> {
             reservations,
             unreadable,
             unknown_fields,
+            comment_ids,
         })
     }
 }

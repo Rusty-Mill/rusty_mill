@@ -79,10 +79,14 @@ pub struct Import<'a> {
     pub moves: &'a [(Uuid, i64)],
     /// Every milestone, at its revision.
     pub milestones: &'a [Milestone],
-    /// Members a card's source document held that this board does not know, by card. They are
-    /// kept in the stored document, where an edit leaves them alone (see `with_unknown`).
-    pub unknown: &'a [(Uuid, serde_json::Map<String, Value>)],
+    /// What the source held for a card that the card itself does not: unknown document members,
+    /// comment ids. It is stored under its own key in the card's document, so it can never
+    /// collide with a card member, and an edit leaves it alone (see `with_unknown`).
+    pub source: &'a [(Uuid, serde_json::Map<String, Value>)],
 }
+
+/// The key of a card's document that holds [`Import::source`].
+pub const SOURCE_KEY: &str = "migrated_from_tick";
 
 /// Cards, events, reserved numbers and milestones in one SQLite file.
 pub struct SqliteStore {
@@ -108,19 +112,17 @@ fn uint(n: i64) -> Result<u64, BoardError> {
     u64::try_from(n).map_err(|_| storage(format!("{n} is out of range")))
 }
 
-/// `card`'s document, with the unknown members listed for it added beside the known ones.
-/// A member the card itself writes is never overridden.
+/// `card`'s document, with what the source held for it under [`SOURCE_KEY`].
 fn doc_with(
     card: &Card,
-    unknown: &[(Uuid, serde_json::Map<String, Value>)],
+    source: &[(Uuid, serde_json::Map<String, Value>)],
 ) -> Result<String, BoardError> {
     let mut doc = serde_json::to_value(card).map_err(storage)?;
-    if let Some(out) = doc.as_object_mut() {
-        for (_, extra) in unknown.iter().filter(|(id, _)| *id == card.id) {
-            for (key, value) in extra {
-                out.entry(key.clone()).or_insert_with(|| value.clone());
-            }
-        }
+    if let (Some(out), Some((_, held))) = (
+        doc.as_object_mut(),
+        source.iter().find(|(id, _)| *id == card.id),
+    ) {
+        out.insert(SOURCE_KEY.into(), Value::Object(held.clone()));
     }
     serde_json::to_string(&doc).map_err(storage)
 }
@@ -302,7 +304,7 @@ impl SqliteStore {
                     card.project,
                     card.created_ms,
                     card.updated_ms,
-                    doc_with(card, data.unknown)?
+                    doc_with(card, data.source)?
                 ],
             )
             .map_err(storage)?;

@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::domain::{BoardError, Card};
 use crate::milestones::MilestoneStore;
-use crate::sqlite::{Import, SqliteStore};
+use crate::sqlite::{Import, SOURCE_KEY, SqliteStore};
 use crate::store::Store;
 use crate::tick::{TickApi, TickStore};
 
@@ -125,18 +125,58 @@ pub fn migrate<T: TickApi>(source: &TickStore<T>, target: &SqliteStore) -> Resul
     }
     let mut numbers = history.reservations.clone();
     numbers.sort_unstable();
+    let source_held = held_by_card(&cards, &history);
+    // A card's comments and the documents they came from must line up one for one.
+    for card in &cards {
+        let ids = history
+            .comment_ids
+            .iter()
+            .find(|(task, _)| *task == card.id)
+            .map_or(0, |(_, ids)| ids.len());
+        if ids != card.comments.len() {
+            report.mismatches.push(format!(
+                "card {} has {} comments but {ids} comment documents",
+                card.id,
+                card.comments.len()
+            ));
+        }
+    }
+    if !report.exact() {
+        return Ok(report);
+    }
     let expected = Import {
         cards: &cards,
         numbers: &numbers,
         moves: &moves,
         milestones: &milestones,
-        unknown: &history.unknown_fields,
+        source: &source_held,
     };
     target
         .import(&expected)
         .map_err(|e| format!("writing SQLite: {e}"))?;
     report.mismatches.extend(verify(&expected, target)?);
     Ok(report)
+}
+
+/// What the source holds for each card beyond the card: its unknown document members and the
+/// ids of its comment documents, by card (cards with neither are left out).
+fn held_by_card(
+    cards: &[Card],
+    history: &crate::tick::TickHistory,
+) -> Vec<(Uuid, serde_json::Map<String, Value>)> {
+    cards
+        .iter()
+        .filter_map(|c| {
+            let mut held = serde_json::Map::new();
+            if let Some((_, extra)) = history.unknown_fields.iter().find(|(id, _)| *id == c.id) {
+                held.insert("unknown_fields".into(), Value::Object(extra.clone()));
+            }
+            if let Some((_, ids)) = history.comment_ids.iter().find(|(id, _)| *id == c.id) {
+                held.insert("comment_ids".into(), serde_json::json!(ids));
+            }
+            (!held.is_empty()).then_some((c.id, held))
+        })
+        .collect()
 }
 
 /// Read `target` back and list every difference from what was loaded: each card whole,
@@ -187,19 +227,11 @@ pub fn verify(expected: &Import<'_>, target: &SqliteStore) -> Result<Vec<String>
             numbers.len()
         ));
     }
-    for (id, extra) in expected.unknown {
+    for (id, held) in expected.source {
         let stored = target.document(*id).map_err(read)?;
-        for (key, value) in extra {
-            let own = expected
-                .cards
-                .iter()
-                .find(|c| c.id == *id)
-                .and_then(|c| serde_json::to_value(c).ok())
-                .is_some_and(|c| c.get(key).is_some());
-            let kept = stored.as_ref().and_then(|d| d.get(key));
-            if !own && kept != Some(value) {
-                found.push(format!("card {id} lost unknown field {key}"));
-            }
+        let got = stored.as_ref().and_then(|d| d.get(SOURCE_KEY));
+        if got != Some(&Value::Object(held.clone())) {
+            found.push(format!("card {id} lost what the source held for it"));
         }
     }
     let mut moves: Vec<(Uuid, i64)> = expected
