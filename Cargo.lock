@@ -10885,6 +10885,7 @@ dependencies = [
  "rusty_rand",
  "rusty_request",
  "rusty_serve",
+ "rusty_sqlite",
  "rusty_tokio",
  "schemars 1.2.2",
  "serde",

@@ -40,6 +40,7 @@ pub mod projects;
 pub mod retag;
 pub mod roadmap;
 pub mod settings;
+pub mod sqlite;
 pub mod store;
 pub mod sync;
 pub mod syncer;

@@ -2,6 +2,7 @@
 
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{BoardError, Column, EventKind};
+use rusty_mill_board::sqlite::SqliteStore;
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::tick::TickStore;
 
@@ -68,6 +69,12 @@ fn mem_store() {
         Roles::default(),
         clock,
     ));
+}
+
+#[test]
+fn sqlite_store() {
+    let store = SqliteStore::open_in_memory().expect("open");
+    scenario(&Board::with_clock(store, Roles::default(), clock));
 }
 
 #[test]
