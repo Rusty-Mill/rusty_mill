@@ -120,18 +120,25 @@ struct Section<'a> {
     end: usize,
 }
 
+/// A code fence line: its character, its run length, and whether nothing follows the run (only
+/// such a line can close a fence, and only when its run is as long as the opening one).
+fn fence_line(line: &str) -> Option<(char, usize, bool)> {
+    let t = line.trim_start();
+    let c = t.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let n = t.chars().take_while(|x| *x == c).count();
+    (n >= 3).then(|| (c, n, t[n..].trim().is_empty()))
+}
+
 /// The `## ` sections of `body`, outside code fences. A `# ` heading ends the section above it.
 fn sections(body: &str) -> Vec<Section<'_>> {
     let (mut out, mut fence, mut open, mut at) = (Vec::<Section>::new(), None, false, 0);
     for line in body.split_inclusive('\n') {
-        let t = line.trim_start();
-        let marker = ["```", "~~~"].into_iter().find(|m| t.starts_with(m));
-        if let Some(m) = marker {
-            fence = if fence == Some(m) {
-                None
-            } else {
-                fence.or(Some(m))
-            };
+        if let Some((c, n, bare)) = fence_line(line) {
+            match fence {
+                None => fence = Some((c, n)),
+                Some((open_c, open_n)) if c == open_c && n >= open_n && bare => fence = None,
+                Some(_) => {}
+            }
         } else if fence.is_none() && (line.starts_with("## ") || line.starts_with("# ")) {
             if let Some(last) = out.last_mut().filter(|_| open) {
                 last.end = at;
@@ -246,19 +253,26 @@ fn lift_card(
             keep(field, "several sections name it");
             continue;
         }
-        let text = named
+        // In-scope text first, then the out-of-scope text under its label, whatever the order
+        // in the body: nothing follows the label, so it cannot be read as in scope.
+        let is_out = |s: &Section| s.title.eq_ignore_ascii_case("out of scope");
+        let mut parts: Vec<String> = named
             .iter()
-            .map(|s| match s.title.to_lowercase().as_str() {
-                "out of scope" => format!("Out of scope: {}", s.text),
-                _ => s.text.to_owned(),
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
+            .filter(|s| !is_out(s))
+            .map(|s| s.text.to_owned())
+            .collect();
+        parts.extend(
+            named
+                .iter()
+                .filter(|s| is_out(s))
+                .map(|s| format!("Out of scope: {}", s.text)),
+        );
+        let text = parts.join("\n\n");
         if !before.fields[i].is_empty() {
             keep(field, "the field already has text");
         } else if named.iter().any(|s| s.text.is_empty()) {
             keep(field, "the section is empty");
-        } else if *field == "summary" && text.contains("\n\n") {
+        } else if *field == "summary" && text.lines().any(|l| l.trim().is_empty()) {
             keep(field, "the summary has several paragraphs");
         } else if text.len() > *cap {
             keep(field, "the section is over the cap");
@@ -467,6 +481,24 @@ mod tests {
             assert!(p.lifts.is_empty(), "{word}: {p:?}");
             assert!(p.left[0].why.contains(word), "{word}: {p:?}");
         }
+        // A shorter or labelled fence line inside a longer fence does not close it.
+        for body in [
+            "````\n```\n## Why\nin code\n```js\n````\n",
+            "~~~~\n~~~\n## Why\nx\n~~~~\n",
+        ] {
+            assert!(lifted(&card("t", body)).lifts.is_empty(), "{body:?}");
+        }
+        for body in [
+            "## Summary\none\r\n\r\ntwo\r\n",
+            "## Summary\none\n \ntwo\n",
+        ] {
+            assert!(lifted(&card("t", body)).lifts.is_empty(), "{body:?}");
+        }
+        let swapped = lifted(&card("t", "## Out of scope\nthat\n\n## Scope\nthis\n"));
+        assert_eq!(
+            swapped.lifts[0].after.fields[1],
+            "this\n\nOut of scope: that"
+        );
         for fence in ["```", "~~~"] {
             let c = card("t", &format!("{fence}\n## Why\nin code\n{fence}\n"));
             assert!(lifted(&c).lifts.is_empty(), "{fence}");
