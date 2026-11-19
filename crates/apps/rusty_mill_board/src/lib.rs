@@ -11,6 +11,7 @@
 //! - [`trace`]: parent/child decomposition and milestone links, rolled up from cards.
 //! - [`metrics`]: work in progress, flow and lead time, derived from cards.
 //! - [`retag`]: re-filing cards when the workflow's columns change, with a rollback record.
+//! - [`lift`]: the one-off lift of headed body sections into the typed card fields, with a rollback record.
 //! - [`store`]: the storage port and an in-memory adapter.
 //! - [`mcp`], [`web`]: the two surfaces over [`api`].
 //! - [`github`]: the GitHub issues adapter.
@@ -33,6 +34,7 @@ pub mod github;
 pub mod http;
 pub mod identities;
 pub mod inbox;
+pub mod lift;
 pub mod mcp;
 pub mod metrics;
 pub mod migrate;

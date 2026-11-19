@@ -32,6 +32,7 @@ use rusty_mill_board::bbp_cli::BbpCli;
 use rusty_mill_board::board::{Board, Roles, system_ms};
 use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
 use rusty_mill_board::github::{GITHUB_COM_API, GithubMerged};
+use rusty_mill_board::lift;
 use rusty_mill_board::mcp;
 use rusty_mill_board::migrate;
 use rusty_mill_board::milestones::{MemMilestones, MilestoneStore};
@@ -124,6 +125,22 @@ struct Cli {
     /// whose evidence has changed since is left alone and reported.
     #[arg(long, value_name = "FILE", conflicts_with_all = ["export_projects", "retag_columns", "undo_retag"])]
     undo_backfill: Option<PathBuf>,
+    /// Lift headed body sections (`## Acceptance`, `## Scope`, `## Why`, `## Summary`) into the
+    /// typed card fields, drop a `## Parent milestone` that repeats the parent, and turn
+    /// `## Prerequisites` codes into `related` links, then exit. Only unambiguous cases move;
+    /// the rest stay in the body and are listed on stderr. Prints the plan as JSON; nothing is
+    /// written without --lift-record.
+    #[arg(long, conflicts_with_all = ["export_projects", "retag_columns", "undo_retag", "backfill_evidence", "undo_backfill", "undo_lift"])]
+    lift_sections: bool,
+    /// With --lift-sections: a new file the plan is saved to before any card is written (stop
+    /// the board first; a card changed meanwhile is skipped and reported); it holds every
+    /// original body, and is what --undo-lift reads.
+    #[arg(long, value_name = "FILE", requires = "lift_sections")]
+    lift_record: Option<PathBuf>,
+    /// Put back the cards a lift changed, from its --lift-record FILE, and exit. A card
+    /// changed since the lift is left alone and reported.
+    #[arg(long, value_name = "FILE", conflicts_with = "export_projects")]
+    undo_lift: Option<PathBuf>,
     /// Keep the cards in this rusty_tick (e.g. `http://127.0.0.1:8788`): its tasks tagged
     /// `agent` are the board. Omit for an in-memory board. The token is read from the
     /// `RUSTY_TICK_TOKEN` environment variable only, never an argument (which process
@@ -423,7 +440,38 @@ fn run_backfill(cli: &Cli, store: &dyn Store) -> Result<(), String> {
     Ok(())
 }
 
-/// Pretty JSON for the retag and backfill output.
+/// `--lift-sections` / `--undo-lift`: plan, apply or undo the lift of body sections.
+fn run_lift(cli: &Cli, store: &dyn Store) -> Result<(), String> {
+    if let Some(path) = &cli.undo_lift {
+        let fail = |e: String| format!("--undo-lift {}: {e}", path.display());
+        let text = std::fs::read_to_string(path).map_err(|e| fail(e.to_string()))?;
+        let lifts: Vec<lift::Lift> =
+            serde_json::from_str(&text).map_err(|e| fail(e.to_string()))?;
+        let out = lift::undo(store, &lifts, system_ms()).map_err(|e| fail(e.to_string()))?;
+        println!("{}", json(&out)?);
+        return Ok(());
+    }
+    let plan = lift::plan(&store.list().map_err(|e| e.to_string())?);
+    eprintln!("{}", json(&plan.left)?);
+    let Some(record) = &cli.lift_record else {
+        println!("{}", json(&plan.lifts)?);
+        eprintln!(
+            "dry run: {} card(s) would change, {} section(s) stay in their bodies; add --lift-record FILE to write",
+            plan.lifts.len(),
+            plan.left.len()
+        );
+        return Ok(());
+    };
+    let fail = |e: String| format!("--lift-record {}: {e}", record.display());
+    lift::save_record(record, &plan.lifts)
+        .map_err(|e| fail(format!("not saved, nothing written: {e}")))?;
+    let out = lift::apply(store, &plan.lifts, system_ms())
+        .map_err(|e| fail(format!("{e}; undo what was written with --undo-lift")))?;
+    println!("{}", json(&out)?);
+    Ok(())
+}
+
+/// Pretty JSON for the retag, backfill and lift output.
 fn json<T: serde::Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string_pretty(value).map_err(|e| e.to_string())
 }
@@ -508,6 +556,9 @@ fn run(cli: Cli) -> Result<(), String> {
     }
     if cli.backfill_evidence.is_some() || cli.undo_backfill.is_some() {
         return run_backfill(&cli, store.as_ref());
+    }
+    if cli.lift_sections || cli.undo_lift.is_some() {
+        return run_lift(&cli, store.as_ref());
     }
     let files = files(&cli);
     required(&cli.projects, "--projects")?;
