@@ -495,7 +495,7 @@ pub fn tools() -> Vec<SettingsTool> {
         ),
         tool(
             "settings_registered_agent_revoke_stale",
-            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin). A dry run unless `revoke: true`: it returns `count`, the agent `ids` it would revoke and `unsaved` (a revocation that failed to write: call again with `revoke: true` to write it). After a board restart, a last use may count up to an hour late. Revoked agents can register again.",
+            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin). A dry run unless `revoke: true`: it returns `count`, the agent `ids` it would revoke and `unsaved` (a revocation that failed to write: call again with `revoke: true` to write it). After a board restart, a last use may count up to an hour late while registry writes succeed; if a last-use write failed, a recently used agent can look stale and must register again. Revoked agents can register again.",
             json!({"older_than_hours": {"type": "integer", "description": "2-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}, "ids": {"type": "array", "items": {"type": "string"}, "description": "With revoke: only these previewed ids, and only if still stale."}}),
             &[],
         ),
