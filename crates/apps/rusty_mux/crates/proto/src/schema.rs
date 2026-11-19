@@ -1632,7 +1632,8 @@ pub static CATALOG: &[Method] = &[
               socket as `PORT<TAB>PID<TAB>NAME`, by port and then pid, where `PID` and `NAME` \
               are the process that holds it. A program listening on IPv4 and IPv6 at once is \
               listed once. Only programs of the block's own session count, and only sockets \
-              in the server's network namespace. A `NAME` is written as in \
+              in the server's network namespace. `NAME` is the kernel's \
+              name for the process (at most 15 characters), escaped as a name is in \
               `terminal.process`. Empty when nothing listens.",
         params: &[BLOCK],
         needs: TERMINAL_PORTS,
