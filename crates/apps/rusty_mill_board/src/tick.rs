@@ -1437,6 +1437,9 @@ pub struct TickHistory {
     /// Board and comment documents [`TickStore::list`] cannot read and so leaves out of a
     /// card, one line each. A copy made from the cards alone would silently lack them.
     pub unreadable: Vec<String>,
+    /// Fields of a task's board document that this binary does not know, by task (ADR-0006,
+    /// a newer board's fields): the migration carries them so nothing is lost.
+    pub unknown_fields: Vec<(Uuid, serde_json::Map<String, Value>)>,
 }
 
 impl<T: TickApi> TickStore<T> {
@@ -1489,13 +1492,19 @@ impl<T: TickApi> TickStore<T> {
             })
             .collect::<Result<_, _>>()?;
         let mut unreadable = Vec::new();
+        let mut unknown_fields = Vec::new();
         let boards: Vec<Doc> = self.collection("/docs/board", "docs")?;
-        unreadable.extend(
-            boards
-                .into_iter()
-                .filter(|d| serde_json::from_value::<BoardDoc>(d.body.clone()).is_err())
-                .map(|d| format!("board document {} cannot be read", d.id)),
-        );
+        for d in boards {
+            match serde_json::from_value::<BoardDoc>(d.body) {
+                Err(_) => unreadable.push(format!("board document {} cannot be read", d.id)),
+                Ok(mut doc) => {
+                    doc.unknown.remove("v"); // the format version, not a field
+                    if !doc.unknown.is_empty() {
+                        unknown_fields.push((d.id, doc.unknown));
+                    }
+                }
+            }
+        }
         let comments: Vec<Doc> = self.collection("/docs/comment", "docs")?;
         unreadable.extend(
             comments
@@ -1524,6 +1533,7 @@ impl<T: TickApi> TickStore<T> {
             moves,
             reservations,
             unreadable,
+            unknown_fields,
         })
     }
 }

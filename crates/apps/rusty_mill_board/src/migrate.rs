@@ -35,6 +35,8 @@ pub struct Report {
     pub moves: usize,
     /// Moves of a task that is not a card: left out.
     pub moves_dropped: usize,
+    /// Unknown board-document members carried across, in all.
+    pub unknown_fields: usize,
     /// Cards per column.
     pub per_column: BTreeMap<String, usize>,
     /// Each difference found, as text. Empty when the copy is exact.
@@ -92,6 +94,7 @@ pub fn migrate<T: TickApi>(source: &TickStore<T>, target: &SqliteStore) -> Resul
         comments: cards.iter().map(|c| c.comments.len()).sum(),
         reservations: history.reservations.len(),
         milestones: milestones.len(),
+        unknown_fields: history.unknown_fields.iter().map(|(_, m)| m.len()).sum(),
         moves: moves.len(),
         moves_dropped: history.moves.len() - moves.len(),
         ..Report::default()
@@ -127,6 +130,7 @@ pub fn migrate<T: TickApi>(source: &TickStore<T>, target: &SqliteStore) -> Resul
         numbers: &numbers,
         moves: &moves,
         milestones: &milestones,
+        unknown: &history.unknown_fields,
     };
     target
         .import(&expected)
@@ -183,6 +187,21 @@ pub fn verify(expected: &Import<'_>, target: &SqliteStore) -> Result<Vec<String>
             numbers.len()
         ));
     }
+    for (id, extra) in expected.unknown {
+        let stored = target.document(*id).map_err(read)?;
+        for (key, value) in extra {
+            let own = expected
+                .cards
+                .iter()
+                .find(|c| c.id == *id)
+                .and_then(|c| serde_json::to_value(c).ok())
+                .is_some_and(|c| c.get(key).is_some());
+            let kept = stored.as_ref().and_then(|d| d.get(key));
+            if !own && kept != Some(value) {
+                found.push(format!("card {id} lost unknown field {key}"));
+            }
+        }
+    }
     let mut moves: Vec<(Uuid, i64)> = expected
         .moves
         .iter()
@@ -209,23 +228,14 @@ pub fn verify(expected: &Import<'_>, target: &SqliteStore) -> Result<Vec<String>
 /// removes only its own staging files, so it can simply be run again, even beside another run.
 ///
 /// # Errors
-/// A `String` if `path` already exists (now or when publishing), or as for [`migrate`].
+/// A `String` if `path` or a sidecar of it exists (before the copy or when publishing), or as
+/// for [`migrate`]. The destination's directory must be under the caller's control while this
+/// runs: a file created there between the last check and the link is not detectable.
 pub fn migrate_to_file<T: TickApi>(source: &TickStore<T>, path: &Path) -> Result<Report, String> {
     if path.exists() {
         return Err(exists(path));
     }
-    // A log or rollback journal left beside a missing file would be replayed into the new one.
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let mut stray = path.as_os_str().to_owned();
-        stray.push(suffix);
-        if Path::new(&stray).exists() {
-            return Err(format!(
-                "{} exists beside a missing {}: remove it or choose another path",
-                Path::new(&stray).display(),
-                path.display()
-            ));
-        }
-    }
+    no_sidecars(path)?;
     let mut name = path.as_os_str().to_owned();
     name.push(format!(".{}.partial", Uuid::new_v4().simple()));
     let partial = PathBuf::from(name);
@@ -249,19 +259,39 @@ pub fn migrate_to_file<T: TickApi>(source: &TickStore<T>, path: &Path) -> Result
             Ok(report)
         });
     let result = match outcome {
-        Ok(report) if report.exact() => std::fs::hard_link(&partial, path)
-            .map(|()| report)
-            .map_err(|e| {
-                if path.exists() {
-                    exists(path)
-                } else {
-                    format!("publishing {}: {e}", path.display())
-                }
-            }),
+        // Checked again here: the copy can take long, and a sidecar that appeared meanwhile
+        // would be replayed into the published file.
+        Ok(report) if report.exact() => no_sidecars(path).and_then(|()| {
+            std::fs::hard_link(&partial, path)
+                .map(|()| report)
+                .map_err(|e| {
+                    if path.exists() {
+                        exists(path)
+                    } else {
+                        format!("publishing {}: {e}", path.display())
+                    }
+                })
+        }),
         other => other,
     };
     discard();
     result
+}
+
+/// Refuse a log or rollback journal beside `path`: SQLite would replay it into the new file.
+fn no_sidecars(path: &Path) -> Result<(), String> {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut stray = path.as_os_str().to_owned();
+        stray.push(suffix);
+        if Path::new(&stray).exists() {
+            return Err(format!(
+                "{} exists beside {}: remove it or choose another path",
+                Path::new(&stray).display(),
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn exists(path: &Path) -> String {

@@ -6,7 +6,7 @@ use rusty_mill_board::domain::{BoardError, Card, Event, EventKind};
 use rusty_mill_board::domain::{Column, Span};
 use rusty_mill_board::migrate::{migrate, migrate_to_file};
 use rusty_mill_board::milestones::{Milestone, MilestoneStore};
-use rusty_mill_board::sqlite::SqliteStore;
+use rusty_mill_board::sqlite::{Import, SqliteStore};
 use rusty_mill_board::store::Store;
 use rusty_mill_board::tick::{TickApi, TickRequest, TickStore};
 use serde_json::json;
@@ -437,6 +437,7 @@ fn verification_compares_every_move_and_reservation_not_just_who_moved() {
         numbers: &numbers,
         moves: &moves,
         milestones: &[],
+        unknown: &[],
     };
     let corruptions = [
         "DELETE FROM moves WHERE card = '{a}' AND at_ms = 200",
@@ -537,4 +538,109 @@ fn an_edit_that_keeps_the_column_adds_no_move_to_a_migrated_card() {
         .replace(&moved, Event::of(&moved, EventKind::Moved, "nano"))
         .expect("replace");
     assert_eq!(target.moves().expect("moves").len(), before + 1);
+}
+
+/// rusty_tick that creates `file` the first time the move history is read.
+struct SidecarDuring {
+    tick: FakeTick,
+    file: std::path::PathBuf,
+}
+
+impl TickApi for SidecarDuring {
+    fn send(&self, r: &TickRequest<'_>) -> Result<(u16, serde_json::Value), BoardError> {
+        if r.path.starts_with("/moves?") && !self.file.exists() {
+            std::fs::write(&self.file, "stale").expect("write");
+        }
+        self.tick.send(r)
+    }
+}
+
+#[test]
+fn a_sidecar_created_during_the_copy_stops_publication_and_is_left_alone() {
+    for sidecar in ["board.db-wal", "board.db-shm", "board.db-journal"] {
+        let dir = dir("sidecar_race");
+        let path = dir.join("board.db");
+        let source = TickStore::new(SidecarDuring {
+            tick: seeded().0,
+            file: dir.join(sidecar),
+        });
+        let err = migrate_to_file(&source, &path).expect_err("refused");
+        assert!(err.contains(sidecar), "{err}");
+        assert!(!path.exists(), "nothing was published");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(sidecar)).expect("read"),
+            "stale"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).expect("dir").count(),
+            1,
+            "staging removed"
+        );
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+}
+
+#[test]
+fn unknown_board_document_fields_are_carried_and_survive_an_edit() {
+    let source = altered(|path, body| {
+        if path.starts_with("/docs/board") && !path.starts_with("/docs/board_number") {
+            // A newer board's field on the first card's document, and a known one beside it.
+            let id = "00000000-0000-4000-8000-0000000000aa";
+            body["docs"].as_array_mut().expect("docs").push(
+                json!({"id": id, "body": {"v": 1, "prompt": "p", "futureField": {"a": [1, 2]}}}),
+            );
+        }
+    });
+    let id: uuid::Uuid = "00000000-0000-4000-8000-0000000000aa".parse().expect("id");
+    let history = source.history().expect("history");
+    assert_eq!(history.unknown_fields.len(), 1);
+    assert_eq!(history.unknown_fields[0].0, id);
+    // A card the board holds with this id: the unknown member is stored with its document.
+    let cards = [Card::new("c", "", vec![], 1)
+        .map(|c| Card { id, ..c })
+        .expect("card")];
+    let target = SqliteStore::open_in_memory().expect("open");
+    target
+        .import(&Import {
+            cards: &cards,
+            numbers: &[],
+            moves: &[],
+            milestones: &[],
+            unknown: &history.unknown_fields,
+        })
+        .expect("import");
+    let doc = target.document(id).expect("doc").expect("some");
+    assert_eq!(doc["futureField"], json!({"a": [1, 2]}));
+    // An edit writes the card back and the unknown member is still there.
+    let edited = Card {
+        rev: 1,
+        title: "d".into(),
+        ..cards[0].clone()
+    };
+    target
+        .replace(&edited, Event::of(&edited, EventKind::Edited, "x"))
+        .expect("replace");
+    assert_eq!(
+        target.document(id).expect("doc").expect("some")["futureField"],
+        json!({"a": [1, 2]})
+    );
+    // And verification notices if it goes missing.
+    let found = rusty_mill_board::migrate::verify(
+        &Import {
+            cards: &[edited],
+            numbers: &[],
+            moves: &[],
+            milestones: &[],
+            unknown: &[(
+                id,
+                serde_json::Map::from_iter([("other".to_string(), json!(1))]),
+            )],
+        },
+        &target,
+    )
+    .expect("verify");
+    assert!(
+        found.iter().any(|m| m.contains("lost unknown field other")),
+        "{found:?}"
+    );
 }

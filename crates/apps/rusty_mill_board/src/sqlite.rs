@@ -79,6 +79,9 @@ pub struct Import<'a> {
     pub moves: &'a [(Uuid, i64)],
     /// Every milestone, at its revision.
     pub milestones: &'a [Milestone],
+    /// Members a card's source document held that this board does not know, by card. They are
+    /// kept in the stored document, where an edit leaves them alone (see `with_unknown`).
+    pub unknown: &'a [(Uuid, serde_json::Map<String, Value>)],
 }
 
 /// Cards, events, reserved numbers and milestones in one SQLite file.
@@ -103,6 +106,23 @@ fn int(n: u64) -> Result<i64, BoardError> {
 
 fn uint(n: i64) -> Result<u64, BoardError> {
     u64::try_from(n).map_err(|_| storage(format!("{n} is out of range")))
+}
+
+/// `card`'s document, with the unknown members listed for it added beside the known ones.
+/// A member the card itself writes is never overridden.
+fn doc_with(
+    card: &Card,
+    unknown: &[(Uuid, serde_json::Map<String, Value>)],
+) -> Result<String, BoardError> {
+    let mut doc = serde_json::to_value(card).map_err(storage)?;
+    if let Some(out) = doc.as_object_mut() {
+        for (_, extra) in unknown.iter().filter(|(id, _)| *id == card.id) {
+            for (key, value) in extra {
+                out.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+    }
+    serde_json::to_string(&doc).map_err(storage)
 }
 
 fn card_of(doc: &str) -> Result<Card, BoardError> {
@@ -282,7 +302,7 @@ impl SqliteStore {
                     card.project,
                     card.created_ms,
                     card.updated_ms,
-                    serde_json::to_string(card).map_err(storage)?
+                    doc_with(card, data.unknown)?
                 ],
             )
             .map_err(storage)?;
@@ -346,6 +366,25 @@ impl SqliteStore {
         rows.into_iter()
             .map(|(id, at)| Ok((uuid(&id)?, at)))
             .collect()
+    }
+
+    /// A card's stored document as JSON, members this board does not know included.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] if SQLite fails or the document is not JSON.
+    pub fn document(&self, id: Uuid) -> Result<Option<Value>, BoardError> {
+        let doc: Option<String> = self
+            .db()?
+            .as_raw()
+            .query_row(
+                "SELECT doc FROM cards WHERE id = ?1",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        doc.map(|d| serde_json::from_str(&d).map_err(storage))
+            .transpose()
     }
 
     /// Every reserved number and its card, by number.
