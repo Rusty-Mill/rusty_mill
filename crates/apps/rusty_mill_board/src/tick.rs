@@ -1427,6 +1427,53 @@ impl<T: TickApi> Store for TickStore<T> {
     }
 }
 
+/// What rusty_tick keeps beside the cards, for the move to SQLite (ADR-0007).
+#[derive(Debug, Default)]
+pub struct TickHistory {
+    /// Every column entry in the move history: the card and when. rusty_tick keeps no column.
+    pub moves: Vec<(Uuid, i64)>,
+    /// Every card number ever reserved, and the card it was reserved for.
+    pub reservations: Vec<(u64, Uuid)>,
+}
+
+impl<T: TickApi> TickStore<T> {
+    /// The whole move history and every number reservation, read only.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] if rusty_tick cannot be read.
+    pub fn history(&self) -> Result<TickHistory, BoardError> {
+        let mut moves = Vec::new();
+        let mut after = 0u64;
+        loop {
+            let page = self.call(
+                TickRequest::new(
+                    "GET",
+                    format!("/moves?since=0&after={after}&limit={MOVES_PAGE}"),
+                ),
+                200,
+            )?;
+            let records: Vec<MoveRecord> = Self::decode(page.clone(), "moves")?;
+            moves.extend(records.iter().map(|m| (m.task_id, m.at_ms)));
+            match page["next"].as_u64() {
+                Some(next) if next > after => after = next,
+                _ => break,
+            }
+        }
+        let docs: Vec<Doc> = self.collection(&format!("/docs/{NUMBER_KIND}"), "docs")?;
+        let reservations = docs
+            .iter()
+            .filter_map(|d| {
+                let task = serde_json::from_value(d.body["taskId"].clone()).ok()?;
+                Some((d.body["number"].as_u64()?, task))
+            })
+            .collect();
+        Ok(TickHistory {
+            moves,
+            reservations,
+        })
+    }
+}
+
 /// Milestones in rusty_tick: tasks tagged `milestone` in the project's list, `dueMs` the target,
 /// closed when done.
 impl<T: TickApi> TickStore<T> {

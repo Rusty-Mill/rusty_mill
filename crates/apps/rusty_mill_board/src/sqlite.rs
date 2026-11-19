@@ -69,6 +69,18 @@ fn migrations() -> Migrations {
     )
 }
 
+/// What [`SqliteStore::import`] loads.
+pub struct Import<'a> {
+    /// Every card, whole.
+    pub cards: &'a [Card],
+    /// Every number ever reserved, and its card.
+    pub numbers: &'a [(u64, Uuid)],
+    /// Column entries: the card and when. A card not in `cards` is skipped.
+    pub moves: &'a [(Uuid, i64)],
+    /// Every milestone, at its revision.
+    pub milestones: &'a [Milestone],
+}
+
 /// Cards, events, reserved numbers and milestones in one SQLite file.
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -233,6 +245,84 @@ impl SqliteStore {
         }
         tx.commit().map_err(storage)?;
         Ok(card.rev)
+    }
+
+    /// Load a whole board into an empty file in one transaction: the move from rusty_tick
+    /// (ADR-0007). Revisions, times, numbers and comments are kept as given. The event log
+    /// starts empty, so every poller resyncs once.
+    ///
+    /// # Errors
+    /// [`BoardError::Conflict`] if the file already holds cards, numbers or milestones;
+    /// [`BoardError::Storage`] if SQLite fails (nothing is written).
+    pub fn import(&self, data: &Import<'_>) -> Result<(), BoardError> {
+        let mut db = self.db()?;
+        let tx = db
+            .as_raw_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let rows: i64 = tx
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM cards) + (SELECT COUNT(*) FROM numbers)
+                        + (SELECT COUNT(*) FROM milestones)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if rows != 0 {
+            return Err(BoardError::Conflict);
+        }
+        for card in data.cards {
+            tx.execute(
+                "INSERT INTO cards (id, number, rev, col, project, created_ms, updated_ms, doc)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    card.id.to_string(),
+                    card.number.map(int).transpose()?,
+                    int(card.rev)?,
+                    card.column.to_string(),
+                    card.project,
+                    card.created_ms,
+                    card.updated_ms,
+                    serde_json::to_string(card).map_err(storage)?
+                ],
+            )
+            .map_err(storage)?;
+        }
+        for (number, card) in data.numbers {
+            tx.execute(
+                "INSERT INTO numbers (number, card) VALUES (?1, ?2)",
+                params![int(*number)?, card.to_string()],
+            )
+            .map_err(storage)?;
+        }
+        for (card, at_ms) in data.moves {
+            // The move history has no column: the card's own stands in, so the next real move
+            // is compared with the column the card is in now.
+            let Some(entered) = data.cards.iter().find(|c| c.id == *card) else {
+                continue;
+            };
+            tx.execute(
+                "INSERT INTO moves (card, from_col, col, at_ms) VALUES (?1, NULL, ?2, ?3)",
+                params![card.to_string(), entered.column.to_string(), at_ms],
+            )
+            .map_err(storage)?;
+        }
+        for m in data.milestones {
+            tx.execute(
+                "INSERT INTO milestones (id, project, title, target_ms, done_ms, rev)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    m.id.to_string(),
+                    m.project,
+                    m.title,
+                    m.target_ms,
+                    m.done_ms,
+                    int(m.rev)?
+                ],
+            )
+            .map_err(storage)?;
+        }
+        tx.commit().map_err(storage)
     }
 
     /// The cards a query selects, parsed from their documents.

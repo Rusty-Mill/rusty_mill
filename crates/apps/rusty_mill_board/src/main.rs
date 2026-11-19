@@ -4,8 +4,10 @@
 //! RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788   # MCP over stdio
 //! RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.0.0.1:8787 --auth-token S
 //! ```
-//! The cards are rusty_tick tasks tagged `agent` (ADR-0012); without `--tick-url`
-//! the board lives in memory and is gone when the process ends.
+//! The cards are rusty_tick tasks tagged `agent` (ADR-0012); with `--db FILE` they are in the
+//! board's own SQLite file instead (ADR-0007); with neither the board lives in memory and is gone
+//! when the process ends. `--migrate-from-tick` copies rusty_tick into `--db` (`--dry-run` writes
+//! nothing).
 //! Add `--github-repo owner/name` (and `GITHUB_TOKEN`) to mirror cards to issues.
 //! Add `--identities FILE` for a token per model, each bound to an actor and role.
 //! The HTTP mode serves the UI at `/`, the web API at `/api/<op>` and MCP at
@@ -31,6 +33,7 @@ use rusty_mill_board::board::{Board, Roles, system_ms};
 use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
 use rusty_mill_board::github::{GITHUB_COM_API, GithubMerged};
 use rusty_mill_board::mcp;
+use rusty_mill_board::migrate;
 use rusty_mill_board::milestones::{MemMilestones, MilestoneStore};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::retag;
@@ -38,6 +41,7 @@ use rusty_mill_board::settings::{
     Files, GithubFile, ServerInfo, Settings, load_github, load_roles, load_rules, load_statuses,
     load_workflow, open_credentials, projects_sink,
 };
+use rusty_mill_board::sqlite::SqliteStore;
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
 use rusty_mill_board::tick::{TickHttp, TickStore};
@@ -126,6 +130,19 @@ struct Cli {
     /// listings show).
     #[arg(long, env = "MILL_BOARD_TICK_URL")]
     tick_url: Option<String>,
+    /// Keep the cards in this SQLite file, created if missing (ADR-0007). Not with
+    /// --tick-url, except for --migrate-from-tick. The board is its only writer.
+    #[arg(long, value_name = "FILE", env = "MILL_BOARD_DB")]
+    db: Option<PathBuf>,
+    /// Copy every card, comment, number reservation, move and milestone from --tick-url
+    /// into the empty --db and compare the copy, then exit non-zero on any difference.
+    /// rusty_tick is only read. Stop the board first, so nothing changes meanwhile.
+    #[arg(long, requires_all = ["tick_url", "db"], conflicts_with_all = ["export_projects", "retag_columns", "undo_retag", "backfill_evidence", "undo_backfill"])]
+    migrate_from_tick: bool,
+    /// With --migrate-from-tick: copy into a private in-memory database instead, so nothing
+    /// is written anywhere, and print the same report.
+    #[arg(long, requires = "migrate_from_tick")]
+    dry_run: bool,
     /// Serve HTTP (UI + API + MCP) on this address instead of MCP over stdio.
     #[arg(long, env = "MILL_BOARD_HTTP")]
     http: Option<SocketAddr>,
@@ -410,6 +427,68 @@ fn json<T: serde::Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string_pretty(value).map_err(|e| e.to_string())
 }
 
+/// The card store and the milestone store the board runs on.
+type Stores = (Box<dyn Store>, Box<dyn MilestoneStore>);
+
+/// rusty_tick over HTTP, with its token from the environment.
+fn open_tick(url: &str) -> Result<TickStore<TickHttp>, String> {
+    let token = std::env::var("RUSTY_TICK_TOKEN")
+        .map_err(|_| "--tick-url needs RUSTY_TICK_TOKEN in the environment".to_owned())?;
+    Ok(TickStore::new(TickHttp::new(url, &token)?))
+}
+
+/// Cards and milestones live in the SQLite file when `--db` is given, in rusty_tick when
+/// `--tick-url` is, else in memory; each through its own port.
+fn open_stores(cli: &Cli) -> Result<Stores, String> {
+    match (&cli.db, &cli.tick_url) {
+        (Some(_), Some(_)) => Err("--db and --tick-url are two stores: give one (to copy \
+                                    rusty_tick into --db, use --migrate-from-tick)"
+            .into()),
+        (Some(path), None) => {
+            let open =
+                || SqliteStore::open(path).map_err(|e| format!("--db {}: {e}", path.display()));
+            Ok((Box::new(open()?), Box::new(open()?)))
+        }
+        (None, Some(url)) => Ok((Box::new(open_tick(url)?), Box::new(open_tick(url)?))),
+        (None, None) => Ok((
+            Box::new(MemStore::default()),
+            Box::new(MemMilestones::default()),
+        )),
+    }
+}
+
+/// `--migrate-from-tick`: copy, compare, print the report; an inexact copy is an error.
+fn run_migrate(cli: &Cli) -> Result<(), String> {
+    let (Some(url), Some(path)) = (&cli.tick_url, &cli.db) else {
+        return Err("--migrate-from-tick needs --tick-url and --db".into());
+    };
+    let source = open_tick(url)?;
+    let target = if cli.dry_run {
+        SqliteStore::open_in_memory()
+    } else {
+        SqliteStore::open(path)
+    }
+    .map_err(|e| format!("--db {}: {e}", path.display()))?;
+    let report = migrate::migrate(&source, &target)?;
+    println!("{}", json(&report)?);
+    if !report.exact() {
+        return Err(format!(
+            "the copy differs from rusty_tick in {} way(s); see the report",
+            report.mismatches.len()
+        ));
+    }
+    eprintln!(
+        "{}: {} cards, copy exact",
+        if cli.dry_run {
+            "dry run, nothing written"
+        } else {
+            "migrated"
+        },
+        report.cards
+    );
+    Ok(())
+}
+
 fn run(cli: Cli) -> Result<(), String> {
     refuse_retired_env()?;
     if cli.export_projects {
@@ -420,21 +499,10 @@ fn run(cli: Cli) -> Result<(), String> {
         println!("{}", Projects::load(path)?.file_json()?);
         return Ok(());
     }
-    // Cards and milestones live in rusty_tick when it is given, each through its own port.
-    let (store, milestones): (Box<dyn Store>, Box<dyn MilestoneStore>) = match &cli.tick_url {
-        Some(url) => {
-            let token = std::env::var("RUSTY_TICK_TOKEN")
-                .map_err(|_| "--tick-url needs RUSTY_TICK_TOKEN in the environment".to_owned())?;
-            (
-                Box::new(TickStore::new(TickHttp::new(url, &token)?)),
-                Box::new(TickStore::new(TickHttp::new(url, &token)?)),
-            )
-        }
-        None => (
-            Box::new(MemStore::default()),
-            Box::new(MemMilestones::default()),
-        ),
-    };
+    if cli.migrate_from_tick {
+        return run_migrate(&cli);
+    }
+    let (store, milestones) = open_stores(&cli)?;
     if cli.retag_columns.is_some() || cli.undo_retag.is_some() {
         return run_retag(&cli, store.as_ref());
     }
