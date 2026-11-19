@@ -181,6 +181,15 @@ pub(crate) fn lookup(pid: u32) -> Option<Proc> {
     parse(pid, &stat, &cmdline)
 }
 
+/// The session `pid` belongs to, from `/proc/PID/stat` alone: unlike
+/// [`lookup`] it never reads the command line, so scanning unrelated
+/// processes collects none of their arguments.
+#[cfg(target_os = "linux")]
+pub(crate) fn session_of(pid: u32) -> Option<u32> {
+    let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+    parse(pid, &stat, &[])?.session
+}
+
 /// Process `pid` by its image (term pack D188): the name is the image's
 /// file name, `.exe` kept; parent, session and command are not read
 /// (Q42). `None` if it has gone or may not be queried.

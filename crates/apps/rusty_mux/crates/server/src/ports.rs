@@ -109,9 +109,16 @@ fn session(child: u32, wanted: &HashSet<u64>) -> Vec<Member> {
     };
     dir.filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
         .filter_map(|pid| {
-            let proc = crate::process::lookup(pid).filter(|p| p.session == Some(child))?;
+            // Stat only until the process is known to be the block's.
+            if crate::process::session_of(pid) != Some(child) {
+                return None;
+            }
             let sockets: BTreeSet<u64> = sockets(pid).filter(|i| wanted.contains(i)).collect();
-            (!sockets.is_empty()).then_some(Member {
+            if sockets.is_empty() {
+                return None;
+            }
+            let proc = crate::process::lookup(pid)?;
+            Some(Member {
                 pid,
                 name: proc.name,
                 sockets,
