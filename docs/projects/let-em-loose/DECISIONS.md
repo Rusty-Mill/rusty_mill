@@ -171,6 +171,7 @@ Precise contracts used by this guide:
 | D161 | #1571 v0 isolation is `same_user` (agents run as Nano's user); `agent_user` once the BaileyAi host writes are approved | [stated] 2026-11-18 (1571) |
 | D162 | #1571 profile files live in Factory (`factory/agent-profiles/*.json`, `factory/project-profiles/*.json`) | [stated] 2026-11-18 (1571) |
 | D163 | #1166: reword the A2 fixture as "Proposed action, not run" (seed claim A stays the control); does not close Q53 | [stated] 2026-11-18 (1166) |
+| D164 | Smoke-7 is the first run under D143; the D127 design freeze lifts; builder sessions (#1402, #600) are released first | [stated] 2026-11-18 (1166, general) |
 
 ## D1. Lenses, not stages
 
@@ -1272,6 +1273,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Decision.** Let Em Loose is under a design freeze until its first run. No new design is added to the project until then; work goes into building and running what is already approved. This is a scope rule and changes no existing design or decision.
 **Why.** It is the project's own rule: build the slice before designing more.
 **Rejected.** Continuing to add designs before the first run.
+**Lifted by D164 (2026-11-18): smoke-7 is the first run under D143.**
 **Tag.** [stated] · remind-me: mem_1bae9f1358544fc3a517998b983b896a
 **Key.** lel:general:design-freeze-until-first-run
 **Meaning amended by D143 (2026-11-17): the first run is a clean #1166 pass.**
@@ -1625,3 +1627,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_9e4daa70bddd471d9ffc49e3020a5fb6
 **Key.** lel:1166:a2-fixture-reworded-proposed-not-run
 **Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_0f6dd8deda1f4aceb7bfa9096941d65d` (speaker Nano). Relates to D146, Q53, Q61. Numbered D163 after D162 (D160 to D162 are the launch-profiles design in #1802).
+
+## D164. Smoke-7 is the first run under D143; the D127 design freeze lifts; builder sessions (#1402, #600) are released first
+
+**Decision.** Nano confirmed that smoke-7 is "the first run" of D127, as D143 defined it (a clean #1166 pass). The board confirms every D143 and section 9 criterion: claim 6 Accepted by the lenses at rev 72 (AcceptLine, score 10, two support authors), Nano's `choose` on question 1 dropped claim 7 at rev 118, the fixture A2 was dropped by Nano at rev 121, the inbox is empty, `bbp verify` is clean, and there were three candidates from three providers. The D127 design freeze LIFTS. The first thing it releases is the #1402 builder-session design rebuild (D129) and #600, which M2 depends on. The packs design (#723, D133, Q46 to Q48) and the Survey and Intent lenses (#1456), with the other `bbp_factory` Backlog cards, stay for later. The open items stay open: Q53, Q51, Q55, Q56 to Q58, Q60, Q62.
+**Why.** Builder sessions are what the loop needs next, and D129 said they wait for the first run. Design approval, ask-first gates, spending and review/merge rules still apply to everything released.
+**Rejected.** b) the packs design first; c) the Survey and Intent lenses and the other Backlog cards first.
+**Tag.** [stated] · remind-me: mem_e2491f793d78419dbeeb0b764c33f4c4
+**Key.** lel:127:freeze-lifted-smoke-7-first-run
+**Source.** Nano, answer dialog in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_fff1f77dbd664befb0eb3945bd9c03b1` (speaker Nano). Lifts D127; applies D143; releases D129's wait. Numbered D164 after D163.
