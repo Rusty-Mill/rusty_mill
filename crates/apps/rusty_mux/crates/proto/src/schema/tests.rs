@@ -140,7 +140,8 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.report-status",
             "terminal.history",
             "terminal.prompts",
-            "terminal.find"
+            "terminal.find",
+            "terminal.ports"
         ]
     );
     let control = ["terminal.size", "terminal.reset", "terminal.set-theme"];
@@ -157,6 +158,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             (_, _, "terminal.prompts" | "terminal.find") => {
                 Features::BLOCK_CALL.union(Features::TERMINAL_FIND)
             }
+            (_, _, "terminal.ports") => Features::BLOCK_CALL.union(Features::PORTS),
             (_, _, "terminal.list-dir") => Features::BLOCK_CALL.union(Features::DIR_LISTING),
             _ => Features::BLOCK_CALL,
         };

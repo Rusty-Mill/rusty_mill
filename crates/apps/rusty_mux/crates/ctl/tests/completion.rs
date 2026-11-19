@@ -29,7 +29,12 @@ const CASES: &[(&str, &[&str])] = &[
     ("rusty-mux-ctl list + acq", &["acquire-lease"]),
     (
         "rusty-mux-ctl help terminal.p",
-        &["terminal.process", "terminal.prompts", "terminal.pwd"],
+        &[
+            "terminal.ports",
+            "terminal.process",
+            "terminal.prompts",
+            "terminal.pwd",
+        ],
     ),
     ("rusty-mux-ctl api ll", &["llms"]),
     ("rusty-mux-ctl completion po", &["powershell"]),

@@ -619,6 +619,9 @@ const TERMINAL_HISTORY: Features = Features::BLOCK_CALL.union(Features::TERMINAL
 /// What `terminal.prompts` and `terminal.find` need.
 const TERMINAL_FIND: Features = Features::BLOCK_CALL.union(Features::TERMINAL_FIND);
 
+/// What `terminal.ports` needs.
+const TERMINAL_PORTS: Features = Features::BLOCK_CALL.union(Features::PORTS);
+
 /// An optional parameter of `terminal.history`.
 const fn history(name: &'static str, ty: Ty, doc: &'static str) -> Param {
     Param {
@@ -1622,6 +1625,20 @@ pub static CATALOG: &[Method] = &[
         needs: TERMINAL_FIND,
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.find"),
+    },
+    Method {
+        name: "terminal.ports",
+        doc: "Read the TCP ports the terminal's programs listen on: one line per listening \
+              socket as `PORT<TAB>PID<TAB>NAME`, by port and then pid, where `PID` and `NAME` \
+              are the process that holds it. A program listening on IPv4 and IPv6 at once is \
+              listed once. Only programs of the block's own session count, and only sockets \
+              in the server's network namespace. `NAME` is the kernel's \
+              name for the process (at most 15 characters), escaped as a name is in \
+              `terminal.process`. Empty when nothing listens.",
+        params: &[BLOCK],
+        needs: TERMINAL_PORTS,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.ports"),
     },
     Method {
         name: "close-block",

@@ -36,6 +36,7 @@ use crate::keys;
 use crate::listing;
 use crate::outbox::Outbox;
 use crate::passed::{Fd, Passed};
+use crate::ports;
 use crate::process;
 use crate::pty::{self, Process, Pty};
 use crate::spool::Spool;
@@ -132,9 +133,12 @@ const SHOW_PERIOD: Duration = Duration::from_secs(1);
 
 /// Offered on Linux only: signal and release (C76) act on a Unix process
 /// group, and orch, their one client, runs there; the tailscale status
-/// event (C27) comes from a `tailscaled` this server asks on Linux.
+/// event (C27) comes from a `tailscaled` this server asks on Linux, and
+/// `terminal.ports` (C80) reads the sockets from `/proc`.
 #[cfg(target_os = "linux")]
-const UNIX_ONLY: Features = Features::SIGNAL_RELEASE.union(Features::TAILSCALE_STATUS);
+const UNIX_ONLY: Features = Features::SIGNAL_RELEASE
+    .union(Features::TAILSCALE_STATUS)
+    .union(Features::PORTS);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
 
@@ -2003,6 +2007,11 @@ impl State {
                 let live = rt.live()?;
                 let pid = live.process.pid().ok_or("the program has exited")?;
                 process::text(&live.pty.processes(pid))
+            }
+            "terminal.ports" => {
+                let live = rt.live()?;
+                let pid = live.process.pid().ok_or("the program has exited")?;
+                ports::text(&ports::listening(pid))
             }
             "terminal.size" => format!("{}x{}", rt.grid.cols, rt.grid.rows),
             "terminal.reset" => {

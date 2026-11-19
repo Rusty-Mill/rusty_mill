@@ -40,6 +40,7 @@ mod outbox;
 #[cfg(any(target_os = "linux", windows))]
 mod passed;
 #[cfg(any(target_os = "linux", windows))]
+mod ports;
 mod process;
 #[cfg(any(target_os = "linux", windows))]
 mod pty;

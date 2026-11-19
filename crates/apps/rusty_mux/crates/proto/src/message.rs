@@ -202,6 +202,12 @@ impl Features {
     /// at all.
     pub const LEASE_REQUESTS: Self = Self(1 << 37);
 
+    /// The block method `terminal.ports` (C80): the TCP ports the block's
+    /// programs listen on, as `PORT<TAB>PID<TAB>NAME` lines. It travels as
+    /// [`Message::BlockCall`], so the bit only says the server knows it. A
+    /// server offers it where it can read the sockets (Linux).
+    pub const PORTS: Self = Self(1 << 39);
+
     /// A clean stop on request (C36b): [`Message::Shutdown`] has the server
     /// answer, save its state, hang up owned blocks and release its name,
     /// then close every connection. Only the server's own account may ask.
@@ -369,6 +375,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::SHOW_SESSION, "sessions across windows"),
     (Features::FLOATS, "floating layers"),
     (Features::TERMINAL_FIND, "prompts and find in scrollback"),
+    (Features::PORTS, "listening ports of a block"),
     (Features::AGENT_META, "agent, role and card on blocks"),
 ];
 

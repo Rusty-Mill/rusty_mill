@@ -181,6 +181,41 @@ pub(crate) fn lookup(pid: u32) -> Option<Proc> {
     parse(pid, &stat, &cmdline)
 }
 
+/// Who a process is, from `/proc/PID/stat` alone: unlike [`lookup`] it
+/// never reads the command line. The start time tells one process from
+/// another that reuses its pid.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Identity {
+    pub session: u32,
+    pub start: u64,
+    pub comm: String,
+}
+
+/// The identity of process `pid`; `None` if it has gone.
+#[cfg(target_os = "linux")]
+pub(crate) fn identity(pid: u32) -> Option<Identity> {
+    parse_identity(&std::fs::read(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// An [`Identity`] from the text of `/proc/PID/stat`.
+#[cfg(target_os = "linux")]
+fn parse_identity(stat: &[u8]) -> Option<Identity> {
+    let stat = String::from_utf8_lossy(stat);
+    let (head, tail) = stat.rsplit_once(')')?;
+    let comm = head.split_once('(')?.1.to_owned();
+    // After `comm`: state, parent, group, session, ... start time (field
+    // 22 of the file, the 20th after `comm`).
+    let mut fields = tail.split_whitespace();
+    let session = fields.nth(3)?.parse().ok()?;
+    let start = fields.nth(15)?.parse().ok()?;
+    Some(Identity {
+        session,
+        start,
+        comm,
+    })
+}
+
 /// Process `pid` by its image (term pack D188): the name is the image's
 /// file name, `.exe` kept; parent, session and command are not read
 /// (Q42). `None` if it has gone or may not be queried.
@@ -267,6 +302,27 @@ mod tests {
 
     fn pids(chain: &[Proc]) -> Vec<u32> {
         chain.iter().map(|p| p.pid).collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_identity_is_read_from_stat_alone() {
+        let stat = b"42 (a (b) c) S 1 42 42 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 9876 1000 10";
+        let id = parse_identity(stat).expect("identity");
+        assert_eq!(
+            id,
+            Identity {
+                session: 42,
+                start: 9876,
+                comm: "a (b) c".into()
+            }
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_short_stat_has_no_identity() {
+        assert_eq!(parse_identity(b"42 (x) S 1 42 42"), None);
     }
 
     #[test]
