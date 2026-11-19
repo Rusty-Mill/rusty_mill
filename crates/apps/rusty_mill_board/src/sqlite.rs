@@ -50,6 +50,7 @@ fn migrations() -> Migrations {
         -- Column entries, kept apart from events so pruning or migrating events never loses them.
         CREATE TABLE moves (
             card TEXT NOT NULL,
+            from_col TEXT,
             col TEXT NOT NULL,
             at_ms INTEGER NOT NULL
         );
@@ -199,8 +200,8 @@ impl SqliteStore {
             .map_err(storage)?;
         if prev.as_deref() != Some(entered.as_str()) {
             tx.execute(
-                "INSERT INTO moves (card, col, at_ms) VALUES (?1, ?2, ?3)",
-                params![id, entered, event.at_ms],
+                "INSERT INTO moves (card, from_col, col, at_ms) VALUES (?1, ?2, ?3, ?4)",
+                params![id, prev, entered, event.at_ms],
             )
             .map_err(storage)?;
         }

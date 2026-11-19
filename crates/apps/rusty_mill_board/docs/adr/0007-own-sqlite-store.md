@@ -1,6 +1,6 @@
 # ADR-0007: Mill Board owns its store (SQLite)
 
-- **Status:** Proposed (2026-11-12). Nano asked for this design note: decision card in the Mill_Board thread, 2026-11-12, "Write the #1438 design note". It is card #1438 and Millwright milestone B2. Nothing here is built until Nano approves this note. The production migration, deleting the tick adapter and archiving rusty_tick are each authorized separately.
+- **Status:** Accepted (2026-11-18). Nano: "I approve it" (Mill_Board thread, 2026-11-18, message cmsg_017MoLbtrGAAcyE1PVPZXuN6YK5kc56ScE3siu9C7sX81s; remind-me `mem_573093b1e0b143c1986f9da69f09c13e`). Proposed 2026-11-12. Nano asked for this design note: decision card in the Mill_Board thread, 2026-11-12, "Write the #1438 design note". It is card #1438 and Millwright milestone B2. The adapter alone (#1811) may land on this approval. The production migration, deleting the tick adapter and archiving rusty_tick are each authorized separately.
 - **Supersedes:** [ADR-0012](../../../../../docs/adr/0012-one-task-store.md) (rusty_tick as the one task store), per Nano's 2026-11-10 decision (Millwright `board-store`, remind-me `mem_c6d02995042b4dedbb6a18e84730853f`).
 
 ## Context
@@ -82,3 +82,10 @@ Settings stay in their files (`--settings-dir`, ADR-0004): they are config, not 
 ## Open questions for Nano
 1. Is 14 days the right rollback window before archiving rusty_tick?
 2. Should event retention be 100,000 events, or time-based, for example 90 days?
+
+## Implementation notes: SqliteStore v1 (#1811)
+Nano accepted these departures from the schema above on 2026-11-19 (decision card, "Add moves table, accept rest"):
+- Cards are stored whole as a JSON `doc` beside indexed columns. There are no separate `tags` or `comments` tables.
+- `events` has `id, card, col, at_ms, doc`; `actor`, `kind` and `rev` live inside the JSON `doc`, not as columns.
+- `moves` is `card, from_col, col, at_ms`, written in the commit transaction, so it survives event pruning.
+- One connection behind a mutex, no read pool, no event pruning; scale ceilings are not measured.
