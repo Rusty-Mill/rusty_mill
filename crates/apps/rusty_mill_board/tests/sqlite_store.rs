@@ -385,3 +385,25 @@ fn a_card_number_is_unique_and_milestones_come_back_in_id_order() {
     sorted.sort_by_key(|i| i.to_string());
     assert_eq!(ids, sorted);
 }
+
+#[test]
+fn moves_outlive_the_events_they_came_from() {
+    let path = file("moves");
+    let store = SqliteStore::open(&path).expect("open");
+    let a = card("a", 100);
+    add(&store, &a);
+    let span = Span {
+        from: Some(0),
+        to: Some(1000),
+    };
+    assert_eq!(store.moved_in(span).expect("moved"), [a.id].into());
+    Connection::open(&path)
+        .expect("raw")
+        .execute("DELETE FROM events", [])
+        .expect("prune");
+    assert_eq!(
+        store.moved_in(span).expect("moved"),
+        [a.id].into(),
+        "pruned events leave the move history intact"
+    );
+}

@@ -24,7 +24,7 @@ use crate::store::Store;
 fn migrations() -> Migrations {
     Migrations::new().add(
         1,
-        "cards, events, numbers, milestones",
+        "cards, events, moves, numbers, milestones",
         "CREATE TABLE cards (
             id TEXT PRIMARY KEY,
             number INTEGER,
@@ -47,6 +47,14 @@ fn migrations() -> Migrations {
             doc TEXT NOT NULL
         );
         CREATE INDEX events_card ON events (card, id);
+        -- Column entries, kept apart from events so pruning or migrating events never loses them.
+        CREATE TABLE moves (
+            card TEXT NOT NULL,
+            col TEXT NOT NULL,
+            at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX moves_card ON moves (card);
+        CREATE INDEX moves_at ON moves (at_ms);
         CREATE TABLE numbers (number INTEGER PRIMARY KEY, card TEXT NOT NULL);
         CREATE TABLE milestones (
             id TEXT PRIMARY KEY,
@@ -180,6 +188,22 @@ impl SqliteStore {
             ],
         )
         .map_err(storage)?;
+        let entered = event.column.to_string();
+        let prev: Option<String> = tx
+            .query_row(
+                "SELECT col FROM moves WHERE card = ?1 ORDER BY rowid DESC LIMIT 1",
+                [&id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        if prev.as_deref() != Some(entered.as_str()) {
+            tx.execute(
+                "INSERT INTO moves (card, col, at_ms) VALUES (?1, ?2, ?3)",
+                params![id, entered, event.at_ms],
+            )
+            .map_err(storage)?;
+        }
         tx.commit().map_err(storage)?;
         Ok(card.rev)
     }
@@ -342,16 +366,13 @@ impl Store for SqliteStore {
     }
 
     fn moved_in(&self, span: Span) -> Result<BTreeSet<Uuid>, BoardError> {
-        // A card moved when an event's column differs from the card's previous event, or it has
-        // no previous event: entering the board counts.
+        // A card moved when it entered a column, the board included: one row per entry.
         let db = self.db()?;
         let mut stmt = db
             .as_raw()
             .prepare_cached(
-                "SELECT DISTINCT card FROM (
-                    SELECT card, col, at_ms, LAG(col) OVER (PARTITION BY card ORDER BY id) AS prev FROM events
-                 ) WHERE (prev IS NULL OR prev <> col)
-                   AND (?1 IS NULL OR at_ms >= ?1) AND (?2 IS NULL OR at_ms < ?2)",
+                "SELECT DISTINCT card FROM moves
+                 WHERE (?1 IS NULL OR at_ms >= ?1) AND (?2 IS NULL OR at_ms < ?2)",
             )
             .map_err(storage)?;
         let rows = stmt
