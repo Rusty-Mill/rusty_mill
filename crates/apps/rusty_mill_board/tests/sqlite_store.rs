@@ -434,3 +434,93 @@ fn a_field_this_board_does_not_know_survives_a_replace() {
         Column::DONE
     );
 }
+
+/// Every file in `path`'s directory with its bytes, to compare before and after a read.
+fn snapshot(path: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(path.parent().expect("dir"))
+        .expect("dir")
+        .map(|e| e.expect("entry").path())
+        .map(|p| {
+            (
+                p.file_name().expect("name").to_string_lossy().into_owned(),
+                std::fs::read(&p).expect("read"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn read_cards_reads_a_stopped_board_and_refuses_a_running_one_without_touching_files() {
+    let path = file("read_only");
+    let store = SqliteStore::open(&path).expect("open");
+    add(&store, &card("a", 1));
+    add(&store, &card("b", 2));
+    // Running: the WAL sidecars exist, and even a read-only reader would update the `-shm`.
+    let before = snapshot(&path);
+    let err = rusty_mill_board::sqlite::read_cards(&path).expect_err("running");
+    assert!(err.to_string().contains("stop the board"), "{err}");
+    assert_eq!(snapshot(&path), before, "refusing changed a file");
+    drop(store);
+    // Stopped: the sidecars are gone, and reading leaves every file as it was.
+    let before = snapshot(&path);
+    let cards = rusty_mill_board::sqlite::read_cards(&path).expect("read");
+    assert_eq!(
+        cards.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert!(
+        snapshot(&path) == before,
+        "reading changed a file or added one"
+    );
+    assert_eq!(
+        before.len(),
+        1,
+        "only the database file remains: {:?}",
+        before.keys()
+    );
+}
+
+#[test]
+fn read_cards_refuses_a_missing_file_and_a_schema_that_is_not_this_builds() {
+    let missing = file("read_missing");
+    assert!(rusty_mill_board::sqlite::read_cards(&missing).is_err());
+    assert!(!missing.exists(), "a missing file must not be created");
+
+    for version in [0, 99] {
+        let path = file(&format!("read_schema_{version}"));
+        let conn = Connection::open(&path).expect("open");
+        conn.pragma_update(None, "user_version", version)
+            .expect("set");
+        drop(conn);
+        let before = snapshot(&path);
+        let err = rusty_mill_board::sqlite::read_cards(&path).expect_err("schema");
+        assert!(err.to_string().contains("schema"), "{err}");
+        assert_eq!(snapshot(&path), before, "refusing changed a file");
+    }
+}
+
+#[test]
+fn read_cards_resolves_a_relative_path_once_and_refuses_a_rollback_journal() {
+    let path = file("read_relative");
+    {
+        let store = SqliteStore::open(&path).expect("open");
+        add(&store, &card("a", 1));
+    }
+    // The same file by a relative path: the sidecar checks and the open must agree on it.
+    let dir = path.parent().expect("dir");
+    let relative = std::path::Path::new("board.db");
+    let cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(dir).expect("cd");
+    let read = rusty_mill_board::sqlite::read_cards(relative);
+    let sidecar = std::path::Path::new("board.db-journal");
+    std::fs::write(sidecar, b"hot").expect("journal");
+    let refused = rusty_mill_board::sqlite::read_cards(relative);
+    std::env::set_current_dir(cwd).expect("back");
+    assert_eq!(read.expect("relative read").len(), 1);
+    assert!(
+        refused
+            .expect_err("journal")
+            .to_string()
+            .contains("-journal")
+    );
+}
