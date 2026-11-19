@@ -7,7 +7,7 @@
 //! A card is stored whole as JSON (`doc`), beside the few columns the board queries by. A new
 //! card field therefore needs no migration, and what the domain wrote is what is read back.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -69,6 +69,25 @@ fn migrations() -> Migrations {
     )
 }
 
+/// What [`SqliteStore::import`] loads.
+pub struct Import<'a> {
+    /// Every card, whole.
+    pub cards: &'a [Card],
+    /// Every number ever reserved, and its card.
+    pub numbers: &'a [(u64, Uuid)],
+    /// Column entries: the card and when. A card not in `cards` is skipped.
+    pub moves: &'a [(Uuid, i64)],
+    /// Every milestone, at its revision.
+    pub milestones: &'a [Milestone],
+    /// What the source held for a card that the card itself does not: unknown document members,
+    /// comment ids. It is stored under its own key in the card's document, so it can never
+    /// collide with a card member, and an edit leaves it alone (see `with_unknown`).
+    pub source: &'a [(Uuid, serde_json::Map<String, Value>)],
+}
+
+/// The key of a card's document that holds [`Import::source`].
+pub const SOURCE_KEY: &str = "migrated_from_tick";
+
 /// Cards, events, reserved numbers and milestones in one SQLite file.
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -91,6 +110,21 @@ fn int(n: u64) -> Result<i64, BoardError> {
 
 fn uint(n: i64) -> Result<u64, BoardError> {
     u64::try_from(n).map_err(|_| storage(format!("{n} is out of range")))
+}
+
+/// `card`'s document, with what the source held for it under [`SOURCE_KEY`].
+fn doc_with(
+    card: &Card,
+    source: &[(Uuid, serde_json::Map<String, Value>)],
+) -> Result<String, BoardError> {
+    let mut doc = serde_json::to_value(card).map_err(storage)?;
+    if let (Some(out), Some((_, held))) = (
+        doc.as_object_mut(),
+        source.iter().find(|(id, _)| *id == card.id),
+    ) {
+        out.insert(SOURCE_KEY.into(), Value::Object(held.clone()));
+    }
+    serde_json::to_string(&doc).map_err(storage)
 }
 
 fn card_of(doc: &str) -> Result<Card, BoardError> {
@@ -154,6 +188,10 @@ impl SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
         let id = card.id.to_string();
+        let before: Option<String> = tx
+            .query_row("SELECT col FROM cards WHERE id = ?1", [&id], |r| r.get(0))
+            .optional()
+            .map_err(storage)?;
         let number = card.number.map(int).transpose()?;
         let rev = int(card.rev)?;
         let col = card.column.to_string();
@@ -215,24 +253,183 @@ impl SqliteStore {
             ],
         )
         .map_err(storage)?;
+        // A card enters a column on creation and whenever its column differs from the one it
+        // had: compared with the stored card, not the last recorded move, so a card whose
+        // history is older than the move table (a migrated one) gains no row from an edit.
         let entered = event.column.to_string();
-        let prev: Option<String> = tx
-            .query_row(
-                "SELECT col FROM moves WHERE card = ?1 ORDER BY rowid DESC LIMIT 1",
-                [&id],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        if prev.as_deref() != Some(entered.as_str()) {
+        if before.as_deref() != Some(entered.as_str()) {
             tx.execute(
                 "INSERT INTO moves (card, from_col, col, at_ms) VALUES (?1, ?2, ?3, ?4)",
-                params![id, prev, entered, event.at_ms],
+                params![id, before, entered, event.at_ms],
             )
             .map_err(storage)?;
         }
         tx.commit().map_err(storage)?;
         Ok(card.rev)
+    }
+
+    /// Load a whole board into an empty file in one transaction: the move from rusty_tick
+    /// (ADR-0007). Revisions, times, numbers and comments are kept as given. The event log
+    /// starts empty, so every poller resyncs once.
+    ///
+    /// # Errors
+    /// [`BoardError::Conflict`] if the file already holds cards, numbers or milestones;
+    /// [`BoardError::Storage`] if SQLite fails (nothing is written).
+    pub fn import(&self, data: &Import<'_>) -> Result<(), BoardError> {
+        let mut db = self.db()?;
+        let tx = db
+            .as_raw_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let rows: i64 = tx
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM cards) + (SELECT COUNT(*) FROM numbers)
+                        + (SELECT COUNT(*) FROM milestones)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if rows != 0 {
+            return Err(BoardError::Conflict);
+        }
+        for card in data.cards {
+            tx.execute(
+                "INSERT INTO cards (id, number, rev, col, project, created_ms, updated_ms, doc)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    card.id.to_string(),
+                    card.number.map(int).transpose()?,
+                    int(card.rev)?,
+                    card.column.to_string(),
+                    card.project,
+                    card.created_ms,
+                    card.updated_ms,
+                    doc_with(card, data.source)?
+                ],
+            )
+            .map_err(storage)?;
+        }
+        for (number, card) in data.numbers {
+            tx.execute(
+                "INSERT INTO numbers (number, card) VALUES (?1, ?2)",
+                params![int(*number)?, card.to_string()],
+            )
+            .map_err(storage)?;
+        }
+        let columns: BTreeMap<Uuid, String> = data
+            .cards
+            .iter()
+            .map(|c| (c.id, c.column.to_string()))
+            .collect();
+        for (card, at_ms) in data.moves {
+            // The move history has no column: the card's own stands in.
+            let Some(entered) = columns.get(card) else {
+                continue;
+            };
+            tx.execute(
+                "INSERT INTO moves (card, from_col, col, at_ms) VALUES (?1, NULL, ?2, ?3)",
+                params![card.to_string(), entered, at_ms],
+            )
+            .map_err(storage)?;
+        }
+        for m in data.milestones {
+            tx.execute(
+                "INSERT INTO milestones (id, project, title, target_ms, done_ms, rev)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    m.id.to_string(),
+                    m.project,
+                    m.title,
+                    m.target_ms,
+                    m.done_ms,
+                    int(m.rev)?
+                ],
+            )
+            .map_err(storage)?;
+        }
+        tx.commit().map_err(storage)
+    }
+
+    /// Every column entry as `(card, at_ms)`, sorted, repeats kept: what a migration compares.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] if SQLite fails or a stored id is malformed.
+    pub fn moves(&self) -> Result<Vec<(Uuid, i64)>, BoardError> {
+        let db = self.db()?;
+        let mut stmt = db
+            .as_raw()
+            .prepare_cached("SELECT card, at_ms FROM moves ORDER BY card, at_ms")
+            .map_err(storage)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        rows.into_iter()
+            .map(|(id, at)| Ok((uuid(&id)?, at)))
+            .collect()
+    }
+
+    /// A card's stored document as JSON, members this board does not know included.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] if SQLite fails or the document is not JSON.
+    pub fn document(&self, id: Uuid) -> Result<Option<Value>, BoardError> {
+        let doc: Option<String> = self
+            .db()?
+            .as_raw()
+            .query_row(
+                "SELECT doc FROM cards WHERE id = ?1",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        doc.map(|d| serde_json::from_str(&d).map_err(storage))
+            .transpose()
+    }
+
+    /// Every reserved number and its card, by number.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] if SQLite fails or a stored value is malformed.
+    pub fn numbers(&self) -> Result<Vec<(u64, Uuid)>, BoardError> {
+        let db = self.db()?;
+        let mut stmt = db
+            .as_raw()
+            .prepare_cached("SELECT number, card FROM numbers ORDER BY number")
+            .map_err(storage)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        rows.into_iter()
+            .map(|(n, card)| Ok((uint(n)?, uuid(&card)?)))
+            .collect()
+    }
+
+    /// Move everything the write-ahead log holds into the main file and empty the log, so the
+    /// main file alone is the whole database.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] if the checkpoint fails or could not complete (a reader or
+    /// writer held it up): the main file may then lack committed data.
+    pub fn checkpoint(&self) -> Result<(), BoardError> {
+        let (busy, log, done): (i64, i64, i64) = self
+            .db()?
+            .as_raw()
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .map_err(storage)?;
+        // An in-memory or non-WAL database reports -1 for both counts: nothing to move.
+        if busy != 0 || (log >= 0 && log != done) {
+            return Err(storage(format!(
+                "checkpoint incomplete: busy {busy}, {done} of {log} frames moved"
+            )));
+        }
+        Ok(())
     }
 
     /// The cards a query selects, parsed from their documents.

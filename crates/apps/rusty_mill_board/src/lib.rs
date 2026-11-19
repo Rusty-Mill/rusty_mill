@@ -17,6 +17,7 @@
 //! - [`sync`]: forge reconcile (issues <-> cards) over a `Forge` port; [`syncer`] runs it in the background.
 //! - [`settings`]: admin changes (agents, repositories, projects, roles, GitHub) persisted to files and applied live.
 //! - [`tick`]: the rusty_tick adapter, where the cards live (ADR-0012).
+//! - [`migrate`]: the one-way copy from rusty_tick into SQLite, with a dry run that writes nothing.
 //! - [`drain`]: work in flight, so a stop can wait for it.
 //! - [`inbox`]: the decision inbox, open BBP escalations and the actions on them (#595); [`bbp_cli`] reads them from the host's `bbp`.
 
@@ -34,6 +35,7 @@ pub mod identities;
 pub mod inbox;
 pub mod mcp;
 pub mod metrics;
+pub mod migrate;
 pub mod milestones;
 pub mod page;
 pub mod projects;

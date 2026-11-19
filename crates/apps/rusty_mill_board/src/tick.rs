@@ -1427,6 +1427,127 @@ impl<T: TickApi> Store for TickStore<T> {
     }
 }
 
+/// What rusty_tick keeps beside the cards, for the move to SQLite (ADR-0007).
+#[derive(Debug, Default)]
+pub struct TickHistory {
+    /// Every column entry in the move history: the card and when. rusty_tick keeps no column.
+    pub moves: Vec<(Uuid, i64)>,
+    /// Every card number ever reserved, and the card it was reserved for.
+    pub reservations: Vec<(u64, Uuid)>,
+    /// Board and comment documents [`TickStore::list`] cannot read and so leaves out of a
+    /// card, one line each. A copy made from the cards alone would silently lack them.
+    pub unreadable: Vec<String>,
+    /// Fields of a task's board document that this binary does not know, by task (ADR-0006,
+    /// a newer board's fields): the migration carries them so nothing is lost.
+    pub unknown_fields: Vec<(Uuid, serde_json::Map<String, Value>)>,
+    /// Each task's comment document ids, in the order its card lists the comments.
+    pub comment_ids: Vec<(Uuid, Vec<Uuid>)>,
+}
+
+impl<T: TickApi> TickStore<T> {
+    /// The whole move history and every number reservation, read only.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] if rusty_tick cannot be read.
+    pub fn history(&self) -> Result<TickHistory, BoardError> {
+        let mut moves = Vec::new();
+        let mut after = 0u64;
+        loop {
+            let page = self.call(
+                TickRequest::new(
+                    "GET",
+                    format!("/moves?since=0&after={after}&limit={MOVES_PAGE}"),
+                ),
+                200,
+            )?;
+            let records: Vec<MoveRecord> = Self::decode(page.clone(), "moves")?;
+            moves.extend(records.iter().map(|m| (m.task_id, m.at_ms)));
+            // A page with no `next` is the last. A `next` that is not a number past `after`
+            // would end the loop with history missing, so it is an error, not an end.
+            match &page["next"] {
+                Value::Null => break,
+                n => match n.as_u64() {
+                    Some(next) if next > after => after = next,
+                    _ => {
+                        return Err(BoardError::Storage(format!(
+                            "rusty_tick sent move cursor {n} after {after}: the history is incomplete"
+                        )));
+                    }
+                },
+            }
+        }
+        let docs: Vec<Doc> = self.collection(&format!("/docs/{NUMBER_KIND}"), "docs")?;
+        let reservations = docs
+            .iter()
+            .map(|d| {
+                let reservation = (
+                    d.body["number"].as_u64(),
+                    serde_json::from_value::<Uuid>(d.body["taskId"].clone()).ok(),
+                );
+                match reservation {
+                    (Some(number), Some(task)) => Ok((number, task)),
+                    _ => Err(BoardError::Storage(format!(
+                        "rusty_tick number reservation {} is malformed: {}",
+                        d.id, d.body
+                    ))),
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        let mut unreadable = Vec::new();
+        let mut unknown_fields = Vec::new();
+        let boards: Vec<Doc> = self.collection("/docs/board", "docs")?;
+        for d in boards {
+            match serde_json::from_value::<BoardDoc>(d.body) {
+                Err(_) => unreadable.push(format!("board document {} cannot be read", d.id)),
+                Ok(mut doc) => {
+                    doc.unknown.remove("v"); // the format version, not a field
+                    if !doc.unknown.is_empty() {
+                        unknown_fields.push((d.id, doc.unknown));
+                    }
+                }
+            }
+        }
+        let comments: Vec<Doc> = self.collection("/docs/comment", "docs")?;
+        let mut by_task: BTreeMap<Uuid, Vec<(i64, Uuid)>> = BTreeMap::new();
+        for d in comments {
+            let body = serde_json::from_value::<CommentBody>(d.body.clone()).ok();
+            match body.and_then(|b| Some((Uuid::parse_str(&b.task_id).ok()?, b.created_ms))) {
+                Some((task, at_ms)) => by_task.entry(task).or_default().push((at_ms, d.id)),
+                None => unreadable.push(format!("comment document {} cannot be read", d.id)),
+            }
+        }
+        // The order `comments()` gives a card: by time, ties in document order.
+        let comment_ids = by_task
+            .into_iter()
+            .map(|(task, mut ids)| {
+                ids.sort_by_key(|(at_ms, _)| *at_ms);
+                (task, ids.into_iter().map(|(_, id)| id).collect())
+            })
+            .collect();
+        let projects = self.projects()?;
+        let milestones: Vec<Task> =
+            self.collection(&format!("/tags/{MILESTONE_TAG}/tasks"), "tasks")?;
+        unreadable.extend(
+            milestones
+                .into_iter()
+                .filter(Task::is_milestone)
+                .filter_map(|t| {
+                    let id = t.id;
+                    Self::milestone_of(&projects, t)
+                        .is_none()
+                        .then(|| format!("milestone task {id} has an unreadable version"))
+                }),
+        );
+        Ok(TickHistory {
+            moves,
+            reservations,
+            unreadable,
+            unknown_fields,
+            comment_ids,
+        })
+    }
+}
+
 /// Milestones in rusty_tick: tasks tagged `milestone` in the project's list, `dueMs` the target,
 /// closed when done.
 impl<T: TickApi> TickStore<T> {
