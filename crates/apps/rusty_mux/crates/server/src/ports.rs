@@ -2,6 +2,8 @@
 //! the listening sockets of the processes in the block's session, read from
 //! `/proc` on Linux.
 
+#[cfg(target_os = "linux")]
+use crate::process::Identity;
 use std::collections::BTreeSet;
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
@@ -100,6 +102,14 @@ pub(crate) fn listening(_child: u32) -> Vec<Listener> {
     Vec::new()
 }
 
+/// The name of the process `after` reads, if it is the process `before`
+/// read: the same start time. A pid reused while its descriptors were
+/// read is another process, which may belong to another block.
+#[cfg(target_os = "linux")]
+fn same_process(before: &Identity, after: Identity) -> Option<String> {
+    (before.start == after.start && before.session == after.session).then_some(after.comm)
+}
+
 /// The processes of the session `child` leads that hold any of the
 /// sockets `wanted`.
 #[cfg(target_os = "linux")]
@@ -109,22 +119,17 @@ fn session(child: u32, wanted: &HashSet<u64>) -> Vec<Member> {
     };
     dir.filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
         .filter_map(|pid| {
-            // Stat only until the process is known to be the block's.
-            if crate::process::session_of(pid) != Some(child) {
+            // Stat only: no command line is read on this path.
+            let before = crate::process::identity(pid)?;
+            if before.session != child {
                 return None;
             }
             let sockets: BTreeSet<u64> = sockets(pid).filter(|i| wanted.contains(i)).collect();
             if sockets.is_empty() {
                 return None;
             }
-            // Confirm the session after the descriptors were read: a pid
-            // reused in between belongs to another block, and is dropped.
-            let proc = crate::process::lookup(pid).filter(|p| p.session == Some(child))?;
-            Some(Member {
-                pid,
-                name: proc.name,
-                sockets,
-            })
+            let name = same_process(&before, crate::process::identity(pid)?)?;
+            Some(Member { pid, name, sockets })
         })
         .collect()
 }
@@ -160,6 +165,32 @@ mod tests {
    2: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 333 1 0000000000000000 100 0 0 10 0
    3: garbage
 ";
+
+    #[cfg(target_os = "linux")]
+    fn id(session: u32, start: u64, comm: &str) -> Identity {
+        Identity {
+            session,
+            start,
+            comm: comm.into(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_same_process_keeps_its_name() {
+        let name = same_process(&id(7, 100, "node"), id(7, 100, "node"));
+        assert_eq!(name.as_deref(), Some("node"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reused_pid_is_dropped() {
+        // Another start time: the pid now names a new process, even in
+        // the same session.
+        assert_eq!(same_process(&id(7, 100, "node"), id(7, 200, "node")), None);
+        // Another session: it belongs to another block.
+        assert_eq!(same_process(&id(7, 100, "node"), id(9, 100, "node")), None);
+    }
 
     fn member(pid: u32, name: &str, sockets: &[u64]) -> Member {
         Member {
