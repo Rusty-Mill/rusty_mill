@@ -129,6 +129,17 @@ fn fence_line(line: &str) -> Option<(char, usize, bool)> {
     (n >= 3).then(|| (c, n, t[n..].trim().is_empty()))
 }
 
+/// A `# ` or `## ` heading line, indented by up to three spaces: its level and title.
+fn heading(line: &str) -> Option<(usize, &str)> {
+    let text = line.trim_start_matches(' ');
+    if line.len() - text.len() > 3 {
+        return None;
+    }
+    text.strip_prefix("## ")
+        .map(|t| (2, t))
+        .or_else(|| text.strip_prefix("# ").map(|t| (1, t)))
+}
+
 /// The `## ` sections of `body`, outside code fences. A `# ` heading ends the section above it.
 fn sections(body: &str) -> Vec<Section<'_>> {
     let (mut out, mut fence, mut open, mut at) = (Vec::<Section>::new(), None, false, 0);
@@ -139,14 +150,14 @@ fn sections(body: &str) -> Vec<Section<'_>> {
                 Some((open_c, open_n)) if c == open_c && n >= open_n && bare => fence = None,
                 Some(_) => {}
             }
-        } else if fence.is_none() && (line.starts_with("## ") || line.starts_with("# ")) {
+        } else if let (None, Some((level, title))) = (fence, heading(line)) {
             if let Some(last) = out.last_mut().filter(|_| open) {
                 last.end = at;
             }
-            open = line.starts_with("## ");
+            open = level == 2;
             if open {
                 out.push(Section {
-                    title: line[3..].trim().trim_end_matches(':'),
+                    title: title.trim().trim_end_matches(':'),
                     text: "",
                     start: at,
                     end: body.len(),
@@ -162,27 +173,45 @@ fn sections(body: &str) -> Vec<Section<'_>> {
     out
 }
 
-/// `body` with each byte range of `cut` replaced by its text. Only the blank lines at a join
-/// are tidied; the rest of the body is left byte for byte.
-fn rewrite(body: &str, mut cut: Vec<(usize, usize, String)>) -> String {
+/// `body` without the byte ranges of `cut`. A range marked `tidy` is a whole section: the blank
+/// lines at its join are squeezed to one. The rest of the body is left byte for byte.
+fn rewrite(body: &str, mut cut: Vec<(usize, usize, bool)>) -> String {
     cut.sort_unstable();
     let (mut out, mut at) = (String::new(), 0);
-    for (s, e, with) in cut {
+    for (s, e, tidy) in cut {
         out.push_str(&body[at..s]);
         at = e;
-        if !with.is_empty() {
-            out.push_str(&with);
+        if !tidy {
             continue;
         }
         out.truncate(out.trim_end().len());
-        let rest = &body[at..];
-        at += rest.len() - rest.trim_start().len();
+        // Skip whole blank lines only: the next line's own indentation is part of it.
+        at += body[at..]
+            .split_inclusive('\n')
+            .take_while(|l| l.trim().is_empty())
+            .map(str::len)
+            .sum::<usize>();
         if !out.is_empty() && at < body.len() {
             out.push_str("\n\n");
         }
     }
     out.push_str(&body[at..]);
     out
+}
+
+/// The byte range of the first non-blank line under `section`'s heading, newline included.
+fn codes_line(body: &str, section: &Section<'_>) -> (usize, usize) {
+    let mut at = section.start;
+    for (n, line) in body[section.start..section.end]
+        .split_inclusive('\n')
+        .enumerate()
+    {
+        if n > 0 && !line.trim().is_empty() {
+            return (at, at + line.len());
+        }
+        at += line.len();
+    }
+    (section.start, section.end)
 }
 
 /// A milestone-style code: `M2.2`.
@@ -283,7 +312,7 @@ fn lift_card(
             } else {
                 text
             };
-            cut.extend(named.iter().map(|s| (s.start, s.end, String::new())));
+            cut.extend(named.iter().map(|s| (s.start, s.end, true)));
         }
     }
     for s in secs
@@ -295,7 +324,7 @@ fn lift_card(
             .and_then(|p| by_id.get(&p))
             .and_then(|p| p.number);
         if number.is_some_and(|n| s.text == format!("#{n}")) {
-            cut.push((s.start, s.end, String::new()));
+            cut.push((s.start, s.end, true));
         }
     }
     for s in secs
@@ -323,18 +352,14 @@ fn lift_card(
         after.related.extend(found.into_iter().flatten());
         after.related.sort_unstable();
         after.related.dedup();
-        // The codes line goes; any text after it stays under its header.
-        let rest = s.text.split_once('\n').map_or("", |(_, r)| r.trim());
-        let whole = &card.body[s.start..s.end];
-        let kept = if rest.is_empty() {
-            String::new()
+        // Only the codes line goes; the heading and every byte after it stay. A section of
+        // nothing else goes whole.
+        let (lo, hi) = codes_line(&card.body, s);
+        if s.text.lines().count() == 1 {
+            cut.push((s.start, s.end, true));
         } else {
-            format!(
-                "## Prerequisites\n{rest}{}",
-                &whole[whole.trim_end().len()..]
-            )
-        };
-        cut.push((s.start, s.end, kept));
+            cut.push((lo, hi, false));
+        }
     }
     if cut.is_empty() {
         return None;
@@ -366,7 +391,7 @@ fn with_state(card: &Card, state: &State, now_ms: i64) -> Result<Card, BoardErro
     })
 }
 
-/// Save `plan` as the record file at `path`, which must not exist yet, and sync it: what
+/// Save `plan` as the record file at `path`, which must not exist yet, and sync it and its directory: what
 /// [`undo`] reads, written before [`apply`] changes any card.
 ///
 /// # Errors
@@ -380,7 +405,23 @@ pub fn save_record(path: &std::path::Path, lifts: &[Lift]) -> Result<(), String>
         .map_err(|e| e.to_string())?;
     std::io::Write::write_all(&mut file, json.as_bytes())
         .and_then(|()| file.sync_all())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // The file's own sync does not make its directory entry durable: without this a crash could
+    // keep the card writes that follow and lose the record that undoes them.
+    crate::retag::sync_parent_dir(path)
+        .map_err(|e| format!("the record's directory could not be synced: {e}"))
+}
+
+/// Whether `card` holds only the first step of a write the store keeps in two (rusty_tick saves
+/// the body, then the typed fields and links, and reports `PartlySaved` if the second fails):
+/// the lifted body with everything else as before. Both [`apply`] and [`undo`] take it as theirs,
+/// so the record that undoes a lift also finishes or reverses a half-written one.
+fn partial(card: &Card, l: &Lift) -> bool {
+    let held = State::of(card);
+    held.body == l.after.body
+        && held.body != l.before.body
+        && held.fields == l.before.fields
+        && held.related == l.before.related
 }
 
 /// Write each lift whose card is still at the planned revision. A card changed since is
@@ -390,7 +431,7 @@ pub fn save_record(path: &std::path::Path, lifts: &[Lift]) -> Result<(), String>
 /// The first storage error other than a conflict. Cards before it are written.
 pub fn apply(store: &dyn Store, lifts: &[Lift], now_ms: i64) -> Result<Vec<Outcome>, BoardError> {
     write(store, lifts, now_ms, |card, l| {
-        (card.rev == l.rev).then_some(&l.after)
+        (card.rev == l.rev || partial(card, l)).then_some(&l.after)
     })
 }
 
@@ -400,7 +441,7 @@ pub fn apply(store: &dyn Store, lifts: &[Lift], now_ms: i64) -> Result<Vec<Outco
 /// The first storage error other than a conflict. Cards before it are restored.
 pub fn undo(store: &dyn Store, lifts: &[Lift], now_ms: i64) -> Result<Vec<Outcome>, BoardError> {
     write(store, lifts, now_ms, |card, l| {
-        (State::of(card) == l.after).then_some(&l.before)
+        (State::of(card) == l.after || partial(card, l)).then_some(&l.before)
     })
 }
 
@@ -532,6 +573,109 @@ mod tests {
     }
 
     #[test]
+    fn indented_headings_end_sections_and_prerequisites_keep_their_other_bytes() {
+        let c = card(
+            "t",
+            "## Why\nreason\n\n  ## Execution gate\nleave this here\n",
+        );
+        let p = lifted(&c);
+        let [l] = &p.lifts[..] else { panic!("{p:?}") };
+        assert_eq!(l.after.fields[2], "reason");
+        assert_eq!(l.after.body, "  ## Execution gate\nleave this here\n");
+        let target = card("M1.1 First", "");
+        let c = card(
+            "M2.1 Second",
+            "## Prerequisites\nM1.1\n\n    literal command\n",
+        );
+        let p = plan(&[target, c]);
+        let [l] = &p.lifts[..] else { panic!("{p:?}") };
+        assert_eq!(l.after.body, "## Prerequisites\n\n    literal command\n");
+    }
+
+    /// A store that keeps only a write's body, as rusty_tick does when its second write fails.
+    struct Halves(MemStore);
+
+    impl Store for Halves {
+        fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+            self.0.get(id)
+        }
+        fn list(&self) -> Result<Vec<Card>, BoardError> {
+            self.0.list()
+        }
+        fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
+            self.0.insert(card, event)
+        }
+        fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
+            let held = self.0.get(card.id)?.expect("card");
+            let half = Card {
+                body: card.body.clone(),
+                ..held.next(card.updated_ms)
+            };
+            self.0.replace(&half, event)?;
+            Err(BoardError::PartlySaved {
+                rev: half.rev,
+                why: "second write failed".into(),
+            })
+        }
+        fn events_since(
+            &self,
+            after: Option<Uuid>,
+            limit: usize,
+        ) -> Result<Vec<Event>, BoardError> {
+            self.0.events_since(after, limit)
+        }
+        fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+            self.0.last_event_id()
+        }
+        fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+            self.0.reserve_number(card, floor)
+        }
+    }
+
+    #[test]
+    fn a_half_written_lift_is_finished_by_apply_and_reversed_by_undo() {
+        for finish in [true, false] {
+            let store = Halves(MemStore::default());
+            let c = card("t", "## Why\nBecause.\n\n## Objective\nx\n");
+            store
+                .insert(&c, Event::of(&c, EventKind::Created, "t"))
+                .expect("insert");
+            let p = lifted(&c);
+            assert!(matches!(
+                apply(&store, &p.lifts, 5),
+                Err(BoardError::PartlySaved { .. })
+            ));
+            let held = store.get(c.id).expect("get").expect("card");
+            assert_eq!(
+                (held.body.as_str(), held.why.as_str()),
+                ("## Objective\nx\n", "")
+            );
+            let out = if finish {
+                apply(&store.0, &p.lifts, 6)
+            } else {
+                undo(&store.0, &p.lifts, 6)
+            }
+            .expect("recover");
+            assert!(matches!(out[0], Outcome::Done { .. }), "{out:?}");
+            let end = store.get(c.id).expect("get").expect("card");
+            let want = if finish {
+                ("Because.", "## Objective\nx\n")
+            } else {
+                ("", c.body.as_str())
+            };
+            assert_eq!((end.why.as_str(), end.body.as_str()), want);
+        }
+    }
+
+    #[test]
+    fn the_record_is_new_and_never_overwritten() {
+        let path = std::env::temp_dir().join(format!("lift_record_{}.json", Uuid::new_v4()));
+        save_record(&path, &[]).expect("save");
+        assert!(save_record(&path, &[]).is_err());
+        std::fs::remove_file(&path).expect("clean");
+    }
+
+    #[test]
     fn parent_milestone_goes_only_where_it_repeats_the_parent() {
         let mut parent = card("M1", "");
         parent.number = Some(872);
@@ -557,7 +701,7 @@ mod tests {
         assert_eq!(l.after.related, want);
         assert_eq!(
             l.after.body,
-            "## Prerequisites\nPlanning does not change status.\n"
+            "## Prerequisites\n\nPlanning does not change status.\n"
         );
         assert_eq!(p.left.len(), 1);
     }

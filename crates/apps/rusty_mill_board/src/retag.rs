@@ -209,7 +209,7 @@ impl RecordFile {
 }
 
 #[cfg(unix)]
-fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
@@ -220,7 +220,7 @@ fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
 /// Elsewhere this code cannot make a new file's directory entry durable, so it refuses to
 /// write a record, and with it any retag.
 #[cfg(not(unix))]
-fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "retag records are only made durable on Unix",
