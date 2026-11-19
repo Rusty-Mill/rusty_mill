@@ -17,7 +17,7 @@ const INSET: f32 = 8.0;
 /// Space between the view's edge and its content.
 const MARGIN: f32 = 16.0;
 const TILE_W: f32 = 240.0;
-const TILE_H: f32 = 76.0;
+const TILE_H: f32 = 72.0;
 const TILE_PAD: f32 = 12.0;
 const TILE_GAP: f32 = 8.0;
 const ROW_GAP: f32 = 16.0;
@@ -255,7 +255,9 @@ fn paint_tile(
     let base = line1 + ICON * s / 2.0 + font.centre_drop(px);
     out.text(font, &name, Weight::Medium, px, tx, base, shade(c.text));
     // Line 2: the role.
-    let line2 = line1 + 17.0 * s;
+    // Rows of 16 px each (the glyph's height) fill D97's 72 px tile exactly
+    // between its 12 px paddings.
+    let line2 = line1 + ICON * s;
     let spx = SMALL_PX * s;
     if !t.src.role.is_empty() {
         let role = font.fit(&t.src.role, Weight::Regular, spx, right - x);

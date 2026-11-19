@@ -174,8 +174,11 @@ impl Overview {
         } else {
             (r + n - 1) % n
         };
-        let tiles = &self.cards[r].tiles;
-        self.selected = Some(tiles[i.min(tiles.len() - 1)].src.key);
+        // A card always has a tile today; one with none keeps the selection.
+        let Some(last) = self.cards[r].tiles.len().checked_sub(1) else {
+            return;
+        };
+        self.selected = Some(self.cards[r].tiles[i.min(last)].src.key);
     }
 }
 
@@ -220,6 +223,18 @@ mod tests {
         c[1].tiles[0].focused = true;
         assert_eq!(Overview::open(c, true).selected(), Some(4));
         assert_eq!(Overview::open(Vec::new(), true).selected(), None);
+    }
+
+    #[test]
+    fn a_row_with_no_tiles_keeps_the_selection() {
+        let mut c = cards();
+        c.push(Card {
+            card: Some("#2".into()),
+            tiles: Vec::new(),
+        });
+        let mut o = Overview::open(c, true);
+        o.key(Key::Up);
+        assert_eq!(o.selected(), Some(1), "an empty row is not stepped into");
     }
 
     #[test]

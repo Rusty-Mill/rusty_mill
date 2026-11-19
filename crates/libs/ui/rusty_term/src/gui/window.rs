@@ -5359,6 +5359,31 @@ impl WindowState<'_> {
         self.overview_out(out);
     }
 
+    /// Whether a key down while the overview is open is one it lets through:
+    /// the prefix, `o` after it (which closes the view; any other key after
+    /// the prefix only ends it, so nothing acts on the hidden blocks), and
+    /// the palette's shortcut, which opens the palette in its place.
+    fn overview_passes(&mut self, event: &KeyEvent) -> bool {
+        let (key, physical) = (&event.logical_key, event.physical_key);
+        if self.chord_action(physical) == Some(Action::CommandPalette) {
+            self.open_palette();
+            return true;
+        }
+        if !self.armed {
+            if !prefix::is_prefix(key, physical, self.mods) {
+                return false;
+            }
+            self.set_armed(true);
+            return true;
+        }
+        match prefix::command(key, physical, self.mods) {
+            Command::Overview => self.toggle_overview(),
+            Command::Wait => {}
+            _ => self.set_armed(false),
+        }
+        true
+    }
+
     /// Carry out what the overview asked for: a tile shows its window and
     /// takes the focus when it is laid out there; a click off the view
     /// closes it.
@@ -5379,7 +5404,13 @@ impl WindowState<'_> {
                     .iter()
                     .any(|w| w.key == window && w.shown);
                 if !shown {
+                    // The server focuses a block in any window, so the
+                    // window it shows next opens on it (D97).
                     self.source.select(window);
+                    if !detached {
+                        self.told = Some(key);
+                        self.source.focus(key);
+                    }
                 } else if !detached
                     && let Some(tab) = self.tabs.get_mut(self.active)
                     && (tab.layout.ids().contains(&key) || self.floats.iter().any(|f| f.key == key))
@@ -6199,12 +6230,10 @@ impl WindowState<'_> {
                 self.config_path.is_some(),
             ),
         ];
+        // Opening the palette leaves the overview, so its row always opens
+        // it (gui-design D98).
         if session.overview.is_some() {
-            let label = if self.overview.is_open() {
-                "Close session overview"
-            } else {
-                "Session overview"
-            };
+            let label = "Session overview";
             let at = out
                 .iter()
                 .position(|e| e.id == Id::Cmd(Cmd::Switcher))
@@ -6510,6 +6539,12 @@ impl WindowState<'_> {
                     {
                         self.write_child(&bytes);
                     }
+                    return;
+                }
+                // The overview still hears the chord that toggles it and the
+                // palette's shortcut, which leaves it (gui-design D97, D98).
+                if self.overview.is_open() && self.overview_passes(&event) {
+                    self.consumed_keys.consume(event.physical_key);
                     return;
                 }
                 // An open popover owns every key (gui-design D60, D61).
@@ -6989,6 +7024,19 @@ impl WindowState<'_> {
                 let (lines, remainder) = accumulate_scroll_lines(self.scroll_accum, raw_lines);
                 self.scroll_accum = remainder;
                 if lines == 0 {
+                    return;
+                }
+                // The overview covers the body: the wheel moves its
+                // selection a row, which scrolls the view, and never reaches
+                // the panes under it.
+                if self.overview.is_open() {
+                    let step = if lines > 0 {
+                        overview::Key::Up
+                    } else {
+                        overview::Key::Down
+                    };
+                    let out = self.overview.key(step);
+                    self.overview_out(out);
                     return;
                 }
                 // An open confirm owns the wheel: it scrolls a long URL.

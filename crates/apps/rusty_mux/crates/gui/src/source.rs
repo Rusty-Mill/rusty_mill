@@ -972,11 +972,13 @@ impl Events {
                 event:
                     Event::WindowCreated { .. }
                     | Event::SessionCreated { .. }
-                    | Event::ClientConnected { .. },
+                    | Event::ClientConnected { .. }
+                    | Event::BlockCreated { .. },
                 ..
             } = message
             {
-                // Its name, or what a client can do, comes with its entry.
+                // Its name, what a client can do, or who works a new block
+                // (the overview's `Entry::Agent`, D97) comes with its entry.
                 self.state.send(|req| Message::List { req });
             }
             if matches!(change, Change::Layout | Change::Shown) {
