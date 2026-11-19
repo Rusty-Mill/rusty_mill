@@ -172,6 +172,8 @@ Precise contracts used by this guide:
 | D162 | #1571 profile files live in Factory (`factory/agent-profiles/*.json`, `factory/project-profiles/*.json`) | [stated] 2026-11-18 (1571) |
 | D164 | Smoke-7 is the first run under D143; the D127 design freeze lifts; builder sessions (#1402, #600) are released first | [stated] 2026-11-18 (1166, general) |
 | D165 | #600 builders: the Claude CLI in the v0 jail uses Nano's subscription (Q15) | [stated] 2026-11-19 (1318) |
+| D166 | #600 v0: the Claude CLI reads Nano's `~/.claude` login through a read-only jail root (written exception to D101, `same_user` v0, expires with the gateway #726) | [stated] 2026-11-19 (1318, 600) |
+| D167 | One paid run approved: the #1318 toy-claim acceptance run (2 builders, 45 min, one claim) after the Claude `no_overage` assertion is added; #1320 not approved | [stated] 2026-11-19 (1318) |
 
 ## D1. Lenses, not stages
 
@@ -1636,3 +1638,22 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_f885f3a1b16a415eb01506c3146e0c7f
 **Key.** lel:600:builder-claude-credential-subscription
 **Source.** Nano, Millwright project thread for card #1402, message `cmsg_01632CBKCXsWe6RyFWvE9dovEBkpMdZ4enJ2R7MBLywZXz`, 2026-11-19T18:13:22Z: "15 it uses my subscription", answering OPEN_QUESTIONS Q15 (card #1318). Relates to D101, D107, D134, D140, `1571-launch-profiles-design.md` (model provider row). Numbered D165: D163 and D164 are taken on PR #1813 (unmerged); D164 is copied below.
+
+## D166. #600 v0: the Claude CLI reads Nano's `~/.claude` login through a read-only jail root (written exception to D101, `same_user` v0, expires with the gateway #726)
+
+**Decision.** D101 stays the long-term rule: the gateway holds the login and the jail gets only an orch-minted token. For v0 only there is a written exception, scoped to `same_user` v0 (D161): the Claude CLI reads Nano's existing `~/.claude` login through a read-only root in `jail.json`. `jail.json`'s `token` slot stays orch-minted tokens only (D107). The exception expires when the gateway (#726) lands, and D101 then returns in force. Nothing is copied into `jail.json`. Nano accepted the caveat: v0 is not a security boundary and egress is open (the D107 gap), so a jailed builder could read and send the login. This answers the delivery half of D165 item 1.
+**Why.** D165 chose the subscription as the credential; the gateway doesn't exist yet, and v0 runs as Nano's user (D161). A read-only root of an existing login needs no new credential file and no change to the `token` slot.
+**Rejected.** A separate revocable subscription token file in the `token` slot: it would reverse D101 for good.
+**Tag.** [stated] · remind-me: mem_c4e782acab594c2aa3cda4bf653f6aa2
+**Key.** lel:600:subscription-login-v0-exception-same-user
+**Source.** Nano, thread message `cmsg_01632CBKCXsWe6RyFWvE9dovNuNMU7fiwfx8bvmVJhWei4`, 2026-11-19T18:22:12Z: "concur", to the recommendation `cmsg_01632CBKCXsWe6RyFWvE9dov4g3WihbLKaDjCJDV35SQxg`. Follows D165; scoped by D161; limits D101 temporarily. Numbered D166 after D165 (D163 and D164 are on PR #1813).
+
+## D167. One paid run approved: the #1318 toy-claim acceptance run (2 builders, 45 min, one claim) after the Claude `no_overage` assertion is added; #1320 not approved
+
+**Decision.** Nano approves ONE paid run: the toy-claim acceptance run for #1318, with `builders_per_claim` 2, `builder_wall_secs` 2700 (45 minutes each) and one claim. This supersedes D134 for that run only, as D140 did for its run. Before it, the Claude `no_overage` assertion must be added to `/etc/let-em-loose/assertions.json` so the run fails closed. The dedup run (#1320) is NOT approved; it waits on M1 and the toy-run result, and any further paid call stays ask-first. The subscription is flat-rate, so the cost is usage limit, not dollars.
+**Open action for Nano (not done).** Adding the `no_overage` assertion is a host write on BaileyAi. Nano hasn't done it and hasn't authorised an agent to. Entry shape (from `mem_fe5132a19f51456190c6017e94955e0a`): `{provider: claude, account: <email as `claude auth status` reports it for the running account>, checked: YYYY-MM-DD}`. The run does not start until it is in place.
+**Why.** The smallest paid run that tests builder launch; the assertion makes it fail closed; the dedup run needs evidence from the first.
+**Rejected.** Approving #1320 as well.
+**Tag.** [stated] · remind-me: mem_77c0be9609544059ae911c7e2ccdb2f9
+**Key.** lel:1318:one-paid-run-toy-claim-acceptance
+**Source.** Nano, thread message `cmsg_01632CBKCXsWe6RyFWvE9dovNuNMU7fiwfx8bvmVJhWei4`, 2026-11-19T18:22:12Z: "concur", to `cmsg_01632CBKCXsWe6RyFWvE9dov4g3WihbLKaDjCJDV35SQxg`. Relates to D134, D140, D141, D165, `600-build-plan.md` section 4 defaults.
