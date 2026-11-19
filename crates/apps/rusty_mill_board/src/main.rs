@@ -135,7 +135,8 @@ struct Cli {
     #[arg(long, value_name = "FILE", env = "MILL_BOARD_DB")]
     db: Option<PathBuf>,
     /// Copy every card, comment, number reservation, move and milestone from --tick-url
-    /// into the empty --db and compare the copy, then exit non-zero on any difference.
+    /// into a new --db file (never an existing one) and compare the copy; the file appears only if
+    /// the copy is exact. Exit non-zero on any difference.
     /// rusty_tick is only read. Stop the board first, so nothing changes meanwhile.
     #[arg(long, requires_all = ["tick_url", "db"], conflicts_with_all = ["export_projects", "retag_columns", "undo_retag", "backfill_evidence", "undo_backfill"])]
     migrate_from_tick: bool,
@@ -463,13 +464,12 @@ fn run_migrate(cli: &Cli) -> Result<(), String> {
         return Err("--migrate-from-tick needs --tick-url and --db".into());
     };
     let source = open_tick(url)?;
-    let target = if cli.dry_run {
-        SqliteStore::open_in_memory()
+    let report = if cli.dry_run {
+        let target = SqliteStore::open_in_memory().map_err(|e| e.to_string())?;
+        migrate::migrate(&source, &target)?
     } else {
-        SqliteStore::open(path)
-    }
-    .map_err(|e| format!("--db {}: {e}", path.display()))?;
-    let report = migrate::migrate(&source, &target)?;
+        migrate::migrate_to_file(&source, path)?
+    };
     println!("{}", json(&report)?);
     if !report.exact() {
         return Err(format!(

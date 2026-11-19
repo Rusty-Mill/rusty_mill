@@ -2,12 +2,13 @@
 //! towards rusty_tick, and loud when the copy cannot be right.
 
 use rusty_mill_board::board::{Board, Roles};
+use rusty_mill_board::domain::BoardError;
 use rusty_mill_board::domain::{Column, Span};
-use rusty_mill_board::migrate::migrate;
+use rusty_mill_board::migrate::{migrate, migrate_to_file};
 use rusty_mill_board::milestones::{Milestone, MilestoneStore};
 use rusty_mill_board::sqlite::SqliteStore;
 use rusty_mill_board::store::Store;
-use rusty_mill_board::tick::TickStore;
+use rusty_mill_board::tick::{TickApi, TickRequest, TickStore};
 use serde_json::json;
 
 mod fake_tick;
@@ -166,4 +167,136 @@ fn a_card_number_nothing_reserved_is_reported() {
         "{:?}",
         report.mismatches
     );
+}
+
+/// rusty_tick as `FakeTick`, with its answers to `/moves` or `/docs/board_number` altered.
+struct Altered {
+    tick: FakeTick,
+    alter: fn(&str, &mut serde_json::Value),
+}
+
+impl TickApi for Altered {
+    fn send(&self, r: &TickRequest<'_>) -> Result<(u16, serde_json::Value), BoardError> {
+        let (status, mut body) = self.tick.send(r)?;
+        (self.alter)(&r.path, &mut body);
+        Ok((status, body))
+    }
+}
+
+fn altered(alter: fn(&str, &mut serde_json::Value)) -> TickStore<Altered> {
+    TickStore::new(Altered {
+        tick: seeded().0,
+        alter,
+    })
+}
+
+#[test]
+fn a_move_cursor_that_is_not_the_end_is_an_error_not_a_short_history() {
+    let source = altered(|path, body| {
+        if path.starts_with("/moves?") {
+            body["next"] = json!("junk");
+        }
+    });
+    let err = source.history().expect_err("history");
+    assert!(err.to_string().contains("history is incomplete"), "{err}");
+    let target = SqliteStore::open_in_memory().expect("open");
+    assert!(migrate(&source, &target).is_err());
+    assert!(
+        target.list().expect("list").is_empty(),
+        "nothing was written"
+    );
+    // A stalled cursor (not past `after`) is the same failure.
+    let stalled = altered(|path, body| {
+        if path.starts_with("/moves?") {
+            body["next"] = json!(0);
+        }
+    });
+    assert!(stalled.history().is_err());
+}
+
+#[test]
+fn a_malformed_reservation_is_an_error_not_a_lost_high_water_mark() {
+    let source = altered(|path, body| {
+        if path.starts_with("/docs/board_number") {
+            body["docs"][1]["body"]["number"] = json!("x");
+        }
+    });
+    let err = source.history().expect_err("history");
+    assert!(err.to_string().contains("reservation"), "{err}");
+    assert!(migrate(&source, &SqliteStore::open_in_memory().expect("open")).is_err());
+}
+
+fn unreserved() -> (FakeTick, TickStore<FakeTick>) {
+    let (tick, source) = seeded();
+    let card = source.list().expect("list")[0].clone();
+    tick.owner_edit(card.id, |task| {
+        let tags = task["tags"].as_array_mut().expect("tags");
+        tags.retain(|t| !t.as_str().is_some_and(|t| t.starts_with("number:")));
+        tags.push(json!("number:99"));
+    });
+    (tick, source)
+}
+
+#[test]
+fn a_source_known_to_be_wrong_writes_nothing() {
+    let (_tick, source) = unreserved();
+    let target = SqliteStore::open_in_memory().expect("open");
+    let report = migrate(&source, &target).expect("report");
+    assert!(!report.exact());
+    assert!(
+        target.list().expect("list").is_empty(),
+        "no cards were imported"
+    );
+    assert_eq!(target.highest_reserved(), Ok(0));
+}
+
+fn dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("mill_migrate_{name}_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    dir
+}
+
+#[test]
+fn a_failed_file_migration_leaves_no_file_and_can_be_run_again() {
+    let dir = dir("retry");
+    let path = dir.join("board.db");
+    let (tick, source) = unreserved();
+    let report = migrate_to_file(&source, &path).expect("report");
+    assert!(!report.exact());
+    assert_eq!(
+        std::fs::read_dir(&dir).expect("dir").count(),
+        0,
+        "no file, no partial"
+    );
+    // The source is fixed and the same command succeeds.
+    let card = source.list().expect("list")[0].clone();
+    tick.owner_edit(card.id, |task| {
+        let tags = task["tags"].as_array_mut().expect("tags");
+        tags.retain(|t| !t.as_str().is_some_and(|t| t.starts_with("number:")));
+        tags.push(json!("number:1"));
+    });
+    let report = migrate_to_file(&source, &path).expect("retry");
+    assert!(report.exact(), "{:?}", report.mismatches);
+    assert_eq!(
+        SqliteStore::open(&path)
+            .expect("open")
+            .list()
+            .expect("list")
+            .len(),
+        2
+    );
+    assert!(!dir.join("board.db.partial").exists());
+    std::fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
+fn an_existing_destination_is_never_touched() {
+    let dir = dir("exists");
+    let path = dir.join("board.db");
+    std::fs::write(&path, "precious").expect("write");
+    let (_tick, source) = seeded();
+    let err = migrate_to_file(&source, &path).expect_err("refused");
+    assert!(err.contains("already exists"), "{err}");
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), "precious");
+    std::fs::remove_dir_all(dir).expect("cleanup");
 }

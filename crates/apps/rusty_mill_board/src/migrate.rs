@@ -6,6 +6,7 @@
 //! in-memory store: nothing is written anywhere.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -68,7 +69,8 @@ fn differing(a: &Card, b: &Card) -> String {
     fields.join(", ")
 }
 
-/// Copy `source` into the empty `target` and check the copy.
+/// Copy `source` into the empty `target` and check the copy. A source that is already
+/// inconsistent is reported and nothing is written.
 ///
 /// # Errors
 /// A `String` if rusty_tick cannot be read or `target` cannot be written (a non-empty `target`
@@ -100,16 +102,22 @@ pub fn migrate<T: TickApi>(source: &TickStore<T>, target: &SqliteStore) -> Resul
             .entry(card.column.to_string())
             .or_default() += 1;
     }
-    // Every card number must hold a reservation, or a new card could be given it again.
+    // Every card number must hold a reservation, or a new card could be given it again. A copy
+    // known to be wrong is not written at all.
     let reserved: BTreeSet<u64> = history.reservations.iter().map(|(n, _)| *n).collect();
-    for card in cards
-        .iter()
-        .filter(|c| c.number.is_some_and(|n| !reserved.contains(&n)))
-    {
-        report.mismatches.push(format!(
-            "card {} has number {:?} with no reservation",
-            card.id, card.number
-        ));
+    report.mismatches.extend(
+        cards
+            .iter()
+            .filter(|c| c.number.is_some_and(|n| !reserved.contains(&n)))
+            .map(|c| {
+                format!(
+                    "card {} has number {:?} with no reservation",
+                    c.id, c.number
+                )
+            }),
+    );
+    if !report.exact() {
+        return Ok(report);
     }
     let mut numbers = history.reservations.clone();
     numbers.sort_unstable();
@@ -196,4 +204,47 @@ fn verify(
         ));
     }
     Ok(())
+}
+
+/// Copy `source` into a new file at `path`, which appears only if the copy is exact.
+///
+/// The copy is built in `path` + `.partial` and renamed into place after it verifies, so a
+/// failed or interrupted run leaves no file a board could be started on, and can simply be run
+/// again.
+///
+/// # Errors
+/// A `String` if `path` already exists, or as for [`migrate`].
+pub fn migrate_to_file<T: TickApi>(source: &TickStore<T>, path: &Path) -> Result<Report, String> {
+    if path.exists() {
+        return Err(format!(
+            "{} already exists: the migration writes a new file",
+            path.display()
+        ));
+    }
+    let mut name = path.as_os_str().to_owned();
+    name.push(".partial");
+    let partial = PathBuf::from(name);
+    let discard = || {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = partial.as_os_str().to_owned();
+            file.push(suffix);
+            let _ = std::fs::remove_file(file);
+        }
+    };
+    discard();
+    let outcome = SqliteStore::open(&partial)
+        .map_err(|e| format!("{}: {e}", partial.display()))
+        .and_then(|target| migrate(source, &target));
+    let report = match outcome {
+        Ok(report) if report.exact() => report,
+        other => {
+            discard();
+            return other;
+        }
+    };
+    std::fs::rename(&partial, path).map_err(|e| {
+        discard();
+        format!("moving {} into place: {e}", partial.display())
+    })?;
+    Ok(report)
 }

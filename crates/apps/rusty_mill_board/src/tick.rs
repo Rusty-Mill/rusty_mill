@@ -1454,19 +1454,37 @@ impl<T: TickApi> TickStore<T> {
             )?;
             let records: Vec<MoveRecord> = Self::decode(page.clone(), "moves")?;
             moves.extend(records.iter().map(|m| (m.task_id, m.at_ms)));
-            match page["next"].as_u64() {
-                Some(next) if next > after => after = next,
-                _ => break,
+            // A page with no `next` is the last. A `next` that is not a number past `after`
+            // would end the loop with history missing, so it is an error, not an end.
+            match &page["next"] {
+                Value::Null => break,
+                n => match n.as_u64() {
+                    Some(next) if next > after => after = next,
+                    _ => {
+                        return Err(BoardError::Storage(format!(
+                            "rusty_tick sent move cursor {n} after {after}: the history is incomplete"
+                        )));
+                    }
+                },
             }
         }
         let docs: Vec<Doc> = self.collection(&format!("/docs/{NUMBER_KIND}"), "docs")?;
         let reservations = docs
             .iter()
-            .filter_map(|d| {
-                let task = serde_json::from_value(d.body["taskId"].clone()).ok()?;
-                Some((d.body["number"].as_u64()?, task))
+            .map(|d| {
+                let reservation = (
+                    d.body["number"].as_u64(),
+                    serde_json::from_value::<Uuid>(d.body["taskId"].clone()).ok(),
+                );
+                match reservation {
+                    (Some(number), Some(task)) => Ok((number, task)),
+                    _ => Err(BoardError::Storage(format!(
+                        "rusty_tick number reservation {} is malformed: {}",
+                        d.id, d.body
+                    ))),
+                }
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         Ok(TickHistory {
             moves,
             reservations,
