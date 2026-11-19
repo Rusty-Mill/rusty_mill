@@ -3,7 +3,8 @@
 //! pure ([`plan`]); [`apply`] and [`undo`] write through the [`Store`] port.
 //!
 //! Only unambiguous cases move. A field is lifted when exactly one section names it, the card's
-//! field is still empty and the text fits the cap; anything else stays in the body and is
+//! field is still empty and the text fits the cap (a wrapped summary becomes one line, and an
+//! `## Out of scope` joins `scope` as `Out of scope: ...`, so its meaning survives); anything else stays in the body and is
 //! listed in [`Plan::left`]. Two more sections are tidied: `## Parent milestone` is dropped
 //! where it only repeats the card's `parent`, and `## Prerequisites` codes (`M2.2, M1.4`)
 //! become `related` links where every code names exactly one card of the project. `related`,
@@ -119,22 +120,31 @@ struct Section<'a> {
     end: usize,
 }
 
-/// The `## ` sections of `body`, outside code fences.
+/// The `## ` sections of `body`, outside code fences. A `# ` heading ends the section above it.
 fn sections(body: &str) -> Vec<Section<'_>> {
-    let (mut out, mut fenced, mut at) = (Vec::<Section>::new(), false, 0);
+    let (mut out, mut fence, mut open, mut at) = (Vec::<Section>::new(), None, false, 0);
     for line in body.split_inclusive('\n') {
-        if line.trim_start().starts_with("```") {
-            fenced = !fenced;
-        } else if !fenced && line.starts_with("## ") {
-            if let Some(last) = out.last_mut() {
+        let t = line.trim_start();
+        let marker = ["```", "~~~"].into_iter().find(|m| t.starts_with(m));
+        if let Some(m) = marker {
+            fence = if fence == Some(m) {
+                None
+            } else {
+                fence.or(Some(m))
+            };
+        } else if fence.is_none() && (line.starts_with("## ") || line.starts_with("# ")) {
+            if let Some(last) = out.last_mut().filter(|_| open) {
                 last.end = at;
             }
-            out.push(Section {
-                title: line[3..].trim().trim_end_matches(':'),
-                text: "",
-                start: at,
-                end: body.len(),
-            });
+            open = line.starts_with("## ");
+            if open {
+                out.push(Section {
+                    title: line[3..].trim().trim_end_matches(':'),
+                    text: "",
+                    start: at,
+                    end: body.len(),
+                });
+            }
         }
         at += line.len();
     }
@@ -145,21 +155,27 @@ fn sections(body: &str) -> Vec<Section<'_>> {
     out
 }
 
-/// `body` with each byte range of `cut` replaced by its text, blank-line runs squeezed.
+/// `body` with each byte range of `cut` replaced by its text. Only the blank lines at a join
+/// are tidied; the rest of the body is left byte for byte.
 fn rewrite(body: &str, mut cut: Vec<(usize, usize, String)>) -> String {
     cut.sort_unstable();
-    let mut out = String::new();
-    let mut at = 0;
+    let (mut out, mut at) = (String::new(), 0);
     for (s, e, with) in cut {
         out.push_str(&body[at..s]);
-        out.push_str(&with);
         at = e;
+        if !with.is_empty() {
+            out.push_str(&with);
+            continue;
+        }
+        out.truncate(out.trim_end().len());
+        let rest = &body[at..];
+        at += rest.len() - rest.trim_start().len();
+        if !out.is_empty() && at < body.len() {
+            out.push_str("\n\n");
+        }
     }
     out.push_str(&body[at..]);
-    while out.contains("\n\n\n") {
-        out = out.replace("\n\n\n", "\n\n");
-    }
-    out.trim().to_owned()
+    out
 }
 
 /// A milestone-style code: `M2.2`.
@@ -214,21 +230,46 @@ fn lift_card(
             .iter()
             .filter(|s| titles.contains(&s.title.to_lowercase().as_str()))
             .collect();
-        let [one] = named[..] else {
-            if named.len() > 1 {
-                keep(field, "several sections name it");
-            }
+        // Scope alone may take its in-scope and out-of-scope sections together.
+        let one_of_each = *field == "scope"
+            && named.iter().all(|a| {
+                named
+                    .iter()
+                    .filter(|b| b.title.eq_ignore_ascii_case(a.title))
+                    .count()
+                    == 1
+            });
+        if named.is_empty() {
             continue;
-        };
+        }
+        if named.len() > 1 && !one_of_each {
+            keep(field, "several sections name it");
+            continue;
+        }
+        let text = named
+            .iter()
+            .map(|s| match s.title.to_lowercase().as_str() {
+                "out of scope" => format!("Out of scope: {}", s.text),
+                _ => s.text.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
         if !before.fields[i].is_empty() {
             keep(field, "the field already has text");
-        } else if one.text.is_empty() {
+        } else if named.iter().any(|s| s.text.is_empty()) {
             keep(field, "the section is empty");
-        } else if one.text.len() > *cap {
+        } else if *field == "summary" && text.contains("\n\n") {
+            keep(field, "the summary has several paragraphs");
+        } else if text.len() > *cap {
             keep(field, "the section is over the cap");
         } else {
-            after.fields[i] = one.text.to_owned();
-            cut.push((one.start, one.end, String::new()));
+            // The summary box is one line, so a wrapped summary becomes one paragraph.
+            after.fields[i] = if *field == "summary" {
+                text.split_whitespace().collect::<Vec<_>>().join(" ")
+            } else {
+                text
+            };
+            cut.extend(named.iter().map(|s| (s.start, s.end, String::new())));
         }
     }
     for s in secs
@@ -270,10 +311,14 @@ fn lift_card(
         after.related.dedup();
         // The codes line goes; any text after it stays under its header.
         let rest = s.text.split_once('\n').map_or("", |(_, r)| r.trim());
+        let whole = &card.body[s.start..s.end];
         let kept = if rest.is_empty() {
             String::new()
         } else {
-            format!("## Prerequisites\n{rest}\n\n")
+            format!(
+                "## Prerequisites\n{rest}{}",
+                &whole[whole.trim_end().len()..]
+            )
         };
         cut.push((s.start, s.end, kept));
     }
@@ -400,7 +445,7 @@ mod tests {
         assert_eq!(l.after.fields[2], "Because.");
         assert_eq!(
             l.after.body,
-            "## Objective\nDo it.\n\n## Execution gate\nboiler"
+            "## Objective\nDo it.\n\n## Execution gate\nboiler\n"
         );
         assert!(p.left.is_empty());
     }
@@ -411,7 +456,8 @@ mod tests {
         let mut set = card("t", "## Why\nnew\n");
         set.why = "kept".into();
         let cases = [
-            (card("t", "## Scope\na\n\n## Out of scope\nb\n"), "several"),
+            (card("t", "## Why\na\n\n## Problem\nb\n"), "several"),
+            (card("t", "## Summary\none\n\ntwo\n"), "paragraphs"),
             (set, "already"),
             (card("t", &format!("## Summary\n{long}\n")), "cap"),
             (card("t", "## Why\n"), "empty"),
@@ -421,8 +467,36 @@ mod tests {
             assert!(p.lifts.is_empty(), "{word}: {p:?}");
             assert!(p.left[0].why.contains(word), "{word}: {p:?}");
         }
-        let fenced = card("t", "```\n## Why\nin code\n```\n");
-        assert!(lifted(&fenced).lifts.is_empty());
+        for fence in ["```", "~~~"] {
+            let c = card("t", &format!("{fence}\n## Why\nin code\n{fence}\n"));
+            assert!(lifted(&c).lifts.is_empty(), "{fence}");
+        }
+    }
+
+    #[test]
+    fn out_of_scope_keeps_its_meaning_and_a_wrapped_summary_becomes_one_line() {
+        let c = card(
+            "t",
+            "## Scope\nthis\n\n## Out of scope\nthat\n\n## Summary\nwrapped\nacross lines\n",
+        );
+        let p = lifted(&c);
+        let [l] = &p.lifts[..] else { panic!("{p:?}") };
+        assert_eq!(l.after.fields[1], "this\n\nOut of scope: that");
+        assert_eq!(l.after.fields[3], "wrapped across lines");
+        let only = lifted(&card("t", "## Out of scope\nthat\n"));
+        assert_eq!(only.lifts[0].after.fields[1], "Out of scope: that");
+    }
+
+    #[test]
+    fn only_the_joins_are_tidied_and_a_top_level_heading_ends_a_section() {
+        let body = "intro\n\n\n\n```\na\n\n\n\nb\n```\n\n## Why\nBecause.\n\n# Notes\nkept\n";
+        let p = lifted(&card("t", body));
+        let [l] = &p.lifts[..] else { panic!("{p:?}") };
+        assert_eq!(l.after.fields[2], "Because.");
+        assert_eq!(
+            l.after.body,
+            "intro\n\n\n\n```\na\n\n\n\nb\n```\n\n# Notes\nkept\n"
+        );
     }
 
     #[test]
@@ -435,7 +509,7 @@ mod tests {
         odd.parent = Some(parent.id);
         let p = plan(&[parent, child, odd]);
         let [l] = &p.lifts[..] else { panic!("{p:?}") };
-        assert_eq!(l.after.body, "## Objective\nx");
+        assert_eq!(l.after.body, "## Objective\nx\n");
     }
 
     #[test]
@@ -451,7 +525,7 @@ mod tests {
         assert_eq!(l.after.related, want);
         assert_eq!(
             l.after.body,
-            "## Prerequisites\nPlanning does not change status."
+            "## Prerequisites\nPlanning does not change status.\n"
         );
         assert_eq!(p.left.len(), 1);
     }
@@ -471,7 +545,7 @@ mod tests {
         let now = store.get(c.id).expect("get").expect("card");
         assert_eq!(
             (now.why.as_str(), now.body.as_str()),
-            ("Because.", "## Objective\nx")
+            ("Because.", "## Objective\nx\n")
         );
         assert!(matches!(
             apply(&store, &p.lifts, 6).expect("again")[0],
