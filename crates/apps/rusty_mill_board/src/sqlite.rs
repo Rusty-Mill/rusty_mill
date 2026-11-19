@@ -69,6 +69,92 @@ fn migrations() -> Migrations {
     )
 }
 
+/// Every card in the board file at `path`, read without changing anything: the file is opened
+/// read-only (never created, no journal mode or migration), and one that is not at exactly this
+/// build's schema is refused rather than brought up to date. For plans that must write nothing.
+///
+/// # Errors
+/// [`BoardError::Storage`] if the file is missing, cannot be read, is not at this build's
+/// schema version, or has a `-wal`, `-shm` or `-journal` file beside it.
+///
+/// The file must already be stable and recovered: a board that exited cleanly leaves no sidecar.
+/// An immutable read ignores the log, so a sidecar means a board is running, or stopped
+/// uncleanly and has yet to recover; either way it is refused rather than read stale.
+pub fn read_cards(path: impl AsRef<Path>) -> Result<Vec<Card>, BoardError> {
+    // One resolved path for the sidecar checks and the open, so a relative path names the same
+    // file in both. A missing file fails here, and is never created.
+    let path = std::fs::canonicalize(path.as_ref()).map_err(storage)?;
+    let path = path.as_path();
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut side = path.as_os_str().to_owned();
+        side.push(suffix);
+        if Path::new(&side).exists() {
+            return Err(storage(format!(
+                "{} exists: stop the board (let it exit cleanly) before reading its file",
+                Path::new(&side).display()
+            )));
+        }
+    }
+    // `immutable=1`: no locks and no sidecars, so even a WAL-mode file is read without a `-shm`
+    // or `-wal` appearing beside it. Safe here because no sidecar exists to be ignored.
+    let conn = rusqlite::Connection::open_with_flags(
+        immutable_uri(path)?,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(storage)?;
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(storage)?;
+    let want = migrations().latest_version();
+    if version != want {
+        return Err(storage(format!(
+            "the board file is at schema {version}, this build reads {want}"
+        )));
+    }
+    let mut stmt = conn
+        .prepare("SELECT doc FROM cards ORDER BY created_ms, id")
+        .map_err(storage)?;
+    let docs = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage)?;
+    docs.iter().map(|d| card_of(d)).collect()
+}
+
+/// `path` as a SQLite `file:` URI that opens it immutable, percent-encoding all but the
+/// characters a URI path keeps.
+fn immutable_uri(path: &Path) -> Result<String, BoardError> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| storage("the path is not valid UTF-8"))?
+        .replace('\\', "/");
+    // Windows `canonicalize` gives `\\?\C:\…`; SQLite needs `file:/C:/…`.
+    let text = match text.strip_prefix("//?/") {
+        Some(rest) if rest.starts_with("UNC/") => {
+            return Err(storage("a network (UNC) path is not supported"));
+        }
+        Some(rest) => rest.to_owned(),
+        None => text,
+    };
+    let mut uri = String::from("file:");
+    if !text.starts_with('/') {
+        uri.push('/');
+    }
+    for b in text.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'.' | b'_' | b'-' | b'~' | b':' => {
+                uri.push(char::from(b));
+            }
+            _ => uri.push_str(&format!("%{b:02X}")),
+        }
+    }
+    uri.push_str("?immutable=1");
+    Ok(uri)
+}
+
 /// What [`SqliteStore::import`] loads.
 pub struct Import<'a> {
     /// Every card, whole.
@@ -730,5 +816,28 @@ impl MilestoneStore for SqliteStore {
             Some(()) => BoardError::Conflict,
             None => BoardError::NotFound(current.id),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::immutable_uri;
+    use std::path::Path;
+
+    #[test]
+    fn a_windows_verbatim_path_loses_its_verbatim_prefix() {
+        let uri = immutable_uri(Path::new(r"\\?\C:\my board\b.db")).expect("uri");
+        assert_eq!(uri, "file:/C:/my%20board/b.db?immutable=1");
+    }
+
+    #[test]
+    fn a_unix_path_keeps_its_single_leading_slash() {
+        let uri = immutable_uri(Path::new("/srv/b.db")).expect("uri");
+        assert_eq!(uri, "file:/srv/b.db?immutable=1");
+    }
+
+    #[test]
+    fn a_verbatim_unc_path_is_refused() {
+        assert!(immutable_uri(Path::new(r"\\?\UNC\host\share\b.db")).is_err());
     }
 }

@@ -136,3 +136,51 @@ fn a_file_that_is_not_a_database_fails_with_its_path() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("board.db"));
     std::fs::remove_dir_all(dir).expect("cleanup");
 }
+
+/// Every file under `dir` with its bytes.
+fn files(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(dir)
+        .expect("dir")
+        .map(|e| e.expect("entry").path())
+        .map(|p| (p.display().to_string(), std::fs::read(&p).expect("read")))
+        .collect()
+}
+
+#[test]
+fn the_lift_dry_run_reads_the_file_without_creating_migrating_or_touching_anything() {
+    // A directory name with characters a URI would mangle.
+    let dir = dir("lift plan#1");
+    let file = dir.join("board.db");
+    let arg = file.to_str().expect("utf8");
+    {
+        let store = SqliteStore::open(&file).expect("open");
+        let card = rusty_mill_board::domain::Card::new("t", "## Why\nBecause.\n", vec![], 1)
+            .expect("card");
+        store
+            .insert(
+                &card,
+                rusty_mill_board::domain::Event::of(
+                    &card,
+                    rusty_mill_board::domain::EventKind::Created,
+                    "t",
+                ),
+            )
+            .expect("insert");
+    }
+    let before = files(&dir);
+    let out = board(&["--db", arg, "--lift-sections"])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Because."));
+    assert!(stderr.contains("1 card(s) would change"), "{stderr}");
+    assert!(files(&dir) == before, "the dry run changed or added a file");
+
+    let missing = dir.join("none.db");
+    let out = board(&["--db", missing.to_str().expect("utf8"), "--lift-sections"])
+        .output()
+        .expect("run");
+    assert!(!out.status.success());
+    assert!(!missing.exists(), "the dry run created the file");
+}
