@@ -325,6 +325,69 @@ impl SqliteStore {
         tx.commit().map_err(storage)
     }
 
+    /// Every column entry as `(card, at_ms)`, sorted, repeats kept: what a migration compares.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] if SQLite fails or a stored id is malformed.
+    pub fn moves(&self) -> Result<Vec<(Uuid, i64)>, BoardError> {
+        let db = self.db()?;
+        let mut stmt = db
+            .as_raw()
+            .prepare_cached("SELECT card, at_ms FROM moves ORDER BY card, at_ms")
+            .map_err(storage)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        rows.into_iter()
+            .map(|(id, at)| Ok((uuid(&id)?, at)))
+            .collect()
+    }
+
+    /// Every reserved number and its card, by number.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] if SQLite fails or a stored value is malformed.
+    pub fn numbers(&self) -> Result<Vec<(u64, Uuid)>, BoardError> {
+        let db = self.db()?;
+        let mut stmt = db
+            .as_raw()
+            .prepare_cached("SELECT number, card FROM numbers ORDER BY number")
+            .map_err(storage)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        rows.into_iter()
+            .map(|(n, card)| Ok((uint(n)?, uuid(&card)?)))
+            .collect()
+    }
+
+    /// Move everything the write-ahead log holds into the main file and empty the log, so the
+    /// main file alone is the whole database.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] if the checkpoint fails or could not complete (a reader or
+    /// writer held it up): the main file may then lack committed data.
+    pub fn checkpoint(&self) -> Result<(), BoardError> {
+        let (busy, log, done): (i64, i64, i64) = self
+            .db()?
+            .as_raw()
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .map_err(storage)?;
+        // An in-memory or non-WAL database reports -1 for both counts: nothing to move.
+        if busy != 0 || (log >= 0 && log != done) {
+            return Err(storage(format!(
+                "checkpoint incomplete: busy {busy}, {done} of {log} frames moved"
+            )));
+        }
+        Ok(())
+    }
+
     /// The cards a query selects, parsed from their documents.
     fn cards(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Card>, BoardError> {
         let db = self.db()?;

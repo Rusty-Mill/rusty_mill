@@ -399,3 +399,69 @@ fn a_run_removes_only_its_own_staging_files() {
     );
     std::fs::remove_dir_all(dir).expect("cleanup");
 }
+
+#[test]
+fn the_published_file_alone_is_the_whole_database() {
+    let dir = dir("alone");
+    let path = dir.join("board.db");
+    let (_tick, source) = seeded();
+    assert!(migrate_to_file(&source, &path).expect("migrate").exact());
+    // Only the main file travels: no log beside it.
+    let elsewhere = dir.join("moved");
+    std::fs::create_dir_all(&elsewhere).expect("dir");
+    std::fs::copy(&path, elsewhere.join("board.db")).expect("copy");
+    let copy = SqliteStore::open(elsewhere.join("board.db")).expect("open");
+    assert_eq!(copy.list(), source.list());
+    assert_eq!(copy.moves().expect("moves").len(), 3);
+    assert!(
+        SqliteStore::open_in_memory()
+            .expect("open")
+            .checkpoint()
+            .is_ok()
+    );
+    std::fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
+fn verification_compares_every_move_and_reservation_not_just_who_moved() {
+    use rusty_mill_board::migrate::verify;
+    use rusty_mill_board::sqlite::Import;
+    use rusty_sqlite::rusqlite::Connection;
+    let (_tick, source) = seeded();
+    let cards = source.list().expect("list");
+    let (a, b) = (cards[0].id, cards[1].id);
+    let moves = [(a, 100), (a, 200), (b, 150)];
+    let numbers = [(1, a), (2, b)];
+    let expected = Import {
+        cards: &cards,
+        numbers: &numbers,
+        moves: &moves,
+        milestones: &[],
+    };
+    let corruptions = [
+        "DELETE FROM moves WHERE card = '{a}' AND at_ms = 200",
+        "UPDATE moves SET at_ms = at_ms + 1 WHERE card = '{b}'",
+        "DELETE FROM numbers WHERE number = 1",
+        "UPDATE numbers SET card = '{b}' WHERE number = 1",
+    ];
+    for sql in corruptions {
+        let dir = dir("verify");
+        let path = dir.join("board.db");
+        let target = SqliteStore::open(&path).expect("open");
+        target.import(&expected).expect("import");
+        assert_eq!(verify(&expected, &target), Ok(vec![]), "a faithful copy");
+        drop(target);
+        let raw = Connection::open(&path).expect("raw");
+        raw.execute(
+            &sql.replace("{a}", &a.to_string())
+                .replace("{b}", &b.to_string()),
+            [],
+        )
+        .expect("corrupt");
+        drop(raw);
+        let target = SqliteStore::open(&path).expect("reopen");
+        let found = verify(&expected, &target).expect("verify");
+        assert_eq!(found.len(), 1, "{sql}: {found:?}");
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+}

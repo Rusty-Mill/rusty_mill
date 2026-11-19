@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::domain::{BoardError, Card, Span};
+use crate::domain::{BoardError, Card};
 use crate::milestones::MilestoneStore;
 use crate::sqlite::{Import, SqliteStore};
 use crate::store::Store;
@@ -122,49 +122,40 @@ pub fn migrate<T: TickApi>(source: &TickStore<T>, target: &SqliteStore) -> Resul
     }
     let mut numbers = history.reservations.clone();
     numbers.sort_unstable();
+    let expected = Import {
+        cards: &cards,
+        numbers: &numbers,
+        moves: &moves,
+        milestones: &milestones,
+    };
     target
-        .import(&Import {
-            cards: &cards,
-            numbers: &numbers,
-            moves: &moves,
-            milestones: &milestones,
-        })
+        .import(&expected)
         .map_err(|e| format!("writing SQLite: {e}"))?;
-    verify(
-        &mut report,
-        &cards,
-        &milestones,
-        &history.reservations,
-        &moves,
-        target,
-    )?;
+    report.mismatches.extend(verify(&expected, target)?);
     Ok(report)
 }
 
-/// Read `target` back through the ports and record every difference from what was loaded.
-fn verify(
-    report: &mut Report,
-    cards: &[Card],
-    milestones: &[crate::milestones::Milestone],
-    reservations: &[(u64, Uuid)],
-    moves: &[(Uuid, i64)],
-    target: &SqliteStore,
-) -> Result<(), String> {
-    let back = target.list().map_err(|e| format!("reading SQLite: {e}"))?;
-    if back.len() != cards.len() {
-        report.mismatches.push(format!(
+/// Read `target` back and list every difference from what was loaded: each card whole,
+/// milestones, every number reservation, and every move with its time and repeats.
+///
+/// # Errors
+/// A `String` if `target` cannot be read.
+pub fn verify(expected: &Import<'_>, target: &SqliteStore) -> Result<Vec<String>, String> {
+    let read = |e: BoardError| format!("reading SQLite: {e}");
+    let mut found = Vec::new();
+    let back = target.list().map_err(read)?;
+    if back.len() != expected.cards.len() {
+        found.push(format!(
             "{} cards read back, {} written",
             back.len(),
-            cards.len()
+            expected.cards.len()
         ));
     }
     let back: BTreeMap<Uuid, &Card> = back.iter().map(|c| (c.id, c)).collect();
-    for card in cards {
+    for card in expected.cards {
         match back.get(&card.id) {
-            None => report
-                .mismatches
-                .push(format!("card {} is missing", card.id)),
-            Some(got) if *got != card => report.mismatches.push(format!(
+            None => found.push(format!("card {} is missing", card.id)),
+            Some(got) if *got != card => found.push(format!(
                 "card {} differs in: {}",
                 card.id,
                 differing(card, got)
@@ -172,39 +163,42 @@ fn verify(
             Some(_) => {}
         }
     }
-    let mut want = milestones.to_vec();
+    let mut want = expected.milestones.to_vec();
     want.sort_by_key(|m| m.id);
-    let got = target
-        .milestones()
-        .map_err(|e| format!("reading SQLite: {e}"))?;
+    let got = target.milestones().map_err(read)?;
     if got != want {
-        report.mismatches.push(format!(
+        found.push(format!(
             "milestones differ: {} read back, {} written",
             got.len(),
             want.len()
         ));
     }
-    let top = reservations.iter().map(|(n, _)| *n).max().unwrap_or(0);
-    let got_top = target
-        .highest_reserved()
-        .map_err(|e| format!("reading SQLite: {e}"))?;
-    if got_top != top {
-        report.mismatches.push(format!(
-            "highest reserved number is {got_top}, expected {top}"
+    let mut numbers = expected.numbers.to_vec();
+    numbers.sort_unstable();
+    let got = target.numbers().map_err(read)?;
+    if got != numbers {
+        found.push(format!(
+            "number reservations differ: {} read back, {} written",
+            got.len(),
+            numbers.len()
         ));
     }
-    let moved = target
-        .moved_in(Span::default())
-        .map_err(|e| format!("reading SQLite: {e}"))?;
-    let expected: BTreeSet<Uuid> = moves.iter().map(|(id, _)| *id).collect();
-    if moved != expected {
-        report.mismatches.push(format!(
-            "{} cards with moves read back, {} expected",
-            moved.len(),
-            expected.len()
+    let mut moves: Vec<(Uuid, i64)> = expected
+        .moves
+        .iter()
+        .copied()
+        .filter(|(id, _)| back.contains_key(id))
+        .collect();
+    moves.sort_unstable();
+    let got = target.moves().map_err(read)?;
+    if got != moves {
+        found.push(format!(
+            "moves differ: {} read back, {} written (card and time compared)",
+            got.len(),
+            moves.len()
         ));
     }
-    Ok(())
+    Ok(found)
 }
 
 /// Copy `source` into a new file at `path`, which appears only if the copy is exact.
@@ -232,7 +226,16 @@ pub fn migrate_to_file<T: TickApi>(source: &TickStore<T>, path: &Path) -> Result
     };
     let outcome = SqliteStore::open(&partial)
         .map_err(|e| format!("{}: {e}", partial.display()))
-        .and_then(|target| migrate(source, &target));
+        .and_then(|target| {
+            let report = migrate(source, &target)?;
+            // The main file alone must be the whole database: it is all that gets published.
+            if report.exact() {
+                target
+                    .checkpoint()
+                    .map_err(|e| format!("making {} self-contained: {e}", partial.display()))?;
+            }
+            Ok(report)
+        });
     let result = match outcome {
         Ok(report) if report.exact() => std::fs::hard_link(&partial, path)
             .map(|()| report)
