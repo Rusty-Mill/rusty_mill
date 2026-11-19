@@ -28,6 +28,8 @@ mod echo;
 #[cfg(target_os = "linux")]
 pub mod endpoint;
 #[cfg(any(target_os = "linux", windows))]
+mod forward;
+#[cfg(any(target_os = "linux", windows))]
 mod history;
 #[cfg(any(target_os = "linux", windows))]
 mod keys;
