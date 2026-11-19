@@ -32,6 +32,11 @@
 //! directory, and with `--wait` waits for it the same way. Both give up
 //! after `--timeout SECS` with exit code 124.
 //!
+//! `forward [--block B] [LOCAL:]REMOTE...` (C81) attaches to the block, takes
+//! its input lease and tunnels loopback ports of the server's host to this
+//! machine's, printing `LOCAL<TAB>REMOTE` for each, until the block closes
+//! or it is stopped. It is not for chaining with `+`.
+//!
 //! Output is text, or one JSON object per line with `--json`. The exit code
 //! is an [`Exit`]; an interrupt ends the process with the signal, which a
 //! shell reports as 130. An embedder bounds a command with [`run_until`].
@@ -69,7 +74,7 @@ use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rusty_mux_core::Event;
+use rusty_mux_core::{BlockId, Event};
 use rusty_mux_proto::schema::{CATALOG, Returns, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Message};
 use rusty_uuid::Uuid;
@@ -509,6 +514,7 @@ pub fn run_until(
         | Command::Watch { .. }
         | Command::Wait(_)
         | Command::Run(_)
+        | Command::Forward(_)
         | Command::Overview
         | Command::ServerStop => {}
     }
@@ -524,9 +530,11 @@ pub fn run_until(
     );
     let tracker = (follows && (env.hosts.is_some() || env.config.is_some()))
         .then(|| hosts::Tracker::new(env.hosts.clone(), env.config.clone()));
-    let stop = match tracker {
-        Some(_) => stop.polling(),
-        None => stop.clone(),
+    // A forward polls too, or its reading thread could not notice the end.
+    let polls = tracker.is_some() || matches!(invocation.command, Command::Forward(_));
+    let stop = match polls {
+        true => stop.polling(),
+        false => stop.clone(),
     };
     if let Command::Watch { after } = invocation.command {
         return run_watch(
@@ -772,6 +780,25 @@ fn execute(
         Command::Run(run) => session.run(run),
         Command::Overview => session.overview(),
         Command::ServerStop => session.stop_server(),
+        Command::Forward(forward) => {
+            let (features, block) = session.calls_with(&forward.prepare, Features::PORT_FORWARD)?;
+            if !features.contains(Features::PORT_FORWARD) {
+                return Err(Failure::Failed(
+                    "forward: this server does not offer port forwards".into(),
+                ));
+            }
+            let block = block.ok_or_else(|| Failure::Failed("forward: no block".into()))?;
+            let (reader, writer, pending) = session.conn.split()?;
+            let json = session.json;
+            run_forward(
+                (reader, writer, pending),
+                forward,
+                BlockId::from_uuid(block),
+                json,
+                stop,
+                &mut *session.out,
+            )
+        }
         Command::Help(_)
         | Command::Api(_)
         | Command::Do { .. }
@@ -786,6 +813,43 @@ fn execute(
         | Command::Bridge
         | Command::Own
         | Command::Completion(_) => Ok(Exit::Ok),
+    }
+}
+
+/// `forward`: listens on each port and tunnels it until the block closes or
+/// `stop` says so. The connection has attached to `block` and holds its
+/// lease.
+#[cfg(any(unix, windows))]
+fn run_forward(
+    (reader, writer, pending): (conn::Stream, conn::Stream, Vec<u8>),
+    forward: &cli::Forward,
+    block: BlockId,
+    json: bool,
+    stop: &Stop,
+    out: &mut dyn Write,
+) -> Result<Exit, Failure> {
+    use rusty_mux_client::forward::{Bound, Ended};
+    let mut said = Ok(());
+    let mut bound = |Bound { local, remote }: Bound| {
+        let line = match json {
+            true => format!("{{\"local\":{local},\"remote\":{remote}}}"),
+            false => format!("{local}\t{remote}"),
+        };
+        said = writeln!(out, "{line}").and_then(|()| out.flush());
+    };
+    let ended = rusty_mux_client::forward::run(
+        reader,
+        writer,
+        pending,
+        block,
+        &forward.ports,
+        &|| stop.is_cancelled() || stop.check().is_err(),
+        &mut bound,
+    )?;
+    said.map_err(|e| Failure::Failed(format!("writing output: {e}")))?;
+    match ended {
+        Ended::Stopped | Ended::BlockClosed => Ok(Exit::Ok),
+        Ended::Lost(e) => Err(e.into()),
     }
 }
 
@@ -1076,17 +1140,28 @@ impl<S: io::Read + Write> Session<'_, S> {
     }
 
     fn calls(&mut self, calls: &[Call]) -> Result<(), Failure> {
+        self.calls_with(calls, Features::NONE).map(|_| ())
+    }
+
+    /// [`Session::calls`], also asking for `extra`. The features the server
+    /// granted, and the block the last call named.
+    fn calls_with(
+        &mut self,
+        calls: &[Call],
+        extra: Features,
+    ) -> Result<(Features, Option<Uuid>), Failure> {
         // Everything any method needs, and sync to confirm unanswered ones.
         // The screen an attach sends is ignored.
-        let wanted = CATALOG
-            .iter()
-            .fold(Features::SYNC, |all, m| all.union(m.all_needs()));
+        let wanted = CATALOG.iter().fold(Features::SYNC.union(extra), |all, m| {
+            all.union(m.all_needs())
+        });
         let (features, _) = self.hello(wanted, None)?;
         // Refuse a chain the server cannot run before any of it runs.
         for call in calls {
             require(features, call)?;
         }
         let mut reqs = 1..;
+        let mut block = None;
         for call in calls {
             // Listed afresh for each call that names a target, so it can
             // name what an earlier call in the chain created or renamed.
@@ -1095,6 +1170,13 @@ impl<S: io::Read + Write> Session<'_, S> {
                 false => Vec::new(),
             };
             let args = self.resolve(call, &entries)?;
+            block = args
+                .iter()
+                .find_map(|(name, value)| match (*name, value) {
+                    ("block", Value::Id(id)) => Some(*id),
+                    _ => None,
+                })
+                .or(block);
             let req = reqs.next().unwrap_or(u64::MAX);
             let message = call
                 .method
@@ -1113,7 +1195,7 @@ impl<S: io::Read + Write> Session<'_, S> {
             };
             self.print(name, reply)?;
         }
-        Ok(())
+        Ok((features, block))
     }
 
     /// Every entity, for resolving targets.

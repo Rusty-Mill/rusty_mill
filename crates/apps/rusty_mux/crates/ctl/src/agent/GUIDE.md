@@ -85,6 +85,22 @@ block's input lease, and a user typing in that block holds it. Only type into
 a block someone else uses when the user asked you to. Requests joined by `+`
 run in order on one connection.
 
+## Reaching a port of this machine
+
+A dev server in a block listens on this machine; `rusty-mux-ctl terminal.ports
+--block dev-server` lists the ports (`PORT<TAB>PID<TAB>NAME`). Each `forward`
+line below tunnels one to the machine you run `rusty-mux-ctl` on:
+
+```sh
+rusty-mux-ctl forward --block dev-server 3000        # prints LOCAL<TAB>REMOTE, then runs
+rusty-mux-ctl forward --block dev-server 8080:3000   # listens on 127.0.0.1:8080
+```
+
+It listens on 127.0.0.1 only, the same port when free, and runs until the
+block closes or you stop it, so start it in the background. It attaches to
+the block and takes its input lease, so it fails while a user typing there
+holds the lease; ask before taking it from them.
+
 ## Finding out more
 
 - `rusty-mux-ctl list` shows every session, window, block and client; each
