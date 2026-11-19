@@ -143,6 +143,11 @@ pub enum Event {
         pid: u32,
         name: String,
     },
+    /// The TCP ports the block's programs listen on changed; the
+    /// `terminal.ports` block method reads them.
+    PortsChanged {
+        block: BlockId,
+    },
     /// The session's name changed to `name`.
     SessionRenamed {
         session: SessionId,

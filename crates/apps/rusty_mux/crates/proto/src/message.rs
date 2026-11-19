@@ -2330,6 +2330,7 @@ mod kind {
     pub const TAILSCALE_STATUS_CHANGED: u64 = 34;
     pub const SHARE_CHANGED: u64 = 35;
     pub const FLOATS_CHANGED: u64 = 36;
+    pub const PORTS_CHANGED: u64 = 37;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -2520,6 +2521,10 @@ fn put_event(out: &mut Out, event: &Event) {
             out.varint(KIND, kind::STATUS_REMOVED)
                 .uuid(BLOCK, block.uuid())
                 .bytes(STATUS, id.as_bytes());
+        }
+        E::PortsChanged { block } => {
+            out.varint(KIND, kind::PORTS_CHANGED)
+                .uuid(BLOCK, block.uuid());
         }
         E::ProcessChanged {
             block,
@@ -2738,6 +2743,9 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
             block: block(f, BLOCK)?,
             title: f.string(TITLE)?,
             body: f.string(BODY)?,
+        },
+        kind::PORTS_CHANGED => E::PortsChanged {
+            block: block(f, BLOCK)?,
         },
         kind::PROCESS_CHANGED => E::ProcessChanged {
             block: block(f, BLOCK)?,

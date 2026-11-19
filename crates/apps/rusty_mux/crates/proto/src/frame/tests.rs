@@ -666,6 +666,7 @@ fn every_event_round_trips() {
             title: String::new(),
             body: "done; ok".into(),
         },
+        Event::PortsChanged { block },
         Event::ProcessChanged {
             block,
             pid: u32::MAX,
