@@ -10,9 +10,9 @@ Where it fills a gap, it says so and marks it **[filled]**. D66's approval cover
 the §8 list named in section 7; nothing here adds to that list. Every **[filled]**
 item goes to Nano before the card that needs it is built (section 8).
 
-Drift noted: D164 (the freeze lift that releases #1402) is in remind-me
-(`mem_42b9149b06e84d01bd4bea07d64fb1dd` cites it) but not yet in this folder's
-DECISIONS.md. The expert records it there.
+Drift noted: D164 (the freeze lift that releases #1402) is copied onto this
+branch from PR #1813, which holds D163 and D164 and isn't merged yet. Expect a
+trivial conflict in D164 when it merges (Nano concurred, 2026-11-19).
 
 ## Ownership
 
@@ -130,9 +130,11 @@ ignored (D101); the agent gets only the orch-minted token.
 approved (D66); its contents are **[filled]**: the dependencies INTENT.md's
 toolchain needs, fetched before launch and mounted read-only.
 
-Waits on: mux rows C75 #749, C76 #750, C78 #752; Q15 (which credential the Claude
-CLI uses inside the v0 jail). No account credential enters `jail.json` before
-Nano answers Q15.
+Waits on: mux rows C75 #749, C76 #750, C78 #752. Q15 is answered (D165): the
+Claude CLI uses Nano's subscription. Still waits on how that login reaches the
+jail without breaking D101 (no secrets inside; `jail.json`'s `token` slot carries
+only an orch-minted token, D107) and on a paid-run approval (D134). No account
+credential enters `jail.json` until Nano settles both.
 
 Tests (design §11): inside the jail `RUSTY_MUX_SOCKET` is unset, its path doesn't
 exist (needs the mount namespace; Landlock covers v0, D107), `socket(AF_UNIX)`
@@ -175,7 +177,7 @@ rescan under 1 h after adding 50 GB; crash loss at most a few minutes.
                          └─► #1319 synthetic tree
 #1402 this plan ─► #1404 Builder job kind ─┐
               └──► #1405 untested check    ├─► #1318 builder launch via mux ─► #1320 the run
-                                           │       (waits on #749, #750, #752, Q15)
+                                           │       (waits on #749, #750, #752, Q15 delivery, D134)
 #1236, #1238, #1319 ───────────────────────┘
 ```
 
@@ -189,5 +191,5 @@ dottiusmaximus; agents never queue or merge.
 
 Everything marked **[filled]**: the two builder counts (section 3), the
 `builder_session` columns (section 4), how Windows-only lines are recognised
-(section 5), the mirror's contents (section 6). Open and unchanged: Q15 (credential
-in the jail), Q4 (golden-set sign-off), and the model for the holdout lens.
+(section 5), the mirror's contents (section 6). Open and unchanged: Q15 delivery (how the
+subscription login reaches the jail), D134 paid-run approval, Q4 (golden-set sign-off), and the model for the holdout lens.
