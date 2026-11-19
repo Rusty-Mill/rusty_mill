@@ -209,21 +209,19 @@ fn verify(
 
 /// Copy `source` into a new file at `path`, which appears only if the copy is exact.
 ///
-/// The copy is built in `path` + `.partial` and renamed into place after it verifies, so a
-/// failed or interrupted run leaves no file a board could be started on, and can simply be run
-/// again.
+/// The copy is built in a staging file of this run's own (named for it, in `path`'s directory),
+/// then published by a hard link, which fails rather than replace a file that appeared at
+/// `path` meanwhile. A failed or interrupted run leaves no file a board could be started on, and
+/// removes only its own staging files, so it can simply be run again, even beside another run.
 ///
 /// # Errors
-/// A `String` if `path` already exists, or as for [`migrate`].
+/// A `String` if `path` already exists (now or when publishing), or as for [`migrate`].
 pub fn migrate_to_file<T: TickApi>(source: &TickStore<T>, path: &Path) -> Result<Report, String> {
     if path.exists() {
-        return Err(format!(
-            "{} already exists: the migration writes a new file",
-            path.display()
-        ));
+        return Err(exists(path));
     }
     let mut name = path.as_os_str().to_owned();
-    name.push(".partial");
+    name.push(format!(".{}.partial", Uuid::new_v4().simple()));
     let partial = PathBuf::from(name);
     let discard = || {
         for suffix in ["", "-wal", "-shm"] {
@@ -232,20 +230,28 @@ pub fn migrate_to_file<T: TickApi>(source: &TickStore<T>, path: &Path) -> Result
             let _ = std::fs::remove_file(file);
         }
     };
-    discard();
     let outcome = SqliteStore::open(&partial)
         .map_err(|e| format!("{}: {e}", partial.display()))
         .and_then(|target| migrate(source, &target));
-    let report = match outcome {
-        Ok(report) if report.exact() => report,
-        other => {
-            discard();
-            return other;
-        }
+    let result = match outcome {
+        Ok(report) if report.exact() => std::fs::hard_link(&partial, path)
+            .map(|()| report)
+            .map_err(|e| {
+                if path.exists() {
+                    exists(path)
+                } else {
+                    format!("publishing {}: {e}", path.display())
+                }
+            }),
+        other => other,
     };
-    std::fs::rename(&partial, path).map_err(|e| {
-        discard();
-        format!("moving {} into place: {e}", partial.display())
-    })?;
-    Ok(report)
+    discard();
+    result
+}
+
+fn exists(path: &Path) -> String {
+    format!(
+        "{} already exists: the migration writes a new file",
+        path.display()
+    )
 }

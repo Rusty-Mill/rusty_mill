@@ -285,7 +285,11 @@ fn a_failed_file_migration_leaves_no_file_and_can_be_run_again() {
             .len(),
         2
     );
-    assert!(!dir.join("board.db.partial").exists());
+    assert_eq!(
+        std::fs::read_dir(&dir).expect("dir").count(),
+        1,
+        "no staging left behind"
+    );
     std::fs::remove_dir_all(dir).expect("cleanup");
 }
 
@@ -336,4 +340,62 @@ fn an_unreadable_board_or_comment_document_is_reported_and_nothing_is_written() 
             "{kind}: nothing written"
         );
     }
+}
+
+/// rusty_tick that creates `path` the first time the move history is read: someone else
+/// creating the destination while the copy runs.
+struct Intruder {
+    tick: FakeTick,
+    path: std::path::PathBuf,
+}
+
+impl TickApi for Intruder {
+    fn send(&self, r: &TickRequest<'_>) -> Result<(u16, serde_json::Value), BoardError> {
+        if r.path.starts_with("/moves?") && !self.path.exists() {
+            std::fs::write(&self.path, "someone else's").expect("write");
+        }
+        self.tick.send(r)
+    }
+}
+
+#[test]
+fn a_destination_created_during_the_copy_is_never_replaced() {
+    let dir = dir("race");
+    let path = dir.join("board.db");
+    let source = TickStore::new(Intruder {
+        tick: seeded().0,
+        path: path.clone(),
+    });
+    let err = migrate_to_file(&source, &path).expect_err("refused");
+    assert!(err.contains("already exists"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        "someone else's"
+    );
+    assert_eq!(
+        std::fs::read_dir(&dir).expect("dir").count(),
+        1,
+        "no staging left behind"
+    );
+    std::fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
+fn a_run_removes_only_its_own_staging_files() {
+    let dir = dir("own");
+    let path = dir.join("board.db");
+    let other = dir.join("board.db.otherrun.partial");
+    std::fs::write(&other, "another run's copy").expect("write");
+    let (_tick, source) = seeded();
+    assert!(migrate_to_file(&source, &path).expect("migrate").exact());
+    assert_eq!(
+        std::fs::read_to_string(&other).expect("read"),
+        "another run's copy"
+    );
+    assert_eq!(
+        std::fs::read_dir(&dir).expect("dir").count(),
+        2,
+        "the copy and the other run's file"
+    );
+    std::fs::remove_dir_all(dir).expect("cleanup");
 }
