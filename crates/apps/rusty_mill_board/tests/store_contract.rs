@@ -110,3 +110,66 @@ fn stale_replace_conflicts() {
         Err(BoardError::Conflict)
     );
 }
+
+/// The typed fields (#1568) survive a write and a read on every adapter, an empty one clears,
+/// and an over-cap one writes nothing.
+fn typed_fields<S: Store>(board: &Board<S>) {
+    use rusty_mill_board::domain::Edit;
+    let human = board.roles().actor("n", "human").expect("role");
+    let card = board.add(&human, "t", "", vec![]).expect("add");
+    let set = Edit {
+        acceptance: Some("done when green"),
+        scope: Some("the card only"),
+        why: Some("agents re-parse headers"),
+        summary: Some("typed fields"),
+        ..Edit::default()
+    };
+    board.edit_at(card.id, &human, None, &set).expect("set");
+    let read = board.get(card.id).expect("get");
+    assert_eq!(
+        [&read.acceptance, &read.scope, &read.why, &read.summary],
+        [
+            "done when green",
+            "the card only",
+            "agents re-parse headers",
+            "typed fields"
+        ]
+    );
+    let clear = Edit {
+        why: Some(""),
+        ..Edit::default()
+    };
+    board.edit_at(card.id, &human, None, &clear).expect("clear");
+    let long = "x".repeat(321);
+    let over = Edit {
+        summary: Some(&long),
+        ..Edit::default()
+    };
+    assert!(matches!(
+        board.edit_at(card.id, &human, None, &over),
+        Err(BoardError::Invalid(_))
+    ));
+    let read = board.get(card.id).expect("get");
+    assert_eq!(
+        (read.why.as_str(), read.summary.as_str()),
+        ("", "typed fields")
+    );
+    assert_eq!(read.acceptance, "done when green");
+}
+
+#[test]
+fn typed_fields_on_every_store() {
+    typed_fields(&Board::with_clock(
+        MemStore::default(),
+        Roles::default(),
+        clock,
+    ));
+    let store = SqliteStore::open_in_memory().expect("open");
+    typed_fields(&Board::with_clock(store, Roles::default(), clock));
+    let tick = fake_tick::FakeTick::default();
+    typed_fields(&Board::with_clock(
+        TickStore::new(tick),
+        Roles::default(),
+        clock,
+    ));
+}
