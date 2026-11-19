@@ -6482,14 +6482,16 @@ impl WindowState<'_> {
                 }
             }
             WindowEvent::DroppedFile(path) => {
-                // Paste the dropped file's shell-quoted path (plus a trailing
-                // space, so several drops land as separate arguments), same
-                // bracketed-paste handling as a clipboard paste.
-                let quoted = format!("{} ", shell_quote(&path.to_string_lossy()));
-                if let Some(p) = self.pane_mut() {
-                    let bracketed = p.grid.lock().bracketed_paste;
-                    let _ = p.writer.write(&encode_paste(&quoted, bracketed));
-                }
+                let overview = self.overview.is_open();
+                let Some(p) = self.pane_mut() else {
+                    return;
+                };
+                let bracketed = p.grid.lock().bracketed_paste;
+                let Some(bytes) = dropped_file_paste(&path.to_string_lossy(), bracketed, overview)
+                else {
+                    return;
+                };
+                let _ = p.writer.write(&bytes);
                 self.snap_to_bottom();
             }
             WindowEvent::RedrawRequested => self.redraw(),
@@ -6748,7 +6750,7 @@ impl WindowState<'_> {
                     // reaching the child either.
                     match ime_commit_target(
                         self.searching.is_some(),
-                        self.overlay.is_some(),
+                        self.overlay.is_some() || self.overview.is_open(),
                         self.copy_mode.is_some(),
                     ) {
                         ImeCommitTarget::SearchBar => {
@@ -7634,9 +7636,10 @@ enum ImeCommitTarget {
     SearchBar,
     /// Nothing else owns the keyboard: forward to the focused pane's child.
     Pane,
-    /// An overlay (settings/shell menu) or copy mode owns the keyboard and
-    /// has no free-text field of its own — the committed text is dropped
-    /// rather than leaking into the background shell underneath it.
+    /// An overlay (settings/shell menu, the session overview) or copy mode
+    /// owns the keyboard and has no free-text field of its own — the
+    /// committed text is dropped rather than leaking into the background
+    /// shell underneath it.
     Dropped,
 }
 
@@ -7648,6 +7651,17 @@ fn ime_commit_target(searching: bool, overlay: bool, copy_mode: bool) -> ImeComm
     } else {
         ImeCommitTarget::Pane
     }
+}
+
+/// What a file dropped on the window writes to the focused pane: its
+/// shell-quoted path plus a space (so several drops land as separate
+/// arguments), with the same bracketed-paste handling as a clipboard paste.
+/// Nothing while the session overview covers the panes (gui-design D98).
+fn dropped_file_paste(path: &str, bracketed: bool, overview_open: bool) -> Option<Vec<u8>> {
+    if overview_open {
+        return None;
+    }
+    Some(encode_paste(&format!("{} ", shell_quote(path)), bracketed))
 }
 
 /// A Ctrl+=/Ctrl+-/Ctrl+0 font zoom.
@@ -8150,7 +8164,7 @@ mod tests {
         ConsumedKeys, Copied, Hit, ImeCommitTarget, KeyRelease, MenuKind, SETTINGS_CARDS_TOP,
         SETTINGS_FOOTER_H, SETTINGS_ROW_H, SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SelectionDrag,
         SettingsHit, UI_FONT_PX, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text,
-        drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
+        drag_scroll_direction, dropped_file_paste, encode_paste, fmt_runtime, ime_commit_target,
         ime_cursor_area_origin, menu_items, osc52_reply, pane_pixel_point, physical_px,
         pressed_after_focus, put_text, read_git_branch, release_input, route_key_down,
         settings_hit, settings_value_end, settings_visible, widget_text, zoom_px,
@@ -8927,6 +8941,25 @@ mod tests {
         assert_eq!(
             ime_commit_target(false, false, true),
             ImeCommitTarget::Dropped
+        );
+    }
+
+    #[test]
+    fn a_dropped_file_writes_nothing_while_the_overview_is_open() {
+        assert_eq!(dropped_file_paste("/tmp/a b", false, true), None);
+        assert_eq!(dropped_file_paste("/tmp/a b", true, true), None);
+    }
+
+    #[test]
+    fn a_dropped_file_pastes_its_quoted_path_otherwise() {
+        let quoted = format!("{} ", super::shell_quote("/tmp/a b"));
+        assert_eq!(
+            dropped_file_paste("/tmp/a b", false, false),
+            Some(encode_paste(&quoted, false))
+        );
+        assert_eq!(
+            dropped_file_paste("/tmp/a b", true, false),
+            Some(encode_paste(&quoted, true))
         );
     }
 
