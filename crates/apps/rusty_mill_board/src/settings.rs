@@ -574,13 +574,13 @@ struct AuditRead {
     limit: Option<usize>,
 }
 
-/// Append `line` and a newline to `path`, creating it owner-only.
 /// Refusal records stop being appended once the audit file is this long, in bytes.
 pub const MAX_REFUSAL_FILE: u64 = 4 << 20;
 
 /// The longest reason kept in a refusal record, in characters.
 const MAX_WHY: usize = 200;
 
+/// Append `line` and a newline to `path`, creating it owner-only.
 fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
