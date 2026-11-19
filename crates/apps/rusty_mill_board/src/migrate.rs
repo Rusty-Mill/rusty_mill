@@ -214,8 +214,8 @@ pub fn migrate_to_file<T: TickApi>(source: &TickStore<T>, path: &Path) -> Result
     if path.exists() {
         return Err(exists(path));
     }
-    // A log left beside a missing file would be replayed into the new one by SQLite.
-    for suffix in ["-wal", "-shm"] {
+    // A log or rollback journal left beside a missing file would be replayed into the new one.
+    for suffix in ["-wal", "-shm", "-journal"] {
         let mut stray = path.as_os_str().to_owned();
         stray.push(suffix);
         if Path::new(&stray).exists() {

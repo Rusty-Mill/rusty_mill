@@ -494,14 +494,20 @@ fn a_milestone_task_with_an_unreadable_version_is_reported_not_dropped() {
 
 #[test]
 fn a_log_left_beside_a_missing_destination_is_refused() {
-    let dir = dir("stray");
-    let path = dir.join("board.db");
-    std::fs::write(dir.join("board.db-wal"), "stale").expect("write");
-    let (_tick, source) = seeded();
-    let err = migrate_to_file(&source, &path).expect_err("refused");
-    assert!(err.contains("-wal"), "{err}");
-    assert!(!path.exists());
-    std::fs::remove_dir_all(dir).expect("cleanup");
+    for sidecar in ["board.db-wal", "board.db-shm", "board.db-journal"] {
+        let dir = dir("stray");
+        let path = dir.join("board.db");
+        std::fs::write(dir.join(sidecar), "stale").expect("write");
+        let (_tick, source) = seeded();
+        let err = migrate_to_file(&source, &path).expect_err("refused");
+        assert!(err.contains(sidecar), "{err}");
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join(sidecar)).expect("read"),
+            "stale"
+        );
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
 }
 
 #[test]
