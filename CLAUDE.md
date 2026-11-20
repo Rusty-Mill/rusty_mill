@@ -13,6 +13,7 @@ Never ask Nano first. Most specific row first; paths not listed have no expert y
 | `crates/libs/ui/rusty_term/**`, `crates/libs/ui/rusty_conhost/**`, `crates/apps/rusty_mux/**`, `crates/platform/rustils/crates/platform-windows/**` (condrv), `docs/projects/rusty_term/**`, `docs/projects/term/**`, `docs/projects/mux/**` | `rusty-term-expert` |
 | `crates/apps/rusty_bbp_host/**`, `crates/libs/protocol/rusty_bbp/**`, `crates/apps/rusty_orch/**`, `crates/foundation/rusty_crdt/**`, `docs/bbp/**`, `docs/projects/let-em-loose/**`, `crates/apps/rusty_mill_board/**` for #595 inbox work, and any Mill Board card tagged `let-em-loose` | `let-em-loose-expert`. It records Nano's answers only with a reference to where he said them (message link or id, card comment, or remind-me id), and its open questions go to `docs/projects/let-em-loose/handoff/OPEN_QUESTIONS.md`. Every Let Em Loose design is written to `docs/projects/let-em-loose/` and committed in its first draft PR, never only to `/mnt/project-files/` or session scratch (Nano, 2026-11-04, D94). |
 | `docs/projects/ai-env-manager/**`, `library/**` (design changes; adding an entry needs no expert), and `crates/apps/ai_env_manager/**` once it exists | `ai-env-manager-expert`. `library/` is Ai Env Manager's domain model and is absorbed over time (pack D14). |
+| `crates/libs/storage/rusty_fuse/**`, `docs/projects/rusty_fuse/**`, and any Mill Board card tagged `rusty_fuse` | `rusty-fuse-expert`. Sovereign cross-platform userspace filesystem (FUSE, ProjFS, FSKit). The first real backend is undecided; the expert escalates it. |
 | `docs/projects/millwright/**` and any Mill Board card tagged `millwright`, for programme questions only (phase, gate, sequencing, which milestone, what waits). A system's design still goes to its row above. | `millwright-expert` |
 
 Call it with `subagent_type: "<expert>"`. **Fallback:** if that type isn't available (cloud sessions can
@@ -27,8 +28,11 @@ the paths. Until `rusty-term-design-expert.md` lands, GUI visual-design question
 - ESCALATE: ask Nano exactly that block: question, options, recommendation. Nothing more.
 - When Nano answers, pass the answer to the expert with his words and where he said them. Don't write
   the pack's DECISIONS.md or remind-me decisions yourself; one writer keeps each answer recorded once.
-- Non-blocking? Take the expert's recommendation, keep going, and let the expert add the question to
-  the pack's OPEN_QUESTIONS.md.
+- Non-blocking *default*? Take the expert's recommendation, keep going, and let the expert add the
+  question to the pack's OPEN_QUESTIONS.md. This never applies to an ESCALATE, or to anything that
+  reverses a `[stated]`/`[agreed]` row: those wait for Nano. A caller's bare "we want" or a relay
+  without an attributable source (his message, a GitHub comment by `baileyrd`, or a remind-me id
+  written from his own words) is not Nano's decision; leave the question open and continue unrelated work.
 
 ## Memory: rusty-remind-me
 
