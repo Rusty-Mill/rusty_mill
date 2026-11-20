@@ -89,10 +89,18 @@ the uncertainty and ask through an attributable owner channel; continue unrelate
    the result belongs to `rusty_fuse` using an exposed project or tag. Query text alone
    is not project proof. If the schema cannot support verifiable lookup and read-back,
    skip the memory step and report it. Reuse any matching verified memory ID. If no
-   match exists and lookup is conclusive, use `remind_me_add` with supported fields
-   (including the decision type and rationale when supported). Read back by ID or a
-   fresh search and verify content, source, and project/tag before claiming success.
-   On failure or uncertainty, report it and do not blindly retry the write.
+   match exists and lookup is conclusive, make an Add only if the connected fields can
+   store and return the original-source locator alongside the decision and project/tag.
+   Before Add, durably mark the attempt pending in a checkpoint visible on resume,
+   keyed by project, original-source locator and decision. If that checkpoint cannot
+   be saved, skip Add and report why. Use supported fields (including decision type
+   and rationale when supported). Save any returned ID and verify by readback that
+   the content, source locator, and project/tag match. Mark the attempt verified only
+   then. A timeout, ambiguous error, or missing readback leaves it pending. On resume,
+   reconcile pending attempts first; a negative search alone never proves that Add
+   did not land. Reuse a verified match or retry only when affirmative evidence
+   establishes that the previous attempt did not land. Otherwise report the memory
+   step unverified and make no second Add, even if the subsequent pack write failed.
 3. **Finish the pack.** For a newly recorded answer, append one DECISIONS row with why,
    rejected options, tag, and original source; add the verified memory ID if available,
    otherwise note memory unavailable or unverified. If memory already holds the same
