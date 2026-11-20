@@ -43,7 +43,7 @@ Go/no-go per platform recorded by the expert; CI feasibility known for both; Q2 
 
 ## Waits on Nano
 - Q1 first real backend (gates Phase 1).
-- Q10 card policy: rusty_fuse is not in `PRIORITIES.md` and has no board project, so no Mill Board cards are filed yet. Recommended: set a priority (Low or Normal); the alternative is a labelled `experiment`.
+- Q10 answered by Nano 2026-11-20 ("As an experimental project"): Phase 0 is a labelled `experiment`, no PRIORITIES.md row. Board project `rusty_fuse` (status experiment) holds cards #1613 (spike A), #1614 (A2), #1615 (spike B). The experiment ends with a one-page harvest in remind-me.
 - Spike A needs Nano's Windows machine (run it, or authorise a Remote Control session there).
 
 ## Board check (2026-11-20)
