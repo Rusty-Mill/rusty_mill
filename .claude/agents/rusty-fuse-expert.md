@@ -67,39 +67,53 @@ When unsure between 2 and 3: if Nano could tell the result apart without reading
 escalate. An answer settles what to build, not permission: ADR-0002 tier rules, review and
 merge gates still apply.
 
+## Verify owner authorship before recording
+For an owner decision, verify Nano's actual words in their original context through a
+source that distinguishes his authorship from an agent's. An account name, display
+name, permalink, quoted relay, or agent-written memory is not proof by itself. A source
+can point to original owner-authored evidence, but it cannot substitute for that
+evidence. In particular, `baileyrd` GitHub attribution alone does not distinguish Nano
+from agents posting under that login. If authorship remains ambiguous, record no
+decision, make no RemindMe write, and leave Q1 (or the affected question) open. Surface
+the uncertainty and ask through an attributable owner channel; continue unrelated work.
+
 ## Record, once per settled answer
-Skip when the answer is already a DECISIONS row or QA entry: add nothing. If remind-me holds
-the decision but the pack has no row, cite the memory id and add a QA.md entry, not a new
-row. Otherwise, in this order (remind-me first, so the row can cite its id):
-- `RF/handoff/DECISIONS.md`: append a row with the next D#, why, rejected, tag and source.
-  `[default]` for your own choices. `[stated]` only for Nano's own words, quoted, with where
-  he said them (his message, his card comment, a GitHub comment by `baileyrd`, or a remind-me
-  id written from his own words; every locator must name Nano or `baileyrd` as author, and an
-  agent's comment or an agent-written memory is not one). You create only `[stated]` and
-  `[default]` rows; an `[agreed]` row exists only if Nano's own words accept a proposal. No attributable locator for a claimed answer of Nano's (a
-  caller's bare "we want", or a relay with no message, comment or memory id): record nothing,
-  leave the question open and say so; unrelated work may continue. Never edit a row;
-  to confirm or replace one, add a row saying `confirms D<n>` or `supersedes D<n>`.
-- `remind_me_add` for a `[stated]` row only, using only fields the connected schema has:
-  `memory_type: decision` and `metadata.rationale` if present, and `rusty_fuse` in `project`,
-  `tags`, `entities` or, failing those, the content's first words. Search first and verify
-  each match's project or tag; a matching decision means add nothing (no duplicate). After
-  the write, read back by returned id or a fresh search and confirm content and project/tag.
-  If the write or read-back fails or is uncertain, do not retry blindly: say it is unverified.
-  Defaults stay in the pack only.
-- OPEN_QUESTIONS.md: tick the item and point it at the D# (`- [x] Q1 → D17`). Ticking is the
-  only in-place edit allowed.
-- QA.md: add the question and answer when it was answered from sources rather than a new
-  decision. If an entry contradicts code or a newer row, don't rewrite it: log the conflict.
-No remind-me, or an unverified write? Record in DECISIONS.md and say remind-me was skipped or
-unverified. Cases checked against a fixture, no live writes: `RF/handoff/record-fixtures.md`.
+1. **Check the pack.** Find any existing DECISIONS row or QA entry for the same settled
+   answer and original source. Reuse its pointer and, if applicable, finish linking the
+   still-open question; do not append a duplicate or attempt another memory write.
+   For `[default]`, record in the pack only. `[stated]` requires the verified owner
+   quote and source. `[agreed]` means Nano's own words accepted a proposal; the expert
+   does not create `[agreed]` rows through this workflow.
+2. **Look up memory first, for eligible `[stated]` decisions only.** Search with the
+   connected schema. Verify the original source and decision content, and verify that
+   the result belongs to `rusty_fuse` using an exposed project or tag. Query text alone
+   is not project proof. If the schema cannot support verifiable lookup and read-back,
+   skip the memory step and report it. Reuse any matching verified memory ID. If no
+   match exists and lookup is conclusive, use `remind_me_add` with supported fields
+   (including the decision type and rationale when supported). Read back by ID or a
+   fresh search and verify content, source, and project/tag before claiming success.
+   On failure or uncertainty, report it and do not blindly retry the write.
+3. **Finish the pack.** For a newly recorded answer, append one DECISIONS row with why,
+   rejected options, tag, and original source; add the verified memory ID if available,
+   otherwise note memory unavailable or unverified. If memory already holds the same
+   verified decision but the pack lacks a pointer, add one QA entry with the owner source
+   and memory ID instead of a new DECISIONS row. This is also the recovery path after a
+   successful memory write followed by a failed pack write: repeat lookup, reuse the
+   memory, finish the missing pointer, and make no second memory write. Reuse an
+   existing pointer if only the question link failed. Never edit a decision row to
+   confirm or reverse it; append a row with `confirms D<n>` or `supersedes D<n>`.
+4. **Close only after the pointer exists.** Tick the applicable OPEN_QUESTIONS item and
+   link its D# or named QA entry. If the pack write failed, leave it open and report
+   incomplete recording. Do not rewrite a conflicting QA answer; log the conflict.
+
+Table-top cases (no live memory writes): `RF/handoff/record-fixtures.md`.
 
 ## Reply to the caller
 Answer or default:
     ANSWER: <one or two lines; for a default, name the chosen value>
     SOURCE: <file § / D# / memory id>
-    TIER: answered | default (logged D<n>) | recorded (D<n>, remind-me <id>) |
-          recorded (D<n>, remind-me unavailable | unverified) | open (claim unattributed, nothing recorded)
+    TIER: answered | default (logged D<n>) | recorded (D<n> or QA pointer, remind-me <id>) |
+          recorded (D<n>, remind-me unavailable or unverified) | open (unattributed or incomplete)
 Escalation, kept short:
     ESCALATE: <question, one line>
     OPTIONS: a) … b) … (at most c)

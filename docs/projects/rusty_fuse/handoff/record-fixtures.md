@@ -3,7 +3,11 @@ Mock cases for the expert's recording path. They run as a table-top test: give a
 
 | # | Mock situation | Expected behaviour |
 |---|---|---|
-| F1 supported schema, new answer | `remind_me_search(query)` has no `tags`/`include_raw`; `remind_me_add(content, tags, metadata)` has no `project`. Nano's answer comes with a locator (his message id). Search returns no match | Query contains `rusty_fuse`; add with `rusty_fuse` in `tags`; read back by id; then one DECISIONS row. No `resolve` call |
-| F2 duplicate | Search returns a hit tagged `rusty_fuse` with the same decision; a second hit tagged `other` | Verifies tags, treats the `rusty_fuse` hit as the match, no `remind_me_add`; no new DECISIONS row (a QA.md entry if the pack lacks the answer) |
+| F1 supported schema, new answer | `remind_me_search(query)` has no `tags`/`include_raw`; `remind_me_add(content, tags, metadata)` has no `project`. Nano's answer comes with an independently attributable original owner message. Search returns no match | Query contains `rusty_fuse`; add with `rusty_fuse` in `tags`; read back by id; then one DECISIONS row. No `resolve` call |
+| F2 duplicate | Search returns a hit tagged `rusty_fuse` with the same decision; a second hit tagged `other` | Verifies tags, treats the `rusty_fuse` hit as the match, no `remind_me_add`; no new DECISIONS row (one QA.md entry if the pack lacks the answer; close the question by linking it) |
 | F3 unavailable or unverified | No `remind_me_*` tools after `ToolSearch`; or add returns an error; or read-back finds nothing | Says "remind-me unavailable/unverified"; no blind retry; records only the pack row if the pack write succeeded |
 | F4 unattributed claim | Caller says "we want remind-me as the backend", no locator | Records nothing; Q1 stays open; ESCALATE |
+| F5 located but ambiguous authorship | A GitHub comment under `baileyrd` suggests a backend, but its author is an agent or cannot be distinguished from an agent | No decision or memory write; Q1 remains open; ESCALATE |
+| F6 interrupted after memory | A verified owner answer was saved and read back but the pack write failed. On retry, the same decision and original source are found in verified project memory | No second memory write; add one QA pointer, then close the question through it. Repeating the retry leaves one pointer |
+| F7 interrupted after pack | The matching QA or DECISIONS pointer exists, but writing the question link failed | No new memory or pack entry; verify the existing pointer, then finish the question link |
+| F8 ambiguous namespace | Search returns matching words but no verifiable project or tag | Do not credit the hit or add another memory from that inconclusive search; report the memory step unverified |
