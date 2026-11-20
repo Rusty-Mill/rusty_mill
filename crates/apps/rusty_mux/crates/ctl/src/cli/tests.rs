@@ -594,3 +594,57 @@ fn token_takes_a_verb_a_name_and_a_file() {
         assert!(token(bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn forward_names_ports_and_prepares_an_attach_and_a_lease() {
+    let forward = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Forward(forward)) => Ok(forward),
+        Ok(other) => panic!("expected forward, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    let parsed = forward(&format!("forward --block {ID} 3000 8080:80")).unwrap();
+    assert_eq!(
+        parsed.ports,
+        [
+            Spec {
+                local: None,
+                remote: 3000
+            },
+            Spec {
+                local: Some(8080),
+                remote: 80
+            },
+        ]
+    );
+    let names: Vec<&str> = parsed.prepare.iter().map(|c| c.method.name).collect();
+    assert_eq!(names, ["attach", "acquire-lease"]);
+    for call in &parsed.prepare {
+        assert_eq!(
+            call.args,
+            [("block", Arg::Value(Value::Id(ID.parse().unwrap())))]
+        );
+    }
+    // The block defaults from the environment, like any other command.
+    let defaults = Defaults {
+        block: Some(ID.parse().unwrap()),
+        ..Defaults::default()
+    };
+    let invocation = super::parse(&args("forward 3000"), &defaults).unwrap();
+    assert!(matches!(invocation.command, Command::Forward(_)));
+}
+
+#[test]
+fn forward_refuses_what_is_not_a_port() {
+    for line in [
+        "forward",
+        "forward --block",
+        "forward 0",
+        "forward 70000",
+        "forward x",
+        "forward 80:",
+        "forward :80",
+        "forward --port 80",
+    ] {
+        assert!(parse(&args(line)).is_err(), "{line}");
+    }
+}
