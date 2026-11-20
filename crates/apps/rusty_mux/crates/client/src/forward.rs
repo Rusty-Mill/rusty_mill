@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, Scope};
 use std::time::{Duration, Instant};
@@ -22,6 +22,9 @@ use rusty_mux_proto::{FORWARD_CHUNK, FORWARD_WINDOW, Message, decode, encode};
 
 /// How long the server may take to accept a forward.
 const OPEN_WAIT: Duration = Duration::from_secs(10);
+/// Forwards open or opening at once; the server's per-connection cap.
+/// Past it a local connection is closed before it costs a thread.
+const MAX_FORWARDS: usize = 16;
 /// How long any wait goes before it looks at the stop and end flags again.
 const SLICE: Duration = Duration::from_millis(50);
 
@@ -59,6 +62,55 @@ struct Fwd {
     /// Bytes the server will still take.
     credit: Mutex<usize>,
     credited: Condvar,
+    /// Bytes from the server not yet written to the local socket.
+    held: AtomicUsize,
+    /// False once the forward is closed, from either side.
+    open: AtomicBool,
+}
+
+impl Fwd {
+    fn new(to_local: Sender<Vec<u8>>) -> Self {
+        Self {
+            to_local,
+            credit: Mutex::new(FORWARD_WINDOW),
+            credited: Condvar::new(),
+            held: AtomicUsize::new(0),
+            open: AtomicBool::new(true),
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        self.open.load(Ordering::SeqCst)
+    }
+
+    /// Takes `n` bytes from the server into the held total, unless that is
+    /// a chunk the server may not send or more than its window.
+    fn admit(&self, n: usize) -> bool {
+        n != 0
+            && n <= FORWARD_CHUNK
+            && self.held.fetch_add(n, Ordering::SeqCst) + n <= FORWARD_WINDOW
+    }
+
+    /// Adds the credit of an acknowledgment, unless it acknowledges more
+    /// than was sent.
+    fn credit(&self, n: usize) -> bool {
+        let mut credit = lock(&self.credit);
+        if n == 0 || *credit + n > FORWARD_WINDOW {
+            return false;
+        }
+        *credit += n;
+        self.credited.notify_all();
+        true
+    }
+}
+
+/// Holds one of the [`MAX_FORWARDS`] places until dropped.
+struct Slot<'a>(&'a AtomicUsize);
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// What the threads of one [`run`] share.
@@ -69,6 +121,8 @@ struct Shared<W> {
     /// Requests waiting for their answer.
     asked: Mutex<HashMap<u64, Sender<Result<(), String>>>>,
     next: AtomicU64,
+    /// Tunnels that hold a place.
+    live: AtomicUsize,
     ended: Mutex<Option<Ended>>,
 }
 
@@ -85,8 +139,31 @@ impl<W: Write> Shared<W> {
     /// Ends the run with `why`, the first time only, and wakes every wait.
     fn end(&self, why: Ended) {
         lock(&self.ended).get_or_insert(why);
-        for fwd in lock(&self.forwards).values() {
+        let all: Vec<_> = lock(&self.forwards).values().cloned().collect();
+        for fwd in all {
             fwd.credited.notify_all();
+        }
+    }
+
+    fn find(&self, id: u64) -> Option<Arc<Fwd>> {
+        lock(&self.forwards).get(&id).cloned()
+    }
+
+    /// Takes forward `id` out and wakes what waits on it; false if it was
+    /// not open. The map lock is released before anything else is touched.
+    fn retire(&self, id: u64) -> bool {
+        let Some(fwd) = lock(&self.forwards).remove(&id) else {
+            return false;
+        };
+        fwd.open.store(false, Ordering::SeqCst);
+        fwd.credited.notify_all();
+        true
+    }
+
+    /// Ends forward `id` from this side, telling the server if it was open.
+    fn close(&self, id: u64, reason: Option<String>) {
+        if self.retire(id) {
+            self.say(&Message::CloseForward { id, reason });
         }
     }
 
@@ -165,6 +242,7 @@ where
         forwards: Mutex::new(HashMap::new()),
         asked: Mutex::new(HashMap::new()),
         next: AtomicU64::new(1),
+        live: AtomicUsize::new(0),
         ended: Mutex::new(None),
     };
     thread::scope(|scope| {
@@ -228,20 +306,22 @@ fn dispatch<W: Write>(shared: &Shared<W>, message: Message) {
         Message::Done { req, .. } => answer(req, Ok(())),
         Message::Failed { req, reason, .. } => answer(req, Err(reason)),
         Message::ForwardData { id, data } => {
-            if let Some(fwd) = lock(&shared.forwards).get(&id) {
+            let Some(fwd) = shared.find(id) else { return };
+            if fwd.admit(data.len()) {
                 // The local side is gone: its close follows.
                 let _ = fwd.to_local.send(data);
+            } else {
+                shared.close(id, Some("forward data out of bounds".into()));
             }
         }
         Message::ForwardAck { id, n } => {
-            if let Some(fwd) = lock(&shared.forwards).get(&id) {
-                let mut credit = lock(&fwd.credit);
-                *credit = (*credit + n as usize).min(FORWARD_WINDOW);
-                fwd.credited.notify_all();
+            let Some(fwd) = shared.find(id) else { return };
+            if !fwd.credit(n as usize) {
+                shared.close(id, Some("forward acknowledgment out of bounds".into()));
             }
         }
         Message::CloseForward { id, .. } => {
-            lock(&shared.forwards).remove(&id);
+            shared.retire(id);
         }
         Message::Event {
             event: Event::BlockClosed { block },
@@ -261,7 +341,15 @@ fn accept<'scope, 'env, W: Write + Send>(
     while !shared.over() {
         match listener.accept() {
             Ok((local, _)) => {
-                scope.spawn(move || tunnel(scope, shared, local, remote));
+                // Dropping `local` refuses a connection past the cap.
+                if shared.live.fetch_add(1, Ordering::SeqCst) >= MAX_FORWARDS {
+                    shared.live.fetch_sub(1, Ordering::SeqCst);
+                    continue;
+                }
+                scope.spawn(move || {
+                    let _slot = Slot(&shared.live);
+                    tunnel(scope, shared, local, remote);
+                });
             }
             Err(e) if is_wait(&e) => thread::sleep(SLICE),
             // A connection that fell over before it was taken is not ours.
@@ -283,22 +371,19 @@ fn tunnel<'scope, 'env, W: Write + Send>(
         return;
     };
     let Ok(writer) = local.try_clone() else {
-        return close(shared, id);
+        return shared.close(id, None);
     };
-    scope.spawn(move || downstream(shared, id, writer, from_server));
+    let down = fwd.clone();
+    scope.spawn(move || downstream(shared, &down, id, writer, from_server));
     upstream(shared, id, &fwd, local);
-    close(shared, id);
+    shared.close(id, None);
 }
 
 /// Asks for a forward to `remote`, waiting for the server's answer.
 fn open<W: Write>(shared: &Shared<W>, remote: u16) -> Option<(u64, Arc<Fwd>, Receiver<Vec<u8>>)> {
     let id = shared.id();
     let (to_local, from_server) = channel();
-    let fwd = Arc::new(Fwd {
-        to_local,
-        credit: Mutex::new(FORWARD_WINDOW),
-        credited: Condvar::new(),
-    });
+    let fwd = Arc::new(Fwd::new(to_local));
     let (answer, answered) = channel();
     lock(&shared.asked).insert(id, answer);
     lock(&shared.forwards).insert(id, fwd.clone());
@@ -318,29 +403,54 @@ fn open<W: Write>(shared: &Shared<W>, remote: u16) -> Option<(u64, Arc<Fwd>, Rec
     };
     if !accepted {
         lock(&shared.asked).remove(&id);
-        lock(&shared.forwards).remove(&id);
+        shared.close(id, None);
         return None;
     }
     Some((id, fwd, from_server))
 }
 
 /// Server to local socket: writes what arrives, then gives the server
-/// credit.
+/// credit. A write that waits on a slow reader gives up when the forward or
+/// the run ends.
 fn downstream<W: Write>(
     shared: &Shared<W>,
+    fwd: &Fwd,
     id: u64,
     mut local: TcpStream,
     from_server: Receiver<Vec<u8>>,
 ) {
-    // The sender is dropped with the forward.
-    while let Ok(data) = from_server.recv() {
-        if local.write_all(&data).is_err() {
+    let _ = local.set_write_timeout(Some(SLICE));
+    let cancelled = || shared.over() || !fwd.is_open();
+    // This thread holds the forward, so the sender is never dropped: look
+    // at the forward's state between waits.
+    while !cancelled() {
+        let data = match from_server.recv_timeout(SLICE) {
+            Ok(data) => data,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        if !write_until(&mut local, &data, &cancelled) {
             break;
         }
+        fwd.held.fetch_sub(data.len(), Ordering::SeqCst);
         let n = u32::try_from(data.len()).unwrap_or(u32::MAX);
         shared.say(&Message::ForwardAck { id, n });
     }
     let _ = local.shutdown(Shutdown::Both);
+}
+
+/// Writes all of `data`, retrying timeouts until `cancelled`; false if it
+/// could not.
+fn write_until(to: &mut impl Write, mut data: &[u8], cancelled: &dyn Fn() -> bool) -> bool {
+    while !data.is_empty() {
+        match to.write(data) {
+            Ok(0) => return false,
+            Ok(n) => data = &data[n..],
+            Err(e) if is_wait(&e) && !cancelled() => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// Local socket to server: reads as much as the server has credit for.
@@ -350,7 +460,7 @@ fn upstream<W: Write>(shared: &Shared<W>, id: u64, fwd: &Fwd, mut local: TcpStre
     loop {
         let credit = {
             let mut credit = lock(&fwd.credit);
-            while *credit == 0 && !shared.over() && still_open(shared, id) {
+            while *credit == 0 && !shared.over() && fwd.is_open() {
                 credit = fwd
                     .credited
                     .wait_timeout(credit, SLICE)
@@ -359,7 +469,7 @@ fn upstream<W: Write>(shared: &Shared<W>, id: u64, fwd: &Fwd, mut local: TcpStre
             }
             *credit
         };
-        if credit == 0 || shared.over() || !still_open(shared, id) {
+        if credit == 0 || shared.over() || !fwd.is_open() {
             return;
         }
         let n = match local.read(&mut buf[..credit.min(FORWARD_CHUNK)]) {
@@ -373,17 +483,6 @@ fn upstream<W: Write>(shared: &Shared<W>, id: u64, fwd: &Fwd, mut local: TcpStre
             id,
             data: buf[..n].to_vec(),
         });
-    }
-}
-
-fn still_open<W: Write>(shared: &Shared<W>, id: u64) -> bool {
-    lock(&shared.forwards).contains_key(&id)
-}
-
-/// Ends forward `id` from this side, telling the server if it is open.
-fn close<W: Write>(shared: &Shared<W>, id: u64) {
-    if lock(&shared.forwards).remove(&id).is_some() {
-        shared.say(&Message::CloseForward { id, reason: None });
     }
 }
 
@@ -679,5 +778,123 @@ mod tests {
         // Taken now: asking for the same number gets a different one.
         let second = listen(None, port).expect("another");
         assert_ne!(second.local_addr().expect("addr").port(), port);
+    }
+
+    #[test]
+    fn data_past_the_chunk_or_the_window_is_not_admitted() {
+        let (to_local, _from) = channel();
+        let fwd = Fwd::new(to_local);
+        assert!(!fwd.admit(0));
+        assert!(!fwd.admit(FORWARD_CHUNK + 1));
+        let fwd = Fwd::new(channel().0);
+        for _ in 0..FORWARD_WINDOW / FORWARD_CHUNK {
+            assert!(fwd.admit(FORWARD_CHUNK));
+        }
+        assert!(!fwd.admit(1), "one byte past the window");
+    }
+
+    #[test]
+    fn an_acknowledgment_of_more_than_was_sent_is_refused() {
+        let fwd = Fwd::new(channel().0);
+        assert!(!fwd.credit(1), "nothing is outstanding");
+        *lock(&fwd.credit) = FORWARD_WINDOW - 10;
+        assert!(!fwd.credit(0));
+        assert!(!fwd.credit(11));
+        assert!(fwd.credit(10));
+        assert_eq!(*lock(&fwd.credit), FORWARD_WINDOW);
+    }
+
+    /// A server that accepts a forward and then sends `bad`, recording
+    /// whether the client closed it with a reason.
+    fn misbehaves(bad: Message) -> (bool, usize) {
+        let told = Arc::new(Mutex::new(false));
+        let seen = told.clone();
+        let handler = move |fake: &mut Fake, message| match message {
+            Message::OpenForward { req, id, .. } => {
+                fake.send(&Message::Done { req, created: None });
+                fake.send(&match &bad {
+                    Message::ForwardData { data, .. } => Message::ForwardData {
+                        id,
+                        data: data.clone(),
+                    },
+                    Message::ForwardAck { n, .. } => Message::ForwardAck { id, n: *n },
+                    other => unreachable!("{other:?}"),
+                });
+            }
+            Message::CloseForward {
+                reason: Some(_), ..
+            } => *lock(&seen) = true,
+            _ => {}
+        };
+        let (_, read) = with_server(handler, |port| {
+            let mut local = connect(port);
+            let mut byte = [0u8; 1];
+            let read = local.read(&mut byte).unwrap_or(0);
+            // The client's close reaches the server after the local one.
+            thread::sleep(Duration::from_millis(200));
+            read
+        });
+        (*lock(&told), read)
+    }
+
+    #[test]
+    fn an_oversized_chunk_closes_that_forward_with_a_reason() {
+        let bad = Message::ForwardData {
+            id: 0,
+            data: vec![0; FORWARD_CHUNK + 1],
+        };
+        assert_eq!(misbehaves(bad), (true, 0));
+    }
+
+    #[test]
+    fn an_acknowledgment_nothing_was_sent_for_closes_that_forward() {
+        assert_eq!(misbehaves(Message::ForwardAck { id: 0, n: 1 }), (true, 0));
+    }
+
+    #[test]
+    fn local_connections_past_the_cap_are_closed_at_once() {
+        let opened = Arc::new(Mutex::new(0usize));
+        let seen = opened.clone();
+        // Never answers, so every forward stays waiting for its place.
+        let silent = move |_: &mut Fake, message| {
+            if matches!(message, Message::OpenForward { .. }) {
+                *lock(&seen) += 1;
+            }
+        };
+        let probe = opened.clone();
+        let (_, (read, count)) = with_server(silent, move |port| {
+            let held: Vec<_> = (0..MAX_FORWARDS).map(|_| connect(port)).collect();
+            let mut extra = connect(port);
+            let mut byte = [0u8; 1];
+            let read = extra.read(&mut byte).unwrap_or(0);
+            // The server sees the opens a moment after the client sends them.
+            thread::sleep(Duration::from_millis(300));
+            let count = *lock(&probe);
+            drop(held);
+            (read, count)
+        });
+        assert_eq!(read, 0, "the extra connection is closed");
+        assert_eq!(count, MAX_FORWARDS, "and never asked for");
+    }
+
+    #[test]
+    fn a_write_to_a_slow_reader_gives_up_when_cancelled() {
+        struct Stuck;
+        impl Write for Stuck {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let tries = std::cell::Cell::new(0);
+        let cancelled = || {
+            tries.set(tries.get() + 1);
+            tries.get() > 3
+        };
+        assert!(!write_until(&mut Stuck, b"x", &cancelled));
+        assert_eq!(tries.get(), 4, "it retried until told to stop");
+        assert!(write_until(&mut Vec::new(), b"x", &|| false));
     }
 }
