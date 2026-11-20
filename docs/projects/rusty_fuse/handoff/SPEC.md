@@ -17,6 +17,7 @@ Nano wants one sovereign, cross-platform userspace filesystem: a backend written
 - Name `rusty_fuse`; family under `crates/libs/storage/rusty_fuse/` [stated: D3]. Code and docs layout follow ADR-0003: libs depend only on foundation and platform.
 - `fusermount3` is acceptable on Linux as a Tier T dependency with a plan to migrate away [stated: D2]; ADR-0002 Tier T needs an owner, a first-party seam and a tracked milestone (owner [open]).
 - Port crate has no OS calls and no `unsafe`; all `unsafe` lives in each adapter's `sys` module. [default]
+- ProjFS cleanup evicts verified clean, provider-owned cache only; local changes are preserved; never imply secure erasure [default: D16].
 - Do not depend on the `fsk` crate; design reference only [default: D8].
 - Nano's standing rules apply: ports-and-adapters, minimal dependencies, no async unless real I/O concurrency, tests for non-trivial logic. [stated]
 
@@ -39,4 +40,5 @@ Port, adapters, crate layout, phases: `../design.md`.
 ## Acceptance — first slice
 - [ ] Phase 0: ProjFS hello-world mount through `rusty_win32::dynlib` on Nano's Windows machine; go or no-go recorded.
 - [ ] Phase 0: `/dev/fuse` hello-world through `rusty_libc` on a Linux host; go or no-go recorded; CI feasibility known.
+- [ ] Phase 0 (ProjFS): confirm cache-state names and non-forcing delete behaviour; test clean hydration versus local changes: eviction removes a clean hydrated file and leaves an edited file, a locally created file, a changed-metadata file and a locally deleted entry untouched.
 - [ ] Phase 1 starts only after the first real backend is named (OPEN_QUESTIONS Q1).

@@ -28,8 +28,11 @@ the paths. Until `rusty-term-design-expert.md` lands, GUI visual-design question
 - ESCALATE: ask Nano exactly that block: question, options, recommendation. Nothing more.
 - When Nano answers, pass the answer to the expert with his words and where he said them. Don't write
   the pack's DECISIONS.md or remind-me decisions yourself; one writer keeps each answer recorded once.
-- Non-blocking? Take the expert's recommendation, keep going, and let the expert add the question to
-  the pack's OPEN_QUESTIONS.md.
+- Non-blocking *default*? Take the expert's recommendation, keep going, and let the expert add the
+  question to the pack's OPEN_QUESTIONS.md. This never applies to an ESCALATE, or to anything that
+  reverses a `[stated]`/`[agreed]` row: those wait for Nano. A caller's bare "we want" or a relay
+  without an attributable source (his message, a GitHub comment by `baileyrd`, or a remind-me id
+  written from his own words) is not Nano's decision; leave the question open and continue unrelated work.
 
 ## Memory: rusty-remind-me
 

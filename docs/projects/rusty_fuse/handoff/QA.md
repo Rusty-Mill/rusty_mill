@@ -22,7 +22,8 @@ Pre-answered from the design chat and `../design.md`. Each cites its source. The
 - **Q:** What are the v1 FUSE opcodes? **A:** `INIT`, `DESTROY`, `LOOKUP`, `FORGET`, `BATCH_FORGET`, `GETATTR`, `OPENDIR`, `READDIR`, `RELEASEDIR`, `OPEN`, `READ`, `RELEASE`, `READLINK`, `STATFS`, `INTERRUPT`; the write set arrives in Phase 3; the rest answer `ENOSYS`. [default] design.md § Linux
 - **Q:** ProjFS binding? **A:** Load `ProjectedFSLib.dll` at run time with `rusty_win32::dynlib`; if the feature is off, `mount_projected` returns a clear `MountError` and the binary still starts. [default] D13
 - **Q:** Illegal or case-colliding Windows names? **A:** Skip, log, and record in the divergence registry. [default] design.md § ProjFS
-- **Q:** Hydrated data left on disk? **A:** Purge on unmount by default; document it. [default] D16
+- **Q:** Hydrated data left on disk? **A:** Best-effort eviction of verified clean, provider-owned cache only. Local edits, creates, metadata changes and deletions are preserved by default. No destructive cleanup, and eviction is not secure erasure. [default] D16
+- **Q:** May the adapter delete a dirty or full file on unmount? **A:** No. That needs a separate, explicit, owner-approved operation this design does not authorize. [default] D16
 
 ## Testing
 - **Q:** How is it tested without a mount? **A:** Codec fixtures and fuzzing; `memfs` port tests on every OS; conformance mounts `memfs` through the real adapter on Linux and Windows CI; divergences numbered in `divergences.md` (rustils `platform-parity` pattern). macOS mount tests are manual. [default] design.md § Testing
