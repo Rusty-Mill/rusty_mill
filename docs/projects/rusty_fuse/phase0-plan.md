@@ -43,7 +43,7 @@ Go/no-go per platform recorded by the expert; CI feasibility known for both; Q2 
 
 ## Waits on Nano
 - Q1 first real backend (gates Phase 1).
-- Q10 answered by Nano 2026-11-20 ("As an experimental project"): Phase 0 is a labelled `experiment`, no PRIORITIES.md row. Board project `rusty_fuse` (status experiment) holds cards #1613 (spike A), #1614 (A2), #1615 (spike B). The experiment ends with a one-page harvest in remind-me.
+- Q10 answered by Nano 2026-11-20: first "As an experimental project" (D18), then superseded by his taps on the decision cards ("Set a priority", then "Low", 20:12 UTC). rusty_fuse is committed work at tier Low in `PRIORITIES.md`. Board project `rusty_fuse` (active) holds cards #1613 (spike A), #1614 (A2), #1615 (spike B). The cards keep the `experiment` tag; drop it if you prefer.
 - Spike A needs Nano's Windows machine (run it, or authorise a Remote Control session there).
 
 ## Board check (2026-11-20)
