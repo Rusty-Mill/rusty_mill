@@ -25,6 +25,9 @@ const OPEN_WAIT: Duration = Duration::from_secs(10);
 /// Forwards open or opening at once; the server's per-connection cap.
 /// Past it a local connection is closed before it costs a thread.
 const MAX_FORWARDS: usize = 16;
+/// Frames from the server held for one forward, as well as bytes: a peer
+/// sending one byte a frame cannot make the queue cost more than this.
+const MAX_HELD_FRAMES: usize = 1024;
 /// How long any wait goes before it looks at the stop and end flags again.
 const SLICE: Duration = Duration::from_millis(50);
 
@@ -64,6 +67,8 @@ struct Fwd {
     credited: Condvar,
     /// Bytes from the server not yet written to the local socket.
     held: AtomicUsize,
+    /// Frames of those bytes.
+    frames: AtomicUsize,
     /// False once the forward is closed, from either side.
     open: AtomicBool,
 }
@@ -75,6 +80,7 @@ impl Fwd {
             credit: Mutex::new(FORWARD_WINDOW),
             credited: Condvar::new(),
             held: AtomicUsize::new(0),
+            frames: AtomicUsize::new(0),
             open: AtomicBool::new(true),
         }
     }
@@ -83,12 +89,28 @@ impl Fwd {
         self.open.load(Ordering::SeqCst)
     }
 
-    /// Takes `n` bytes from the server into the held total, unless that is
-    /// a chunk the server may not send or more than its window.
+    /// Reserves room for a frame of `n` bytes from the server, unless it is
+    /// a chunk the server may not send or takes more than its window of
+    /// bytes or [`MAX_HELD_FRAMES`] of frames. Never waits: the shared
+    /// reader must not stall on one slow local reader.
     fn admit(&self, n: usize) -> bool {
         n != 0
             && n <= FORWARD_CHUNK
+            && self.frames.fetch_add(1, Ordering::SeqCst) < MAX_HELD_FRAMES
             && self.held.fetch_add(n, Ordering::SeqCst) + n <= FORWARD_WINDOW
+    }
+
+    /// Gives back the reservation of a frame of `n` bytes.
+    fn release(&self, n: usize) {
+        self.held.fetch_sub(n, Ordering::SeqCst);
+        self.frames.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Gives back everything still queued for the local socket.
+    fn drain(&self, queued: &Receiver<Vec<u8>>) {
+        while let Ok(data) = queued.try_recv() {
+            self.release(data.len());
+        }
     }
 
     /// Adds the credit of an acknowledgment, unless it acknowledges more
@@ -432,10 +454,12 @@ fn downstream<W: Write>(
         if !write_until(&mut local, &data, &cancelled) {
             break;
         }
-        fwd.held.fetch_sub(data.len(), Ordering::SeqCst);
+        fwd.release(data.len());
         let n = u32::try_from(data.len()).unwrap_or(u32::MAX);
         shared.say(&Message::ForwardAck { id, n });
     }
+    // What is still queued was reserved too.
+    fwd.drain(&from_server);
     let _ = local.shutdown(Shutdown::Both);
 }
 
@@ -791,6 +815,28 @@ mod tests {
             assert!(fwd.admit(FORWARD_CHUNK));
         }
         assert!(!fwd.admit(1), "one byte past the window");
+    }
+
+    #[test]
+    fn frames_are_bounded_as_well_as_bytes_and_released_when_written_or_dropped() {
+        let (to_local, queued) = channel();
+        let fwd = Fwd::new(to_local);
+        for _ in 0..MAX_HELD_FRAMES {
+            assert!(fwd.admit(1));
+            fwd.to_local.send(vec![0]).expect("queued");
+        }
+        assert!(!fwd.admit(1), "one frame past the budget, bytes aside");
+        // Writing one frees one place.
+        let first = queued.recv().expect("frame");
+        fwd.release(first.len());
+        let fwd2 = Fwd::new(channel().0);
+        fwd2.frames.store(MAX_HELD_FRAMES - 1, Ordering::SeqCst);
+        assert!(fwd2.admit(1));
+        // Closing releases what is still queued.
+        fwd.frames.store(MAX_HELD_FRAMES - 1, Ordering::SeqCst);
+        fwd.drain(&queued);
+        assert_eq!(fwd.frames.load(Ordering::SeqCst), 0);
+        assert_eq!(fwd.held.load(Ordering::SeqCst), 0);
     }
 
     #[test]
