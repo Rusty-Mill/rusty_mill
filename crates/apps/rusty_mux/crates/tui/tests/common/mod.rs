@@ -102,6 +102,8 @@ pub enum End {
     Closed,
     /// Waits for the client to leave.
     Open,
+    /// Waits for the client to leave, then keeps every connection open.
+    Hold,
 }
 
 pub fn listen() -> (PathBuf, UnixListener) {
@@ -146,6 +148,9 @@ pub fn scripted_server(lease: bool, end: End) -> (PathBuf, JoinHandle<()>) {
         let _control = welcome(&listener, Features::CHECKPOINT_V6);
         let pane = welcome(&listener, Features::CHECKPOINT_V6);
         serve_block(Conn::new(pane), lease, end);
+        if matches!(end, End::Hold) {
+            std::thread::sleep(Duration::from_secs(30));
+        }
     });
     (path, server)
 }
@@ -218,7 +223,7 @@ pub fn finish(conn: &mut Conn<Stream>, block: BlockId, end: End) -> bool {
             .expect("closed");
             false
         }
-        End::Open => false,
+        End::Open | End::Hold => false,
     }
 }
 

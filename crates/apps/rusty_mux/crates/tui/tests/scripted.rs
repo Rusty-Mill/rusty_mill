@@ -47,6 +47,18 @@ fn detaching_after_the_program_set_modes_resets_the_terminal() {
     assert_restored(&screen, "detached from block");
 }
 
+/// A server that never closes its connections must not hold the exit:
+/// on Windows shutting a socket does not wake the control reader.
+#[test]
+fn detaching_does_not_wait_for_a_server_that_never_closes() {
+    let (socket, _server) = scripted_server(true, End::Hold);
+    let tui = Tui::start(&socket);
+    tui.wait_for(b"REMOTE");
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
+    let screen = tui.exit_within(Duration::from_secs(8));
+    assert_restored(&screen, "detached from block");
+}
+
 /// The local terminal must keep sending plain keys, or Ctrl-] arrives
 /// win32-encoded and passes to the block: the client drops the program's
 /// request for the mode.
