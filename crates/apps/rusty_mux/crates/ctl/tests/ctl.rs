@@ -437,6 +437,70 @@ fn a_chain_takes_the_lease_and_types() {
     );
 }
 
+/// The real program takes the payload from its stdin once: parsing it twice
+/// (to pick the command, then to run it) would send an empty one.
+#[test]
+fn a_chain_types_what_stdin_carries() {
+    let socket = start_server();
+    let block = block(&socket);
+    let chain = [
+        "attach",
+        "--block",
+        &block,
+        "+",
+        "acquire-lease",
+        "--block",
+        &block,
+        "+",
+        "input",
+        "--block",
+        &block,
+        "--data-stdin",
+    ];
+    // Output differs from the echo: `cmd.exe` drops the `^` escape.
+    let typed = if cfg!(windows) {
+        "echo VIA^42\r"
+    } else {
+        "echo VIA$((6*7))\r"
+    };
+    let mut child = ctl_command(&socket, &chain)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(typed.as_bytes())
+        .expect("write");
+    let output = child.wait_with_output().expect("wait");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let capture = ["terminal.format", "--block", &block, "--history", "0"];
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !ok(&socket, &capture).lines().any(|l| l.ends_with("VIA42")) {
+        assert!(std::time::Instant::now() < deadline, "no VIA42 on screen");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A socket path too long for AF_UNIX says so even though nothing is
+/// there, not "no server is running".
+#[test]
+fn a_socket_path_over_the_limit_exits_4_naming_the_limit() {
+    let long = std::env::temp_dir().join("x".repeat(120)).join("s.sock");
+    let output = ctl(&long, &["list"]);
+    assert_eq!(output.status.code(), Some(4));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("107-byte limit"), "{stderr}");
+}
+
 #[test]
 fn a_refused_request_exits_1() {
     let socket = start_server();

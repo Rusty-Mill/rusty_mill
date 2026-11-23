@@ -314,7 +314,11 @@ pub fn run_process(args: &[String], env: &Env) -> Exit {
             let socket = socket.clone().or_else(|| env.socket.clone());
             return send_hook_report(socket.as_deref(), env, &hook, &stop);
         }
-        _ => return run(args, env, &mut io::stdout(), &mut err),
+        _ => {
+            let stop = Stop::default();
+            let stdin: &mut dyn io::Read = &mut io::stdin();
+            return run_with(args, env, &stop, &mut io::stdout(), &mut err, Some(stdin));
+        }
     };
     match socket(&bridged, env, &Stop::default()) {
         Ok(reached) => finish(bridge(&reached.socket), &reached.socket, &mut err),
@@ -439,6 +443,19 @@ pub fn run_until(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Exit {
+    run_with(args, env, stop, out, err, None)
+}
+
+/// [`run_until`] with the stdin a `--NAME-stdin` flag reads: only the
+/// program passes its own; the library has none and refuses the flag.
+fn run_with(
+    args: &[String],
+    env: &Env,
+    stop: &Stop,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    stdin: Option<&mut dyn io::Read>,
+) -> Exit {
     let mut invocation = match cli::parse(args, &env.here) {
         Ok(invocation) => invocation,
         Err(reason) => return report(err, Exit::Usage, &reason),
@@ -509,6 +526,12 @@ pub fn run_until(
         | Command::Wait(_)
         | Command::Run(_)
         | Command::ServerStop => {}
+    }
+    // After the whole line has parsed and before anything connects.
+    if let Command::Calls(calls) = &mut invocation.command
+        && let Err(reason) = cli::fill_stdin(calls, stdin)
+    {
+        return report(err, Exit::Usage, &reason);
     }
     let reached = match socket(&invocation, env, stop) {
         Ok(reached) => reached,
@@ -654,6 +677,10 @@ fn finish(result: Result<Exit, Failure>, socket: &Path, err: &mut dyn Write) -> 
 /// there at all (the raw error says little, and on Windows it is
 /// `WSAENETDOWN`), else the error.
 fn unreachable(socket: &Path, e: &io::Error) -> String {
+    // A path too long to connect to says so, whether or not it exists.
+    if let Err(reason) = rusty_mux_proto::endpoint::check_socket_path(socket) {
+        return reason;
+    }
     let lookup = std::fs::symlink_metadata(socket).err().map(|e| e.kind());
     describe(socket, e, lookup)
 }
@@ -1127,6 +1154,7 @@ impl<S: io::Read + Write> Session<'_, S> {
                     let id = target::resolve(entries, *entity, spec, self.here)?;
                     Ok((*name, Value::Id(id)))
                 }
+                Arg::Stdin => Err(Failure::Failed(format!("--{name}-stdin was not read"))),
             })
             .collect()
     }

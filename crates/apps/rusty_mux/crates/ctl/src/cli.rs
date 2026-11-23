@@ -1,6 +1,7 @@
 //! Command-line parsing, with no I/O. Every request subcommand and its flags
 //! come from [`schema::CATALOG`].
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -314,6 +315,9 @@ impl Call {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Arg {
     Value(Value),
+    /// Bytes read from stdin once the whole line has parsed: see
+    /// [`fill_stdin`].
+    Stdin,
     /// A name, position or id suffix; see [`crate::target`].
     Target {
         entity: Entity,
@@ -422,13 +426,11 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
             [shell] => shell.parse().map(Command::Completion),
             _ => Err("usage: completion bash|zsh|fish|nu|powershell".into()),
         },
-        _ => {
-            let mut stdin = StdinOnce::default();
-            args.split(|a| a == "+")
-                .map(|args| call_with(args, defaults, &mut || stdin.take()))
-                .collect::<Result<_, _>>()
-                .map(Command::Calls)
-        }
+        _ => args
+            .split(|a| a == "+")
+            .map(|args| call(args, defaults))
+            .collect::<Result<_, _>>()
+            .map(Command::Calls),
     }
 }
 
@@ -1031,23 +1033,6 @@ fn known(name: &str) -> Result<&'static Method, String> {
     schema::method(name).ok_or_else(|| format!("unknown command `{name}`; try `help`"))
 }
 
-/// Stdin, read once: a `--NAME-stdin` flag takes all of it, and a second
-/// one in the same line has nothing left to take.
-#[derive(Default)]
-struct StdinOnce(bool);
-
-impl StdinOnce {
-    fn take(&mut self) -> Result<Vec<u8>, String> {
-        if std::mem::replace(&mut self.0, true) {
-            return Err("stdin is already taken by an earlier flag".into());
-        }
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut bytes)
-            .map_err(|e| format!("reading stdin: {e}"))?;
-        Ok(bytes)
-    }
-}
-
 /// A `bytes` parameter's `--NAME-stdin` form, for a payload too large for
 /// the command line (about 32 KB on Windows): the parameter's name.
 fn stdin_param(method: &Method, flag: &str) -> Option<&'static str> {
@@ -1056,15 +1041,40 @@ fn stdin_param(method: &Method, flag: &str) -> Option<&'static str> {
     (param.ty == Ty::Bytes).then_some(param.name)
 }
 
-fn call(args: &[String], defaults: &Defaults) -> Result<Call, String> {
-    call_with(args, defaults, &mut || Err("no stdin here".into()))
+/// The most stdin one request carries: a frame less room for its fields.
+pub const MAX_STDIN: usize = rusty_mux_proto::MAX_FRAME as usize - 4096;
+
+/// Fills the one `--NAME-stdin` of `calls` from `stdin`, once the whole
+/// line has parsed. `None` is a caller with no stdin of its own (the
+/// library's `run`), which refuses the flag.
+pub fn fill_stdin(calls: &mut [Call], stdin: Option<&mut dyn Read>) -> Result<(), String> {
+    let mut slots: Vec<&mut (&'static str, Arg)> = calls
+        .iter_mut()
+        .flat_map(|call| call.args.iter_mut())
+        .filter(|(_, arg)| matches!(arg, Arg::Stdin))
+        .collect();
+    let slot = match slots.as_mut_slice() {
+        [] => return Ok(()),
+        [slot] => slot,
+        _ => return Err("only one --NAME-stdin flag per command line".into()),
+    };
+    let name = slot.0;
+    let stdin = stdin.ok_or_else(|| format!("--{name}-stdin needs the program's own stdin"))?;
+    let mut bytes = Vec::new();
+    stdin
+        .take(MAX_STDIN as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("--{name}-stdin: reading stdin: {e}"))?;
+    if bytes.len() > MAX_STDIN {
+        return Err(format!(
+            "--{name}-stdin: stdin is over {MAX_STDIN} bytes, the most one request carries"
+        ));
+    }
+    slot.1 = Arg::Value(Value::Bytes(bytes));
+    Ok(())
 }
 
-fn call_with(
-    args: &[String],
-    defaults: &Defaults,
-    stdin: &mut dyn FnMut() -> Result<Vec<u8>, String>,
-) -> Result<Call, String> {
+fn call(args: &[String], defaults: &Defaults) -> Result<Call, String> {
     let Some((name, rest)) = args.split_first() else {
         return Err("empty request between `+`".into());
     };
@@ -1079,11 +1089,14 @@ fn call_with(
     };
     for (key, text) in flags(name, rest, bare)? {
         if let Some(param) = stdin_param(method, key) {
+            // A bare flag: `--data-stdin=false` is not a way to leave it off.
+            if text != "true" {
+                return Err(format!("{name}: --{key} takes no value"));
+            }
             if values.iter().any(|(n, _)| *n == param) {
                 return Err(format!("{name}: --{param} is given twice"));
             }
-            let bytes = stdin().map_err(|e| format!("{name}: {e}"))?;
-            values.push((param, Arg::Value(Value::Bytes(bytes))));
+            values.push((param, Arg::Stdin));
             continue;
         }
         let param = method
@@ -1117,6 +1130,7 @@ fn call_with(
         .map(|(n, a)| match a {
             Arg::Value(v) => (*n, v.clone()),
             Arg::Target { .. } => (*n, Value::Id(Uuid::nil())),
+            Arg::Stdin => (*n, Value::Bytes(Vec::new())),
         })
         .collect();
     method.request(0, &checked).map_err(|e| reason(name, &e))?;
