@@ -127,6 +127,44 @@ fn flags_take_a_separate_or_attached_value() {
     );
 }
 
+fn words(line: &str) -> Vec<String> {
+    line.split(' ').map(String::from).collect()
+}
+
+#[test]
+fn a_bytes_flag_can_take_its_value_from_stdin() {
+    let line = format!("input --block {ID} --data-stdin");
+    let call = call_with(&words(&line), &Defaults::default(), &mut || {
+        Ok(b"big\npayload".to_vec())
+    })
+    .expect("parses");
+    let data = call.args.iter().find(|(n, _)| *n == "data").expect("data");
+    assert_eq!(data.1, Arg::Value(Value::Bytes(b"big\npayload".to_vec())));
+}
+
+#[test]
+fn stdin_is_refused_for_other_flags_twice_and_a_second_time() {
+    let none = &mut || Ok(Vec::new());
+    for line in [
+        format!("input --block {ID} --data x --data-stdin"),
+        format!("input --block {ID} --data-stdin --data-stdin"),
+        format!("resize --block {ID} --cols-stdin --rows 24"),
+    ] {
+        assert!(
+            call_with(&words(&line), &Defaults::default(), none).is_err(),
+            "{line}"
+        );
+    }
+    let mut once = StdinOnce(true);
+    let err = call_with(
+        &words(&format!("input --block {ID} --data-stdin")),
+        &Defaults::default(),
+        &mut || once.take(),
+    )
+    .expect_err("already taken");
+    assert!(err.contains("already taken"), "{err}");
+}
+
 #[test]
 fn plus_chains_requests() {
     let line =

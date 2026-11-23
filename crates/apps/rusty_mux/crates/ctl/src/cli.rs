@@ -422,11 +422,13 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
             [shell] => shell.parse().map(Command::Completion),
             _ => Err("usage: completion bash|zsh|fish|nu|powershell".into()),
         },
-        _ => args
-            .split(|a| a == "+")
-            .map(|args| call(args, defaults))
-            .collect::<Result<_, _>>()
-            .map(Command::Calls),
+        _ => {
+            let mut stdin = StdinOnce::default();
+            args.split(|a| a == "+")
+                .map(|args| call_with(args, defaults, &mut || stdin.take()))
+                .collect::<Result<_, _>>()
+                .map(Command::Calls)
+        }
     }
 }
 
@@ -1029,19 +1031,61 @@ fn known(name: &str) -> Result<&'static Method, String> {
     schema::method(name).ok_or_else(|| format!("unknown command `{name}`; try `help`"))
 }
 
+/// Stdin, read once: a `--NAME-stdin` flag takes all of it, and a second
+/// one in the same line has nothing left to take.
+#[derive(Default)]
+struct StdinOnce(bool);
+
+impl StdinOnce {
+    fn take(&mut self) -> Result<Vec<u8>, String> {
+        if std::mem::replace(&mut self.0, true) {
+            return Err("stdin is already taken by an earlier flag".into());
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut bytes)
+            .map_err(|e| format!("reading stdin: {e}"))?;
+        Ok(bytes)
+    }
+}
+
+/// A `bytes` parameter's `--NAME-stdin` form, for a payload too large for
+/// the command line (about 32 KB on Windows): the parameter's name.
+fn stdin_param(method: &Method, flag: &str) -> Option<&'static str> {
+    let name = flag.strip_suffix("-stdin")?;
+    let param = method.params.iter().find(|p| p.name == name)?;
+    (param.ty == Ty::Bytes).then_some(param.name)
+}
+
 fn call(args: &[String], defaults: &Defaults) -> Result<Call, String> {
+    call_with(args, defaults, &mut || Err("no stdin here".into()))
+}
+
+fn call_with(
+    args: &[String],
+    defaults: &Defaults,
+    stdin: &mut dyn FnMut() -> Result<Vec<u8>, String>,
+) -> Result<Call, String> {
     let Some((name, rest)) = args.split_first() else {
         return Err("empty request between `+`".into());
     };
     let method = known(name)?;
     let mut values: Vec<(&'static str, Arg)> = Vec::new();
     let bare = |key: &str| {
-        method
-            .params
-            .iter()
-            .any(|p| p.name == key && p.ty == Ty::Flag)
+        stdin_param(method, key).is_some()
+            || method
+                .params
+                .iter()
+                .any(|p| p.name == key && p.ty == Ty::Flag)
     };
     for (key, text) in flags(name, rest, bare)? {
+        if let Some(param) = stdin_param(method, key) {
+            if values.iter().any(|(n, _)| *n == param) {
+                return Err(format!("{name}: --{param} is given twice"));
+            }
+            let bytes = stdin().map_err(|e| format!("{name}: {e}"))?;
+            values.push((param, Arg::Value(Value::Bytes(bytes))));
+            continue;
+        }
         let param = method
             .params
             .iter()
