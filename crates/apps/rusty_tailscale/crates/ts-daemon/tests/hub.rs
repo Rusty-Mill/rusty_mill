@@ -573,6 +573,58 @@ async fn a_node_will_not_follow_a_hub_with_a_different_key() {
     );
 }
 
+/// Rebind a dead hub's address even when its accepted connections are in
+/// TIME_WAIT. The hub also sets SO_REUSEADDR; no live listener is shared.
+fn retry_probe(addr: &str) -> std::net::TcpListener {
+    let socket = rusty_tokio::io::TcpSocket::new_v4().expect("probe socket");
+    socket
+        .set_reuseaddr(true)
+        .expect("reuse the dead hub's address");
+    socket
+        .bind(addr.parse().expect("hub address"))
+        .expect("bind probe");
+    let probe = socket
+        .listen(128)
+        .expect("listen")
+        .into_std()
+        .expect("probe listener");
+    probe.set_nonblocking(true).expect("nonblocking probe");
+    probe
+}
+
+#[rusty_tokio::test]
+async fn retry_probe_rebinds_after_the_server_closes_an_accepted_connection() {
+    use std::io::Read;
+
+    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener")
+        .into_std()
+        .expect("std listener");
+    let addr = listener.local_addr().unwrap();
+    let mut client = std::net::TcpStream::connect(addr).expect("connect");
+    let (mut server, _) = listener.accept().expect("accept");
+    // Complete both halves of a server-first close before rebinding, so
+    // the server's local address is in TIME_WAIT rather than racing FIN.
+    server
+        .shutdown(std::net::Shutdown::Write)
+        .expect("server FIN");
+    assert_eq!(client.read(&mut [0]).expect("server EOF"), 0);
+    client
+        .shutdown(std::net::Shutdown::Write)
+        .expect("client FIN");
+    assert_eq!(server.read(&mut [0]).expect("client EOF"), 0);
+    drop(server);
+    drop(client);
+    drop(listener);
+    let probe = retry_probe(&addr.to_string());
+    assert_eq!(probe.local_addr().unwrap(), addr);
+    assert_eq!(
+        probe.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
 /// A dropped node must not leave retry loops behind when its hub dies.
 #[rusty_tokio::test]
 async fn a_dropped_node_stops_retrying_when_its_hub_dies() {
@@ -596,8 +648,7 @@ async fn a_dropped_node_stops_retrying_when_its_hub_dies() {
     hub.child.wait().unwrap();
 
     // Whatever still dials the old address shows up here.
-    let probe = std::net::TcpListener::bind(&addr).expect("the address is free again");
-    probe.set_nonblocking(true).unwrap();
+    let probe = retry_probe(&addr);
     rusty_tokio::time::sleep(Duration::from_secs(8)).await;
     assert!(
         probe.accept().is_err(),
@@ -630,8 +681,7 @@ async fn a_node_dropped_while_retrying_stops_retrying() {
     rusty_tokio::time::sleep(Duration::from_secs(2)).await;
     drop(node);
 
-    let probe = std::net::TcpListener::bind(&addr).expect("the address is free again");
-    probe.set_nonblocking(true).unwrap();
+    let probe = retry_probe(&addr);
     rusty_tokio::time::sleep(Duration::from_secs(8)).await;
     assert!(
         probe.accept().is_err(),
