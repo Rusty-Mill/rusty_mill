@@ -99,7 +99,7 @@ fn node(entry: &Entry) -> Option<Node<'_>> {
             name: Some(name),
         },
         // A window's floats are part of its entry, not a target.
-        Entry::Floats { .. } => return None,
+        Entry::Floats { .. } | Entry::Agent { .. } => return None,
     })
 }
 

@@ -6,6 +6,7 @@ use rusty_uuid::Uuid;
 use rusty_wire::Writer;
 
 use super::*;
+use crate::AgentMeta;
 use crate::field::Out;
 use crate::schema::Value;
 use crate::{
@@ -536,6 +537,25 @@ fn every_message_round_trips() {
             selection: Selection::Clipboard,
             data: None,
         },
+        Message::OpenForward {
+            req: 30,
+            block,
+            port: 8080,
+            id: 3,
+        },
+        Message::ForwardData {
+            id: 3,
+            data: b"GET /".to_vec(),
+        },
+        Message::ForwardAck { id: 3, n: 5 },
+        Message::CloseForward {
+            id: 3,
+            reason: Some("refused".into()),
+        },
+        Message::CloseForward {
+            id: 4,
+            reason: None,
+        },
     ];
     for message in messages {
         round_trip(message);
@@ -665,6 +685,7 @@ fn every_event_round_trips() {
             title: String::new(),
             body: "done; ok".into(),
         },
+        Event::PortsChanged { block },
         Event::ProcessChanged {
             block,
             pid: u32::MAX,
@@ -1592,4 +1613,77 @@ fn block_signals_keep_their_linux_numbers_and_names() {
         );
     }
     assert_eq!(BlockSignal::from_name("usr1"), None);
+}
+
+#[test]
+fn agent_meta_round_trips_in_a_launch_and_an_entry() {
+    let meta = AgentMeta {
+        agent: "claude".into(),
+        role: "critic".into(),
+        card: "#1570".into(),
+    };
+    round_trip(Message::CreateBlock {
+        req: 1,
+        window: WindowId::from_uuid(Uuid::from_bytes([9; 16])),
+        size: Size::new(80, 24).expect("size"),
+        launch: Launch {
+            agent: Some(meta.clone()),
+            ..Launch::default()
+        },
+    });
+    round_trip(Message::Entry {
+        req: 1,
+        entry: Entry::Agent {
+            block: BlockId::from_uuid(Uuid::from_bytes([8; 16])),
+            meta,
+        },
+    });
+}
+
+#[test]
+fn agent_meta_is_all_three_texts_and_printable_or_malformed() {
+    let create = |body: &dyn Fn(&mut Out)| {
+        raw_frame(0x04, |out| {
+            out.varint(REQ_ID, 1)
+                .bytes(3, &[9u8; 16])
+                .varint(7, 80)
+                .varint(8, 24);
+            body(out);
+        })
+    };
+    let long = "x".repeat(AgentMeta::MAX_LEN + 1);
+    let cases: [&dyn Fn(&mut Out); 4] = [
+        &|out| {
+            out.bytes(72, b"claude");
+        },
+        &|out| {
+            out.bytes(73, b"builder").bytes(74, b"#1");
+        },
+        &|out| {
+            out.bytes(72, b"a\x1b[31m").bytes(73, b"r").bytes(74, b"c");
+        },
+        &|out| {
+            out.bytes(72, long.as_bytes())
+                .bytes(73, b"r")
+                .bytes(74, b"c");
+        },
+    ];
+    for body in cases {
+        assert!(decode(&create(body)).is_err());
+    }
+}
+
+#[test]
+fn agent_meta_refuses_bidi_and_zero_width_characters() {
+    let with = |c: char| AgentMeta {
+        agent: "claude".into(),
+        role: "builder".into(),
+        card: format!("#15{c}72"),
+    };
+    assert!(with('7').is_valid());
+    for c in [
+        '\u{200B}', '\u{200F}', '\u{202E}', '\u{2066}', '\u{2069}', '\u{FEFF}',
+    ] {
+        assert!(!with(c).is_valid(), "{c:?}");
+    }
 }

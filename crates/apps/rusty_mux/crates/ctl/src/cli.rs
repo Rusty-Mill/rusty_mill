@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use rusty_mux_client::forward::Spec;
 use rusty_mux_proto::Cursor;
 use rusty_mux_proto::schema::{self, CallError, Entity, Method, Presence, Ty, Value};
 use rusty_mux_script::hosts::Address;
@@ -67,10 +68,14 @@ pub enum Command {
     /// Holds one connection that owns the blocks it launches, driven by
     /// JSON lines on stdin (C46).
     Own,
+    /// Tunnels loopback ports to the server's host (C81).
+    Forward(Forward),
     /// Prints a completion script for a shell.
     Completion(Shell),
     /// Stops the server cleanly and waits until it has (C36b).
     ServerStop,
+    /// Blocks grouped by the card their agent works on (D336).
+    Overview,
 }
 
 /// `agent`: each verb but `hook` and `skill` acts on the chosen agents in
@@ -414,10 +419,13 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "wait" => wait(rest).map(Command::Wait),
         "run" => run(rest, defaults).map(Command::Run),
         "agent" => agent(rest).map(Command::Agent),
+        "forward" => forward(rest, defaults).map(Command::Forward),
         "bridge" if rest.is_empty() => Ok(Command::Bridge),
         "bridge" => Err("bridge takes no arguments".into()),
         "own" if rest.is_empty() => Ok(Command::Own),
         "own" => Err("own takes no arguments".into()),
+        "overview" if rest.is_empty() => Ok(Command::Overview),
+        "overview" => Err("overview takes no arguments".into()),
         "server" => match rest {
             [verb] if verb == "stop" => Ok(Command::ServerStop),
             _ => Err("usage: server stop".into()),
@@ -431,6 +439,65 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
             .map(|args| call(args, defaults))
             .collect::<Result<_, _>>()
             .map(Command::Calls),
+    }
+}
+
+/// `forward`: the ports to listen on, and the requests that attach to the
+/// block and take its input lease first, which the server asks of the
+/// opener of a forward.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Forward {
+    pub prepare: Vec<Call>,
+    pub ports: Vec<Spec>,
+}
+
+fn forward(args: &[String], defaults: &Defaults) -> Result<Forward, String> {
+    let usage = "usage: forward [--block BLOCK] [LOCAL:]REMOTE...";
+    let mut block: Vec<String> = Vec::new();
+    let mut ports = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--block" => {
+                let value = rest.next().ok_or("forward: --block needs a value")?;
+                block = vec!["--block".into(), value.clone()];
+            }
+            flag if flag.starts_with('-') => return Err(format!("forward: unknown flag {flag}")),
+            port => ports.push(port_spec(port)?),
+        }
+    }
+    if ports.is_empty() {
+        return Err(usage.into());
+    }
+    let prepare = ["attach", "acquire-lease"]
+        .into_iter()
+        .map(|method| {
+            let words: Vec<String> = std::iter::once(method.to_owned())
+                .chain(block.iter().cloned())
+                .collect();
+            call(&words, defaults)
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Forward { prepare, ports })
+}
+
+/// `REMOTE` or `LOCAL:REMOTE`, each a port from 1 to 65535.
+fn port_spec(text: &str) -> Result<Spec, String> {
+    let port = |s: &str| {
+        s.parse::<u16>()
+            .ok()
+            .filter(|p| *p != 0)
+            .ok_or_else(|| format!("forward: {text:?} is not [LOCAL:]REMOTE, ports 1 to 65535"))
+    };
+    match text.split_once(':') {
+        Some((local, remote)) => Ok(Spec {
+            local: Some(port(local)?),
+            remote: port(remote)?,
+        }),
+        None => Ok(Spec {
+            local: None,
+            remote: port(text)?,
+        }),
     }
 }
 
@@ -1226,6 +1293,14 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
          \x20                  terminfo setup|remove DEST [--dry-run]",
     ),
     (
+        "forward",
+        "Tunnel loopback ports of the server's host to this machine, until\n\
+         \x20                  the block closes or you stop it: forward [--block BLOCK]\n\
+         \x20                  [LOCAL:]REMOTE...; attaches to the block and takes its input\n\
+         \x20                  lease, so it fails while another client holds it; prints\n\
+         \x20                  LOCAL and REMOTE for each port; not for use with +",
+    ),
+    (
         "watch",
         "Run the config's rules on events: watch [--after EPOCH:SEQ]",
     ),
@@ -1268,6 +1343,13 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "Hold one connection that owns every block it launches: JSON\n\
          \x20                  requests on stdin (launch, close), one JSON answer or\n\
          \x20                  owner event per line on stdout; ends at the end of stdin",
+    ),
+    (
+        "overview",
+        "List blocks by the card their agent works on, agents underneath:\n\
+         \x20                  overview, for the session it runs in, or every session\n\
+         \x20                  outside one (a server without agent metadata lists every\n\
+         \x20                  block under no card)",
     ),
     (
         "server",

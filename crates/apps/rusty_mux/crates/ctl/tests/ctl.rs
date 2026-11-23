@@ -3410,3 +3410,83 @@ fn hosts_push_merges_into_the_remote_hosts_per_name() {
     );
     let _gone = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn forward_tunnels_a_port_and_ends_when_the_block_closes() {
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+
+    let socket = start_server();
+    let block = block(&socket);
+    // A service on the server's host that echoes one connection.
+    let service = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+    let remote = service.local_addr().expect("addr").port();
+    std::thread::spawn(move || {
+        let (mut peer, _) = service.accept().expect("accept");
+        let mut buf = [0u8; 64];
+        while let Ok(n @ 1..) = peer.read(&mut buf) {
+            peer.write_all(&buf[..n]).expect("echo");
+        }
+    });
+
+    let mut forward = ctl_command(
+        &socket,
+        &["forward", "--block", &block, &remote.to_string()],
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("spawn forward");
+    let mut lines = BufReader::new(forward.stdout.take().expect("stdout"));
+    let mut line = String::new();
+    lines.read_line(&mut line).expect("a bound line");
+    let (local, said_remote) = line.trim().split_once('\t').expect("LOCAL<TAB>REMOTE");
+    assert_eq!(said_remote, remote.to_string());
+    let local: u16 = local.parse().expect("a port");
+
+    let mut through = TcpStream::connect((Ipv4Addr::LOCALHOST, local)).expect("connect");
+    through
+        .set_read_timeout(Some(PATIENCE))
+        .expect("read timeout");
+    through.write_all(b"ping").expect("write");
+    let mut back = [0u8; 4];
+    through.read_exact(&mut back).expect("echo came back");
+    assert_eq!(&back, b"ping");
+    drop(through);
+
+    ok(&socket, &["close-block", "--block", &block]);
+    let deadline = std::time::Instant::now() + PATIENCE;
+    let status = loop {
+        if let Some(status) = forward.try_wait().expect("wait") {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "forward outlived its block"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(0), "{status:?}");
+}
+
+#[test]
+fn forward_fails_while_another_client_holds_the_lease() {
+    let socket = start_server();
+    let block = block(&socket);
+    // `own` holds nothing; a chain that attaches and leases and then waits
+    // does. Hold it with a long-running chain's connection: take the lease
+    // from a first forward, then try a second.
+    let mut first = ctl_command(&socket, &["forward", "--block", &block, "9"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn forward");
+    let mut lines = BufReader::new(first.stdout.take().expect("stdout"));
+    let mut line = String::new();
+    lines.read_line(&mut line).expect("bound");
+
+    let second = ctl(&socket, &["forward", "--block", &block, "8"]);
+    assert_eq!(second.status.code(), Some(1), "{second:?}");
+    let err = String::from_utf8_lossy(&second.stderr);
+    assert!(err.contains("lease"), "{err}");
+    let _ = first.kill();
+    let _ = first.wait();
+}

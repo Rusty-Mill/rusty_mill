@@ -495,7 +495,7 @@ pub fn tools() -> Vec<SettingsTool> {
         ),
         tool(
             "settings_registered_agent_revoke_stale",
-            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin). A dry run unless `revoke: true`: it returns `count`, the agent `ids` it would revoke and `unsaved` (a revocation that failed to write: call again with `revoke: true` to write it). After a board restart, nothing counts as stale until `older_than_hours` have passed since the start. Revoked agents can register again.",
+            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin). A dry run unless `revoke: true`: it returns `count`, the agent `ids` it would revoke and `unsaved` (a revocation that failed to write: call again with `revoke: true` to write it). After a board restart, a last use may count up to an hour late while registry writes succeed; if a last-use write failed, a recently used agent can look stale and must register again. Revoked agents can register again.",
             json!({"older_than_hours": {"type": "integer", "description": "2-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}, "ids": {"type": "array", "items": {"type": "string"}, "description": "With revoke: only these previewed ids, and only if still stale."}}),
             &[],
         ),
@@ -573,6 +573,12 @@ struct AuditRead {
     /// How many of the newest records (1-500, default 50).
     limit: Option<usize>,
 }
+
+/// Refusal records stop being appended once the audit file is this long, in bytes.
+pub const MAX_REFUSAL_FILE: u64 = 4 << 20;
+
+/// The longest reason kept in a refusal record, in characters.
+const MAX_WHY: usize = 200;
 
 /// Append `line` and a newline to `path`, creating it owner-only.
 fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
@@ -837,6 +843,76 @@ impl Settings {
         };
         if let Err(e) = append_line(path, &line.to_string()) {
             rusty_log::warn!(error = %e, "could not write the settings audit record");
+        }
+    }
+
+    /// Record a board operation that was refused or failed, in the same file `settings_audit`
+    /// reads: who, which operation, the card it named and why.
+    ///
+    /// `actor` is the verified caller: the credential's identity, or its registered agent only
+    /// when the agent's key checks out. What the call merely claimed, when that differs, is kept
+    /// apart as `claimed_actor`. The reason is the board's own error text, capped; a malformed
+    /// argument's detail (which can quote its value) is replaced by a fixed phrase, and the
+    /// arguments themselves are never stored. Reads are skipped, and the file stops growing at
+    /// [`MAX_REFUSAL_FILE`], so a looping client cannot fill the disk.
+    pub fn audit_refusal(
+        &self,
+        identity: Option<&Identity>,
+        op: &str,
+        args: &Value,
+        err: &CallError,
+    ) {
+        if op.starts_with("board_") || matches!(op, "card_get" | "card_trace" | "inbox_list") {
+            return;
+        }
+        let text = |k: &str| {
+            args.get(k)
+                .and_then(Value::as_str)
+                .map(|s| s.chars().take(64).collect::<String>())
+        };
+        let claimed = text("agent_id").or_else(|| text("actor"));
+        let verified_agent = identity.filter(|i| i.connector).and_then(|i| {
+            let (id, key) = (
+                args.get("agent_id")?.as_str()?,
+                args.get("agent_key")?.as_str()?,
+            );
+            self.board
+                .verify_agent(&i.actor, id, key)
+                .map(|_| id.chars().take(64).collect::<String>())
+        });
+        let actor = match identity {
+            Some(i) => verified_agent.clone().unwrap_or_else(|| i.actor.clone()),
+            None => claimed.clone().unwrap_or_default(),
+        };
+        let claimed_actor = claimed.filter(|c| *c != actor);
+        let (result, why) = match err {
+            CallError::BadArgs(_) => ("bad_args", "the arguments did not parse".to_owned()),
+            CallError::Board(
+                e @ (BoardError::Forbidden(_)
+                | BoardError::ForbiddenAny(_)
+                | BoardError::OutOfScope(_)),
+            ) => ("denied", e.to_string()),
+            CallError::Board(e) => ("refused", e.to_string()),
+        };
+        let line = json!({
+            "at_ms": self.board.now_ms(),
+            "actor": actor,
+            "claimed_actor": claimed_actor,
+            "via_connector": identity.is_some_and(|i| i.connector),
+            "op": op,
+            "card": text("id"),
+            "result": result,
+            "why": why.chars().take(MAX_WHY).collect::<String>(),
+        });
+        let Some(path) = &self.files.audit else {
+            return;
+        };
+        if std::fs::metadata(path).is_ok_and(|m| m.len() >= MAX_REFUSAL_FILE) {
+            rusty_log::warn!("the audit file is full: a refusal was not recorded");
+            return;
+        }
+        if let Err(e) = append_line(path, &line.to_string()) {
+            rusty_log::warn!(error = %e, "could not write the refusal record");
         }
     }
 

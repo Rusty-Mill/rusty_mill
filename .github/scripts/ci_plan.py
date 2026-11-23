@@ -96,7 +96,7 @@ def full_plan_outputs() -> dict[str, str]:
         **{job: "true" for job in SPECIALIZED_JOB_NAMES},
         "msrv_manifests": "",
         "shards": "[1,2,3]",
-        "components": '[{"component":"workspace","packages":""}]',
+        "components": '[{"component":"workspace","packages":"","native":"true"}]',
     }
 
 

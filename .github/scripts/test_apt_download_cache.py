@@ -258,7 +258,7 @@ class ActionPolicyTests(unittest.TestCase):
         native = action.split("    - name: Install native build dependencies", 1)[1].split("    - name:", 1)[0]
         self.assertNotIn("cache-hit", native)
         self.assertNotIn("continue-on-error", native)
-        self.assertIn("if: runner.os == 'Linux'", native)
+        self.assertIn("if: inputs.native != 'false' && runner.os == 'Linux'", native)
         self.assertLess(action.index("Save downloaded Ubuntu packages"), action.index("Start a D-Bus session"))
         self.assertIn("SEGMENT_DOWNLOAD_TIMEOUT_MINS: '1'", action)
 

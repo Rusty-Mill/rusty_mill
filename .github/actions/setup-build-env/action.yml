@@ -8,6 +8,10 @@ inputs:
     description: 'Extra rustup components to install (e.g. clippy, rustfmt)'
     required: false
     default: ''
+  native:
+    description: "'false' skips the Linux native apt install (and the D-Bus keyring that needs it) for lanes whose crates link none of it; see NATIVE_CRATES in .github/scripts/ci_components.py"
+    required: false
+    default: 'true'
   cache-shared-key:
     description: 'Cache namespace shared across jobs/matrix legs that should reuse the same target-dir cache; empty means no cache (see the budget note in ci.yml)'
     required: false
@@ -24,7 +28,7 @@ runs:
     # The hosted image already lists the official archive as a fallback.
     # APT uses numeric priorities, so reordering lines cannot prefer it.
     - name: Prefer official Ubuntu archive (GitHub-hosted Linux)
-      if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+      if: inputs.native != 'false' && runner.os == 'Linux' && runner.environment == 'github-hosted'
       shell: bash
       run: sudo python3 "${{ github.action_path }}/prefer_ubuntu_archive.py"
 
@@ -40,7 +44,7 @@ runs:
     # round-trips.
     - name: Prepare APT download cache key (hosted Linux)
       id: apt-key
-      if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+      if: inputs.native != 'false' && runner.os == 'Linux' && runner.environment == 'github-hosted'
       continue-on-error: true
       shell: bash
       run: /usr/bin/python3 "${{ github.action_path }}/apt_download_cache.py" key
@@ -61,7 +65,7 @@ runs:
 
     - name: Install native build dependencies (Linux)
       id: native-install
-      if: runner.os == 'Linux'
+      if: inputs.native != 'false' && runner.os == 'Linux'
       shell: bash
       env:
         APT_STAGING: ${{ steps.apt-key.outputs.path }}
@@ -115,7 +119,7 @@ runs:
     # nexus-bootstrap's tests in CI). A throwaway D-Bus session bus plus an
     # unlocked default keyring collection, for the lifetime of this job.
     - name: Start a D-Bus session and unlock a keyring (Linux only)
-      if: runner.os == 'Linux'
+      if: inputs.native != 'false' && runner.os == 'Linux'
       shell: bash
       run: |
         eval "$(dbus-launch --sh-syntax)"

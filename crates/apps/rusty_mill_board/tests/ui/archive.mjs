@@ -58,7 +58,7 @@ await page.locator("#dlg button", { hasText: "Archive" }).click();
 await sleep(500);
 check(await done.locator(".card", { hasText: "Fresh shipped" }).count() === 0, "the dialog's Archive takes it off the board");
 check(await page.locator("#dlg button", { hasText: "Restore" }).count() === 1, "and the button turns into Restore");
-await page.locator("#dlg button", { hasText: "Close" }).click();
+await page.locator("#dlg button", { hasText: "Dismiss" }).click();
 
 // 4. Archive all empties the column.
 await done.locator(".colbar button", { hasText: "Archive all" }).click();

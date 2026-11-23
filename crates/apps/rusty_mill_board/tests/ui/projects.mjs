@@ -1,4 +1,4 @@
-// Browser check of the scope bar: a project picker (projects only, never repositories), the projects as chips, then the agents;
+// Browser check of the scope bar: a project picker (projects only, never repositories, no per-project buttons), then the agents;
 // filtering the board, adding into the selection, and moving a card between projects from its dialog.
 //
 //   cat > /tmp/p.json <<'J'
@@ -46,18 +46,14 @@ check((await page.locator("#repo").count()) === 0 && (await page.locator("#proje
 const rows = await items("#nav1");
 check(rows.slice(-2).join("|") === "Everyone 1|claude 1", `agents holding claims are listed with their counts (${rows.slice(-2).join("|")})`);
 
-const project = (name) => page.locator("#nav1 .item").filter({ hasText: new RegExp(`^${name}\\d`) });
-await project("skills").click();
-check((await titles()).join() === "Skills card", "choosing a project shows only its cards");
-await project("skills").click();
-check((await titles()).length === 4 && (await page.locator("#nav1 .item.on", { hasText: "skills" }).count()) === 0, "clicking the chosen project again clears it");
+check(!rows.some((r) => /^(skills|rl|orch|Inbox)\b/.test(r)), `no project filter buttons (${rows})`);
 await pick("");
 check((await titles()).length === 4, "All projects clears it");
 await pick("skills");
 check((await titles()).join() === "Skills card", "choosing a project in the picker filters the board");
 await pick("");
 
-await project("rl").click();
+await pick("rl");
 check((await titles()).join() === "RL card", "choosing a project narrows further");
 check((await page.locator(".card .tag.proj").count()) === 0, "no project chip when one project is chosen");
 
@@ -122,12 +118,12 @@ check(chips.join() === "kept", `the migration marker is not shown as a chip (${c
 check(!(await page.locator("#toast").isVisible()), "a normal load shows no error");
 
 // The Inbox: the default project, where a card that names none lands.
-await page.locator("#nav1 .item", { hasText: "Inbox" }).click();
+await pick("default");
 await page.fill("#title", "Unsorted idea");
 await page.click("#add");
 await page.waitForFunction(() => [...document.querySelectorAll(".card b")].map((b) => b.textContent).join() === "Unsorted idea");
 check((await api("board_list", { project: "default" })).cards.some((c) => c.title === "Unsorted idea"), "a card added in the Inbox has the default project");
-check((await page.locator("#nav1 .item.on", { hasText: "Inbox" }).innerText()).replace(/\s+/g, " ").trim() === "Inbox 1", "and the Inbox counts it");
+check((await page.locator("#project option:checked").innerText()).trim() === "Inbox · 1", "and the Inbox counts it");
 
 // A refused project list is said so, not shown as an empty panel.
 const refused = await browser.newPage({ viewport: { width: 1300, height: 700 } });

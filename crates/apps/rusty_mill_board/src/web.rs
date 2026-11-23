@@ -308,7 +308,11 @@ impl Web {
         let Some(op) = self.ops.iter().find(|o| o.name == name) else {
             return reply(StatusCode::NOT_FOUND, json!({"error": "no such operation"}));
         };
-        answer(op.call(&self.board, identity, args))
+        let out = op.call(&self.board, identity, args.clone());
+        if let Err(e) = &out {
+            self.settings.audit_refusal(identity, name, &args, e);
+        }
+        answer(out)
     }
 }
 

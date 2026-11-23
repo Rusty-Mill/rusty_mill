@@ -104,9 +104,9 @@ check(scoped.status === 200, "(setup) an agent limited to rocket_league and skil
 const limited = await browser.newPage({ viewport: { width: 1300, height: 900 } });
 limited.on("pageerror", (e) => errors.push(String(e)));
 await limited.goto(`${BASE}/#token=${scoped.body.token}`);
-await limited.waitForFunction(() => document.querySelector("#actor").value === "scoped" && document.querySelectorAll("#nav1 .item").length > 0);
-const sideItems = async () => [...await limited.locator("#project option").allInnerTexts(), ...await limited.locator("#nav1 .item").allInnerTexts()].map((t) => t.split(/\n| · /)[0].trim());
-check(JSON.stringify(await sideItems()) === JSON.stringify(["All projects", "rocket_league", "skills", "rocket_league", "skills"]), `a limited agent sees only its projects listed (${await sideItems()})`);
+await limited.waitForFunction(() => document.querySelector("#actor").value === "scoped" && document.querySelectorAll("#project option").length > 1);
+const sideItems = async () => [...await limited.locator("#project option").allInnerTexts()].map((t) => t.split(/\n| · /)[0].trim());
+check(JSON.stringify(await sideItems()) === JSON.stringify(["All projects", "rocket_league", "skills"]), `a limited agent sees only its projects listed (${await sideItems()})`);
 await limited.selectOption("#project", "skills");
 await limited.fill("#title", "scoped card");
 await limited.click("#add");

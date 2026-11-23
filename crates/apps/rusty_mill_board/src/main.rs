@@ -4,8 +4,10 @@
 //! RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788   # MCP over stdio
 //! RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.0.0.1:8787 --auth-token S
 //! ```
-//! The cards are rusty_tick tasks tagged `agent` (ADR-0012); without `--tick-url`
-//! the board lives in memory and is gone when the process ends.
+//! The cards are rusty_tick tasks tagged `agent` (ADR-0012); with `--db FILE` they are in the
+//! board's own SQLite file instead (ADR-0007); with neither the board lives in memory and is gone
+//! when the process ends. `--migrate-from-tick` copies rusty_tick into `--db` (`--dry-run` writes
+//! nothing).
 //! Add `--github-repo owner/name` (and `GITHUB_TOKEN`) to mirror cards to issues.
 //! Add `--identities FILE` for a token per model, each bound to an actor and role.
 //! The HTTP mode serves the UI at `/`, the web API at `/api/<op>` and MCP at
@@ -30,7 +32,9 @@ use rusty_mill_board::bbp_cli::BbpCli;
 use rusty_mill_board::board::{Board, Roles, system_ms};
 use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
 use rusty_mill_board::github::{GITHUB_COM_API, GithubMerged};
+use rusty_mill_board::lift;
 use rusty_mill_board::mcp;
+use rusty_mill_board::migrate;
 use rusty_mill_board::milestones::{MemMilestones, MilestoneStore};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::retag;
@@ -38,6 +42,7 @@ use rusty_mill_board::settings::{
     Files, GithubFile, ServerInfo, Settings, load_github, load_roles, load_rules, load_statuses,
     load_workflow, open_credentials, projects_sink,
 };
+use rusty_mill_board::sqlite::SqliteStore;
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
 use rusty_mill_board::tick::{TickHttp, TickStore};
@@ -120,12 +125,42 @@ struct Cli {
     /// whose evidence has changed since is left alone and reported.
     #[arg(long, value_name = "FILE", conflicts_with_all = ["export_projects", "retag_columns", "undo_retag"])]
     undo_backfill: Option<PathBuf>,
+    /// Lift headed body sections (`## Acceptance`, `## Scope`, `## Why`, `## Summary`) into the
+    /// typed card fields, drop a `## Parent milestone` that repeats the parent, and turn
+    /// `## Prerequisites` codes into `related` links, then exit. Only unambiguous cases move;
+    /// the rest stay in the body and are listed on stderr. Prints the plan as JSON; nothing is
+    /// written without --lift-record.
+    #[arg(long, conflicts_with_all = ["export_projects", "retag_columns", "undo_retag", "backfill_evidence", "undo_backfill", "undo_lift"])]
+    lift_sections: bool,
+    /// With --lift-sections: a new file the plan is saved to before any card is written (stop
+    /// the board first; a card changed meanwhile is skipped and reported); it holds every
+    /// original body, and is what --undo-lift reads.
+    #[arg(long, value_name = "FILE", requires = "lift_sections")]
+    lift_record: Option<PathBuf>,
+    /// Put back the cards a lift changed, from its --lift-record FILE, and exit. A card
+    /// changed since the lift is left alone and reported.
+    #[arg(long, value_name = "FILE", conflicts_with = "export_projects")]
+    undo_lift: Option<PathBuf>,
     /// Keep the cards in this rusty_tick (e.g. `http://127.0.0.1:8788`): its tasks tagged
     /// `agent` are the board. Omit for an in-memory board. The token is read from the
     /// `RUSTY_TICK_TOKEN` environment variable only, never an argument (which process
     /// listings show).
     #[arg(long, env = "MILL_BOARD_TICK_URL")]
     tick_url: Option<String>,
+    /// Keep the cards in this SQLite file, created if missing (ADR-0007). Not with
+    /// --tick-url, except for --migrate-from-tick. The board is its only writer.
+    #[arg(long, value_name = "FILE", env = "MILL_BOARD_DB")]
+    db: Option<PathBuf>,
+    /// Copy every card, comment, number reservation, move and milestone from --tick-url
+    /// into a new --db file (never an existing one) and compare the copy; the file appears only if
+    /// the copy is exact. Exit non-zero on any difference.
+    /// rusty_tick is only read. Stop the board first, so nothing changes meanwhile.
+    #[arg(long, requires_all = ["tick_url", "db"], conflicts_with_all = ["export_projects", "retag_columns", "undo_retag", "backfill_evidence", "undo_backfill", "http"])]
+    migrate_from_tick: bool,
+    /// With --migrate-from-tick: copy into a private in-memory database instead, so nothing
+    /// is written anywhere, and print the same report.
+    #[arg(long, requires = "migrate_from_tick")]
+    dry_run: bool,
     /// Serve HTTP (UI + API + MCP) on this address instead of MCP over stdio.
     #[arg(long, env = "MILL_BOARD_HTTP")]
     http: Option<SocketAddr>,
@@ -405,9 +440,107 @@ fn run_backfill(cli: &Cli, store: &dyn Store) -> Result<(), String> {
     Ok(())
 }
 
-/// Pretty JSON for the retag and backfill output.
+/// The dry run of `--lift-sections`: the plan on stdout, what stays in bodies on stderr.
+fn show_lift_plan(plan: &lift::Plan) -> Result<(), String> {
+    eprintln!("{}", json(&plan.left)?);
+    println!("{}", json(&plan.lifts)?);
+    eprintln!(
+        "dry run: {} card(s) would change, {} section(s) stay in their bodies; add --lift-record FILE to write",
+        plan.lifts.len(),
+        plan.left.len()
+    );
+    Ok(())
+}
+
+/// `--lift-sections` / `--undo-lift`: plan, apply or undo the lift of body sections.
+fn run_lift(cli: &Cli, store: &dyn Store) -> Result<(), String> {
+    if let Some(path) = &cli.undo_lift {
+        let fail = |e: String| format!("--undo-lift {}: {e}", path.display());
+        let text = std::fs::read_to_string(path).map_err(|e| fail(e.to_string()))?;
+        let lifts: Vec<lift::Lift> =
+            serde_json::from_str(&text).map_err(|e| fail(e.to_string()))?;
+        let out = lift::undo(store, &lifts, system_ms()).map_err(|e| fail(e.to_string()))?;
+        println!("{}", json(&out)?);
+        return Ok(());
+    }
+    let plan = lift::plan(&store.list().map_err(|e| e.to_string())?);
+    let Some(record) = &cli.lift_record else {
+        return show_lift_plan(&plan);
+    };
+    eprintln!("{}", json(&plan.left)?);
+    let fail = |e: String| format!("--lift-record {}: {e}", record.display());
+    lift::save_record(record, &plan.lifts)
+        .map_err(|e| fail(format!("not saved, nothing written: {e}")))?;
+    let out = lift::apply(store, &plan.lifts, system_ms())
+        .map_err(|e| fail(format!("{e}; undo what was written with --undo-lift")))?;
+    println!("{}", json(&out)?);
+    Ok(())
+}
+
+/// Pretty JSON for the retag, backfill and lift output.
 fn json<T: serde::Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string_pretty(value).map_err(|e| e.to_string())
+}
+
+/// The card store and the milestone store the board runs on.
+type Stores = (Box<dyn Store>, Box<dyn MilestoneStore>);
+
+/// rusty_tick over HTTP, with its token from the environment.
+fn open_tick(url: &str) -> Result<TickStore<TickHttp>, String> {
+    let token = std::env::var("RUSTY_TICK_TOKEN")
+        .map_err(|_| "--tick-url needs RUSTY_TICK_TOKEN in the environment".to_owned())?;
+    Ok(TickStore::new(TickHttp::new(url, &token)?))
+}
+
+/// Cards and milestones live in the SQLite file when `--db` is given, in rusty_tick when
+/// `--tick-url` is, else in memory; each through its own port.
+fn open_stores(cli: &Cli) -> Result<Stores, String> {
+    match (&cli.db, &cli.tick_url) {
+        (Some(_), Some(_)) => Err("--db and --tick-url are two stores: give one (to copy \
+                                    rusty_tick into --db, use --migrate-from-tick)"
+            .into()),
+        (Some(path), None) => {
+            let open =
+                || SqliteStore::open(path).map_err(|e| format!("--db {}: {e}", path.display()));
+            Ok((Box::new(open()?), Box::new(open()?)))
+        }
+        (None, Some(url)) => Ok((Box::new(open_tick(url)?), Box::new(open_tick(url)?))),
+        (None, None) => Ok((
+            Box::new(MemStore::default()),
+            Box::new(MemMilestones::default()),
+        )),
+    }
+}
+
+/// `--migrate-from-tick`: copy, compare, print the report; an inexact copy is an error.
+fn run_migrate(cli: &Cli) -> Result<(), String> {
+    let (Some(url), Some(path)) = (&cli.tick_url, &cli.db) else {
+        return Err("--migrate-from-tick needs --tick-url and --db".into());
+    };
+    let source = open_tick(url)?;
+    let report = if cli.dry_run {
+        let target = SqliteStore::open_in_memory().map_err(|e| e.to_string())?;
+        migrate::migrate(&source, &target)?
+    } else {
+        migrate::migrate_to_file(&source, path)?
+    };
+    println!("{}", json(&report)?);
+    if !report.exact() {
+        return Err(format!(
+            "the copy differs from rusty_tick in {} way(s); see the report",
+            report.mismatches.len()
+        ));
+    }
+    eprintln!(
+        "{}: {} cards, copy exact",
+        if cli.dry_run {
+            "dry run, nothing written"
+        } else {
+            "migrated"
+        },
+        report.cards
+    );
+    Ok(())
 }
 
 fn run(cli: Cli) -> Result<(), String> {
@@ -420,26 +553,27 @@ fn run(cli: Cli) -> Result<(), String> {
         println!("{}", Projects::load(path)?.file_json()?);
         return Ok(());
     }
-    // Cards and milestones live in rusty_tick when it is given, each through its own port.
-    let (store, milestones): (Box<dyn Store>, Box<dyn MilestoneStore>) = match &cli.tick_url {
-        Some(url) => {
-            let token = std::env::var("RUSTY_TICK_TOKEN")
-                .map_err(|_| "--tick-url needs RUSTY_TICK_TOKEN in the environment".to_owned())?;
-            (
-                Box::new(TickStore::new(TickHttp::new(url, &token)?)),
-                Box::new(TickStore::new(TickHttp::new(url, &token)?)),
-            )
-        }
-        None => (
-            Box::new(MemStore::default()),
-            Box::new(MemMilestones::default()),
-        ),
-    };
+    if cli.migrate_from_tick {
+        return run_migrate(&cli);
+    }
+    // A plan that writes nothing reads the file read-only: opening the store would create it and
+    // migrate its schema.
+    if let (true, None, Some(path), None) =
+        (cli.lift_sections, &cli.lift_record, &cli.db, &cli.tick_url)
+    {
+        let cards = rusty_mill_board::sqlite::read_cards(path)
+            .map_err(|e| format!("--db {}: {e}", path.display()))?;
+        return show_lift_plan(&lift::plan(&cards));
+    }
+    let (store, milestones) = open_stores(&cli)?;
     if cli.retag_columns.is_some() || cli.undo_retag.is_some() {
         return run_retag(&cli, store.as_ref());
     }
     if cli.backfill_evidence.is_some() || cli.undo_backfill.is_some() {
         return run_backfill(&cli, store.as_ref());
+    }
+    if cli.lift_sections || cli.undo_lift.is_some() {
+        return run_lift(&cli, store.as_ref());
     }
     let files = files(&cli);
     required(&cli.projects, "--projects")?;

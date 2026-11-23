@@ -1,4 +1,4 @@
-// Browser check that a credential limited to projects other than `default` gets no Inbox row.
+// Browser check that a credential limited to projects other than `default` gets no Inbox entry.
 //
 //   D=$(mktemp -d); echo '{"rl": ["crates/apps/rocket_league"], "orch": ["crates/apps/rusty_orch"]}' > $D/p.json
 //   echo '[{"token": "scoped-token-0123456789", "actor": "dev", "role": "builder", "projects": ["rl", "orch"]}]' > $D/ids.json
@@ -27,13 +27,13 @@ page.on("pageerror", (e) => errors.push(String(e)));
 await page.goto(`${BASE}/#token=${TOKEN}`);
 await page.waitForSelector(".card");
 const titles = async () => (await page.locator(".card b").allInnerTexts()).sort();
-const rows = (await page.locator("#nav1 .item").allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim());
+const rows = (await page.locator("#project option").allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim());
 
 check(!rows.some((r) => r.startsWith("Inbox")), `no Inbox row for a credential without project default (${rows.join("|")})`);
-check(rows.some((r) => r === "rl 1") && rows.some((r) => r === "orch 1"), "its permitted projects are listed");
+check(rows.some((r) => r === "rl · 1") && rows.some((r) => r === "orch · 1"), "its permitted projects are listed");
 check((await page.locator("#dlg option[value=default]").count()) === 0, "and the dialog does not offer it");
 
-await page.locator("#nav1 .item", { hasText: /^rl/ }).click();
+await page.selectOption("#project", "rl");
 check((await titles()).join() === "RL card", "choosing a permitted project still filters");
 await page.fill("#title", "Added under rl");
 await page.click("#add");

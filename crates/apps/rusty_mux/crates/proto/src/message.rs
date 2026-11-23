@@ -12,6 +12,11 @@ use crate::field::{In, Out};
 use crate::schema::Value;
 use crate::{Error, args, varint};
 
+/// The most bytes one [`Message::ForwardData`] carries (C81).
+pub const FORWARD_CHUNK: usize = 16 << 10;
+/// The bytes of a forward's data a sender may have unacknowledged, per
+/// direction (C81).
+pub const FORWARD_WINDOW: usize = 256 << 10;
 /// The most bytes a clipboard answer (`ClipboardReply`) carries (C38's OSC 52 limit).
 pub const MAX_CLIPBOARD: usize = 1 << 20;
 
@@ -202,6 +207,19 @@ impl Features {
     /// at all.
     pub const LEASE_REQUESTS: Self = Self(1 << 37);
 
+    /// The block method `terminal.ports` (C80): the TCP ports the block's
+    /// programs listen on, as `PORT<TAB>PID<TAB>NAME` lines. It travels as
+    /// [`Message::BlockCall`], so the bit only says the server knows it. A
+    /// server offers it where it can read the sockets (Linux).
+    pub const PORTS: Self = Self(1 << 39);
+
+    /// Port forwards (C81): the input-lease holder of a block opens a
+    /// tunnel to a loopback port of the server's host with
+    /// [`Message::OpenForward`], and [`Message::ForwardData`],
+    /// [`Message::ForwardAck`] and [`Message::CloseForward`] carry it, in
+    /// both directions, over the same connection.
+    pub const PORT_FORWARD: Self = Self(1 << 40);
+
     /// A clean stop on request (C36b): [`Message::Shutdown`] has the server
     /// answer, save its state, hang up owned blocks and release its name,
     /// then close every connection. Only the server's own account may ask.
@@ -260,6 +278,11 @@ impl Features {
     /// [`Event::FloatsChanged`] (skipped for a client without it) and
     /// listed by [`Entry::Floats`]. Bit 49 is another capability's.
     pub const FLOATS: Self = Self(1 << 50);
+
+    /// Who works a block (D336): [`Launch::agent`] names the agent, role and
+    /// card a block is launched for, and [`Entry::Agent`] lists them. The
+    /// server stores and echoes the three texts and never acts on them.
+    pub const AGENT_META: Self = Self(1 << 52);
 
     /// The block methods `terminal.prompts` and `terminal.find` (C55): the
     /// rows where the shell's prompts started (OSC 133/633 `A`) and the rows
@@ -364,6 +387,9 @@ const NAMES: &[(Features, &str)] = &[
     (Features::SHOW_SESSION, "sessions across windows"),
     (Features::FLOATS, "floating layers"),
     (Features::TERMINAL_FIND, "prompts and find in scrollback"),
+    (Features::PORTS, "listening ports of a block"),
+    (Features::PORT_FORWARD, "port forwards"),
+    (Features::AGENT_META, "agent, role and card on blocks"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -444,6 +470,45 @@ pub struct Launch {
     /// Keep the block, read-only, once its program exits (C78).
     /// Negotiated with [`Features::HOLD`].
     pub hold: bool,
+    /// Who works the block (D336). Negotiated with [`Features::AGENT_META`].
+    pub agent: Option<AgentMeta>,
+}
+
+/// Who works a block, as the launcher names them (D336): the server keeps
+/// the texts and echoes them, and never branches on them. There is no
+/// project: the session is the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMeta {
+    pub agent: String,
+    pub role: String,
+    pub card: String,
+}
+
+impl AgentMeta {
+    /// The longest each text may be, in bytes.
+    pub const MAX_LEN: usize = 128;
+
+    /// Whether every text is non-empty, at most [`Self::MAX_LEN`] bytes and
+    /// free of control and invisible formatting characters (bidi overrides
+    /// and isolates, zero-width marks), so it prints as written in a header.
+    pub fn is_valid(&self) -> bool {
+        [&self.agent, &self.role, &self.card]
+            .into_iter()
+            .all(|t| !t.is_empty() && t.len() <= Self::MAX_LEN && !t.chars().any(unprintable))
+    }
+}
+
+/// A control character, or one that formats without showing.
+fn unprintable(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
 }
 
 /// What [`Message::SignalBlock`] may send (C76): a closed set, so no
@@ -555,6 +620,10 @@ pub enum Entry {
         window: WindowId,
         floats: Vec<Float>,
     },
+    /// Who works a block (D336); sent after its [`Entry::Block`], only for a
+    /// block launched with [`Launch::agent`] and to a client with
+    /// [`Features::AGENT_META`].
+    Agent { block: BlockId, meta: AgentMeta },
     Block {
         block: BlockId,
         window: WindowId,
@@ -919,6 +988,38 @@ pub enum Message {
         session: SessionId,
         to: ShowTo,
     },
+    /// Opens forward `id` (C81): a tunnel to `127.0.0.1:port` on the
+    /// server's host. Done means the forward is accepted; the connection
+    /// itself is made after, and a refused one ends with
+    /// [`Message::CloseForward`]. `id` is the client's own choice, unused
+    /// on this connection. Accepted from the block's input-lease holder
+    /// only, like input. Negotiated with [`Features::PORT_FORWARD`].
+    OpenForward {
+        req: u64,
+        block: BlockId,
+        port: u16,
+        id: u64,
+    },
+    /// Bytes of forward `id`, at most [`FORWARD_CHUNK`], in either
+    /// direction. The receiver gives the sender credit back with
+    /// [`Message::ForwardAck`]. Negotiated with [`Features::PORT_FORWARD`].
+    ForwardData {
+        id: u64,
+        data: Vec<u8>,
+    },
+    /// `n` bytes of forward `id`'s data were consumed, in either direction.
+    /// A sender has at most [`FORWARD_WINDOW`] bytes unacknowledged; one
+    /// that sends more has its forward closed.
+    ForwardAck {
+        id: u64,
+        n: u32,
+    },
+    /// Ends forward `id`, in either direction; the server says why, if it
+    /// can.
+    CloseForward {
+        id: u64,
+        reason: Option<String>,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -1165,12 +1266,20 @@ const SHOWABLE: u32 = 70;
 /// A `ShowSession`'s mark that it asks every other window: 1; a request
 /// has this or a client, never neither (C64).
 const EVERY: u32 = 71;
+/// A launch's or agent entry's agent, role and card texts (D336).
+const AGENT: u32 = 72;
+const ROLE: u32 = 73;
+const CARD: u32 = 74;
+/// A forward's id, the client's choice (C81).
+const FORWARD: u32 = 75;
+/// Bytes of credit a [`Message::ForwardAck`] gives back.
+const CREDIT: u32 = 76;
 /// Floating blocks (C42) in the text form of [`rusty_mux_core::floats_text`].
 const FLOATS: u32 = 67;
 /// A [`Message::StackFloat`]'s end: 1 top, 0 bottom.
 const TOP: u32 = 68;
-// IDs 1..=EVERY are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = EVERY as usize;
+// IDs 1..=CREDIT are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = CREDIT as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -1211,6 +1320,10 @@ mod ty {
     pub const SHUTDOWN: u8 = 0x24;
     pub const SHARE_SESSION: u8 = 0x25;
     pub const UNSHARE_SESSION: u8 = 0x26;
+    pub const OPEN_FORWARD: u8 = 0x27;
+    pub const FORWARD_DATA: u8 = 0x2b;
+    pub const FORWARD_ACK: u8 = 0x2c;
+    pub const CLOSE_FORWARD: u8 = 0x2d;
     pub const SIGNAL_BLOCK: u8 = 0x28;
     pub const RELEASE_BLOCK: u8 = 0x29;
     pub const CLIPBOARD_REPLY: u8 = 0x2a;
@@ -1373,6 +1486,30 @@ impl Message {
                 req_block(out, *req, *block, ty::SIGNAL_BLOCK)
             }
             M::ReleaseBlock { req, block } => req_block(out, *req, *block, ty::RELEASE_BLOCK),
+            M::OpenForward {
+                req,
+                block,
+                port,
+                id,
+            } => {
+                out.varint(PORT, (*port).into()).varint(FORWARD, *id);
+                req_block(out, *req, *block, ty::OPEN_FORWARD)
+            }
+            M::ForwardData { id, data } => {
+                out.varint(FORWARD, *id).bytes(DATA, data);
+                ty::FORWARD_DATA
+            }
+            M::ForwardAck { id, n } => {
+                out.varint(FORWARD, *id).varint(CREDIT, (*n).into());
+                ty::FORWARD_ACK
+            }
+            M::CloseForward { id, reason } => {
+                out.varint(FORWARD, *id);
+                if let Some(reason) = reason {
+                    out.bytes(REASON, reason.as_bytes());
+                }
+                ty::CLOSE_FORWARD
+            }
             M::ShowSession { req, session, to } => {
                 out.varint(REQ, *req).uuid(SESSION, session.uuid());
                 match to {
@@ -1755,6 +1892,24 @@ impl Message {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
             },
+            ty::OPEN_FORWARD => M::OpenForward {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                port: u16::try_from(f.varint(PORT)?).map_err(|_| f.invalid(PORT))?,
+                id: f.varint(FORWARD)?,
+            },
+            ty::FORWARD_DATA => M::ForwardData {
+                id: f.varint(FORWARD)?,
+                data: f.bytes(DATA)?.to_vec(),
+            },
+            ty::FORWARD_ACK => M::ForwardAck {
+                id: f.varint(FORWARD)?,
+                n: u32::try_from(f.varint(CREDIT)?).map_err(|_| f.invalid(CREDIT))?,
+            },
+            ty::CLOSE_FORWARD => M::CloseForward {
+                id: f.varint(FORWARD)?,
+                reason: f.opt(REASON, |f, id| f.string(id))?,
+            },
             ty::SHOW_SESSION => M::ShowSession {
                 req: f.varint(REQ)?,
                 session: session(&f, SESSION)?,
@@ -1969,6 +2124,9 @@ fn put_launch(out: &mut Out, launch: &Launch) {
     if launch.hold {
         out.varint(HOLD, 1);
     }
+    if let Some(meta) = &launch.agent {
+        put_meta(out, meta);
+    }
     put_input(out, launch.input);
     if let Some(env) = &launch.env {
         out.bytes(ENV, &strings(env.iter().flat_map(|(k, v)| [k, v])));
@@ -2028,7 +2186,34 @@ fn get_launch(f: &In<'_>) -> Result<Launch, Error> {
             Some(n) => u8::try_from(n).map_err(|_| f.invalid(FDS))?,
         },
         hold: f.opt(HOLD, In::varint)? == Some(1),
+        agent: get_meta(f)?,
     })
+}
+
+fn put_meta(out: &mut Out, meta: &AgentMeta) {
+    out.bytes(AGENT, meta.agent.as_bytes())
+        .bytes(ROLE, meta.role.as_bytes())
+        .bytes(CARD, meta.card.as_bytes());
+}
+
+/// All three texts or none; a partial or invalid set is malformed.
+fn get_meta(f: &In<'_>) -> Result<Option<AgentMeta>, Error> {
+    let Some(agent) = f.opt(AGENT, In::string)? else {
+        return match (f.opt(ROLE, In::string)?, f.opt(CARD, In::string)?) {
+            (None, None) => Ok(None),
+            _ => Err(f.invalid(AGENT)),
+        };
+    };
+    let meta = AgentMeta {
+        agent,
+        role: f.string(ROLE)?,
+        card: f.string(CARD)?,
+    };
+    if meta.is_valid() {
+        Ok(Some(meta))
+    } else {
+        Err(f.invalid(AGENT))
+    }
 }
 
 /// Name and value pairs; an odd count is malformed.
@@ -2240,6 +2425,7 @@ mod kind {
     pub const TAILSCALE_STATUS_CHANGED: u64 = 34;
     pub const SHARE_CHANGED: u64 = 35;
     pub const FLOATS_CHANGED: u64 = 36;
+    pub const PORTS_CHANGED: u64 = 37;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -2430,6 +2616,10 @@ fn put_event(out: &mut Out, event: &Event) {
             out.varint(KIND, kind::STATUS_REMOVED)
                 .uuid(BLOCK, block.uuid())
                 .bytes(STATUS, id.as_bytes());
+        }
+        E::PortsChanged { block } => {
+            out.varint(KIND, kind::PORTS_CHANGED)
+                .uuid(BLOCK, block.uuid());
         }
         E::ProcessChanged {
             block,
@@ -2649,6 +2839,9 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
             title: f.string(TITLE)?,
             body: f.string(BODY)?,
         },
+        kind::PORTS_CHANGED => E::PortsChanged {
+            block: block(f, BLOCK)?,
+        },
         kind::PROCESS_CHANGED => E::ProcessChanged {
             block: block(f, BLOCK)?,
             pid: u32::try_from(f.varint(PID)?).map_err(|_| f.invalid(PID))?,
@@ -2693,6 +2886,7 @@ mod entry {
     pub const BLOCK: u64 = 3;
     pub const CLIENT: u64 = 4;
     pub const FLOATS: u64 = 5;
+    pub const AGENT: u64 = 6;
 }
 
 fn put_entry(out: &mut Out, entry: &Entry) {
@@ -2730,6 +2924,10 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             if let Some(block) = focused {
                 out.uuid(FOCUSED, block.uuid());
             }
+        }
+        Entry::Agent { block, meta } => {
+            out.varint(KIND, entry::AGENT).uuid(BLOCK, block.uuid());
+            put_meta(out, meta);
         }
         Entry::Floats { window, floats } => {
             out.varint(KIND, entry::FLOATS)
@@ -2815,6 +3013,10 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             layout: f.opt(LAYOUT, |_, _| get_layout(f))?.flatten(),
             zoomed: f.opt(ZOOMED, block)?,
             focused: f.opt(FOCUSED, block)?,
+        },
+        entry::AGENT => Entry::Agent {
+            block: block(f, BLOCK)?,
+            meta: get_meta(f)?.ok_or_else(|| f.invalid(AGENT))?,
         },
         entry::FLOATS => Entry::Floats {
             window: window(f, WINDOW)?,

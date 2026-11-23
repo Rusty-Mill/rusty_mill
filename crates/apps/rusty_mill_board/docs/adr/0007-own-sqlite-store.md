@@ -1,6 +1,6 @@
 # ADR-0007: Mill Board owns its store (SQLite)
 
-- **Status:** Proposed (2026-11-12). Nano asked for this design note: decision card in the Mill_Board thread, 2026-11-12, "Write the #1438 design note". It is card #1438 and Millwright milestone B2. Nothing here is built until Nano approves this note. The production migration, deleting the tick adapter and archiving rusty_tick are each authorized separately.
+- **Status:** Accepted (2026-11-18). Nano: "I approve it" (Mill_Board thread, 2026-11-18, message cmsg_017MoLbtrGAAcyE1PVPZXuN6YK5kc56ScE3siu9C7sX81s; remind-me `mem_573093b1e0b143c1986f9da69f09c13e`). Proposed 2026-11-12. Nano asked for this design note: decision card in the Mill_Board thread, 2026-11-12, "Write the #1438 design note". It is card #1438 and Millwright milestone B2. The adapter alone (#1811) may land on this approval. The production migration, deleting the tick adapter and archiving rusty_tick are each authorized separately.
 - **Supersedes:** [ADR-0012](../../../../../docs/adr/0012-one-task-store.md) (rusty_tick as the one task store), per Nano's 2026-11-10 decision (Millwright `board-store`, remind-me `mem_c6d02995042b4dedbb6a18e84730853f`).
 
 ## Context
@@ -16,13 +16,13 @@ The `Store` port (`src/store.rs`) already isolates all of this. `MemStore` and `
 Add a third adapter, `SqliteStore` (`src/sqlite.rs`), on the workspace's existing `rusqlite` 0.41 (`bundled`, `backup`). It adds no new dependency. The board becomes the only writer of its own file. Once the migration is verified, `TickStore` and its fake are deleted and rusty_tick is archived.
 
 ### Schema
-There is one file, `--db PATH`, defaulting to `~/.mill-board/board.db`. It uses WAL mode with `foreign_keys=ON`, and `user_version` holds the schema version, with migrations applied at startup in order.
+There is one file, `--db PATH` (no default: without `--db` the board is not on SQLite). It uses WAL mode with `foreign_keys=ON`, and `user_version` holds the schema version, with migrations applied at startup in order.
 
 | Table | Columns (keys) | Notes |
 |---|---|---|
 | `cards` | `id` TEXT PK, `number` INTEGER UNIQUE NULL, `rev`, `title`, `body`, `prompt`, `column`, `claim`, `project`, `priority`, `sort_order`, `issue`, `synced_text`, `created_ms`, `updated_ms`, `done_ms`, `archived_ms`, `restored_ms`, `target_ms`, `doc` TEXT (JSON) | `doc` holds the card's links and the rest as JSON: `deps`, `superseded_by`, `related`, `parent`, `milestone`, `execution` and `external_refs`, plus unknown fields kept per S5a. That way a new field needs no migration, and the S5a rollback guarantee carries over. Indexes: `(column)`, `(project, column)`, `(updated_ms)`, `(created_ms, id)`. |
 | `tags` | `card_id`, `tag` (PK both) | User tags only. Column, claim, number and archive state become real columns instead of reserved tags. |
-| `comments` | `id` TEXT PK (UUIDv7), `card_id`, `by`, `at_ms`, `text` | Index `(card_id, at_ms)`. Ids are kept from tick. |
+| `comments` | `id` TEXT PK (UUIDv7), `card_id`, `by`, `at_ms`, `text` | Index `(card_id, at_ms)`. Ids are kept from tick. (As built in #1817 comments live in the card's document and carry no id; tick's ids are kept in `migrated_from_tick.comment_ids`. A comments table is a later step.) |
 | `events` | `id` TEXT PK (UUIDv7), `card_id`, `actor`, `kind`, `rev`, `column`, `at_ms` | **Durable.** A restart no longer forces a resync. It keeps the last 100,000 events and prunes older ones at startup, and a cursor older than the pruned point gets `resync: true` as today. |
 | `moves` | `card_id`, `at_ms`, `from`, `to` | Replaces tick's `GET /moves`, which `moved_in` reads. It is written in the same transaction as the move. |
 | `numbers` | `number` PK, `card_id` | Reservations are never reused, as with tick's `board_number` docs (#1238). |
@@ -43,10 +43,10 @@ Settings stay in their files (`--settings-dir`, ADR-0004): they are config, not 
 - The S2 observation machinery (`observe`, the comment window, the 5-minute reconcile) is no longer needed: the board is the only writer. Anyone who edits the file by hand must restart the board.
 
 ## Migration (B3, separately authorized)
-`rusty_mill_board migrate-from-tick --tick-url … --db NEW.db [--dry-run]` works as follows:
-1. **Export:** it reads through the existing `TickStore` read paths (tasks tagged `agent`, board docs, comments, `board_number` docs, milestones, `/moves`) and writes `NEW.db` in one transaction. It keeps ids, numbers, revs, `created_ms`/`updated_ms`, comment ids, authors and times, move history and unknown doc fields. Events are not migrated (tick keeps none), and the new log starts empty with a `resync` cursor.
-2. **Verify:** it reads both stores through the `Store` port and compares them card by card, and every field must be equal. It also compares counts per table, the highest reserved number and a checksum of the serialized cards. Any difference fails the run.
-3. **Dry run first:** the dry run runs against production tick and writes to `/tmp`. It changes nothing in tick. The result (counts and diff, expected to be zero) goes to Nano.
+`rusty_mill_board --migrate-from-tick --tick-url … --db NEW.db [--dry-run]` (a flag, not a subcommand; built in PR #1817) works as follows:
+1. **Export:** it reads through the existing `TickStore` read paths (tasks tagged `agent`, board docs, comments, `board_number` docs, milestones, `/moves`) and loads `NEW.db` in one transaction, in a staging file of the run's own that is published only if the read-back is exact (an existing `NEW.db` is refused). It keeps ids, numbers, revs, `created_ms`/`updated_ms`, comment ids, authors and times, and move history (card and time; tick records no column, so each carries the card's current column). Comments are projected without an id, as the domain has none, so each card's source comment document ids, in order, and its unknown board-document members are read from tick and stored under their own key (`migrated_from_tick`) in the card's document, where they cannot collide with a card member and an edit leaves them alone; read-back compares them exactly, and the report counts them. Board and comment documents tick's own reader would skip, malformed reservations and an incomplete move history fail the run instead. Events are not migrated (tick keeps none), and the new log starts empty with a `resync` cursor.
+2. **Verify:** it reads both stores through the `Store` port and compares them card by card, and every field must be equal. It also compares milestones, every number reservation with its card, and every move with its time and repeats (the full comparison stands in for per-table counts and a checksum). Any difference fails the run.
+3. **Dry run first:** the dry run runs against production tick and copies into a private in-memory database, so nothing is written anywhere. It changes nothing in tick. The result (counts and diff, expected to be zero) goes to Nano.
 4. **Cutover:** stop the board, run the migration for real, start the board with `--db` instead of `--tick-url`, then check health and spot-check `card_get`, `board_list` and `board_events`. Tick stays running, read-only for the board, until archiving.
 
 ### Rollback
@@ -82,3 +82,11 @@ Settings stay in their files (`--settings-dir`, ADR-0004): they are config, not 
 ## Open questions for Nano
 1. Is 14 days the right rollback window before archiving rusty_tick?
 2. Should event retention be 100,000 events, or time-based, for example 90 days?
+
+## Implementation notes: SqliteStore v1 (#1811)
+Nano accepted these departures from the schema above on 2026-11-19 (decision card, "Add moves table, accept rest"):
+- Cards are stored whole as a JSON `doc` beside indexed columns. There are no separate `tags` or `comments` tables.
+- `events` has `id, card, col, at_ms, doc`; `actor`, `kind` and `rev` live inside the JSON `doc`, not as columns.
+- `moves` is `card, from_col, col, at_ms`, written in the commit transaction, so it survives event pruning.
+- One connection behind a mutex, no read pool, no event pruning; scale ceilings are not measured.
+- A replace writes back any member of the stored card document this board does not know, as `TickStore` does (S5a).

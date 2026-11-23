@@ -496,6 +496,14 @@ struct AddArgs {
     /// Evidence that the work shipped (a merged PR or other http(s) link), at most 8. A Done
     /// card counts as shipped only with evidence; without, metrics report it as a prototype.
     evidence: Option<Vec<String>>,
+    /// What makes the card done (`""` clears it; at most 1200 bytes).
+    acceptance: Option<String>,
+    /// What the card covers and leaves out (`""` clears it; at most 800 bytes).
+    scope: Option<String>,
+    /// Why the card exists (`""` clears it; at most 600 bytes).
+    why: Option<String>,
+    /// One short paragraph for the card face (`""` clears it; at most 320 bytes).
+    summary: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -553,6 +561,14 @@ struct UpdateArgs {
     /// New prompt: instructions for whoever takes the card, kept apart from the body
     /// (`""` clears it; at most 32 KiB).
     prompt: Option<String>,
+    /// What makes the card done (`""` clears it; at most 1200 bytes).
+    acceptance: Option<String>,
+    /// What the card covers and leaves out (`""` clears it; at most 800 bytes).
+    scope: Option<String>,
+    /// Why the card exists (`""` clears it; at most 600 bytes).
+    why: Option<String>,
+    /// One short paragraph for the card face (`""` clears it; at most 320 bytes).
+    summary: Option<String>,
     /// The card revision you last saw. If the card has moved on, the update is refused (409)
     /// so you can look at what changed instead of overwriting it.
     rev: Option<u64>,
@@ -1023,7 +1039,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_add",
-            "Create a card in Backlog, or with `done: true` straight in Done to record work that already merged (needs `close`; pass the merged PR as `evidence`, or it counts as a prototype). When splitting work into pieces, pass `parent` (the card it is split from) on each piece.",
+            "Create a card in Backlog, or with `done: true` straight in Done to record work that already merged (needs `close`; pass the merged PR as `evidence`, or it counts as a prototype). When splitting work into pieces, pass `parent` (the card it is split from) on each piece. `acceptance` (1200 bytes), `scope` (800), `why` (600) and `summary` (320) are typed fields; use them instead of `##` headers in the body.",
             |b, i, a: AddArgs| {
                 let who = acting(b, i, &a.who)?;
                 let new = NewCard {
@@ -1031,6 +1047,10 @@ pub fn ops() -> Vec<Op> {
                     parent: a.parent.as_deref().map(|r| card_ref(b, r)).transpose()?,
                     evidence: a.evidence.unwrap_or_default(),
                     repo: a.repo.as_deref(),
+                    acceptance: a.acceptance.as_deref().unwrap_or(""),
+                    scope: a.scope.as_deref().unwrap_or(""),
+                    why: a.why.as_deref().unwrap_or(""),
+                    summary: a.summary.as_deref().unwrap_or(""),
                     ..NewCard::new(
                         &a.title,
                         a.body.as_deref().unwrap_or(""),
@@ -1153,7 +1173,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_update",
-            "Edit a card's title, body, tags or prompt (instructions for whoever takes it, shown apart from the body). Pass `rev` (the revision you last read) to refuse the edit if the card has changed since.",
+            "Edit a card's title, body, tags, prompt (instructions for whoever takes it, shown apart from the body) or its typed fields `acceptance`, `scope`, `why` and `summary`. Put those in the fields, not under `## Acceptance`-style headers in the body: `card_take` and `card_get` return them, `board_list` summaries leave them out. Pass `rev` (the revision you last read) to refuse the edit if the card has changed since.",
             |b, i, a: UpdateArgs| {
                 let who = acting(b, i, &a.who)?;
                 let edit = Edit {
@@ -1161,6 +1181,10 @@ pub fn ops() -> Vec<Op> {
                     body: a.body.as_deref(),
                     tags: a.tags,
                     prompt: a.prompt.as_deref(),
+                    acceptance: a.acceptance.as_deref(),
+                    scope: a.scope.as_deref(),
+                    why: a.why.as_deref(),
+                    summary: a.summary.as_deref(),
                 };
                 card(b.edit_at(card_ref(b, &a.id)?, &who, a.rev, &edit)?)
             },
@@ -2483,6 +2507,63 @@ mod tests {
         );
         let anon = call_as(&board, None, "board_whoami", json!({})).expect("whoami");
         assert_eq!(anon["authenticated"], json!(false));
+    }
+
+    #[test]
+    fn typed_fields_are_set_over_mcp_taken_with_the_card_and_left_out_of_summaries() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let (human, dev) = (ident("nano", "human"), ident("claude", "builder"));
+        let id = call_as(
+            &board,
+            Some(&human),
+            "card_add",
+            json!({"title": "work", "acceptance": "a", "why": "w"}),
+        )
+        .expect("add")["card"]["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        let set = |args: Value| call_as(&board, Some(&human), "card_update", args);
+        set(json!({"id": id, "scope": "s", "summary": "m"})).expect("set");
+        call_as(
+            &board,
+            Some(&human),
+            "card_move",
+            json!({"id": id, "to": "ready"}),
+        )
+        .expect("ready");
+
+        let taken = call_as(&board, Some(&dev), "card_take", json!({})).expect("take");
+        assert_eq!(taken["card"]["acceptance"], "a");
+        assert_eq!(taken["card"]["scope"], "s");
+
+        let out = call_as(&board, None, "board_list", json!({})).expect("summary");
+        let card = out["cards"][0].as_object().expect("card");
+        for absent in ["acceptance", "scope", "why", "summary"] {
+            assert!(!card.contains_key(absent), "{absent}");
+        }
+        let full = call_as(&board, None, "card_get", json!({"id": id})).expect("get");
+        assert_eq!(full["card"]["why"], "w");
+        assert_eq!(full["card"]["summary"], "m");
+
+        // At the cap is accepted, one byte over is refused on both tools, and "" clears.
+        assert!(set(json!({"id": id, "summary": "x".repeat(320)})).is_ok());
+        assert!(set(json!({"id": id, "summary": "x".repeat(321)})).is_err());
+        assert!(
+            call_as(
+                &board,
+                Some(&human),
+                "card_add",
+                json!({"title": "t", "why": "x".repeat(601)})
+            )
+            .is_err()
+        );
+        let cleared = set(json!({"id": id, "why": ""})).expect("clear");
+        assert!(
+            cleared["card"].get("why").is_none(),
+            "empty fields are left out"
+        );
+        assert_eq!(cleared["card"]["acceptance"], "a");
     }
 
     #[test]

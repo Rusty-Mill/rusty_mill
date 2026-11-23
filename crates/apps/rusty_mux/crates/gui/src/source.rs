@@ -73,7 +73,8 @@ pub const GUI: Features = CONTROL
     .union(Features::MORE_PROGRAM_EVENTS)
     .union(Features::LAUNCH)
     .union(Features::FLOATS)
-    .union(Features::SHOW_SESSION);
+    .union(Features::SHOW_SESSION)
+    .union(Features::AGENT_META);
 
 /// What a block's connection asks for: the panes' features, and the input
 /// gate's grants and lease requests, so an owner-only block can be taken
@@ -162,6 +163,7 @@ pub fn attach_with(
     let follows_active = welcomed.features.contains(Features::ACTIVE_WINDOW);
     let mut model = Model::from_list(&entries, block, local_host(), follows_active)?;
     model.set_me(welcomed.client);
+    model.set_knows_agents(welcomed.features.contains(Features::AGENT_META));
     let calls_blocks = welcomed.features.contains(Features::BLOCK_CALL);
     let next = req.next;
     let layout = model.view().0.cloned().unwrap_or(Layout::Block(block));
@@ -970,11 +972,13 @@ impl Events {
                 event:
                     Event::WindowCreated { .. }
                     | Event::SessionCreated { .. }
-                    | Event::ClientConnected { .. },
+                    | Event::ClientConnected { .. }
+                    | Event::BlockCreated { .. },
                 ..
             } = message
             {
-                // Its name, or what a client can do, comes with its entry.
+                // Its name, what a client can do, or who works a new block
+                // (the overview's `Entry::Agent`, D97) comes with its entry.
                 self.state.send(|req| Message::List { req });
             }
             if matches!(change, Change::Layout | Change::Shown) {

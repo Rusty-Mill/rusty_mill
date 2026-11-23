@@ -18,8 +18,8 @@ use rusty_mux_proto::MAX_CLIPBOARD;
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
 use rusty_mux_proto::{
-    Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Ownership, ShowTo, Takeover,
-    encode,
+    AgentMeta, Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Ownership,
+    ShowTo, Takeover, encode,
 };
 use rusty_mux_status::{Parts, Status};
 use rusty_term_core::{AnsiParser, Grid};
@@ -31,11 +31,13 @@ use crate::Config;
 use crate::checkpoint::validate_size;
 use crate::datagram::Registry;
 use crate::echo::Waiting;
+use crate::forward::{self, Forwards};
 use crate::history::History;
 use crate::keys;
 use crate::listing;
 use crate::outbox::Outbox;
 use crate::passed::{Fd, Passed};
+use crate::ports;
 use crate::process;
 use crate::pty::{self, Process, Pty};
 use crate::spool::Spool;
@@ -62,6 +64,11 @@ const REPLY_FRAME: usize = 64;
 
 /// Events kept for clients that reconnect.
 const HISTORY: usize = 4096;
+
+/// Every this many [`PROCESS_POLL`]s the listening ports of every block are
+/// read, and only while some client can be told of a change: a read walks
+/// `/proc`.
+const PORTS_EVERY: u8 = 4;
 
 /// How often every block's foreground process group and echo mode are
 /// checked, to see a job start or echo turned off that writes nothing;
@@ -114,6 +121,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::SHOW_SESSION)
     .union(Features::FLOATS)
     .union(Features::TERMINAL_FIND)
+    .union(Features::AGENT_META)
+    .union(Features::PORT_FORWARD)
     .union(UNIX_ONLY);
 
 /// What a float edit needs: floating takes a block out of the layout, as a
@@ -131,9 +140,12 @@ const SHOW_PERIOD: Duration = Duration::from_secs(1);
 
 /// Offered on Linux only: signal and release (C76) act on a Unix process
 /// group, and orch, their one client, runs there; the tailscale status
-/// event (C27) comes from a `tailscaled` this server asks on Linux.
+/// event (C27) comes from a `tailscaled` this server asks on Linux, and
+/// `terminal.ports` (C80) reads the sockets from `/proc`.
 #[cfg(target_os = "linux")]
-const UNIX_ONLY: Features = Features::SIGNAL_RELEASE.union(Features::TAILSCALE_STATUS);
+const UNIX_ONLY: Features = Features::SIGNAL_RELEASE
+    .union(Features::TAILSCALE_STATUS)
+    .union(Features::PORTS);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
 
@@ -228,6 +240,8 @@ struct BlockRt {
     foreground: Option<process::Foreground>,
     /// Who echoes typing, as last announced.
     echo: Echo,
+    /// The listening ports last announced, as `terminal.ports` replies.
+    ports: String,
     /// Keys awaiting their echo ack.
     waiting: Waiting,
     /// How the program was started: for `terminal.shell` and the store.
@@ -242,6 +256,9 @@ struct BlockRt {
     /// Launched with `hold` (C78): the block stays, read-only, once its
     /// program exits.
     hold: bool,
+    /// Who works it, as its launcher named them (D336). Stored and echoed,
+    /// never acted on; not kept across a restart.
+    agent: Option<AgentMeta>,
     /// Its PTY was released (C76): read-only, with its program, if still
     /// running, left to its owner.
     released: bool,
@@ -324,12 +341,14 @@ impl BlockRt {
             seen: terminal::Seen::default(),
             foreground: None,
             echo: Echo::Unknown,
+            ports: String::new(),
             waiting: Waiting::default(),
             started,
             unsaved: true,
             spool: None,
             input_seq: 0,
             hold: false,
+            agent: None,
             released: false,
         }
     }
@@ -428,6 +447,10 @@ pub(crate) struct State {
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
     features: HashMap<ClientId, Features>,
+    /// Polls since the listening ports were last read, below [`PORTS_EVERY`].
+    ports_tick: u8,
+    /// The open port forwards (C81).
+    forwards: Forwards,
     /// The one clipboard read asked of a block's lease holder per selection
     /// (`true` for primary), until it is answered or [`CLIPBOARD_WAIT`] ends
     /// (C54). A reply that matches none is refused.
@@ -511,6 +534,8 @@ impl State {
             blocks: HashMap::new(),
             clients: HashMap::new(),
             features: HashMap::new(),
+            ports_tick: 0,
+            forwards: Forwards::default(),
             reads: HashMap::new(),
             shows: HashMap::new(),
             tokens: HashMap::new(),
@@ -1114,6 +1139,7 @@ impl State {
             return;
         }
         self.features.remove(&client);
+        self.forwards.close_client(client);
         self.tokens.remove(&client);
         self.shows.remove(&client);
         self.forget_keys(client);
@@ -1145,6 +1171,14 @@ impl State {
         }
         // Grants end on time before anything relies on them (C77).
         this.mux.expire_grants(now_ms());
+        if matches!(
+            message,
+            Message::ForwardData { .. } | Message::ForwardAck { .. } | Message::CloseForward { .. }
+        ) {
+            this.forward_frame(client, message);
+            this.flush();
+            return None;
+        }
         let (req, outcome) = this.apply(shared, client, message, passed);
         let write = match outcome {
             Ok(Outcome::Done(created)) => {
@@ -1516,6 +1550,16 @@ impl State {
                 self.require(client, Features::CLIPBOARD, "a clipboard reply")
                     .and_then(|()| self.clipboard_reply(client, req, block, selection, data)),
             ),
+            M::OpenForward {
+                req,
+                block,
+                port,
+                id,
+            } => (
+                req,
+                self.require(client, Features::PORT_FORWARD, "a port forward")
+                    .and_then(|()| self.open_forward(shared, client, block, port, id)),
+            ),
             M::ShowSession { req, session, to } => (
                 req,
                 self.require(client, Features::SHOW_SESSION, "show-session")
@@ -1527,6 +1571,103 @@ impl State {
                     .and_then(|()| self.open_datagram(client, req)),
             ),
             other => (0, Err(format!("not a client request: {other:?}").into())),
+        }
+    }
+
+    /// Opens forward `id` to `127.0.0.1:port` for the holder of `block`'s
+    /// input lease (C81). Done once it is accepted; the dial follows, and
+    /// its failure closes the forward.
+    fn open_forward(
+        &mut self,
+        shared: &Shared,
+        client: ClientId,
+        block: BlockId,
+        port: u16,
+        id: u64,
+    ) -> Result<Outcome, Refusal> {
+        self.mux
+            .authorize_input(client, block)
+            .map_err(Refusal::from)?;
+        if port == 0 {
+            return Err("port 0 is no port".into());
+        }
+        let ends = self.forwards.open(client, id, block)?;
+        rusty_tokio::task::spawn_local(forward::run(Rc::downgrade(shared), port, ends));
+        Ok(Outcome::Done(None))
+    }
+
+    /// A forward's data, credit or close from `client`, none of which is
+    /// answered: a violation closes the forward instead.
+    fn forward_frame(&mut self, client: ClientId, message: Message) {
+        if !self.has(client, Features::PORT_FORWARD) {
+            return;
+        }
+        let (id, broken) = match message {
+            Message::ForwardData { id, data } => (id, self.forwards.data(client, id, data)),
+            Message::ForwardAck { id, n } => (id, self.forwards.ack(client, id, n)),
+            Message::CloseForward { id, .. } => {
+                self.forwards.close(client, id);
+                return;
+            }
+            _ => return,
+        };
+        if let Err(why) = broken {
+            self.end_forward(client, id, Some(why));
+        }
+    }
+
+    /// Closes forward `id` and tells its client, if it was still open.
+    fn end_forward(&mut self, client: ClientId, id: u64, reason: Option<String>) {
+        if self.forwards.close(client, id) {
+            self.send(client, &Message::CloseForward { id, reason });
+        }
+    }
+
+    /// The task of forward `tag` is done, because the target closed, failed,
+    /// or never answered. A forward that is no longer this instance has
+    /// nothing to say.
+    pub(crate) fn forward_ended(&mut self, tag: forward::Tag, reason: Option<String>) {
+        if self.forwards.close_tag(tag) {
+            let id = tag.id;
+            self.send(tag.client, &Message::CloseForward { id, reason });
+        }
+    }
+
+    /// The target got a chunk of `n` bytes of the client's data: the client
+    /// may send that many more.
+    pub(crate) fn forward_wrote(&mut self, tag: forward::Tag, n: usize) {
+        if self.forwards.wrote(tag, n) {
+            let n = u32::try_from(n).unwrap_or(u32::MAX);
+            self.send(tag.client, &Message::ForwardAck { id: tag.id, n });
+        }
+    }
+
+    /// How many bytes the target's side may send to the client now.
+    pub(crate) fn forward_credit(&mut self, tag: forward::Tag) -> usize {
+        self.forwards.credit(tag)
+    }
+
+    /// Sends the client what the target wrote.
+    pub(crate) fn forward_sent(&mut self, tag: forward::Tag, data: Vec<u8>) {
+        if self.forwards.sent(tag, data.len()) {
+            self.send(tag.client, &Message::ForwardData { id: tag.id, data });
+        }
+    }
+
+    /// Closes the forwards whose client went, left the block, or lost an
+    /// owner-only block's lease, and those of a block that closed.
+    fn check_forwards(&mut self) {
+        let (mux, clients) = (&self.mux, &self.clients);
+        let ended = self.forwards.retain(|client, block| {
+            let attached = mux.client(client).and_then(|c| c.attached()) == Some(block);
+            let allowed = mux
+                .block(block)
+                .is_some_and(|b| b.input() != InputMode::OwnerOnly || b.lease() == Some(client));
+            clients.contains_key(&client) && attached && allowed
+        });
+        for (client, id) in ended {
+            let reason = Some("the opener left the block or lost it".to_owned());
+            self.send(client, &Message::CloseForward { id, reason });
         }
     }
 
@@ -1845,6 +1986,9 @@ impl State {
         if launch.hold {
             self.require(client, Features::HOLD, "a held launch")?;
         }
+        if launch.agent.is_some() {
+            self.require(client, Features::AGENT_META, "a launch naming an agent")?;
+        }
         if launch.input == InputMode::OwnerOnly {
             self.require(client, Features::INPUT_GATE, "an owner-only launch")?;
             if !launch.own {
@@ -1995,6 +2139,11 @@ impl State {
                 let live = rt.live()?;
                 let pid = live.process.pid().ok_or("the program has exited")?;
                 process::text(&live.pty.processes(pid))
+            }
+            "terminal.ports" => {
+                let live = rt.live()?;
+                let pid = live.process.pid().ok_or("the program has exited")?;
+                ports::text(&ports::listening(pid))
             }
             "terminal.size" => format!("{}x{}", rt.grid.cols, rt.grid.rows),
             "terminal.reset" => {
@@ -2181,6 +2330,14 @@ impl State {
                             .get(&block.id())
                             .is_some_and(|rt| rt.live.is_none()),
                     });
+                    if let Some(meta) = self.blocks.get(&block.id()).and_then(|rt| rt.agent.clone())
+                        && self.has(client, Features::AGENT_META)
+                    {
+                        entries.push(Entry::Agent {
+                            block: block.id(),
+                            meta,
+                        });
+                    }
                 }
             }
         }
@@ -2303,6 +2460,7 @@ impl State {
         );
         let mut rt = rt.screened(shared, grid, parser);
         rt.hold = launch.hold;
+        rt.agent = launch.agent.clone();
         self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
     }
@@ -2811,11 +2969,40 @@ impl State {
     fn check_processes(&mut self) {
         self.mux.expire_grants(now_ms());
         let blocks: Vec<BlockId> = self.blocks.keys().copied().collect();
+        let ports = self.ports_due();
+        self.check_forwards();
         for block in blocks {
             self.check_process(block, true);
             self.check_echo(block);
+            if ports {
+                self.check_ports(block);
+            }
         }
         self.flush();
+    }
+
+    /// Whether this poll reads the listening ports: every [`PORTS_EVERY`]th
+    /// one, and only when a client could be told of a change.
+    fn ports_due(&mut self) -> bool {
+        self.ports_tick = (self.ports_tick + 1) % PORTS_EVERY;
+        self.ports_tick == 0 && self.features.values().any(|f| f.contains(Features::PORTS))
+    }
+
+    /// Announces the block's listening ports if they differ from the last
+    /// announcement.
+    fn check_ports(&mut self, block: BlockId) {
+        let Some(rt) = self.blocks.get_mut(&block) else {
+            return;
+        };
+        let Some(pid) = rt.live.as_ref().and_then(|l| l.process.pid()) else {
+            return;
+        };
+        let now = ports::text(&ports::listening(pid));
+        if now == rt.ports {
+            return;
+        }
+        rt.ports = now;
+        in_step("ports", self.mux.note_ports(block));
     }
 
     /// The block's output ended: stop serving its PTY, without aborting the
@@ -3053,6 +3240,7 @@ fn receives(features: Features, principal: &Principal, event: &Event) -> bool {
         | Event::ProgressChanged { .. }
         | Event::Notification { .. } => Features::PROGRAM_EVENTS,
         Event::ProcessChanged { .. } => Features::PROCESS,
+        Event::PortsChanged { .. } => Features::PORTS,
         Event::SessionRenamed { .. }
         | Event::WindowRenamed { .. }
         | Event::BlockRenamed { .. }

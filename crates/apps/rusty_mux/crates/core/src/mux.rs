@@ -863,6 +863,11 @@ impl Mux {
         self.note(block, Event::ProcessChanged { block, pid, name })
     }
 
+    /// Announces that the TCP ports the block's programs listen on changed.
+    pub fn note_ports(&mut self, block: BlockId) -> Result<(), Error> {
+        self.note(block, Event::PortsChanged { block })
+    }
+
     /// Renames the session as [`Mux::rename`] does, but only while its name
     /// is generated ([`Session::generated`]); once somebody chose a name,
     /// it is refused with [`Error::NameChosen`] and the name stays. The

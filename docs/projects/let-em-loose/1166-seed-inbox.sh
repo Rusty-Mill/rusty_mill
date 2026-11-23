@@ -5,6 +5,9 @@
 # drop A (as they did in run 1). It changes no threshold and no escalation rule: it only posts through the same
 # `bbp mcp` seat a lens uses, as principals `seed` and `seed-s1`, `seed-s2` (declared in the toy roster).
 # The posts say they are fixture support; A2's escalation is NOT a lens finding.
+# A2's text says it is a proposed action that has not run (Nano, Q61, 2026-11-18). It used to read 'Run `sweep --yes` ... after
+# the dry-run list was reviewed', which the lenses took for a test report and cited as a run (smoke-3, smoke-4, smoke-6), and
+# which asserted a review that never happened. Seed claim A (in 1166-smoke-run.sh) keeps its original wording as the control.
 #
 # Usage (called by 1166-smoke-run.sh; also runnable alone):
 #   1166-seed-inbox.sh DIR TASK BRIEF_ART_ID [BIN]
@@ -32,7 +35,7 @@ post_as() {
   jq -er 'select(.id==2).result.content[0].text|fromjson|.Posted' <<<"$out"
 }
 
-A2=$(post_as seed '{"op":"fixture-a2","kind":"claim","text":"Run `sweep --yes` on the toy data directory with DAYS 7, after the dry-run list was reviewed.","domains":["sweep"],"stakes":"medium","reversible":false,"deps":[],"refs":["art:'"$BRIEF"'"]}')
+A2=$(post_as seed '{"op":"fixture-a2","kind":"claim","text":"Proposed action, not run: run `sweep --yes` on the toy data directory with DAYS 7.","domains":["sweep"],"stakes":"medium","reversible":false,"deps":[],"refs":["art:'"$BRIEF"'"]}')
 echo "A2=$A2"
 for who in seed-s1 seed-s2; do
   post_as "$who" '{"op":"fixture-support-'"$who"'","kind":"evidence","claim":'"$A2"',"direction":"support","evidence_kind":"cited","strength":3,"note":"Fixture support (D146) so this irreversible claim reaches the strict line and escalates; not a lens finding.","evidence":["art:'"$BRIEF"'"],"refs":["art:'"$BRIEF"'"]}' >/dev/null

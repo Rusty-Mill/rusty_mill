@@ -140,6 +140,7 @@ pub(crate) fn needs(kind: &str) -> Features {
         "pwd-changed" | "title-changed" => Features::TERMINAL_EVENTS,
         "program-exited" | "bell" | "progress-changed" | "notification" => Features::PROGRAM_EVENTS,
         "process-changed" => Features::PROCESS,
+        "ports-changed" => Features::PORTS,
         "session-renamed" | "window-renamed" | "block-renamed" | "client-renamed" => {
             Features::LABELS
         }

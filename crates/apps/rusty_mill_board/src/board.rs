@@ -162,6 +162,14 @@ pub struct NewCard<'a> {
     pub evidence: Vec<String>,
     /// The repository of a project that spans several; none means its default.
     pub repo: Option<&'a str>,
+    /// What makes the card done (see [`Edit::acceptance`]); empty by default.
+    pub acceptance: &'a str,
+    /// What the card covers and leaves out; empty by default.
+    pub scope: &'a str,
+    /// Why the card exists; empty by default.
+    pub why: &'a str,
+    /// One short paragraph for the card face; empty by default.
+    pub summary: &'a str,
 }
 
 impl<'a> NewCard<'a> {
@@ -1312,6 +1320,13 @@ impl<S: Store> Board<S> {
             check_records_shipped(by, &new.evidence)?;
         }
         let mut card = Card::new(new.title, new.body, new.tags, (self.clock)())?;
+        card = card.with_fields(&Edit {
+            acceptance: Some(new.acceptance),
+            scope: Some(new.scope),
+            why: Some(new.why),
+            summary: Some(new.summary),
+            ..Edit::default()
+        })?;
         if new.done {
             card.column = Column::DONE;
             card.done_ms = Some(card.created_ms);
@@ -1879,7 +1894,7 @@ impl<S: Store> Board<S> {
             title,
             body,
             tags,
-            prompt: None,
+            ..Edit::default()
         };
         self.edit_at(id, by, None, &edit)
     }
@@ -1902,10 +1917,11 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::Conflict);
             }
             let next = c.edit(edit.title, edit.body, edit.tags.clone(), now)?;
-            match edit.prompt {
-                Some(p) => next.with_prompt(p),
-                None => Ok(next),
-            }
+            let next = match edit.prompt {
+                Some(p) => next.with_prompt(p)?,
+                None => next,
+            };
+            next.with_fields(edit)
         })
     }
 

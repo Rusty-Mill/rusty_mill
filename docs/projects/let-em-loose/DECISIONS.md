@@ -165,6 +165,16 @@ Precise contracts used by this guide:
 | D155 | Standing rule: every run's read-back includes the grounding audit before Nano acts on an escalated claim | [stated] 2026-11-18 (1166) |
 | D156 | #1166 smoke-5: the architect prompt must say every claim sets `answers` to the question's id; a prompt bug fix | [default] 2026-11-18 (1166) |
 | D157 | #1166: keep the D143 bar (criterion 3 not reworded); build D156 and rerun as smoke-6; the all-dropped BBP rule returns to Nano only if candidates keep dropping | [stated] 2026-11-18 (1166) |
+| D158 | The grounding audit (D155) also covers candidates the board dropped, as a read-only report | [stated] 2026-11-18 (1166) |
+| D159 | D143 criterion 3 for an audit-rescued candidate: one reopen, a lens run, then Nano's `choose` counts (D158 stays) | [stated] 2026-11-18 (1166) |
+| D160 | #1571: Nano approves the agent launch profiles design as written (composition, env delivery, no service credentials in the jail, hooks deferred, build order) | [stated] 2026-11-18 (1571) |
+| D161 | #1571 v0 isolation is `same_user` (agents run as Nano's user); `agent_user` once the BaileyAi host writes are approved | [stated] 2026-11-18 (1571) |
+| D162 | #1571 profile files live in Factory (`factory/agent-profiles/*.json`, `factory/project-profiles/*.json`) | [stated] 2026-11-18 (1571) |
+| D163 | #1166: reword the A2 fixture as "Proposed action, not run" (seed claim A stays the control); does not close Q53 | [stated] 2026-11-18 (1166) |
+| D164 | Smoke-7 is the first run under D143; the D127 design freeze lifts; builder sessions (#1402, #600) are released first | [stated] 2026-11-18 (1166, general) |
+| D165 | #600 builders: the Claude CLI in the v0 jail uses Nano's subscription (Q15) | [stated] 2026-11-19 (1318) |
+| D166 | #600 v0: the Claude CLI reads Nano's `~/.claude` login through a read-only jail root (written exception to D101, `same_user` v0, expires with the gateway #726) | [stated] 2026-11-19 (1318, 600) |
+| D167 | One paid run approved: the #1318 toy-claim acceptance run (2 builders, 45 min, one claim) after the Claude `no_overage` assertion is added; #1320 not approved | [stated] 2026-11-19 (1318) |
 
 ## D1. Lenses, not stages
 
@@ -1266,6 +1276,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Decision.** Let Em Loose is under a design freeze until its first run. No new design is added to the project until then; work goes into building and running what is already approved. This is a scope rule and changes no existing design or decision.
 **Why.** It is the project's own rule: build the slice before designing more.
 **Rejected.** Continuing to add designs before the first run.
+**Lifted by D164 (2026-11-18): smoke-7 is the first run under D143.**
 **Tag.** [stated] · remind-me: mem_1bae9f1358544fc3a517998b983b896a
 **Key.** lel:general:design-freeze-until-first-run
 **Meaning amended by D143 (2026-11-17): the first run is a clean #1166 pass.**
@@ -1518,7 +1529,7 @@ The first three were approved first. The last three were added to Q35 after that
 ## D153. #1166: the Qwen reasoning budget (`--reasoning-budget 2048`) is the one host change allowed before smoke-5; the llama.cpp rebuild stays held
 
 **Decision.** After smoke-4 Nano chose option a, "Qwen reasoning budget only": add `--reasoning-budget 2048` to the `qwen3.6-35b-a3b` entry in `~/llama/config.yaml` (untested), then rerun as smoke-5. This lifts D152's no-host-change hold for exactly that one change. D147's one-change-at-a-time stays, and the llama.cpp rebuild (D145) stays held; the gpt-oss HTTP 500s cost only absorbed calls. Smoke-5 is judged on the same section 9 criteria.
-**Result (smoke-5, 2026-11-18):** effective: 0 empty Qwen replies, against 3 in smoke-3 and 3 in smoke-4. The llama.cpp rebuild (D145) stays held: smoke-5 had 2 gpt-oss HTTP 500 `peg-native` transients, both absorbed.
+**Correction 2026-11-18 (smoke-6):** the earlier "effective: 0 empty Qwen replies" claim is withdrawn. In smoke-6 there were 7 empty Qwen replies and seven Qwen generations of exactly 4096 tokens in the llama-swap log. The flag was never active in smoke-5 or smoke-6: llama-swap (started 2026-11-16 19:01:54) was never restarted after `~/llama/config.yaml` was edited (mtime 2026-11-18 08:36:58), it keeps its config in memory, and the running Qwen llama-server (started 2026-11-18 10:38) has no `--reasoning-budget` in its arguments. So the budget is applied in the file but not loaded; Nano must run `systemctl --user restart llama-swap`. Smoke-5's 0 empties was chance (few Qwen calls), not proof. The per-request test (3 of 3 empty without, 6 of 6 valid with `reasoning_budget_tokens` 2048) stands. The llama.cpp rebuild (D145) stays held. Drift: a coordinator memory (`mem_e66abb6f86404568ac8605aa7ff51f79`) says the change was applied "with a llama-swap restart"; the process start times say otherwise.
 **Why.** Empty Qwen replies (`reply is not JSON: unexpected end of input`) recurred in smoke-3 (3) and smoke-4 (3) and cost the third candidate in smoke-4; the llama-swap log shows four Qwen generations of exactly 4096 tokens, orch's output cap. That is strong evidence, not proof, that thinking consumes the cap.
 **Note.** llama-server accepts the budget per request (`reasoning_budget_tokens` in the request body, `tools/server/server-common.cpp`), so the effect can be tested with free local calls before the config is edited (the coordinator is running that test). Claim 6 in Nano's inbox (smoke-4) is his own call: `bbp human ... claim 6 accept`, or `choose 1 6`.
 **Rejected.** b) no host change; c) rebuilding llama.cpp first.
@@ -1562,3 +1573,103 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_708b09f2022e4622b7d060153b9ed72a
 **Key.** lel:1166:keep-first-run-bar-fix-and-rerun-smoke-6
 **Source.** Nano, answer dialog in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_96800eda3fae4f51b07672e908a68ccc` (speaker Nano). Confirms D143; builds on D151, D156. Numbered D157 after D156.
+
+## D158. The grounding audit (D155) also covers candidates the board dropped, as a read-only report
+
+**Decision.** Nano, answering Q59: "Q59: yes. Extend 1166-grounding.sh to audit candidates the board dropped, not only escalated claims. Put it in its own PR." D155 is extended: every run's read-back audits escalated AND dropped claims, with the same method (quote the brief sentence each vote relies on or mark it ungrounded; the score three ways), as a read-only report. Q59 is closed.
+**Why.** A drop on ungrounded votes decides whether Q has a survivor: on smoke-5, claim 7 was dropped by ungrounded votes (msgs 10 and 14) and would have stayed Open at a grounded -4, above the -8 drop line.
+**Rejected.** Auditing escalated claims only.
+**Tag.** [stated] · remind-me: mem_e8160b3d28624f2ca91300fbceb8eac2
+**Key.** lel:1166:grounding-audit-covers-dropped-claims
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved as `mem_928dc8aca99743ffb756ee87a6e1b0ff` (speaker Nano). Extends D155; relates to Q53, Q59. Numbered D158 after D157.
+
+## D159. D143 criterion 3 for an audit-rescued candidate: one reopen, a lens run, then Nano's `choose` counts (D158 stays)
+
+**Decision.** Nano: "b, with a limit. A human choose of an audit-rescued candidate counts toward criterion 3 only if a lens run after `reopen` leaves the candidate Open or accepted. One reopen per candidate. If the lenses drop it again on votes the audit shows are ungrounded, then (a) applies: I choose it, and the audit is recorded as the reason in the run record." This sets how D143's criterion 3 is read for a candidate dropped on ungrounded votes. D158 stays.
+**Procedure.** (1) The read-back's grounding audit shows a candidate was dropped on ungrounded votes. (2) Nano reopens it, once per candidate (`bbp human ... claim N reopen`); reopen is refused if a dep is closed, and if the claim's budget is exhausted `budget_extended` must be recorded first. (3) A lens run on the same task (the resume script) reviews it afresh in the new epoch. (4) If the candidate is Open or accepted afterwards, Nano's `choose` counts toward criterion 3. (5) If the lenses drop it again on votes the audit shows ungrounded, Nano's `choose` counts anyway, with the audit recorded as the reason in the run record. (6) If it is dropped again on grounded votes, it does not count, and the bar is not met by that candidate.
+**Where the reason is recorded.** `bbp human` has no reason or note field that Nano knows of, so "recorded as the reason in the run record" means the run record: `1166-smoke-run.md` (the Run N result) and the grounding audit file, not a board field.
+**Why.** A human override counts only if the lens loop confirms the candidate, or drops it again on votes the audit shows ungrounded; one reopen per candidate bounds it. D143's "clean pass" keeps its meaning that the lens loop works.
+**Rejected.** a) counting any human choose; c) never counting a human choose (a lens-driven survivor only).
+**Tag.** [stated] · remind-me: mem_49f619c6e57a417daf2e0ec6e80490e0
+**Key.** lel:1166:audit-rescued-candidate-reopen-then-choose
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_af1925dad3d74a6c9d84f8f67b19bfc3` (speaker Nano). Refines D143 and D158; relates to C-R8 in the claims addendum. Numbered D159 after D158.
+
+## D160. #1571: Nano approves the agent launch profiles design as written (composition, env delivery, no service credentials in the jail, hooks deferred, build order)
+
+**Decision.** The design in `1571-launch-profiles-design.md` (PR #1802) is approved as written: an agent file (trust cap) and a project file (needs) compose purely into one C75 `Launch`; credentials are minted per launch, delivered in the exact env and revoked by each service; the jail gets no service credentials (D101); hooks are deferred; build order as its section 6. Question 3: "Approve the design". Nano: "3. Yes." This satisfies D25 for #1571. Ask-first items inside it (the BaileyAi host writes for `agent_user`, dependency bumps, public API changes) still need their own approval.
+**Why.** Profiles as data keep the later fold into the mux server a move, not a rewrite (`mem_b563d1346d6545ae9bb06a10707cf777`); the mux grants, each service revokes, orch holds both keys.
+**Rejected.** None offered.
+**Tag.** [stated] · remind-me: mem_556bfcda61f64e6aaa6cd38c230ca0f5
+**Key.** lel:1571:launch-profiles-design-approved
+**Source.** Nano, Let Em Loose project chat, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YGppB9nnPb7JnUCwC3s2Yq`, 2026-11-18T17:43:36Z: "1. Concur. 2. Concur. 3. Yes. 4. accept", answering in order the questions in thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42brap92o45tKyeDpvs4Be3` (~17:30Z). Item 4 answers #1563 and is recorded by its own thread, not here. Numbered D160, after D158-D159 (#1797).
+
+## D161. #1571 v0 isolation is `same_user` (agents run as Nano's user); `agent_user` once the BaileyAi host writes are approved
+
+**Decision.** v0 launch profiles run agents as Nano's own user (`same_user`). `agent_user` (`orch-runner`) follows once the four BaileyAi host writes are approved; the jail comes later. This departs from the card's "start with a dedicated user". Question 1: "v0 isolation: same_user now, agent_user once the host writes are approved". Nano: "1. Concur."
+**Why.** Agents sharing orch's uid can read the minting keys under `same_user` and `agent_user` alike until the jail exists, so a dedicated user now buys little and needs host writes; no worse than today.
+**Rejected.** b) `agent_user` now with the host writes approved; c) a separate uid holding the minting keys and handing orch only minted tokens.
+**Tag.** [stated] · remind-me: mem_3c3a28e44b9d4dc39ef02413c70ac818
+**Key.** lel:1571:v0-isolation-same-user
+**Source.** Nano, Let Em Loose project chat, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YGppB9nnPb7JnUCwC3s2Yq`, 2026-11-18T17:43:36Z: "1. Concur. 2. Concur. 3. Yes. 4. accept", answering in order the questions in thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42brap92o45tKyeDpvs4Be3` (~17:30Z). Item 4 answers #1563 and is recorded by its own thread, not here. Relates to D101, D104 and `mem_931824b0f5b042618d54ed84b2d3da8e` (no sandbox dependency). Numbered D161 after D160.
+
+## D162. #1571 profile files live in Factory (`factory/agent-profiles/*.json`, `factory/project-profiles/*.json`)
+
+**Decision.** For v0, agent profiles are `factory/agent-profiles/*.json` and project profiles are `factory/project-profiles/*.json`, in Factory. Question 2: "Profile files live in Factory". Nano: "2. Concur."
+**Why.** Orch already reads Factory, and `resolve` does not care where files come from, so the location is cheap to move later.
+**Rejected.** b) agent files in pack-validation with agent-stack-spec and project needs in each repo's manifest; c) this monorepo.
+**Tag.** [stated] · remind-me: mem_ad2c3b4877d64a0494d5bdfac712a55c
+**Key.** lel:1571:profile-files-in-factory
+**Source.** Nano, Let Em Loose project chat, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YGppB9nnPb7JnUCwC3s2Yq`, 2026-11-18T17:43:36Z: "1. Concur. 2. Concur. 3. Yes. 4. accept", answering in order the questions in thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42brap92o45tKyeDpvs4Be3` (~17:30Z). Item 4 answers #1563 and is recorded by its own thread, not here. Numbered D162 after D161.
+
+## D163. #1166: reword the A2 fixture as "Proposed action, not run" (seed claim A stays the control); does not close Q53
+
+**Decision.** Nano answered Q61: "Q61: yes. Reword A2 as 'Proposed action, not run: ...'. Also remove or rewrite 'after the dry-run list was reviewed': no dry-run list was reviewed, so the fixture itself states something that never happened. Leave seed claim A's wording unchanged, as the control. Record that this does not close Q53." The A2 text in `1166-seed-inbox.sh` becomes "Proposed action, not run: run `sweep --yes` on the toy data directory with DAYS 7." (built on branch `claude/lel-a2-wording`). It is a fixture choice within D146's scope: no threshold, roster or escalation rule changes. Seed claim A stays unchanged as the control, so the next run's evidence can compare the adversary's citations of msg 3 (A2) against msg 2 (A). Q61 is decided and closes once the PR is merged and deployed.
+**Why.** The adversary cited A2 (msg 3) as a test run in smoke-3 (msgs 7, 12, 14), smoke-4 (msgs 12, 13) and smoke-6 (msgs 11 and 14, computing `7*86400` from A2's "DAYS 7"), and the fixture itself asserted a dry-run review that never happened.
+**Rejected.** b) leaving the wording.
+**Q53 stays OPEN.** This removes one trigger for invented citations. Invented runs, false "the brief mandates X" attributions and self or another-vote citations are separate.
+**Tag.** [stated] · remind-me: mem_9e4daa70bddd471d9ffc49e3020a5fb6
+**Key.** lel:1166:a2-fixture-reworded-proposed-not-run
+**Source.** Nano, typed in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_0f6dd8deda1f4aceb7bfa9096941d65d` (speaker Nano). Relates to D146, Q53, Q61. Numbered D163 after D162 (D160 to D162 are the launch-profiles design in #1802).
+
+## D164. Smoke-7 is the first run under D143; the D127 design freeze lifts; builder sessions (#1402, #600) are released first
+
+**Decision.** Nano confirmed that smoke-7 is "the first run" of D127, as D143 defined it (a clean #1166 pass). The board confirms every D143 and section 9 criterion: claim 6 Accepted by the lenses at rev 72 (AcceptLine, score 10, two support authors), Nano's `choose` on question 1 dropped claim 7 at rev 118, the fixture A2 was dropped by Nano at rev 121, the inbox is empty, `bbp verify` is clean, and there were three candidates from three providers. The D127 design freeze LIFTS. The first thing it releases is the #1402 builder-session design rebuild (D129) and #600, which M2 depends on. The packs design (#723, D133, Q46 to Q48) and the Survey and Intent lenses (#1456), with the other `bbp_factory` Backlog cards, stay for later. The open items stay open: Q53, Q51, Q55, Q56 to Q58, Q60, Q62.
+**Why.** Builder sessions are what the loop needs next, and D129 said they wait for the first run. Design approval, ask-first gates, spending and review/merge rules still apply to everything released.
+**Rejected.** b) the packs design first; c) the Survey and Intent lenses and the other Backlog cards first.
+**Tag.** [stated] · remind-me: mem_e2491f793d78419dbeeb0b764c33f4c4
+**Key.** lel:127:freeze-lifted-smoke-7-first-run
+**Source.** Nano, answer dialog in the Claude Code session on BaileyAi, 2026-11-18, saved verbatim as `mem_fff1f77dbd664befb0eb3945bd9c03b1` (speaker Nano). Lifts D127; applies D143; releases D129's wait. Numbered D164 after D163.
+
+## D165. #600 builders: the Claude CLI in the v0 jail uses Nano's subscription (Q15)
+
+**Decision.** The Claude CLI that a #600 builder session runs inside the v0 jail uses Nano's Claude subscription. Nano: "15 it uses my subscription." This answers which credential, not how it reaches the jail. The ask-first and D101 limits below still hold, and each needs its own answer before an account credential goes into `jail.json`:
+1. **Delivery.** D101 says no secrets go inside the jail, only a short-lived token scoped to the lens and claim. A subscription login is an account credential. How it is reached (a gateway that holds it and honours an orch-minted token, or something else) is not decided. `jail.json`'s `token` {file, var} slot (D107) carries only an orch-minted token until it is.
+2. **Spend.** D134 holds subscription calls back as paid. Builder sessions are paid model calls, ask-first, until Nano approves a run (D140 approved one lens run only). The Claude `no_overage` assertion is also not in `/etc/let-em-loose/assertions.json` (D140).
+**Why.** Nano chose the credential source. The builder is Claude-only in v0 (`lel:600:claude-only-builders`, D64).
+**Rejected.** None offered.
+**Tag.** [stated] · remind-me: mem_f885f3a1b16a415eb01506c3146e0c7f
+**Key.** lel:600:builder-claude-credential-subscription
+**Source.** Nano, Millwright project thread for card #1402, message `cmsg_01632CBKCXsWe6RyFWvE9dovEBkpMdZ4enJ2R7MBLywZXz`, 2026-11-19T18:13:22Z: "15 it uses my subscription", answering OPEN_QUESTIONS Q15 (card #1318). Relates to D101, D107, D134, D140, `1571-launch-profiles-design.md` (model provider row). Numbered D165 because D163 and D164 were already taken (both now on main).
+**Confirmed.** Confirmed by name 2026-11-19 by Nano ("confirm D165, D166, D167"), thread message `cmsg_01632CBKCXsWe6RyFWvE9dovXnfgsvDuk5meRkwzs4GR7M`, 2026-11-19T18:57:26Z, answering the PR #1824 review.
+
+## D166. #600 v0: the Claude CLI reads Nano's `~/.claude` login through a read-only jail root (written exception to D101, `same_user` v0, expires with the gateway #726)
+
+**Decision.** D101 stays the long-term rule: the gateway holds the login and the jail gets only an orch-minted token. For v0 only there is a written exception, scoped to `same_user` v0 (D161): the Claude CLI reads Nano's existing `~/.claude` login through a read-only root in `jail.json`. `jail.json`'s `token` slot stays orch-minted tokens only (D107). The exception expires when the gateway (#726) lands, and D101 then returns in force. Nothing is copied into `jail.json`. Nano accepted the caveat: v0 is not a security boundary and egress is open (the D107 gap), so a jailed builder could read and send the login. This answers the delivery half of D165 item 1.
+**Why.** D165 chose the subscription as the credential; the gateway doesn't exist yet, and v0 runs as Nano's user (D161). A read-only root of an existing login needs no new credential file and no change to the `token` slot.
+**Rejected.** A separate revocable subscription token file in the `token` slot: it would reverse D101 for good.
+**Tag.** [stated] · remind-me: mem_c4e782acab594c2aa3cda4bf653f6aa2
+**Key.** lel:600:subscription-login-v0-exception-same-user
+**Source.** Nano, thread message `cmsg_01632CBKCXsWe6RyFWvE9dovNuNMU7fiwfx8bvmVJhWei4`, 2026-11-19T18:22:12Z: "concur", to the recommendation `cmsg_01632CBKCXsWe6RyFWvE9dov4g3WihbLKaDjCJDV35SQxg`. Follows D165; scoped by D161; limits D101 temporarily. Numbered D166 after D165 (D163 and D164 are on PR #1813).
+**Confirmed.** Confirmed by name 2026-11-19 by Nano ("confirm D165, D166, D167"), thread message `cmsg_01632CBKCXsWe6RyFWvE9dovXnfgsvDuk5meRkwzs4GR7M`, 2026-11-19T18:57:26Z, answering the PR #1824 review.
+
+## D167. One paid run approved: the #1318 toy-claim acceptance run (2 builders, 45 min, one claim) after the Claude `no_overage` assertion is added; #1320 not approved
+
+**Decision.** Nano approves ONE paid run: the toy-claim acceptance run for #1318, with `builders_per_claim` 2, `builder_wall_secs` 2700 (45 minutes each) and one claim. This supersedes D134 for that run only, as D140 did for its run. Before it, the Claude `no_overage` assertion must be added to `/etc/let-em-loose/assertions.json` so the run fails closed. The dedup run (#1320) is NOT approved; it waits on M1 and the toy-run result, and any further paid call stays ask-first. The subscription is flat-rate, so the cost is usage limit, not dollars.
+**Open action for Nano (not done).** Adding the `no_overage` assertion is a host write on BaileyAi. Nano hasn't done it and hasn't authorised an agent to. Entry shape (from `mem_fe5132a19f51456190c6017e94955e0a`): `{provider: claude, account: <email as `claude auth status` reports it for the running account>, checked: YYYY-MM-DD}`. The run does not start until it is in place.
+**Why.** The smallest paid run that tests builder launch; the assertion makes it fail closed; the dedup run needs evidence from the first.
+**Rejected.** Approving #1320 as well.
+**Tag.** [stated] · remind-me: mem_77c0be9609544059ae911c7e2ccdb2f9
+**Key.** lel:1318:one-paid-run-toy-claim-acceptance
+**Source.** Nano, thread message `cmsg_01632CBKCXsWe6RyFWvE9dovNuNMU7fiwfx8bvmVJhWei4`, 2026-11-19T18:22:12Z: "concur", to `cmsg_01632CBKCXsWe6RyFWvE9dov4g3WihbLKaDjCJDV35SQxg`. Relates to D134, D140, D141, D165, `600-build-plan.md` section 4 defaults.
+**Confirmed.** Confirmed by name 2026-11-19 by Nano ("confirm D165, D166, D167"), thread message `cmsg_01632CBKCXsWe6RyFWvE9dovXnfgsvDuk5meRkwzs4GR7M`, 2026-11-19T18:57:26Z, answering the PR #1824 review.
+

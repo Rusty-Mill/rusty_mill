@@ -30,7 +30,7 @@ const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 await page.goto(BASE);
 await page.waitForSelector(".card");
-await page.locator("#nav1 .item").filter({ hasText: /^rl\d/ }).click();
+await page.selectOption("#project", "rl");
 await page.click("#view");
 await page.waitForSelector(".roadmap h3");
 const lane = async (name) => page.locator(`[data-lane=${name}] .card b`).allInnerTexts();
@@ -51,7 +51,7 @@ check((await lane("blocked")).join() === "Later idea", "the roadmap follows boar
 await page.reload();
 await page.waitForSelector(".roadmap h3");
 check(true, "the roadmap view is remembered across reloads");
-await page.locator("#nav1 .item.on").filter({ hasText: /^rl\d/ }).click();
+await page.selectOption("#project", "");
 await page.waitForFunction(() => document.querySelector(".roadmap h3")?.textContent !== "Roadmap · rl");
 check((await rowsOf()).join() === "rl", `with no project chosen, the timeline has a row per project with planned work (${await rowsOf()})`);
 check((await page.locator("[data-lane]").count()) === 0, "and no lanes, which belong to one project");

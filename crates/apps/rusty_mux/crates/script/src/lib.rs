@@ -187,6 +187,7 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("bell", &["block"]),
     ("progress-changed", &["block", "state", "percent"]),
     ("notification", &["block", "title", "body"]),
+    ("ports-changed", &["block"]),
     ("process-changed", &["block", "pid", "name"]),
     ("session-renamed", &["session", "name"]),
     ("window-renamed", &["window", "name"]),

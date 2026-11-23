@@ -451,6 +451,13 @@ client keeps a local socket rather than running `Conn` over one child's pipes.
 **Tests.** The Windows CI leg runs `--ssh` against a fake `ssh`, the same way `ssh.rs` tests
 `args`. A manual check from Lap to BaileyAi goes in a WINDOWS-MANUAL-CHECK file.
 
+## Grants and revocation
+
+Nano, 2026-11-18 (remind-me `mem_b563d134`, card #1571): "mux grants at launch, each service revokes on its own, the orchestrator holds both keys."
+- **Grant.** orch mints each credential and passes it in the C75 `Launch`: in the exact `env`, which the server never persists, or as a descriptor (the child's 3…10, at most 8 per launch). Never in `argv`, which the C45 `Started` record persists (D74).
+- **Revoke.** The mux cannot take a descriptor back from a running program. It can only signal or release the block (C76) and gate input (C77). Cutting an agent off mid-run is each service's own credential revoke, called by orch.
+- **Re-run.** An agent block re-runs through orch and its profile with fresh credentials, never by replaying the stored argv (handoff D338).
+
 ## Gates
 
 D104 starts these rows. These still need Nano's or a reviewer's go on the PR that builds them:

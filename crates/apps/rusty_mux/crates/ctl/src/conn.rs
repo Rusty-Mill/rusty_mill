@@ -12,6 +12,10 @@ use rusty_mux_proto::{Message, decode, encode};
 
 #[cfg(any(unix, windows))]
 use crate::stop::POLL;
+
+/// What [`connect`] returns.
+#[cfg(any(unix, windows))]
+pub(crate) type Stream = UnixStream;
 use crate::stop::{Stop, is_wait};
 
 /// A stream to the server at `path`. When `stop` is bounded, connecting
@@ -163,6 +167,17 @@ impl<S: Read + Write> Conn<S> {
             };
             self.buf.extend_from_slice(&chunk[..n]);
         }
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl Conn<Stream> {
+    /// Two handles to the stream, for a reader and a writer of their own,
+    /// and the bytes read from it that no frame has used. The bytes leave
+    /// this connection; use it for nothing after.
+    pub(crate) fn split(&mut self) -> io::Result<(Stream, Stream, Vec<u8>)> {
+        let (reader, writer) = (self.stream.try_clone()?, self.stream.try_clone()?);
+        Ok((reader, writer, std::mem::take(&mut self.buf)))
     }
 }
 
