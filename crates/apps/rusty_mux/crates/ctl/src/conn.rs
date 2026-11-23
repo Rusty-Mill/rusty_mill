@@ -22,6 +22,7 @@ use crate::stop::{Stop, is_wait};
 /// leaves them unbounded.
 #[cfg(any(unix, windows))]
 pub(crate) fn connect(path: &Path, stop: &Stop) -> io::Result<UnixStream> {
+    rusty_mux_proto::endpoint::check_socket_path(path).map_err(io::Error::other)?;
     if !stop.is_bounded() {
         return connect_blocking(path);
     }

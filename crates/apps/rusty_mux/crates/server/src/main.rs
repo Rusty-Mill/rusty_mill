@@ -479,6 +479,7 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
     }
     let env = |name: &str| std::env::var_os(name);
     let (socket, _) = endpoint::resolve(args.socket, env).map_err(std::io::Error::other)?;
+    endpoint::check_socket_path(&socket).map_err(std::io::Error::other)?;
     // A client starting a server names the default socket, so compare.
     if Some(&socket) == endpoint::default_socket(env).as_ref() {
         default_dir(&socket)?;

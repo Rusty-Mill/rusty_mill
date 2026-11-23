@@ -117,11 +117,13 @@ pub struct Welcomed {
 
 #[cfg(unix)]
 pub fn connect(path: &Path) -> Result<UnixStream, String> {
+    rusty_mux_proto::endpoint::check_socket_path(path)?;
     UnixStream::connect(path).map_err(|e| format!("connecting: {e}"))
 }
 
 #[cfg(windows)]
 pub fn connect(path: &Path) -> Result<UnixStream, String> {
+    rusty_mux_proto::endpoint::check_socket_path(path)?;
     UnixStream::connect(path).map_err(|e| format!("connecting: {e:?}"))
 }
 
