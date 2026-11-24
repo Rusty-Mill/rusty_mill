@@ -89,7 +89,8 @@ fn tool(method: &Method) -> Tool {
 }
 
 /// Behaviour hints: reads are read-only; closing, disconnecting another
-/// client, which ends its connection and frees its lease, and resetting a
+/// client, which ends its connection and frees its lease, archiving a block, which
+/// closes it, and resetting a
 /// or clearing a terminal, which drops its scrollback, are destructive.
 /// `input` types into a shell, and `create-block` and `split-block` run
 /// any program they are given; each can delete data and reach any system,
@@ -100,6 +101,7 @@ fn annotations(method: &Method) -> Value {
     let destructive = runs
         || method.name.starts_with("close-")
         || method.name.starts_with("disconnect-")
+        || method.name == "archive-block"
         || matches!(method.name, "terminal.reset" | "terminal.clear");
     let hints: Map = [
         ("readOnlyHint", read_only),

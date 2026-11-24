@@ -67,6 +67,13 @@ fn keys_are_sent_under_the_lease() {
 }
 
 #[test]
+fn archiving_a_block_is_marked_destructive() {
+    let hints = annotations(known("archive-block"));
+    assert_eq!(hints["destructiveHint"], true);
+    assert_eq!(annotations(known("archive-list"))["readOnlyHint"], true);
+}
+
+#[test]
 fn a_reset_and_a_theme_are_made_under_the_lease() {
     let reset = args(r#"{"block": "2"}"#);
     assert_eq!(
