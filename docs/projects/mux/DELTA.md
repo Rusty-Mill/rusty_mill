@@ -1,9 +1,69 @@
 # Incremental attach: design only
 
-Status: designed, not built. On 2026-10-25 the owner chose to ship compact
+Status: designed, not built. Recommendation (2026-11-24, card #83): keep it on
+paper; see [Reconnect cost today](#reconnect-cost-today-2026-11-24). On 2026-10-25 the owner chose to ship compact
 RTCP v3 now (#1055) and to keep deltas on paper until a consumer needs them.
 The consumers are C05 (resumable event stream, Phase 2) and C13 (roaming,
 Phase 3). Nothing here changes a wire format yet.
+
+## Reconnect cost today (2026-11-24)
+
+Card #83 asked whether C05, C13 and C45/C70 now justify building deltas.
+
+Measured on main c945f067, release build, Linux container, 200x50 grid with 10,000
+history rows of the `eight_colours` test workload (`tests/memory.rs`; mostly
+short coloured lines, so real output may encode larger):
+
+| Item | Full RTCP v6 | Screen only (50 rows, same workload) |
+|---|---|---|
+| Size | 402,954 bytes | 3,912 bytes |
+| Encode, server | 2.0-2.1 ms | not measured |
+| Decode, client | 5.3-7.3 ms | 15 us |
+
+Transfer time is size over link rate, computed, not measured. The bytes are the
+same over SSH and UDP; SSH adds a few percent of framing and UDP adds loss
+recovery:
+
+| Link | Full checkpoint (403 KB) | Delta, 2-5 KB (this note's estimate) |
+|---|---|---|
+| 2 Mbit/s (poor mobile) | about 1.6 s | 10-20 ms |
+| 10 Mbit/s | about 320 ms | 2-4 ms |
+| 100 Mbit/s | about 32 ms | under 1 ms |
+
+Two things cut against building it:
+
+- With `Features::BACKGROUND_HISTORY` (bit 41, GUI) Ready follows the screen
+  checkpoint and history streams after it, newest first. The time to a usable
+  reconnect is the screen part (about 4 KB on this workload), so a delta saves
+  background bytes, not time to first paint. The TUI and ctl do not ask for
+  background history and still pay the full cost.
+- A delta needs the client to hold a token that stays exact with every Output
+  frame (about 40 bytes a frame), a server incarnation id, `hist_seq`,
+  `hist_epoch` and `screen_gen`, and a new decoder with its own hostile-input
+  tests. That is a wire change under owner review (D27).
+
+Not measured: the 10,000-row worst case with real (non-synthetic) colour and
+width variety, and an SSH or UDP link under real loss. Both would move the
+full-checkpoint numbers up, not down.
+
+**Decided (Nano, 2026-11-24): do not build.**
+
+- *Time to a usable reconnect.* The GUI asks for background history, so Ready
+  follows the screen part. A delta saves almost no time to first paint there.
+  The TUI and ctl do not ask for it and wait for the whole checkpoint: about
+  1.6 s at 2 Mbit/s, about 320 ms at 10 Mbit/s, about 32 ms at 100 Mbit/s. A
+  delta would cut those to roughly 10-20 ms, 2-4 ms and under 1 ms.
+- *Bytes saved.* For the GUI the saving is background bytes only (about 400 KB
+  per reconnect), which costs bandwidth but not waiting.
+- *Cost of building.* A wire change, a token kept exact with every Output frame,
+  and a new decoder with hostile-input tests.
+
+Revisit if a user reports a slow TUI reattach on a slow link, or if C13
+predictive echo wants row-grain deltas. A cheaper step that needs no new format
+is asking the TUI for `BACKGROUND_HISTORY`, which would give it the GUI's
+time to a usable reconnect.
+
+Nano's call (2026-11-24, PR #1840): skip attach deltas. Revisit on the triggers above.
 
 ## Why it waits
 
