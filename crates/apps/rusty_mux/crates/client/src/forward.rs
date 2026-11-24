@@ -346,8 +346,11 @@ where
             match bound {
                 Ok((listener, local)) => {
                     let remote = want.spec.remote;
-                    scope.spawn(move || accept(scope, fed, &listener, remote));
-                    let _ = want.answer.send(Ok(Bound { local, remote }));
+                    // Told before it serves: a wish nobody waits for any
+                    // more (it timed out) leaves no listener behind.
+                    if want.answer.send(Ok(Bound { local, remote })).is_ok() {
+                        scope.spawn(move || accept(scope, fed, &listener, remote));
+                    }
                 }
                 Err(e) => {
                     let _ = want.answer.send(Err(e));

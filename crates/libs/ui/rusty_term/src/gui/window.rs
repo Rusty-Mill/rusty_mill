@@ -128,8 +128,6 @@ const DRAG_SCROLL_MARGIN: f64 = 24.0;
 /// Auto-scroll step cadence while the pointer is held past the edge.
 const DRAG_SCROLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Wakeups sent from per-tab PTY reader threads into the winit loop, tagged
-/// with the tab id they concern.
 /// The forwards a window asked its source for and has no answer to yet, by
 /// pane and port. An answer counts only for the latest ask of its pane and
 /// port, once: a newer ask, or an answer already taken, makes it stale.
@@ -182,6 +180,8 @@ mod forward_ask_tests {
     }
 }
 
+/// Wakeups sent from per-tab PTY reader threads into the winit loop, tagged
+/// with the tab id they concern.
 pub(crate) enum UserEvent {
     /// New output was parsed into the tab's grid; repaint if it's the active one.
     Redraw(u64),
