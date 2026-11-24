@@ -1438,7 +1438,10 @@ pub static CATALOG: &[Method] = &[
               removed first, counted before each chunk is written, unfinished files too; a file \
               over that is refused. At most 16 files are unfinished at once, and one untouched \
               for 10 minutes is cleared by the next new file. The folder goes with the block. \
-              Needs the lease and a server with a state directory.",
+              A lost reply to the last chunk is not safe to retry blindly: the file may \
+              already be in the folder (a resend from 0 is kept beside it as `name-1`), or \
+              its partial lost, and a nonzero offset then reports an unknown outcome; look \
+              at the folder first. Needs the lease and a server with a state directory.",
         params: &[
             BLOCK,
             required(
