@@ -250,6 +250,23 @@ fn read_linux(
     private: Option<&Path>,
     keep: &Protected,
 ) -> Result<String, String> {
+    read_linux_with(base, path, offset, private, keep, || {})
+}
+
+/// The policy is linearized at the reply: bytes are returned only while the
+/// generation they were judged under is still the one in force, checked
+/// before the file is read and again once its chunk is in memory. A reload
+/// in between drops the chunk. `after_read` runs between the read and that
+/// last check, for tests.
+#[cfg(target_os = "linux")]
+fn read_linux_with(
+    base: Option<&str>,
+    path: &str,
+    offset: u32,
+    private: Option<&Path>,
+    keep: &Protected,
+    after_read: impl FnOnce(),
+) -> Result<String, String> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = locate(base, path)?;
     let root = private_root(private)?;
@@ -300,6 +317,10 @@ fn read_linux(
     let left = size.saturating_sub(u64::from(offset)).min(CHUNK as u64);
     let mut chunk = Vec::with_capacity(left as usize);
     f.take(left).read_to_end(&mut chunk).map_err(io)?;
+    after_read();
+    if !keep.is_current(generation) {
+        return Err("the server's access files changed during this download; try again".into());
+    }
     Ok(format!("{size}\n{}", rusty_base64::encode_standard(&chunk)))
 }
 
@@ -489,6 +510,21 @@ mod tests {
         // The same identity loaded again is no change.
         keep.loaded(Path::new("/allow"), (2, 2));
         assert!(keep.is_current(now));
+    }
+
+    #[test]
+    fn a_reload_during_the_read_drops_the_bytes() {
+        let dir = scratch();
+        fs::write(dir.join("plain"), b"ok").unwrap();
+        let keep = Protected::default();
+        keep.require(dir.join("allow"));
+        keep.loaded(&dir.join("allow"), (1, 1));
+        let reload = || keep.loaded(&dir.join("allow"), (2, 2));
+        let err = read_linux_with(dir.to_str(), "plain", 0, None, &keep, reload).unwrap_err();
+        assert!(err.contains("changed during this download"), "{err}");
+        // Judged again under the new policy, the same read goes through.
+        assert!(read(dir.to_str(), "plain", 0, None, &keep).is_ok());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
