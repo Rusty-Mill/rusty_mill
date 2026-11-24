@@ -1493,7 +1493,7 @@ struct Forwarder {
 
 /// Writes frames to a block's connection, whole, under its lock, so they
 /// never interleave with the pane's own.
-struct ConnWriter(Arc<Block>, Arc<AtomicBool>);
+struct ConnWriter(Arc<Block>, Arc<AtomicBool>, u64);
 
 impl std::io::Write for ConnWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -1501,7 +1501,8 @@ impl std::io::Write for ConnWriter {
         // as is the swap of the connection (`Block::revive`), so a stopped
         // run never writes through the connection that replaced its own.
         let mut conn = lock(&self.0.conn);
-        if self.1.load(Ordering::SeqCst) {
+        // Stopped, or the block is on another connection than the run's.
+        if self.1.load(Ordering::SeqCst) || self.0.conn_gen.load(Ordering::SeqCst) != self.2 {
             return Err(std::io::ErrorKind::BrokenPipe.into());
         }
         conn.write_raw(buf)?;
@@ -1715,15 +1716,19 @@ impl Block {
         let (wants_tx, wants) = sync_channel(FORWARD_WANTS);
         let stop = Arc::new(AtomicBool::new(false));
         let (block, flag) = (Arc::clone(self), Arc::clone(&stop));
+        let id = RUNS.fetch_add(1, Ordering::Relaxed);
+        let conn = self.conn_gen.load(Ordering::SeqCst);
         let spawned = std::thread::Builder::new()
             .name(format!("mux-forward-{}", self.block))
             .spawn(move || {
                 let ended = forward::run_fed(
                     block.block,
-                    FORWARD_REQ,
+                    // Apart from every other run's, which may still be closing
+                    // its tunnels on this connection.
+                    FORWARD_REQ + (id << 24),
                     frames,
                     &wants,
-                    ConnWriter(Arc::clone(&block), Arc::clone(&flag)),
+                    ConnWriter(Arc::clone(&block), Arc::clone(&flag), conn),
                     &|| flag.load(Ordering::SeqCst),
                 );
                 if let forward::Ended::Lost(e) = ended {
@@ -1745,8 +1750,8 @@ impl Block {
             );
         }
         Forwarder {
-            id: RUNS.fetch_add(1, Ordering::Relaxed),
-            conn: self.conn_gen.load(Ordering::SeqCst),
+            id,
+            conn,
             frames: frames_tx,
             wants: wants_tx,
             stop,
@@ -1781,9 +1786,9 @@ impl Block {
         // the next click starts a fresh one.
         if let Err(TrySendError::Full(_)) = run.frames.try_send(message) {
             eprintln!("rusty-mux-gui: block {}: forwards fell behind", self.block);
-            if let Some(run) = forwarder.take() {
-                run.stop.store(true, Ordering::SeqCst);
-            }
+            // Dropped, not stopped: its frames end, so the run closes its
+            // tunnels on the server while its writer still works.
+            forwarder.take();
         }
     }
 
