@@ -137,11 +137,23 @@ pub struct Board<S> {
     milestones: Box<dyn MilestoneStore>,
     /// Agents registered on shared connectors.
     agents: Mutex<crate::agents::Registry>,
+    /// Held by every writer of a parent link and by the merge close, so a card cannot gain a
+    /// child between the close's childlessness check and its commit (#1620).
+    links: Mutex<()>,
     /// What the merge watch last found (#1620).
     merged_open: Mutex<(
         Vec<crate::mergewatch::MergedOpen>,
         crate::mergewatch::WatchStatus,
     )>,
+}
+
+/// The parent-link gate, even if a holder panicked: it guards no data.
+impl<S> Board<S> {
+    fn links(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -218,6 +230,7 @@ impl<S: Store> Board<S> {
             escalations: None,
             milestones: Box::new(MemMilestones::default()),
             agents: Mutex::default(),
+            links: Mutex::new(()),
             merged_open: Mutex::default(),
         }
     }
@@ -1516,6 +1529,7 @@ impl<S: Store> Board<S> {
         if !new.evidence.is_empty() {
             card.evidence = card.add_evidence(&new.evidence, card.created_ms)?.evidence;
         }
+        let _links = new.parent.map(|_| self.links());
         if let Some(p) = new.parent {
             // A new card has no children, so no parent can close a loop through it.
             self.store.get(p)?.ok_or(BoardError::NotFound(p))?;
@@ -1975,6 +1989,57 @@ impl<S: Store> Board<S> {
         self.apply(id, by, EventKind::Archived, |c, now| c.archive(now))
     }
 
+    /// Close a card because pull request `pr`, read from GitHub repository `repo`, merged and
+    /// said so: see [`Card::closed_by_merge`]. Logged as a move by `by` (the merge watch).
+    /// Needs `Record`.
+    ///
+    /// The match was made on a snapshot, so it is checked again on the card as it is now, and
+    /// committed once, never retried: the card must still be at revision `rev`, in a project `by`
+    /// may work in whose repositories include `repo`, and have no children.
+    ///
+    /// # Errors
+    /// [`BoardError::Conflict`] if the card changed since `rev` or the commit lost a race,
+    /// [`BoardError::Refused`] if the repository no longer matches or the card is a parent,
+    /// a missing capability or card, or see [`Card::closed_by_merge`].
+    pub fn close_merged(
+        &self,
+        id: Uuid,
+        rev: u64,
+        pr: &str,
+        repo: &str,
+        by: &Actor,
+    ) -> Result<Card, BoardError> {
+        let _links = self.links();
+        let flow = self.flow();
+        let current = self.get_in(&flow, id)?;
+        if !by.may_work_in(&current.project) {
+            return Err(BoardError::OutOfScope(current.project));
+        }
+        if current.rev != rev {
+            return Err(BoardError::Conflict);
+        }
+        let projects = self.projects();
+        if !projects
+            .repos_of(&current.project)
+            .any(|r| projects.github_of(r) == Some(repo))
+        {
+            return Err(BoardError::Refused(
+                "the pull request's repository is not the card's".into(),
+            ));
+        }
+        // `cards_in`, not `cards`: a second read of the workflow lock could queue behind a
+        // waiting writer while this holds the link gate.
+        if self.cards_in(&flow)?.iter().any(|c| c.parent == Some(id)) {
+            return Err(BoardError::Refused(
+                "a parent closes with its children".into(),
+            ));
+        }
+        let next = current.closed_by_merge(&flow, pr, by, (self.clock)())?;
+        let event = Event::of(&next, EventKind::Moved, &by.name);
+        let rev = self.store.replace(&next, event)?;
+        Ok(Card { rev, ..next })
+    }
+
     /// Put a shelved card (archived, or past the default Done window) back on the default
     /// views: see [`Card::restore`]. Needs `Close`.
     ///
@@ -2127,6 +2192,7 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::NotFound(*linked));
             }
         }
+        let _links = plan.parent.map(|_| self.links());
         if let Some(Some(parent)) = plan.parent {
             self.check_parent(id, parent)?;
         }

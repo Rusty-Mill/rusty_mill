@@ -1229,6 +1229,67 @@ impl Card {
         }
     }
 
+    /// Close the card as shipped because pull request `pr` merged and said so (the merge
+    /// watch, #1620): the PR becomes evidence, the card goes to Done as shipped work, its claim
+    /// is released, and a comment records which PR closed it and from which column. Needs
+    /// `Record` only. Never for a card in Blocked or Parked, or with a gate between it and Done
+    /// (those wait for a human).
+    ///
+    /// # Errors
+    /// [`BoardError::Forbidden`] without `Record`, [`BoardError::Terminal`] for a Done card,
+    /// [`BoardError::Invalid`] if `pr` is not a GitHub pull request link, and
+    /// [`BoardError::Refused`] for a parked, blocked or gated card.
+    pub fn closed_by_merge(
+        &self,
+        flow: &Workflow,
+        pr: &str,
+        by: &Actor,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
+        if !by.caps.contains(&Capability::Record) {
+            return Err(BoardError::Forbidden(Capability::Record));
+        }
+        if self.column == Column::DONE {
+            return Err(BoardError::Terminal);
+        }
+        if !is_pull_link(pr) {
+            return Err(BoardError::Invalid(
+                "a merged pull request link is required",
+            ));
+        }
+        if matches!(flow.kind(&self.column), Some(Kind::Blocked | Kind::Parked)) {
+            return Err(BoardError::Refused(
+                "a blocked or parked card waits for a person, not a merge".into(),
+            ));
+        }
+        if !flow.gates_crossed(&self.column, &Column::DONE).is_empty() {
+            return Err(BoardError::Refused(
+                "a human approval lies between this card and Done".into(),
+            ));
+        }
+        let with = self.add_evidence(&[pr.to_owned()], now_ms)?;
+        // One revision for the whole change: the store accepts exactly rev + 1.
+        let mut base = if with.rev == self.rev {
+            self.next(now_ms)
+        } else {
+            with
+        };
+        base.comments.push(Comment {
+            by: by.name.clone(),
+            at_ms: now_ms,
+            text: format!(
+                "Closed by merge: {pr} merged (was in {}).",
+                self.column.as_str()
+            ),
+        });
+        Ok(Self {
+            column: Column::DONE,
+            claim: None,
+            done_ms: Some(now_ms),
+            ..base
+        })
+    }
+
     /// Close unstarted work without shipping it: the card goes to Done with `reason`, no
     /// `done_ms` and no claim, so it counts as dropped. Needs `Triage`. Only a card in Backlog
     /// or a queue may be closed: started work ships, or is blocked for a human.
