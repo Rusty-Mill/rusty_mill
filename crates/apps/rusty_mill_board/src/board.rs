@@ -137,8 +137,11 @@ pub struct Board<S> {
     milestones: Box<dyn MilestoneStore>,
     /// Agents registered on shared connectors.
     agents: Mutex<crate::agents::Registry>,
-    /// Held by every writer of a parent link and by the merge close, so a card cannot gain a
-    /// child between the close's childlessness check and its commit (#1620).
+    /// Held by every writer of a parent link, by the merge close and `unclose`, and by `take`,
+    /// so a card cannot gain a child between the close's childlessness check and its commit, and
+    /// a dependency check by a take cannot go stale under an unclose (#1620). **Lock order:
+    /// this gate first, then the workflow guard**; never the other way, or a waiting workflow
+    /// writer can deadlock the board.
     links: Mutex<()>,
     /// What the merge watch last found (#1620).
     merged_open: Mutex<(
@@ -1693,6 +1696,10 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::OutOfScope(p.to_owned()));
             }
         }
+        // The link gate is taken before the workflow guard, as everywhere (see `Board::links`),
+        // and held across every dependency check and commit below: `unclose` reopens a
+        // prerequisite under the same gate, so a take's check cannot go stale before its write.
+        let _links = self.links();
         let flow = self.flow();
         let queues = flow.work_queues();
         let rank = |c: &Card| queues.iter().position(|q| *q == c.column);
@@ -1762,9 +1769,6 @@ impl<S: Store> Board<S> {
         listed: Card,
         by: &Actor,
     ) -> Result<Card, BoardError> {
-        // Held across the dependency check and the commit: `unclose` reopens a prerequisite
-        // under the same gate, so the check cannot go stale between them.
-        let _links = self.links();
         let id = listed.id;
         let queues = flow.work_queues();
         let works = |col: &Column| queues.contains(col) && flow.actionable(col, &by.caps);
@@ -2071,8 +2075,9 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// A missing capability or card, a started dependent, or see [`Card::unclosed`].
     pub fn unclose(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
-        // Under the gate every dependency-checked take holds, so no card can start between
-        // the look at the dependents and the reopening.
+        // Under the gate every take holds, so no take can start a dependent between the look
+        // at the dependents and the reopening. Other ways to start work (`card_claim`, a move
+        // into a work column) do not hold it and are not covered.
         let _links = self.links();
         let flow = self.flow();
         // Authorize and validate the card itself first: only then look at other cards, and
@@ -2082,6 +2087,10 @@ impl<S: Store> Board<S> {
             return Err(BoardError::OutOfScope(current.project));
         }
         current.unclosed(&flow, by, (self.clock)())?;
+        // Back into a work column: a paused project takes no new work.
+        if let Some(m) = &current.merged {
+            self.check_starts(&flow, &current, &m.was)?;
+        }
         if self
             .cards_in(&flow)?
             .iter()

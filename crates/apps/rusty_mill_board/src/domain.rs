@@ -897,6 +897,9 @@ pub const MERGE_WATCH: &str = "merge-watch";
 /// How the comment of a close on merge begins.
 const MERGED_PREFIX: &str = "Closed by merge:";
 
+/// How the comment that undoes such a close begins.
+const UNCLOSED_PREFIX: &str = "Unclosed:";
+
 /// What happened to a card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1317,6 +1320,15 @@ impl Card {
         })
     }
 
+    /// Whether the merge watch's close on pull request `pr` was undone ([`Card::unclosed`]):
+    /// its comment names the pull request, so the same marker does not close the card again.
+    /// A person's comment can only add to this, which only withholds a close.
+    pub fn unclosed_from(&self, pr: &str) -> bool {
+        self.comments
+            .iter()
+            .any(|c| c.text.starts_with(UNCLOSED_PREFIX) && c.text.contains(pr))
+    }
+
     /// Undo the merge watch's close: back to the column it was in, ship time cleared, evidence
     /// and comments kept, and a comment saying who undid it. Only for a Done card carrying the
     /// typed [`MergeClose`] that [`Card::closed_by_merge`] wrote (nothing else sets it, and
@@ -1342,11 +1354,20 @@ impl Card {
             return refuse("the column the card was in is gone");
         }
         let mut next = self.next(now_ms);
+        let pr = self
+            .comments
+            .iter()
+            .rev()
+            .filter(|c| c.by == MERGE_WATCH)
+            .find_map(|c| c.text.strip_prefix(MERGED_PREFIX))
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(|pr| format!(" of {pr}"))
+            .unwrap_or_default();
         next.comments.push(Comment {
             by: by.name.clone(),
             at_ms: now_ms,
             text: format!(
-                "Unclosed: the merge watch's close is undone, back to {}.",
+                "{UNCLOSED_PREFIX} the merge watch's close{pr} is undone, back to {}.",
                 was.as_str()
             ),
         });

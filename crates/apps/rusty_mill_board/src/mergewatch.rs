@@ -323,9 +323,9 @@ pub fn scan(
         let ours = |c: &Card| bound.get(&c.id).is_some_and(|b| b.contains(&pr.repo));
         for (n, closes) in card_refs(&pr.body) {
             if let Some(card) = by_number.get(&n).filter(|c| ours(c)) {
-                // A pull request the card already lists was dealt with (closed once and
-                // unclosed, or recorded by a person): its marker does not close again.
-                let handled = card.evidence.iter().any(|l| same_pull(l, &pr.url));
+                // Closed by this pull request once and undone (`card_unclose`): its marker does
+                // not close the card again.
+                let handled = card.unclosed_from(&pr.url);
                 note(
                     card,
                     if closes && pr.may_close && !handled {
@@ -1060,6 +1060,143 @@ mod tests {
             b.unclose(prereq.id, &who),
             Err(BoardError::Refused(_))
         ));
+    }
+
+    #[test]
+    fn evidence_added_before_the_merge_does_not_stop_the_first_close() {
+        let (b, who, card, n) = one_card();
+        b.add_evidence(card.id, &[PR.to_owned()], &who)
+            .expect("evidence");
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        assert_eq!(b.get(card.id).expect("card").column, Column::DONE);
+    }
+
+    /// A store that parks the Nth `get` after being armed, to hold a caller at a known place.
+    struct Parking {
+        inner: MemStore,
+        countdown: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl Store for Parking {
+        fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            if self.countdown.load(SeqCst) > 0 && self.countdown.fetch_sub(1, SeqCst) == 1 {
+                self.entered.send(()).expect("test is listening");
+                self.release.lock().expect("lock").recv().expect("released");
+            }
+            self.inner.get(id)
+        }
+        fn list(&self) -> Result<Vec<Card>, BoardError> {
+            self.inner.list()
+        }
+        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            self.inner.insert(card, event)
+        }
+        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            self.inner.replace(card, event)
+        }
+        fn events_since(
+            &self,
+            after: Option<Uuid>,
+            limit: usize,
+        ) -> Result<Vec<crate::domain::Event>, BoardError> {
+            self.inner.events_since(after, limit)
+        }
+        fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+            self.inner.last_event_id()
+        }
+        fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+            self.inner.reserve_number(card, floor)
+        }
+    }
+
+    /// Lock order: the link gate before the workflow guard, everywhere. A take that held the
+    /// workflow guard while it waited for the gate, a parent `plan` that held the gate while it
+    /// asked for the workflow, and a workflow writer queued between them, blocked each other
+    /// for good (a waiting writer holds back new readers).
+    #[test]
+    fn a_take_a_parent_plan_and_a_workflow_change_do_not_deadlock() {
+        use std::sync::{Arc, atomic::AtomicUsize, mpsc};
+        use std::time::Duration;
+        let (entered, started) = mpsc::channel();
+        let (release, held) = mpsc::channel();
+        let countdown = Arc::new(AtomicUsize::new(0));
+        let parking = Parking {
+            inner: MemStore::default(),
+            countdown: Arc::clone(&countdown),
+            entered,
+            release: std::sync::Mutex::new(held),
+        };
+        let arm = |n| countdown.store(n, std::sync::atomic::Ordering::SeqCst);
+        let b: Arc<Shared> = Arc::new(
+            Board::new(
+                Box::new(parking) as Box<dyn Store>,
+                crate::board::Roles::default(),
+            )
+            .with_projects(Projects::parse(REGISTRY).expect("registry")),
+        );
+        let who = b.roles().actor("nano", "human").expect("role");
+        let parent = b.add_in(&who, "p", "parent", "", vec![]).expect("card");
+        let child = b.add_in(&who, "p", "child", "", vec![]).expect("card");
+        let ready = b.add_in(&who, "p", "ready", "", vec![]).expect("card");
+        b.move_card(ready.id, &Column::READY, &who).expect("ready");
+
+        let (done, finished) = mpsc::channel();
+        let run = |name: &'static str, f: Box<dyn FnOnce() + Send>| {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                f();
+                done.send(name).ok();
+            });
+        };
+        // A: `plan` with a parent holds the gate and parks at its parent-chain read, before it
+        // asks for the workflow (the second `get`: the first is its linked-card check).
+        arm(2);
+        let (bb, w) = (Arc::clone(&b), who.clone());
+        let (pid, cid) = (parent.id, child.id);
+        run(
+            "plan",
+            Box::new(move || {
+                let plan = crate::domain::Plan {
+                    parent: Some(Some(pid)),
+                    ..Default::default()
+                };
+                bb.plan(cid, &w, &plan).expect("planned");
+            }),
+        );
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("plan parked");
+        // C: a take of another card. B: a workflow change, which queues for the write lock.
+        let (bb, w, rid) = (Arc::clone(&b), who.clone(), ready.id);
+        run(
+            "take",
+            Box::new(move || {
+                bb.take(&w, Some(rid)).expect("take");
+            }),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        let (bb, flow) = (Arc::clone(&b), b.workflow());
+        run(
+            "workflow",
+            Box::new(move || {
+                bb.set_workflow(flow, |_| Ok(())).expect("workflow");
+            }),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        release.send(()).expect("release the plan");
+        let mut ended = Vec::new();
+        for _ in 0..3 {
+            ended.push(
+                finished
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("every thread finishes: no lock-order deadlock"),
+            );
+        }
+        ended.sort_unstable();
+        assert_eq!(ended, ["plan", "take", "workflow"]);
     }
 
     const PR: &str = "https://github.com/o/r/pull/7";
