@@ -1547,7 +1547,7 @@ pub static CATALOG: &[Method] = &[
     },
     Method {
         name: "terminal.download",
-        doc: "Read a file of the server's host a chunk at a time, for a copy to the \
+        doc: "Refused on an agent's (jailed) block. Read a file of the server's host a chunk at a time, for a copy to the \
               client. The reply is the file's size in bytes on the first line, then the \
               base64 of at most 192 KiB of it from `offset` (empty past the end); ask \
               again from `offset` plus the bytes got until the size is reached. `path` is \

@@ -2229,6 +2229,7 @@ impl State {
                 });
             }
             "terminal.download" => {
+                rt.refuse_agent("terminal.download")?;
                 // It reads any file the server's account can, as list-dir
                 // lists any directory: the lease, which a watch-only grant
                 // (C14) never holds.

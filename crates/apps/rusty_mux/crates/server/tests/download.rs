@@ -9,10 +9,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use common::{Client, block_for, shell, start_server_with};
-use rusty_mux_core::BlockId;
+use common::{Client, block_for, shell, start_server_with, window_for};
+use rusty_mux_core::{BlockId, Size};
 use rusty_mux_proto::schema::Value;
-use rusty_mux_proto::{Features, Message};
+use rusty_mux_proto::{Features, Launch, Message};
 use rusty_mux_server::Config;
 
 const DOWNLOAD: Features = Features::CHECKPOINT_V6
@@ -134,4 +134,35 @@ fn only_the_lease_holder_may_download() {
     let err = read(&mut viewer, block, dir.join("f").to_str().unwrap(), 0).unwrap_err();
     assert!(err.contains("lease"), "{err}");
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_agents_block_refuses_a_download() {
+    let path = serve(None);
+    let mut client = Client::connect_with(
+        &path,
+        DOWNLOAD
+            .union(Features::LAUNCH)
+            .union(Features::AGENT_LAUNCH),
+        None,
+    );
+    let window = window_for(&mut client);
+    // Launched as an agent's block is: with an exact environment, and
+    // without saying it is one.
+    let launch = Launch {
+        env: Some(vec![("PATH".into(), "/usr/bin:/bin".into())]),
+        ..Launch::default()
+    };
+    let size = Size::new(80, 24).expect("size");
+    let id = client.request(|req| Message::CreateBlock {
+        req,
+        window,
+        size,
+        launch,
+    });
+    let block = BlockId::from_uuid(id.expect("a block id"));
+    client.request(|req| Message::Attach { req, block });
+    client.request(|req| Message::AcquireLease { req, block });
+    let err = read(&mut client, block, "/etc/hostname", 0).unwrap_err();
+    assert!(err.contains("agent"), "{err}");
 }
