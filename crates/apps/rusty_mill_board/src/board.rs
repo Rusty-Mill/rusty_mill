@@ -738,6 +738,22 @@ impl<S: Store> Board<S> {
             return self.closed_escalation(by, id, rev, action, dry_run);
         };
         if e.rev != rev {
+            // An earlier send at `rev` may have lost its answer: its card is settled now.
+            if !dry_run {
+                let project = owner.as_ref().map_or(DEFAULT_PROJECT, |c| &c.project);
+                let decision = Decision {
+                    escalation: id,
+                    rev,
+                    action,
+                };
+                if let Some(card) = self.remediation_card(by, project, &decision)? {
+                    let settled = self.settle(by, source, &e.task, &card, true)?;
+                    return Ok(InboxAnswer::Recorded {
+                        card: InboxCard::of(&card),
+                        settled,
+                    });
+                }
+            }
             return Err(BoardError::Refused(format!(
                 "stale_rev: {id} is at rev {}, not {rev}; re-read the inbox",
                 e.rev
@@ -752,7 +768,7 @@ impl<S: Store> Board<S> {
         let dropped = e.dropped_acted(action).map_err(inbox_error)?;
         if dropped.is_empty() {
             let outcome = source
-                .act(&e, action, &answerer(&by.name))
+                .act(&e, action, &answerer(&by.name), None)
                 .map_err(inbox_error)?;
             return Ok(InboxAnswer::Outcome(outcome));
         }
@@ -772,24 +788,29 @@ impl<S: Store> Board<S> {
             action,
         };
         let card = self.remediate(by, &project, &e, &decision, &dropped, &dry)?;
-        let outcome =
-            source
-                .act(&e, action, &answerer(&by.name))
-                .map_err(|err| match inbox_error(err) {
-                    BoardError::Storage(why) => BoardError::Storage(format!(
-                        "{why}; its Remediate card {} was written first, so retry to reconcile",
-                        card.label()
-                    )),
-                    other => other,
-                })?;
+        let id = decision.card_id(&project)?.to_string();
+        let outcome = source
+            .act(&e, action, &answerer(&by.name), Some(&id))
+            .map_err(|err| match inbox_error(err) {
+                BoardError::Storage(why) => BoardError::Storage(format!(
+                    "{why}; its Remediate card {} was written first, so retry to reconcile",
+                    card.label()
+                )),
+                other => other,
+            })?;
         if let Outcome::Refused { step: 0, code, .. } = &outcome {
-            // Only this send is known to have written nothing: another send of the same
-            // decision shares the card and may commit before or after any re-read.
-            self.comment(
-                card.id,
-                by,
-                &format!("BBP refused this send ({code}). Another send of the same decision may still apply it, so check BBP's log before closing this card."),
-            )?;
+            // A stale fence can never apply later, so BBP's log settles the card. For any
+            // other refusal only this send is known to have written nothing: another send
+            // of the same decision shares the card and may commit before or after a re-read.
+            let settled =
+                self.settle(by, source, &e.task, &self.get(card.id)?, code == "StaleRev")?;
+            if settled == Settled::Unknown {
+                self.comment(
+                    card.id,
+                    by,
+                    &format!("BBP refused this send ({code}). Another send of the same decision may still apply it, so check BBP's log before closing this card."),
+                )?;
+            }
         }
         Ok(InboxAnswer::Remediated { outcome, card })
     }
@@ -815,10 +836,55 @@ impl<S: Store> Board<S> {
             rev,
             action,
         };
-        self.remediation_card(by, &project, &decision)?
-            .map(|card| InboxCard::of(&card))
-            .map(|card| InboxAnswer::Recorded { card })
-            .ok_or_else(closed)
+        let card = self
+            .remediation_card(by, &project, &decision)?
+            .ok_or_else(closed)?;
+        // The escalation is gone, so the log has moved past `rev`: a send that was not
+        // applied by now never will be.
+        let settled = self.settle(by, self.inbox_source(by)?, task, &card, true)?;
+        Ok(InboxAnswer::Recorded {
+            card: InboxCard::of(&card),
+            settled,
+        })
+    }
+
+    /// Settle a Remediate `card` against BBP's log: keep it if the decision was applied,
+    /// close it if not. The log can only say "not applied yet" while a send may still
+    /// land, so `final_` says whether none can (its fence has passed); until then, or if
+    /// the host cannot say (it predates `bbp decision`), the card is left as it is.
+    fn settle(
+        &self,
+        by: &Actor,
+        source: &Arc<dyn Escalations>,
+        task: &str,
+        card: &Card,
+        final_: bool,
+    ) -> Result<Settled, BoardError> {
+        let applied = match source.applied(task, &card.id.to_string()) {
+            Ok(applied) => applied,
+            Err(err) => {
+                rusty_log::warn!(card = %card.id, error = %err, "cannot settle a Remediate card");
+                return Ok(Settled::Unknown);
+            }
+        };
+        if let Some(rev) = applied {
+            let said = format!(
+                "BBP's log shows this decision was applied (rev {rev}). Undo or reconcile the dropped work."
+            );
+            if !card.comments.iter().any(|c| c.text == said) {
+                self.comment(card.id, by, &said)?;
+            }
+            return Ok(Settled::Applied { rev });
+        }
+        if !final_ {
+            return Ok(Settled::Unknown);
+        }
+        let note = "BBP's log holds no such decision and its escalation has moved on, so it can never apply: nothing was dropped.";
+        match self.close(card.id, CloseReason::WontDo, Some(note), by) {
+            // Someone already closed or started it: leave it to them.
+            Ok(_) | Err(BoardError::Terminal | BoardError::Refused(_)) => Ok(Settled::NotApplied),
+            Err(err) => Err(err),
+        }
     }
 
     /// The project of the card linked to BBP task `task`, as `inbox` attaches it.
@@ -2100,7 +2166,24 @@ pub enum InboxAnswer {
     Recorded {
         /// The Backlog card to undo or reconcile the work.
         card: InboxCard,
+        /// What BBP's log says of the send: kept if applied, closed if not.
+        settled: Settled,
     },
+}
+
+/// What BBP's log says of a decision that dropped acted-on work, and so of its Remediate card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Settled {
+    /// Applied at this rev: the card stays for the dropped work.
+    Applied {
+        /// The task revision just after BBP recorded the send.
+        rev: u64,
+    },
+    /// Not applied, and no send can apply it now: the card was closed.
+    NotApplied,
+    /// Not known: the send may still land, or the host cannot say. The card stays.
+    Unknown,
 }
 
 /// Namespace of the Remediate card ids (UUIDv5).

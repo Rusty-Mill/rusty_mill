@@ -276,7 +276,7 @@ fn the_inbox_drives_a_real_bbp_host() {
     assert!(matches!(dry.response, Response::Accepted(_)), "{dry:?}");
     assert!(!dry.events.is_empty());
     assert_eq!(
-        cli.act(&row, &Action::Approve, "owner").unwrap(),
+        cli.act(&row, &Action::Approve, "owner", None).unwrap(),
         Outcome::Done
     );
     assert!(cli.open(&["C1".into()]).unwrap().is_empty());
@@ -288,7 +288,7 @@ fn the_inbox_drives_a_real_bbp_host() {
     );
 
     // The same decision sent again is fenced out: no second allowance.
-    let again = cli.act(&row, &Action::Approve, "owner").unwrap();
+    let again = cli.act(&row, &Action::Approve, "owner", None).unwrap();
     assert!(
         matches!(&again, Outcome::Refused { step: 0, .. }),
         "{again:?}"
@@ -303,7 +303,10 @@ fn the_inbox_drives_a_real_bbp_host() {
     let refine = Action::Refine {
         note: "smaller steps".into(),
     };
-    assert_eq!(cli.act(&row, &refine, "owner").unwrap(), Outcome::Done);
+    assert_eq!(
+        cli.act(&row, &refine, "owner", None).unwrap(),
+        Outcome::Done
+    );
     assert!(cli.open(&["C2".into()]).unwrap().is_empty());
     let after = card(&bin, &root, "C2");
     assert!(after.contains(r#""state":"Open""#), "{after}");
@@ -327,12 +330,39 @@ fn the_inbox_drives_a_real_bbp_host() {
         row.pause.as_ref().map(|p| p.reason.as_str()),
         Some("Breaker")
     );
+    // Sent as decision `dec-c3`: the host records the id, so the log says it was applied.
+    assert_eq!(cli.applied("C3", "dec-c3").unwrap(), None);
+    let decision = Some("dec-c3");
     assert_eq!(
-        cli.act(&row, &Action::Approve, "owner").unwrap(),
+        cli.act(&row, &Action::Approve, "owner", decision).unwrap(),
         Outcome::Done
     );
     assert!(cli.open(&["C3".into()]).unwrap().is_empty());
-    assert!(card(&bin, &root, "C3").contains(r#""state":"Open""#));
+    let after = card(&bin, &root, "C3");
+    assert!(after.contains(r#""state":"Open""#));
+    let at = cli.applied("C3", "dec-c3").unwrap();
+    assert!(
+        at.is_some_and(|rev| rev > row.rev),
+        "{at:?} after {}",
+        row.rev
+    );
+    assert_eq!(cli.applied("C3", "dec-other").unwrap(), None);
+    // The retry after a lost answer replays: it reports done and writes nothing more.
+    assert_eq!(
+        cli.act(&row, &Action::Approve, "owner", decision).unwrap(),
+        Outcome::Done
+    );
+    assert_eq!(card(&bin, &root, "C3"), after);
+    assert_eq!(cli.applied("C3", "dec-c3").unwrap(), at);
+    // A send fenced on the same rev under another id loses, and is not applied.
+    let lost = cli
+        .act(&row, &Action::Approve, "owner", Some("dec-late"))
+        .unwrap();
+    assert!(
+        matches!(&lost, Outcome::Refused { step: 0, code, .. } if code == "StaleRev"),
+        "{lost:?}"
+    );
+    assert_eq!(cli.applied("C3", "dec-late").unwrap(), None);
 
     drop(scratch);
     println!("BBP_ACCEPTANCE PASS millboard-inbox");

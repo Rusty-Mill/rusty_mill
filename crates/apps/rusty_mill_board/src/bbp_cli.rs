@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::inbox::{
     Action, DryRun, Escalation, Escalations, InboxError, Outcome, Response, Step, plan,
+    step_decision,
 };
 
 /// Runs `<bin> ... --dir <root>` for every read and write.
@@ -41,8 +42,17 @@ impl BbpCli {
             .map_err(|e| InboxError::Host(format!("unreadable output: {e}")))
     }
 
-    /// `bbp human` for `step`, fenced on `fence`; a dry run if `dry`.
-    fn human(&self, e: &Escalation, step: &Step, fence: u64, by: &str, dry: bool) -> Vec<String> {
+    /// `bbp human` for `step`, fenced on `fence`; a dry run if `dry`; sent as `decision`
+    /// if the caller named one.
+    fn human(
+        &self,
+        e: &Escalation,
+        step: &Step,
+        fence: u64,
+        by: &str,
+        decision: Option<&str>,
+        dry: bool,
+    ) -> Vec<String> {
         let fence = fence.to_string();
         let mut argv: Vec<String> = [
             "human",
@@ -60,6 +70,9 @@ impl BbpCli {
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
+        if let Some(id) = decision {
+            argv.extend(["--decision".to_owned(), id.to_owned()]);
+        }
         if dry {
             argv.extend(["--dry-run".to_owned(), "yes".to_owned()]);
         }
@@ -79,8 +92,9 @@ impl BbpCli {
         step: &Step,
         fence: u64,
         by: &str,
+        decision: Option<&str>,
     ) -> Result<(Response, Vec<Value>), InboxError> {
-        let v = self.run(&self.human(e, step, fence, by, true))?;
+        let v = self.run(&self.human(e, step, fence, by, decision, true))?;
         let events = v
             .get("events")
             .and_then(Value::as_array)
@@ -127,7 +141,7 @@ impl Escalations for BbpCli {
         let step = steps
             .next()
             .ok_or_else(|| InboxError::Invalid("the action has no command".into()))?;
-        let (response, events) = self.dry(e, &step, e.rev, PREVIEW_AS)?;
+        let (response, events) = self.dry(e, &step, e.rev, PREVIEW_AS, None)?;
         Ok(DryRun {
             step,
             response,
@@ -140,10 +154,18 @@ impl Escalations for BbpCli {
     /// commit appends exactly the previewed events (BBP's pure engine), so
     /// the next command is fenced on `fence + events`: anyone else writing in
     /// between makes it `StaleRev`, and the outcome says how far it got.
-    fn act(&self, e: &Escalation, a: &Action, by: &str) -> Result<Outcome, InboxError> {
+    fn act(
+        &self,
+        e: &Escalation,
+        a: &Action,
+        by: &str,
+        decision: Option<&str>,
+    ) -> Result<Outcome, InboxError> {
         let mut fence = e.rev;
         for (n, step) in plan(e, a)?.iter().enumerate() {
-            let (response, events) = self.dry(e, step, fence, by)?;
+            let id = decision.map(|d| step_decision(d, n));
+            let id = id.as_deref();
+            let (response, events) = self.dry(e, step, fence, by, id)?;
             if let Response::Rejected { code, detail } = response {
                 return Ok(Outcome::Refused {
                     step: n,
@@ -151,7 +173,8 @@ impl Escalations for BbpCli {
                     detail,
                 });
             }
-            let committed = Response::from_json(self.run(&self.human(e, step, fence, by, false))?);
+            let committed =
+                Response::from_json(self.run(&self.human(e, step, fence, by, id, false))?);
             if let Response::Rejected { code, detail } = committed {
                 return Ok(Outcome::Refused {
                     step: n,
@@ -163,4 +186,29 @@ impl Escalations for BbpCli {
         }
         Ok(Outcome::Done)
     }
+
+    fn applied(&self, task: &str, decision: &str) -> Result<Option<u64>, InboxError> {
+        if !valid_task(task) {
+            return Err(InboxError::Invalid(format!("bad BBP task id {task:?}")));
+        }
+        let argv = [
+            "decision".to_owned(),
+            "--dir".to_owned(),
+            self.root_str(),
+            "--task".to_owned(),
+            task.to_owned(),
+            "--decision".to_owned(),
+            step_decision(decision, 0),
+        ];
+        let rows: Vec<Applied> = serde_json::from_value(self.run(&argv)?)
+            .map_err(|e| InboxError::Host(format!("unreadable decision: {e}")))?;
+        Ok(rows.into_iter().find(|r| r.applied).and_then(|r| r.rev))
+    }
+}
+
+/// One row of `bbp decision`.
+#[derive(serde::Deserialize)]
+struct Applied {
+    applied: bool,
+    rev: Option<u64>,
 }

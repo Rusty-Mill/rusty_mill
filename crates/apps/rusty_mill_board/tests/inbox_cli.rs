@@ -93,7 +93,7 @@ fn approve_on_budget_extends_then_reopens_with_chained_fences() {
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     let e = cli.open(&["C1".into()]).unwrap().remove(0);
     assert_eq!(
-        cli.act(&e, &Action::Approve, "nano").unwrap(),
+        cli.act(&e, &Action::Approve, "nano", None).unwrap(),
         Outcome::Done
     );
     let human: Vec<String> = calls(&log).into_iter().skip(1).collect();
@@ -115,7 +115,7 @@ fn a_stale_commit_stops_the_sequence_and_says_where() {
     let (bin, log, _serial) = fake("stale", &[18]);
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     let e = cli.open(&["C1".into()]).unwrap().remove(0);
-    let out = cli.act(&e, &Action::Approve, "nano").unwrap();
+    let out = cli.act(&e, &Action::Approve, "nano", None).unwrap();
     assert_eq!(
         out,
         Outcome::Refused {
@@ -147,14 +147,18 @@ fn an_invalid_action_sends_nothing() {
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     let e = cli.open(&["C1".into()]).unwrap().remove(0);
     let n = calls(&log).len();
-    assert!(cli.act(&e, &Action::Choose { chosen: 9 }, "nano").is_err());
+    assert!(
+        cli.act(&e, &Action::Choose { chosen: 9 }, "nano", None)
+            .is_err()
+    );
     assert!(
         cli.act(
             &e,
             &Action::Refine {
                 note: String::new()
             },
-            "nano"
+            "nano",
+            None
         )
         .is_err()
     );

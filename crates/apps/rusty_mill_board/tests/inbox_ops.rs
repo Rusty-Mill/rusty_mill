@@ -29,6 +29,16 @@ struct Fake {
     lose_answer: AtomicBool,
     /// Refuse the command at this step; the ones before it commit.
     refuse_at: Option<usize>,
+    /// The code a refusal carries (default `dep_closed`).
+    refuse_code: Option<&'static str>,
+    /// A refusal that comes from another send of the same decision winning the fence.
+    winner_is_same_decision: bool,
+    /// Fail before the host is reached: nothing is applied or recorded.
+    fail_before: AtomicBool,
+    /// The host predates `bbp decision`.
+    old_host: bool,
+    /// The decision ids the host applied, with the rev.
+    decided: Mutex<Vec<String>>,
     /// The `verb args` of every command each act sent.
     planned: Mutex<Vec<Vec<String>>>,
     asked: Mutex<Vec<Vec<String>>>,
@@ -65,7 +75,28 @@ impl Escalations for Fake {
             then: steps.collect(),
         })
     }
-    fn act(&self, e: &Escalation, a: &Action, by: &str) -> Result<Outcome, InboxError> {
+    fn applied(&self, _task: &str, decision: &str) -> Result<Option<u64>, InboxError> {
+        if self.old_host {
+            return Err(InboxError::Host("unknown subcommand decision".into()));
+        }
+        let at = self
+            .decided
+            .lock()
+            .unwrap()
+            .iter()
+            .position(|d| d == decision);
+        Ok(at.map(|n| 8 + n as u64))
+    }
+    fn act(
+        &self,
+        e: &Escalation,
+        a: &Action,
+        by: &str,
+        decision: Option<&str>,
+    ) -> Result<Outcome, InboxError> {
+        if self.fail_before.load(Ordering::SeqCst) {
+            return Err(InboxError::Host("connection refused".into()));
+        }
         let steps = plan(e, a)?;
         self.planned.lock().unwrap().push(
             steps
@@ -81,13 +112,22 @@ impl Escalations for Fake {
             // Another send of the decision won the fence first.
             self.rows.lock().unwrap().retain(|r| r.id != e.id);
         }
+        let record = |this: &Self| {
+            if let Some(id) = decision {
+                this.decided.lock().unwrap().push(id.to_owned());
+            }
+        };
         if let Some(step) = self.refuse_at {
+            if self.winner_is_same_decision {
+                record(self);
+            }
             return Ok(Outcome::Refused {
                 step,
-                code: "dep_closed".into(),
+                code: self.refuse_code.unwrap_or("dep_closed").into(),
                 detail: "a dependency closed".into(),
             });
         }
+        record(self);
         if self.consume {
             self.rows.lock().unwrap().retain(|r| r.id != e.id);
         }
@@ -714,4 +754,137 @@ fn a_memory_only_board_refuses_a_drop_of_acted_on_work() {
         json!({"outcome": "Done"}),
         "a decision that drops nothing still works"
     );
+}
+
+fn fresh() -> (Arc<MemStore>, Arc<AtomicBool>) {
+    (
+        Arc::new(MemStore::default()),
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+fn last_comment(c: &Card) -> &str {
+    c.comments.last().map_or("", |c| c.text.as_str())
+}
+
+/// The answer to a send was lost after BBP applied it: the retry reads BBP's log, keeps the
+/// card, and says at which rev.
+#[test]
+fn a_lost_answer_that_was_applied_keeps_its_card() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        lose_answer: AtomicBool::new(true),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    let board = board_over(&store, &down, &fake, false);
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(
+        out["recorded"]["settled"],
+        json!({"applied": {"rev": 8}}),
+        "{out}"
+    );
+    let card = &remediate_cards(&board)[0];
+    assert!(card.closed.is_none(), "an applied drop keeps its card");
+    assert!(last_comment(card).contains("applied (rev 8)"), "{card:?}");
+    // Asking again does not repeat the note.
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(
+        remediate_cards(&board)[0].comments.len(),
+        card.comments.len()
+    );
+}
+
+/// The send never reached BBP and another decision then closed the escalation: the retry
+/// finds nothing in the log and no send can apply now, so the card is closed.
+#[test]
+fn a_lost_answer_that_was_not_applied_closes_its_card() {
+    let fake = Arc::new(Fake::with(vec![shipped()]));
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    // The card is written first, then the host cannot be reached.
+    fake.fail_before.store(true, Ordering::SeqCst);
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    assert!(remediate_cards(&board)[0].closed.is_none());
+    // Someone else resolved the escalation meanwhile.
+    fake.rows.lock().unwrap().clear();
+
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "not_applied", "{out}");
+    let card = &remediate_cards(&board)[0];
+    assert!(card.closed.is_some(), "{card:?}");
+    assert!(
+        last_comment(card).contains("nothing was dropped"),
+        "{card:?}"
+    );
+}
+
+/// The same, with the escalation still open but moved past the rev the send was read at.
+#[test]
+fn a_retry_at_a_stale_rev_settles_the_card() {
+    let fake = Arc::new(Fake::with(vec![shipped()]));
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    fake.fail_before.store(true, Ordering::SeqCst);
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    fake.rows.lock().unwrap()[0].rev = 9;
+
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "not_applied", "{out}");
+    assert!(remediate_cards(&board)[0].closed.is_some());
+}
+
+/// A send that loses the fence to another decision is settled at once: its card is closed.
+/// Losing to a send of the same decision keeps the card, since that send applied it.
+#[test]
+fn a_losing_send_settles_its_card_from_the_log() {
+    let lose = |same: bool| {
+        let fake = Arc::new(Fake {
+            consume: true,
+            refuse_at: Some(0),
+            refuse_code: Some("StaleRev"),
+            winner_is_same_decision: same,
+            ..Fake::with(vec![shipped()])
+        });
+        let (store, down) = fresh();
+        let board = board_over(&store, &down, &fake, true);
+        call(&board, &owner(), "inbox_act", reject()).unwrap();
+        remediate_cards(&board).remove(0)
+    };
+    let other = lose(false);
+    assert!(other.closed.is_some(), "{other:?}");
+    let same = lose(true);
+    assert!(same.closed.is_none(), "{same:?}");
+    assert!(last_comment(&same).contains("applied"), "{same:?}");
+}
+
+/// A host that predates `bbp decision` cannot settle anything: the card stays, as before.
+#[test]
+fn an_old_host_leaves_the_card_for_a_person() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        lose_answer: AtomicBool::new(true),
+        old_host: true,
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    let board = board_over(&store, &down, &fake, false);
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board)[0].closed.is_none());
+}
+
+/// The id a drop is sent under is the Remediate card's id, so the card and BBP's log meet.
+#[test]
+fn a_drop_is_sent_under_its_cards_id() {
+    let fake = Arc::new(Fake::with(vec![shipped()]));
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    let card = out["remediated"]["card"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(*fake.decided.lock().unwrap(), [card]);
 }

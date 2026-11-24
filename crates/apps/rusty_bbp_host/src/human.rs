@@ -289,6 +289,41 @@ pub fn labelled_op(by: &str) -> Result<OpId, String> {
     Ok(OpId(format!("by:{by}/{}", fresh_op().0)))
 }
 
+/// What marks a caller-chosen decision id in an op: `by:<by>/dec:<id>`.
+const DECISION_MARK: &str = "dec:";
+
+/// The op id for a human action sent as decision `id`: `by:<by>/dec:<id>`.
+/// The caller chooses `id` (1 to 64 of `[A-Za-z0-9._-]`), so a retry of the
+/// same send replays by R15 instead of applying twice, and
+/// [`crate::decision`] can tell afterwards whether it was applied.
+pub fn decision_op(by: &str, id: &str) -> Result<OpId, String> {
+    let OpId(labelled) = labelled_op(by)?;
+    let by = labelled
+        .strip_prefix("by:")
+        .and_then(|r| r.split_once('/'))
+        .map_or(by, |(by, _)| by);
+    if !valid_decision(id) {
+        return Err("--decision must be 1 to 64 characters of letters, digits, - _ .".into());
+    }
+    Ok(OpId(format!("by:{by}/{DECISION_MARK}{id}")))
+}
+
+/// Whether `id` is a decision id [`decision_op`] takes.
+pub fn valid_decision(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// The decision id an op carries, whoever answered: the `id` of [`decision_op`].
+pub fn decision_of(op: &OpId) -> Option<&str> {
+    op.0.strip_prefix("by:")
+        .and_then(|r| r.split_once('/'))
+        .and_then(|(_, rest)| rest.strip_prefix(DECISION_MARK))
+}
+
 /// Who an op says answered: the label of [`labelled_op`], else [`UNLABELLED`].
 pub fn answered_by(op: &OpId) -> &str {
     op.0.strip_prefix("by:")
@@ -781,6 +816,88 @@ mod tests {
         assert!(fenced(&dir2, &task2).is_err());
         assert_eq!(log_len(&dir2, &task2), before);
         let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn a_decision_id_rides_the_op_and_keeps_the_label() {
+        let op = decision_op("owner", "ab-12.3_x").unwrap();
+        assert_eq!(op.0, "by:owner/dec:ab-12.3_x");
+        assert_eq!(answered_by(&op), "owner");
+        assert_eq!(decision_of(&op), Some("ab-12.3_x"));
+        // Whoever answered, and never a fresh op.
+        assert_eq!(decision_of(&OpId("by:other/dec:ab".into())), Some("ab"));
+        assert_eq!(decision_of(&labelled_op("owner").unwrap()), None);
+        assert_eq!(decision_of(&fresh_op()), None);
+        assert_eq!(decision_of(&OpId("dec:ab".into())), None);
+    }
+
+    #[test]
+    fn a_decision_id_that_could_break_the_op_is_refused() {
+        for bad in ["", "a/b", "a b", "a,b", &"x".repeat(65)] {
+            assert!(decision_op("owner", bad).is_err(), "{bad:?}");
+        }
+        assert!(decision_op("a/b", "ok").is_err());
+        assert!(decision_op("owner", &"x".repeat(64)).is_ok());
+    }
+
+    fn decision_log(dir: &Path, task: &TaskId, id: &str) -> crate::decision::Decision {
+        let events = open_driver(dir, task)
+            .unwrap()
+            .store
+            .events(task, 0)
+            .unwrap();
+        crate::decision::lookup(&events, &[id.to_owned()]).remove(0)
+    }
+
+    /// A send whose answer was lost is sent again with the same id and fence:
+    /// it replays and logs nothing. A send the log moved past is refused, and
+    /// the same id then reads as not applied, whatever was fenced.
+    #[test]
+    fn a_decision_id_settles_a_lost_answer_and_a_losing_send() {
+        let (dir, task) = task("decision-id", false);
+        let send = |id: &str, fence: u64, limit: &str| {
+            let op = decision_op("owner", id).unwrap();
+            perform_fenced(
+                &dir,
+                &task,
+                "extend",
+                &["messages", limit],
+                None,
+                "owner",
+                Some(Rev(fence)),
+                Some(op),
+            )
+            .unwrap()
+        };
+        let rev = open_driver(&dir, &task).unwrap().state.rev.0;
+        assert!(!decision_log(&dir, &task, "d1").applied);
+
+        assert!(!matches!(send("d1", rev, "1000"), Response::Rejected(_)));
+        let applied = decision_log(&dir, &task, "d1");
+        assert!(applied.applied && applied.rev > Some(rev), "{applied:?}");
+        let len = log_len(&dir, &task);
+
+        // The retry after a lost answer: same id, same fence.
+        assert!(!matches!(send("d1", rev, "1000"), Response::Rejected(_)));
+        assert_eq!(log_len(&dir, &task), len, "a replay logs nothing");
+        assert_eq!(decision_log(&dir, &task, "d1"), applied);
+
+        // A losing concurrent send fenced on the old rev: refused, not applied.
+        let lost = send("d2", rev, "2000");
+        assert!(
+            matches!(&lost, Response::Rejected(r) if r.code == Code::StaleRev),
+            "{lost:?}"
+        );
+        assert!(!decision_log(&dir, &task, "d2").applied);
+
+        // The same id with another payload is a conflict, never a second apply.
+        let again = send("d1", rev, "3000");
+        assert!(
+            matches!(&again, Response::Rejected(r) if r.code == Code::OpConflict),
+            "{again:?}"
+        );
+        assert_eq!(decision_log(&dir, &task, "d1"), applied);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
