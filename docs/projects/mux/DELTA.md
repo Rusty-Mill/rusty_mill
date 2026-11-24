@@ -46,13 +46,24 @@ Not measured: the 10,000-row worst case with real (non-synthetic) colour and
 width variety, and an SSH or UDP link under real loss. Both would move the
 full-checkpoint numbers up, not down.
 
-**Recommendation: do not build.** The GUI already hides history behind Ready;
-the only gain is TUI reconnects on links under about 10 Mbit/s, which costs up to
-a second. Revisit if a user reports a slow TUI reattach, or if C13 predictive
-echo wants row-grain deltas. If Nano wants deltas anyway, the cheaper step is
-asking the TUI for `BACKGROUND_HISTORY`, which needs no new format.
+**Recommendation (not yet decided): do not build.**
 
-Nano's call: pending (not recorded yet).
+- *Time to a usable reconnect.* The GUI asks for background history, so Ready
+  follows the screen part. A delta saves almost no time to first paint there.
+  The TUI and ctl do not ask for it and wait for the whole checkpoint: about
+  1.6 s at 2 Mbit/s, about 320 ms at 10 Mbit/s, about 32 ms at 100 Mbit/s. A
+  delta would cut those to roughly 10-20 ms, 2-4 ms and under 1 ms.
+- *Bytes saved.* For the GUI the saving is background bytes only (about 400 KB
+  per reconnect), which costs bandwidth but not waiting.
+- *Cost of building.* A wire change, a token kept exact with every Output frame,
+  and a new decoder with hostile-input tests.
+
+Revisit if a user reports a slow TUI reattach on a slow link, or if C13
+predictive echo wants row-grain deltas. A cheaper step that needs no new format
+is asking the TUI for `BACKGROUND_HISTORY`, which would give it the GUI's
+time to a usable reconnect.
+
+The owner's call is still pending: nothing above decides it.
 
 ## Why it waits
 
