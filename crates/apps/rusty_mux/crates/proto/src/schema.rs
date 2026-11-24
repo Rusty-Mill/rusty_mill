@@ -1505,7 +1505,7 @@ pub static CATALOG: &[Method] = &[
     },
     Method {
         name: "terminal.upload",
-        doc: "Send a file to the server's host, a chunk at a time, into a folder kept for \
+        doc: "Refused on an agent's (jailed) block. Send a file to the server's host, a chunk at a time, into a folder kept for \
               the block under the server's state directory. Each call appends `data` to \
               the file `name` at `offset`, which must be the bytes received so far (0 \
               starts the file again); the reply is then the bytes received, as a number. \

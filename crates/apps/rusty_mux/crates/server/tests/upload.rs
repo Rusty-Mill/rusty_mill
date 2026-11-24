@@ -9,10 +9,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use common::{Client, block_for, shell, start_server_with};
-use rusty_mux_core::BlockId;
+use common::{Client, block_for, shell, start_server_with, window_for};
+use rusty_mux_core::{BlockId, Size};
 use rusty_mux_proto::schema::Value;
-use rusty_mux_proto::{Features, Message};
+use rusty_mux_proto::{Features, Launch, Message};
 use rusty_mux_server::Config;
 
 const UPLOAD: Features = Features::CHECKPOINT_V6
@@ -95,6 +95,37 @@ fn chunks_arrive_as_one_file_and_the_reply_is_its_path() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert!(!folder.exists(), "{folder:?} outlived its block");
+    let _ = fs::remove_dir_all(state);
+}
+
+#[test]
+fn an_agents_block_refuses_an_upload() {
+    let state = state_dir();
+    let path = serve(Some(state.clone()));
+    let mut client = Client::connect_with(
+        &path,
+        UPLOAD.union(Features::LAUNCH).union(Features::AGENT_LAUNCH),
+        None,
+    );
+    let window = window_for(&mut client);
+    // Launched as an agent's block is: with an exact environment, and
+    // without saying it is one.
+    let launch = Launch {
+        env: Some(vec![("PATH".into(), "/usr/bin:/bin".into())]),
+        ..Launch::default()
+    };
+    let size = Size::new(80, 24).expect("size");
+    let id = client.request(|req| Message::CreateBlock {
+        req,
+        window,
+        size,
+        launch,
+    });
+    let block = BlockId::from_uuid(id.expect("a block id"));
+    client.request(|req| Message::Attach { req, block });
+    client.request(|req| Message::AcquireLease { req, block });
+    let err = chunk(&mut client, block, "f", 0, b"x", true).unwrap_err();
+    assert!(err.contains("agent"), "{err}");
     let _ = fs::remove_dir_all(state);
 }
 

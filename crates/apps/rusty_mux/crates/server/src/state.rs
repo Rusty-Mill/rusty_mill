@@ -266,6 +266,9 @@ struct BlockRt {
     /// Launched with `hold` (C78): the block stays, read-only, once its
     /// program exits.
     hold: bool,
+    /// Its launch passed an environment, descriptors or ownership (C75, C46),
+    /// as an agent's jailed block is launched. Not known for a restored block.
+    custom: bool,
     /// Who works it, as its launcher named them (D336). Stored and echoed,
     /// never acted on; not kept across a restart.
     agent: Option<AgentMeta>,
@@ -363,6 +366,7 @@ impl BlockRt {
             spool: None,
             input_seq: 0,
             hold: false,
+            custom: false,
             agent: None,
             released: false,
             exit: None,
@@ -375,6 +379,21 @@ impl BlockRt {
             live: Some(live),
             ..self
         }
+    }
+
+    /// Refuses `method` on an agent's block, until there is a jail-aware
+    /// design (Nano, 2026-11-24, "Refuse on agent blocks"). It judges by the
+    /// launch facts, not by the optional `AGENT_META`: a launch with an
+    /// environment, descriptors or ownership, or the `lel-jail` program,
+    /// which is all a restored block still shows.
+    fn refuse_agent(&self, method: &str) -> Result<(), Refusal> {
+        let jail = std::path::Path::new(&self.started.program)
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("lel-jail"));
+        if self.custom || self.agent.is_some() || jail {
+            return Err(format!("{method}: refused on an agent's block").into());
+        }
+        Ok(())
     }
 
     /// The program, or a refusal saying the block is read-only.
@@ -2204,6 +2223,7 @@ impl State {
                 });
             }
             "terminal.upload" => {
+                rt.refuse_agent("terminal.upload")?;
                 // It writes to the server's disk, so it takes the lease.
                 self.mux
                     .authorize_input(client, block)
@@ -2551,6 +2571,7 @@ impl State {
         );
         let mut rt = rt.screened(shared, grid, parser);
         rt.hold = launch.hold;
+        rt.custom = launch.env.is_some() || launch.fds > 0 || launch.own;
         rt.agent = launch.agent.clone();
         self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
