@@ -283,6 +283,85 @@ where
     Ok(ended.unwrap_or(Ended::Stopped))
 }
 
+/// A wish for a port to listen on, made to [`run_fed`] while it runs.
+pub struct Want {
+    pub spec: Spec,
+    /// Told the port listened on, or why it could not be.
+    pub answer: Sender<io::Result<Bound>>,
+}
+
+/// As [`run`], for a connection another reader owns (the GUI's pane): that
+/// reader passes the block's [`Message`]s that concern forwards (data,
+/// acknowledgments, closes, answers numbered from `first_req` on, and
+/// `BlockClosed`) as `frames`, `wr` writes to the same connection, and
+/// ports to listen on arrive as `wants` while it runs. `first_req` keeps
+/// this run's request numbers apart from the owner's. Ends when `stopped`
+/// says so, the block closes or `frames` ends.
+pub fn run_fed<W>(
+    block: BlockId,
+    first_req: u64,
+    frames: Receiver<Message>,
+    wants: &Receiver<Want>,
+    wr: W,
+    stopped: &(dyn Fn() -> bool + Sync),
+) -> Ended
+where
+    W: Write + Send,
+{
+    let shared = Shared {
+        block,
+        wr: Mutex::new(wr),
+        forwards: Mutex::new(HashMap::new()),
+        asked: Mutex::new(HashMap::new()),
+        next: AtomicU64::new(first_req),
+        live: AtomicUsize::new(0),
+        ended: Mutex::new(None),
+    };
+    let fed = &shared;
+    thread::scope(|scope| {
+        scope.spawn(move || {
+            while !fed.over() {
+                match frames.recv_timeout(SLICE) {
+                    Ok(message) => dispatch(fed, message),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
+                        fed.end(Ended::Lost(io::ErrorKind::UnexpectedEof.into()));
+                    }
+                }
+            }
+        });
+        while !shared.over() {
+            if stopped() {
+                shared.end(Ended::Stopped);
+                break;
+            }
+            let Ok(want) = wants.recv_timeout(SLICE) else {
+                continue;
+            };
+            let bound = listen(want.spec.local, want.spec.remote).and_then(|listener| {
+                listener.set_nonblocking(true)?;
+                let local = listener.local_addr()?.port();
+                Ok((listener, local))
+            });
+            match bound {
+                Ok((listener, local)) => {
+                    let remote = want.spec.remote;
+                    // Told before it serves: a wish nobody waits for any
+                    // more (it timed out) leaves no listener behind.
+                    if want.answer.send(Ok(Bound { local, remote })).is_ok() {
+                        scope.spawn(move || accept(scope, fed, &listener, remote));
+                    }
+                }
+                Err(e) => {
+                    let _ = want.answer.send(Err(e));
+                }
+            }
+        }
+    });
+    let ended = lock(&shared.ended).take();
+    ended.unwrap_or(Ended::Stopped)
+}
+
 /// Binds `local`, or the remote port's number if free, else any port.
 fn listen(local: Option<u16>, remote: u16) -> io::Result<TcpListener> {
     let on = |port| TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
@@ -357,7 +436,7 @@ fn dispatch<W: Write>(shared: &Shared<W>, message: Message) {
 fn accept<'scope, 'env, W: Write + Send>(
     scope: &'scope Scope<'scope, 'env>,
     shared: &'env Shared<W>,
-    listener: &'env TcpListener,
+    listener: &TcpListener,
     remote: u16,
 ) {
     while !shared.over() {
@@ -621,6 +700,75 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    /// A fed run: the server's frames reach it through a channel, as from
+    /// a pane's reader, and a port asked for while it runs is tunnelled.
+    #[test]
+    fn a_fed_run_listens_where_asked_and_tunnels() {
+        let (near, far) = UnixStream::pair().expect("pair");
+        far.set_read_timeout(Some(TICK)).expect("timeout");
+        let (frames_tx, frames) = channel();
+        let (wants_tx, wants) = channel();
+        let stop = AtomicBool::new(false);
+        // The server stays until the run has ended.
+        let over = AtomicBool::new(false);
+        let first = 1 << 40;
+        let ended = thread::scope(|scope| {
+            // The server: echoes through the frame channel.
+            scope.spawn(|| {
+                let mut fake = Fake {
+                    stream: far,
+                    buf: Vec::new(),
+                };
+                while !over.load(Ordering::SeqCst) {
+                    let Some(message) = fake.next() else { continue };
+                    match message {
+                        Message::OpenForward { req, .. } => {
+                            assert!(req >= first, "{req}");
+                            let _ = frames_tx.send(Message::Done { req, created: None });
+                        }
+                        Message::ForwardData { id, data } => {
+                            let n = data.len() as u32;
+                            let _ = frames_tx.send(Message::ForwardAck { id, n });
+                            let _ = frames_tx.send(Message::ForwardData { id, data });
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            scope.spawn(|| {
+                let (answer, answered) = channel();
+                wants_tx
+                    .send(Want {
+                        spec: Spec {
+                            local: Some(0),
+                            remote: 9,
+                        },
+                        answer,
+                    })
+                    .expect("run is waiting");
+                let bound = answered.recv().expect("answer").expect("bound");
+                assert_eq!(bound.remote, 9);
+                let mut local = connect(bound.local);
+                local.write_all(b"fed").expect("write");
+                let mut back = [0u8; 3];
+                local.read_exact(&mut back).expect("read");
+                assert_eq!(&back, b"fed");
+                stop.store(true, Ordering::SeqCst);
+            });
+            let ended = run_fed(
+                BlockId::from_uuid(Uuid::nil()),
+                first,
+                frames,
+                &wants,
+                near,
+                &|| stop.load(Ordering::SeqCst),
+            );
+            over.store(true, Ordering::SeqCst);
+            ended
+        });
+        assert!(matches!(ended, Ended::Stopped), "{ended:?}");
     }
 
     #[test]
