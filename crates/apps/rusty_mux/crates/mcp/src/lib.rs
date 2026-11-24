@@ -46,8 +46,13 @@ enum Shape {
 fn shape(method: &Method) -> Shape {
     match method.name {
         "attach" | "detach" | "acquire-lease" | "release-lease" | "sync" => Shape::Connection,
-        "input" | "resize" | "terminal.send-keys" | "terminal.reset" | "terminal.set-theme"
-        | "terminal.clear" => Shape::Leased,
+        "input"
+        | "resize"
+        | "terminal.send-keys"
+        | "terminal.reset"
+        | "terminal.set-theme"
+        | "terminal.clear"
+        | "terminal.workspace-list" => Shape::Leased,
         _ => Shape::Plain,
     }
 }
