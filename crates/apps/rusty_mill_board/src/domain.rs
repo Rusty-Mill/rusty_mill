@@ -378,13 +378,12 @@ pub fn reserved_tag(tag: &str) -> bool {
         || tag.starts_with("archived:")
         || tag.starts_with("restored:")
         || tag.starts_with("closed:")
-        || tag.starts_with("merged:")
 }
 
 fn check_tags(tags: &[String]) -> Result<(), BoardError> {
     if tags.iter().any(|t| reserved_tag(t)) {
         return Err(BoardError::Invalid(
-            "tags `agent`, `board:…`, `claim:…`, `number:…`, `archived:…`, `restored:…`, `closed:…` and `merged:…` are the board's own",
+            "tags `agent`, `board:…`, `claim:…`, `number:…`, `archived:…`, `restored:…` and `closed:…` are the board's own",
         ));
     }
     Ok(())
@@ -686,7 +685,7 @@ pub struct Card {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed: Option<Closure>,
     /// Set when the merge watch closed the card ([`Card::closed_by_merge`]): which column it was
-    /// in. Reserved to the board (a `merged:` tag in rusty_tick); `card_unclose` needs it.
+    /// in. Set only by the board; `card_unclose` needs it. Kept by the SQLite store (the card's JSON); rusty_tick keeps none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<MergeClose>,
     /// Links showing the work shipped: a merged PR, or any page that shows it ([`Card::add_evidence`]).
@@ -1332,7 +1331,7 @@ impl Card {
     /// Undo the merge watch's close: back to the column it was in, ship time cleared, evidence
     /// and comments kept, and a comment saying who undid it. Only for a Done card carrying the
     /// typed [`MergeClose`] that [`Card::closed_by_merge`] wrote (nothing else sets it, and
-    /// callers cannot send its `merged:` tag). Needs `Triage`.
+    /// callers cannot send the record). Needs `Triage`.
     ///
     /// # Errors
     /// [`BoardError::Forbidden`] without `Triage`, and [`BoardError::Refused`] for a card that

@@ -40,7 +40,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     BoardError, Card, CloseReason, Closure, Column, Comment, DEFAULT_PROJECT, Event, EventKind,
-    ExecutionLink, MergeClose, Span, next_event_id, reserved_tag,
+    ExecutionLink, Span, next_event_id, reserved_tag,
 };
 use crate::external::{ExternalRef, Provider, RefState};
 use crate::http::Http;
@@ -458,28 +458,8 @@ fn task_tags(card: &Card) -> Vec<String> {
             .iter()
             .map(|c| format!("closed:{}:{}", c.reason.as_str(), c.at_ms)),
     );
-    tags.extend(
-        card.merged
-            .iter()
-            .map(|m| format!("merged:{}:{}", m.at_ms, m.was)),
-    );
     tags.extend(card.tags.iter().cloned());
     tags
-}
-
-/// The merge watch's close, from its `merged:<ms>:<column>` tag. Only a Done card has one; a
-/// tag on an open task, or an unreadable one, means nothing (the card then cannot be unclosed).
-fn merge_close_of(task: &Task, column: &Column) -> Option<MergeClose> {
-    if *column != Column::DONE {
-        return None;
-    }
-    task.tags.iter().find_map(|t| {
-        let (ms, was) = t.strip_prefix("merged:")?.split_once(':')?;
-        Some(MergeClose {
-            was: Column::new(was).ok()?,
-            at_ms: ms.parse().ok()?,
-        })
-    })
 }
 
 /// rusty_tick's status for a Done card: `wontdo` when it closed without shipping.
@@ -570,7 +550,6 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         .collect();
     let doc = doc.unwrap_or_default();
     let closed = closure_of(&task);
-    let merged = merge_close_of(&task, &column);
     Ok(Card {
         id: task.id,
         number,
@@ -608,7 +587,9 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         // Only shipped work has a ship date; won't-do is closed but never shipped.
         done_ms: task.completed_ms.filter(|_| task.status == "done"),
         closed,
-        merged,
+        // rusty_tick is retired (ADR-0007): its tasks carry no merge record, so a card read
+        // from it cannot be unclosed.
+        merged: None,
         evidence: doc.evidence,
         archived_ms,
         restored_ms,
@@ -962,12 +943,9 @@ impl<T: TickApi> TickStore<T> {
         if task_tags(next) != task_tags(current) {
             patch.insert("tags".into(), json!(task_tags(next)));
         }
-        // Done is terminal on the board, except for `card_unclose`, which reopens the task
-        // (rusty_tick clears its completion time, and `column_of` then reads the `board:` tag).
+        // Done is terminal on the board, so a card only ever closes its task.
         if next.column == Column::DONE && current.column != Column::DONE {
             patch.insert("status".into(), json!(closed_status(next)));
-        } else if next.column != Column::DONE && current.column == Column::DONE {
-            patch.insert("status".into(), json!("open"));
         }
         if next.project != current.project {
             patch.insert("listId".into(), json!(self.list_for(&next.project)?));
@@ -1320,23 +1298,6 @@ impl<T: TickApi> Store for TickStore<T> {
                             },
                             false => e,
                         })?;
-                }
-                // Comments the change appended (the merge watch's close, an unclose): each is
-                // its own fenced request, after the state it explains, so a failure leaves the
-                // card changed without its note and says so (`PartlySaved`, with the revision
-                // reached; the change itself is saved and a person can add the note).
-                let fresh = card
-                    .comments
-                    .get(current.comments.len()..)
-                    .unwrap_or_default();
-                for comment in fresh {
-                    let before = version;
-                    version = self.put_comment(card, comment, before).map_err(|e| {
-                        BoardError::PartlySaved {
-                            rev: before - 1,
-                            why: e.to_string(),
-                        }
-                    })?;
                 }
                 Ok(version)
             }
