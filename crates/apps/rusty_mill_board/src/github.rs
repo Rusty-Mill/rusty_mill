@@ -145,6 +145,7 @@ struct RawClosed {
     html_url: String,
     body: Option<String>,
     merged_at: Option<String>,
+    updated_at: Option<String>,
     author_association: Option<String>,
     base: Option<RawBase>,
 }
@@ -161,25 +162,59 @@ struct RawBaseRepo {
     default_branch: String,
 }
 
-impl RawClosed {
-    /// Merged into the repository's default branch: a merge into a feature branch has not shipped.
-    fn shipped(&self) -> bool {
-        self.merged_at.is_some()
-            && self.base.as_ref().is_some_and(|b| {
-                b.repo
-                    .as_ref()
-                    .is_some_and(|r| r.default_branch == b.branch)
-            })
-    }
+/// Seconds a pull request may change after its merge and still count as unedited: the merge
+/// itself touches it.
+const MERGE_SLACK_SECS: i64 = 60;
 
-    /// Written by someone who may merge here. The body is read as it is now, so an edit after
-    /// the merge counts: only a trusted author's text may close a card.
-    fn trusted(&self) -> bool {
-        matches!(
+impl RawClosed {
+    /// May a `Closes card #N` in this body close a card? Only if it merged into the repository's
+    /// default branch (a merge into a feature branch has not shipped), its author may merge here
+    /// (owner, member or collaborator), and nothing touched it after the merge. The body is read
+    /// as it is now and the API gives no edit history, so a later change of any kind (an edit,
+    /// but also a comment or label) withholds the right to close: the card stays listed for a
+    /// person. This is evidence, not authentication: it cannot tell who wrote the text.
+    fn may_close(&self) -> bool {
+        let on_default = self.base.as_ref().is_some_and(|b| {
+            b.repo
+                .as_ref()
+                .is_some_and(|r| r.default_branch == b.branch)
+        });
+        let trusted = matches!(
             self.author_association.as_deref(),
             Some("OWNER" | "MEMBER" | "COLLABORATOR")
-        )
+        );
+        let untouched = match (
+            self.merged_at.as_deref().and_then(epoch_secs),
+            self.updated_at.as_deref().and_then(epoch_secs),
+        ) {
+            (Some(merged), Some(updated)) => updated <= merged + MERGE_SLACK_SECS,
+            _ => false,
+        };
+        on_default && trusted && untouched
     }
+}
+
+/// Unix seconds of a GitHub timestamp, `YYYY-MM-DDTHH:MM:SSZ`.
+fn epoch_secs(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    let num = |from: usize, len: usize| -> Option<i64> {
+        s.get(from..from + len)?.parse::<u32>().ok().map(i64::from)
+    };
+    if b.len() != 20 || b[4] != b'-' || b[10] != b'T' || b[19] != b'Z' {
+        return None;
+    }
+    let (y, m, d) = (num(0, 4)?, num(5, 2)?, num(8, 2)?);
+    let (hh, mm, ss) = (num(11, 2)?, num(14, 2)?, num(17, 2)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Days from civil (Hinnant): the proleptic Gregorian calendar.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) * 86_400 + hh * 3600 + mm * 60 + ss)
 }
 
 impl MergedPulls for GithubMerged {
@@ -202,10 +237,10 @@ impl MergedPulls for GithubMerged {
             let n = raw.len();
             out.prs.extend(
                 raw.into_iter()
-                    .filter(RawClosed::shipped)
+                    .filter(|p| p.merged_at.is_some())
                     .map(|p| MergedPr {
                         repo: slug.to_owned(),
-                        trusted: p.trusted(),
+                        may_close: p.may_close(),
                         url: p.html_url,
                         body: p.body.unwrap_or_default(),
                     }),
@@ -466,11 +501,9 @@ mod tests {
     fn recent_merged_keeps_merged_pulls_only() {
         let (base, server) = serve(&[(
             200,
-            r#"[{"html_url":"https://github.com/o/r/pull/1","body":"Closes card #5","merged_at":"2026-11-20T00:00:00Z","base":{"ref":"main","repo":{"default_branch":"main"}},"author_association":"MEMBER"},
+            r#"[{"html_url":"https://github.com/o/r/pull/1","body":"Closes card #5","merged_at":"2026-11-20T00:00:00Z","updated_at":"2026-11-20T00:00:05Z","base":{"ref":"main","repo":{"default_branch":"main"}},"author_association":"MEMBER"},
                 {"html_url":"https://github.com/o/r/pull/2","body":null,"merged_at":null},
-                {"html_url":"https://github.com/o/r/pull/3","body":null,"merged_at":"2026-11-21T00:00:00Z","base":{"ref":"main","repo":{"default_branch":"main"}},"author_association":"NONE"},
-                {"html_url":"https://github.com/o/r/pull/4","body":"b","merged_at":"2026-11-22T00:00:00Z","base":{"ref":"feature","repo":{"default_branch":"main"}},"author_association":"OWNER"},
-                {"html_url":"https://github.com/o/r/pull/5","body":"b","merged_at":"2026-11-22T00:00:00Z","author_association":"OWNER"}]"#,
+                {"html_url":"https://github.com/o/r/pull/3","body":null,"merged_at":"2026-11-21T00:00:00Z"}]"#,
         )]);
         let forge = GithubMerged::new(&base, "hunter2").expect("client");
         let recent = forge.recent_merged("o/r").expect("merged");
@@ -487,11 +520,53 @@ mod tests {
         assert_eq!(got[0].body, "Closes card #5");
         assert_eq!(got[0].repo, "o/r");
         assert!(got[1].body.is_empty());
-        // Pull 4 merged into a feature branch and pull 5 has no base: neither shipped. Only
-        // a member, owner or collaborator is trusted; the author of pull 3 is not.
-        assert_eq!((got[0].trusted, got[1].trusted), (true, false));
+        // Pull 3 lacks what the right to close needs, but stays listed.
+        assert_eq!((got[0].may_close, got[1].may_close), (true, false));
         assert!(forge.recent_merged("not a slug").is_err());
         assert!(server.join().expect("server")[0].starts_with("GET /repos/o/r/pulls?state=closed"));
+    }
+
+    /// One closed pull request, merged at 2026-11-20T00:00:00Z.
+    fn closed(branch: &str, assoc: &str, updated: &str) -> RawClosed {
+        serde_json::from_str(&format!(
+            r#"{{"html_url":"https://github.com/o/r/pull/1","body":"b","merged_at":"2026-11-20T00:00:00Z","updated_at":"{updated}","base":{{"ref":"{branch}","repo":{{"default_branch":"main"}}}},"author_association":"{assoc}"}}"#
+        ))
+        .expect("pull request")
+    }
+
+    #[test]
+    fn only_untouched_default_branch_work_by_someone_who_may_merge_can_close() {
+        assert!(closed("main", "MEMBER", "2026-11-20T00:00:30Z").may_close());
+        assert!(closed("main", "OWNER", "2026-11-20T00:01:00Z").may_close());
+        assert!(closed("main", "COLLABORATOR", "2026-11-19T23:59:00Z").may_close());
+        // Each condition alone withholds it: a feature branch, an outsider, a later touch.
+        assert!(!closed("feature", "MEMBER", "2026-11-20T00:00:00Z").may_close());
+        for assoc in ["CONTRIBUTOR", "NONE", "FIRST_TIME_CONTRIBUTOR"] {
+            assert!(!closed("main", assoc, "2026-11-20T00:00:00Z").may_close());
+        }
+        assert!(!closed("main", "OWNER", "2026-11-27T00:00:00Z").may_close());
+        // Unreadable or missing times, or no base, never allow it.
+        assert!(!closed("main", "OWNER", "yesterday").may_close());
+        let bare: RawClosed = serde_json::from_str(
+            r#"{"html_url":"u","merged_at":"2026-11-20T00:00:00Z","author_association":"OWNER"}"#,
+        )
+        .expect("pull request");
+        assert!(!bare.may_close());
+    }
+
+    #[test]
+    fn timestamps_become_unix_seconds() {
+        assert_eq!(epoch_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(epoch_secs("2000-03-01T00:00:00Z"), Some(951_868_800));
+        assert_eq!(epoch_secs("2026-11-20T01:02:03Z"), Some(1_795_136_523));
+        for bad in [
+            "",
+            "2026-11-20",
+            "2026-13-20T00:00:00Z",
+            "2026-11-20T00:00:00+01:00",
+        ] {
+            assert_eq!(epoch_secs(bad), None, "{bad}");
+        }
     }
 
     const BASE: &str =

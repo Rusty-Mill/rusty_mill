@@ -25,9 +25,10 @@ pub struct MergedPr {
     pub url: String,
     /// Its body (empty when none).
     pub body: String,
-    /// Its author may merge in this repository (owner, member or collaborator). The body is
-    /// read as it is now, so only a trusted author's `Closes card #N` may close a card.
-    pub trusted: bool,
+    /// Whether its `Closes card #N` may close a card: merged into the default branch, by an
+    /// author who may merge here, and untouched since the merge (the adapter decides, see
+    /// `GithubMerged`). Any PR is still listed and its mentions shown.
+    pub may_close: bool,
 }
 
 /// What one repository read returned.
@@ -324,7 +325,7 @@ pub fn scan(
             if let Some(card) = by_number.get(&n).filter(|c| ours(c)) {
                 note(
                     card,
-                    if closes && pr.trusted {
+                    if closes && pr.may_close {
                         Why::Marker
                     } else {
                         Why::Mention
@@ -459,7 +460,7 @@ mod tests {
 
     fn pr(n: u64, body: &str) -> MergedPr {
         MergedPr {
-            trusted: true,
+            may_close: true,
             repo: "o/r".to_owned(),
             url: format!("https://github.com/o/r/pull/{n}"),
             body: body.to_owned(),
@@ -781,10 +782,10 @@ mod tests {
     }
 
     #[test]
-    fn a_marker_from_an_untrusted_author_is_only_a_mention() {
+    fn a_marker_that_may_not_close_is_only_a_mention() {
         let (b, _, card, n) = one_card();
         let outsider = MergedPr {
-            trusted: false,
+            may_close: false,
             ..pr(7, &format!("Closes card #{n}"))
         };
         assert_eq!(watch(&b, &recent(vec![outsider], false), true), Ok(1));
