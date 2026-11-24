@@ -284,6 +284,11 @@ impl Features {
     /// server stores and echoes the three texts and never acts on them.
     pub const AGENT_META: Self = Self(1 << 52);
 
+    /// `terminal.workspace-list` (card #1573, D337): one directory under the
+    /// block's launch directory, for the workspace explorer. A block call, so
+    /// the bit only says the server knows the method.
+    pub const WORKSPACE: Self = Self(1 << 53);
+
     /// The block method `terminal.upload` (C82): a file sent in chunks to a
     /// folder of the server's state directory, answered with its absolute
     /// path. It travels as [`Message::BlockCall`], so the bit only says the
@@ -401,6 +406,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::PORTS, "listening ports of a block"),
     (Features::PORT_FORWARD, "port forwards"),
     (Features::AGENT_META, "agent, role and card on blocks"),
+    (Features::WORKSPACE, "workspace explorer"),
     (Features::UPLOAD, "file upload to a block"),
     (Features::DOWNLOAD, "file download from a server"),
 ];
