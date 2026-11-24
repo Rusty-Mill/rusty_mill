@@ -32,6 +32,7 @@ Tiers:
 | skill_pack | Low | none | project-priorities |
 | expert_agents | Low | none | project-priorities |
 | tokio_migration | Low | none | project-priorities |
+| rusty_fuse | Low | none (Phase 0 spikes #1613 to #1615 are rusty_fuse's own, not a Millwright milestone; Phase 1 blocked on its Q1) | rusty-fuse-priority |
 | agent_cloud | Low | none | project-priorities |
 | rusty_tick | Low | archive after B3 | project-priorities, board-store |
 | rocket_league | Paused | B0 (paused status) | project-priorities, paused-project-status |

@@ -661,6 +661,18 @@ const fn theme(name: &'static str, ty: Ty, doc: &'static str) -> Param {
     }
 }
 
+/// An optional text parameter of the archive methods.
+const fn archive_part(name: &'static str, doc: &'static str) -> Param {
+    Param {
+        name,
+        ty: Ty::Text,
+        doc,
+        presence: Presence::Optional {
+            needs: Features::ARCHIVE,
+        },
+    }
+}
+
 const BLOCK: Param = required("block", Ty::Id(Entity::Block), "The block to act on.");
 const NEW_NAME: Param = required(
     "name",
@@ -1283,6 +1295,71 @@ pub static CATALOG: &[Method] = &[
         },
     },
     Method {
+        name: "archive-block",
+        doc: "Archive a held block, then close it (C84): its screen, history, exit status, \
+              who and why are saved under the server's state directory, and any secret-like \
+              text in it marks the record sensitive. Refused while the program runs. \
+              `card`, `label` (say `good` or `bad`) and `why` are kept with it, at most 256 \
+              bytes each.",
+        params: &[
+            BLOCK,
+            archive_part("card", "The card the run was for."),
+            archive_part("label", "How the run went, such as `good` or `bad`."),
+            archive_part("why", "Why it was dismissed."),
+        ],
+        needs: Features::ARCHIVE,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::ArchiveBlock {
+                req,
+                block: BlockId::from_uuid(a.uuid("block", Entity::Block)?),
+                card: a.opt_text("card")?,
+                label: a.opt_text("label")?,
+                why: a.opt_text("why")?,
+            })
+        },
+    },
+    Method {
+        name: "archive-list",
+        doc: "List archived blocks, newest first, one per line as \
+              `ID<TAB>WHEN<TAB>EXIT<TAB>SENSITIVE<TAB>CARD<TAB>LABEL` (`WHEN` in unix seconds, `EXIT` as `code:N`, `signal:N` or `unknown`, `SENSITIVE` as `yes` or `no`). At most 1000 rows; \
+              more remaining are counted in a last line `+<TAB>N<TAB>ID`.",
+        params: &[
+            archive_part("card", "Only the runs for this card."),
+            archive_part(
+                "before",
+                "Only records older than this id: the next page, when a last line \
+                 `+<TAB>N<TAB>ID` says N more remain.",
+            ),
+        ],
+        needs: Features::ARCHIVE,
+        returns: Returns::Text,
+        build: |req, a| {
+            Ok(Message::ArchiveList {
+                req,
+                card: a.opt_text("card")?,
+                before: a.opt_text("before")?,
+            })
+        },
+    },
+    Method {
+        name: "archive-show",
+        doc: "Read one archived block: its header lines, a blank line, then its transcript.",
+        params: &[required(
+            "id",
+            Ty::Text,
+            "The record's id, from `archive-list`.",
+        )],
+        needs: Features::ARCHIVE,
+        returns: Returns::Text,
+        build: |req, a| {
+            Ok(Message::ArchiveShow {
+                req,
+                id: a.text("id")?,
+            })
+        },
+    },
+    Method {
         name: "reload-config",
         doc: "Have the server read its config file again: the `server` section's \
               defaults for new blocks. A file with problems is refused, naming each, and \
@@ -1428,6 +1505,32 @@ pub static CATALOG: &[Method] = &[
         needs: Features::BLOCK_CALL.union(Features::DIR_LISTING),
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.list-dir"),
+    },
+    Method {
+        name: "terminal.workspace-list",
+        doc: "List a directory under the block's workspace (the directory its program \
+              was launched in) for the workspace explorer, in the same text form as \
+              `terminal.list-dir`. The path is relative to the workspace and the result \
+              never leaves it: `..`, an absolute path or a link in the path is refused, and a \
+              link in the listing is `l` and never followed. The first line is the path \
+              under the workspace (`.` for itself), and a refusal names nothing outside \
+              it. Refused to a watch-only client, and on a platform that cannot confine it (only \
+              Linux can today).",
+        params: &[
+            BLOCK,
+            Param {
+                name: "path",
+                ty: Ty::Text,
+                doc: "The directory, relative to the workspace; by default the workspace \
+                      itself.",
+                presence: Presence::Optional {
+                    needs: Features::WORKSPACE,
+                },
+            },
+        ],
+        needs: Features::BLOCK_CALL.union(Features::WORKSPACE),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.workspace-list"),
     },
     Method {
         name: "terminal.reset",

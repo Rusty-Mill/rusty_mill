@@ -980,6 +980,42 @@ fn the_github_sync_is_configured_without_ever_showing_its_token() {
 }
 
 #[test]
+fn auto_close_is_off_unless_set_and_survives_a_save_that_omits_it() {
+    let f = start("autoclose");
+    let set = |extra: Value| {
+        let mut body = json!({"repo": "owner/name", "token": "tok", "api": "http://127.0.0.1:9"});
+        body.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        f.admin("settings_github_set", &body)
+    };
+    let stored = || {
+        load_github(&f.file("github.json"))
+            .expect("file")
+            .expect("some")
+            .auto_close
+    };
+    // Missing means off.
+    assert_eq!(set(json!({})).0, 200);
+    assert!(!stored());
+    // A wrong type is refused and changes nothing.
+    assert_eq!(set(json!({"auto_close": "yes"})).0, 422);
+    assert!(!stored());
+    // On, and kept by a later save that says nothing about it.
+    let (status, out, text) = set(json!({"auto_close": true}));
+    assert_eq!(
+        (status, out["auto_close"].as_bool()),
+        (200, Some(true)),
+        "{text}"
+    );
+    assert!(stored());
+    assert_eq!(set(json!({"interval_secs": 60})).0, 200);
+    assert!(stored());
+    assert_eq!(set(json!({"auto_close": false})).0, 200);
+    assert!(!stored());
+}
+
+#[test]
 fn without_files_settings_can_be_read_but_not_changed() {
     let board: Arc<Shared> = Arc::new(Board::new(Box::new(MemStore::default()), Roles::default()));
     let settings = Settings::read_only(board);
