@@ -46,7 +46,7 @@ Not measured: the 10,000-row worst case with real (non-synthetic) colour and
 width variety, and an SSH or UDP link under real loss. Both would move the
 full-checkpoint numbers up, not down.
 
-**Recommendation (not yet decided): do not build.**
+**Decided (Nano, 2026-11-24): do not build.**
 
 - *Time to a usable reconnect.* The GUI asks for background history, so Ready
   follows the screen part. A delta saves almost no time to first paint there.
@@ -63,7 +63,7 @@ predictive echo wants row-grain deltas. A cheaper step that needs no new format
 is asking the TUI for `BACKGROUND_HISTORY`, which would give it the GUI's
 time to a usable reconnect.
 
-The owner's call is still pending: nothing above decides it.
+Nano's call (2026-11-24, PR #1840): skip attach deltas. Revisit on the triggers above.
 
 ## Why it waits
 
