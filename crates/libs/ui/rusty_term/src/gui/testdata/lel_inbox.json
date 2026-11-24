@@ -37,8 +37,8 @@
     "reversible": true,
     "evidence": [],
     "candidates": [
-      { "id": 21, "text": "Two columns", "status": "Open", "score": 2, "confidence": 55, "epoch": 1, "spent": 10, "budget": 50 },
-      { "id": 22, "text": "One column", "status": "Open", "score": 2, "confidence": 45, "epoch": 1, "spent": 12, "budget": 50 }
+      { "id": 21, "text": "Two columns", "status": "Open", "score": 2, "confidence": 55, "epoch": 1, "spent": 10, "budget": 50, "evidence": [], "candidates": [] },
+      { "id": 22, "text": "One column", "status": "Open", "score": 2, "confidence": 45, "epoch": 1, "spent": 12, "budget": 50, "evidence": [], "candidates": [] }
     ],
     "label": "Taste call or deadlock",
     "card": null
