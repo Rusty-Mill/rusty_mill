@@ -363,7 +363,8 @@ impl Tree {
         // Keep the cut summary right under the cursor in view, so a long
         // listing never looks complete.
         let end = here + 1 + rows[here + 1..].iter().take_while(|r| r.summary).count();
-        let top = end.saturating_sub(height.max(1));
+        // The selected row first, then as many summaries as fit.
+        let top = end.saturating_sub(height.max(1)).min(here);
         rows.iter()
             .zip(marked)
             .skip(top)
@@ -700,5 +701,25 @@ mod tests {
         let rows = t.render(40, 3);
         assert_eq!(rows.len(), 3);
         assert!(rows[1].starts_with('>') && rows[2].contains("2 not shown"));
+    }
+
+    #[test]
+    fn the_selection_stays_in_view_before_summaries() {
+        let mut t = tree(&parse(".\nf\ta\nf\tb\n+\t2").unwrap());
+        t.step(10);
+        assert_eq!(t.render(40, 1), [">    b"]);
+        // Adjacent summaries of nested cut listings: two of them under `x`.
+        let mut t = tree(&parse(".\nd\ta\n+\t1").unwrap());
+        t.step(1);
+        t.enter();
+        t.load(&parse("a\nf\tx\n+\t3").unwrap());
+        t.step(1);
+        assert_eq!(t.selected_path(), "a/x");
+        let two = t.render(40, 2);
+        assert!(two[0].starts_with('>') && two[1].contains("3 not shown"));
+        let three = t.render(40, 3);
+        assert!(three[0].starts_with('>') && three[2].contains("1 not shown"));
+        assert_eq!(t.render(40, 1).len(), 1);
+        assert!(t.render(40, 1)[0].starts_with('>'));
     }
 }
