@@ -95,3 +95,7 @@ Source: D268; D269; D45; mux `UDP-ACCOUNTS.md`, `SHARED-MODE.md`; `crates/apps/r
 ## How should hub failover (H8) promote and advertise standbys?
 Asked 2026-11-16. Manual promotion by restarting the standby with `--promote`, refused while the active still answers unless `--force`; an extra MapResponse field lists standby URLs, set by `--advertise-standby`; the test kills the active mid-transfer and checks existing pair, new join and a still-revoked machine. The replication channel is a shared secret over `/replicate` with the Noise key in the snapshot (Q67, D275).
 Source: D274; D275; MESH.md stage 4; hub-build-plan.md H8.
+
+## Where does the TUI workspace tree live and what does the first go cover?
+Asked 2026-11-24 (card #1573, order item 2). The go ("Go, go") covers the TUI tree over `terminal.workspace-list` only; stat, touched-by and new wire need their own go. The tree is a read-only modal overlay opened by prefix `e`, built from a pure model first (PR #1853); copy path, cd in a block and open in an editor are later questions.
+Source: D349; D337; D340; D343; D348; `tui/src/keys.rs`; `tui/src/find.rs`.

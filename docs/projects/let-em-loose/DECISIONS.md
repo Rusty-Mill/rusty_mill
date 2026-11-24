@@ -175,6 +175,11 @@ Precise contracts used by this guide:
 | D165 | #600 builders: the Claude CLI in the v0 jail uses Nano's subscription (Q15) | [stated] 2026-11-19 (1318) |
 | D166 | #600 v0: the Claude CLI reads Nano's `~/.claude` login through a read-only jail root (written exception to D101, `same_user` v0, expires with the gateway #726) | [stated] 2026-11-19 (1318, 600) |
 | D167 | One paid run approved: the #1318 toy-claim acceptance run (2 builders, 45 min, one claim) after the Claude `no_overage` assertion is added; #1320 not approved | [stated] 2026-11-19 (1318) |
+| D168 | #703: new bbp CLI surface `bbp human --decision ID` and `bbp decision` approved | [stated] 2026-11-24 (703) |
+| D169 | #703: board-side API changes in PR #1844 (Escalations::act decision id, Escalations::applied, inbox_act `settled`) approved as built | [stated] 2026-11-24 (703) |
+| D170 | #703: an uncertain inbox send is written ahead as a pending mark on the Remediate card; closed as not applied only on proof (SUPERSEDED by D171) | [stated] 2026-11-24 (703) |
+| D171 | #703: Mill Board never closes a Remediate card from BBP's log; it only notes once the decision id shows applied (with rev); supersedes D170 | [stated] 2026-11-24 (703) |
+| D172 | #703: PR #1844 surface approved as built, including required `--fence` on `bbp human --decision` (closes Q63) | [stated] 2026-11-24 (703) |
 
 ## D1. Lenses, not stages
 
@@ -1673,3 +1678,50 @@ The first three were approved first. The last three were added to Q35 after that
 **Source.** Nano, thread message `cmsg_01632CBKCXsWe6RyFWvE9dovNuNMU7fiwfx8bvmVJhWei4`, 2026-11-19T18:22:12Z: "concur", to `cmsg_01632CBKCXsWe6RyFWvE9dov4g3WihbLKaDjCJDV35SQxg`. Relates to D134, D140, D141, D165, `600-build-plan.md` section 4 defaults.
 **Confirmed.** Confirmed by name 2026-11-19 by Nano ("confirm D165, D166, D167"), thread message `cmsg_01632CBKCXsWe6RyFWvE9dovXnfgsvDuk5meRkwzs4GR7M`, 2026-11-19T18:57:26Z, answering the PR #1824 review.
 
+
+## D168. #703: the `bbp human --decision ID` and `bbp decision` CLI surface is approved
+
+**Decision.** Nano approves the new bbp CLI surface in PR #1844 (card #703). `bbp human --decision ID` writes the human op with `by:<as>/dec:ID`; it rides the existing `op_accepted`, so there is no log or schema change. `bbp decision --task T --decision ID[,..]` is read-only and prints `[{decision,applied,rev}]`, where `rev` is the task revision just after the `op_accepted` that carries the id. Nano: "I approve". This settles the ask-first public-API gate (a new CLI surface) for this surface only. CI, review by `dottiusmaximus` and the merge rules still apply.
+**Why.** Card #703 (decision ids for settling an uncertain send; QA.md, card #595 2026-11-03: backlog, not blocking v0) needs the board to learn whether a decision was applied, and a new CLI surface is a public API change.
+**Rejected.** None offered.
+**Tag.** [stated] · remind-me: mem_494a46793ab94f7aa5ea8eb891d99af4
+**Key.** lel:703:bbp-human-decision-id-cli-surface
+**Source.** Nano, Mill Board project thread, message `cmsg_017MoLbtrGAAcyE1PVPZXuN63jqD6m4iZ3CnxC8vRdurRk`, 2026-11-24T08:11:19Z: "I approve", replying to the caller's request to approve that CLI surface (relayed by the caller; the request message itself was not read). Applies D119's host-CLI trust model (`bbp human`); fulfils the QA.md § card #595 deferral of decision ids to #703.
+
+## D169. #703: the board-side API changes in PR #1844 are approved as built
+
+**Decision.** Nano approves, as built, the board-side API changes in PR #1844 beyond the CLI surface of D168: `Escalations::act` takes an optional decision id, `Escalations::applied` is added, and the `inbox_act` answer carries `settled`. This settles the ask-first public-API gate for these changes only. CI, review by `dottiusmaximus` and the merge rules still apply.
+**Why.** Card #703 needs the board to learn whether a decision was applied; these are the board calls that carry it, and a public API change is ask-first.
+**Rejected.** None recorded (the card's other options were not relayed).
+**Tag.** [stated] · remind-me: mem_bcf96446f7ab4d679867c861a8cc8dca
+**Key.** lel:703:board-api-changes-as-built
+**Source.** Nano tapped "Approve as built" on a Hearth decision card, 2026-11-24 (card `cmsg_017MoLbtrGAAcyE1PVPZXuN6XmhpUb1QuGg8qTvDpSxKzt` or `cmsg_017MoLbtrGAAcyE1PVPZXuN6DEW14f4wpgLziio54sPHnY`; taps arrived as messages at 14:37:23Z and 14:37:08Z; the caller did not say which card carried which tap). Relayed by the caller; the cards were not read. Extends D168.
+
+## D170. #703: an uncertain inbox send is written ahead as a pending mark; closed as not applied only on proof
+
+**SUPERSEDED by D171** (2026-11-24): the write-ahead pending marks were removed from PR #1844.
+
+**Decision.** For an inbox send the board cannot prove was tracked, the board persists a pending mark on the Remediate card before calling BBP. It clears the mark only on proof: the decision id appears in the log, or BBP refused before writing. It never closes the card as not applied while a mark is open. Implemented in commit `ede5d038b` on branch `claude/project-thread-9w7nhi` (PR #1844).
+**Why.** Closing as not applied on an unproven send could hide a decision that was in fact applied; the write-ahead mark keeps closes rare and safe.
+**Rejected.** The other options on the card were not relayed; Nano chose "Write-ahead pending, rare closes".
+**Tag.** [stated] · remind-me: mem_924abcd166b64ab8a1639b59530abe4a
+**Key.** lel:703:uncertain-send-write-ahead-pending
+**Source.** Nano tapped "Write-ahead pending, rare closes" on a Hearth decision card, 2026-11-24 (cards `cmsg_017MoLbtrGAAcyE1PVPZXuN6XmhpUb1QuGg8qTvDpSxKzt` and `cmsg_017MoLbtrGAAcyE1PVPZXuN6DEW14f4wpgLziio54sPHnY`; taps at 14:37:23Z and 14:37:08Z). Relayed by the caller; the cards were not read. Builds on D168.
+
+## D171. #703: Mill Board never closes a Remediate card from BBP's log; it only notes an applied decision
+
+**Decision.** For PR #1844 (card #703) Nano chose "Drop auto-close, keep applied note". Mill Board never closes a Remediate card from BBP's log. When the log shows the decision id applied it adds one note on the card with the rev; otherwise it leaves the card for a person. The write-ahead pending marks of D170 are removed from the PR. The CLI (`bbp human --decision ID` with `--fence`, `bbp decision`) and the `Escalations::act` / `Escalations::applied` API stay as approved in D168 and D169. Supersedes D170.
+**Why.** The reviewer found a race in each close path, and the typed-state alternative was a card schema change (ask-first). Never closing from the log is the simplest safe behaviour.
+**Rejected.** Write-ahead pending marks with proof-only closes (D170); a typed card state (card schema change). The remaining card options were not relayed.
+**Tag.** [stated] · remind-me: mem_844eeb2e2a6343eeb09f431eea1099dc
+**Key.** lel:703:drop-auto-close-keep-applied-note
+**Source.** Nano tapped "Drop auto-close, keep applied note" on Hearth decision card `cmsg_017MoLbtrGAAcyE1PVPZXuN6Y4PcGdaZac4qsyWyRT4Jo5`, 2026-11-24T16:03:01Z. Relayed by the caller; the card was not read. Supersedes D170; leaves D168 and D169 as approved. Q63 (is required `--fence` acceptable) stays open.
+
+## D172. #703: the PR #1844 surface is approved as built, including the required `--fence`
+
+**Decision.** Nano approves the surface listed in the PR #1844 review (6043258136), in particular the required `--fence` (Q63, answer a): `bbp human --decision ID` now requires `--fence`; `bbp decision` counts only the human principal; `Escalations::act(decision)` and the new required trait method `Escalations::applied`; `inbox_act`'s `recorded.settled` (`applied {rev}` or `unknown`); a stale-rev retry that finds a card returns `recorded`; the second card id scheme `tracked_id`; `decision::lookup(human)` and `human::op_for`. Nano did not say anything about dropping the second id scheme, so it stays as built. This settles the ask-first public-API gate for this surface only. CI, review by `dottiusmaximus` and the merge rules still apply. Extends D168 and D169 (the required `--fence` is stricter than D168's shape); consistent with D171 (no auto-close).
+**Why.** A decision id without a fence could skip the revision fence, so the stricter shape is the safe one; the other items are public API of the board and BBP, which is ask-first.
+**Rejected.** Making `--fence` optional to match D168's shape (Q63 option b).
+**Tag.** [stated] · remind-me: mem_f6abd383d5b9495c9e796c271eb42140
+**Key.** lel:703:approve-pr1844-surface-required-fence
+**Source.** Nano, GitHub comment by `baileyrd` on Rusty-Mill/rusty_mill#1844, comment id 7137833262, 2026-11-24T16:32:51Z: "I approve the surface it lists, in particular the required --fence (Q63)." Replying to review 6043258136. Relayed by the caller; the comment was not read.

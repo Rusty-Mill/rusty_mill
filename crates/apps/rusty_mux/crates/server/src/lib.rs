@@ -20,6 +20,8 @@
 
 pub use rusty_mux_proto::checkpoint;
 #[cfg(any(target_os = "linux", windows))]
+mod archive;
+#[cfg(any(target_os = "linux", windows))]
 mod conn;
 #[cfg(any(target_os = "linux", windows))]
 mod datagram;

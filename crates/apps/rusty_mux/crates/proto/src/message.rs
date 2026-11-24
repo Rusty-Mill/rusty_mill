@@ -289,6 +289,13 @@ impl Features {
     /// the bit only says the server knows the method.
     pub const WORKSPACE: Self = Self(1 << 53);
 
+    /// Archiving a block (C84, card #1570): [`Message::ArchiveBlock`] saves
+    /// a held block's transcript and outcome under the server's state
+    /// directory and closes the block; [`Message::ArchiveList`] and
+    /// [`Message::ArchiveShow`] read the records back. Bit 53 is another
+    /// capability's.
+    pub const ARCHIVE: Self = Self(1 << 54);
+
     /// The block method `terminal.upload` (C82): a file sent in chunks to a
     /// folder of the server's state directory, answered with its absolute
     /// path. It travels as [`Message::BlockCall`], so the bit only says the
@@ -402,6 +409,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::PORT_FORWARD, "port forwards"),
     (Features::AGENT_META, "agent, role and card on blocks"),
     (Features::WORKSPACE, "workspace explorer"),
+    (Features::ARCHIVE, "archive of dismissed blocks"),
     (Features::UPLOAD, "file upload to a block"),
 ];
 
@@ -1033,6 +1041,37 @@ pub enum Message {
         id: u64,
         reason: Option<String>,
     },
+    /// Archives a held block, then closes it (C84): its screen, history and
+    /// exit status are saved with who and why. Refused while the program
+    /// runs. `card`, `label` (such as `good` or `bad`) and `why` are texts
+    /// the sender chose, each at most 256 bytes. Done carries nothing; the
+    /// record's id is in [`Message::ArchiveList`]. Needs the block's owner,
+    /// or the input lease on an open block. Negotiated with
+    /// [`Features::ARCHIVE`].
+    ArchiveBlock {
+        req: u64,
+        block: BlockId,
+        card: Option<String>,
+        label: Option<String>,
+        why: Option<String>,
+    },
+    /// Lists the archived blocks, newest first, one per line as
+    /// `ID<TAB>WHEN<TAB>EXIT<TAB>SENSITIVE<TAB>CARD<TAB>LABEL` (`WHEN` in unix seconds, `EXIT` as `code:N`, `signal:N` or `unknown`, `SENSITIVE` as `yes` or `no`), as
+    /// [`Message::Text`]; only those of `card` when it names one. At most
+    /// 1000 rows are given; when more remain, a last line `+<TAB>N<TAB>ID`
+    /// says how many (`N`) and which row was the last listed (`ID`), to
+    /// pass as `before` for the next page: only records older than it.
+    ArchiveList {
+        req: u64,
+        card: Option<String>,
+        before: Option<String>,
+    },
+    /// One archived block as [`Message::Text`]: its record's header lines,
+    /// a blank line, then its transcript. `id` is as `ArchiveList` shows.
+    ArchiveShow {
+        req: u64,
+        id: String,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -1287,12 +1326,14 @@ const CARD: u32 = 74;
 const FORWARD: u32 = 75;
 /// Bytes of credit a [`Message::ForwardAck`] gives back.
 const CREDIT: u32 = 76;
+/// An archive record's id (C84).
+const ARCHIVE: u32 = 77;
 /// Floating blocks (C42) in the text form of [`rusty_mux_core::floats_text`].
 const FLOATS: u32 = 67;
 /// A [`Message::StackFloat`]'s end: 1 top, 0 bottom.
 const TOP: u32 = 68;
-// IDs 1..=CREDIT are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = CREDIT as usize;
+// IDs 1..=ARCHIVE are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = ARCHIVE as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -1341,6 +1382,9 @@ mod ty {
     pub const RELEASE_BLOCK: u8 = 0x29;
     pub const CLIPBOARD_REPLY: u8 = 0x2a;
     pub const SHOW_SESSION: u8 = 0x30;
+    pub const ARCHIVE_BLOCK: u8 = 0x31;
+    pub const ARCHIVE_LIST: u8 = 0x32;
+    pub const ARCHIVE_SHOW: u8 = 0x33;
     pub const PLACE_FLOAT: u8 = 0x2e;
     pub const STACK_FLOAT: u8 = 0x2f;
     pub const WELCOME: u8 = 0x81;
@@ -1522,6 +1566,35 @@ impl Message {
                     out.bytes(REASON, reason.as_bytes());
                 }
                 ty::CLOSE_FORWARD
+            }
+            M::ArchiveBlock {
+                req,
+                block,
+                card,
+                label,
+                why,
+            } => {
+                out.varint(REQ, *req).uuid(BLOCK, block.uuid());
+                for (id, text) in [(CARD, card), (NAME, label), (REASON, why)] {
+                    if let Some(text) = text {
+                        out.bytes(id, text.as_bytes());
+                    }
+                }
+                ty::ARCHIVE_BLOCK
+            }
+            M::ArchiveList { req, card, before } => {
+                out.varint(REQ, *req);
+                if let Some(card) = card {
+                    out.bytes(CARD, card.as_bytes());
+                }
+                if let Some(before) = before {
+                    out.bytes(ARCHIVE, before.as_bytes());
+                }
+                ty::ARCHIVE_LIST
+            }
+            M::ArchiveShow { req, id } => {
+                out.varint(REQ, *req).bytes(ARCHIVE, id.as_bytes());
+                ty::ARCHIVE_SHOW
             }
             M::ShowSession { req, session, to } => {
                 out.varint(REQ, *req).uuid(SESSION, session.uuid());
@@ -1922,6 +1995,22 @@ impl Message {
             ty::CLOSE_FORWARD => M::CloseForward {
                 id: f.varint(FORWARD)?,
                 reason: f.opt(REASON, |f, id| f.string(id))?,
+            },
+            ty::ARCHIVE_BLOCK => M::ArchiveBlock {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                card: f.opt(CARD, In::string)?,
+                label: f.opt(NAME, In::string)?,
+                why: f.opt(REASON, In::string)?,
+            },
+            ty::ARCHIVE_LIST => M::ArchiveList {
+                req: f.varint(REQ)?,
+                card: f.opt(CARD, In::string)?,
+                before: f.opt(ARCHIVE, In::string)?,
+            },
+            ty::ARCHIVE_SHOW => M::ArchiveShow {
+                req: f.varint(REQ)?,
+                id: f.string(ARCHIVE)?,
             },
             ty::SHOW_SESSION => M::ShowSession {
                 req: f.varint(REQ)?,

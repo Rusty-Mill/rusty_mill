@@ -120,6 +120,10 @@ pub struct GithubFile {
     pub interval_secs: u64,
     /// The access token.
     pub token: String,
+    /// Close cards a merged pull request names with `Closes card #N` (the merge watch, #1620).
+    /// Off by default: the watch then only lists them in `board_metrics`.
+    #[serde(default)]
+    pub auto_close: bool,
 }
 
 fn default_api() -> String {
@@ -434,6 +438,8 @@ struct GithubSet {
     repo: String,
     api: Option<String>,
     interval_secs: Option<u64>,
+    /// Absent: keep the stored choice (off at first).
+    auto_close: Option<bool>,
     /// Absent or blank: keep the stored token.
     token: Option<String>,
 }
@@ -1006,7 +1012,7 @@ impl Settings {
                 .collect()
         });
         let github = self.github.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|g| {
-            json!({ "repo": g.repo, "api": g.api, "interval_secs": g.interval_secs, "has_token": !g.token.is_empty(),
+            json!({ "repo": g.repo, "api": g.api, "interval_secs": g.interval_secs, "auto_close": g.auto_close, "has_token": !g.token.is_empty(),
                     "running": self.syncer.repo().is_some() })
         });
         Ok(json!({
@@ -1493,13 +1499,22 @@ impl Settings {
                 .or_else(|| current.as_ref().map(|c| c.interval_secs))
                 .unwrap_or(DEFAULT_SECS),
             token,
+            auto_close: a
+                .auto_close
+                .or_else(|| current.as_ref().map(|c| c.auto_close))
+                .unwrap_or(false),
         };
         let config = file.config().map_err(refused)?;
         let json = serde_json::to_string_pretty(&file).map_err(|e| refused(e.to_string()))?;
         rusty_atomic_file::write_private(&path, json.as_bytes())
             .map_err(|e| refused(format!("{}: {e}", path.display())))?;
         self.syncer
-            .start(config, &file.repo, Duration::from_secs(file.interval_secs))
+            .start(
+                config,
+                &file.repo,
+                Duration::from_secs(file.interval_secs),
+                file.auto_close,
+            )
             .map_err(|e| refused(format!("saved, but the sync did not start: {e}")))?;
         *self.github.lock().unwrap_or_else(PoisonError::into_inner) = Some(file);
         self.get().map(|v| v["github"].clone())
