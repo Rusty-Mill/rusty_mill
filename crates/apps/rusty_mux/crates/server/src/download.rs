@@ -253,10 +253,12 @@ fn read_linux(
     read_linux_with(base, path, offset, private, keep, || {})
 }
 
-/// The policy is linearized at the reply: bytes are returned only while the
-/// generation they were judged under is still the one in force, checked
-/// before the file is read and again once its chunk is in memory. A reload
-/// in between drops the chunk. `after_read` runs between the read and that
+/// The policy is linearized at the worker's last check: bytes are returned
+/// only while the generation they were judged under is still the one in
+/// force, checked before the file is read and again once its chunk is in
+/// memory. A reload in between drops the chunk. That check is the cutoff, not
+/// the server loop's enqueue of the reply: a reply already returned is not
+/// recalled by a reload that lands after it. `after_read` runs between the read and that
 /// last check, for tests.
 #[cfg(target_os = "linux")]
 fn read_linux_with(
