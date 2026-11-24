@@ -50,8 +50,13 @@ fn shape(method: &Method) -> Shape {
         "attach" | "detach" | "acquire-lease" | "release-lease" | "sync" | "terminal.upload" => {
             Shape::Connection
         }
-        "input" | "resize" | "terminal.send-keys" | "terminal.reset" | "terminal.set-theme"
-        | "terminal.clear" => Shape::Leased,
+        "input"
+        | "resize"
+        | "terminal.send-keys"
+        | "terminal.reset"
+        | "terminal.set-theme"
+        | "terminal.clear"
+        | "terminal.workspace-list" => Shape::Leased,
         _ => Shape::Plain,
     }
 }
