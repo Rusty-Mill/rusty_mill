@@ -41,8 +41,11 @@ pub fn server_with(
          Working loop: card_take (your next card, claimed for you; null means nothing is \
          waiting), do the work, card_comment what you did and anything the next person needs, then \
          card_move it to the next column (leaving a work column needs your claim). board_columns lists \
-         the columns, their kinds and the moves between them with the capability each needs; a move \
-         marked `gate` is a human approval. A card whose PR already merged on the forge may be moved \
+         the columns, their kinds and the moves between them with the capability each needs, and says \
+         whether movement rules are on or off (off: any move but out of Done and through a gate is \
+         allowed, whatever the list shows); a move marked `gate` is a human approval. Never say a \
+         move is not possible without trying it: call card_move and report the refusal reason \
+         verbatim. A rule you were told in writing is a rule, not a board limit: say so. A card whose PR already merged on the forge may be moved \
          straight to done by a role holding `close`, where the workflow allows it: record the merged \
          PR with card_evidence first (a Done card counts as shipped only with evidence). \
          Merged work with no card: card_add with done: true and evidence: [the PR link]. A missing project: project_add. If a move is refused, the reason says which capability is \

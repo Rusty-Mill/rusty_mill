@@ -85,7 +85,12 @@ impl BoardApi for HttpBoard {
     }
 
     fn workflow(&self) -> Result<Workflow, ApiError> {
-        let out = self.call("board_columns", json!({}))?;
+        let mut out = self.call("board_columns", json!({}))?;
+        // The reply also states the movement rules in force; a `Workflow` is only the table.
+        if let Some(o) = out.as_object_mut() {
+            o.remove("movement");
+            o.remove("note");
+        }
         serde_json::from_value(out).map_err(transport)
     }
 

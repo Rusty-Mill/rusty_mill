@@ -777,6 +777,19 @@ fn paged<T: serde::Serialize>(
     }))
 }
 
+/// What the movement rules in force mean for a caller, in words: the transition table alone
+/// reads as a restriction, so `board_columns` and `board_whoami` state the mode plainly.
+fn movement_note(rules: crate::domain::MoveRules) -> &'static str {
+    match rules {
+        crate::domain::MoveRules::Enforced => {
+            "movement rules are on: a move needs a listed transition and its capability, and leaving a work column needs your claim; a role holding record may also move a claimed work card with a merged PR as evidence to done"
+        }
+        crate::domain::MoveRules::Open => {
+            "movement rules are off: any move except out of Done and through a gate is allowed, whatever the transition list shows; only a refusal from card_move means no"
+        }
+    }
+}
+
 fn to_json(v: impl serde::Serialize) -> Result<Value, BoardError> {
     serde_json::to_value(v).map_err(|e| BoardError::Storage(e.to_string()))
 }
@@ -961,8 +974,13 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_columns",
-            "The board's columns in display order ({id, label, kind}: kind backlog, queue (waits to be taken), work (claimed; leaving needs the claim), done or blocked) and the moves between them ({from, to, cap, gate}: the capability a move needs; a gate also needs admin). Any open card may move to blocked.",
-            |b, _, _: Nothing| to_json(json!(b.workflow())),
+            "The board's columns in display order ({id, label, kind}: kind backlog, queue (waits to be taken), work (claimed; leaving needs the claim), done or blocked) and the moves between them ({from, to, cap, gate}: the capability a move needs; a gate also needs admin). Any open card may move to blocked. `movement` says whether the moves are enforced or open (an admin's switch: any move but out of Done and through a gate is allowed, whatever the list says), and `note` says so in words; a missing move in the list is not a refusal: try card_move and read the reason.",
+            |b, _, _: Nothing| {
+                let mut out = json!(b.workflow());
+                out["movement"] = json!(b.move_rules());
+                out["note"] = json!(movement_note(b.move_rules()));
+                to_json(out)
+            },
         ),
         op(
             "board_events",
@@ -993,6 +1011,8 @@ pub fn ops() -> Vec<Op> {
                     return to_json(json!({
                         "authenticated": false,
                         "note": "no per-model credential: pass actor and role on each call",
+                        "movement": b.move_rules(),
+                        "movement_note": movement_note(b.move_rules()),
                         "nicknames": b.agent_nicknames()
                     }));
                 };
@@ -1002,6 +1022,8 @@ pub fn ops() -> Vec<Op> {
                     "actor": who.name,
                     "role": i.role,
                     "capabilities": who.caps,
+                    "movement": b.move_rules(),
+                    "movement_note": movement_note(b.move_rules()),
                     "nicknames": b.agent_nicknames()
                 }))
             },
@@ -2320,6 +2342,42 @@ mod tests {
         assert_eq!(me.expect("whoami")["nicknames"][id], "QA bot");
         let anon = call_as(&board, None, "board_whoami", json!({})).expect("anon");
         assert_eq!(anon["nicknames"][id], "QA bot");
+    }
+
+    #[test]
+    fn columns_and_whoami_state_the_movement_rules_in_force() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let id = ident("claude", "builder");
+        for (rules, word, note) in [
+            (crate::domain::MoveRules::Enforced, "enforced", "rules are on"),
+            (crate::domain::MoveRules::Open, "open", "rules are off"),
+        ] {
+            board.set_move_rules(rules);
+            let cols = call_as(&board, Some(&id), "board_columns", json!({})).expect("columns");
+            assert_eq!(cols["movement"], word);
+            assert!(cols["note"].as_str().expect("note").contains(note));
+            assert!(cols["columns"].is_array(), "the table is still listed");
+            let me = call_as(&board, Some(&id), "board_whoami", json!({})).expect("whoami");
+            assert_eq!(me["movement"], word);
+            assert!(me["movement_note"].as_str().expect("note").contains(note));
+            let anon = call_as(&board, None, "board_whoami", json!({})).expect("anon");
+            assert_eq!(anon["movement"], word);
+        }
+    }
+
+    #[test]
+    fn open_rules_allow_the_moves_the_table_does_not_list() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let id = ident("claude", "builder");
+        board.set_move_rules(crate::domain::MoveRules::Open);
+        let card = call_as(&board, Some(&id), "card_add", json!({"title": "t"})).expect("add");
+        let moved = call_as(
+            &board,
+            Some(&id),
+            "card_move",
+            json!({"id": card["card"]["id"], "to": "ready"}),
+        );
+        assert_eq!(moved.expect("backlog to ready")["card"]["column"], "ready");
     }
 
     #[test]
