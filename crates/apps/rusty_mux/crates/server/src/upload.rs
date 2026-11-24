@@ -7,7 +7,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
 /// The most bytes one chunk carries.
 pub(crate) const CHUNK_MAX: usize = 1 << 20;
@@ -140,6 +142,61 @@ fn receive_within(
     std::path::absolute(&target).map(Received::Done).map_err(io)
 }
 
+/// One block's upload authority: its transfers run one at a time, so the
+/// offsets, the byte budget and the final names are decided by one party,
+/// and once the block closes none runs again. A job that holds the slot as
+/// the block closes finishes, then clears the folder itself.
+#[derive(Default)]
+pub(crate) struct Slot {
+    closing: AtomicBool,
+    busy: Mutex<()>,
+}
+
+impl Slot {
+    /// Runs `work` alone, unless the block closed or `deadline` passed
+    /// while this job waited for its turn.
+    pub(crate) fn run<T>(
+        &self,
+        dir: &Path,
+        deadline: Instant,
+        work: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let turn = self.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        let out = if self.closing.load(Ordering::SeqCst) {
+            Err("the block was closed".to_owned())
+        } else if Instant::now() >= deadline {
+            Err("timed out waiting for the block's earlier transfers".to_owned())
+        } else {
+            work()
+        };
+        drop(turn);
+        // The block may have closed while `work` ran.
+        if self.closing.load(Ordering::SeqCst) {
+            self.clear(dir);
+        }
+        out
+    }
+
+    /// The block closed: no job runs after this. Its folder goes now, or
+    /// when the job in flight ends.
+    pub(crate) fn close(&self, dir: &Path) {
+        self.closing.store(true, Ordering::SeqCst);
+        if self.busy.try_lock().is_ok() {
+            self.clear(dir);
+        }
+    }
+
+    fn clear(&self, dir: &Path) {
+        let _turn = self.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        match fs::remove_dir_all(dir) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                eprintln!("rusty-mux-server: removing {}: {e}", dir.display());
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Whether `offset` is where `part` left off; 0 always is.
 fn check_offset(part: &Path, offset: u64) -> Result<(), String> {
     let have = fs::metadata(part).map_or(0, |m| m.len());
@@ -229,7 +286,8 @@ fn make_room(dir: &Path, keep: &Path, keep_len: u64, max: u64) -> io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
+    use std::sync::{Arc, mpsc};
 
     fn scratch() -> PathBuf {
         static N: AtomicU32 = AtomicU32::new(0);
@@ -371,6 +429,86 @@ mod tests {
         fs::write(dir.join("new"), b"1234").unwrap();
         make_room(&dir, &dir.join("keep"), 0, BLOCK_MAX).unwrap();
         assert!(dir.join("new").exists(), "room enough: nothing removed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(30)
+    }
+
+    #[test]
+    fn a_blocks_transfers_take_turns() {
+        let dir = scratch();
+        let slot = Arc::new(Slot::default());
+        let inside = Arc::new(AtomicU32::new(0));
+        let most = Arc::new(AtomicU32::new(0));
+        let jobs: Vec<_> = (0..8)
+            .map(|_| {
+                let (slot, inside, most, dir) =
+                    (slot.clone(), inside.clone(), most.clone(), dir.clone());
+                std::thread::spawn(move || {
+                    slot.run(&dir, soon(), || {
+                        let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                        most.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(5));
+                        inside.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                })
+            })
+            .collect();
+        for j in jobs {
+            j.join().unwrap().unwrap();
+        }
+        assert_eq!(most.load(Ordering::SeqCst), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn closing_while_a_transfer_runs_clears_the_folder_after_it() {
+        let dir = scratch();
+        let slot = Arc::new(Slot::default());
+        let (started_tx, started) = mpsc::channel();
+        let (go, go_rx) = mpsc::channel::<()>();
+        let job = {
+            let (slot, dir) = (slot.clone(), dir.clone());
+            std::thread::spawn(move || {
+                slot.run(&dir, soon(), || {
+                    fs::write(dir.join("f"), b"x").unwrap();
+                    started_tx.send(()).unwrap();
+                    go_rx.recv().unwrap();
+                    fs::write(dir.join("g"), b"y").unwrap();
+                    Ok(())
+                })
+            })
+        };
+        started.recv().unwrap();
+        slot.close(&dir);
+        assert!(
+            dir.join("f").exists(),
+            "the transfer in flight is not cut off"
+        );
+        go.send(()).unwrap();
+        job.join().unwrap().unwrap();
+        assert!(!dir.exists(), "the folder goes once the transfer ends");
+        let mut ran = false;
+        let late = slot.run(&dir, soon(), || {
+            ran = true;
+            Ok(())
+        });
+        assert!(late.is_err() && !ran, "nothing runs after the close");
+    }
+
+    #[test]
+    fn a_transfer_whose_deadline_passed_while_it_waited_does_not_run() {
+        let dir = scratch();
+        let slot = Slot::default();
+        let mut ran = false;
+        let out = slot.run(&dir, Instant::now(), || {
+            ran = true;
+            Ok(())
+        });
+        assert!(out.is_err() && !ran);
         fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -92,6 +92,12 @@ pub(crate) fn read(
 ) -> Result<String, String> {
     let file = locate(base, path)?;
     let root = private_root(private)?;
+    // Where the opened object's own path cannot be read, a file inside the
+    // state directory could not be told from outside it: nothing is read.
+    #[cfg(not(target_os = "linux"))]
+    if root.is_some() {
+        return Err("this platform cannot check an opened file against the state directory".into());
+    }
     if root.as_ref().is_some_and(|root| file.starts_with(root)) {
         return Err("the server's own state directory is not read".into());
     }

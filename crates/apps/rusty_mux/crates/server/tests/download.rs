@@ -100,6 +100,28 @@ fn a_directory_and_the_state_directory_are_refused() {
 }
 
 #[test]
+fn the_state_directory_stays_out_of_reach_when_its_store_cannot_open() {
+    // The configured path is a file, so no store opens there; it is still
+    // the server's state directory, and its contents are still not read.
+    let (dir, tmp) = (scratch(), scratch());
+    fs::write(dir.join("f"), b"ok").unwrap();
+    let state = tmp.join("not-a-dir");
+    fs::write(&state, b"secret").unwrap();
+    let mut client = Client::connect_with(&serve(Some(state.clone())), DOWNLOAD, None);
+    let block = block_for(&mut client);
+    let err = read(&mut client, block, state.to_str().unwrap(), 0).unwrap_err();
+    assert!(err.contains("state directory"), "{err}");
+    // A path under a file cannot be resolved: nothing is read at all.
+    let under = tmp.join("not-a-dir").join("sub");
+    let mut client = Client::connect_with(&serve(Some(under)), DOWNLOAD, None);
+    let block = block_for(&mut client);
+    let err = read(&mut client, block, dir.join("f").to_str().unwrap(), 0).unwrap_err();
+    assert!(err.contains("cannot be resolved"), "{err}");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(tmp);
+}
+
+#[test]
 fn only_the_lease_holder_may_download() {
     let dir = scratch();
     fs::write(dir.join("f"), b"x").unwrap();
