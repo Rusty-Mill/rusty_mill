@@ -2165,7 +2165,10 @@ impl State {
                 self.mux
                     .authorize_input(client, block)
                     .map_err(Refusal::from)?;
-                self.upload(block, &named)?
+                return Ok(Outcome::Blocking {
+                    method: "terminal.upload",
+                    work: self.upload(block, &named)?,
+                });
             }
             "terminal.title" => rt.grid.title.clone(),
             "terminal.status" => rt.status.shown().bodies().join("\n"),
@@ -3140,15 +3143,15 @@ impl State {
     }
 
     /// `terminal.upload`: one chunk of a file into `block`'s upload folder.
-    fn upload(&self, block: BlockId, named: &[(&str, Value)]) -> Result<String, Refusal> {
+    fn upload(&self, block: BlockId, named: &[(&str, Value)]) -> Result<Blocking, Refusal> {
         let text = |param| {
             named.iter().find_map(|(n, v)| match v {
-                Value::Text(t) if *n == param => Some(t.as_str()),
+                Value::Text(t) if *n == param => Some(t.clone()),
                 _ => None,
             })
         };
         let data = named.iter().find_map(|(n, v)| match v {
-            Value::Bytes(b) if *n == "data" => Some(b.as_slice()),
+            Value::Bytes(b) if *n == "data" => Some(b.clone()),
             _ => None,
         });
         let done = named
@@ -3158,18 +3161,17 @@ impl State {
             return Err("terminal.upload: missing name or data".to_owned().into());
         };
         let offset = u64::from(lines(named, "offset"));
-        let store = self.store.as_ref().ok_or(
+        let store = self.store.clone().ok_or(
             "terminal.upload: the server keeps no state directory to put files in".to_owned(),
         )?;
-        let dir = store
-            .upload_dir(block)
-            .map_err(|e| format!("terminal.upload: {e}"))?;
-        let received = upload::receive(&dir, name, offset, data, done)
-            .map_err(|e| format!("terminal.upload: {e}"))?;
-        Ok(match received {
-            upload::Received::Partial(n) => n.to_string(),
-            upload::Received::Done(path) => path.display().to_string(),
-        })
+        // The disk work runs off the event loop, like a listing.
+        Ok(Box::new(move || {
+            let dir = store.upload_dir(block).map_err(|e| e.to_string())?;
+            Ok(match upload::receive(&dir, &name, offset, &data, done)? {
+                upload::Received::Partial(n) => n.to_string(),
+                upload::Received::Done(path) => path.display().to_string(),
+            })
+        }))
     }
 
     /// Deletes closed `block`'s spool by its path, whether or not a handle

@@ -23,6 +23,7 @@ pub fn fetch<S: Read + Write>(
     first_req: u64,
 ) -> io::Result<u64> {
     let (mut offset, mut req) = (0u64, first_req);
+    let mut first = None;
     loop {
         let at = u32::try_from(offset)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "a file is at most 2 GiB"))?;
@@ -36,6 +37,14 @@ pub fn fetch<S: Read + Write>(
             ],
         })?;
         let (size, data) = split(&reply(conn, req)?)?;
+        // The first size is the file's; a different one later means it
+        // changed under the read, and what is in `out` is not that file.
+        if *first.get_or_insert(size) != size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the file changed size while it was read",
+            ));
+        }
         out.write_all(&data)?;
         offset += data.len() as u64;
         if offset >= size {
@@ -129,6 +138,40 @@ mod tests {
     #[test]
     fn a_file_comes_in_pieces_and_is_put_together() {
         assert_eq!(fetch_from(b"0123456789"), b"0123456789");
+    }
+
+    #[test]
+    fn a_file_that_changes_size_mid_read_is_refused() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut sizes = [10usize, 6].into_iter();
+            loop {
+                let mut chunk = [0u8; 4096];
+                let n = theirs.read(&mut chunk).unwrap();
+                if n == 0 {
+                    return;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                while let Some((Message::BlockCall { req, .. }, used)) = decode(&buf).unwrap() {
+                    buf.drain(..used);
+                    let size = sizes.next().unwrap_or(6);
+                    let text = format!("{size}\n{}", rusty_base64::encode_standard(b"abcd"));
+                    theirs
+                        .write_all(&encode(&Message::Text { req, text }).unwrap())
+                        .unwrap();
+                }
+            }
+        });
+        let err = fetch(
+            &mut Conn::new(ours),
+            BlockId::from_uuid(rusty_uuid::Uuid::nil()),
+            "f",
+            &mut Vec::new(),
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
