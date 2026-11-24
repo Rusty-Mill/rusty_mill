@@ -24,14 +24,15 @@ pub enum Kind {
 pub struct Cut {
     /// Entries read and left out (`+`).
     pub left_out: usize,
-    /// Entries past what the server reads (`>`): at least this many.
-    pub unread: usize,
+    /// Entries left out because the directory is bigger than the server
+    /// reads (`>`): at least this many, counting ones it never read.
+    pub more: usize,
     /// Entries it could not read or whose names are not UTF-8 (`!`).
     pub unreadable: usize,
 }
 
 impl Cut {
-    fn is_none(self) -> bool {
+    fn is_empty(self) -> bool {
         self == Self::default()
     }
 }
@@ -55,17 +56,34 @@ impl std::fmt::Display for Malformed {
     }
 }
 
+impl std::error::Error for Malformed {}
+
+/// A name or path part the client will not draw or fetch: empty, `.`, `..`,
+/// with a `/`, or with any control character (the server escapes those, so a
+/// raw one means a server this client should not trust).
+fn bad_name(raw: &str) -> bool {
+    let name = unescape(raw);
+    matches!(name.as_str(), "" | "." | "..")
+        || name.contains('/')
+        || raw.chars().any(char::is_control)
+        || name.contains('\0')
+}
+
 /// Reads a `terminal.workspace-list` reply. Names stay as the server wrote
 /// them, escaped, so they are safe to draw; [`unescape`] gives the real one.
 ///
 /// # Errors
-/// [`Malformed`] on an empty reply, an unknown kind or a bad trailer count.
+/// [`Malformed`] on an empty reply, an unknown kind, a bad trailer count or
+/// a path or name that is unsafe to draw or fetch.
 pub fn parse(reply: &str) -> Result<Listing, Malformed> {
     let mut lines = reply.lines();
     let path = lines
         .next()
         .filter(|p| !p.is_empty())
         .ok_or_else(|| Malformed("no path line".into()))?;
+    if path != "." && path.split('/').any(bad_name) || path.chars().any(char::is_control) {
+        return Err(Malformed(format!("bad path `{}`", path.escape_debug())));
+    }
     let mut listing = Listing {
         path: path.to_owned(),
         entries: Vec::new(),
@@ -79,13 +97,16 @@ pub fn parse(reply: &str) -> Result<Listing, Malformed> {
             rest.parse::<usize>()
                 .map_err(|_| Malformed(format!("bad count `{rest}`")))
         };
+        if matches!(head, "d" | "f" | "l" | "o") && bad_name(rest) {
+            return Err(Malformed(format!("bad name `{}`", rest.escape_debug())));
+        }
         match head {
             "d" => listing.entries.push((Kind::Dir, rest.to_owned())),
             "f" => listing.entries.push((Kind::File, rest.to_owned())),
             "l" => listing.entries.push((Kind::Link, rest.to_owned())),
             "o" => listing.entries.push((Kind::Other, rest.to_owned())),
             "+" => listing.cut.left_out = count(rest)?,
-            ">" => listing.cut.unread = count(rest)?,
+            ">" => listing.cut.more = count(rest)?,
             "!" => listing.cut.unreadable = count(rest)?,
             other => return Err(Malformed(format!("unknown kind `{other}`"))),
         }
@@ -110,11 +131,19 @@ pub fn unescape(text: &str) -> String {
             Some('n') => out.push('\n'),
             Some('r') => out.push('\r'),
             Some('u') => {
-                let hex: String = chars.by_ref().skip(1).take_while(|c| *c != '}').collect();
-                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                let braced = chars
+                    .as_str()
+                    .strip_prefix('{')
+                    .and_then(|r| r.split_once('}'));
+                let Some((hex, rest)) = braced else {
+                    out.push_str("\\u");
+                    continue;
+                };
+                match u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
                     Some(c) => out.push(c),
                     None => out.push_str(&format!("\\u{{{hex}}}")),
                 }
+                chars = rest.chars();
             }
             Some(other) => {
                 out.push('\\');
@@ -179,8 +208,17 @@ struct Row {
 
 impl Tree {
     /// A tree holding the root listing a first reply gave.
-    #[must_use]
-    pub fn new(root: &Listing) -> Self {
+    ///
+    /// # Errors
+    /// [`Malformed`] when the listing is not the root (`.`): paths would
+    /// then be built from the wrong place.
+    pub fn new(root: &Listing) -> Result<Self, Malformed> {
+        if root.path != "." {
+            return Err(Malformed(format!(
+                "first listing is `{}`, not the root",
+                root.path
+            )));
+        }
         let mut node = Node {
             kind: Kind::Dir,
             name: root.path.clone(),
@@ -189,10 +227,10 @@ impl Tree {
             open: true,
         };
         fill(&mut node, root);
-        Self {
+        Ok(Self {
             root: node,
             cursor: 0,
-        }
+        })
     }
 
     /// Puts `listing` under the directory it names. A path that is no longer
@@ -220,7 +258,8 @@ impl Tree {
             };
             node = next;
         }
-        if node.kind != Kind::Dir {
+        // A repeat reply must not rebuild a subtree already read.
+        if node.kind != Kind::Dir || node.children.is_some() {
             return;
         }
         fill(node, listing);
@@ -382,12 +421,12 @@ fn fill(node: &mut Node, listing: &Listing) {
 }
 
 fn walk(node: &Node, depth: usize, at: &mut Vec<usize>, rows: &mut Vec<Row>) {
-    let sign = match (node.kind, node.open, node.children.is_some()) {
-        (Kind::Dir, true, _) => "v ",
-        (Kind::Dir, false, _) => "+ ",
-        (Kind::Link, ..) => "@ ",
-        (Kind::Other, ..) => "? ",
-        (Kind::File, ..) => "  ",
+    let sign = match (node.kind, node.open) {
+        (Kind::Dir, true) => "v ",
+        (Kind::Dir, false) => "+ ",
+        (Kind::Link, _) => "@ ",
+        (Kind::Other, _) => "? ",
+        (Kind::File, _) => "  ",
     };
     let slash = if node.kind == Kind::Dir { "/" } else { "" };
     rows.push(Row {
@@ -404,7 +443,7 @@ fn walk(node: &Node, depth: usize, at: &mut Vec<usize>, rows: &mut Vec<Row>) {
         walk(child, depth + 1, at, rows);
         at.pop();
     }
-    if !node.cut.is_none() {
+    if !node.cut.is_empty() {
         rows.push(Row {
             depth: depth + 1,
             at: at.clone(),
@@ -414,14 +453,14 @@ fn walk(node: &Node, depth: usize, at: &mut Vec<usize>, rows: &mut Vec<Row>) {
     }
 }
 
-/// "... 3 more, 2 unread, 1 unreadable" for a cut listing.
+/// "... 3 not shown, 1 unreadable" for a cut listing.
 fn cut_line(cut: Cut) -> String {
     let mut parts = Vec::new();
     if cut.left_out > 0 {
         parts.push(format!("{} not shown", cut.left_out));
     }
-    if cut.unread > 0 {
-        parts.push(format!("{}+ not read", cut.unread));
+    if cut.more > 0 {
+        parts.push(format!("{}+ not shown", cut.more));
     }
     if cut.unreadable > 0 {
         parts.push(format!("{} unreadable", cut.unreadable));
@@ -432,6 +471,10 @@ fn cut_line(cut: Cut) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tree(l: &Listing) -> Tree {
+        Tree::new(l).unwrap()
+    }
 
     fn root() -> Listing {
         parse(".\nd\tsrc\nf\tREADME.md\nl\tlink\no\tsock").unwrap()
@@ -449,7 +492,7 @@ mod tests {
             l.cut,
             Cut {
                 left_out: 3,
-                unread: 2,
+                more: 2,
                 unreadable: 1
             }
         );
@@ -473,7 +516,7 @@ mod tests {
 
     #[test]
     fn draws_kinds_and_the_cursor() {
-        let t = Tree::new(&root());
+        let t = tree(&root());
         assert_eq!(
             t.render(40, 10),
             [
@@ -488,7 +531,7 @@ mod tests {
 
     #[test]
     fn only_a_directory_opens_and_it_asks_for_its_listing_once() {
-        let mut t = Tree::new(&root());
+        let mut t = tree(&root());
         t.step(1);
         assert_eq!(t.enter(), Want::Fetch("src".into()));
         t.load(&parse("src\nf\tlib.rs").unwrap());
@@ -505,10 +548,10 @@ mod tests {
 
     #[test]
     fn fetch_paths_use_real_names_and_nest() {
-        let mut t = Tree::new(&parse(".\nd\ta\\tb").unwrap());
+        let mut t = tree(&parse(".\nd\ta\\tb").unwrap());
         t.step(1);
         assert_eq!(t.enter(), Want::Fetch("a\tb".into()));
-        t.load(&parse("a\tb\nd\tin").unwrap());
+        t.load(&parse("a\\tb\nd\tin").unwrap());
         t.step(1);
         assert_eq!(t.enter(), Want::Fetch("a\tb/in".into()));
         assert_eq!(t.selected_path(), "a\tb/in");
@@ -517,7 +560,7 @@ mod tests {
     #[test]
     fn escaped_names_attach_their_replies() {
         // Exactly as the server writes a tab and a backslash in a name.
-        let mut t = Tree::new(&parse(".\nd\ta\\tb\nd\tc\\\\d").unwrap());
+        let mut t = tree(&parse(".\nd\ta\\tb\nd\tc\\\\d").unwrap());
         t.step(1);
         assert_eq!(t.enter(), Want::Fetch("a\tb".into()));
         t.load(&parse("a\\tb\nf\tin").unwrap());
@@ -530,7 +573,7 @@ mod tests {
 
     #[test]
     fn a_late_reply_does_not_move_the_selection() {
-        let mut t = Tree::new(&parse(".\nd\ta\nd\tb").unwrap());
+        let mut t = tree(&parse(".\nd\ta\nd\tb").unwrap());
         t.step(1);
         assert_eq!(t.enter(), Want::Fetch("a".into()));
         t.step(1);
@@ -541,7 +584,7 @@ mod tests {
 
     #[test]
     fn the_cut_row_is_never_under_the_cursor() {
-        let mut t = Tree::new(&parse(".\nd\ta\n+\t2").unwrap());
+        let mut t = tree(&parse(".\nd\ta\n+\t2").unwrap());
         t.step(5);
         assert_eq!(t.selected_path(), "a");
         let rows = t.render(40, 10);
@@ -551,7 +594,7 @@ mod tests {
 
     #[test]
     fn wide_characters_are_clipped_by_cells() {
-        let t = Tree::new(&parse(".\nf\t\u{4e2d}\u{6587}").unwrap());
+        let t = tree(&parse(".\nf\t\u{4e2d}\u{6587}").unwrap());
         // Five columns of mark, indent and sign, then two 2-cell characters:
         // 8 cells fit one, and the second is not split.
         assert_eq!(t.render(8, 10)[1], "     \u{4e2d}");
@@ -559,7 +602,7 @@ mod tests {
 
     #[test]
     fn leave_closes_then_goes_to_the_parent() {
-        let mut t = Tree::new(&root());
+        let mut t = tree(&root());
         t.step(1);
         t.enter();
         t.load(&parse("src\nf\tlib.rs").unwrap());
@@ -572,7 +615,7 @@ mod tests {
 
     #[test]
     fn a_cut_listing_says_so() {
-        let t = Tree::new(&parse(".\nf\ta\n+\t2\n!\t1").unwrap());
+        let t = tree(&parse(".\nf\ta\n+\t2\n!\t1").unwrap());
         assert_eq!(
             t.render(40, 10).last().unwrap(),
             "   ... 2 not shown, 1 unreadable"
@@ -581,7 +624,7 @@ mod tests {
 
     #[test]
     fn a_stale_reply_is_ignored_and_the_cursor_is_held() {
-        let mut t = Tree::new(&root());
+        let mut t = tree(&root());
         t.load(&parse("gone\nf\tx").unwrap());
         assert_eq!(t.render(40, 10).len(), 5);
         t.step(100);
@@ -592,11 +635,58 @@ mod tests {
 
     #[test]
     fn long_trees_scroll_to_the_cursor_and_lines_are_clipped() {
-        let mut t = Tree::new(&parse(".\nf\t1\nf\t2\nf\t3\nf\t4").unwrap());
+        let mut t = tree(&parse(".\nf\t1\nf\t2\nf\t3\nf\t4").unwrap());
         t.step(4);
         let rows = t.render(5, 3);
         assert_eq!(rows.len(), 3);
         assert!(rows[2].starts_with('>'));
         assert!(rows.iter().all(|r| r.chars().count() <= 5));
+    }
+
+    #[test]
+    fn unsafe_names_and_paths_are_refused() {
+        for bad in [
+            ".\nd\t\u{1b}]0;x",
+            ".\nd\t\u{9b}2J",
+            ".\nf\t",
+            ".\nf\t..",
+            ".\nf\ta/b",
+            ".\nf\t\\u{2f}",
+            "\u{1b}\nf\ta",
+            "a//b\nf\ta",
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
+        assert!(parse("a/b\nf\t.hidden").is_ok());
+    }
+
+    #[test]
+    fn a_first_listing_must_be_the_root() {
+        assert!(Tree::new(&parse("src\nf\tlib.rs").unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_repeat_reply_keeps_what_was_read() {
+        let mut t = tree(&parse(".\nd\ta").unwrap());
+        t.step(1);
+        t.enter();
+        t.load(&parse("a\nd\tb").unwrap());
+        t.step(1);
+        t.enter();
+        t.load(&parse("a/b\nf\tc").unwrap());
+        t.load(&parse("a\nd\tb").unwrap());
+        assert_eq!(t.render(40, 10).len(), 4, "b stays open with c");
+    }
+
+    #[test]
+    fn the_more_trailer_is_not_called_unread() {
+        let t = tree(&parse(".\nf\ta\n>\t19001").unwrap());
+        assert_eq!(t.render(40, 10).last().unwrap(), "   ... 19001+ not shown");
+    }
+
+    #[test]
+    fn unescape_wants_braces() {
+        assert_eq!(unescape(r"\uX41}"), r"\uX41}");
+        assert_eq!(unescape(r"\u{41"), r"\u{41");
     }
 }
