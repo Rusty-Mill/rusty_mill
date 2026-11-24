@@ -263,7 +263,10 @@ fn restarted_read_only(name: &str, script: &str, needles: &[&str]) {
 
     for run in 0..2 {
         let server = Server::start(&dir);
-        let mut client = Client::connect(&server.socket);
+        let calls = Features::CHECKPOINT_V6
+            .union(Features::BLOCK_CALL)
+            .union(Features::HOLD);
+        let mut client = Client::connect_with(&server.socket, calls, None);
         client.request(|req| Message::Attach { req, block });
         client.wait_ready(block);
         let text = client.text(block);
@@ -280,6 +283,17 @@ fn restarted_read_only(name: &str, script: &str, needles: &[&str]) {
             "one marker, run {run}: {text}"
         );
         client.request(|req| Message::AcquireLease { req, block });
+        // What launched a restored block is not known, so it is not re-run.
+        let rerun = client.answer(|req| Message::BlockCall {
+            req,
+            block,
+            method: "terminal.rerun".into(),
+            args: Vec::new(),
+        });
+        assert!(
+            matches!(rerun.as_slice(), [Message::Failed { reason, .. }] if reason.contains("restored")),
+            "run {run}: {rerun:?}"
+        );
         client.send(&Message::Input {
             req: 900,
             block,

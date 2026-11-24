@@ -262,6 +262,13 @@ struct BlockRt {
     /// Its PTY was released (C76): read-only, with its program, if still
     /// running, left to its owner.
     released: bool,
+    /// Its program was started by this server run, so what it was started
+    /// as is known (not a block restored from disk, whose record cannot say
+    /// who launched it).
+    launched: bool,
+    /// Its program has ended and been reaped, and the exit was announced:
+    /// nothing of the last run is still to be heard of.
+    finished: bool,
 }
 
 /// A block's running program: its PTY and the task reading it.
@@ -332,6 +339,7 @@ impl Unscreened {
         rt.echo = self.echo;
         rt.started = self.started;
         rt.unsaved = true;
+        rt.finished = false;
     }
 }
 
@@ -356,6 +364,8 @@ impl BlockRt {
             hold: false,
             agent: None,
             released: false,
+            launched: false,
+            finished: false,
         }
     }
 
@@ -2470,6 +2480,7 @@ impl State {
         );
         let mut rt = rt.screened(shared, grid, parser);
         rt.hold = launch.hold;
+        rt.launched = true;
         rt.agent = launch.agent.clone();
         self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
@@ -2549,6 +2560,20 @@ impl State {
         if rt.live.is_some() || rt.released {
             return Err(format!("{METHOD}: the block's program is still running").into());
         }
+        // A restored block does not say who launched it, so an agent's
+        // cannot be told from a command's: refused until provenance is kept.
+        if !rt.launched {
+            return Err(format!(
+                "{METHOD}: the block was restored after a restart, and what launched it \
+                 is not known"
+            )
+            .into());
+        }
+        // Not the last run's reaping, nor its exit still to be announced:
+        // a late one would read as the new run's.
+        if !rt.finished {
+            return Err(format!("{METHOD}: the block's last run has not finished ending").into());
+        }
         if rt.agent.is_some() {
             return Err(format!(
                 "{METHOD}: an agent's block is re-run through its orchestrator and profile"
@@ -2565,12 +2590,19 @@ impl State {
             .window(window)
             .ok_or(rusty_mux_core::Error::UnknownWindow(window))?
             .session();
+        // What it was started as, even a default shell: a config reloaded
+        // since would otherwise start something else. The directory is the
+        // last one the program reported, if it still exists.
+        let dir_exists = |d: &String| std::path::Path::new(d).is_dir();
+        let cwd = terminal::pwd(&rt.grid, None)
+            .filter(dir_exists)
+            .or_else(|| Some(rt.started.cwd.clone()).filter(|d| !d.is_empty()));
         let launch = Launch {
-            program: (!rt.started.shell).then(|| Program {
+            program: Some(Program {
                 command: rt.started.program.clone(),
                 args: rt.started.args.clone(),
             }),
-            cwd: Some(rt.started.cwd.clone()).filter(|cwd| !cwd.is_empty()),
+            cwd,
             ..Launch::default()
         };
         let config = launched(&self.config, &launch)?;
@@ -3110,6 +3142,9 @@ impl State {
     /// block, unless a client closed it while the program was reaped or it
     /// is held (C78).
     fn exited(&mut self, block: BlockId, status: Option<ExitStatus>) {
+        if let Some(rt) = self.blocks.get_mut(&block) {
+            rt.finished = true;
+        }
         if let Some(status) = status
             && self.mux.note_exit(block, status).is_err()
         {
