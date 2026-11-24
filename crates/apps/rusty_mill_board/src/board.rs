@@ -966,8 +966,12 @@ impl<S: Store> Board<S> {
         dry: &DryRun,
         tracked: bool,
     ) -> Result<(InboxCard, bool), BoardError> {
-        if let Some((card, tracked)) = self.remediation_card(by, project, decision)? {
-            return Ok((InboxCard::of(&card), tracked));
+        if let Some((card, was_tracked)) = self.remediation_card(by, project, decision)? {
+            // A tracked card is reused only while the host can still record ids: after a
+            // rollback the send would go untracked, so the legacy card is filed first.
+            if !was_tracked || tracked {
+                return Ok((InboxCard::of(&card), was_tracked));
+            }
         }
         let tag = format!("remediate:{}", e.id);
         let text = |id: u64| {

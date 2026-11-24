@@ -417,7 +417,8 @@ pub trait Escalations: Send + Sync {
     fn preview(&self, e: &Escalation, a: &Action) -> Result<DryRun, InboxError>;
 
     /// Do `a` to `e`, answered by `by` (recorded in BBP's op id). With `decision`, the
-    /// caller's id for this send is recorded too, command `n` as `<decision>.<n>`: a
+    /// caller's id for this send is recorded too (as `<decision>.0`, so the action must be one
+    /// command, else [`InboxError::Invalid`]): a
     /// repeat of the same send then replays instead of applying twice, and
     /// [`Escalations::applied`] can say afterwards whether it was applied.
     ///

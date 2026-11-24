@@ -1017,3 +1017,38 @@ fn a_passing_probe_after_a_legacy_card_files_nothing_and_sends_no_id() {
     assert_eq!(remediate_cards(&board).len(), 1);
     assert!(fake.decided.lock().unwrap().is_empty());
 }
+
+/// A tracked card exists but the host has since been rolled back: the retry's probe fails,
+/// so the legacy card is filed before the send goes untracked. After the host is upgraded
+/// again, the log's silence about that send must not close either card.
+#[test]
+fn a_host_rolled_back_after_a_tracked_card_never_closes_it() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        lose_answer: AtomicBool::new(true),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    fake.fail_before.store(true, Ordering::SeqCst); // the first try never reaches BBP
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    assert_eq!(remediate_cards(&board).len(), 1);
+
+    fake.fail_before.store(false, Ordering::SeqCst);
+    fake.old_host.store(true, Ordering::SeqCst); // rolled back: cannot record ids
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    assert_eq!(
+        remediate_cards(&board).len(),
+        2,
+        "the legacy card was filed first"
+    );
+    assert!(
+        fake.decided.lock().unwrap().is_empty(),
+        "the send carried no id"
+    );
+
+    fake.old_host.store(false, Ordering::SeqCst); // upgraded again
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
+}

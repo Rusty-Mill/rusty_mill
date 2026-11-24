@@ -179,24 +179,25 @@ fn answers(bin: &Path, json: &str) {
 }
 
 #[test]
-fn a_decision_id_is_sent_per_command_and_looked_up_by_its_first() {
+fn a_decision_id_rides_a_single_command_and_is_looked_up_by_it() {
     let (bin, log, _serial) = fake("decision", &[]);
     let cli = BbpCli::new(bin.clone(), "/srv/bbp".into());
-    let e = cli.open(&["C1".into()]).unwrap().remove(0);
+    let mut e = cli.open(&["C1".into()]).unwrap().remove(0);
+    e.acted = Some(vec![]); // a host that reports acted-on work
+    // Approve on a budget is two commands: a repeat would replay the first without events
+    // and fence the second wrongly, so an id is refused before anything is sent.
+    let two = cli.act(&e, &Action::Approve, "nano", Some("dec-1"));
+    assert!(matches!(two, Err(InboxError::Invalid(_))), "{two:?}");
+    assert_eq!(calls(&log).len(), 1, "only the inbox read ran");
+
+    let drop = Action::Reject { reason: None };
     assert_eq!(
-        cli.act(&e, &Action::Approve, "nano", Some("dec-1"))
-            .unwrap(),
+        cli.act(&e, &drop, "nano", Some("dec-1")).unwrap(),
         Outcome::Done
     );
     let sent = calls(&log);
-    // Each command carries its own id, in the dry run and in the commit.
-    for (n, id) in [
-        (1, "dec-1.0"),
-        (2, "dec-1.0"),
-        (3, "dec-1.1"),
-        (4, "dec-1.1"),
-    ] {
-        assert!(sent[n].contains(&format!("--decision {id}")), "{sent:?}");
+    for n in [1, 2] {
+        assert!(sent[n].contains("--decision dec-1.0"), "{sent:?}");
     }
 
     answers(&bin, r#"[{"decision":"dec-1.0","applied":true,"rev":19}]"#);

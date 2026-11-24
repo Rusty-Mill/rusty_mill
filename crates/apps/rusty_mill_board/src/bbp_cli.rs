@@ -161,8 +161,16 @@ impl Escalations for BbpCli {
         by: &str,
         decision: Option<&str>,
     ) -> Result<Outcome, InboxError> {
+        let steps = plan(e, a)?;
+        // A repeat of a send replays its commands without events, which would leave a
+        // later command fenced on the wrong rev: ids ride single-command actions only.
+        if decision.is_some() && steps.len() != 1 {
+            return Err(InboxError::Invalid(
+                "a decision id needs a single-command action".into(),
+            ));
+        }
         let mut fence = e.rev;
-        for (n, step) in plan(e, a)?.iter().enumerate() {
+        for (n, step) in steps.iter().enumerate() {
             let id = decision.map(|d| step_decision(d, n));
             let id = id.as_deref();
             let (response, events) = self.dry(e, step, fence, by, id)?;
