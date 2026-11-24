@@ -79,6 +79,8 @@ left the terminal garbled; it is refused while an older client is attached. `ter
 `--background`, `--cursor` and `--palette N=COLOUR` as `#RRGGBB` or `default`.
 `terminal.clear` clears the screen and scrollback as `clear` does and keeps
 the modes; the program's prompt comes back with its next output.
+`terminal.rerun` starts a held or restored block's command again (not an
+agent's, not a running one), under the lease, and writes a `re-run at` line.
 
 Typing (`input`, `terminal.send-keys`), resetting, clearing and theming need the
 block's input lease, and a user typing in that block holds it. Only type into

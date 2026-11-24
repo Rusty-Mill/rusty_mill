@@ -159,3 +159,72 @@ fn a_held_launch_needs_the_feature() {
         "{answer:?}"
     );
 }
+
+fn rerun(client: &mut Client, block: BlockId) -> Vec<Message> {
+    client.answer(|req| Message::BlockCall {
+        req,
+        block,
+        method: "terminal.rerun".into(),
+        args: Vec::new(),
+    })
+}
+
+fn wait_screen(client: &mut Client, block: BlockId, want: &str) -> String {
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        let screen = text(&call(client, block, "terminal.format"));
+        if screen.contains(want) {
+            return screen;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never showed {want}: {screen}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_held_block_is_re_run_under_the_lease_and_keeps_its_screen() {
+    let socket = start_server();
+    let mut client = Client::connect_with(&socket, HOLDING, None);
+    let block = created(&create(&mut client, launch("echo FIRST-RUN; exit 0", true)));
+    wait_exited(&mut client, block);
+    client.request(|req| Message::Attach { req, block });
+    client.wait_ready(block);
+
+    // No lease, no re-run.
+    let refused = rerun(&mut client, block);
+    assert!(
+        matches!(refused.as_slice(), [Message::Failed { .. }]),
+        "{refused:?}"
+    );
+
+    client.request(|req| Message::AcquireLease { req, block });
+    let done = rerun(&mut client, block);
+    assert!(
+        matches!(done.as_slice(), [Message::Done { .. }]),
+        "{done:?}"
+    );
+    // The command ran again; the first run's output and a line stay.
+    let screen = wait_screen(&mut client, block, "-- re-run at");
+    assert!(screen.contains("FIRST-RUN"), "{screen}");
+    wait_exited(&mut client, block);
+    let shown = text(&call(&mut client, block, "terminal.format"));
+    assert_eq!(shown.matches("FIRST-RUN").count(), 2, "{shown}");
+}
+
+#[test]
+fn a_running_block_is_not_re_run() {
+    let socket = start_server();
+    let mut client = Client::connect_with(&socket, HOLDING, None);
+    let block = created(&create(&mut client, launch("sleep 30", true)));
+    client.request(|req| Message::Attach { req, block });
+    client.wait_ready(block);
+    client.request(|req| Message::AcquireLease { req, block });
+    let answer = rerun(&mut client, block);
+    assert!(
+        matches!(answer.as_slice(), [Message::Failed { reason, .. }] if reason.contains("still running")),
+        "{answer:?}"
+    );
+}

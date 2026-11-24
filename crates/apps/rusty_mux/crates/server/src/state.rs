@@ -19,7 +19,7 @@ use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
 use rusty_mux_proto::{
     AgentMeta, Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Ownership,
-    ShowTo, Takeover, encode,
+    Program, ShowTo, Takeover, encode,
 };
 use rusty_mux_status::{Parts, Status};
 use rusty_term_core::{AnsiParser, Grid};
@@ -306,6 +306,14 @@ struct Unscreened {
 impl Unscreened {
     /// The block, reading its PTY into `grid` from now on.
     fn screened(self, shared: &Shared, grid: Grid, parser: AnsiParser) -> BlockRt {
+        let mut rt = BlockRt::read_only(grid, parser, self.started.clone());
+        self.revive(shared, &mut rt);
+        rt
+    }
+
+    /// Gives `rt`, a block with no program, this one: its reader starts and
+    /// the screen it has stays (C45, D338).
+    fn revive(self, shared: &Shared, rt: &mut BlockRt) {
         let wake = Rc::new(Notify::new());
         let reader = rusty_tokio::task::spawn_local(pump(
             shared.clone(),
@@ -313,19 +321,17 @@ impl Unscreened {
             self.pty.clone(),
             wake.clone(),
         ));
-        let live = Live {
+        rt.live = Some(Live {
             pty: self.pty,
             revoke: Rc::default(),
             process: self.process,
             wake,
             reader,
-        };
-        BlockRt {
-            foreground: self.foreground,
-            echo: self.echo,
-            ..BlockRt::read_only(grid, parser, self.started)
-        }
-        .with(live)
+        });
+        rt.foreground = self.foreground;
+        rt.echo = self.echo;
+        rt.started = self.started;
+        rt.unsaved = true;
     }
 }
 
@@ -350,13 +356,6 @@ impl BlockRt {
             hold: false,
             agent: None,
             released: false,
-        }
-    }
-
-    fn with(self, live: Live) -> Self {
-        Self {
-            live: Some(live),
-            ..self
         }
     }
 
@@ -1423,6 +1422,17 @@ impl State {
                 ),
             ),
             M::Sync { req } => (req, Ok(Outcome::Done(None))),
+            // It starts a program, which a call has no runtime for: here.
+            M::BlockCall {
+                req,
+                block,
+                method,
+                args,
+            } if method == "terminal.rerun" && args.is_empty() => (
+                req,
+                self.require(client, Features::BLOCK_CALL.union(Features::HOLD), &method)
+                    .and_then(|()| self.rerun(shared, client, block)),
+            ),
             M::BlockCall {
                 req,
                 block,
@@ -2515,6 +2525,79 @@ impl State {
         })
     }
 
+    /// `terminal.rerun` (D338): starts again the command a held or restored
+    /// block was started with, in the block, under the lease. The screen
+    /// stays and a line says when. Never done on its own (D72), and not for
+    /// an agent's block, which is re-run through the orchestrator.
+    fn rerun(
+        &mut self,
+        shared: &Shared,
+        client: ClientId,
+        block: BlockId,
+    ) -> Result<Outcome, Refusal> {
+        const METHOD: &str = "terminal.rerun";
+        if self.stopping {
+            return Err(String::from("the server is stopping").into());
+        }
+        self.mux
+            .authorize_input(client, block)
+            .map_err(Refusal::from)?;
+        let rt = self
+            .blocks
+            .get(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        if rt.live.is_some() || rt.released {
+            return Err(format!("{METHOD}: the block's program is still running").into());
+        }
+        if rt.agent.is_some() {
+            return Err(format!(
+                "{METHOD}: an agent's block is re-run through its orchestrator and profile"
+            )
+            .into());
+        }
+        let target = self
+            .mux
+            .block(block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        let (window, size, owned) = (target.window(), target.size(), target.owner().is_some());
+        let session = self
+            .mux
+            .window(window)
+            .ok_or(rusty_mux_core::Error::UnknownWindow(window))?
+            .session();
+        let launch = Launch {
+            program: (!rt.started.shell).then(|| Program {
+                command: rt.started.program.clone(),
+                args: rt.started.args.clone(),
+            }),
+            cwd: Some(rt.started.cwd.clone()).filter(|cwd| !cwd.is_empty()),
+            ..Launch::default()
+        };
+        let config = launched(&self.config, &launch)?;
+        let started = Started {
+            read_only: false,
+            ..rt.started.clone()
+        };
+        let program = self.start(Start {
+            block,
+            session,
+            window,
+            size,
+            config: &config,
+            started,
+            owned,
+            env: None,
+            fds: Vec::new(),
+        })?;
+        // CAN first, so a sequence the old program left unfinished ends.
+        let mark = format!("\x18\r\n\x1b[2m-- re-run at {} --\x1b[0m\r\n", utc_clock());
+        self.inject(block, mark.as_bytes());
+        if let Some(rt) = self.blocks.get_mut(&block) {
+            program.revive(shared, rt);
+        }
+        Ok(Outcome::Done(None))
+    }
+
     /// Where a block's program is, for `rusty-mux-ctl` run inside it.
     fn block_env(
         &self,
@@ -3203,6 +3286,20 @@ fn passed_fds(want: u8, passed: Passed) -> Result<Vec<Fd>, Refusal> {
         .into());
     }
     Ok(fds)
+}
+
+/// The time of day in UTC, as `HH:MM:SS UTC`, for a line shown in a block.
+fn utc_clock() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let day = secs % 86_400;
+    format!(
+        "{:02}:{:02}:{:02} UTC",
+        day / 3600,
+        day % 3600 / 60,
+        day % 60
+    )
 }
 
 /// The server's `config` with what `launch` asks for instead. A relative

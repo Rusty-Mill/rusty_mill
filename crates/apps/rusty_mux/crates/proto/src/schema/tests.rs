@@ -141,7 +141,8 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.history",
             "terminal.prompts",
             "terminal.find",
-            "terminal.ports"
+            "terminal.ports",
+            "terminal.rerun"
         ]
     );
     let control = ["terminal.size", "terminal.reset", "terminal.set-theme"];
@@ -159,6 +160,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
                 Features::BLOCK_CALL.union(Features::TERMINAL_FIND)
             }
             (_, _, "terminal.ports") => Features::BLOCK_CALL.union(Features::PORTS),
+            (_, _, "terminal.rerun") => Features::BLOCK_CALL.union(Features::HOLD),
             (_, _, "terminal.list-dir") => Features::BLOCK_CALL.union(Features::DIR_LISTING),
             _ => Features::BLOCK_CALL,
         };
@@ -168,6 +170,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.reset"
             | "terminal.set-theme"
             | "terminal.clear"
+            | "terminal.rerun"
             | "terminal.report-status" => Returns::Nothing,
             _ => Returns::Text,
         };
