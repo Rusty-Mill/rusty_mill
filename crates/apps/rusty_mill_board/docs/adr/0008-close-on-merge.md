@@ -1,0 +1,18 @@
+# ADR-0008: Close a card when its pull request says so
+
+- **Status:** Accepted (2026-11-23): Nano concurred ("Concur") with the design note for card #1620, option (c), marker-only. Built in three PRs: the read-only merge watch (#1842), the marker close (this change), then `card_unclose`.
+
+## Context
+Work that merged kept sitting open on the board, so finished decisions were re-made (#1620: #762, #1078, #1563). Closing relied on an agent remembering. The sync's old rule was that moving a card to Done needs review: the `github-sync` actor holds no capabilities and never moves a card.
+
+## Decision
+- The **merge watch** (`mergewatch`, run by the GitHub sync thread, at most every 5 minutes) reads recently merged pull requests of the registered GitHub repositories and lists the open cards they point at in `board_metrics.merged_open`. The board core stays pure: all I/O is behind the `MergedPulls` port.
+- Only one link may close a card: a standalone prose line `Closes card #N` (also Fixes/Resolves) in a merged PR's body, from a repository of the card's own project. The word `card` is required, because a bare `Closes #N` makes GitHub close issue N. Quotes, code, comments and longer sentences never count. Evidence, `card #N` mentions and earlier PRs of a multi-PR card are listed, never acted on.
+- Closing is **off by default** (`auto_close` in the GitHub settings file). Without it the watch only lists, and the `marker` entries are the dry-run report of what it would close.
+- The actor is `merge-watch`, holding `Record` only. `Card::closed_by_merge` adds the PR as evidence, moves the card to Done as shipped work (`done_ms` set), releases its claim and comments which PR closed it and from which column; the move is logged as that actor's. It refuses a Blocked, Parked or gated card (a gate lies between it and Done) and a Done card. The watch also skips parents: their children decide.
+- ADR-0006 is unchanged: the watch reads the forge directly and never decides from external refs.
+
+## Consequences
+- A merged PR whose author wrote the marker ends its card without anyone remembering; a wrong marker closes the wrong card, which `card_unclose` (next PR) reverts.
+- The sync's "moving to Done needs review" rule now has this one exception, for a marker in a merged PR.
+- A card the marker cannot close stays listed in `merged_open` for a person.

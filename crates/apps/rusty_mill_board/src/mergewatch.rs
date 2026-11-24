@@ -7,14 +7,14 @@
 //! only link a later step may close a card on. Evidence on the card and a plain `card #N`
 //! mention are weaker ([`Why::Evidence`], [`Why::Mention`]): they are only listed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::api::Shared;
 use crate::backfill::pull_parts;
-use crate::domain::{Card, Column};
+use crate::domain::{Actor, BoardError, Capability, Card, Column};
 
 /// A merged pull request, as the forge reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,14 +333,49 @@ pub fn scan(
     out
 }
 
+/// The actor merge watch writes as: `Record` only, no project limit.
+fn watcher() -> Actor {
+    Actor {
+        name: ACTOR.to_owned(),
+        caps: BTreeSet::from([Capability::Record]),
+        projects: None,
+    }
+}
+
+/// Who merge watch is on the board's history.
+pub const ACTOR: &str = "merge-watch";
+
+/// Close each listed card a merged pull request said `Closes card #N` for, unless it is a
+/// parent (its children decide), or [`Card::closed_by_merge`] refuses it (blocked, parked,
+/// gated): those stay listed. A card with only weaker links is never touched.
+fn close_marked(board: &Shared, cards: &[Card], found: &[MergedOpen]) {
+    let parents: HashSet<Uuid> = cards.iter().filter_map(|c| c.parent).collect();
+    let actor = watcher();
+    for o in found.iter().filter(|o| o.why == Why::Marker) {
+        let Some(pr) = o.prs.iter().find(|l| l.why == Why::Marker) else {
+            continue;
+        };
+        if parents.contains(&o.id) {
+            continue;
+        }
+        match board.close_merged(o.id, &pr.url, &actor) {
+            Ok(_) => rusty_log::info!(card = ?o.number, pr = %pr.url, "closed by merge"),
+            Err(BoardError::Refused(_) | BoardError::Terminal) => {}
+            Err(e) => rusty_log::warn!(card = ?o.number, error = %e, "merge close failed"),
+        }
+    }
+}
+
 /// One watch run: read the recently merged pull requests of every registered GitHub
-/// repository, [`scan`] the board's cards and keep the result for `board_metrics`. Reads only.
+/// repository, [`scan`] the board's cards and keep the result for `board_metrics`. With
+/// `close`, also closes the cards a merged pull request named with a `Closes card #N` line
+/// ([`close_marked`]); without it, it only reads.
 /// A repository that cannot be read is skipped and flagged ([`WatchStatus::error`]); when none
 /// can be read the last list stays, flagged the same way.
 ///
 /// # Errors
 /// Every repository (or the board) failed.
-pub fn watch(board: &Shared, pulls: &dyn MergedPulls) -> Result<usize, String> {
+pub fn watch(board: &Shared, pulls: &dyn MergedPulls, close: bool) -> Result<usize, String> {
     let projects = board.projects();
     let slugs: Vec<&str> = projects.github_slugs().collect();
     let (mut merged, mut truncated, mut failed) = (Vec::new(), false, Vec::new());
@@ -375,6 +410,9 @@ pub fn watch(board: &Shared, pulls: &dyn MergedPulls) -> Result<usize, String> {
             .collect()
     };
     let found = scan(&cards, &merged, &github_of);
+    if close {
+        close_marked(board, &cards, &found);
+    }
     let n = found.len();
     board.set_merged_open(found, truncated, !failed.is_empty());
     Ok(n)
@@ -383,7 +421,7 @@ pub fn watch(board: &Shared, pulls: &dyn MergedPulls) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::Board;
+    use crate::board::{Board, NewCard};
     use crate::projects::Projects;
     use crate::store::{MemStore, Store};
 
@@ -533,7 +571,7 @@ mod tests {
             theirs.number.expect("n")
         );
         // Merged in o/r: card of project q (repository o/other) must not appear.
-        assert_eq!(watch(&b, &recent(vec![pr(1, &body)], false)), Ok(1));
+        assert_eq!(watch(&b, &recent(vec![pr(1, &body)], false), false), Ok(1));
         let m = b.metrics(|_| true).expect("metrics");
         assert_eq!(m.merged_open.len(), 1);
         assert_eq!(m.merged_open[0].id, mine.id);
@@ -545,7 +583,7 @@ mod tests {
         let who = b.roles().actor("nano", "human").expect("role");
         let card = b.add_in(&who, "p", "work", "", vec![]).expect("card");
         let body = format!("Closes card #{}", card.number.expect("n"));
-        assert_eq!(watch(&b, &recent(vec![pr(1, &body)], true)), Ok(1));
+        assert_eq!(watch(&b, &recent(vec![pr(1, &body)], true), false), Ok(1));
         let m = b.metrics(|_| true).expect("metrics");
         assert_eq!(
             (m.merged_open.len(), m.merged_open[0].why),
@@ -554,7 +592,7 @@ mod tests {
         assert!(m.merged_watch.truncated && !m.merged_watch.error);
         assert!(m.merged_watch.checked_ms.is_some());
         // A failed refresh keeps the last list, flagged.
-        assert!(watch(&b, &Fixed(Err("rate limit".into()))).is_err());
+        assert!(watch(&b, &Fixed(Err("rate limit".into())), false).is_err());
         let m = b.metrics(|_| true).expect("metrics");
         assert_eq!(m.merged_open.len(), 1);
         // The detail is for the log: the status says only that the refresh failed.
@@ -579,7 +617,7 @@ mod tests {
         let who = b.roles().actor("nano", "human").expect("role");
         let card = b.add_in(&who, "p", "work", "", vec![]).expect("card");
         let body = format!("Closes card #{}", card.number.expect("n"));
-        assert_eq!(watch(&b, &recent(vec![pr(1, &body)], false)), Ok(1));
+        assert_eq!(watch(&b, &recent(vec![pr(1, &body)], false), false), Ok(1));
         assert_eq!(b.metrics(|_| true).expect("metrics").merged_open.len(), 1);
         // Project q lives in repository o/other: the link read from o/r no longer applies.
         b.assign(card.id, "q", &who).expect("assigned");
@@ -622,10 +660,92 @@ mod tests {
         let b = board();
         let who = b.roles().actor("nano", "human").expect("role");
         b.add_in(&who, "p", "work", "", vec![]).expect("card");
-        assert_eq!(watch(&b, &Half), Ok(1));
+        assert_eq!(watch(&b, &Half, false), Ok(1));
         let m = b.metrics(|_| true).expect("metrics");
         assert_eq!(m.merged_open.len(), 1);
         assert!(m.merged_watch.error);
         assert!(m.merged_watch.checked_ms.is_some());
+    }
+
+    fn merged(b: &Shared, body: &str) -> Result<usize, String> {
+        watch(b, &recent(vec![pr(7, body)], false), true)
+    }
+
+    fn two_cards() -> (Shared, Actor, Card, u64) {
+        let b = board();
+        let who = b.roles().actor("nano", "human").expect("role");
+        let card = b.add_in(&who, "p", "work", "", vec![]).expect("card");
+        let n = card.number.expect("n");
+        (b, who, card, n)
+    }
+
+    #[test]
+    fn a_marker_closes_the_card_with_evidence_a_comment_and_no_claim() {
+        let (b, who, card, n) = two_cards();
+        b.move_card(card.id, &Column::READY, &who).expect("ready");
+        b.move_card(card.id, &Column::BUILDING, &who)
+            .expect("building");
+        b.claim(card.id, &who).expect("claimed");
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        let done = b.get(card.id).expect("card");
+        assert_eq!(done.column, Column::DONE);
+        assert!(done.shipped() && done.claim.is_none());
+        assert_eq!(done.evidence, ["https://github.com/o/r/pull/7"]);
+        let last = done.comments.last().expect("comment");
+        assert_eq!(last.by, ACTOR);
+        assert!(last.text.contains("pull/7") && last.text.contains("building"));
+        let events = b.events(None, 100).expect("events");
+        assert!(
+            events
+                .iter()
+                .any(|e| e.actor == ACTOR && e.column == Column::DONE)
+        );
+        // Closed once: the next run finds nothing open.
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(0));
+    }
+
+    #[test]
+    fn weaker_links_and_earlier_prs_never_close() {
+        let (b, who, card, n) = two_cards();
+        let by_evidence = b
+            .add_evidence(card.id, &["https://github.com/o/r/pull/7".into()], &who)
+            .expect("evidence");
+        assert_eq!(by_evidence.column, Column::BACKLOG);
+        // Evidence match, then a plain mention, then no marker at all: card stays open.
+        for body in ["", &format!("see card #{n}"), &format!("Closes #{n}")] {
+            merged(&b, body).expect("watch");
+            assert_ne!(b.get(card.id).expect("card").column, Column::DONE);
+        }
+    }
+
+    #[test]
+    fn without_the_flag_a_marker_only_lists() {
+        let (b, _, card, n) = two_cards();
+        let body = format!("Closes card #{n}");
+        assert_eq!(watch(&b, &recent(vec![pr(7, &body)], false), false), Ok(1));
+        assert_eq!(b.get(card.id).expect("card").column, Column::BACKLOG);
+    }
+
+    #[test]
+    fn blocked_parked_and_parent_cards_are_listed_not_closed() {
+        let (b, who, blocked, n_blocked) = two_cards();
+        b.move_card(blocked.id, &Column::BLOCKED, &who)
+            .expect("blocked");
+        let parked = b.add_in(&who, "p", "parked", "", vec![]).expect("card");
+        b.move_card(parked.id, &Column::PARKED, &who)
+            .expect("parked");
+        let parent = b.add_in(&who, "p", "parent", "", vec![]).expect("card");
+        let mut child = NewCard::new("child", "", vec![]);
+        child.parent = Some(parent.id);
+        b.add_card(&who, "p", child).expect("child");
+        let body = format!(
+            "Closes card #{n_blocked}\nCloses card #{}\nCloses card #{}",
+            parked.number.expect("n"),
+            parent.number.expect("n")
+        );
+        assert_eq!(merged(&b, &body), Ok(3));
+        for id in [blocked.id, parked.id, parent.id] {
+            assert_ne!(b.get(id).expect("card").column, Column::DONE);
+        }
     }
 }

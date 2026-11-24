@@ -644,6 +644,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 repo: repo.clone(),
                 api: cli.github_api.clone(),
                 interval_secs: cli.github_secs,
+                auto_close: false,
                 token: cli
                     .github_token
                     .clone()
@@ -655,7 +656,12 @@ fn run(cli: Cli) -> Result<(), String> {
     let syncer = Syncer::new(board.clone());
     if let Some(file) = &github {
         let config = file.config()?;
-        syncer.start(config, &file.repo, Duration::from_secs(file.interval_secs))?;
+        syncer.start(
+            config,
+            &file.repo,
+            Duration::from_secs(file.interval_secs),
+            file.auto_close,
+        )?;
     }
 
     let in_flight: Arc<InFlight> = Arc::default();

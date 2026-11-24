@@ -41,11 +41,19 @@ impl Syncer {
         }
     }
 
-    /// Start syncing with `config` every `every`, replacing any running sync.
+    /// Start syncing with `config` every `every`, replacing any running sync. With `auto_close`
+    /// the merge watch also closes cards a merged PR named (`Closes card #N`); without, it
+    /// only lists them.
     ///
     /// # Errors
     /// If the HTTP client or the thread cannot start (an existing sync keeps running).
-    pub fn start(&self, config: GithubConfig, repo: &str, every: Duration) -> Result<(), String> {
+    pub fn start(
+        &self,
+        config: GithubConfig,
+        repo: &str,
+        every: Duration,
+        auto_close: bool,
+    ) -> Result<(), String> {
         let pulls = config.merged()?;
         let forge = GithubForge::new(config).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -64,7 +72,7 @@ impl Syncer {
                         if !flag.load(Ordering::SeqCst) {
                             if last_watch.is_none_or(|t| t.elapsed() >= WATCH_EVERY) {
                                 last_watch = Some(Instant::now());
-                                if let Err(e) = watch(&board, &pulls) {
+                                if let Err(e) = watch(&board, &pulls, auto_close) {
                                     rusty_log::warn!(error = %e, "merge watch failed; will retry");
                                 }
                             }

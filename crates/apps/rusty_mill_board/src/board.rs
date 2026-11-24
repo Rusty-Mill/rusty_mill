@@ -1870,6 +1870,18 @@ impl<S: Store> Board<S> {
         self.apply(id, by, EventKind::Archived, |c, now| c.archive(now))
     }
 
+    /// Close a card because pull request `pr` merged and said so: see [`Card::closed_by_merge`].
+    /// Logged as a move by `by` (the merge watch). Needs `Record`.
+    ///
+    /// # Errors
+    /// A missing capability, a missing card, or see [`Card::closed_by_merge`].
+    pub fn close_merged(&self, id: Uuid, pr: &str, by: &Actor) -> Result<Card, BoardError> {
+        let flow = self.flow();
+        self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
+            c.closed_by_merge(&flow, pr, by, now)
+        })
+    }
+
     /// Put a shelved card (archived, or past the default Done window) back on the default
     /// views: see [`Card::restore`]. Needs `Close`.
     ///
