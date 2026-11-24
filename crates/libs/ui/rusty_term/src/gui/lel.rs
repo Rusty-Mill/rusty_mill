@@ -3,7 +3,7 @@
 //!
 //! Pure parsing, no UI and no I/O. The input is the JSON `inbox_list` returns
 //! (an array of escalations, each with a `label` and its board `card`). The
-//! types stay here rather than in `rusty_mill_board` (D170); a drift test in
+//! types stay here rather than in `rusty_mill_board` (D174); a drift test in
 //! that crate parses `testdata/lel_inbox.json` with its own types.
 
 use rusty_json::Value;
