@@ -133,6 +133,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.process",
             "terminal.size",
             "terminal.list-dir",
+            "terminal.workspace-list",
             "terminal.reset",
             "terminal.set-theme",
             "terminal.modes",
@@ -160,6 +161,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
                 Features::BLOCK_CALL.union(Features::TERMINAL_FIND)
             }
             (_, _, "terminal.ports") => Features::BLOCK_CALL.union(Features::PORTS),
+            (_, _, "terminal.workspace-list") => Features::BLOCK_CALL.union(Features::WORKSPACE),
             (_, _, "terminal.list-dir") => Features::BLOCK_CALL.union(Features::DIR_LISTING),
             _ => Features::BLOCK_CALL,
         };
@@ -349,6 +351,7 @@ fn optional_parameters_add_their_features_only_when_given() {
             "trim",
             "unwrap",
             "vt",
+            "path",
             "path",
             "foreground",
             "background",

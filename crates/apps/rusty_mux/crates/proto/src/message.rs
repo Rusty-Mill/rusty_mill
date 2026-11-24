@@ -284,6 +284,11 @@ impl Features {
     /// server stores and echoes the three texts and never acts on them.
     pub const AGENT_META: Self = Self(1 << 52);
 
+    /// `terminal.workspace-list` (card #1573, D337): one directory under the
+    /// block's launch directory, for the workspace explorer. A block call, so
+    /// the bit only says the server knows the method.
+    pub const WORKSPACE: Self = Self(1 << 53);
+
     /// Archiving a block (C84, card #1570): [`Message::ArchiveBlock`] saves
     /// a held block's transcript and outcome under the server's state
     /// directory and closes the block; [`Message::ArchiveList`] and
@@ -397,6 +402,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::PORTS, "listening ports of a block"),
     (Features::PORT_FORWARD, "port forwards"),
     (Features::AGENT_META, "agent, role and card on blocks"),
+    (Features::WORKSPACE, "workspace explorer"),
     (Features::ARCHIVE, "archive of dismissed blocks"),
 ];
 

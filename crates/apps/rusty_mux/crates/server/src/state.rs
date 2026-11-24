@@ -146,11 +146,13 @@ const SHOW_PERIOD: Duration = Duration::from_secs(1);
 /// Offered on Linux only: signal and release (C76) act on a Unix process
 /// group, and orch, their one client, runs there; the tailscale status
 /// event (C27) comes from a `tailscaled` this server asks on Linux, and
-/// `terminal.ports` (C80) reads the sockets from `/proc`.
+/// `terminal.ports` (C80) reads the sockets from `/proc`; the workspace
+/// call (D337) confines its walk with `openat`, which only Linux has here.
 #[cfg(target_os = "linux")]
 const UNIX_ONLY: Features = Features::SIGNAL_RELEASE
     .union(Features::TAILSCALE_STATUS)
-    .union(Features::PORTS);
+    .union(Features::PORTS)
+    .union(Features::WORKSPACE);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
 
@@ -633,6 +635,7 @@ impl State {
         req: u64,
         base: Option<String>,
         path: Option<String>,
+        root: Option<listing::Workspace>,
     ) -> Result<oneshot::Receiver<()>, String> {
         let cancel = self
             .clients
@@ -647,7 +650,7 @@ impl State {
         let work = rusty_tokio::spawn_blocking(move || {
             // Held until the thread ends, not until the deadline.
             let _slot = slot;
-            lister(base.as_deref(), path.as_deref())
+            lister(base.as_deref(), path.as_deref(), root.as_ref())
         });
         let (done, finished) = oneshot::channel();
         let weak = Rc::downgrade(shared);
@@ -1211,8 +1214,8 @@ impl State {
             }
             Ok(Outcome::Write(write)) => Some(Pending::Write(write)),
             Ok(Outcome::Later(done)) => Some(Pending::Reload(done)),
-            Ok(Outcome::Listing { base, path }) => {
-                match this.list_dir(shared, client, req, base, path) {
+            Ok(Outcome::Listing { base, path, root }) => {
+                match this.list_dir(shared, client, req, base, path, root) {
                     Ok(done) => Some(Pending::Reload(done)),
                     Err(reason) => {
                         this.send(
@@ -2149,6 +2152,28 @@ impl State {
             }
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.pid())
                 .ok_or("the program's working directory is unknown")?,
+            "terminal.workspace-list" => {
+                // The same lease rule as `terminal.list-dir` (D316); the
+                // root is the directory the program was launched in, not
+                // where it has since moved (D337).
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                let root = rt
+                    .started
+                    .workspace()
+                    .ok_or("the workspace root is unknown after a server restart")?
+                    .clone();
+                let path = named.iter().find_map(|(n, v)| match (*n, v) {
+                    ("path", Value::Text(p)) => Some(p.as_str()),
+                    _ => None,
+                });
+                return Ok(Outcome::Listing {
+                    base: None,
+                    path: path.map(str::to_owned),
+                    root: Some(root),
+                });
+            }
             "terminal.list-dir" => {
                 // It shows the host's files as the server's account, so it
                 // takes what typing into the block takes: the lease, which
@@ -2164,6 +2189,7 @@ impl State {
                 return Ok(Outcome::Listing {
                     base,
                     path: path.map(str::to_owned),
+                    root: None,
                 });
             }
             "terminal.title" => rt.grid.title.clone(),
@@ -2458,6 +2484,16 @@ impl State {
             .session();
         // The id is chosen first so the program starts knowing it.
         let block = BlockId::from_uuid(Uuid::new_v4());
+        // The program starts in the very directory the workspace holds: the
+        // spawn changes into the held descriptor, not the configured path, so
+        // the two cannot name different directories. Where it can't be held,
+        // the program starts at the path and the workspace stays unknown.
+        let mut workspace = listing::Workspace::open(std::path::Path::new(&config.cwd));
+        let mut spawn = config.clone();
+        match workspace.spawn_cwd() {
+            Some(held) => spawn.cwd = held.into(),
+            None => workspace = listing::Workspace::default(),
+        }
         let started = Started {
             shell: launch.program.is_none(),
             read_only: false,
@@ -2468,13 +2504,14 @@ impl State {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect(),
             cwd: config.cwd.to_string_lossy().into_owned(),
+            workspace,
         };
         let rt = self.start(Start {
             block,
             session,
             window,
             size,
-            config: &config,
+            config: &spawn,
             started,
             owned: launch.own,
             env: launch.env.as_deref(),
@@ -3527,6 +3564,8 @@ enum Outcome {
     Listing {
         base: Option<String>,
         path: Option<String>,
+        /// The directory the result must lie under, for the workspace call.
+        root: Option<listing::Workspace>,
     },
 }
 
@@ -4151,7 +4190,7 @@ mod regression {
             let (shared, _account, block, _inbox) = fixture();
             let (go, wait) = std::sync::mpsc::channel::<()>();
             let wait = std::sync::Mutex::new(wait);
-            shared.borrow_mut().lister = std::sync::Arc::new(move |_, _| {
+            shared.borrow_mut().lister = std::sync::Arc::new(move |_, _, _| {
                 wait.lock()
                     .map_err(|e| e.to_string())?
                     .recv()
@@ -5023,6 +5062,7 @@ mod regression {
             program: "sh".into(),
             args: vec![],
             cwd: "/".into(),
+            workspace: Default::default(),
         };
         BlockRt::read_only(grid, AnsiParser::new(), started)
     }
