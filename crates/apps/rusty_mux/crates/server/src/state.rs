@@ -266,6 +266,10 @@ struct BlockRt {
     /// as is known (not a block restored from disk, whose record cannot say
     /// who launched it).
     launched: bool,
+    /// Its launch passed an environment, descriptors or ownership (C75, C46):
+    /// what a re-run could not give it again, so it is never re-run. An
+    /// agent's block is launched so, whether or not it says it is one.
+    custom: bool,
     /// Its program has ended and been reaped, and the exit was announced:
     /// nothing of the last run is still to be heard of.
     finished: bool,
@@ -365,6 +369,7 @@ impl BlockRt {
             agent: None,
             released: false,
             launched: false,
+            custom: false,
             finished: false,
         }
     }
@@ -1438,10 +1443,13 @@ impl State {
                 block,
                 method,
                 args,
-            } if method == "terminal.rerun" && args.is_empty() => (
+            } if method == "terminal.rerun" => (
                 req,
                 self.require(client, Features::BLOCK_CALL.union(Features::HOLD), &method)
-                    .and_then(|()| self.rerun(shared, client, block)),
+                    .and_then(|()| match args.is_empty() {
+                        true => self.rerun(shared, client, block),
+                        false => Err(String::from("terminal.rerun takes no arguments").into()),
+                    }),
             ),
             M::BlockCall {
                 req,
@@ -2481,6 +2489,7 @@ impl State {
         let mut rt = rt.screened(shared, grid, parser);
         rt.hold = launch.hold;
         rt.launched = true;
+        rt.custom = launch.env.is_some() || launch.fds > 0 || launch.own;
         rt.agent = launch.agent.clone();
         self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
@@ -2536,10 +2545,10 @@ impl State {
         })
     }
 
-    /// `terminal.rerun` (D338): starts again the command a held or restored
-    /// block was started with, in the block, under the lease. The screen
+    /// `terminal.rerun` (D338): starts again the command a held block (not yet
+    /// a restored one) was started with, in the block, under the lease. The screen
     /// stays and a line says when. Never done on its own (D72), and not for
-    /// an agent's block, which is re-run through the orchestrator.
+    /// a block launched with its own environment, descriptors or owner.
     fn rerun(
         &mut self,
         shared: &Shared,
@@ -2557,7 +2566,10 @@ impl State {
             .blocks
             .get(&block)
             .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
-        if rt.live.is_some() || rt.released {
+        if rt.released {
+            return Err(format!("{METHOD}: the block's program was released to its owner").into());
+        }
+        if rt.live.is_some() {
             return Err(format!("{METHOD}: the block's program is still running").into());
         }
         // A restored block does not say who launched it, so an agent's
@@ -2574,9 +2586,11 @@ impl State {
         if !rt.finished {
             return Err(format!("{METHOD}: the block's last run has not finished ending").into());
         }
-        if rt.agent.is_some() {
+        // Not on the launcher's word: what the launch passed is what decides.
+        if rt.custom || rt.agent.is_some() {
             return Err(format!(
-                "{METHOD}: an agent's block is re-run through its orchestrator and profile"
+                "{METHOD}: a block launched with its own environment, descriptors or \
+                 owner (an agent's, say) is re-run through its launcher"
             )
             .into());
         }
@@ -2593,9 +2607,12 @@ impl State {
         // What it was started as, even a default shell: a config reloaded
         // since would otherwise start something else. The directory is the
         // last one the program reported, if it still exists.
+        // A shell's is the last one it reported; any other program's output
+        // could name one for it, so it keeps the one it was started in.
         let dir_exists = |d: &String| std::path::Path::new(d).is_dir();
-        let cwd = terminal::pwd(&rt.grid, None)
-            .filter(dir_exists)
+        let reported = terminal::pwd(&rt.grid, None).filter(dir_exists);
+        let cwd = reported
+            .filter(|_| rt.started.shell)
             .or_else(|| Some(rt.started.cwd.clone()).filter(|d| !d.is_empty()));
         let launch = Launch {
             program: Some(Program {

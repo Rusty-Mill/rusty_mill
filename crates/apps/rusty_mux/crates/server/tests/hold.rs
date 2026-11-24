@@ -196,7 +196,7 @@ fn a_held_block_is_re_run_under_the_lease_and_keeps_its_screen() {
     // No lease, no re-run.
     let refused = rerun(&mut client, block);
     assert!(
-        matches!(refused.as_slice(), [Message::Failed { .. }]),
+        matches!(refused.as_slice(), [Message::Failed { reason, .. }] if !reason.contains("launched") && !reason.contains("running")),
         "{refused:?}"
     );
 
@@ -265,4 +265,61 @@ fn a_block_whose_output_ended_before_its_program_is_not_re_run_until_reaped() {
         assert!(std::time::Instant::now() < deadline, "never reaped");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+}
+
+#[test]
+fn a_block_launched_with_its_own_environment_is_not_re_run_whatever_it_says_it_is() {
+    let socket = start_server();
+    let mut client = Client::connect_with(&socket, HOLDING.union(Features::AGENT_LAUNCH), None);
+    // No `agent` metadata: the launch's environment is what marks it.
+    let mut own = launch("exit 0", true);
+    own.env = Some(vec![("PATH".into(), "/usr/bin:/bin".into())]);
+    let block = created(&create(&mut client, own));
+    wait_exited(&mut client, block);
+    client.request(|req| Message::Attach { req, block });
+    client.wait_ready(block);
+    client.request(|req| Message::AcquireLease { req, block });
+    let answer = rerun(&mut client, block);
+    assert!(
+        matches!(answer.as_slice(), [Message::Failed { reason, .. }] if reason.contains("re-run through its launcher")),
+        "{answer:?}"
+    );
+}
+
+#[test]
+fn a_client_without_hold_cannot_re_run() {
+    let socket = start_server();
+    let mut holder = Client::connect_with(&socket, HOLDING, None);
+    let block = created(&create(&mut holder, launch("exit 0", true)));
+    wait_exited(&mut holder, block);
+    let mut plain = Client::connect_with(
+        &socket,
+        Features::CHECKPOINT_V6
+            .union(Features::BLOCK_CALL)
+            .union(Features::INSPECT),
+        None,
+    );
+    let answer = rerun(&mut plain, block);
+    assert!(
+        matches!(answer.as_slice(), [Message::Failed { .. }]),
+        "{answer:?}"
+    );
+}
+
+#[test]
+fn a_re_run_takes_no_arguments() {
+    let socket = start_server();
+    let mut client = Client::connect_with(&socket, HOLDING, None);
+    let block = created(&create(&mut client, launch("exit 0", true)));
+    wait_exited(&mut client, block);
+    let answer = client.answer(|req| Message::BlockCall {
+        req,
+        block,
+        method: "terminal.rerun".into(),
+        args: vec![("x".into(), Value::Flag(true))],
+    });
+    assert!(
+        matches!(answer.as_slice(), [Message::Failed { reason, .. }] if reason.contains("no arguments")),
+        "{answer:?}"
+    );
 }
