@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
@@ -491,6 +492,8 @@ pub(crate) struct State {
     listings: listing::Gate,
     /// Where sessions are saved across restarts, with `Config::state_dir`.
     store: Option<Store>,
+    /// Each block's upload authority (C82), made at its first upload.
+    uploads: RefCell<HashMap<BlockId, Arc<upload::Slot>>>,
     /// The event number the store last saved the model at.
     saved_at: Option<u64>,
     /// Numbers each save, newest highest.
@@ -558,6 +561,7 @@ impl State {
             lister: listing::lister(),
             listings: listing::Gate::default(),
             store: None,
+            uploads: RefCell::default(),
             saved_at: None,
             generation: 0,
             account: None,
@@ -3140,12 +3144,18 @@ impl State {
         let store = self.store.clone().ok_or(
             "terminal.upload: the server keeps no state directory to put files in".to_owned(),
         )?;
-        // The disk work runs off the event loop, like a listing.
+        let slot = Arc::clone(self.uploads.borrow_mut().entry(block).or_default());
+        let deadline = Instant::now() + listing::DEADLINE;
+        // The disk work runs off the event loop, like a listing, and one
+        // block's transfers take turns.
         Ok(Box::new(move || {
-            let dir = store.upload_dir(block).map_err(|e| e.to_string())?;
-            Ok(match upload::receive(&dir, &name, offset, &data, done)? {
-                upload::Received::Partial(n) => n.to_string(),
-                upload::Received::Done(path) => path.display().to_string(),
+            let dir = store.upload_path(block);
+            slot.run(&dir, deadline, || {
+                let dir = store.upload_dir(block).map_err(|e| e.to_string())?;
+                Ok(match upload::receive(&dir, &name, offset, &data, done)? {
+                    upload::Received::Partial(n) => n.to_string(),
+                    upload::Received::Done(path) => path.display().to_string(),
+                })
             })
         }))
     }
@@ -3156,8 +3166,16 @@ impl State {
         if let Some(Err(e)) = self.store.as_ref().map(|s| s.remove_spool(block)) {
             eprintln!("rusty-mux-server: removing block {block}'s history: {e}");
         }
-        if let Some(Err(e)) = self.store.as_ref().map(|s| s.remove_uploads(block)) {
-            eprintln!("rusty-mux-server: removing block {block}'s uploads: {e}");
+        let slot = self.uploads.borrow_mut().remove(&block);
+        match (slot, self.store.as_ref()) {
+            // Transfers in flight end first; the slot clears the folder.
+            (Some(slot), Some(store)) => slot.close(&store.upload_path(block)),
+            (None, Some(store)) => {
+                if let Err(e) = store.remove_uploads(block) {
+                    eprintln!("rusty-mux-server: removing block {block}'s uploads: {e}");
+                }
+            }
+            _ => {}
         }
     }
 
