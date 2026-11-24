@@ -1,6 +1,8 @@
 //! `terminal.download` (C83): a file of the server's host, read a chunk at a
 //! time for a copy to the client.
 
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -90,14 +92,28 @@ pub(crate) fn read(
     offset: u32,
     private: Option<&Path>,
 ) -> Result<String, String> {
+    // Only Linux can place the opened object by the kernel. Elsewhere a path
+    // is not resolved at all (resolving may reach another machine) and a
+    // file inside the state directory could not be told from one outside:
+    // nothing is read until that platform has its own check.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (base, path, offset, private);
+        Err("downloading is not supported on this platform yet".into())
+    }
+    #[cfg(target_os = "linux")]
+    read_linux(base, path, offset, private)
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux(
+    base: Option<&str>,
+    path: &str,
+    offset: u32,
+    private: Option<&Path>,
+) -> Result<String, String> {
     let file = locate(base, path)?;
     let root = private_root(private)?;
-    // Where the opened object's own path cannot be read, a file inside the
-    // state directory could not be told from outside it: nothing is read.
-    #[cfg(not(target_os = "linux"))]
-    if root.is_some() {
-        return Err("this platform cannot check an opened file against the state directory".into());
-    }
     if root.as_ref().is_some_and(|root| file.starts_with(root)) {
         return Err("the server's own state directory is not read".into());
     }
@@ -126,7 +142,16 @@ pub(crate) fn read(
     Ok(format!("{size}\n{}", rusty_base64::encode_standard(&chunk)))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "linux")))]
+mod refusal_tests {
+    #[test]
+    fn nothing_is_read_where_the_opened_file_cannot_be_checked() {
+        let err = super::read(None, "f", 0, None).unwrap_err();
+        assert!(err.contains("not supported"), "{err}");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
