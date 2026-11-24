@@ -612,43 +612,41 @@ impl State {
         Ok(Outcome::Later(finished))
     }
 
-    /// `terminal.list-dir`: reads the directory on the blocking pool under
-    /// [`listing::DEADLINE`], in a task of its own, and answers once read
-    /// ([`Self::listed`]). The connection waits for it before its next
-    /// request; no other client, PTY or task waits.
-    fn list_dir(
+    /// `terminal.list-dir` and `terminal.download`: runs `work` on the
+    /// blocking pool under [`listing::DEADLINE`], in a task of its own, and
+    /// answers once done ([`Self::listed`]). The connection waits for it
+    /// before its next request; no other client, PTY or task waits.
+    fn run_blocking(
         &mut self,
         shared: &Shared,
         client: ClientId,
         req: u64,
-        base: Option<String>,
-        path: Option<String>,
+        method: &'static str,
+        work: Blocking,
     ) -> Result<oneshot::Receiver<()>, String> {
         let cancel = self
             .clients
             .get(&client)
             .map(|out| out.cancel().clone())
             .ok_or("no such client")?;
-        let slot = self
-            .listings
-            .take()
-            .map_err(|e| format!("terminal.list-dir: {e}"))?;
-        let lister = self.lister.clone();
+        let slot = self.listings.take().map_err(|e| format!("{method}: {e}"))?;
         let work = rusty_tokio::spawn_blocking(move || {
             // Held until the thread ends, not until the deadline.
             let _slot = slot;
-            lister(base.as_deref(), path.as_deref())
+            work()
         });
         let (done, finished) = oneshot::channel();
         let weak = Rc::downgrade(shared);
         rusty_tokio::task::spawn_local(async move {
             let answer = match rusty_tokio::time::timeout(listing::DEADLINE, work).await {
                 Ok(Ok(listed)) => listed,
-                Ok(Err(e)) => Err(format!("the listing failed: {e}")),
-                Err(_) => Err("the listing timed out".into()),
+                Ok(Err(e)) => Err(format!("the read failed: {e}")),
+                Err(_) => Err("the read timed out".into()),
             };
             if let Some(shared) = weak.upgrade() {
-                shared.borrow_mut().listed(client, &cancel, req, answer);
+                shared
+                    .borrow_mut()
+                    .listed(client, &cancel, req, method, answer);
             }
             // The connection may have gone; nothing waits then.
             let _ = done.send(());
@@ -663,13 +661,14 @@ impl State {
         client: ClientId,
         cancel: &Rc<Notify>,
         req: u64,
+        method: &str,
         answer: Result<String, String>,
     ) {
         let message = match answer {
             Ok(text) => Message::Text { req, text },
             Err(reason) => Message::Failed {
                 req,
-                reason: format!("terminal.list-dir: {reason}"),
+                reason: format!("{method}: {reason}"),
                 code: None,
             },
         };
@@ -1201,8 +1200,8 @@ impl State {
             }
             Ok(Outcome::Write(write)) => Some(Pending::Write(write)),
             Ok(Outcome::Later(done)) => Some(Pending::Reload(done)),
-            Ok(Outcome::Listing { base, path }) => {
-                match this.list_dir(shared, client, req, base, path) {
+            Ok(Outcome::Blocking { method, work }) => {
+                match this.run_blocking(shared, client, req, method, work) {
                     Ok(done) => Some(Pending::Reload(done)),
                     Err(reason) => {
                         this.send(
@@ -2130,9 +2129,11 @@ impl State {
                     ("path", Value::Text(p)) => Some(p.as_str()),
                     _ => None,
                 });
-                return Ok(Outcome::Listing {
-                    base,
-                    path: path.map(str::to_owned),
+                let path = path.map(str::to_owned);
+                let lister = self.lister.clone();
+                return Ok(Outcome::Blocking {
+                    method: "terminal.list-dir",
+                    work: Box::new(move || lister(base.as_deref(), path.as_deref())),
                 });
             }
             "terminal.upload" => {
@@ -2140,7 +2141,10 @@ impl State {
                 self.mux
                     .authorize_input(client, block)
                     .map_err(Refusal::from)?;
-                self.upload(block, &named)?
+                return Ok(Outcome::Blocking {
+                    method: "terminal.upload",
+                    work: self.upload(block, &named)?,
+                });
             }
             "terminal.title" => rt.grid.title.clone(),
             "terminal.status" => rt.status.shown().bodies().join("\n"),
@@ -3115,15 +3119,15 @@ impl State {
     }
 
     /// `terminal.upload`: one chunk of a file into `block`'s upload folder.
-    fn upload(&self, block: BlockId, named: &[(&str, Value)]) -> Result<String, Refusal> {
+    fn upload(&self, block: BlockId, named: &[(&str, Value)]) -> Result<Blocking, Refusal> {
         let text = |param| {
             named.iter().find_map(|(n, v)| match v {
-                Value::Text(t) if *n == param => Some(t.as_str()),
+                Value::Text(t) if *n == param => Some(t.clone()),
                 _ => None,
             })
         };
         let data = named.iter().find_map(|(n, v)| match v {
-            Value::Bytes(b) if *n == "data" => Some(b.as_slice()),
+            Value::Bytes(b) if *n == "data" => Some(b.clone()),
             _ => None,
         });
         let done = named
@@ -3133,18 +3137,17 @@ impl State {
             return Err("terminal.upload: missing name or data".to_owned().into());
         };
         let offset = u64::from(lines(named, "offset"));
-        let store = self.store.as_ref().ok_or(
+        let store = self.store.clone().ok_or(
             "terminal.upload: the server keeps no state directory to put files in".to_owned(),
         )?;
-        let dir = store
-            .upload_dir(block)
-            .map_err(|e| format!("terminal.upload: {e}"))?;
-        let received = upload::receive(&dir, name, offset, data, done)
-            .map_err(|e| format!("terminal.upload: {e}"))?;
-        Ok(match received {
-            upload::Received::Partial(n) => n.to_string(),
-            upload::Received::Done(path) => path.display().to_string(),
-        })
+        // The disk work runs off the event loop, like a listing.
+        Ok(Box::new(move || {
+            let dir = store.upload_dir(block).map_err(|e| e.to_string())?;
+            Ok(match upload::receive(&dir, &name, offset, &data, done)? {
+                upload::Received::Partial(n) => n.to_string(),
+                upload::Received::Done(path) => path.display().to_string(),
+            })
+        }))
     }
 
     /// Deletes closed `block`'s spool by its path, whether or not a handle
@@ -3419,13 +3422,16 @@ enum Outcome {
     /// Answered later, by the task the request started; resolves once it
     /// has.
     Later(oneshot::Receiver<()>),
-    /// `terminal.list-dir`, to be read off this thread: the directory
-    /// `path` names from `base`.
-    Listing {
-        base: Option<String>,
-        path: Option<String>,
+    /// A read of the host's files (`terminal.list-dir`,
+    /// `terminal.download`), to run off this thread; its text is the reply.
+    Blocking {
+        method: &'static str,
+        work: Blocking,
     },
 }
+
+/// What a [`Outcome::Blocking`] runs.
+type Blocking = Box<dyn FnOnce() -> Result<String, String> + Send>;
 
 /// The line count `param` holds, 0 when left out.
 fn lines(named: &[(&str, Value)], param: &str) -> u32 {
