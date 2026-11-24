@@ -3,6 +3,12 @@
 //!
 //! A file grows under `part/` and moves to the folder itself on commit, so a
 //! half-sent file is never taken for a whole one.
+//!
+//! A chunk whose reply was lost is retried safely: the offset check refuses
+//! it and names how many bytes arrived, and where nothing is under `part/`
+//! it says the file may be whole already, in the folder. A finished file is
+//! never replaced, so a blind resend of a one-chunk file would be kept
+//! beside the first as `name-1`; the sender looks first.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -174,12 +180,41 @@ fn receive_within(
 
 /// Deletes a closed block's upload folder on a thread of its own.
 pub(crate) fn discard(dir: PathBuf) {
-    std::thread::spawn(move || match fs::remove_dir_all(&dir) {
+    later(Box::new(move || remove(&dir)));
+}
+
+fn remove(dir: &Path) {
+    match fs::remove_dir_all(dir) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => {
             eprintln!("rusty-mux-server: removing {}: {e}", dir.display());
         }
         _ => {}
+    }
+}
+
+type Chore = Box<dyn FnOnce() + Send>;
+
+/// Runs `chore` on the one thread that does the folder cleanups, one after
+/// another, so closing many blocks never starts many threads.
+fn later(chore: Chore) {
+    use std::sync::{OnceLock, mpsc};
+    static CLEANER: OnceLock<Mutex<mpsc::Sender<Chore>>> = OnceLock::new();
+    let tx = CLEANER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Chore>();
+        std::thread::Builder::new()
+            .name("mux-upload-cleanup".into())
+            .spawn(move || rx.into_iter().for_each(|chore| chore()))
+            .expect("the cleanup thread starts");
+        Mutex::new(tx)
     });
+    let sent = tx
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .send(chore);
+    if let Err(gone) = sent {
+        // The cleaner cannot end while the process runs; if it did, do it here.
+        (gone.0)();
+    }
 }
 
 /// One block's upload authority: its transfers run one at a time, so the
@@ -220,11 +255,11 @@ impl Slot {
     /// The block closed: no job runs after this. Its folder goes now, or
     /// when the job in flight ends.
     ///
-    /// The deletion runs on a thread of its own, never on the caller's.
+    /// The deletion runs on the cleanup thread, never on the caller's.
     pub(crate) fn close(self: &Arc<Self>, dir: PathBuf) {
         self.closing.store(true, Ordering::SeqCst);
         let slot = Arc::clone(self);
-        std::thread::spawn(move || {
+        later(Box::new(move || {
             // A job that panicked poisons the lock; its folder still goes.
             if !matches!(
                 slot.busy.try_lock(),
@@ -232,7 +267,7 @@ impl Slot {
             ) {
                 slot.clear(&dir);
             }
-        });
+        }));
     }
 
     fn clear(&self, dir: &Path) {
@@ -252,6 +287,12 @@ fn check_offset(part: &Path, offset: u64) -> Result<(), String> {
     match offset {
         0 => Ok(()),
         _ if have == offset => Ok(()),
+        // Nothing under `part/` also means a file that was finished: the
+        // reply to its last chunk may be the one that was lost.
+        _ if have == 0 => Err(format!(
+            "the chunk starts at {offset} but nothing is being received: if this \
+             was the last chunk, the file is already in the folder"
+        )),
         _ => Err(format!(
             "the chunk starts at {offset} but {have} bytes were received"
         )),
@@ -426,7 +467,7 @@ mod tests {
         let err = receive(&dir, "f", 2, b"x", false).unwrap_err();
         assert!(err.contains("3 bytes were received"), "{err}");
         let err = receive(&dir, "never", 5, b"x", false).unwrap_err();
-        assert!(err.contains("0 bytes were received"), "{err}");
+        assert!(err.contains("nothing is being received"), "{err}");
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -464,7 +505,7 @@ mod tests {
         receive_within(&dir, "b", 0, &[2; 60], false, SMALL).unwrap();
         assert!(!dir.join(PART).join("a").exists());
         let err = receive_within(&dir, "a", 60, &[1; 10], false, SMALL).unwrap_err();
-        assert!(err.contains("0 bytes were received"), "{err}");
+        assert!(err.contains("nothing is being received"), "{err}");
         // Growing the one that is left past the limit removes nothing it needs.
         receive_within(&dir, "b", 60, &[2; 40], false, SMALL).unwrap();
         assert_eq!(fs::metadata(dir.join(PART).join("b")).unwrap().len(), 100);
