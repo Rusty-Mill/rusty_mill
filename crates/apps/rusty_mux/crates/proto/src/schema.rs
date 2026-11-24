@@ -1319,14 +1319,23 @@ pub static CATALOG: &[Method] = &[
     Method {
         name: "archive-list",
         doc: "List archived blocks, newest first, one per line as \
-              `ID<TAB>WHEN<TAB>EXIT<TAB>SENSITIVE<TAB>CARD<TAB>LABEL` (`WHEN` in unix seconds, `EXIT` as `code:N`, `signal:N` or `unknown`, `SENSITIVE` as `yes` or `no`).",
-        params: &[archive_part("card", "Only the runs for this card.")],
+              `ID<TAB>WHEN<TAB>EXIT<TAB>SENSITIVE<TAB>CARD<TAB>LABEL` (`WHEN` in unix seconds, `EXIT` as `code:N`, `signal:N` or `unknown`, `SENSITIVE` as `yes` or `no`). At most 1000 rows; \
+              more remaining are counted in a last line `+<TAB>N<TAB>ID`.",
+        params: &[
+            archive_part("card", "Only the runs for this card."),
+            archive_part(
+                "before",
+                "Only records older than this id: the next page, when a last line \
+                 `+<TAB>N<TAB>ID` says N more remain.",
+            ),
+        ],
         needs: Features::ARCHIVE,
         returns: Returns::Text,
         build: |req, a| {
             Ok(Message::ArchiveList {
                 req,
                 card: a.opt_text("card")?,
+                before: a.opt_text("before")?,
             })
         },
     },

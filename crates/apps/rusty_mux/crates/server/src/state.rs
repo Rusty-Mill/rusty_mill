@@ -1402,10 +1402,10 @@ impl State {
                 self.require(client, Features::ARCHIVE, "archive-block")
                     .and_then(|()| self.archive_block(client, block, card, label, why)),
             ),
-            M::ArchiveList { req, card } => (
+            M::ArchiveList { req, card, before } => (
                 req,
                 self.require(client, Features::ARCHIVE, "archive-list")
-                    .and_then(|()| self.archive_list(client, req, card)),
+                    .and_then(|()| self.archive_list(client, req, card, before)),
             ),
             M::ArchiveShow { req, id } => (
                 req,
@@ -2635,9 +2635,10 @@ impl State {
         client: ClientId,
         req: u64,
         card: Option<String>,
+        before: Option<String>,
     ) -> Result<Outcome, Refusal> {
         let dir = self.archive_dir(client, "archive-list")?;
-        let text = archive::list(&dir, card.as_deref())
+        let text = archive::list(&dir, card.as_deref(), before.as_deref())
             .map_err(|e| format!("archive-list: reading the archive: {e}"))?;
         reply("archive-list", &[Message::Text { req, text }])
     }
@@ -3579,7 +3580,14 @@ fn transcript(rt: &BlockRt) -> Result<String, Refusal> {
             format_history(&read, &rt.grid, capture, archive::MAX_TRANSCRIPT)
                 .map_err(|_| "archive-block: the transcript is too long to archive")?
         }
-        None => String::new(),
+        // Spooling stopped (a write failed): what it kept is still on disk,
+        // and closing the block would delete it unarchived.
+        None => {
+            return Err(
+                "archive-block: the block's history is not being kept, so it cannot be archived whole"
+                    .into(),
+            );
+        }
     };
     let screen = terminal::format(&rt.grid, capture, archive::MAX_TRANSCRIPT)
         .ok_or("archive-block: the transcript is too long to archive")?;

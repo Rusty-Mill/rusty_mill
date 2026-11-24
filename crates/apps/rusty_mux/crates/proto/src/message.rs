@@ -1044,10 +1044,14 @@ pub enum Message {
     },
     /// Lists the archived blocks, newest first, one per line as
     /// `ID<TAB>WHEN<TAB>EXIT<TAB>SENSITIVE<TAB>CARD<TAB>LABEL` (`WHEN` in unix seconds, `EXIT` as `code:N`, `signal:N` or `unknown`, `SENSITIVE` as `yes` or `no`), as
-    /// [`Message::Text`]; only those of `card` when it names one.
+    /// [`Message::Text`]; only those of `card` when it names one. At most
+    /// 1000 rows are given; when more remain, a last line `+<TAB>N<TAB>ID`
+    /// says how many (`N`) and which row was the last listed (`ID`), to
+    /// pass as `before` for the next page: only records older than it.
     ArchiveList {
         req: u64,
         card: Option<String>,
+        before: Option<String>,
     },
     /// One archived block as [`Message::Text`]: its record's header lines,
     /// a blank line, then its transcript. `id` is as `ArchiveList` shows.
@@ -1565,10 +1569,13 @@ impl Message {
                 }
                 ty::ARCHIVE_BLOCK
             }
-            M::ArchiveList { req, card } => {
+            M::ArchiveList { req, card, before } => {
                 out.varint(REQ, *req);
                 if let Some(card) = card {
                     out.bytes(CARD, card.as_bytes());
+                }
+                if let Some(before) = before {
+                    out.bytes(ARCHIVE, before.as_bytes());
                 }
                 ty::ARCHIVE_LIST
             }
@@ -1986,6 +1993,7 @@ impl Message {
             ty::ARCHIVE_LIST => M::ArchiveList {
                 req: f.varint(REQ)?,
                 card: f.opt(CARD, In::string)?,
+                before: f.opt(ARCHIVE, In::string)?,
             },
             ty::ARCHIVE_SHOW => M::ArchiveShow {
                 req: f.varint(REQ)?,

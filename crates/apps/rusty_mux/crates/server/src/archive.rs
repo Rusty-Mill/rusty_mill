@@ -133,14 +133,26 @@ fn header(path: &Path) -> io::Result<Vec<(String, String)>> {
 /// The archived records, newest first, one per line as
 /// `ID<TAB>WHEN<TAB>EXIT<TAB>SENSITIVE<TAB>CARD<TAB>LABEL`, only those of
 /// `card` when given. A file that is not a record is skipped.
-pub(crate) fn list(state: &Path, card: Option<&str>) -> io::Result<String> {
+pub(crate) fn list(state: &Path, card: Option<&str>, before: Option<&str>) -> io::Result<String> {
+    list_page(state, card, before, LIST_MAX)
+}
+
+/// At most this many rows in one listing.
+pub(crate) const LIST_MAX: usize = 1000;
+
+fn list_page(
+    state: &Path,
+    card: Option<&str>,
+    before: Option<&str>,
+    max: usize,
+) -> io::Result<String> {
     let dir = state.join(DIR);
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(String::new()),
         Err(e) => return Err(e),
     };
-    let mut rows: Vec<(u64, String)> = Vec::new();
+    let mut rows: Vec<(String, String)> = Vec::new();
     for entry in entries {
         let path = entry?.path();
         if path.extension().is_none_or(|e| e != "txt") {
@@ -155,9 +167,11 @@ pub(crate) fn list(state: &Path, card: Option<&str>) -> io::Result<String> {
         if card.is_some_and(|c| c != get("card")) || get("id").is_empty() {
             continue;
         }
-        let when = get("when").parse().unwrap_or(0);
+        if before.is_some_and(|b| get("id") >= b) {
+            continue;
+        }
         rows.push((
-            when,
+            get("id").to_owned(),
             format!(
                 "{}\t{}\t{}\t{}\t{}\t{}",
                 get("id"),
@@ -169,12 +183,16 @@ pub(crate) fn list(state: &Path, card: Option<&str>) -> io::Result<String> {
             ),
         ));
     }
+    // An id starts with its time, so the order of ids is the order of time.
     rows.sort_by(|a, b| b.cmp(a));
-    Ok(rows
-        .into_iter()
-        .map(|(_, row)| row)
-        .collect::<Vec<_>>()
-        .join("\n"))
+    let left = rows.len().saturating_sub(max);
+    let last = rows.get(max.wrapping_sub(1)).map(|(id, _)| id.clone());
+    rows.truncate(max);
+    let mut lines: Vec<String> = rows.into_iter().map(|(_, row)| row).collect();
+    if let (true, Some(last)) = (left > 0, last) {
+        lines.push(format!("+\t{left}\t{last}"));
+    }
+    Ok(lines.join("\n"))
 }
 
 /// Record `id`, whole, or why not. An id is lowercase hex, digits and
@@ -286,14 +304,38 @@ mod tests {
     }
 
     #[test]
+    fn a_long_listing_is_paged_and_each_page_says_where_the_next_starts() {
+        let dir = state();
+        for n in 1..=5u64 {
+            write(&dir, &record(&format!("{n:03}-x"), n, "c"), "t").unwrap();
+        }
+        let ids = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|l| !l.starts_with('+'))
+                .map(|l| l.split('\t').next().unwrap().to_owned())
+                .collect()
+        };
+        let first = list_page(&dir, None, None, 2).unwrap();
+        assert_eq!(ids(&first), ["005-x", "004-x"]);
+        assert_eq!(first.lines().last(), Some("+\t3\t004-x"));
+        let second = list_page(&dir, None, Some("004-x"), 2).unwrap();
+        assert_eq!(ids(&second), ["003-x", "002-x"]);
+        assert_eq!(second.lines().last(), Some("+\t1\t002-x"));
+        let last = list_page(&dir, None, Some("002-x"), 2).unwrap();
+        assert_eq!(last.lines().count(), 1, "{last}");
+        assert!(!last.contains('+'));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn records_are_listed_newest_first_by_card_and_shown_whole() {
         let dir = state();
         write(&dir, &record("00a-1", 10, "c1"), "first\nrun\n").unwrap();
         write(&dir, &record("00b-2", 20, "c2"), "second\n").unwrap();
-        let all = list(&dir, None).unwrap();
+        let all = list(&dir, None, None).unwrap();
         let ids: Vec<&str> = all.lines().map(|l| l.split('\t').next().unwrap()).collect();
         assert_eq!(ids, ["00b-2", "00a-1"]);
-        assert_eq!(list(&dir, Some("c1")).unwrap().lines().count(), 1);
+        assert_eq!(list(&dir, Some("c1"), None).unwrap().lines().count(), 1);
         let shown = show(&dir, "00a-1").unwrap();
         assert!(shown.starts_with("id: 00a-1\n") && shown.ends_with("\n\nfirst\nrun\n"));
         // Never replaced, and never named by a path.
@@ -306,7 +348,7 @@ mod tests {
     #[test]
     fn an_empty_archive_lists_nothing() {
         let dir = state();
-        assert_eq!(list(&dir, None).unwrap(), "");
+        assert_eq!(list(&dir, None, None).unwrap(), "");
         let _ = fs::remove_dir_all(&dir);
     }
 

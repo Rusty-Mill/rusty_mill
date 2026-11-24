@@ -573,10 +573,12 @@ fn every_message_round_trips() {
         Message::ArchiveList {
             req: 33,
             card: None,
+            before: None,
         },
         Message::ArchiveList {
             req: 34,
             card: Some("card-7".into()),
+            before: Some("000000000001-abcdef12".into()),
         },
         Message::ArchiveShow {
             req: 35,
