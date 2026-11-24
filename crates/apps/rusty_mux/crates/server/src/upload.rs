@@ -26,6 +26,8 @@ pub(crate) const CHUNK_MAX: usize = 1 << 20;
 pub(crate) const BLOCK_MAX: u64 = 2 << 30;
 /// Unfinished files a block keeps at most.
 const PARTIALS_MAX: usize = 16;
+/// An upload is refused when under this much disk would stay free.
+const FREE_MIN: u64 = 2 << 30;
 /// How long an unfinished file may sit untouched before a new upload clears
 /// it: its sender is gone.
 const STALE: Duration = Duration::from_secs(600);
@@ -116,6 +118,28 @@ pub(crate) struct Limits {
     pub(crate) block_max: u64,
     pub(crate) partials: usize,
     pub(crate) stale: Duration,
+    /// Free bytes the disk should keep after a chunk is written; best effort,
+    /// not a reservation: other blocks and programs share the disk.
+    pub(crate) free_min: u64,
+    /// Free bytes under a path; `None` where it cannot be asked.
+    pub(crate) free: fn(&Path) -> Option<u64>,
+}
+
+/// Bytes an unprivileged process can still write on the disk holding `dir`;
+/// `None` off Linux or when the call fails, which skips the check rather
+/// than refusing every upload.
+#[cfg(target_os = "linux")]
+fn free_space(dir: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    rusty_libc::fs::statfs(&path)
+        .ok()
+        .map(|fs| fs.available_bytes())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn free_space(_dir: &Path) -> Option<u64> {
+    None
 }
 
 /// The limits uploads keep.
@@ -123,6 +147,8 @@ pub(crate) const LIMITS: Limits = Limits {
     block_max: BLOCK_MAX,
     partials: PARTIALS_MAX,
     stale: STALE,
+    free_min: FREE_MIN,
+    free: free_space,
 };
 
 /// Appends `data` to `name` at `offset` in `dir`; with `done` commits it.
@@ -160,6 +186,13 @@ fn receive_within(
     fs::create_dir_all(&part_dir).map_err(io)?;
     let part = part_dir.join(&name);
     check_offset(&part, offset)?;
+    // Before anything is removed: a refusal for low space deletes nothing.
+    if (limits.free)(dir).is_some_and(|f| f < limits.free_min.saturating_add(data.len() as u64)) {
+        return Err(format!(
+            "the server's disk would be left with under {} bytes free",
+            limits.free_min
+        ));
+    }
     if offset == 0 {
         // A new file: what its senders left unfinished long ago goes, and
         // the rest is bounded.
@@ -498,7 +531,38 @@ mod tests {
         block_max: 100,
         partials: 2,
         stale: Duration::from_secs(600),
+        free_min: 0,
+        free: |_| None,
     };
+
+    #[test]
+    fn a_chunk_that_would_leave_the_disk_too_full_is_refused() {
+        let dir = scratch();
+        let old = receive_within(&dir, "old", 0, &[0; 90], true, SMALL).unwrap();
+        let Received::Done(old) = old else { panic!() };
+        let tight = Limits {
+            free_min: 100,
+            free: |_| Some(105),
+            ..SMALL
+        };
+        let err = receive_within(&dir, "f", 0, &[0; 20], false, tight).unwrap_err();
+        assert!(err.contains("under 100 bytes free"), "{err}");
+        // 90 + 20 is over the folder's 100, so room would have been made.
+        assert!(old.exists(), "a refused chunk must not evict other files");
+        let stale = Limits {
+            stale: Duration::ZERO,
+            ..tight
+        };
+        receive_within(&dir, "f", 0, &[0; 20], false, stale).unwrap_err();
+        assert!(old.exists());
+        assert!(receive_within(&dir, "f", 0, &[0; 5], false, tight).is_ok());
+        let unknown = Limits {
+            free: |_| None,
+            ..tight
+        };
+        assert!(receive_within(&dir, "g", 0, &[0; 6], false, unknown).is_ok());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     fn age(path: &Path, secs: u64) {
         let then = SystemTime::now() - Duration::from_secs(secs);

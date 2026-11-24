@@ -658,6 +658,18 @@ const fn theme(name: &'static str, ty: Ty, doc: &'static str) -> Param {
     }
 }
 
+/// An optional text parameter of the archive methods.
+const fn archive_part(name: &'static str, doc: &'static str) -> Param {
+    Param {
+        name,
+        ty: Ty::Text,
+        doc,
+        presence: Presence::Optional {
+            needs: Features::ARCHIVE,
+        },
+    }
+}
+
 const BLOCK: Param = required("block", Ty::Id(Entity::Block), "The block to act on.");
 const NEW_NAME: Param = required(
     "name",
@@ -1280,6 +1292,71 @@ pub static CATALOG: &[Method] = &[
         },
     },
     Method {
+        name: "archive-block",
+        doc: "Archive a held block, then close it (C84): its screen, history, exit status, \
+              who and why are saved under the server's state directory, and any secret-like \
+              text in it marks the record sensitive. Refused while the program runs. \
+              `card`, `label` (say `good` or `bad`) and `why` are kept with it, at most 256 \
+              bytes each.",
+        params: &[
+            BLOCK,
+            archive_part("card", "The card the run was for."),
+            archive_part("label", "How the run went, such as `good` or `bad`."),
+            archive_part("why", "Why it was dismissed."),
+        ],
+        needs: Features::ARCHIVE,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::ArchiveBlock {
+                req,
+                block: BlockId::from_uuid(a.uuid("block", Entity::Block)?),
+                card: a.opt_text("card")?,
+                label: a.opt_text("label")?,
+                why: a.opt_text("why")?,
+            })
+        },
+    },
+    Method {
+        name: "archive-list",
+        doc: "List archived blocks, newest first, one per line as \
+              `ID<TAB>WHEN<TAB>EXIT<TAB>SENSITIVE<TAB>CARD<TAB>LABEL` (`WHEN` in unix seconds, `EXIT` as `code:N`, `signal:N` or `unknown`, `SENSITIVE` as `yes` or `no`). At most 1000 rows; \
+              more remaining are counted in a last line `+<TAB>N<TAB>ID`.",
+        params: &[
+            archive_part("card", "Only the runs for this card."),
+            archive_part(
+                "before",
+                "Only records older than this id: the next page, when a last line \
+                 `+<TAB>N<TAB>ID` says N more remain.",
+            ),
+        ],
+        needs: Features::ARCHIVE,
+        returns: Returns::Text,
+        build: |req, a| {
+            Ok(Message::ArchiveList {
+                req,
+                card: a.opt_text("card")?,
+                before: a.opt_text("before")?,
+            })
+        },
+    },
+    Method {
+        name: "archive-show",
+        doc: "Read one archived block: its header lines, a blank line, then its transcript.",
+        params: &[required(
+            "id",
+            Ty::Text,
+            "The record's id, from `archive-list`.",
+        )],
+        needs: Features::ARCHIVE,
+        returns: Returns::Text,
+        build: |req, a| {
+            Ok(Message::ArchiveShow {
+                req,
+                id: a.text("id")?,
+            })
+        },
+    },
+    Method {
         name: "reload-config",
         doc: "Have the server read its config file again: the `server` section's \
               defaults for new blocks. A file with problems is refused, naming each, and \
@@ -1428,7 +1505,7 @@ pub static CATALOG: &[Method] = &[
     },
     Method {
         name: "terminal.upload",
-        doc: "Send a file to the server's host, a chunk at a time, into a folder kept for \
+        doc: "Refused on an agent's (jailed) block. Send a file to the server's host, a chunk at a time, into a folder kept for \
               the block under the server's state directory. Each call appends `data` to \
               the file `name` at `offset`, which must be the bytes received so far (0 \
               starts the file again); the reply is then the bytes received, as a number. \

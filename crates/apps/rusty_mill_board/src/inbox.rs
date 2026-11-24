@@ -416,11 +416,36 @@ pub trait Escalations: Send + Sync {
     /// The [`plan`] errors, or [`InboxError::Host`].
     fn preview(&self, e: &Escalation, a: &Action) -> Result<DryRun, InboxError>;
 
-    /// Do `a` to `e`, answered by `by` (recorded in BBP's op id).
+    /// Do `a` to `e`, answered by `by` (recorded in BBP's op id). With `decision`, the
+    /// caller's id for this send is recorded too (as `<decision>.0`, so the action must be one
+    /// command, else [`InboxError::Invalid`]): a
+    /// repeat of the same send then replays instead of applying twice, and
+    /// [`Escalations::applied`] can say afterwards whether it was applied.
     ///
     /// # Errors
     /// The [`plan`] errors, or [`InboxError::Host`].
-    fn act(&self, e: &Escalation, a: &Action, by: &str) -> Result<Outcome, InboxError>;
+    fn act(
+        &self,
+        e: &Escalation,
+        a: &Action,
+        by: &str,
+        decision: Option<&str>,
+    ) -> Result<Outcome, InboxError>;
+
+    /// The rev BBP applied `decision` at (see [`Escalations::act`]), or `None` if its log
+    /// holds no such send. A send that drops work is one command, so this asks
+    /// for command 0 only.
+    ///
+    /// # Errors
+    /// [`InboxError::Host`] if the host cannot be read, including a host that
+    /// predates `bbp decision`.
+    fn applied(&self, task: &str, decision: &str) -> Result<Option<u64>, InboxError>;
+}
+
+/// The id command `n` of a send carries: `<decision>.<n>`.
+#[must_use]
+pub fn step_decision(decision: &str, n: usize) -> String {
+    format!("{decision}.{n}")
 }
 
 /// The `bbp human` commands that carry out `a` on `e`, in order (design §4).

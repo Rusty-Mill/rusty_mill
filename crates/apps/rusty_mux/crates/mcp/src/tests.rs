@@ -75,6 +75,13 @@ fn keys_are_sent_under_the_lease() {
 }
 
 #[test]
+fn archiving_a_block_is_marked_destructive() {
+    let hints = annotations(known("archive-block"));
+    assert_eq!(hints["destructiveHint"], true);
+    assert_eq!(annotations(known("archive-list"))["readOnlyHint"], true);
+}
+
+#[test]
 fn a_workspace_listing_is_made_under_the_lease() {
     // The server refuses it without the lease, so a fresh connection must
     // attach and take it first, as for typing.
