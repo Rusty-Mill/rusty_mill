@@ -194,26 +194,27 @@ fn remove(dir: &Path) {
 
 type Chore = Box<dyn FnOnce() + Send>;
 
+/// Most cleanups waiting for the cleanup thread. Past it a folder is left on
+/// disk (and logged) rather than deleted on the caller's thread.
+const CLEANUPS: usize = 1024;
+
 /// Runs `chore` on the one thread that does the folder cleanups, one after
-/// another, so closing many blocks never starts many threads.
+/// another, so closing many blocks never starts many threads and the queue
+/// never grows without bound. A chore that does not fit, or finds the thread
+/// gone, is dropped: never run inline, since the caller is the event loop.
 fn later(chore: Chore) {
     use std::sync::{OnceLock, mpsc};
-    static CLEANER: OnceLock<Mutex<mpsc::Sender<Chore>>> = OnceLock::new();
+    static CLEANER: OnceLock<mpsc::SyncSender<Chore>> = OnceLock::new();
     let tx = CLEANER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<Chore>();
+        let (tx, rx) = mpsc::sync_channel::<Chore>(CLEANUPS);
         std::thread::Builder::new()
             .name("mux-upload-cleanup".into())
             .spawn(move || rx.into_iter().for_each(|chore| chore()))
             .expect("the cleanup thread starts");
-        Mutex::new(tx)
+        tx
     });
-    let sent = tx
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .send(chore);
-    if let Err(gone) = sent {
-        // The cleaner cannot end while the process runs; if it did, do it here.
-        (gone.0)();
+    if let Err(e) = tx.try_send(chore) {
+        eprintln!("rusty-mux-server: upload cleanup skipped, the folder stays on disk: {e}");
     }
 }
 
@@ -287,11 +288,13 @@ fn check_offset(part: &Path, offset: u64) -> Result<(), String> {
     match offset {
         0 => Ok(()),
         _ if have == offset => Ok(()),
-        // Nothing under `part/` also means a file that was finished: the
-        // reply to its last chunk may be the one that was lost.
+        // Nothing under `part/` may mean a finished file whose reply was lost,
+        // or a partial that was evicted or cleared: the server cannot tell
+        // which, so the outcome is unknown and a blind retry is not safe.
         _ if have == 0 => Err(format!(
-            "the chunk starts at {offset} but nothing is being received: if this \
-             was the last chunk, the file is already in the folder"
+            "the chunk starts at {offset} but nothing is being received: the \
+             outcome is unknown (the file may be finished, or the partial was \
+             lost); check the folder before sending again"
         )),
         _ => Err(format!(
             "the chunk starts at {offset} but {have} bytes were received"
