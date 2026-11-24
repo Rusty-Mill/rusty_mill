@@ -810,6 +810,10 @@ impl<S: Store> Board<S> {
             // A stale fence can never apply later, so BBP's log settles the card. For any
             // other refusal only this send is known to have written nothing: another send
             // of the same decision shares the card and may commit before or after a re-read.
+            // Read the card again: a concurrent send may have filed an untracked one since.
+            let tracked = self
+                .remediation_card(by, &project, &decision)?
+                .is_some_and(|(_, tracked)| tracked);
             let settled = self.settle(
                 by,
                 source,
@@ -920,8 +924,8 @@ impl<S: Store> Board<S> {
 
     /// The Remediate card written for `decision` in `project`, and whether its send is
     /// tracked in BBP's log. It is found by its derived id, never by its tag: a tag anyone
-    /// can add to any card is no record. The id says which board wrote it: a card at the
-    /// legacy id was sent without a decision id, so BBP's log can say nothing of it.
+    /// can add to any card is no record. The id says whether its send is tracked: a card at
+    /// the legacy id was sent without a decision id, so BBP's log can say nothing of it.
     fn remediation_card(
         &self,
         by: &Actor,
@@ -931,9 +935,11 @@ impl<S: Store> Board<S> {
         if !by.may_work_in(project) {
             return Ok(None);
         }
+        // The legacy card wins: an untracked send is always preceded by its card, so while
+        // one exists a decision may have applied without an id, whatever else is filed.
         for (id, tracked) in [
-            (decision.tracked_id(project)?, true),
             (decision.card_id(project)?, false),
+            (decision.tracked_id(project)?, true),
         ] {
             if let Some(card) = self.store.get(id)?.filter(|c| c.project == project) {
                 return Ok(Some((card, tracked)));
@@ -947,6 +953,8 @@ impl<S: Store> Board<S> {
     /// the card rather than adding a second, and a different decision never reuses it.
     /// Its `remediate:` tag is for people only. A new card is `tracked` when the host can
     /// record the send's decision id; the second value says whether the card returned is.
+    /// Two retries that probe differently may each file a card: settlement reads the legacy
+    /// one first, so the decision is then never settled and neither card is closed.
     #[allow(clippy::too_many_arguments)]
     fn remediate(
         &self,

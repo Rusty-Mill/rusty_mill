@@ -977,3 +977,43 @@ fn a_drop_sent_to_a_host_that_cannot_track_it_is_never_closed_after_an_upgrade()
     assert!(remediate_cards(&board)[0].closed.is_none());
     assert_eq!(remediate_cards(&board).len(), 1);
 }
+
+/// Two retries of one decision probe the host with different outcomes, so one files the
+/// tracked card and the other the legacy one. The untracked send may have won the fence:
+/// the tracked card's retry must not conclude that nothing was dropped, whichever order
+/// the two cards were filed in, and neither card is closed.
+#[test]
+fn concurrent_retries_with_different_probes_never_close_either_card() {
+    let fake = Arc::new(Fake::with(vec![shipped()]));
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    // Retry A: the probe passes, its card is filed, and the host is then unreachable.
+    fake.fail_before.store(true, Ordering::SeqCst);
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    assert_eq!(remediate_cards(&board).len(), 1);
+    // Retry B: its probe failed, so it filed the legacy card and sent untracked, and won.
+    let legacy = legacy_card(&store);
+    fake.rows.lock().unwrap().clear();
+
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert_eq!(
+        out["recorded"]["card"]["id"],
+        legacy.id.to_string(),
+        "{out}"
+    );
+    assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
+}
+
+/// The other order: the legacy card exists first, so a retry whose probe passes adds no
+/// second card and sends no id.
+#[test]
+fn a_passing_probe_after_a_legacy_card_files_nothing_and_sends_no_id() {
+    let fake = Arc::new(Fake::with(vec![shipped()]));
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    legacy_card(&store);
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(remediate_cards(&board).len(), 1);
+    assert!(fake.decided.lock().unwrap().is_empty());
+}
