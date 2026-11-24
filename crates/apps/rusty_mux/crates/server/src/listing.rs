@@ -244,6 +244,14 @@ impl Workspace {
         )
     }
 
+    /// The held directory as a path only a child of this process resolves
+    /// to it: its inherited descriptor. For the spawn's `chdir`.
+    pub(crate) fn spawn_cwd(&self) -> Option<PathBuf> {
+        self.0
+            .as_ref()
+            .map(|r| PathBuf::from(format!("/proc/self/fd/{}", r.0)))
+    }
+
     /// `names` walked down from the held directory, each opened from its
     /// parent's descriptor with `O_NOFOLLOW`. The first descriptor is a new
     /// one for the same directory (`.`), so the held one is never closed.
@@ -293,6 +301,10 @@ struct Anchor;
 impl Workspace {
     pub(crate) fn open(_: &Path) -> Self {
         Self(None)
+    }
+
+    pub(crate) fn spawn_cwd(&self) -> Option<PathBuf> {
+        None
     }
 
     fn anchor(&self, _: &[&std::ffi::OsStr]) -> std::io::Result<(PathBuf, Anchor)> {

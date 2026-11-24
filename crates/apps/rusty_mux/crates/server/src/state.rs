@@ -2450,6 +2450,15 @@ impl State {
             .session();
         // The id is chosen first so the program starts knowing it.
         let block = BlockId::from_uuid(Uuid::new_v4());
+        // The program starts in the very directory the workspace holds: the
+        // spawn changes into the held descriptor, not the configured path, so
+        // the two cannot name different directories. Where it can't be held,
+        // the program starts at the path and the workspace stays unknown.
+        let workspace = listing::Workspace::open(std::path::Path::new(&config.cwd));
+        let mut spawn = config.clone();
+        if let Some(held) = workspace.spawn_cwd() {
+            spawn.cwd = held.into();
+        }
         let started = Started {
             shell: launch.program.is_none(),
             read_only: false,
@@ -2460,14 +2469,14 @@ impl State {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect(),
             cwd: config.cwd.to_string_lossy().into_owned(),
-            workspace: listing::Workspace::open(std::path::Path::new(&config.cwd)),
+            workspace,
         };
         let rt = self.start(Start {
             block,
             session,
             window,
             size,
-            config: &config,
+            config: &spawn,
             started,
             owned: launch.own,
             env: launch.env.as_deref(),
