@@ -90,6 +90,67 @@ pub(crate) fn parse(url: &str) -> Result<Link, Deny> {
     })
 }
 
+/// A web link to a port of the pane's own host (`localhost`, `127.0.0.1`
+/// or `[::1]`), which on a remote pane means the remote machine (C81).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Loopback {
+    pub scheme: &'static str,
+    pub port: u16,
+    /// What follows the authority: path, query and fragment.
+    pub rest: String,
+}
+
+impl Loopback {
+    /// The same link at `local` port of this machine.
+    pub(crate) fn at(&self, local: u16) -> String {
+        format!("{}://127.0.0.1:{local}{}", self.scheme, self.rest)
+    }
+}
+
+/// `url` as a [`Loopback`] link, if it is one: http or https, no userinfo,
+/// a loopback host by name or literal, and a port (the scheme's own when
+/// absent). Anything else, including `0.0.0.0`, is left to [`parse`].
+pub(crate) fn loopback(url: &str) -> Option<Loopback> {
+    if parse(url).is_err() {
+        return None;
+    }
+    let (scheme, rest) = match split_scheme(url)? {
+        (Scheme::Http, rest) => ("http", rest),
+        (Scheme::Https, rest) => ("https", rest),
+        _ => return None,
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    // A bracketed IPv6 literal holds colons itself: the port follows `]`.
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(_) => match authority.split_once(']') {
+            Some((inner, "")) => (format!("{inner}]"), None),
+            Some((inner, tail)) => (format!("{inner}]"), Some(tail.strip_prefix(':')?)),
+            None => return None,
+        },
+        None => match authority.split_once(':') {
+            Some((host, port)) => (host.to_owned(), Some(port)),
+            None => (authority.to_owned(), None),
+        },
+    };
+    let port = match port {
+        Some(p) => Some(p.parse::<u16>().ok().filter(|p| *p != 0)?),
+        None => None,
+    };
+    if !matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "[::1]"
+    ) {
+        return None;
+    }
+    let port = port.unwrap_or(if scheme == "https" { 443 } else { 80 });
+    Some(Loopback {
+        scheme,
+        port,
+        rest: tail.to_owned(),
+    })
+}
+
 /// Characters that draw as nothing or reorder text (bidi controls, zero
 /// width, soft hyphen, BOM): a link built from them reads as another one.
 fn is_invisible(c: char) -> bool {
@@ -528,6 +589,37 @@ mod tests {
             assert_eq!(p.verdict(&l), Verdict::Ask { can_trust: false }, "{u}");
         }
         assert_eq!(p.origins().count(), 0);
+    }
+
+    #[test]
+    fn loopback_links_name_their_port_and_rest() {
+        let l = loopback("http://localhost:5173/app?x=1#top").unwrap();
+        assert_eq!(
+            (l.scheme, l.port, l.rest.as_str()),
+            ("http", 5173, "/app?x=1#top")
+        );
+        assert_eq!(l.at(40000), "http://127.0.0.1:40000/app?x=1#top");
+        assert_eq!(loopback("https://LOCALHOST").unwrap().port, 443);
+        assert_eq!(loopback("http://127.0.0.1/").unwrap().port, 80);
+        assert_eq!(loopback("http://[::1]:3000").unwrap().port, 3000);
+    }
+
+    #[test]
+    fn other_hosts_and_odd_links_are_not_loopback() {
+        for url in [
+            "http://example.com:3000/",
+            "http://0.0.0.0:3000/",
+            "http://localhost.evil.com:3000/",
+            "http://user@localhost:3000/",
+            "http://localhost:0/",
+            "http://localhost:99999/",
+            "ftp://localhost:21/",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "http://localhost:3000/a b",
+        ] {
+            assert_eq!(loopback(url), None, "{url}");
+        }
     }
 
     #[test]

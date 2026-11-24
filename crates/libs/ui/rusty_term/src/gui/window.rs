@@ -59,7 +59,9 @@ use super::prefix::{self, Command};
 use super::render::{CpuRenderer, FloatLayer, PaneFrame, Renderer, Scene, SearchColors, blend};
 use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
-use super::source::{Act, Feed, Float, FloatAt, Listed, PaneIo, Remote, Show, Source, Tree};
+use super::source::{
+    Act, Feed, Float, FloatAt, Forwarded, Listed, PaneIo, Remote, Show, Source, Tree,
+};
 use super::strip::{self, Spot, StripState};
 use super::{link_policy, link_trust};
 use crate::backend::BackendHandle;
@@ -171,6 +173,8 @@ pub(crate) enum UserEvent {
     /// A folder listing the palette's browse asked for finished, under
     /// the number the palette gave it (gui-design D78).
     Listed(u64, Listed),
+    /// A port forward the source was asked for ([`Source::forward`]).
+    Forwarded(super::link_policy::Loopback, Forwarded),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -733,6 +737,9 @@ struct WindowState<'a> {
     overview: OverviewUi,
     /// The trusted link origins (C63, D69-D72).
     links: link_policy::Policy,
+    /// The (pane, remote port) forwards the user agreed to, for this
+    /// window's life (C81, D341).
+    forward_trust: std::collections::HashSet<(u64, u16)>,
     /// The effective config; refreshed on live reload so new tabs follow it.
     config: Config,
     /// The config file in effect, for the open shortcut + reload re-reads.
@@ -3050,6 +3057,11 @@ impl WindowState<'_> {
     /// other http(s) and other apps ask, everything else is refused with a
     /// notice. The one way a link reaches [`open_link`].
     fn follow_link(&mut self, url: &str) {
+        if let Some(key) = self.focused().filter(|k| self.source.forwards(*k))
+            && let Some(target) = link_policy::loopback(url)
+        {
+            return self.follow_forward(key, target);
+        }
         let link = match link_policy::parse(url) {
             Ok(link) => link,
             Err(why) => return self.refuse_link(why),
@@ -3057,6 +3069,63 @@ impl WindowState<'_> {
         match self.links.verdict(&link) {
             link_policy::Verdict::Open => self.launch_link(&link),
             link_policy::Verdict::Ask { can_trust } => self.ask_link(link, can_trust),
+        }
+    }
+
+    /// A loopback link in a remote pane (C81): forward its port, asking
+    /// the first time, then open the link at the local port.
+    fn follow_forward(&mut self, key: u64, target: link_policy::Loopback) {
+        if self.forward_trust.contains(&(key, target.port)) {
+            return self.start_forward(key, target);
+        }
+        let s = self.scale_factor as f32;
+        let width = self
+            .window
+            .as_ref()
+            .map_or(f32::MAX, |w| w.inner_size().width as f32);
+        let right = (self.mouse_pos.0 as f32 + confirm::LINK_WIDTH * s / 2.0)
+            .min(width)
+            .max(confirm::LINK_WIDTH * s);
+        let top = self.mouse_pos.1 as f32 + 12.0 * s;
+        self.confirm = Confirm::new(
+            Subject::Forward(key, target.clone()),
+            confirm::forward_copy(&target),
+            confirm::forward_buttons(),
+            (1, 0, confirm::LINK_WIDTH),
+            right,
+            top,
+            s,
+        );
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Ask the source to forward `target`'s port; the answer comes back as
+    /// [`UserEvent::Forwarded`].
+    fn start_forward(&mut self, key: u64, target: link_policy::Loopback) {
+        let proxy = self.proxy.clone();
+        self.source.forward(
+            key,
+            target.port,
+            Box::new(move |forwarded| {
+                let _ = proxy.send_event(UserEvent::Forwarded(target, forwarded));
+            }),
+        );
+    }
+
+    /// A forward the source was asked for is up, or is not: open the link
+    /// at its local port, or say why not.
+    fn forwarded(&mut self, target: &link_policy::Loopback, forwarded: Forwarded) {
+        match forwarded {
+            Ok(local) => match link_policy::parse(&target.at(local)) {
+                Ok(link) => self.launch_link(&link),
+                Err(why) => self.refuse_link(why),
+            },
+            Err(why) => self.show_notice(Some(super::source::Notice {
+                title: "Port not forwarded".to_owned(),
+                detail: why,
+            })),
         }
     }
 
@@ -6075,6 +6144,10 @@ impl WindowState<'_> {
     fn confirm_pick(&mut self, subject: Subject, n: usize) {
         match subject {
             Subject::Block(key) => self.source.act(Act::TakeOver(key)),
+            Subject::Forward(key, target) => {
+                self.forward_trust.insert((key, target.port));
+                self.start_forward(key, target);
+            }
             Subject::Link(link) => {
                 // Button 2 is "Always trust": remember the origin, but only in
                 // memory once the file is saved, so what the notice says holds.
@@ -7171,6 +7244,7 @@ impl<'a> App<'a> {
             palette_origin: None,
             overview: OverviewUi::new().ok_or("the interface font failed to parse")?,
             links: load_trust(),
+            forward_trust: std::collections::HashSet::new(),
             config: self.config.clone(),
             config_path: self.config_path.clone(),
             profile_override: self.profile_override.clone(),
@@ -7327,6 +7401,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::ClipboardRead(id, primary) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(id)) {
                     w.answer_clipboard_read(id, primary);
+                }
+            }
+            UserEvent::Forwarded(target, forwarded) => {
+                if let Some(w) = self.windows.first_mut() {
+                    w.forwarded(&target, forwarded);
                 }
             }
             UserEvent::Listed(ask, listed) => {

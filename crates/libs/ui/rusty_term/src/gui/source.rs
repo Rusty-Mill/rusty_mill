@@ -343,7 +343,27 @@ pub trait Source {
     fn list_dir(&self, _key: u64, _path: Option<String>, done: ListDone) {
         done(Err("this source lists no folders".into()));
     }
+    /// Whether the source can tunnel a loopback port of pane `key`'s host
+    /// to this machine (mux C81), so a `localhost` link in that pane opens
+    /// here. A source that can't leaves such links to the ordinary link
+    /// policy.
+    fn forwards(&self, _key: u64) -> bool {
+        false
+    }
+    /// Listens on this machine for connections to `port` of pane `key`'s
+    /// host and calls `done` once, from any thread, with the local port or
+    /// why not. A port already forwarded answers with its listener. Not
+    /// called when [`Source::forwards`] is `false`.
+    fn forward(&self, _key: u64, _port: u16, done: ForwardDone) {
+        done(Err("this source forwards no ports".into()));
+    }
 }
+
+/// The local port a forward listens on, or why there is none.
+pub type Forwarded = Result<u16, String>;
+
+/// What a source calls once with a forward's local port.
+pub type ForwardDone = Box<dyn FnOnce(Forwarded) + Send>;
 
 /// A folder listing's text, or why the host refused it.
 pub type Listed = Result<String, String>;
