@@ -974,7 +974,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_columns",
-            "The board's columns in display order ({id, label, kind}: kind backlog, queue (waits to be taken), work (claimed; leaving needs the claim), done or blocked) and the moves between them ({from, to, cap, gate}: the capability a move needs; a gate also needs admin). Any open card may move to blocked. `movement` says whether the moves are enforced or open (an admin's switch: any move but out of Done and through a gate is allowed, whatever the list says), and `note` says so in words; a move missing from the list is not thereby forbidden, but this tool does not authorize it: your role, project scope, claims, gates and the card's state still apply.",
+            "The board's columns in display order ({id, label, kind}: kind backlog, queue (waits to be taken), work (claimed; leaving needs the claim), done or blocked) and the moves between them ({from, to, cap, gate}: the capability a move needs; a gate also needs admin). Any open card may move to blocked. `movement` says whether the moves are enforced or open (an admin's switch: when open, the transition list is not enforced), and `note` says so in words; a move missing from the list is not thereby forbidden, but this tool does not authorize it: your role, project scope, claims, gates and the card's state still apply.",
             |b, _, _: Nothing| {
                 let rules = b.move_rules();
                 let mut out = json!(b.workflow());
@@ -1131,7 +1131,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_move",
-            "Move a card to a column (an id from `board_columns`). Needs the capability of that transition (`board_columns` lists them; a gate also needs admin); leaving a work column needs your claim. Any open card may be moved to blocked. While an admin has turned movement rules off, any move but out of Done and through a gate is allowed.",
+            "Move a card to a column (an id from `board_columns`). Needs the capability of that transition (`board_columns` lists them; a gate also needs admin); leaving a work column needs your claim. Any open card may be moved to blocked. While an admin has turned movement rules off, the transition list is not enforced; role, project scope, claims, gates and card state still apply, and Done stays final.",
             |b, i, a: MoveArgs| {
                 let who = acting(b, i, &a.who)?;
                 card(b.move_card(card_ref(b, &a.id)?, &a.to, &who)?)
