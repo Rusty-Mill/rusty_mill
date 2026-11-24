@@ -164,16 +164,20 @@ fn confined(root: &Workspace, rel: &str) -> Result<Held, String> {
     }
     let (read, anchor) = root.anchor(&names).map_err(|e| match e.kind() {
         std::io::ErrorKind::Unsupported => UNSUPPORTED.to_owned(),
-        _ => NOT_LISTED.to_owned(),
+        _ => {
+            // The reply names nothing; the cause (a missing directory, a
+            // link, EMFILE) is for the operator.
+            eprintln!(
+                "rusty-mux-server: workspace-list /{}: {e}",
+                names_joined(&names)
+            );
+            NOT_LISTED.to_owned()
+        }
     })?;
     let shown = if names.is_empty() {
         ".".to_owned()
     } else {
-        names
-            .iter()
-            .map(|n| n.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/")
+        names_joined(&names)
     };
     Ok(Held {
         read,
@@ -215,6 +219,11 @@ impl Workspace {
     pub(crate) fn is_known(&self) -> bool {
         self.0.is_some()
     }
+}
+
+fn names_joined(names: &[&std::ffi::OsStr]) -> String {
+    let parts: Vec<_> = names.iter().map(|n| n.to_string_lossy()).collect();
+    parts.join("/")
 }
 
 #[cfg(target_os = "linux")]

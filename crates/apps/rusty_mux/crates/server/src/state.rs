@@ -122,7 +122,6 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::FLOATS)
     .union(Features::TERMINAL_FIND)
     .union(Features::AGENT_META)
-    .union(Features::WORKSPACE)
     .union(Features::PORT_FORWARD)
     .union(UNIX_ONLY);
 
@@ -142,11 +141,13 @@ const SHOW_PERIOD: Duration = Duration::from_secs(1);
 /// Offered on Linux only: signal and release (C76) act on a Unix process
 /// group, and orch, their one client, runs there; the tailscale status
 /// event (C27) comes from a `tailscaled` this server asks on Linux, and
-/// `terminal.ports` (C80) reads the sockets from `/proc`.
+/// `terminal.ports` (C80) reads the sockets from `/proc`; the workspace
+/// call (D337) confines its walk with `openat`, which only Linux has here.
 #[cfg(target_os = "linux")]
 const UNIX_ONLY: Features = Features::SIGNAL_RELEASE
     .union(Features::TAILSCALE_STATUS)
-    .union(Features::PORTS);
+    .union(Features::PORTS)
+    .union(Features::WORKSPACE);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
 
@@ -2128,7 +2129,7 @@ impl State {
                 let root = rt
                     .started
                     .workspace()
-                    .ok_or("the workspace root is unknown, after a restart or on this platform")?
+                    .ok_or("the workspace root is unknown after a server restart")?
                     .clone();
                 let path = named.iter().find_map(|(n, v)| match (*n, v) {
                     ("path", Value::Text(p)) => Some(p.as_str()),
