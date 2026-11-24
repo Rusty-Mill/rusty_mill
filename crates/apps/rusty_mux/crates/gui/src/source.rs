@@ -540,6 +540,12 @@ impl Source for MuxSource {
         self.pane(key).is_some_and(|b| b.forwards)
     }
 
+    fn forwarded_port(&self, key: u64, port: u16) -> Option<u16> {
+        let block = self.pane(key)?;
+        let forwarder = lock(&block.forwarder);
+        forwarder.as_ref()?.ports.get(&port).copied()
+    }
+
     fn forward(&self, key: u64, port: u16, done: ForwardDone) {
         match self.pane(key) {
             Some(block) => block.forward(port, done),
@@ -1479,12 +1485,14 @@ struct ConnWriter(Arc<Block>, Arc<AtomicBool>);
 
 impl std::io::Write for ConnWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // A run that was stopped must not write through the connection that
-        // replaced the one it served.
+        // The check and the write are one step under the connection's lock,
+        // as is the swap of the connection (`Block::revive`), so a stopped
+        // run never writes through the connection that replaced its own.
+        let mut conn = lock(&self.0.conn);
         if self.1.load(Ordering::SeqCst) {
             return Err(std::io::ErrorKind::BrokenPipe.into());
         }
-        lock(&self.0.conn).write_raw(buf)?;
+        conn.write_raw(buf)?;
         Ok(buf.len())
     }
 
@@ -1563,7 +1571,13 @@ impl Block {
     /// asked for again if wanted, as silence may have lost it.
     fn revive(&self, opened: Opened) {
         *lock(&self.takeover) = opened.takeover;
-        *lock(&self.conn) = opened.writer;
+        {
+            // The runs of the old connection end before the new one is
+            // written to, under the writer's lock: no gap between them.
+            let mut conn = lock(&self.conn);
+            self.stop_forwards();
+            *conn = opened.writer;
+        }
         let old = std::mem::replace(&mut *lock(&self.stream), opened.stream);
         // The reader leaves the old connection once it ends.
         let _ = old.shutdown(Shutdown::Both);
@@ -1663,13 +1677,15 @@ impl Block {
             };
             // The run that listened may be gone, and another its replacement:
             // only its own forward counts.
+            // Answered under the lock, so a replacement cannot slip between
+            // the check and the answer.
             match lock(&block.forwarder).as_mut() {
                 Some(run) if Arc::ptr_eq(&run.stop, &generation) => {
                     run.ports.insert(port, local);
+                    done(Ok(local));
                 }
-                _ => return done(Err("the forward ended; try again".into())),
+                _ => done(Err("the forward ended; try again".into())),
             }
-            done(Ok(local));
         });
     }
 

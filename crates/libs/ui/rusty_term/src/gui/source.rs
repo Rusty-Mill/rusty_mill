@@ -357,6 +357,12 @@ pub trait Source {
     fn forward(&self, _key: u64, _port: u16, done: ForwardDone) {
         done(Err("this source forwards no ports".into()));
     }
+    /// The local port pane `key` forwards `port` on right now, if its
+    /// forward is still the one running: how a late answer is told from a
+    /// live one.
+    fn forwarded_port(&self, _key: u64, _port: u16) -> Option<u16> {
+        None
+    }
 }
 
 /// The local port a forward listens on, or why there is none.

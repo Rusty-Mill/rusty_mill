@@ -3196,6 +3196,14 @@ impl WindowState<'_> {
         if !self.forward_trust.contains(&(key, target.port)) {
             return;
         }
+        // The forward may have ended since it answered (the pane's connection
+        // was replaced): the link opens only on a forward that still runs.
+        let forwarded = forwarded.and_then(|local| {
+            match self.source.forwarded_port(key, target.port) == Some(local) {
+                true => Ok(local),
+                false => Err("the forward ended; click the link again".to_owned()),
+            }
+        });
         match forwarded {
             Ok(local) => match link_policy::parse(&target.at(local)) {
                 Ok(link) => self.launch_link(&link),
