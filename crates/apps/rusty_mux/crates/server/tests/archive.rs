@@ -120,12 +120,17 @@ fn a_held_block_is_archived_listed_shown_and_closed() {
     );
     assert!(!exited(&mut client, block), "the block closed");
 
-    let all = text(&client.answer(|req| Message::ArchiveList { req, card: None }));
+    let all = text(&client.answer(|req| Message::ArchiveList {
+        req,
+        card: None,
+        before: None,
+    }));
     let row: Vec<&str> = all.lines().next().expect("a row").split('\t').collect();
     assert_eq!(&row[2..], ["code:3", "no", "card-7", "good"], "{all}");
     let other = text(&client.answer(|req| Message::ArchiveList {
         req,
         card: Some("card-8".into()),
+        before: None,
     }));
     assert_eq!(other, "");
 
@@ -147,7 +152,11 @@ fn a_transcript_with_a_secret_marks_its_record_sensitive() {
     let block = held(&mut client, "echo password=hunter2hunter2");
     wait_exited(&mut client, block);
     archive(&mut client, block, "c");
-    let all = text(&client.answer(|req| Message::ArchiveList { req, card: None }));
+    let all = text(&client.answer(|req| Message::ArchiveList {
+        req,
+        card: None,
+        before: None,
+    }));
     assert!(all.contains("\tyes\t"), "{all}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -178,7 +187,11 @@ fn a_server_without_state_refuses_and_the_feature_is_needed() {
 
     let plain = Features::CHECKPOINT_V6.union(Features::INSPECT);
     let mut old = Client::connect_with(&socket, plain, None);
-    let reason = failed(&old.answer(|req| Message::ArchiveList { req, card: None }));
+    let reason = failed(&old.answer(|req| Message::ArchiveList {
+        req,
+        card: None,
+        before: None,
+    }));
     assert!(reason.contains("requires feature bits"), "{reason}");
 }
 

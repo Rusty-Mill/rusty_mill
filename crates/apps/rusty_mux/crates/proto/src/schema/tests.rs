@@ -345,6 +345,7 @@ fn optional_parameters_add_their_features_only_when_given() {
             "label",
             "why",
             "card",
+            "before",
             "trim",
             "unwrap",
             "vt",
