@@ -6,15 +6,15 @@ Status: plan, no code. Design is merged (gui-design D53-D58, `assets/html/lel.ht
 
 Read-only Let Em Loose tab: intent brief, claims map, decision inbox, per-claim spend. Inbox actions (Approve, Reject, Choose) go through the same host `bbp human` commands as the #595 inbox (`rusty_mill_board/src/bbp_cli.rs`, D35): displayed revision as `--rev` and `--fence`, `dry_run` first, a stale revision is refused and re-read, never retried. No push in v0. No BBP or orch change (D55).
 
-## Data source: PENDING (owner decision)
+## Data source: Mill Board HTTP API (Nano, 2026-11-24)
 
-`bbp` and the BBP log live on the orch host; rusty_term runs on the desktop as a mux client. Options asked of Nano:
+`bbp` and the BBP log live on the orch host; rusty_term runs on the desktop as a mux client. Nano chose (a) on a decision card in the project thread, 2026-11-24T08:07:40Z. Options were:
 
 - a) Mill Board HTTP API: inbox reuses `inbox_list`/`inbox_act`; claims, intent and spend need new read endpoints (public API change). Recommended: smallest, one writer path, same fence.
 - b) `bbp` over SSH or a mux block: waits on Windows `--ssh` (C79) and credentials.
 - c) A new mux `Features` call proxying read-only BBP views and the actions: larger protocol change.
 
-Slices 1-2 do not depend on the answer. Slices 4-6 need it for live data.
+The inbox reuses `inbox_list`/`inbox_act` with their revision fence and `dry_run`. Claims, intent and spend need new read endpoints on Mill Board wrapping `bbp`: a public API change that gets its own PR and owner gate before slices 2, 5 and 6 can show live data. Slice 1 does not depend on it.
 
 ## Types
 
