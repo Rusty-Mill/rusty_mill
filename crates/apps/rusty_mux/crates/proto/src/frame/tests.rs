@@ -556,6 +556,32 @@ fn every_message_round_trips() {
             id: 4,
             reason: None,
         },
+        Message::ArchiveBlock {
+            req: 31,
+            block,
+            card: Some("card-7".into()),
+            label: Some("good".into()),
+            why: None,
+        },
+        Message::ArchiveBlock {
+            req: 32,
+            block,
+            card: None,
+            label: None,
+            why: Some("done".into()),
+        },
+        Message::ArchiveList {
+            req: 33,
+            card: None,
+        },
+        Message::ArchiveList {
+            req: 34,
+            card: Some("card-7".into()),
+        },
+        Message::ArchiveShow {
+            req: 35,
+            id: "000000000001-abcdef12".into(),
+        },
     ];
     for message in messages {
         round_trip(message);

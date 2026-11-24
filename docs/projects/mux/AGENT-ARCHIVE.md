@@ -1,6 +1,6 @@
 # Archive dismissed agent blocks (card #1570)
 
-Status: design; archive and secrets accepted (handoff D339, Nano 2026-11-18). Export to remind-me is its own slice behind the owner gate. Source: Nano, voice, 2026-11-18 (remind-me mem_2faddab4, a decision; card #1570).
+Status: slice 1 built (C84: archive on dismiss, `archive-list`/`archive-show`); design; archive and secrets accepted (handoff D339, Nano 2026-11-18). Export to remind-me is its own slice behind the owner gate. Source: Nano, voice, 2026-11-18 (remind-me mem_2faddab4, a decision; card #1570).
 
 ## Lifecycle
 

@@ -28,6 +28,7 @@ use rusty_tokio::task::JoinHandle;
 use rusty_uuid::Uuid;
 
 use crate::Config;
+use crate::archive;
 use crate::checkpoint::validate_size;
 use crate::datagram::Registry;
 use crate::echo::Waiting;
@@ -123,6 +124,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_FIND)
     .union(Features::AGENT_META)
     .union(Features::PORT_FORWARD)
+    .union(Features::ARCHIVE)
     .union(UNIX_ONLY);
 
 /// What a float edit needs: floating takes a block out of the layout, as a
@@ -262,6 +264,8 @@ struct BlockRt {
     /// Its PTY was released (C76): read-only, with its program, if still
     /// running, left to its owner.
     released: bool,
+    /// How its program ended, if it did while this server watched.
+    exit: Option<ExitStatus>,
 }
 
 /// A block's running program: its PTY and the task reading it.
@@ -350,6 +354,7 @@ impl BlockRt {
             hold: false,
             agent: None,
             released: false,
+            exit: None,
         }
     }
 
@@ -1378,6 +1383,27 @@ impl State {
                 req,
                 self.require(client, Features::FOCUS, "move-focus")
                     .and_then(|()| done(self.mux.move_focus(window, toward))),
+            ),
+            M::ArchiveBlock {
+                req,
+                block,
+                card,
+                label,
+                why,
+            } => (
+                req,
+                self.require(client, Features::ARCHIVE, "archive-block")
+                    .and_then(|()| self.archive_block(client, block, card, label, why)),
+            ),
+            M::ArchiveList { req, card } => (
+                req,
+                self.require(client, Features::ARCHIVE, "archive-list")
+                    .and_then(|()| self.archive_list(client, req, card)),
+            ),
+            M::ArchiveShow { req, id } => (
+                req,
+                self.require(client, Features::ARCHIVE, "archive-show")
+                    .and_then(|()| self.archive_show(client, req, id)),
             ),
             M::ReloadConfig { req } => (
                 req,
@@ -2515,6 +2541,109 @@ impl State {
         })
     }
 
+    /// `archive-block` (C84): saves a block whose program is gone, then
+    /// closes it, for whoever may close it. The record is written first, so
+    /// a failed write leaves the block as it was.
+    fn archive_block(
+        &mut self,
+        client: ClientId,
+        block: BlockId,
+        card: Option<String>,
+        label: Option<String>,
+        why: Option<String>,
+    ) -> Result<Outcome, Refusal> {
+        let (card, label, why) = (
+            card.unwrap_or_default(),
+            label.unwrap_or_default(),
+            why.unwrap_or_default(),
+        );
+        for (name, text) in [("card", &card), ("label", &label), ("why", &why)] {
+            archive::check_text(name, text).map_err(|e| format!("archive-block: {e}"))?;
+        }
+        let state = self
+            .store
+            .as_ref()
+            .map(|store| store.dir().to_path_buf())
+            .ok_or("archive-block: this server keeps no state directory")?;
+        self.mux
+            .authorize_close(client, block)
+            .map_err(Refusal::from)?;
+        let rt = self
+            .blocks
+            .get(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        if rt.live.is_some() || rt.released {
+            return Err("archive-block: the block's program is still running".into());
+        }
+        let transcript = transcript(rt)?;
+        let by = self
+            .mux
+            .client(client)
+            .map_or_else(String::new, |c| c.principal().id().to_owned());
+        let when = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let id = format!("{when:012}-{}", &block.to_string()[..8]);
+        let exit = match rt.exit {
+            Some(ExitStatus::Code(n)) => format!("code:{n}"),
+            Some(ExitStatus::Signal(n)) => format!("signal:{n}"),
+            None => "unknown".to_owned(),
+        };
+        let record = archive::Record {
+            id: &id,
+            when,
+            exit: &exit,
+            card: &card,
+            label: &label,
+            why: &why,
+            by: &by,
+            block: &block.to_string(),
+            program: &one_line(&rt.started.program),
+            sensitive: archive::sensitive(&transcript),
+        };
+        archive::write(&state, &record, &transcript)
+            .map_err(|e| format!("archive-block: writing the record: {e}"))?;
+        self.mux.close_block(block).map_err(Refusal::from)?;
+        Ok(Outcome::Done(None))
+    }
+
+    /// The state directory, for a client that may read the archive: the
+    /// server's own account, or any client of a server one account uses.
+    fn archive_dir(&self, client: ClientId, what: &str) -> Result<PathBuf, Refusal> {
+        let asker = self.mux.client(client).ok_or("unknown client")?.principal();
+        if self.account.as_ref().is_some_and(|a| a.id() != asker.id()) {
+            return Err(
+                format!("{what}: only the server's own account may read the archive").into(),
+            );
+        }
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| format!("{what}: this server keeps no state directory"))?;
+        Ok(store.dir().to_path_buf())
+    }
+
+    fn archive_list(
+        &self,
+        client: ClientId,
+        req: u64,
+        card: Option<String>,
+    ) -> Result<Outcome, Refusal> {
+        let dir = self.archive_dir(client, "archive-list")?;
+        let text = archive::list(&dir, card.as_deref())
+            .map_err(|e| format!("archive-list: reading the archive: {e}"))?;
+        reply("archive-list", &[Message::Text { req, text }])
+    }
+
+    fn archive_show(&self, client: ClientId, req: u64, id: String) -> Result<Outcome, Refusal> {
+        let dir = self.archive_dir(client, "archive-show")?;
+        let text = archive::show(&dir, &id).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => format!("archive-show: no record {id}"),
+            _ => format!("archive-show: reading the record: {e}"),
+        })?;
+        reply("archive-show", &[Message::Text { req, text }])
+    }
+
     /// Where a block's program is, for `rusty-mux-ctl` run inside it.
     fn block_env(
         &self,
@@ -3032,6 +3161,9 @@ impl State {
         {
             return;
         }
+        if let Some(rt) = self.blocks.get_mut(&block) {
+            rt.exit = status;
+        }
         let held = self.blocks.get(&block).is_some_and(|rt| rt.hold);
         if held {
             return self.flush();
@@ -3412,6 +3544,42 @@ fn capture(named: &[(&str, Value)]) -> terminal::Capture {
 
 /// `terminal.history`: the spooled lines `named` asks for, as
 /// `terminal.format` would show them in `grid`, the block's.
+/// `rt`'s history past its scrollback and its screen, as one text, or why
+/// it is too long to archive.
+fn transcript(rt: &BlockRt) -> Result<String, Refusal> {
+    let capture = terminal::Capture {
+        history: u32::MAX,
+        trim: true,
+        unwrap: false,
+        vt: false,
+    };
+    let past = match &rt.spool {
+        Some(spool) => {
+            let read = spool
+                .read(0, spool.lines())
+                .map_err(|e| format!("archive-block: reading the history: {e}"))?;
+            format_history(&read, &rt.grid, capture, archive::MAX_TRANSCRIPT)?
+        }
+        None => String::new(),
+    };
+    let screen = terminal::format(&rt.grid, capture, archive::MAX_TRANSCRIPT)
+        .ok_or("archive-block: the transcript is too long to archive")?;
+    if past.is_empty() {
+        return Ok(screen);
+    }
+    if past.len() + screen.len() >= archive::MAX_TRANSCRIPT {
+        return Err("archive-block: the transcript is too long to archive".into());
+    }
+    Ok(format!("{past}\n{screen}"))
+}
+
+/// `text` with anything that would break a header line made a space.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 fn history(spool: Option<&Spool>, grid: &Grid, named: &[(&str, Value)]) -> Result<String, Refusal> {
     let spool = spool.ok_or(
         "no history is kept past this block's scrollback: the server keeps no state, \
