@@ -25,6 +25,9 @@ pub struct MergedPr {
     pub url: String,
     /// Its body (empty when none).
     pub body: String,
+    /// Its author may merge in this repository (owner, member or collaborator). The body is
+    /// read as it is now, so only a trusted author's `Closes card #N` may close a card.
+    pub trusted: bool,
 }
 
 /// What one repository read returned.
@@ -321,7 +324,11 @@ pub fn scan(
             if let Some(card) = by_number.get(&n).filter(|c| ours(c)) {
                 note(
                     card,
-                    if closes { Why::Marker } else { Why::Mention },
+                    if closes && pr.trusted {
+                        Why::Marker
+                    } else {
+                        Why::Mention
+                    },
                     &pr.repo,
                     &pr.url,
                 );
@@ -356,7 +363,8 @@ fn watcher(project: &str) -> Actor {
 /// not a parent) and tried once: a card that changed since the scan, or that
 /// [`Card::closed_by_merge`] refuses (blocked, parked, gated), stays listed for the next run
 /// or for a person. A card with only weaker links is never touched.
-fn close_marked(board: &Shared, cards: &[Card], found: &[MergedOpen]) {
+fn close_marked(board: &Shared, cards: &[Card], found: &[MergedOpen]) -> BTreeSet<Uuid> {
+    let mut closed = BTreeSet::new();
     let by_id: HashMap<Uuid, &Card> = cards.iter().map(|c| (c.id, c)).collect();
     for o in found.iter().filter(|o| o.why == Why::Marker) {
         let (Some(pr), Some(card)) = (
@@ -367,11 +375,17 @@ fn close_marked(board: &Shared, cards: &[Card], found: &[MergedOpen]) {
         };
         let actor = watcher(&card.project);
         match board.close_merged(o.id, card.rev, &pr.url, &pr.repo, &actor) {
-            Ok(_) => rusty_log::info!(card = ?o.number, pr = %pr.url, "closed by merge"),
-            Err(BoardError::Refused(_) | BoardError::Terminal | BoardError::Conflict) => {}
+            Ok(_) => {
+                rusty_log::info!(card = ?o.number, pr = %pr.url, "closed by merge");
+                closed.insert(o.id);
+            }
+            Err(e @ (BoardError::Refused(_) | BoardError::Terminal | BoardError::Conflict)) => {
+                rusty_log::debug!(card = ?o.number, pr = %pr.url, reason = %e, "merge close skipped");
+            }
             Err(e) => rusty_log::warn!(card = ?o.number, error = %e, "merge close failed"),
         }
     }
+    closed
 }
 
 /// One watch run: read the recently merged pull requests of every registered GitHub
@@ -417,11 +431,13 @@ pub fn watch(board: &Shared, pulls: &dyn MergedPulls, close: bool) -> Result<usi
             .filter_map(|r| projects.github_of(r).map(str::to_owned))
             .collect()
     };
-    let found = scan(&cards, &merged, &github_of);
-    if close {
-        close_marked(board, &cards, &found);
-    }
+    let mut found = scan(&cards, &merged, &github_of);
     let n = found.len();
+    if close {
+        // A card just closed is no longer open: do not list it until the next run.
+        let closed = close_marked(board, &cards, &found);
+        found.retain(|o| !closed.contains(&o.id));
+    }
     board.set_merged_open(found, truncated, !failed.is_empty());
     Ok(n)
 }
@@ -443,6 +459,7 @@ mod tests {
 
     fn pr(n: u64, body: &str) -> MergedPr {
         MergedPr {
+            trusted: true,
             repo: "o/r".to_owned(),
             url: format!("https://github.com/o/r/pull/{n}"),
             body: body.to_owned(),
@@ -684,7 +701,8 @@ mod tests {
         watch(b, &recent(vec![pr(7, body)], false), true)
     }
 
-    fn two_cards() -> (Shared, Actor, Card, u64) {
+    /// A board with one open card in project `p`: the board, a human actor, the card, its number.
+    fn one_card() -> (Shared, Actor, Card, u64) {
         let b = board();
         let who = b.roles().actor("nano", "human").expect("role");
         let card = b.add_in(&who, "p", "work", "", vec![]).expect("card");
@@ -694,7 +712,7 @@ mod tests {
 
     #[test]
     fn a_marker_closes_the_card_with_evidence_a_comment_and_no_claim() {
-        let (b, who, card, n) = two_cards();
+        let (b, who, card, n) = one_card();
         b.move_card(card.id, &Column::READY, &who).expect("ready");
         b.move_card(card.id, &Column::BUILDING, &who)
             .expect("building");
@@ -719,7 +737,7 @@ mod tests {
 
     #[test]
     fn weaker_links_and_earlier_prs_never_close() {
-        let (b, who, card, n) = two_cards();
+        let (b, who, card, n) = one_card();
         let by_evidence = b
             .add_evidence(card.id, &["https://github.com/o/r/pull/7".into()], &who)
             .expect("evidence");
@@ -733,7 +751,7 @@ mod tests {
 
     #[test]
     fn without_the_flag_a_marker_only_lists() {
-        let (b, _, card, n) = two_cards();
+        let (b, _, card, n) = one_card();
         let body = format!("Closes card #{n}");
         assert_eq!(watch(&b, &recent(vec![pr(7, &body)], false), false), Ok(1));
         assert_eq!(b.get(card.id).expect("card").column, Column::BACKLOG);
@@ -741,7 +759,7 @@ mod tests {
 
     #[test]
     fn blocked_parked_and_parent_cards_are_listed_not_closed() {
-        let (b, who, blocked, n_blocked) = two_cards();
+        let (b, who, blocked, n_blocked) = one_card();
         b.move_card(blocked.id, &Column::BLOCKED, &who)
             .expect("blocked");
         let parked = b.add_in(&who, "p", "parked", "", vec![]).expect("card");
@@ -760,6 +778,54 @@ mod tests {
         for id in [blocked.id, parked.id, parent.id] {
             assert_ne!(b.get(id).expect("card").column, Column::DONE);
         }
+    }
+
+    #[test]
+    fn a_marker_from_an_untrusted_author_is_only_a_mention() {
+        let (b, _, card, n) = one_card();
+        let outsider = MergedPr {
+            trusted: false,
+            ..pr(7, &format!("Closes card #{n}"))
+        };
+        assert_eq!(watch(&b, &recent(vec![outsider], false), true), Ok(1));
+        assert_eq!(b.get(card.id).expect("card").column, Column::BACKLOG);
+        let listed = b.metrics(|_| true).expect("metrics").merged_open;
+        assert_eq!(listed[0].why, Why::Mention);
+    }
+
+    #[test]
+    fn a_closed_card_is_not_listed_again_until_the_next_run() {
+        let (b, _, card, n) = one_card();
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        assert_eq!(b.get(card.id).expect("card").column, Column::DONE);
+        assert!(b.metrics(|_| true).expect("metrics").merged_open.is_empty());
+    }
+
+    #[test]
+    fn a_card_behind_a_gate_is_listed_not_closed() {
+        let (b, who, card, n) = one_card();
+        let mut flow = serde_json::to_value(b.workflow()).expect("flow");
+        for t in flow["transitions"].as_array_mut().expect("moves") {
+            if t["to"] == "done" {
+                t["gate"] = true.into();
+            }
+        }
+        let b = b.with_workflow(serde_json::from_value(flow).expect("gated flow"));
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        assert_ne!(b.get(card.id).expect("card").column, Column::DONE);
+        let _ = who;
+    }
+
+    #[test]
+    fn a_done_card_is_not_closed_again() {
+        let (b, who, card, _) = one_card();
+        b.close(card.id, crate::domain::CloseReason::Superseded, None, &who)
+            .expect("closed");
+        let done = b.get(card.id).expect("card");
+        assert!(matches!(
+            b.close_merged(done.id, done.rev, PR, "o/r", &watcher("p")),
+            Err(BoardError::Terminal)
+        ));
     }
 
     const PR: &str = "https://github.com/o/r/pull/7";
@@ -884,7 +950,7 @@ mod tests {
 
     #[test]
     fn the_write_rechecks_the_card_and_never_retries_a_stale_match() {
-        let (b, who, card, _) = two_cards();
+        let (b, who, card, _) = one_card();
         let watcher = watcher("p");
         // Edited since the scan: the revision fence refuses, the card is untouched.
         let stale = card.rev;
@@ -917,7 +983,7 @@ mod tests {
         ));
         assert_eq!(b.get(card.id).expect("card").column, Column::BACKLOG);
         // And when everything holds, it commits once.
-        let (b, _, card, _) = two_cards();
+        let (b, _, card, _) = one_card();
         let done = b
             .close_merged(card.id, card.rev, PR, "o/r", &watcher)
             .expect("closed");

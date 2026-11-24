@@ -145,6 +145,41 @@ struct RawClosed {
     html_url: String,
     body: Option<String>,
     merged_at: Option<String>,
+    author_association: Option<String>,
+    base: Option<RawBase>,
+}
+
+#[derive(Deserialize)]
+struct RawBase {
+    #[serde(rename = "ref")]
+    branch: String,
+    repo: Option<RawBaseRepo>,
+}
+
+#[derive(Deserialize)]
+struct RawBaseRepo {
+    default_branch: String,
+}
+
+impl RawClosed {
+    /// Merged into the repository's default branch: a merge into a feature branch has not shipped.
+    fn shipped(&self) -> bool {
+        self.merged_at.is_some()
+            && self.base.as_ref().is_some_and(|b| {
+                b.repo
+                    .as_ref()
+                    .is_some_and(|r| r.default_branch == b.branch)
+            })
+    }
+
+    /// Written by someone who may merge here. The body is read as it is now, so an edit after
+    /// the merge counts: only a trusted author's text may close a card.
+    fn trusted(&self) -> bool {
+        matches!(
+            self.author_association.as_deref(),
+            Some("OWNER" | "MEMBER" | "COLLABORATOR")
+        )
+    }
 }
 
 impl MergedPulls for GithubMerged {
@@ -167,9 +202,10 @@ impl MergedPulls for GithubMerged {
             let n = raw.len();
             out.prs.extend(
                 raw.into_iter()
-                    .filter(|p| p.merged_at.is_some())
+                    .filter(RawClosed::shipped)
                     .map(|p| MergedPr {
                         repo: slug.to_owned(),
+                        trusted: p.trusted(),
                         url: p.html_url,
                         body: p.body.unwrap_or_default(),
                     }),
@@ -430,9 +466,11 @@ mod tests {
     fn recent_merged_keeps_merged_pulls_only() {
         let (base, server) = serve(&[(
             200,
-            r#"[{"html_url":"https://github.com/o/r/pull/1","body":"Closes card #5","merged_at":"2026-11-20T00:00:00Z"},
+            r#"[{"html_url":"https://github.com/o/r/pull/1","body":"Closes card #5","merged_at":"2026-11-20T00:00:00Z","base":{"ref":"main","repo":{"default_branch":"main"}},"author_association":"MEMBER"},
                 {"html_url":"https://github.com/o/r/pull/2","body":null,"merged_at":null},
-                {"html_url":"https://github.com/o/r/pull/3","body":null,"merged_at":"2026-11-21T00:00:00Z"}]"#,
+                {"html_url":"https://github.com/o/r/pull/3","body":null,"merged_at":"2026-11-21T00:00:00Z","base":{"ref":"main","repo":{"default_branch":"main"}},"author_association":"NONE"},
+                {"html_url":"https://github.com/o/r/pull/4","body":"b","merged_at":"2026-11-22T00:00:00Z","base":{"ref":"feature","repo":{"default_branch":"main"}},"author_association":"OWNER"},
+                {"html_url":"https://github.com/o/r/pull/5","body":"b","merged_at":"2026-11-22T00:00:00Z","author_association":"OWNER"}]"#,
         )]);
         let forge = GithubMerged::new(&base, "hunter2").expect("client");
         let recent = forge.recent_merged("o/r").expect("merged");
@@ -449,9 +487,15 @@ mod tests {
         assert_eq!(got[0].body, "Closes card #5");
         assert_eq!(got[0].repo, "o/r");
         assert!(got[1].body.is_empty());
+        // Pull 4 merged into a feature branch and pull 5 has no base: neither shipped. Only
+        // a member, owner or collaborator is trusted; the author of pull 3 is not.
+        assert_eq!((got[0].trusted, got[1].trusted), (true, false));
         assert!(forge.recent_merged("not a slug").is_err());
         assert!(server.join().expect("server")[0].starts_with("GET /repos/o/r/pulls?state=closed"));
     }
+
+    const BASE: &str =
+        r#","base":{"ref":"main","repo":{"default_branch":"main"}},"author_association":"MEMBER""#;
 
     fn page(n: usize, merged: bool) -> String {
         let merged_at = if merged {
@@ -461,7 +505,7 @@ mod tests {
         };
         let items: Vec<String> = (0..n)
             .map(|i| {
-                format!(r#"{{"html_url":"https://github.com/o/r/pull/{i}","body":"b","merged_at":{merged_at}}}"#)
+                format!(r#"{{"html_url":"https://github.com/o/r/pull/{i}","body":"b","merged_at":{merged_at}{BASE}}}"#)
             })
             .collect();
         format!("[{}]", items.join(","))

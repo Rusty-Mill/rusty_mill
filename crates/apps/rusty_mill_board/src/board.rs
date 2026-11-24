@@ -1922,7 +1922,9 @@ impl<S: Store> Board<S> {
                 "the pull request's repository is not the card's".into(),
             ));
         }
-        if self.cards()?.iter().any(|c| c.parent == Some(id)) {
+        // `cards_in`, not `cards`: a second read of the workflow lock could queue behind a
+        // waiting writer while this holds the link gate.
+        if self.cards_in(&flow)?.iter().any(|c| c.parent == Some(id)) {
             return Err(BoardError::Refused(
                 "a parent closes with its children".into(),
             ));

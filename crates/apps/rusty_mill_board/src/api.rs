@@ -139,6 +139,19 @@ pub(crate) fn acting(
     identity: Option<&Identity>,
     who: &Who,
 ) -> Result<Actor, BoardError> {
+    let actor = acting_as(b, identity, who)?;
+    // The board's own writers sign history under these names; a caller never may (an
+    // `/instance` label included), or `card_unclose` could not tell them apart.
+    if RESERVED_ACTORS.contains(&actor.name.split('/').next().unwrap_or_default()) {
+        return Err(BoardError::Invalid("that actor name is the board's own"));
+    }
+    Ok(actor)
+}
+
+/// Names of the board's own writers: the merge watch and the GitHub sync.
+const RESERVED_ACTORS: [&str; 2] = [crate::mergewatch::ACTOR, "github-sync"];
+
+fn acting_as(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Actor, BoardError> {
     match identity {
         Some(i) if i.connector => {
             let (Some(id), Some(key)) = (who.agent_id.as_deref(), who.agent_key.as_deref()) else {
@@ -2501,6 +2514,27 @@ mod tests {
                 "{op} stays with Close"
             );
         }
+    }
+
+    #[test]
+    fn the_boards_own_writers_are_not_nameable() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        for name in ["merge-watch", "github-sync", "merge-watch/x"] {
+            let who = Who {
+                actor: Some(name.into()),
+                role: Some("human".into()),
+                agent_id: None,
+                agent_key: None,
+            };
+            assert!(acting(&board, None, &who).is_err(), "{name}");
+        }
+        let nano = Who {
+            actor: Some("nano".into()),
+            role: Some("human".into()),
+            agent_id: None,
+            agent_key: None,
+        };
+        assert!(acting(&board, None, &nano).is_ok());
     }
 
     #[test]
