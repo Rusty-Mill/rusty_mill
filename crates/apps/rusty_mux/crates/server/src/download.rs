@@ -221,7 +221,7 @@ fn read_linux(
 mod refusal_tests {
     #[test]
     fn nothing_is_read_where_the_opened_file_cannot_be_checked() {
-        let err = super::read(None, "f", 0, None, &Keep::default()).unwrap_err();
+        let err = super::read(None, "f", 0, None, &super::Keep::default()).unwrap_err();
         assert!(err.contains("not supported"), "{err}");
     }
 }
