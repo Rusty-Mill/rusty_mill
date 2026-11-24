@@ -1435,7 +1435,9 @@ pub static CATALOG: &[Method] = &[
               With `done` the file is committed and the reply is its absolute path. `name` \
               is cleaned: a folder part, control and invisible format characters are \
               dropped. A chunk is at most 1 MiB and a block keeps 2 GiB, the oldest files \
-              removed first; a file over that is refused. The folder goes with the block. \
+              removed first, counted before each chunk is written, unfinished files too; a file \
+              over that is refused. At most 16 files are unfinished at once, and one untouched \
+              for 10 minutes is cleared by the next new file. The folder goes with the block. \
               Needs the lease and a server with a state directory.",
         params: &[
             BLOCK,
