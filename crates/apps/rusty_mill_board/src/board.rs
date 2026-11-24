@@ -806,24 +806,25 @@ impl<S: Store> Board<S> {
         // Only a send this board can track later carries an id: a card from before ids
         // (`tracked` false) may have been applied without one, so it is sent as it was.
         let id = tracked.then(|| card.id.to_string());
-        let outcome = source
-            .act(&e, action, &answerer(&by.name), id.as_deref())
-            .map_err(|err| match inbox_error(err) {
-                BoardError::Storage(why) => BoardError::Storage(format!(
-                    "{why}; its Remediate card {} was written first, so retry to reconcile",
-                    card.label()
-                )),
-                other => other,
-            })?;
-        // A host rolled back between the probe and the send ignores `--decision`: if the
-        // log does not show the id of a send that committed, nothing about it is provable,
-        // so the legacy card is filed too (and from then on decides).
-        if let (Outcome::Done, Some(sent)) = (&outcome, &id)
-            && !matches!(source.applied(&e.task, sent), Ok(Some(_)))
-        {
-            rusty_log::warn!(card = %card.id, "a committed send is not in BBP's log under its id: marking it untracked");
+        let sent = source.act(&e, action, &answerer(&by.name), id.as_deref());
+        // A host rolled back between the probe and the send ignores `--decision`. Whether it
+        // committed is unknown after a lost answer, so unless the log shows the id, nothing
+        // about this send is provable and the legacy card is filed too (it then decides).
+        let unproven = id.as_ref().is_some_and(|sent_id| {
+            let committed = matches!(sent, Ok(Outcome::Done) | Err(_));
+            committed && !matches!(source.applied(&e.task, sent_id), Ok(Some(_)))
+        });
+        if unproven {
+            rusty_log::warn!(card = %card.id, "a send is not in BBP's log under its id: marking it untracked");
             self.remediate(by, &project, &e, &decision, &dropped, &dry, false)?;
         }
+        let outcome = sent.map_err(|err| match inbox_error(err) {
+            BoardError::Storage(why) => BoardError::Storage(format!(
+                "{why}; its Remediate card {} was written first, so retry to reconcile",
+                card.label()
+            )),
+            other => other,
+        })?;
         if let Outcome::Refused { step: 0, code, .. } = &outcome {
             // A stale fence can never apply later, so BBP's log settles the card. For any
             // other refusal only this send is known to have written nothing: another send

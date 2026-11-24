@@ -35,6 +35,8 @@ struct Fake {
     winner_is_same_decision: bool,
     /// Fail before the host is reached: nothing is applied or recorded.
     fail_before: AtomicBool,
+    /// The next send is refused at step 0 without writing anything (a tracked card stays).
+    refuse_next: AtomicBool,
     /// The host predates `bbp decision`.
     old_host: AtomicBool,
     /// The host ignores the decision id it is sent (rolled back between probe and send).
@@ -103,6 +105,13 @@ impl Escalations for Fake {
     ) -> Result<Outcome, InboxError> {
         if self.fail_before.load(Ordering::SeqCst) {
             return Err(InboxError::Host("connection refused".into()));
+        }
+        if self.refuse_next.swap(false, Ordering::SeqCst) {
+            return Ok(Outcome::Refused {
+                step: 0,
+                code: "dep_closed".into(),
+                detail: "a dependency closed".into(),
+            });
         }
         let steps = plan(e, a)?;
         self.planned.lock().unwrap().push(
@@ -812,8 +821,8 @@ fn a_lost_answer_that_was_not_applied_closes_its_card() {
     let (store, down) = fresh();
     let board = board_over(&store, &down, &fake, true);
     // The card is written first, then the host cannot be reached.
-    fake.fail_before.store(true, Ordering::SeqCst);
-    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    fake.refuse_next.store(true, Ordering::SeqCst);
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
     assert!(remediate_cards(&board)[0].closed.is_none());
     // Someone else resolved the escalation meanwhile.
     fake.rows.lock().unwrap().clear();
@@ -834,8 +843,8 @@ fn a_retry_at_a_stale_rev_settles_the_card() {
     let fake = Arc::new(Fake::with(vec![shipped()]));
     let (store, down) = fresh();
     let board = board_over(&store, &down, &fake, true);
-    fake.fail_before.store(true, Ordering::SeqCst);
-    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    fake.refuse_next.store(true, Ordering::SeqCst);
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
     fake.rows.lock().unwrap()[0].rev = 9;
 
     let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
@@ -995,8 +1004,8 @@ fn concurrent_retries_with_different_probes_never_close_either_card() {
     let (store, down) = fresh();
     let board = board_over(&store, &down, &fake, true);
     // Retry A: the probe passes, its card is filed, and the host is then unreachable.
-    fake.fail_before.store(true, Ordering::SeqCst);
-    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    fake.refuse_next.store(true, Ordering::SeqCst);
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
     assert_eq!(remediate_cards(&board).len(), 1);
     // Retry B: its probe failed, so it filed the legacy card and sent untracked, and won.
     let legacy = legacy_card(&store);
@@ -1037,8 +1046,8 @@ fn a_host_rolled_back_after_a_tracked_card_never_closes_it() {
     });
     let (store, down) = fresh();
     let board = board_over(&store, &down, &fake, true);
-    fake.fail_before.store(true, Ordering::SeqCst); // the first try never reaches BBP
-    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    fake.refuse_next.store(true, Ordering::SeqCst); // the first try never reaches BBP
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
     assert_eq!(remediate_cards(&board).len(), 1);
 
     fake.fail_before.store(false, Ordering::SeqCst);
@@ -1055,6 +1064,27 @@ fn a_host_rolled_back_after_a_tracked_card_never_closes_it() {
     );
 
     fake.old_host.store(false, Ordering::SeqCst); // upgraded again
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
+}
+
+/// The same when the answer is lost: the send may have committed without its id, so the board
+/// cannot tell and files the legacy card, and a retry never settles it as "not applied".
+#[test]
+fn a_lost_answer_whose_id_is_not_in_the_log_is_marked_untracked() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        ignore_id: AtomicBool::new(true),
+        lose_answer: AtomicBool::new(true),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    assert_eq!(remediate_cards(&board).len(), 2, "tracked and legacy cards");
+
+    fake.lose_answer.store(false, Ordering::SeqCst);
     let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
     assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
     assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
