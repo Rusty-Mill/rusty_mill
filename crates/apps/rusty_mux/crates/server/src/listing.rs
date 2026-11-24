@@ -143,14 +143,15 @@ struct Held {
 /// The refusal for any path that cannot be listed under the workspace. It
 /// names nothing outside the workspace, so it cannot tell a client what is
 /// out there (a link out, a missing directory and a file all read alike).
+const UNSUPPORTED: &str = "the workspace explorer is not available on this platform yet";
+
 const NOT_LISTED: &str = "that directory cannot be listed in the workspace";
 
 /// `rel` under `root` (D337): its components must be plain names, each a real
 /// directory, never a link. On Linux every component is opened from its
 /// parent's descriptor with `O_NOFOLLOW` and the listing reads that
 /// descriptor, so nothing swapped into the tree after the check is followed.
-/// Elsewhere each component is checked with `symlink_metadata` first, which
-/// stops a link already in place but not a local process racing the check.
+/// Elsewhere the call is refused: no atomic confinement exists there yet.
 fn confined(root: &Path, rel: &str) -> Result<Held, String> {
     let mut names = Vec::new();
     for part in Path::new(rel).components() {
@@ -160,7 +161,10 @@ fn confined(root: &Path, rel: &str) -> Result<Held, String> {
             _ => return Err("the path is outside the workspace".into()),
         }
     }
-    let (read, anchor) = anchor(root, &names).map_err(|_| NOT_LISTED.to_owned())?;
+    let (read, anchor) = anchor(root, &names).map_err(|e| match e.kind() {
+        std::io::ErrorKind::Unsupported => UNSUPPORTED.to_owned(),
+        _ => NOT_LISTED.to_owned(),
+    })?;
     let shown = if names.is_empty() {
         ".".to_owned()
     } else {
@@ -216,19 +220,14 @@ fn anchor(root: &Path, names: &[&std::ffi::OsStr]) -> std::io::Result<(PathBuf, 
     Ok((PathBuf::from(format!("/proc/self/fd/{fd}")), held))
 }
 
+/// Only Linux has the descriptor walk, so elsewhere the call fails closed
+/// rather than offer a confinement a racing process could beat.
 #[cfg(not(target_os = "linux"))]
 struct Anchor;
 
 #[cfg(not(target_os = "linux"))]
-fn anchor(root: &Path, names: &[&std::ffi::OsStr]) -> std::io::Result<(PathBuf, Anchor)> {
-    let mut dir = fs::canonicalize(root)?;
-    for name in names {
-        dir.push(name);
-        if !fs::symlink_metadata(&dir)?.is_dir() {
-            return Err(std::io::ErrorKind::InvalidInput.into());
-        }
-    }
-    Ok((dir, Anchor))
+fn anchor(_: &Path, _: &[&std::ffi::OsStr]) -> std::io::Result<(PathBuf, Anchor)> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 /// The listing text of the directory at `read`, headed by `shown`.
@@ -381,6 +380,7 @@ mod tests {
         assert!(gate.take().is_ok());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_workspace_listing_stays_under_its_root() {
         let dir = scratch("root");
@@ -405,6 +405,7 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_refusal_names_nothing_outside_the_workspace() {
         let dir = scratch("scope");
@@ -419,7 +420,7 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_link_is_not_followed_in_a_workspace() {
         let dir = scratch("rootlink");
@@ -440,6 +441,15 @@ mod tests {
             let reason = list(Some(root), Some(link), Some(root)).unwrap_err();
             assert_eq!(reason, NOT_LISTED, "{link}");
         }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn a_workspace_listing_is_refused_where_it_cannot_be_confined() {
+        let dir = scratch("unsupported");
+        let root = dir.to_str().unwrap();
+        assert_eq!(list(Some(root), None, Some(root)).unwrap_err(), UNSUPPORTED);
         fs::remove_dir_all(dir).unwrap();
     }
 

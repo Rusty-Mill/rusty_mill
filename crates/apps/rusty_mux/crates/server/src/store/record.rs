@@ -26,9 +26,10 @@ pub(crate) struct Started {
     /// Its last known working directory.
     pub(crate) cwd: String,
     /// The directory it was launched in: the root of its workspace (D337),
-    /// kept as the program moves on and across a restart. Empty in a record
-    /// saved before this field, which then has its `cwd`.
-    #[serde(default)]
+    /// kept as the program moves on. Not stored: the records are bincode, so
+    /// a new field needs a schema bump (an owner call). After a restart it is
+    /// empty and the workspace is the last known `cwd`.
+    #[serde(skip)]
     pub(crate) workspace: String,
 }
 

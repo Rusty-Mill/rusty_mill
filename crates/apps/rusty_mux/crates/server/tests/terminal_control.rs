@@ -112,6 +112,7 @@ fn size_follows_the_blocks_resizes() {
     assert_eq!(text(&mut client, block, "terminal.size"), "100x30");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn workspace_list_reads_the_launch_directory_and_refuses_to_leave_it() {
     let path = start_server();

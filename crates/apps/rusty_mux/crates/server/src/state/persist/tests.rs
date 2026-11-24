@@ -11,6 +11,21 @@ fn started(shell: bool) -> Started {
     }
 }
 
+/// The saved bytes must not change: the records are positional, so a field
+/// that is written would make every older record unreadable.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_workspace_is_not_written_to_the_saved_record() {
+    let plain = started(true);
+    let mut moved = started(true);
+    moved.workspace = "/repo".into();
+    assert_eq!(
+        serde_json::to_string(&plain).unwrap(),
+        serde_json::to_string(&moved).unwrap()
+    );
+    assert!(!serde_json::to_string(&plain).unwrap().contains("workspace"));
+}
+
 #[test]
 fn the_workspace_is_the_launch_directory_not_the_last_known_one() {
     let mut s = started(true);

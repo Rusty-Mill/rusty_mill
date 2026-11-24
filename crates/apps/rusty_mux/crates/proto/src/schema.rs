@@ -1434,7 +1434,8 @@ pub static CATALOG: &[Method] = &[
               never leaves it: `..`, an absolute path or a link in the path is refused, and a \
               link in the listing is `l` and never followed. The first line is the path \
               under the workspace (`.` for itself), and a refusal names nothing outside \
-              it. Refused to a watch-only client.",
+              it. Refused to a watch-only client, and on a platform that cannot confine it (only \
+              Linux can today).",
         params: &[
             BLOCK,
             Param {
