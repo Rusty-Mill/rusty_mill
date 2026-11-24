@@ -1431,8 +1431,10 @@ pub static CATALOG: &[Method] = &[
         doc: "List a directory under the block's workspace (the directory its program \
               was launched in) for the workspace explorer, in the same text form as \
               `terminal.list-dir`. The path is relative to the workspace and the result \
-              never leaves it: a path that resolves outside it, by `..` or by a link, is \
-              refused. Refused to a watch-only client.",
+              never leaves it: `..`, an absolute path or a link in the path is refused, and a \
+              link in the listing is `l` and never followed. The first line is the path \
+              under the workspace (`.` for itself), and a refusal names nothing outside \
+              it. Refused to a watch-only client.",
         params: &[
             BLOCK,
             Param {

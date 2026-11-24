@@ -2,7 +2,7 @@
 //! client's directory browse.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -16,7 +16,11 @@ const READ_MAX: usize = 20_000;
 
 /// What an entry is, as the one-letter kind a line starts with; `None` when
 /// the file system will not say.
-fn kind(path: &Path, entry: &fs::DirEntry) -> Option<char> {
+///
+/// With `follow` a link is told by what it points to; without it a link is
+/// `l` and its target is never inspected (the workspace listing, whose
+/// targets may lie outside the workspace).
+fn kind(path: &Path, entry: &fs::DirEntry, follow: bool) -> Option<char> {
     let link = entry.file_type().ok()?;
     if !link.is_symlink() {
         return Some(match (link.is_dir(), link.is_file()) {
@@ -24,6 +28,9 @@ fn kind(path: &Path, entry: &fs::DirEntry) -> Option<char> {
             (_, true) => 'f',
             _ => 'o',
         });
+    }
+    if !follow {
+        return Some('l');
     }
     // A link is told by what it points to; a broken one is `l`.
     Some(match fs::metadata(path) {
@@ -79,8 +86,10 @@ impl Drop for Slot {
 
 /// The listing of `path`, taken relative to `base` (the block's working
 /// directory) when it is not absolute, and `base` itself when `None`.
-/// With a `root` (the workspace, D337) the resolved directory must lie under
-/// it, links followed, or the listing is refused.
+/// With a `root` (the workspace, D337) the listing is confined to it: see
+/// [`confined`]. A link inside it is shown as `l` and never followed, the
+/// first line is the path under the workspace (`.` for itself), and a
+/// refusal names nothing outside it.
 ///
 /// The first line is the directory's resolved path. Every other line is
 /// `KIND<TAB>NAME`: `d` for a directory (a link to one too), `f` a file,
@@ -107,6 +116,10 @@ fn list_with(
     if path.is_some_and(is_network_path) {
         return Err("a network path is not listed".into());
     }
+    if let Some(root) = root {
+        let held = confined(Path::new(root), path.unwrap_or(""))?;
+        return render(&held.read, &held.shown, false, read_max, listed_max);
+    }
     let dir = match (path, base) {
         (Some(p), Some(b)) => Path::new(b).join(p),
         (Some(p), None) if Path::new(p).is_absolute() => p.into(),
@@ -116,17 +129,128 @@ fn list_with(
         (None, Some(b)) => b.into(),
     };
     let dir = fs::canonicalize(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    if let Some(root) = root {
-        let root = fs::canonicalize(root).map_err(|e| format!("{root}: {e}"))?;
-        if !dir.starts_with(&root) {
-            return Err("the path is outside the workspace".into());
+    render(&dir, &dir.to_string_lossy(), true, read_max, listed_max)
+}
+
+/// A workspace directory held open: `read` is what to list, `shown` the
+/// path under the workspace the reply names, `.` for the workspace itself.
+struct Held {
+    read: PathBuf,
+    shown: String,
+    _anchor: Anchor,
+}
+
+/// The refusal for any path that cannot be listed under the workspace. It
+/// names nothing outside the workspace, so it cannot tell a client what is
+/// out there (a link out, a missing directory and a file all read alike).
+const NOT_LISTED: &str = "that directory cannot be listed in the workspace";
+
+/// `rel` under `root` (D337): its components must be plain names, each a real
+/// directory, never a link. On Linux every component is opened from its
+/// parent's descriptor with `O_NOFOLLOW` and the listing reads that
+/// descriptor, so nothing swapped into the tree after the check is followed.
+/// Elsewhere each component is checked with `symlink_metadata` first, which
+/// stops a link already in place but not a local process racing the check.
+fn confined(root: &Path, rel: &str) -> Result<Held, String> {
+    let mut names = Vec::new();
+    for part in Path::new(rel).components() {
+        match part {
+            Component::Normal(n) => names.push(n),
+            Component::CurDir => {}
+            _ => return Err("the path is outside the workspace".into()),
         }
     }
-    let mut read = fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let (read, anchor) = anchor(root, &names).map_err(|_| NOT_LISTED.to_owned())?;
+    let shown = if names.is_empty() {
+        ".".to_owned()
+    } else {
+        names
+            .iter()
+            .map(|n| n.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    Ok(Held {
+        read,
+        shown,
+        _anchor: anchor,
+    })
+}
+
+#[cfg(target_os = "linux")]
+struct Anchor(Vec<i32>);
+
+#[cfg(target_os = "linux")]
+impl Drop for Anchor {
+    fn drop(&mut self) {
+        for fd in self.0.drain(..) {
+            let _ = rusty_libc::fd::close(fd);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn anchor(root: &Path, names: &[&std::ffi::OsStr]) -> std::io::Result<(PathBuf, Anchor)> {
+    use rusty_libc::fd::{AT_FDCWD, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, openat};
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c = |b: &[u8]| {
+        CString::new(b).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    };
+    let io_err = |e: rusty_libc::Errno| std::io::Error::other(format!("{e:?}"));
+    let mut held = Anchor(Vec::new());
+    // The root is trusted (it is where the program started) and may be a link.
+    let mut fd = openat(
+        AT_FDCWD,
+        &c(root.as_os_str().as_bytes())?,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC,
+        0,
+    )
+    .map_err(io_err)?;
+    held.0.push(fd);
+    for name in names {
+        let flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
+        fd = openat(fd, &c(name.as_bytes())?, flags, 0).map_err(io_err)?;
+        held.0.push(fd);
+    }
+    Ok((PathBuf::from(format!("/proc/self/fd/{fd}")), held))
+}
+
+#[cfg(not(target_os = "linux"))]
+struct Anchor;
+
+#[cfg(not(target_os = "linux"))]
+fn anchor(root: &Path, names: &[&std::ffi::OsStr]) -> std::io::Result<(PathBuf, Anchor)> {
+    let mut dir = fs::canonicalize(root)?;
+    for name in names {
+        dir.push(name);
+        if !fs::symlink_metadata(&dir)?.is_dir() {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+    }
+    Ok((dir, Anchor))
+}
+
+/// The listing text of the directory at `read`, headed by `shown`.
+fn render(
+    read: &Path,
+    shown: &str,
+    follow: bool,
+    read_max: usize,
+    listed_max: usize,
+) -> Result<String, String> {
+    let mut reader = fs::read_dir(read).map_err(|e| {
+        // Confined (`!follow`): a refusal must not name where it looked.
+        if follow {
+            format!("{}: {e}", read.display())
+        } else {
+            NOT_LISTED.to_owned()
+        }
+    })?;
     let (mut entries, mut unread) = (Vec::new(), 0_usize);
-    for item in read.by_ref().take(read_max) {
+    for item in reader.by_ref().take(read_max) {
         match item {
-            Ok(e) => match (kind(&e.path(), &e), e.file_name().into_string()) {
+            Ok(e) => match (kind(&e.path(), &e, follow), e.file_name().into_string()) {
                 (Some(k), Ok(name)) => entries.push((k, name)),
                 // A name that is not UTF-8 cannot be sent or typed back.
                 _ => unread += 1,
@@ -134,11 +258,11 @@ fn list_with(
             Err(_) => unread += 1,
         }
     }
-    let more = read.next().is_some();
+    let more = reader.next().is_some();
     entries.sort_by_cached_key(|(k, name)| (*k != 'd', name.to_lowercase(), name.clone()));
     let left = entries.len().saturating_sub(listed_max);
     entries.truncate(listed_max);
-    let mut out = escape(&dir.to_string_lossy());
+    let mut out = escape(shown);
     for (k, name) in &entries {
         out.push_str(&format!("\n{k}\t{}", escape(name)));
     }
@@ -262,31 +386,60 @@ mod tests {
         let dir = scratch("root");
         fs::create_dir_all(dir.join("ws").join("sub")).unwrap();
         fs::write(dir.join("outside.txt"), "").unwrap();
+        fs::write(dir.join("ws").join("sub").join("a.txt"), "").unwrap();
         let root = dir.join("ws");
         let root = root.to_str().unwrap();
         let ok = list(Some(root), Some("sub"), Some(root)).unwrap();
-        assert!(ok.lines().next().unwrap().ends_with("sub"));
-        for escape in ["..", "sub/../..", dir.to_str().unwrap()] {
+        // The first line is under the workspace, never an absolute path.
+        assert_eq!(ok.lines().collect::<Vec<_>>(), ["sub", "f\ta.txt"]);
+        let top = list(Some(root), None, Some(root)).unwrap();
+        assert_eq!(top.lines().next(), Some("."));
+        for escape in ["..", "sub/../..", "/", dir.to_str().unwrap()] {
             let reason = list(Some(root), Some(escape), Some(root)).unwrap_err();
             assert!(
                 reason.contains("outside the workspace"),
                 "{escape}: {reason}"
             );
+            assert!(!reason.contains(dir.to_str().unwrap()), "{reason}");
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_refusal_names_nothing_outside_the_workspace() {
+        let dir = scratch("scope");
+        fs::create_dir_all(dir.join("ws")).unwrap();
+        fs::write(dir.join("ws").join("file"), "").unwrap();
+        let root = dir.join("ws");
+        let root = root.to_str().unwrap();
+        for missing in ["no/such", "file"] {
+            let reason = list(Some(root), Some(missing), Some(root)).unwrap_err();
+            assert_eq!(reason, NOT_LISTED, "{missing}");
         }
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_link_out_of_the_workspace_is_refused() {
+    fn a_link_is_not_followed_in_a_workspace() {
         let dir = scratch("rootlink");
-        fs::create_dir_all(dir.join("ws")).unwrap();
+        fs::create_dir_all(dir.join("ws").join("in")).unwrap();
         fs::create_dir(dir.join("elsewhere")).unwrap();
         std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("ws").join("out")).unwrap();
+        std::os::unix::fs::symlink("in", dir.join("ws").join("local")).unwrap();
         let root = dir.join("ws");
         let root = root.to_str().unwrap();
-        let reason = list(Some(root), Some("out"), Some(root)).unwrap_err();
-        assert!(reason.contains("outside the workspace"), "{reason}");
+        // A link, even one that stays inside, is neither entered nor classified
+        // by its target: it is `l`.
+        let top = list(Some(root), None, Some(root)).unwrap();
+        assert_eq!(
+            top.lines().skip(1).collect::<Vec<_>>(),
+            ["d\tin", "l\tlocal", "l\tout"]
+        );
+        for link in ["out", "local"] {
+            let reason = list(Some(root), Some(link), Some(root)).unwrap_err();
+            assert_eq!(reason, NOT_LISTED, "{link}");
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 
