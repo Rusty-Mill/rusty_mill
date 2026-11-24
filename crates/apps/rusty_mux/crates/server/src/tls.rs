@@ -41,6 +41,8 @@ pub struct Tls {
     listener: TcpListener,
     acceptor: TlsAcceptor,
     pub(crate) tokens_file: PathBuf,
+    /// The private key's file, kept out of downloads.
+    pub(crate) key_file: PathBuf,
     pub(crate) tokens: Rc<RefCell<Tokens>>,
     pub(crate) allow: Rc<RefCell<Allow>>,
 }
@@ -56,6 +58,7 @@ impl Tls {
         tokens_file: PathBuf,
     ) -> io::Result<Self> {
         let bad = |why: String| io::Error::new(io::ErrorKind::InvalidData, why);
+        let key_file = key.to_path_buf();
         let (chain, key) = pem::identity(
             &read_checked(cert, "certificate")?,
             &read_checked(key, "key")?,
@@ -68,6 +71,7 @@ impl Tls {
             listener,
             acceptor,
             tokens_file,
+            key_file,
             tokens: Rc::new(RefCell::new(tokens)),
             allow: Rc::default(),
         })

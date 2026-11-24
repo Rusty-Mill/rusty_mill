@@ -462,7 +462,7 @@ fn reload_tokens(
 /// again; a bad one is refused, keeps the old list, and closes nothing.
 pub async fn serve_shared(
     listener: UnixListener,
-    config: Config,
+    mut config: Config,
     sharing: Sharing,
     mut reloads: UnboundedReceiver<Reload>,
     stop: impl Future<Output = ()>,
@@ -479,6 +479,13 @@ pub async fn serve_shared(
     let tokens = tls
         .as_ref()
         .map(|tls| (tls.tokens_file.clone(), tls.tokens.clone()));
+    // What admits guests is never downloadable, whoever built the config:
+    // the allowlist, the TLS key and the tokens.
+    config.protected.push(sharing.allow.clone());
+    if let Some(tls) = &tls {
+        config.protected.push(tls.key_file.clone());
+        config.protected.push(tls.tokens_file.clone());
+    }
     let guests = Guests::default();
     *guests.tailnet.borrow_mut() = tailnet;
     *guests.tls.borrow_mut() = tls;
