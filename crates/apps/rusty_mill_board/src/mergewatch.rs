@@ -114,6 +114,10 @@ fn prose(body: &str) -> Vec<String> {
     let (mut fenced, mut comment) = (false, false);
     let mut out = Vec::new();
     for raw in body.lines() {
+        // Four spaces or a tab of indentation make an (indented) code block, before any trimming.
+        if !fenced && !comment && (raw.starts_with("    ") || raw.starts_with('\t')) {
+            continue;
+        }
         let line = raw.trim();
         if line.starts_with("```") || line.starts_with("~~~") {
             fenced = !fenced;
@@ -352,6 +356,8 @@ mod tests {
             "```\nCloses card #5\n```",
             "<!-- Closes card #5 -->",
             "<!--\nCloses card #5\n-->",
+            "Example:\n\n    Closes card #5",
+            "Example:\n\n\tCloses card #5",
         ] {
             assert!(
                 card_refs(body).iter().all(|(_, closes)| !closes),
