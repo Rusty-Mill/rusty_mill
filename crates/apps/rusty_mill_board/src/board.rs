@@ -2055,6 +2055,18 @@ impl<S: Store> Board<S> {
         })
     }
 
+    /// Undo the merge watch's close of a card: see [`Card::unclosed`]. Logged as a move by
+    /// `by`. Needs `Triage`.
+    ///
+    /// # Errors
+    /// A missing capability or card, or see [`Card::unclosed`].
+    pub fn unclose(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
+        let flow = self.flow();
+        self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
+            c.unclosed(&flow, by, now)
+        })
+    }
+
     /// Archive every Done card not yet archived whose window ([`Card::shelf_since_ms`])
     /// started at least `older_than_days` ago, in `project` or in every project `by` may work
     /// in. Needs `Triage`: it is a board-wide tidy-up. Returns the cards archived.

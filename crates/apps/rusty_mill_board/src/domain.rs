@@ -875,6 +875,13 @@ impl fmt::Display for BoardError {
 
 impl std::error::Error for BoardError {}
 
+/// The board's own writer for a close on a merged pull request (the merge watch): no caller
+/// may act under this name.
+pub const MERGE_WATCH: &str = "merge-watch";
+
+/// How the comment of a close on merge begins; `unclosed` finds it again by this.
+const MERGED_PREFIX: &str = "Closed by merge:";
+
 /// What happened to a card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1278,7 +1285,7 @@ impl Card {
             by: by.name.clone(),
             at_ms: now_ms,
             text: format!(
-                "Closed by merge: {pr} merged (was in {}).",
+                "{MERGED_PREFIX} {pr} merged (was in {}).",
                 self.column.as_str()
             ),
         });
@@ -1287,6 +1294,57 @@ impl Card {
             claim: None,
             done_ms: Some(now_ms),
             ..base
+        })
+    }
+
+    /// Undo the merge watch's close: back to the column it was in, ship time cleared, evidence
+    /// and comments kept, and a comment saying who undid it. Only for a card whose current Done
+    /// is that close: the comment [`Card::closed_by_merge`] left (by [`MERGE_WATCH`], a name no
+    /// caller may use) carries the Done time and the column. Needs `Triage`.
+    ///
+    /// # Errors
+    /// [`BoardError::Forbidden`] without `Triage`, and [`BoardError::Refused`] for a card that
+    /// is not Done, was closed any other way, or was closed before it last changed, or whose
+    /// earlier column is gone from the workflow.
+    pub fn unclosed(&self, flow: &Workflow, by: &Actor, now_ms: i64) -> Result<Self, BoardError> {
+        if !by.caps.contains(&Capability::Triage) {
+            return Err(BoardError::Forbidden(Capability::Triage));
+        }
+        let refuse = |why: &str| Err(BoardError::Refused(why.to_owned()));
+        if self.column != Column::DONE {
+            return refuse("only a Done card can be unclosed");
+        }
+        let Some(close) = self.comments.iter().rev().find(|c| {
+            c.by == MERGE_WATCH
+                && c.text.starts_with(MERGED_PREFIX)
+                && Some(c.at_ms) == self.done_ms
+        }) else {
+            return refuse("this card was not closed by the merge watch");
+        };
+        let was = close
+            .text
+            .rsplit_once("(was in ")
+            .and_then(|(_, rest)| rest.strip_suffix(")."))
+            .and_then(|c| Column::new(c).ok())
+            .filter(|c| *c != Column::DONE && flow.kind(c).is_some());
+        let Some(was) = was else {
+            return refuse("the column the card was in is gone");
+        };
+        let mut next = self.next(now_ms);
+        next.comments.push(Comment {
+            by: by.name.clone(),
+            at_ms: now_ms,
+            text: format!(
+                "Unclosed: the merge watch's close is undone, back to {}.",
+                was.as_str()
+            ),
+        });
+        Ok(Self {
+            column: was,
+            done_ms: None,
+            archived_ms: None,
+            claim: None,
+            ..next
         })
     }
 

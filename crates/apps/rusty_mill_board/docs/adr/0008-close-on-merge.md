@@ -1,6 +1,6 @@
 # ADR-0008: Close a card when its pull request says so
 
-- **Status:** Accepted (2026-11-23): Nano concurred ("Concur", comment on Mill Board card #1620, 2026-11-23, with the design artifact linked on the card) with option (c), marker-only. Turning `auto_close` on in a deployment is a separate owner decision, still pending. Built in three PRs: the read-only merge watch (#1842), the marker close (this change), then `card_unclose`.
+- **Status:** Accepted (2026-11-23): Nano concurred ("Concur", comment on Mill Board card #1620, 2026-11-23, with the design artifact linked on the card) with option (c), marker-only. Turning `auto_close` on in a deployment is a separate owner decision, still pending. Built in three PRs: the read-only merge watch (#1842), the marker close (#1852), then `card_unclose` (this change).
 
 ## Context
 Work that merged kept sitting open on the board, so finished decisions were re-made (#1620: #762, #1078, #1563). Closing relied on an agent remembering. The sync's old rule was that moving a card to Done needs review: the `github-sync` actor holds no capabilities and never moves a card.
@@ -15,6 +15,6 @@ Work that merged kept sitting open on the board, so finished decisions were re-m
 - ADR-0006 is unchanged: the watch reads the forge directly and never decides from external refs.
 
 ## Consequences
-- A merged PR whose author wrote the marker ends its card without anyone remembering; a wrong marker closes the wrong card, which `card_unclose` (next PR) reverts.
+- A merged PR whose author wrote the marker ends its card without anyone remembering; a wrong marker closes the wrong card, which `card_unclose` reverts: it needs `triage`, accepts only a card whose current Done is the watch's close (found by the comment the close left, under the reserved actor name, with the Done time), returns the card to the column in that comment and keeps its evidence. The PR stays on the card as evidence, so the watch does not close the same marker again; a PR already listed as evidence is never a marker.
 - The sync's "moving to Done needs review" rule now has this one exception, for a marker in a merged PR.
 - A card the marker cannot close stays listed in `merged_open` for a person.

@@ -1199,6 +1199,14 @@ pub fn ops() -> Vec<Op> {
             },
         ),
         op(
+            "card_unclose",
+            "Undo a wrong close by the merge watch: the card goes back to the column it was in, keeps its evidence, and a comment records who undid it. Only for a card whose current Done is the merge watch's close; any other close is refused. Needs `triage`.",
+            |b, i, a: IdArgs| {
+                let who = acting(b, i, &a.who)?;
+                card(b.unclose(card_ref(b, &a.id)?, &who)?)
+            },
+        ),
+        op(
             "card_archive_done",
             "Archive every Done card not yet archived, optionally only one project's and only those done at least `older_than_days` ago. Needs `triage`. {archived: count}.",
             |b, i, a: ArchiveDoneArgs| {

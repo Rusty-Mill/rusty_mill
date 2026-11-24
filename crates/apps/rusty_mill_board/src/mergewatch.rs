@@ -323,9 +323,12 @@ pub fn scan(
         let ours = |c: &Card| bound.get(&c.id).is_some_and(|b| b.contains(&pr.repo));
         for (n, closes) in card_refs(&pr.body) {
             if let Some(card) = by_number.get(&n).filter(|c| ours(c)) {
+                // A pull request the card already lists was dealt with (closed once and
+                // unclosed, or recorded by a person): its marker does not close again.
+                let handled = card.evidence.iter().any(|l| same_pull(l, &pr.url));
                 note(
                     card,
-                    if closes && pr.may_close {
+                    if closes && pr.may_close && !handled {
                         Why::Marker
                     } else {
                         Why::Mention
@@ -347,7 +350,7 @@ pub fn scan(
 }
 
 /// Who merge watch is on the board's history.
-pub const ACTOR: &str = "merge-watch";
+pub const ACTOR: &str = crate::domain::MERGE_WATCH;
 
 /// The actor merge watch writes as for one card: `Record` only, limited to the card's project
 /// as the snapshot saw it, so a card moved to another project meanwhile is refused.
@@ -826,6 +829,56 @@ mod tests {
         assert!(matches!(
             b.close_merged(done.id, done.rev, PR, "o/r", &watcher("p")),
             Err(BoardError::Terminal)
+        ));
+    }
+
+    #[test]
+    fn unclose_undoes_only_the_merge_watchs_close_and_it_is_not_repeated() {
+        let (b, who, card, n) = one_card();
+        b.move_card(card.id, &Column::READY, &who).expect("ready");
+        let body = format!("Closes card #{n}");
+        assert_eq!(merged(&b, &body), Ok(1));
+        assert_eq!(b.get(card.id).expect("card").column, Column::DONE);
+
+        // Needs triage.
+        let builder = b.roles().actor("bot", "builder").expect("role");
+        assert!(matches!(
+            b.unclose(card.id, &builder),
+            Err(BoardError::Forbidden(_))
+        ));
+        let back = b.unclose(card.id, &who).expect("unclosed");
+        assert_eq!((back.column, back.done_ms), (Column::READY, None));
+        assert_eq!(back.evidence, [PR.to_owned()], "the evidence stays");
+        let last = back.comments.last().expect("comment");
+        assert_eq!(last.by, "nano");
+        assert!(last.text.contains("ready"), "{}", last.text);
+        // Not Done any more, so a second call has nothing to undo.
+        assert!(matches!(
+            b.unclose(card.id, &who),
+            Err(BoardError::Refused(_))
+        ));
+        // The marker is still in the merged PR, but its PR is evidence now: it lists, never closes.
+        assert_eq!(merged(&b, &body), Ok(1));
+        assert_eq!(b.get(card.id).expect("card").column, Column::READY);
+        assert_eq!(
+            b.metrics(|_| true).expect("metrics").merged_open[0].why,
+            Why::Evidence
+        );
+    }
+
+    #[test]
+    fn unclose_refuses_a_card_closed_any_other_way() {
+        let (b, who, card, _) = one_card();
+        b.close(card.id, crate::domain::CloseReason::Superseded, None, &who)
+            .expect("closed");
+        assert!(matches!(
+            b.unclose(card.id, &who),
+            Err(BoardError::Refused(_))
+        ));
+        let (b, who, open, _) = one_card();
+        assert!(matches!(
+            b.unclose(open.id, &who),
+            Err(BoardError::Refused(_))
         ));
     }
 
