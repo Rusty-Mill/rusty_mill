@@ -1,0 +1,489 @@
+//! The workspace tree (card #1573, D337): a read-only tree of a block's
+//! workspace, built from `terminal.workspace-list` replies. This module is
+//! pure: it parses replies, holds the tree and its cursor, and renders text
+//! rows. It sends nothing; a caller fetches the path [`Tree::enter`] names
+//! and hands the reply to [`Tree::load`].
+
+/// What a name is, as the server's `KIND` column says. A link is never
+/// followed, so only a directory can be opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Dir,
+    File,
+    Link,
+    Other,
+}
+
+/// How a listing was cut short, from the server's trailer lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Cut {
+    /// Entries read and left out (`+`).
+    pub left_out: usize,
+    /// Entries past what the server reads (`>`): at least this many.
+    pub unread: usize,
+    /// Entries it could not read or whose names are not UTF-8 (`!`).
+    pub unreadable: usize,
+}
+
+impl Cut {
+    fn is_none(self) -> bool {
+        self == Self::default()
+    }
+}
+
+/// One parsed reply: the directory's entries, as the server sorted them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listing {
+    /// The path under the workspace the reply names (`.` for the root).
+    pub path: String,
+    pub entries: Vec<(Kind, String)>,
+    pub cut: Cut,
+}
+
+/// A reply that cannot be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Malformed(pub String);
+
+impl std::fmt::Display for Malformed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unreadable workspace listing: {}", self.0)
+    }
+}
+
+/// Reads a `terminal.workspace-list` reply. Names stay as the server wrote
+/// them, escaped, so they are safe to draw; [`unescape`] gives the real one.
+///
+/// # Errors
+/// [`Malformed`] on an empty reply, an unknown kind or a bad trailer count.
+pub fn parse(reply: &str) -> Result<Listing, Malformed> {
+    let mut lines = reply.lines();
+    let path = lines
+        .next()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| Malformed("no path line".into()))?;
+    let mut listing = Listing {
+        path: path.to_owned(),
+        entries: Vec::new(),
+        cut: Cut::default(),
+    };
+    for line in lines {
+        let (head, rest) = line
+            .split_once('\t')
+            .ok_or_else(|| Malformed(format!("no tab in `{line}`")))?;
+        let count = |rest: &str| {
+            rest.parse::<usize>()
+                .map_err(|_| Malformed(format!("bad count `{rest}`")))
+        };
+        match head {
+            "d" => listing.entries.push((Kind::Dir, rest.to_owned())),
+            "f" => listing.entries.push((Kind::File, rest.to_owned())),
+            "l" => listing.entries.push((Kind::Link, rest.to_owned())),
+            "o" => listing.entries.push((Kind::Other, rest.to_owned())),
+            "+" => listing.cut.left_out = count(rest)?,
+            ">" => listing.cut.unread = count(rest)?,
+            "!" => listing.cut.unreadable = count(rest)?,
+            other => return Err(Malformed(format!("unknown kind `{other}`"))),
+        }
+    }
+    Ok(listing)
+}
+
+/// The inverse of the server's escaping: `\\`, `\t`, `\n`, `\r` and
+/// `\u{HEX}`. Text that is not an escape is kept as it is.
+#[must_use]
+pub fn unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => out.push('\\'),
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('u') => {
+                let hex: String = chars.by_ref().skip(1).take_while(|c| *c != '}').collect();
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(c) => out.push(c),
+                    None => out.push_str(&format!("\\u{{{hex}}}")),
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+#[derive(Debug)]
+struct Node {
+    kind: Kind,
+    /// Escaped, as drawn.
+    name: String,
+    /// `None` until a listing arrives; only a directory has any.
+    children: Option<Vec<Node>>,
+    cut: Cut,
+    open: bool,
+}
+
+impl Node {
+    fn of((kind, name): &(Kind, String)) -> Self {
+        Self {
+            kind: *kind,
+            name: name.clone(),
+            children: None,
+            cut: Cut::default(),
+            open: false,
+        }
+    }
+}
+
+/// What a key on the cursor's row asks of the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Want {
+    /// Nothing, or the tree changed on its own.
+    Nothing,
+    /// List this path (relative to the workspace, real names, `/`-joined;
+    /// empty for the root) and pass the reply to [`Tree::load`].
+    Fetch(String),
+}
+
+/// The tree and its cursor.
+#[derive(Debug)]
+pub struct Tree {
+    root: Node,
+    /// Index into [`Tree::rows`].
+    cursor: usize,
+}
+
+/// One drawn row: depth, the node's place and what to show.
+struct Row {
+    depth: usize,
+    /// Child indices from the root.
+    at: Vec<usize>,
+    text: String,
+}
+
+impl Tree {
+    /// A tree holding the root listing a first reply gave.
+    #[must_use]
+    pub fn new(root: &Listing) -> Self {
+        let mut node = Node {
+            kind: Kind::Dir,
+            name: root.path.clone(),
+            children: None,
+            cut: Cut::default(),
+            open: true,
+        };
+        fill(&mut node, root);
+        Self {
+            root: node,
+            cursor: 0,
+        }
+    }
+
+    /// Puts `listing` under the directory it names. A path that is no longer
+    /// in the tree (a stale reply) is ignored.
+    pub fn load(&mut self, listing: &Listing) {
+        let names: Vec<String> = match listing.path.as_str() {
+            "." => Vec::new(),
+            p => p.split('/').map(str::to_owned).collect(),
+        };
+        let mut node = &mut self.root;
+        for name in &names {
+            let Some(next) = node
+                .children
+                .as_mut()
+                .and_then(|c| c.iter_mut().find(|n| unescape(&n.name) == *name))
+            else {
+                return;
+            };
+            node = next;
+        }
+        if node.kind == Kind::Dir {
+            fill(node, listing);
+            node.open = true;
+        }
+    }
+
+    /// Moves the cursor `by` rows, held to the first and last.
+    pub fn step(&mut self, by: isize) {
+        let last = self.rows().len().saturating_sub(1);
+        self.cursor = self.cursor.saturating_add_signed(by).min(last);
+    }
+
+    /// Opens the directory under the cursor: a loaded one toggles, one not
+    /// yet read asks for its listing. Files and links do nothing.
+    pub fn enter(&mut self) -> Want {
+        let Some(at) = self.rows().into_iter().nth(self.cursor).map(|r| r.at) else {
+            return Want::Nothing;
+        };
+        let path = self.path_of(&at);
+        let node = self.node_mut(&at);
+        match (node.kind, node.children.is_some()) {
+            (Kind::Dir, true) => {
+                node.open = !node.open;
+                Want::Nothing
+            }
+            (Kind::Dir, false) => Want::Fetch(path),
+            _ => Want::Nothing,
+        }
+    }
+
+    /// Closes the open directory under the cursor, or else moves to its
+    /// parent.
+    pub fn leave(&mut self) {
+        let Some(row) = self.rows().into_iter().nth(self.cursor) else {
+            return;
+        };
+        if self.node_mut(&row.at).open && !row.at.is_empty() {
+            self.node_mut(&row.at).open = false;
+        } else if let Some((_, parent)) = row.at.split_last() {
+            let target = parent.to_vec();
+            if let Some(i) = self.rows().iter().position(|r| r.at == target) {
+                self.cursor = i;
+            }
+        }
+    }
+
+    /// The path of the row under the cursor, as [`Want::Fetch`] writes it.
+    #[must_use]
+    pub fn selected_path(&self) -> String {
+        self.rows()
+            .into_iter()
+            .nth(self.cursor)
+            .map(|r| self.path_of(&r.at))
+            .unwrap_or_default()
+    }
+
+    /// The rows to draw in `height` lines of `width` columns, scrolled to
+    /// keep the cursor in view. The cursor row starts with `>`.
+    #[must_use]
+    pub fn render(&self, width: usize, height: usize) -> Vec<String> {
+        let rows = self.rows();
+        let top = (self.cursor + 1).saturating_sub(height.max(1));
+        rows.iter()
+            .enumerate()
+            .skip(top)
+            .take(height)
+            .map(|(i, r)| {
+                let mark = if i == self.cursor { '>' } else { ' ' };
+                let line = format!("{mark}{}{}", "  ".repeat(r.depth), r.text);
+                line.chars().take(width).collect()
+            })
+            .collect()
+    }
+
+    fn rows(&self) -> Vec<Row> {
+        let mut rows = Vec::new();
+        walk(&self.root, 0, &mut Vec::new(), &mut rows);
+        rows
+    }
+
+    fn node_mut(&mut self, at: &[usize]) -> &mut Node {
+        let mut node = &mut self.root;
+        for i in at {
+            node = &mut node.children.as_mut().expect("rows name loaded nodes")[*i];
+        }
+        node
+    }
+
+    fn path_of(&self, at: &[usize]) -> String {
+        let mut node = &self.root;
+        let mut parts = Vec::new();
+        for i in at {
+            let Some(next) = node.children.as_ref().and_then(|c| c.get(*i)) else {
+                break;
+            };
+            parts.push(unescape(&next.name));
+            node = next;
+        }
+        parts.join("/")
+    }
+}
+
+fn fill(node: &mut Node, listing: &Listing) {
+    node.children = Some(listing.entries.iter().map(Node::of).collect());
+    node.cut = listing.cut;
+}
+
+fn walk(node: &Node, depth: usize, at: &mut Vec<usize>, rows: &mut Vec<Row>) {
+    let sign = match (node.kind, node.open, node.children.is_some()) {
+        (Kind::Dir, true, _) => "v ",
+        (Kind::Dir, false, _) => "+ ",
+        (Kind::Link, ..) => "@ ",
+        (Kind::Other, ..) => "? ",
+        (Kind::File, ..) => "  ",
+    };
+    let slash = if node.kind == Kind::Dir { "/" } else { "" };
+    rows.push(Row {
+        depth,
+        at: at.clone(),
+        text: format!("{sign}{}{slash}", node.name),
+    });
+    if !node.open {
+        return;
+    }
+    for (i, child) in node.children.iter().flatten().enumerate() {
+        at.push(i);
+        walk(child, depth + 1, at, rows);
+        at.pop();
+    }
+    if !node.cut.is_none() {
+        rows.push(Row {
+            depth: depth + 1,
+            at: at.clone(),
+            text: cut_line(node.cut),
+        });
+    }
+}
+
+/// "... 3 more, 2 unread, 1 unreadable" for a cut listing.
+fn cut_line(cut: Cut) -> String {
+    let mut parts = Vec::new();
+    if cut.left_out > 0 {
+        parts.push(format!("{} not shown", cut.left_out));
+    }
+    if cut.unread > 0 {
+        parts.push(format!("{}+ not read", cut.unread));
+    }
+    if cut.unreadable > 0 {
+        parts.push(format!("{} unreadable", cut.unreadable));
+    }
+    format!("... {}", parts.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root() -> Listing {
+        parse(".\nd\tsrc\nf\tREADME.md\nl\tlink\no\tsock").unwrap()
+    }
+
+    #[test]
+    fn parses_entries_and_trailers() {
+        let l = parse("sub\nd\ta\nf\tb\n+\t3\n>\t2\n!\t1").unwrap();
+        assert_eq!(l.path, "sub");
+        assert_eq!(
+            l.entries,
+            [(Kind::Dir, "a".into()), (Kind::File, "b".into())]
+        );
+        assert_eq!(
+            l.cut,
+            Cut {
+                left_out: 3,
+                unread: 2,
+                unreadable: 1
+            }
+        );
+    }
+
+    #[test]
+    fn refuses_a_reply_it_cannot_read() {
+        assert!(parse("").is_err());
+        assert!(parse(".\nx\tname").is_err());
+        assert!(parse(".\n+\tmany").is_err());
+        assert!(parse(".\nno tab").is_err());
+    }
+
+    #[test]
+    fn unescape_undoes_the_servers_escaping() {
+        assert_eq!(unescape(r"a\\b\tc\u{1b}d"), "a\\b\tc\u{1b}d");
+        assert_eq!(unescape(r"plain"), "plain");
+        assert_eq!(unescape(r"bad\u{zz}"), r"bad\u{zz}");
+        assert_eq!(unescape("end\\"), "end\\");
+    }
+
+    #[test]
+    fn draws_kinds_and_the_cursor() {
+        let t = Tree::new(&root());
+        assert_eq!(
+            t.render(40, 10),
+            [
+                ">v ./",
+                "   + src/",
+                "     README.md",
+                "   @ link",
+                "   ? sock"
+            ]
+        );
+    }
+
+    #[test]
+    fn only_a_directory_opens_and_it_asks_for_its_listing_once() {
+        let mut t = Tree::new(&root());
+        t.step(1);
+        assert_eq!(t.enter(), Want::Fetch("src".into()));
+        t.load(&parse("src\nf\tlib.rs").unwrap());
+        assert_eq!(t.render(40, 10)[2], "       lib.rs");
+        // Loaded: Enter now toggles, with no second fetch.
+        assert_eq!(t.enter(), Want::Nothing);
+        assert_eq!(t.render(40, 10).len(), 5);
+        t.step(1);
+        t.step(1);
+        assert_eq!(t.enter(), Want::Nothing, "a file does nothing");
+        t.step(1);
+        assert_eq!(t.enter(), Want::Nothing, "a link is never followed");
+    }
+
+    #[test]
+    fn fetch_paths_use_real_names_and_nest() {
+        let mut t = Tree::new(&parse(".\nd\ta\\tb").unwrap());
+        t.step(1);
+        assert_eq!(t.enter(), Want::Fetch("a\tb".into()));
+        t.load(&parse("a\tb\nd\tin").unwrap());
+        t.step(1);
+        assert_eq!(t.enter(), Want::Fetch("a\tb/in".into()));
+        assert_eq!(t.selected_path(), "a\tb/in");
+    }
+
+    #[test]
+    fn leave_closes_then_goes_to_the_parent() {
+        let mut t = Tree::new(&root());
+        t.step(1);
+        t.enter();
+        t.load(&parse("src\nf\tlib.rs").unwrap());
+        t.step(1);
+        t.leave();
+        assert_eq!(t.selected_path(), "src");
+        t.leave();
+        assert_eq!(t.render(40, 10).len(), 5, "src is closed");
+    }
+
+    #[test]
+    fn a_cut_listing_says_so() {
+        let t = Tree::new(&parse(".\nf\ta\n+\t2\n!\t1").unwrap());
+        assert_eq!(
+            t.render(40, 10).last().unwrap(),
+            "   ... 2 not shown, 1 unreadable"
+        );
+    }
+
+    #[test]
+    fn a_stale_reply_is_ignored_and_the_cursor_is_held() {
+        let mut t = Tree::new(&root());
+        t.load(&parse("gone\nf\tx").unwrap());
+        assert_eq!(t.render(40, 10).len(), 5);
+        t.step(100);
+        assert_eq!(t.selected_path(), "sock");
+        t.step(-100);
+        assert_eq!(t.selected_path(), "");
+    }
+
+    #[test]
+    fn long_trees_scroll_to_the_cursor_and_lines_are_clipped() {
+        let mut t = Tree::new(&parse(".\nf\t1\nf\t2\nf\t3\nf\t4").unwrap());
+        t.step(4);
+        let rows = t.render(5, 3);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[2].starts_with('>'));
+        assert!(rows.iter().all(|r| r.chars().count() <= 5));
+    }
+}
