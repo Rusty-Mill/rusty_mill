@@ -472,6 +472,130 @@ fn cut_line(cut: Cut) -> String {
     format!("... {}", parts.join(", "))
 }
 
+/// What a key batch did to the open [`Explorer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// Still open; draw it again.
+    Open,
+    /// Closed.
+    Leave,
+    /// Still open; list this path (see [`Want::Fetch`]) and pass the reply to
+    /// [`Explorer::load`], or the refusal to [`Explorer::refuse`].
+    Fetch(String),
+}
+
+/// The overlay's state: the tree once the root listing arrives, one request
+/// in flight at most, and the last refusal.
+#[derive(Debug, Default)]
+pub struct Explorer {
+    tree: Option<Tree>,
+    waiting: bool,
+    note: Option<String>,
+}
+
+impl Explorer {
+    /// An explorer that has asked for the root and shows nothing yet.
+    #[must_use]
+    pub fn opened() -> Self {
+        Self {
+            waiting: true,
+            ..Self::default()
+        }
+    }
+
+    /// Takes a listing reply: the first one is the root.
+    pub fn load(&mut self, reply: &str) {
+        self.waiting = false;
+        let listing = match parse(reply) {
+            Ok(listing) => listing,
+            Err(e) => return self.note = Some(e.to_string()),
+        };
+        self.note = None;
+        match self.tree.as_mut() {
+            Some(tree) => tree.load(&listing),
+            None => match Tree::new(&listing) {
+                Ok(tree) => self.tree = Some(tree),
+                Err(e) => self.note = Some(e.to_string()),
+            },
+        }
+    }
+
+    /// Takes a refusal in place of a reply; one line, since the server's
+    /// text may carry anything.
+    pub fn refuse(&mut self, why: &str) {
+        self.waiting = false;
+        let line: String = why
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        self.note = Some(line);
+    }
+
+    /// Whether a request is in flight.
+    #[must_use]
+    pub fn waiting(&self) -> bool {
+        self.waiting
+    }
+
+    /// Acts on the keys in `bytes`: `j`/`k` or the arrows move, Enter, `l`
+    /// or right opens, `h` or left goes up, `q` or a lone Esc leaves. Stops
+    /// at the first key that asks for a listing.
+    pub fn keys(&mut self, bytes: &[u8]) -> Step {
+        if bytes == b"\x1b" {
+            return Step::Leave;
+        }
+        let mut i = 0;
+        while i < bytes.len() {
+            let key = match bytes[i..] {
+                [0x1b, b'[' | b'O', last, ..] => {
+                    i += 2;
+                    last
+                }
+                [b, ..] => b,
+                [] => break,
+            };
+            i += 1;
+            match key {
+                b'q' => return Step::Leave,
+                b'j' | b'B' => self.tree.iter_mut().for_each(|t| t.step(1)),
+                b'k' | b'A' => self.tree.iter_mut().for_each(|t| t.step(-1)),
+                b'h' | b'D' => self.tree.iter_mut().for_each(Tree::leave),
+                b'l' | b'C' | b'\r' | b'\n' if !self.waiting => {
+                    if let Some(Want::Fetch(path)) = self.tree.as_mut().map(Tree::enter) {
+                        self.waiting = true;
+                        return Step::Fetch(path);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Step::Open
+    }
+
+    /// `height` lines of `width` cells: a title, the tree and, last, the
+    /// refusal or a wait notice.
+    #[must_use]
+    pub fn render(&self, width: usize, height: usize) -> Vec<String> {
+        let mut lines = vec![clip(
+            "workspace: j/k move, Enter open, h up, q leave",
+            width,
+        )];
+        let status = match (&self.note, self.waiting) {
+            (Some(note), _) => Some(note.as_str()),
+            (None, true) => Some("reading..."),
+            (None, false) => None,
+        };
+        let room = height.saturating_sub(1 + usize::from(status.is_some()));
+        if let Some(tree) = &self.tree {
+            lines.extend(tree.render(width, room));
+        }
+        lines.truncate(height.saturating_sub(usize::from(status.is_some())));
+        lines.extend(status.map(|s| clip(s, width)));
+        lines.truncate(height);
+        lines
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -721,5 +845,58 @@ mod tests {
         assert!(three[0].starts_with('>') && three[2].contains("1 not shown"));
         assert_eq!(t.render(40, 1).len(), 1);
         assert!(t.render(40, 1)[0].starts_with('>'));
+    }
+
+    #[test]
+    fn the_explorer_reads_the_root_then_asks_for_a_directory_once() {
+        let mut e = Explorer::opened();
+        assert!(e.waiting());
+        e.load(".\nd\tsrc\nf\ta");
+        assert!(!e.waiting());
+        assert_eq!(e.keys(b"j"), Step::Open);
+        assert_eq!(e.keys(b"\r"), Step::Fetch("src".into()));
+        // Waiting: a second Enter asks for nothing.
+        assert_eq!(e.keys(b"\r"), Step::Open);
+        e.load("src\nf\tlib.rs");
+        assert!(e.render(40, 10).iter().any(|r| r.ends_with("lib.rs")));
+    }
+
+    #[test]
+    fn keys_move_leave_and_read_arrows() {
+        let mut e = Explorer::opened();
+        e.load(".\nf\ta\nf\tb");
+        assert_eq!(e.keys(b"\x1b[B\x1b[B"), Step::Open);
+        assert!(e.render(40, 10).iter().any(|r| r.starts_with(">    b")));
+        assert_eq!(e.keys(b"k"), Step::Open);
+        assert_eq!(e.keys(b"\x1b"), Step::Leave);
+        assert_eq!(e.keys(b"q"), Step::Leave);
+    }
+
+    #[test]
+    fn a_refusal_is_one_clean_line_and_frees_the_next_request() {
+        let mut e = Explorer::opened();
+        e.refuse("not listed\u{1b}[2J\n");
+        assert!(!e.waiting());
+        let lines = e.render(40, 4);
+        assert_eq!(lines.last().unwrap().trim_end(), "not listed [2J");
+        assert!(lines.iter().all(|l| !l.chars().any(char::is_control)));
+    }
+
+    #[test]
+    fn a_bad_first_reply_leaves_no_tree_and_says_why() {
+        let mut e = Explorer::opened();
+        e.load("src\nf\ta");
+        assert!(e.render(100, 3)[1].contains("not the root"));
+        e.load("garbage");
+        assert!(e.render(60, 3).len() <= 3);
+    }
+
+    #[test]
+    fn render_fits_its_height() {
+        let mut e = Explorer::opened();
+        e.load(".\nf\ta\nf\tb\nf\tc");
+        for h in 0..6 {
+            assert!(e.render(30, h).len() <= h);
+        }
     }
 }

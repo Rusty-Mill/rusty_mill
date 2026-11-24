@@ -197,6 +197,27 @@ impl Frame {
         }
     }
 
+    /// Covers `rect` with `lines`, one per row from the top, the first
+    /// reversed as a title; rows past the lines are blank. The cursor goes
+    /// to the top left.
+    pub fn panel(&mut self, rect: Rect, lines: &[String]) {
+        let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
+        for dy in 0..rows {
+            let mut chars = lines.get(dy).map(|l| l.chars());
+            for dx in 0..cols {
+                let ch = chars.as_mut().and_then(Iterator::next).unwrap_or(' ');
+                let mut glyph = Glyph::plain(ch, Style::of(&Cell::blank()));
+                if dy == 0 {
+                    glyph.style.attrs |= ATTR_REVERSE;
+                }
+                // Both fit in u16: they are below the rect's size.
+                let i = self.index(rect.x + dx as u16, rect.y + dy as u16);
+                self.cells[i] = glyph;
+            }
+        }
+        self.cursor = Some((rect.x, rect.y));
+    }
+
     /// Draws `text` reversed over the last row of `rect`, which the block
     /// shows beneath it; the cursor goes there.
     pub fn bar(&mut self, rect: Rect, text: &str) {

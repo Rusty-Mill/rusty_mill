@@ -124,7 +124,9 @@ mod client {
         Axis, BlockId, Event, Float, FloatRect, Layout, Rect, SessionId, Share, Side, Size, Toward,
         WindowId,
     };
+    use rusty_mux_proto::schema::Value;
     use rusty_mux_proto::{Entry, Features, Launch, Message, Takeover};
+    use rusty_mux_tui::explorer::{Explorer, Step as Explored};
     use rusty_mux_tui::find::{Find, Step};
     use rusty_mux_tui::floats;
     use rusty_mux_tui::follow::Follow;
@@ -1028,6 +1030,7 @@ mod client {
             layouts: features.contains(Features::LAYOUT),
             editing: features.contains(Features::LAYOUT_EDIT),
             floating: features.contains(Features::FLOATS),
+            workspace: features.contains(Features::BLOCK_CALL.union(Features::WORKSPACE)),
             focusing: features.contains(Features::FOCUS),
             follow: Follow::default(),
             session: shape.session,
@@ -1045,6 +1048,7 @@ mod client {
             shown: Shown::Nothing,
             browsing: false,
             finding: None,
+            exploring: None,
             split: None,
             arriving: None,
             opened: 0,
@@ -1339,6 +1343,14 @@ mod client {
         gate: Gate,
     }
 
+    /// The workspace tree open over `block`, and the listing request it
+    /// waits on.
+    struct Exploring {
+        block: BlockId,
+        explorer: Explorer,
+        req: Option<u64>,
+    }
+
     impl Pane {
         fn send(&mut self, make: impl FnOnce(u64) -> Message) -> u64 {
             let req = self.next;
@@ -1566,6 +1578,9 @@ mod client {
         editing: bool,
         /// Whether the server floats blocks: [`Features::FLOATS`].
         floating: bool,
+        /// Whether the server lists a block's workspace:
+        /// [`Features::WORKSPACE`] over [`Features::BLOCK_CALL`].
+        workspace: bool,
         /// Whether the server keeps each window's focus, which this client
         /// then follows: [`Features::FOCUS`].
         focusing: bool,
@@ -1594,6 +1609,8 @@ mod client {
         browsing: bool,
         /// Find is open on the focused block.
         finding: Option<Find>,
+        /// The workspace tree is open over the focused block.
+        exploring: Option<Exploring>,
         /// The pending split, whose new block takes the focus.
         split: Option<u64>,
         /// The split's new block, until the layout shows it.
@@ -1721,6 +1738,7 @@ mod client {
             match input {
                 Input::Keys(bytes) if bytes.is_empty() => self.end(Ended::Detached),
                 Input::Keys(bytes) if self.finding.is_some() => self.found(&bytes),
+                Input::Keys(bytes) if self.exploring.is_some() => self.explored(&bytes),
                 Input::Keys(bytes) => {
                     for action in self.keys.feed(&bytes) {
                         self.typed(action);
@@ -2422,12 +2440,18 @@ mod client {
             if action.on_focused_block() && !self.shows(focus) {
                 return bell();
             }
-            if self.browsing && !matches!(action, Action::Prompt { .. } | Action::Find) {
+            if self.browsing
+                && !matches!(
+                    action,
+                    Action::Prompt { .. } | Action::Find | Action::Explorer
+                )
+            {
                 self.live();
             }
             match action {
                 Action::Prompt { next } => self.prompt(next),
                 Action::Find => self.find(),
+                Action::Explorer => self.explore(),
                 Action::Input(data) => {
                     if let Some(pane) = self.panes.get_mut(&focus) {
                         pane.typed(data);
@@ -2546,10 +2570,77 @@ mod client {
             }
         }
 
+        /// Opens the workspace tree over the focused block: it asks for the
+        /// block's workspace, so it needs the server's call and the lease.
+        fn explore(&mut self) {
+            let block = self.focus;
+            let leased = self.panes.get(&block).is_some_and(|p| p.leased);
+            if !self.workspace || !leased || self.exploring.is_some() {
+                return bell();
+            }
+            self.exploring = Some(Exploring {
+                block,
+                explorer: Explorer::opened(),
+                req: None,
+            });
+            self.list_workspace(None);
+            self.browsing = true;
+            self.sync();
+            self.draw();
+        }
+
+        /// Asks to list `path` of the focused block's workspace; the reply
+        /// reaches [`App::on_control`].
+        fn list_workspace(&mut self, path: Option<String>) {
+            let block = self.focus;
+            let req = self.request(|req| Message::BlockCall {
+                req,
+                block,
+                method: "terminal.workspace-list".into(),
+                args: path
+                    .map(|p| ("path".into(), Value::Text(p)))
+                    .into_iter()
+                    .collect(),
+            });
+            if let Some(open) = self.exploring.as_mut() {
+                open.req = Some(req);
+            }
+        }
+
+        /// Takes keyboard `bytes` for the open workspace tree.
+        fn explored(&mut self, bytes: &[u8]) {
+            let Some(open) = self.exploring.as_mut() else {
+                return;
+            };
+            match open.explorer.keys(bytes) {
+                Explored::Leave => self.live(),
+                Explored::Open => self.draw(),
+                Explored::Fetch(path) => {
+                    self.list_workspace(Some(path));
+                    self.draw();
+                }
+            }
+        }
+
+        /// Gives the tree the answer to its listing request, if `req` is it.
+        fn listed_workspace(&mut self, req: u64, answer: Result<&str, &str>) -> bool {
+            let Some(open) = self.exploring.as_mut().filter(|o| o.req == Some(req)) else {
+                return false;
+            };
+            open.req = None;
+            match answer {
+                Ok(text) => open.explorer.load(text),
+                Err(why) => open.explorer.refuse(why),
+            }
+            self.draw();
+            true
+        }
+
         /// Back to the live screen after browsing history.
         fn live(&mut self) {
             self.browsing = false;
             self.finding = None;
+            self.exploring = None;
             for pane in self.panes.values_mut() {
                 if let Some((grid, _)) = pane.term.as_mut() {
                     grid.reset_view();
@@ -2705,6 +2796,9 @@ mod client {
                 }
                 Message::Datagram { req, port, id, key } if self.asked(req) => {
                     self.offered(Some(Onto::Offer(port, id, key.0)))
+                }
+                Message::Text { req, text } if self.listed_workspace(req, Ok(&text)) => {}
+                Message::Failed { req, reason, .. } if self.listed_workspace(req, Err(&reason)) => {
                 }
                 Message::Failed { req, .. } if self.asked(req) => self.offered(None),
                 Message::Done { req, .. } if self.follow.owns(req) => self.follow.done(req),
@@ -2907,8 +3001,16 @@ mod client {
             self.fit();
             // Browsing ends when the focused block is back on its live screen
             // (it closed, or the server changed the focus).
-            self.browsing =
-                self.browsing && self.grid(self.focus).is_some_and(|g| g.view_offset > 0);
+            // The workspace tree belongs to the block it opened over.
+            if self
+                .exploring
+                .as_ref()
+                .is_some_and(|o| o.block != self.focus)
+            {
+                self.exploring = None;
+            }
+            self.browsing = self.exploring.is_some()
+                || (self.browsing && self.grid(self.focus).is_some_and(|g| g.view_offset > 0));
             let shown = match visible.as_slice() {
                 [(only, _)] if !self.browsing && self.float_of(*only).is_none() => {
                     Shown::Passing(*only)
@@ -3085,6 +3187,18 @@ mod client {
             pane.term.as_ref().map(|(grid, _)| grid)
         }
 
+        /// The open workspace tree, drawn over the focused block.
+        fn paint_explorer(&self, frame: &mut Frame, visible: &[(BlockId, Rect)]) {
+            let Some(Exploring { explorer, .. }) = &self.exploring else {
+                return;
+            };
+            let Some((_, rect)) = visible.iter().find(|(block, _)| *block == self.focus) else {
+                return;
+            };
+            let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
+            frame.panel(*rect, &explorer.render(cols, rows));
+        }
+
         /// The open find bar's matches and prompt, drawn onto `frame`.
         fn paint_find(&self, frame: &mut Frame, visible: &[(BlockId, Rect)]) {
             let (Some(find), Some(grid)) = (&self.finding, self.grid(self.focus)) else {
@@ -3172,6 +3286,7 @@ mod client {
                 .collect();
             let mut frame = screen::compose(self.area, &views, self.focus);
             self.paint_find(&mut frame, &visible);
+            self.paint_explorer(&mut frame, &visible);
             let mut bytes = screen::render(last.as_ref(), &frame);
             // With no frame before (the layout or focus changed), `render`
             // takes the cursor to have the terminal's own colour; one the
@@ -3610,6 +3725,7 @@ mod client {
                 layouts: true,
                 editing: true,
                 floating: false,
+                workspace: false,
                 floats: Vec::new(),
                 focusing: false,
                 follow: Follow::default(),
@@ -3632,6 +3748,7 @@ mod client {
                 shown: Shown::Nothing,
                 browsing: false,
                 finding: None,
+                exploring: None,
                 split: None,
                 arriving: None,
                 opened: 0,
@@ -4274,6 +4391,78 @@ mod client {
             app.window = Some(window_id(7));
             app.session = Some(session_id(8));
             (app, inbox, far)
+        }
+
+        /// The workspace calls among `messages`: the path asked, if any.
+        #[cfg(unix)]
+        fn workspace_calls(messages: &[Message]) -> Vec<(u64, Option<String>)> {
+            messages
+                .iter()
+                .filter_map(|m| match m {
+                    Message::BlockCall {
+                        req, method, args, ..
+                    } if method == "terminal.workspace-list" => {
+                        let path = args.iter().find_map(|(k, v)| match v {
+                            Value::Text(t) if k == "path" => Some(t.clone()),
+                            _ => None,
+                        });
+                        Some((*req, path))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The workspace tree needs the server's call and the lease: without
+        /// either it asks for nothing and does not open.
+        #[cfg(unix)]
+        #[test]
+        fn the_workspace_tree_needs_the_call_and_the_lease() {
+            let (mut app, _inbox, far) = app(None);
+            app.act(Action::Explorer);
+            assert!(app.exploring.is_none(), "the server lacks the call");
+            app.workspace = true;
+            app.panes.get_mut(&block(1)).expect("A").leased = false;
+            app.act(Action::Explorer);
+            assert!(app.exploring.is_none(), "no lease");
+            assert!(workspace_calls(&sent(&far[0])).is_empty());
+        }
+
+        /// The tree asks for the root, then a directory's listing when Enter
+        /// opens it; a refusal shows and a key leaves it.
+        #[cfg(unix)]
+        #[test]
+        fn the_workspace_tree_lists_the_root_then_a_directory() {
+            let (mut app, _inbox, far) = app(None);
+            app.workspace = true;
+            app.act(Action::Explorer);
+            assert!(app.exploring.is_some(), "opened");
+            assert!(app.browsing, "composed, not passed through");
+            let asked = workspace_calls(&sent(&far[0]));
+            assert_eq!(asked.len(), 1);
+            assert_eq!(asked[0].1, None, "the root has no path");
+            // A reply to something else is not the tree's.
+            app.on_control(Message::Text {
+                req: asked[0].0 + 100,
+                text: ".\nd\tsrc".into(),
+            });
+            app.on_control(Message::Text {
+                req: asked[0].0,
+                text: ".\nd\tsrc\nf\ta".into(),
+            });
+            app.take(Input::Keys(b"j\r".to_vec()));
+            let asked = workspace_calls(&sent(&far[0]));
+            assert_eq!(asked.len(), 1);
+            assert_eq!(asked[0].1.as_deref(), Some("src"));
+            app.on_control(Message::Failed {
+                req: asked[0].0,
+                reason: "not listed".into(),
+                code: None,
+            });
+            let open = app.exploring.as_ref().expect("still open");
+            assert!(open.req.is_none() && !open.explorer.waiting());
+            app.take(Input::Keys(b"q".to_vec()));
+            assert!(app.exploring.is_none() && !app.browsing);
         }
 
         /// Requests asked on a path given up are never answered: following
