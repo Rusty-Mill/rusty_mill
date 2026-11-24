@@ -179,6 +179,7 @@ Precise contracts used by this guide:
 | D169 | #703: board-side API changes in PR #1844 (Escalations::act decision id, Escalations::applied, inbox_act `settled`) approved as built | [stated] 2026-11-24 (703) |
 | D170 | #703: an uncertain inbox send is written ahead as a pending mark on the Remediate card; closed as not applied only on proof (SUPERSEDED by D171) | [stated] 2026-11-24 (703) |
 | D171 | #703: Mill Board never closes a Remediate card from BBP's log; it only notes once the decision id shows applied (with rev); supersedes D170 | [stated] 2026-11-24 (703) |
+| D172 | #703: PR #1844 surface approved as built, including required `--fence` on `bbp human --decision` (closes Q63) | [stated] 2026-11-24 (703) |
 
 ## D1. Lenses, not stages
 
@@ -1715,3 +1716,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_844eeb2e2a6343eeb09f431eea1099dc
 **Key.** lel:703:drop-auto-close-keep-applied-note
 **Source.** Nano tapped "Drop auto-close, keep applied note" on Hearth decision card `cmsg_017MoLbtrGAAcyE1PVPZXuN6Y4PcGdaZac4qsyWyRT4Jo5`, 2026-11-24T16:03:01Z. Relayed by the caller; the card was not read. Supersedes D170; leaves D168 and D169 as approved. Q63 (is required `--fence` acceptable) stays open.
+
+## D172. #703: the PR #1844 surface is approved as built, including the required `--fence`
+
+**Decision.** Nano approves the surface listed in the PR #1844 review (6043258136), in particular the required `--fence` (Q63, answer a): `bbp human --decision ID` now requires `--fence`; `bbp decision` counts only the human principal; `Escalations::act(decision)` and the new required trait method `Escalations::applied`; `inbox_act`'s `recorded.settled` (`applied {rev}` or `unknown`); a stale-rev retry that finds a card returns `recorded`; the second card id scheme `tracked_id`; `decision::lookup(human)` and `human::op_for`. Nano did not say anything about dropping the second id scheme, so it stays as built. This settles the ask-first public-API gate for this surface only. CI, review by `dottiusmaximus` and the merge rules still apply. Extends D168 and D169 (the required `--fence` is stricter than D168's shape); consistent with D171 (no auto-close).
+**Why.** A decision id without a fence could skip the revision fence, so the stricter shape is the safe one; the other items are public API of the board and BBP, which is ask-first.
+**Rejected.** Making `--fence` optional to match D168's shape (Q63 option b).
+**Tag.** [stated] · remind-me: mem_f6abd383d5b9495c9e796c271eb42140
+**Key.** lel:703:approve-pr1844-surface-required-fence
+**Source.** Nano, GitHub comment by `baileyrd` on Rusty-Mill/rusty_mill#1844, comment id 7137833262, 2026-11-24T16:32:51Z: "I approve the surface it lists, in particular the required --fence (Q63)." Replying to review 6043258136. Relayed by the caller; the comment was not read.
