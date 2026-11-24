@@ -24,7 +24,9 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver as Inbox, RecvTimeoutError, Sender, SyncSender, channel};
+use std::sync::mpsc::{
+    Receiver as Inbox, RecvTimeoutError, Sender, SyncSender, TrySendError, channel, sync_channel,
+};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -1453,14 +1455,19 @@ struct Block {
 /// [`Block::next`]'s.
 const FORWARD_REQ: u64 = 1 << 40;
 
+/// Frames queued for a pane's forward run, and asks queued for it.
+const FORWARD_FRAMES: usize = 1024;
+const FORWARD_WANTS: usize = 16;
+
 /// How long a port may take to be listened on.
 const LISTEN_WAIT: Duration = Duration::from_secs(10);
 
 /// A pane's running [`forward::run_fed`], and what it listens on.
 struct Forwarder {
-    /// What the reader passes it of the server's frames.
-    frames: Sender<Message>,
-    wants: Sender<Want>,
+    /// What the reader passes it of the server's frames; bounded, so a run
+    /// that stalls never makes the reader wait or the queue grow.
+    frames: SyncSender<Message>,
+    wants: SyncSender<Want>,
     stop: Arc<AtomicBool>,
     /// The local port of each remote port listened on.
     ports: HashMap<u16, u16>,
@@ -1468,10 +1475,15 @@ struct Forwarder {
 
 /// Writes frames to a block's connection, whole, under its lock, so they
 /// never interleave with the pane's own.
-struct ConnWriter(Arc<Block>);
+struct ConnWriter(Arc<Block>, Arc<AtomicBool>);
 
 impl std::io::Write for ConnWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // A run that was stopped must not write through the connection that
+        // replaced the one it served.
+        if self.1.load(Ordering::SeqCst) {
+            return Err(std::io::ErrorKind::BrokenPipe.into());
+        }
         lock(&self.0.conn).write_raw(buf)?;
         Ok(buf.len())
     }
@@ -1616,12 +1628,13 @@ impl Block {
             ));
         }
         let (answer, answered) = channel();
-        {
+        let generation = {
             let mut forwarder = lock(&self.forwarder);
             if let Some(local) = forwarder.as_ref().and_then(|f| f.ports.get(&port)) {
                 return done(Ok(*local));
             }
             let run = forwarder.get_or_insert_with(|| self.start_forwarder());
+            let generation = Arc::clone(&run.stop);
             let want = Want {
                 spec: Spec {
                     local: None,
@@ -1629,11 +1642,18 @@ impl Block {
                 },
                 answer,
             };
-            if run.wants.send(want).is_err() {
-                *forwarder = None;
-                return done(Err("the forward ended; try again".into()));
+            match run.wants.try_send(want) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    return done(Err("too many forwards are waiting; try again".into()));
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    *forwarder = None;
+                    return done(Err("the forward ended; try again".into()));
+                }
             }
-        }
+            generation
+        };
         let block = Arc::clone(self);
         std::thread::spawn(move || {
             let local = match answered.recv_timeout(LISTEN_WAIT) {
@@ -1641,8 +1661,13 @@ impl Block {
                 Ok(Err(e)) => return done(Err(format!("could not listen here: {e}"))),
                 Err(_) => return done(Err("listening here took too long".into())),
             };
-            if let Some(run) = lock(&block.forwarder).as_mut() {
-                run.ports.insert(port, local);
+            // The run that listened may be gone, and another its replacement:
+            // only its own forward counts.
+            match lock(&block.forwarder).as_mut() {
+                Some(run) if Arc::ptr_eq(&run.stop, &generation) => {
+                    run.ports.insert(port, local);
+                }
+                _ => return done(Err("the forward ended; try again".into())),
             }
             done(Ok(local));
         });
@@ -1651,8 +1676,8 @@ impl Block {
     /// Starts the run that tunnels this block's ports, over its own
     /// connection: the reader passes it the frames it is for.
     fn start_forwarder(self: &Arc<Self>) -> Forwarder {
-        let (frames_tx, frames) = channel();
-        let (wants_tx, wants) = channel();
+        let (frames_tx, frames) = sync_channel(FORWARD_FRAMES);
+        let (wants_tx, wants) = sync_channel(FORWARD_WANTS);
         let stop = Arc::new(AtomicBool::new(false));
         let (block, flag) = (Arc::clone(self), Arc::clone(&stop));
         let spawned = std::thread::Builder::new()
@@ -1663,7 +1688,7 @@ impl Block {
                     FORWARD_REQ,
                     frames,
                     &wants,
-                    ConnWriter(Arc::clone(&block)),
+                    ConnWriter(Arc::clone(&block), Arc::clone(&flag)),
                     &|| flag.load(Ordering::SeqCst),
                 );
                 if let forward::Ended::Lost(e) = ended {
@@ -1701,8 +1726,17 @@ impl Block {
 
     /// Hands the forward run a frame it is for.
     fn to_forwards(&self, message: Message) {
-        if let Some(run) = lock(&self.forwarder).as_ref() {
-            let _ = run.frames.send(message);
+        let mut forwarder = lock(&self.forwarder);
+        let Some(run) = forwarder.as_ref() else {
+            return;
+        };
+        // The reader never waits: a run that cannot keep up is ended, and
+        // the next click starts a fresh one.
+        if let Err(TrySendError::Full(_)) = run.frames.try_send(message) {
+            eprintln!("rusty-mux-gui: block {}: forwards fell behind", self.block);
+            if let Some(run) = forwarder.take() {
+                run.stop.store(true, Ordering::SeqCst);
+            }
         }
     }
 

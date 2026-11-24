@@ -98,6 +98,9 @@ pub(crate) struct Loopback {
     pub port: u16,
     /// What follows the authority: path, query and fragment.
     pub rest: String,
+    /// The host was `[::1]`: the tunnel dials IPv4 only, so such a link is
+    /// refused rather than reaching whatever listens on 127.0.0.1.
+    pub v6: bool,
 }
 
 impl Loopback {
@@ -148,6 +151,7 @@ pub(crate) fn loopback(url: &str) -> Option<Loopback> {
         scheme,
         port,
         rest: tail.to_owned(),
+        v6: host == "[::1]",
     })
 }
 
@@ -602,6 +606,8 @@ mod tests {
         assert_eq!(loopback("https://LOCALHOST").unwrap().port, 443);
         assert_eq!(loopback("http://127.0.0.1/").unwrap().port, 80);
         assert_eq!(loopback("http://[::1]:3000").unwrap().port, 3000);
+        assert!(loopback("http://[::1]:3000").unwrap().v6);
+        assert!(!loopback("http://localhost:3000").unwrap().v6);
     }
 
     #[test]
