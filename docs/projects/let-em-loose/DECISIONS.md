@@ -176,6 +176,8 @@ Precise contracts used by this guide:
 | D166 | #600 v0: the Claude CLI reads Nano's `~/.claude` login through a read-only jail root (written exception to D101, `same_user` v0, expires with the gateway #726) | [stated] 2026-11-19 (1318, 600) |
 | D167 | One paid run approved: the #1318 toy-claim acceptance run (2 builders, 45 min, one claim) after the Claude `no_overage` assertion is added; #1320 not approved | [stated] 2026-11-19 (1318) |
 | D168 | #703: new bbp CLI surface `bbp human --decision ID` and `bbp decision` approved | [stated] 2026-11-24 (703) |
+| D169 | #703: board-side API changes in PR #1844 (Escalations::act decision id, Escalations::applied, inbox_act `settled`) approved as built | [stated] 2026-11-24 (703) |
+| D170 | #703: an uncertain inbox send is written ahead as a pending mark on the Remediate card; closed as not applied only on proof | [stated] 2026-11-24 (703) |
 
 ## D1. Lenses, not stages
 
@@ -1683,3 +1685,21 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_494a46793ab94f7aa5ea8eb891d99af4
 **Key.** lel:703:bbp-human-decision-id-cli-surface
 **Source.** Nano, Mill Board project thread, message `cmsg_017MoLbtrGAAcyE1PVPZXuN63jqD6m4iZ3CnxC8vRdurRk`, 2026-11-24T08:11:19Z: "I approve", replying to the caller's request to approve that CLI surface (relayed by the caller; the request message itself was not read). Applies D119's host-CLI trust model (`bbp human`); fulfils the QA.md § card #595 deferral of decision ids to #703.
+
+## D169. #703: the board-side API changes in PR #1844 are approved as built
+
+**Decision.** Nano approves, as built, the board-side API changes in PR #1844 beyond the CLI surface of D168: `Escalations::act` takes an optional decision id, `Escalations::applied` is added, and the `inbox_act` answer carries `settled`. This settles the ask-first public-API gate for these changes only. CI, review by `dottiusmaximus` and the merge rules still apply.
+**Why.** Card #703 needs the board to learn whether a decision was applied; these are the board calls that carry it, and a public API change is ask-first.
+**Rejected.** None recorded (the card's other options were not relayed).
+**Tag.** [stated] · remind-me: mem_bcf96446f7ab4d679867c861a8cc8dca
+**Key.** lel:703:board-api-changes-as-built
+**Source.** Nano tapped "Approve as built" on a Hearth decision card, 2026-11-24 (card `cmsg_017MoLbtrGAAcyE1PVPZXuN6XmhpUb1QuGg8qTvDpSxKzt` or `cmsg_017MoLbtrGAAcyE1PVPZXuN6DEW14f4wpgLziio54sPHnY`; taps arrived as messages at 14:37:23Z and 14:37:08Z; the caller did not say which card carried which tap). Relayed by the caller; the cards were not read. Extends D168.
+
+## D170. #703: an uncertain inbox send is written ahead as a pending mark; closed as not applied only on proof
+
+**Decision.** For an inbox send the board cannot prove was tracked, the board persists a pending mark on the Remediate card before calling BBP. It clears the mark only on proof: the decision id appears in the log, or BBP refused before writing. It never closes the card as not applied while a mark is open. Implemented in commit `ede5d038b` on branch `claude/project-thread-9w7nhi` (PR #1844).
+**Why.** Closing as not applied on an unproven send could hide a decision that was in fact applied; the write-ahead mark keeps closes rare and safe.
+**Rejected.** The other options on the card were not relayed; Nano chose "Write-ahead pending, rare closes".
+**Tag.** [stated] · remind-me: mem_924abcd166b64ab8a1639b59530abe4a
+**Key.** lel:703:uncertain-send-write-ahead-pending
+**Source.** Nano tapped "Write-ahead pending, rare closes" on a Hearth decision card, 2026-11-24 (cards `cmsg_017MoLbtrGAAcyE1PVPZXuN6XmhpUb1QuGg8qTvDpSxKzt` and `cmsg_017MoLbtrGAAcyE1PVPZXuN6DEW14f4wpgLziio54sPHnY`; taps at 14:37:23Z and 14:37:08Z). Relayed by the caller; the cards were not read. Builds on D168.
