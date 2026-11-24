@@ -4,7 +4,7 @@
 use crate::agents::{AgentInfo, Grant};
 use std::cell::Cell;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -138,7 +138,10 @@ pub struct Board<S> {
     /// Agents registered on shared connectors.
     agents: Mutex<crate::agents::Registry>,
     /// What the merge watch last found (#1620).
-    merged_open: Mutex<Vec<crate::mergewatch::MergedOpen>>,
+    merged_open: Mutex<(
+        Vec<crate::mergewatch::MergedOpen>,
+        crate::mergewatch::WatchStatus,
+    )>,
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -1105,24 +1108,56 @@ impl<S: Store> Board<S> {
         let mut cards = self.cards()?;
         cards.retain(|c| keep(c));
         let mut m = metrics(&self.workflow(), &cards, (self.clock)());
-        let shown: HashSet<Uuid> = cards.iter().map(|c| c.id).collect();
-        m.merged_open = self
+        let live: HashMap<Uuid, &Card> = cards.iter().map(|c| (c.id, c)).collect();
+        let seen = self
             .merged_open
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner);
+        // Re-check each cached match against the card as it is now: still open, unarchived and
+        // in scope, with its current number, project, title and column.
+        m.merged_open = seen
+            .0
             .iter()
-            .filter(|o| shown.contains(&o.id))
-            .cloned()
+            .filter_map(|o| {
+                let c = live.get(&o.id)?;
+                (c.column != Column::DONE && c.archived_ms.is_none()).then(|| {
+                    crate::mergewatch::MergedOpen {
+                        number: c.number,
+                        project: c.project.clone(),
+                        title: c.title.clone(),
+                        column: c.column.clone(),
+                        ..o.clone()
+                    }
+                })
+            })
             .collect();
+        m.merged_watch = seen.1.clone();
         Ok(m)
     }
 
-    /// Replace what the merge watch found (see [`crate::mergewatch::scan`]).
-    pub fn set_merged_open(&self, found: Vec<crate::mergewatch::MergedOpen>) {
+    /// Replace what the merge watch found (see [`crate::mergewatch::scan`]); `truncated` when it
+    /// read only the newest closed pull requests of some repository.
+    pub fn set_merged_open(&self, found: Vec<crate::mergewatch::MergedOpen>, truncated: bool) {
         *self
             .merged_open
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = found;
+            .unwrap_or_else(PoisonError::into_inner) = (
+            found,
+            crate::mergewatch::WatchStatus {
+                checked_ms: Some((self.clock)()),
+                truncated,
+                error: None,
+            },
+        );
+    }
+
+    /// Record why the merge watch's latest run failed; the last list stays, marked as stale.
+    pub fn note_merge_watch_error(&self, error: &str) {
+        self.merged_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .1
+            .error = Some(error.to_owned());
     }
 
     /// One card.

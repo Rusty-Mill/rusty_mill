@@ -571,6 +571,11 @@ impl Projects {
         })
     }
 
+    /// The GitHub `owner/name` of repository `repo`, if it has one.
+    pub fn github_of(&self, repo: &str) -> Option<&str> {
+        self.repos.get(repo)?.github.as_deref()
+    }
+
     /// The GitHub `owner/name` of every repository that has one.
     pub fn github_slugs(&self) -> impl Iterator<Item = &str> {
         self.repos.values().filter_map(|r| r.github.as_deref())

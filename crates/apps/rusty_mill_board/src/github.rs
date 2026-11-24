@@ -10,7 +10,7 @@ use serde_json::json;
 
 use crate::backfill::{Lookup, Merged, plain};
 use crate::http::Http;
-use crate::mergewatch::{MergedPr, MergedPulls};
+use crate::mergewatch::{MergedPr, MergedPulls, Recent};
 use crate::sync::{Draft, Forge, Issue, SyncError};
 
 const PAGE: usize = 100;
@@ -148,11 +148,11 @@ struct RawClosed {
 }
 
 impl MergedPulls for GithubMerged {
-    fn recent_merged(&self, slug: &str) -> Result<Vec<MergedPr>, String> {
+    fn recent_merged(&self, slug: &str) -> Result<Recent, String> {
         let Some((owner, name)) = slug.split_once('/').filter(|(o, n)| plain(o) && plain(n)) else {
             return Err(format!("{slug}: not a repository"));
         };
-        let mut out = Vec::new();
+        let mut out = Recent::default();
         for page in 1..=WATCH_PAGES {
             let url = format!(
                 "{}/repos/{owner}/{name}/pulls?state=closed&sort=updated&direction=desc&per_page={PAGE}&page={page}",
@@ -165,10 +165,11 @@ impl MergedPulls for GithubMerged {
             }
             let raw: Vec<RawClosed> = serde_json::from_str(&text).map_err(|e| e.to_string())?;
             let n = raw.len();
-            out.extend(
+            out.prs.extend(
                 raw.into_iter()
                     .filter(|p| p.merged_at.is_some())
                     .map(|p| MergedPr {
+                        repo: slug.to_owned(),
                         url: p.html_url,
                         body: p.body.unwrap_or_default(),
                     }),
@@ -176,6 +177,7 @@ impl MergedPulls for GithubMerged {
             if n < PAGE {
                 break;
             }
+            out.truncated = page == WATCH_PAGES;
         }
         Ok(out)
     }
@@ -433,7 +435,9 @@ mod tests {
                 {"html_url":"https://github.com/o/r/pull/3","body":null,"merged_at":"2026-11-21T00:00:00Z"}]"#,
         )]);
         let forge = GithubMerged::new(&base, "hunter2").expect("client");
-        let got = forge.recent_merged("o/r").expect("merged");
+        let recent = forge.recent_merged("o/r").expect("merged");
+        assert!(!recent.truncated);
+        let got = recent.prs;
         let urls: Vec<&str> = got.iter().map(|p| p.url.as_str()).collect();
         assert_eq!(
             urls,
@@ -443,6 +447,7 @@ mod tests {
             ]
         );
         assert_eq!(got[0].body, "Closes card #5");
+        assert_eq!(got[0].repo, "o/r");
         assert!(got[1].body.is_empty());
         assert!(forge.recent_merged("not a slug").is_err());
         assert!(server.join().expect("server")[0].starts_with("GET /repos/o/r/pulls?state=closed"));

@@ -19,19 +19,42 @@ use crate::domain::{Card, Column};
 /// A merged pull request, as the forge reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergedPr {
+    /// The `OWNER/NAME` it was read from: it can only point at cards of projects in that repository.
+    pub repo: String,
     /// `https://github.com/OWNER/NAME/pull/N`.
     pub url: String,
     /// Its body (empty when none).
     pub body: String,
 }
 
+/// What one repository read returned.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Recent {
+    /// Merged pull requests, newest activity first.
+    pub prs: Vec<MergedPr>,
+    /// More closed pull requests exist than were read, so older merges may be missing.
+    pub truncated: bool,
+}
+
 /// Port: recently merged pull requests of one repository.
 pub trait MergedPulls {
-    /// The most recently merged pull requests of `OWNER/NAME`, newest activity first.
+    /// The most recently merged pull requests of `OWNER/NAME`.
     ///
     /// # Errors
     /// Why the forge could not be read.
-    fn recent_merged(&self, slug: &str) -> Result<Vec<MergedPr>, String>;
+    fn recent_merged(&self, slug: &str) -> Result<Recent, String>;
+}
+
+/// How current [`MergedOpen`] is, reported beside it so a stale or partial list is not read
+/// as complete.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct WatchStatus {
+    /// When the list was last refreshed, Unix ms; `None` before the first successful run.
+    pub checked_ms: Option<i64>,
+    /// The last refresh read only the newest closed pull requests of some repository.
+    pub truncated: bool,
+    /// Why the latest run failed; the list is then the last good one (see `checked_ms`).
+    pub error: Option<String>,
 }
 
 /// How a merged pull request points at a card, strongest first.
@@ -168,9 +191,15 @@ fn same_pull(link: &str, url: &str) -> bool {
     a == b
 }
 
-/// The open cards `prs` point at, strongest link first per card, in card-number order.
+/// The open cards `prs` point at, strongest link first per card, in card-number order. A pull
+/// request only points at a card whose project is in the repository it was read from:
+/// `github_of(project)` is that project's GitHub `OWNER/NAME`s.
 #[must_use]
-pub fn scan(cards: &[Card], prs: &[MergedPr]) -> Vec<MergedOpen> {
+pub fn scan(
+    cards: &[Card],
+    prs: &[MergedPr],
+    github_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<MergedOpen> {
     let by_number: BTreeMap<u64, &Card> = cards
         .iter()
         .filter(|c| c.column != Column::DONE && c.archived_ms.is_none())
@@ -198,9 +227,14 @@ pub fn scan(cards: &[Card], prs: &[MergedPr]) -> Vec<MergedOpen> {
         e.prs.sort_by_key(|p| p.why);
         e.prs.truncate(MAX_PRS);
     };
+    let bound: BTreeMap<Uuid, Vec<String>> = by_number
+        .values()
+        .map(|c| (c.id, github_of(&c.project)))
+        .collect();
     for pr in prs {
+        let ours = |c: &Card| bound[&c.id].contains(&pr.repo);
         for (n, closes) in card_refs(&pr.body) {
-            if let Some(card) = by_number.get(&n) {
+            if let Some(card) = by_number.get(&n).filter(|c| ours(c)) {
                 note(
                     card,
                     if closes { Why::Marker } else { Why::Mention },
@@ -208,7 +242,7 @@ pub fn scan(cards: &[Card], prs: &[MergedPr]) -> Vec<MergedOpen> {
                 );
             }
         }
-        for card in by_number.values() {
+        for card in by_number.values().filter(|c| ours(c)) {
             if card.evidence.iter().any(|l| same_pull(l, &pr.url)) {
                 note(card, Why::Evidence, &pr.url);
             }
@@ -220,26 +254,43 @@ pub fn scan(cards: &[Card], prs: &[MergedPr]) -> Vec<MergedOpen> {
 }
 
 /// One watch run: read the recently merged pull requests of every registered GitHub
-/// repository, [`scan`] the board's cards and keep the result for `board_metrics`. Reads only;
-/// a repository that cannot be read leaves the last result in place.
+/// repository, [`scan`] the board's cards and keep the result for `board_metrics`. Reads only.
+/// A failed read keeps the last list and records the error beside it ([`WatchStatus`]).
 ///
 /// # Errors
 /// The first repository or board failure.
 pub fn watch(board: &Shared, pulls: &dyn MergedPulls) -> Result<usize, String> {
-    let projects = board.projects();
-    let mut merged = Vec::new();
-    for slug in projects.github_slugs() {
-        merged.extend(
-            pulls
+    let run = || -> Result<(Vec<MergedOpen>, bool), String> {
+        let projects = board.projects();
+        let slugs: Vec<&str> = projects.github_slugs().collect();
+        let (mut merged, mut truncated) = (Vec::new(), false);
+        for slug in &slugs {
+            let recent = pulls
                 .recent_merged(slug)
-                .map_err(|e| format!("{slug}: {e}"))?,
-        );
+                .map_err(|e| format!("{slug}: {e}"))?;
+            truncated |= recent.truncated;
+            merged.extend(recent.prs);
+        }
+        let cards = board.list(None).map_err(|e| e.to_string())?;
+        let github_of = |project: &str| -> Vec<String> {
+            projects
+                .repos_of(project)
+                .filter_map(|r| projects.github_of(r).map(str::to_owned))
+                .collect()
+        };
+        Ok((scan(&cards, &merged, &github_of), truncated))
+    };
+    match run() {
+        Ok((found, truncated)) => {
+            let n = found.len();
+            board.set_merged_open(found, truncated);
+            Ok(n)
+        }
+        Err(e) => {
+            board.note_merge_watch_error(&e);
+            Err(e)
+        }
     }
-    let cards = board.list(None).map_err(|e| e.to_string())?;
-    let found = scan(&cards, &merged);
-    let n = found.len();
-    board.set_merged_open(found);
-    Ok(n)
 }
 
 #[cfg(test)]
@@ -259,6 +310,7 @@ mod tests {
 
     fn pr(n: u64, body: &str) -> MergedPr {
         MergedPr {
+            repo: "o/r".to_owned(),
             url: format!("https://github.com/o/r/pull/{n}"),
             body: body.to_owned(),
         }
@@ -274,6 +326,13 @@ mod tests {
         );
         assert!(card_refs("Closes #12").is_empty());
         assert!(card_refs("Closes card #N").is_empty());
+        for body in [
+            "Closes card #12abc",
+            "Closes card #12-other",
+            "see card #12x",
+        ] {
+            assert!(card_refs(body).is_empty(), "{body:?}");
+        }
     }
 
     #[test]
@@ -306,7 +365,7 @@ mod tests {
         let cards = [card(1, &[])];
         let mut prs: Vec<MergedPr> = (1..=6).map(|n| pr(n, "see card #1")).collect();
         prs.push(pr(7, "Closes card #1"));
-        let got = scan(&cards, &prs);
+        let got = scan(&cards, &prs, &|_| vec!["o/r".to_owned()]);
         assert_eq!(got[0].prs.len(), MAX_PRS);
         assert_eq!(got[0].why, Why::Marker);
         assert_eq!(got[0].prs[0].why, Why::Marker);
@@ -324,7 +383,7 @@ mod tests {
             pr(9, "nothing"),
             pr(10, "Closes card #1"),
         ];
-        let got = scan(&cards, &prs);
+        let got = scan(&cards, &prs, &|_| vec!["o/r".to_owned()]);
         assert_eq!(got.len(), 2);
         assert_eq!((got[0].number, got[0].why), (Some(1), Why::Marker));
         assert_eq!(got[0].prs.len(), 2);
@@ -337,48 +396,88 @@ mod tests {
     fn done_and_unknown_cards_are_not_listed() {
         let mut done = card(1, &[]);
         done.column = Column::DONE;
-        let got = scan(&[done], &[pr(1, "Closes card #1 and card #99")]);
+        let got = scan(&[done], &[pr(1, "Closes card #1\ncard #99")], &|_| {
+            vec!["o/r".to_owned()]
+        });
         assert!(got.is_empty());
     }
 
-    struct Fixed(Result<Vec<MergedPr>, String>);
+    struct Fixed(Result<Recent, String>);
 
     impl MergedPulls for Fixed {
-        fn recent_merged(&self, _: &str) -> Result<Vec<MergedPr>, String> {
+        fn recent_merged(&self, _: &str) -> Result<Recent, String> {
             self.0.clone()
         }
     }
 
-    #[test]
-    fn watch_feeds_metrics_and_a_failed_read_keeps_the_last_result() {
-        let registry = r#"{"version": 2, "repos": {"mill": {"github": "o/r"}},
-            "projects": {"p": {"repos": {"mill": ["src"]}}}}"#;
-        let board: Shared = Board::new(
+    fn recent(prs: Vec<MergedPr>, truncated: bool) -> Fixed {
+        Fixed(Ok(Recent { prs, truncated }))
+    }
+
+    const REGISTRY: &str = r#"{"version": 2,
+        "repos": {"mill": {"github": "o/r"}, "other": {"github": "o/other"}},
+        "projects": {"p": {"repos": {"mill": ["src"]}}, "q": {"repos": {"other": ["src"]}}}}"#;
+
+    fn board() -> Shared {
+        Board::new(
             Box::new(MemStore::default()) as Box<dyn Store>,
             crate::board::Roles::default(),
         )
-        .with_projects(Projects::parse(registry).expect("registry"));
-        let who = board.roles().actor("nano", "human").expect("role");
-        let card = board.add_in(&who, "p", "work", "", vec![]).expect("card");
-        let n = card.number.expect("numbered");
-        let body = format!("Closes card #{n}");
-        assert_eq!(watch(&board, &Fixed(Ok(vec![pr(1, &body)]))), Ok(1));
-        let m = board.metrics(|_| true).expect("metrics");
+        .with_projects(Projects::parse(REGISTRY).expect("registry"))
+    }
+
+    #[test]
+    fn a_pull_request_only_points_at_cards_of_its_own_repository() {
+        let b = board();
+        let who = b.roles().actor("nano", "human").expect("role");
+        let mine = b.add_in(&who, "p", "mine", "", vec![]).expect("card");
+        let theirs = b.add_in(&who, "q", "theirs", "", vec![]).expect("card");
+        let body = format!(
+            "Closes card #{}\nsee card #{}",
+            mine.number.expect("n"),
+            theirs.number.expect("n")
+        );
+        // Merged in o/r: card of project q (repository o/other) must not appear.
+        assert_eq!(watch(&b, &recent(vec![pr(1, &body)], false)), Ok(1));
+        let m = b.metrics(|_| true).expect("metrics");
+        assert_eq!(m.merged_open.len(), 1);
+        assert_eq!(m.merged_open[0].id, mine.id);
+    }
+
+    #[test]
+    fn a_cached_match_is_rechecked_and_a_stale_or_partial_list_says_so() {
+        let b = board();
+        let who = b.roles().actor("nano", "human").expect("role");
+        let card = b.add_in(&who, "p", "work", "", vec![]).expect("card");
+        let body = format!("Closes card #{}", card.number.expect("n"));
+        assert_eq!(watch(&b, &recent(vec![pr(1, &body)], true)), Ok(1));
+        let m = b.metrics(|_| true).expect("metrics");
         assert_eq!(
             (m.merged_open.len(), m.merged_open[0].why),
             (1, Why::Marker)
         );
-        assert!(watch(&board, &Fixed(Err("rate limit".into()))).is_err());
-        assert_eq!(
-            board.metrics(|_| true).expect("metrics").merged_open.len(),
-            1
-        );
+        assert!(m.merged_watch.truncated && m.merged_watch.error.is_none());
+        assert!(m.merged_watch.checked_ms.is_some());
+        // A failed refresh keeps the last list, flagged.
+        assert!(watch(&b, &Fixed(Err("rate limit".into()))).is_err());
+        let m = b.metrics(|_| true).expect("metrics");
+        assert_eq!(m.merged_open.len(), 1);
         assert!(
-            board
-                .metrics(|_| false)
+            m.merged_watch
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("rate limit"))
+        );
+        // Out of the caller's scope: not shown.
+        assert!(
+            b.metrics(|_| false)
                 .expect("metrics")
                 .merged_open
                 .is_empty()
         );
+        // The card is Done before the next refresh: no longer listed.
+        b.close(card.id, crate::domain::CloseReason::Superseded, None, &who)
+            .expect("closed");
+        assert!(b.metrics(|_| true).expect("metrics").merged_open.is_empty());
     }
 }
