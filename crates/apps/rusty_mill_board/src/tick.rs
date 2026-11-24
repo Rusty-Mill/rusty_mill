@@ -962,9 +962,12 @@ impl<T: TickApi> TickStore<T> {
         if task_tags(next) != task_tags(current) {
             patch.insert("tags".into(), json!(task_tags(next)));
         }
-        // Done is terminal on the board, so a card only ever closes its task.
+        // Done is terminal on the board, except for `card_unclose`, which reopens the task
+        // (rusty_tick clears its completion time, and `column_of` then reads the `board:` tag).
         if next.column == Column::DONE && current.column != Column::DONE {
             patch.insert("status".into(), json!(closed_status(next)));
+        } else if next.column != Column::DONE && current.column == Column::DONE {
+            patch.insert("status".into(), json!("open"));
         }
         if next.project != current.project {
             patch.insert("listId".into(), json!(self.list_for(&next.project)?));
@@ -1317,6 +1320,23 @@ impl<T: TickApi> Store for TickStore<T> {
                             },
                             false => e,
                         })?;
+                }
+                // Comments the change appended (the merge watch's close, an unclose): each is
+                // its own fenced request, after the state it explains, so a failure leaves the
+                // card changed without its note and says so (`PartlySaved`, with the revision
+                // reached; the change itself is saved and a person can add the note).
+                let fresh = card
+                    .comments
+                    .get(current.comments.len()..)
+                    .unwrap_or_default();
+                for comment in fresh {
+                    let before = version;
+                    version = self.put_comment(card, comment, before).map_err(|e| {
+                        BoardError::PartlySaved {
+                            rev: before - 1,
+                            why: e.to_string(),
+                        }
+                    })?;
                 }
                 Ok(version)
             }

@@ -815,6 +815,62 @@ fn an_archived_card_is_one_tag_on_its_closed_task() {
     assert_eq!(board.get(open.id).expect("get").archived_ms, None);
 }
 
+/// The merge watch's close and its undo, through a native rusty_tick task, read back by a fresh
+/// board: the task is closed and reopened (and its completion time cleared), the provenance
+/// goes and returns with the state, and the audit comments are stored.
+#[test]
+fn a_merge_close_and_its_undo_survive_in_the_native_task_and_a_fresh_read() {
+    let tick = FakeTick::default();
+    let registry = r#"{"version": 2, "repos": {"mill": {"github": "o/r"}},
+        "projects": {"p": {"repos": {"mill": ["src"]}}}}"#;
+    let make = || {
+        Board::with_clock(TickStore::new(tick.clone()), Roles::default(), clock)
+            .with_projects(Projects::parse(registry).expect("projects"))
+    };
+    let board = make();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add_in(&human, "p", "work", "", vec![]).expect("add");
+    let watcher = rusty_mill_board::domain::Actor {
+        name: rusty_mill_board::domain::MERGE_WATCH.to_owned(),
+        caps: [rusty_mill_board::domain::Capability::Record].into(),
+        projects: Some(["p".to_owned()].into()),
+    };
+    let pr = "https://github.com/o/r/pull/7";
+    board
+        .close_merged(card.id, card.rev, pr, "o/r", &watcher)
+        .expect("closed by merge");
+    assert_eq!(tick.task(card.id)["status"], "done");
+    assert!(!tick.task(card.id)["completedMs"].is_null());
+    let fresh = make().get(card.id).expect("get");
+    assert_eq!(fresh.column, Column::DONE);
+    assert_eq!(fresh.merged.map(|m| m.was), Some(Column::BACKLOG));
+    assert!(fresh.done_ms.is_some() && fresh.evidence == [pr.to_owned()]);
+    assert!(
+        fresh
+            .comments
+            .iter()
+            .any(|c| c.by == watcher.name && c.text.starts_with("Closed by merge"))
+    );
+
+    board.unclose(card.id, &human).expect("unclosed");
+    assert_eq!(tick.task(card.id)["status"], "open");
+    assert!(tick.task(card.id)["completedMs"].is_null());
+    let fresh = make().get(card.id).expect("get");
+    assert_eq!(
+        (fresh.column, fresh.merged, fresh.done_ms),
+        (Column::BACKLOG, None, None)
+    );
+    assert_eq!(fresh.evidence, [pr.to_owned()], "the evidence stays");
+    let notes: Vec<&str> = fresh.comments.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(notes[0].starts_with("Closed by merge") && notes[1].starts_with("Unclosed"));
+    // Nothing left to undo.
+    assert!(matches!(
+        make().unclose(card.id, &human),
+        Err(BoardError::Refused(_))
+    ));
+}
+
 #[test]
 fn a_merge_close_is_one_tag_that_unclose_removes() {
     let (board, tick) = board();
