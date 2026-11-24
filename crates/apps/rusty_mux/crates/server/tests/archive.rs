@@ -197,3 +197,27 @@ fn record_ids_cannot_name_other_files() {
     assert!(reason.contains("not a record id"), "{reason}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_transcript_too_long_for_one_reply_is_refused_and_the_block_stays() {
+    let dir = state("long");
+    let socket = start_server_with(rusty_mux_server::Config {
+        state_dir: Some(dir.clone()),
+        ..shell()
+    });
+    let mut client = Client::connect_with(&socket, ARCHIVING, None);
+    // About 4 MiB of output, over what `archive-show` can answer in one reply
+    // and what the spool and screen hold between them.
+    let block = held(
+        &mut client,
+        "yes 0123456789012345678901234567890123456789012345678901234567890123456789012345678 | head -c 4400000",
+    );
+    wait_exited(&mut client, block);
+    let reason = failed(&archive(&mut client, block, "c"));
+    assert!(
+        reason.contains("too long") || reason.contains("lines"),
+        "{reason}"
+    );
+    assert!(exited(&mut client, block), "the block must stay");
+    let _ = std::fs::remove_dir_all(&dir);
+}

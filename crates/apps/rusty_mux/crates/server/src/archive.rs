@@ -13,7 +13,9 @@ use std::path::Path;
 pub(crate) const MAX_TEXT: usize = 256;
 
 /// The largest transcript archived; a longer one is refused, never cut.
-pub(crate) const MAX_TRANSCRIPT: usize = 32 << 20;
+/// `archive-show` answers a record in one `Text` reply, which the server
+/// caps at 4 MiB, so a record must fit there with its header (under 2 KiB).
+pub(crate) const MAX_TRANSCRIPT: usize = 3 << 20;
 
 /// The folder of the archive inside the state directory.
 pub(crate) const DIR: &str = "archive";

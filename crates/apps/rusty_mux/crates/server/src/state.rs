@@ -41,7 +41,7 @@ use crate::passed::{Fd, Passed};
 use crate::ports;
 use crate::process;
 use crate::pty::{self, Process, Pty};
-use crate::spool::Spool;
+use crate::spool::{self, Spool};
 use crate::store::{Started, Store};
 use crate::terminal;
 
@@ -62,6 +62,9 @@ const CHUNK: usize = 16 << 10;
 const REPLY_MAX: usize = crate::outbox::BUDGET / 2;
 /// What a `Text` reply adds to its text: tags, request id and length prefix.
 const REPLY_FRAME: usize = 64;
+/// An archive record, header (under 2 KiB) and transcript, is read back in one
+/// `Text` reply (`archive-show`), so the largest one must fit in it.
+const _: () = assert!(archive::MAX_TRANSCRIPT + 2048 + REPLY_FRAME <= REPLY_MAX);
 
 /// Events kept for clients that reconnect.
 const HISTORY: usize = 4096;
@@ -266,6 +269,9 @@ struct BlockRt {
     released: bool,
     /// How its program ended, if it did while this server watched.
     exit: Option<ExitStatus>,
+    /// Its output ended and its program is being reaped: still running as
+    /// far as its outcome goes, until [`State::exited`] records it.
+    reaping: bool,
 }
 
 /// A block's running program: its PTY and the task reading it.
@@ -355,6 +361,7 @@ impl BlockRt {
             agent: None,
             released: false,
             exit: None,
+            reaping: false,
         }
     }
 
@@ -2572,7 +2579,7 @@ impl State {
             .blocks
             .get(&block)
             .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
-        if rt.live.is_some() || rt.released {
+        if rt.live.is_some() || rt.released || rt.reaping {
             return Err("archive-block: the block's program is still running".into());
         }
         let transcript = transcript(rt)?;
@@ -3147,6 +3154,7 @@ impl State {
             rt.started.read_only = true;
             rt.unsaved = true;
             live.pty.release();
+            rt.reaping = true;
             return Some(live.process);
         }
         self.blocks.remove(&block).and_then(|rt| rt.release(false))
@@ -3163,6 +3171,7 @@ impl State {
         }
         if let Some(rt) = self.blocks.get_mut(&block) {
             rt.exit = status;
+            rt.reaping = false;
         }
         let held = self.blocks.get(&block).is_some_and(|rt| rt.hold);
         if held {
@@ -3555,10 +3564,20 @@ fn transcript(rt: &BlockRt) -> Result<String, Refusal> {
     };
     let past = match &rt.spool {
         Some(spool) => {
+            // One read gives at most READ_MAX lines; a longer history
+            // would be archived short, and the block deleted with the rest.
+            if spool.lines() > spool::READ_MAX {
+                return Err(format!(
+                    "archive-block: the history is over {} lines, more than one archive record keeps",
+                    spool::READ_MAX
+                )
+                .into());
+            }
             let read = spool
                 .read(0, spool.lines())
                 .map_err(|e| format!("archive-block: reading the history: {e}"))?;
-            format_history(&read, &rt.grid, capture, archive::MAX_TRANSCRIPT)?
+            format_history(&read, &rt.grid, capture, archive::MAX_TRANSCRIPT)
+                .map_err(|_| "archive-block: the transcript is too long to archive")?
         }
         None => String::new(),
     };
