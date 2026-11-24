@@ -126,7 +126,6 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_FIND)
     .union(Features::AGENT_META)
     .union(Features::UPLOAD)
-    .union(Features::DOWNLOAD)
     .union(Features::PORT_FORWARD)
     .union(UNIX_ONLY);
 
@@ -150,7 +149,9 @@ const SHOW_PERIOD: Duration = Duration::from_secs(1);
 #[cfg(target_os = "linux")]
 const UNIX_ONLY: Features = Features::SIGNAL_RELEASE
     .union(Features::TAILSCALE_STATUS)
-    .union(Features::PORTS);
+    .union(Features::PORTS)
+    // Downloads are read through the kernel's own account of the opened file.
+    .union(Features::DOWNLOAD);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
 
@@ -2161,11 +2162,20 @@ impl State {
                 // The configured directory, not the opened store's: a store that failed
                 // to open still leaves its directory out of reach.
                 let private = self.config.state_dir.clone();
+                // The config file, the TLS key, the tokens and the allowlist
+                // are as secret as the state directory.
+                let keep: Vec<_> = self
+                    .config
+                    .protected
+                    .iter()
+                    .chain(&self.config.config_file)
+                    .cloned()
+                    .collect();
                 let path = path.ok_or("terminal.download: missing path")?;
                 return Ok(Outcome::Blocking {
                     method: "terminal.download",
                     work: Box::new(move || {
-                        download::read(base.as_deref(), &path, offset, private.as_deref())
+                        download::read(base.as_deref(), &path, offset, private.as_deref(), &keep)
                     }),
                 });
             }
@@ -3700,6 +3710,7 @@ mod regression {
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
                     state_dir: None,
+                    protected: Vec::new(),
                     grapheme_clustering: false,
                     config_file: None,
                 },
@@ -3730,6 +3741,7 @@ mod regression {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
                 state_dir: None,
+                protected: Vec::new(),
                 grapheme_clustering: clustering,
                 config_file: None,
             },
@@ -4496,6 +4508,7 @@ mod regression {
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            protected: Vec::new(),
             grapheme_clustering: false,
             config_file: Some("/stalled.json".into()),
         };
@@ -4839,6 +4852,7 @@ mod regression {
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
                     state_dir: None,
+                    protected: Vec::new(),
                     grapheme_clustering: false,
                     config_file: None,
                 },

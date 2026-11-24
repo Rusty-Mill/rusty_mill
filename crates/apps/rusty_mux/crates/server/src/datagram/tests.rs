@@ -36,6 +36,7 @@ async fn server_on(bind: &str, idle: Duration) -> (Shared, Registry, SocketAddr)
         cwd: "/".into(),
         console_host: ConsoleHost::default(),
         state_dir: None,
+        protected: Vec::new(),
         grapheme_clustering: false,
         config_file: None,
     };
@@ -430,6 +431,7 @@ fn a_hard_lifetime_ends_an_association_that_keeps_being_heard() {
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            protected: Vec::new(),
             grapheme_clustering: false,
             config_file: None,
         };
@@ -464,6 +466,7 @@ fn a_hard_lifetime_cannot_be_renewed_over_udp() {
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            protected: Vec::new(),
             grapheme_clustering: false,
             config_file: None,
         };
@@ -557,6 +560,7 @@ async fn bare_link(peer: &mut Peer, server: Rc<UdpSocket>, registry: Registry) -
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            protected: Vec::new(),
             grapheme_clustering: false,
             config_file: None,
         },
@@ -720,6 +724,7 @@ fn shell() -> Config {
             cwd: std::env::temp_dir().into_os_string(),
             console_host: ConsoleHost::from_env().expect("RUSTY_CONSOLE_HOST"),
             state_dir: None,
+            protected: Vec::new(),
             grapheme_clustering: false,
             config_file: None,
         }
@@ -730,6 +735,7 @@ fn shell() -> Config {
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            protected: Vec::new(),
             grapheme_clustering: false,
             config_file: None,
         }

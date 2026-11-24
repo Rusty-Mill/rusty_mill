@@ -493,6 +493,13 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
         StateDir::At(dir) => Some(dir),
         StateDir::Default => default_state_dir(&socket, |name| std::env::var_os(name)),
     };
+    if let Mode::Shared(allow, _, tls) = &args.mode {
+        config.protected.push(allow.clone());
+        if let Some(tls) = tls {
+            config.protected.push(tls.key.clone());
+            config.protected.push(tls.tokens.clone());
+        }
+    }
     #[cfg(target_os = "linux")]
     if let Mode::Shared(allow, tailnet, tls) = &args.mode {
         return run_shared(&socket, allow.clone(), *tailnet, tls.clone(), config);
@@ -763,6 +770,7 @@ fn default_config(console_host: ConsoleHost, config_file: Option<PathBuf>) -> Co
         grapheme_clustering: false,
         config_file,
         state_dir: None,
+        protected: Vec::new(),
     }
 }
 
@@ -776,6 +784,7 @@ fn default_config(console_host: ConsoleHost, config_file: Option<PathBuf>) -> Co
         grapheme_clustering: false,
         config_file,
         state_dir: None,
+        protected: Vec::new(),
     }
 }
 

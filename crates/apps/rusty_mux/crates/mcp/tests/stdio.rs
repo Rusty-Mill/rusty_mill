@@ -70,6 +70,7 @@ fn shell() -> Config {
         cwd,
         console_host,
         state_dir: None,
+        protected: Vec::new(),
         grapheme_clustering: false,
         config_file: None,
     }

@@ -112,6 +112,9 @@ pub struct Config {
     /// The store directory sessions are saved to and restored from across
     /// restarts (C45); `None` saves nothing.
     pub state_dir: Option<std::path::PathBuf>,
+    /// Files `terminal.download` never reads whatever their path: the TLS
+    /// key, the tokens, the allowlist. The config file is kept out too.
+    pub protected: Vec<std::path::PathBuf>,
 }
 
 /// The Windows console host behind each block.

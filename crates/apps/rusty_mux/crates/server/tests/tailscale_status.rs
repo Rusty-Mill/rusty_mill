@@ -111,6 +111,7 @@ fn start(dir: &Path, whois: PathBuf) -> (PathBuf, std::net::SocketAddr, oneshot:
                     cwd: "/".into(),
                     console_host: rusty_mux_server::ConsoleHost::default(),
                     state_dir: None,
+                    protected: Vec::new(),
                     grapheme_clustering: false,
                     config_file: None,
                 },

@@ -13,11 +13,7 @@ pub(crate) const CHUNK: usize = 192 << 10;
 /// The largest file read; an offset is 32 bits, and this is the upload's limit.
 pub(crate) const FILE_MAX: u64 = 2 << 30;
 
-/// Whether `path` names another machine (a UNC path, or what a Windows
-/// path resolves to on one), which opening would make the server contact.
-fn is_network_path(path: &str) -> bool {
-    path.starts_with("\\\\") || (cfg!(windows) && path.starts_with("//"))
-}
+use crate::listing::is_network_path;
 
 /// The file `path` names, taken relative to `base` (the block's working
 /// directory), resolved to the path it really has.
@@ -92,6 +88,7 @@ pub(crate) fn read(
     path: &str,
     offset: u32,
     private: Option<&Path>,
+    files: &[PathBuf],
 ) -> Result<String, String> {
     // Only Linux can place the opened object by the kernel. Elsewhere a path
     // is not resolved at all (resolving may reach another machine) and a
@@ -99,11 +96,38 @@ pub(crate) fn read(
     // nothing is read until that platform has its own check.
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (base, path, offset, private);
+        let _ = (base, path, offset, private, files);
         Err("downloading is not supported on this platform yet".into())
     }
     #[cfg(target_os = "linux")]
-    read_linux(base, path, offset, private)
+    read_linux(base, path, offset, private, files)
+}
+
+/// A file never read, as it really is, and its device and inode.
+#[cfg(target_os = "linux")]
+type Secret = (PathBuf, (u64, u64));
+
+/// The files that are never read, as they really are, with their identity
+/// (device and inode), so a hard link to one is told too. A file that does
+/// not exist is nothing to keep out; one that cannot be resolved otherwise
+/// leaves nothing read.
+#[cfg(target_os = "linux")]
+fn protected(files: &[PathBuf]) -> Result<Vec<Secret>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = Vec::new();
+    for file in files {
+        match fs::canonicalize(file).and_then(|real| Ok((fs::metadata(&real)?, real))) {
+            Ok((meta, real)) => out.push((real, (meta.dev(), meta.ino()))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "{} cannot be resolved ({e}), so no file is read",
+                    file.display()
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(target_os = "linux")]
@@ -112,11 +136,17 @@ fn read_linux(
     path: &str,
     offset: u32,
     private: Option<&Path>,
+    files: &[PathBuf],
 ) -> Result<String, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = locate(base, path)?;
     let root = private_root(private)?;
+    let keep = protected(files)?;
     if root.as_ref().is_some_and(|root| file.starts_with(root)) {
         return Err("the server's own state directory is not read".into());
+    }
+    if keep.iter().any(|(real, _)| *real == file) {
+        return Err("a file the server keeps secret is not read".into());
     }
     let io = |e: std::io::Error| format!("{}: {e}", file.display());
     // Before opening, which a pipe or device would make wait; the opened
@@ -124,9 +154,19 @@ fn read_linux(
     if !fs::metadata(&file).map_err(io)?.is_file() {
         return Err(format!("{} is not a regular file", file.display()));
     }
-    let mut f = File::open(&file).map_err(io)?;
+    // Never waits on a pipe swapped in since the check above, and never
+    // follows a link swapped in: the type is judged on what was opened.
+    let mut f = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rusty_libc::fd::O_NONBLOCK | rusty_libc::fd::O_NOFOLLOW)
+        .open(&file)
+        .map_err(io)?;
     verify(&f, &file, root.as_deref())?;
     let meta = f.metadata().map_err(io)?;
+    // A hard link to a secret file is that file.
+    if keep.iter().any(|(_, id)| *id == (meta.dev(), meta.ino())) {
+        return Err("a file the server keeps secret is not read".into());
+    }
     if !meta.is_file() {
         return Err(format!("{} is not a regular file", file.display()));
     }
@@ -147,7 +187,7 @@ fn read_linux(
 mod refusal_tests {
     #[test]
     fn nothing_is_read_where_the_opened_file_cannot_be_checked() {
-        let err = super::read(None, "f", 0, None).unwrap_err();
+        let err = super::read(None, "f", 0, None, &[]).unwrap_err();
         assert!(err.contains("not supported"), "{err}");
     }
 }
@@ -182,11 +222,11 @@ mod tests {
         let data: Vec<u8> = (0..CHUNK + 5).map(|i| i as u8).collect();
         fs::write(dir.join("f"), &data).unwrap();
         let base = dir.to_str();
-        let (size, first) = body(&read(base, "f", 0, None).unwrap());
+        let (size, first) = body(&read(base, "f", 0, None, &[]).unwrap());
         assert_eq!((size, first.len()), (data.len() as u64, CHUNK));
-        let (_, rest) = body(&read(base, "f", CHUNK as u32, None).unwrap());
+        let (_, rest) = body(&read(base, "f", CHUNK as u32, None, &[]).unwrap());
         assert_eq!(rest, data[CHUNK..]);
-        let (_, past) = body(&read(base, "f", data.len() as u32 + 9, None).unwrap());
+        let (_, past) = body(&read(base, "f", data.len() as u32 + 9, None, &[]).unwrap());
         assert!(past.is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -196,14 +236,14 @@ mod tests {
         let dir = scratch();
         let base = dir.to_str();
         assert!(
-            read(base, ".", 0, None)
+            read(base, ".", 0, None, &[])
                 .unwrap_err()
                 .contains("not a regular file")
         );
-        assert!(read(base, "missing", 0, None).is_err());
-        assert!(read(None, "relative", 0, None).is_err());
+        assert!(read(base, "missing", 0, None, &[]).is_err());
+        assert!(read(None, "relative", 0, None, &[]).is_err());
         assert!(
-            read(None, "\\\\host\\share\\f", 0, None)
+            read(None, "\\\\host\\share\\f", 0, None, &[])
                 .unwrap_err()
                 .contains("network")
         );
@@ -214,17 +254,47 @@ mod tests {
     fn the_state_directory_is_not_read() {
         let state = scratch();
         fs::write(state.join("key"), b"secret").unwrap();
-        let err = read(state.to_str(), "key", 0, Some(&state)).unwrap_err();
+        let err = read(state.to_str(), "key", 0, Some(&state), &[]).unwrap_err();
         assert!(err.contains("state directory"), "{err}");
         // A link out of a free folder into it is no way round.
         let free = scratch();
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(state.join("key"), free.join("l")).unwrap();
-            assert!(read(free.to_str(), "l", 0, Some(&state)).is_err());
+            assert!(read(free.to_str(), "l", 0, Some(&state), &[]).is_err());
         }
         fs::remove_dir_all(state).unwrap();
         fs::remove_dir_all(free).unwrap();
+    }
+
+    #[test]
+    fn a_secret_file_outside_the_state_directory_is_not_read_even_by_a_hard_link() {
+        let dir = scratch();
+        let key = dir.join("tls.key");
+        fs::write(&key, b"secret").unwrap();
+        let link = dir.join("alias");
+        fs::hard_link(&key, &link).unwrap();
+        let keep = [key.clone(), dir.join("not-yet-made")];
+        for name in ["tls.key", "alias"] {
+            let err = read(dir.to_str(), name, 0, None, &keep).unwrap_err();
+            assert!(err.contains("keeps secret"), "{name}: {err}");
+        }
+        fs::write(dir.join("plain"), b"ok").unwrap();
+        assert!(read(dir.to_str(), "plain", 0, None, &keep).is_ok());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_named_pipe_is_refused_without_waiting() {
+        use std::os::unix::fs::FileTypeExt;
+        let dir = scratch();
+        let fifo = dir.join("p");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if made.is_ok_and(|s| s.success()) && fs::metadata(&fifo).unwrap().file_type().is_fifo() {
+            let err = read(dir.to_str(), "p", 0, None, &[]).unwrap_err();
+            assert!(err.contains("not a regular file"), "{err}");
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -232,7 +302,7 @@ mod tests {
         let dir = scratch();
         fs::write(dir.join("f"), b"x").unwrap();
         let gone = dir.join("no-such-state-dir");
-        let err = read(dir.to_str(), "f", 0, Some(&gone)).unwrap_err();
+        let err = read(dir.to_str(), "f", 0, Some(&gone), &[]).unwrap_err();
         assert!(err.contains("cannot be resolved"), "{err}");
         fs::remove_dir_all(dir).unwrap();
     }
