@@ -1,6 +1,6 @@
 # Workspace explorer (card #1573)
 
-Status: design; server call accepted (handoff D337, Nano 2026-11-18). The wire slice still passes the owner gate when its PR is opened. Source: Nano, voice, 2026-11-18 (remind-me mem_797b5707, card #1573).
+Status: design; slice 1 (list) built; server call accepted (handoff D337, Nano 2026-11-18). The wire slice still passes the owner gate when its PR is opened. Source: Nano, voice, 2026-11-18 (remind-me mem_797b5707, card #1573).
 
 ## What
 
@@ -24,7 +24,7 @@ The mux has no worktree or git state today. Touched-file data is a new server ca
 
 ## Wire (D337)
 
-A server call limited to list, stat and touched-by, scoped to the session workspace. No file contents: opening is the editor's job. Paths are canonicalised so a symlink cannot escape the workspace. New message plus a Features bit (next free on main); old peers see it, so the same owner gate as D336 applies when its PR is opened.
+A server call limited to list, stat and touched-by, scoped to the session workspace. No file contents: opening is the editor's job. Paths are canonicalised so a symlink cannot escape the workspace. Slice 1 (Nano, 2026-11-24, decision card in the project thread) is a block method instead of a new message: `terminal.workspace-list`, behind `Features::WORKSPACE` (bit 53), rooted at the block's launch directory, lease holder only. Stat and touched-by follow. Old peers see the bit, so the same owner gate as D336 applies on its PR.
 
 ## Order
 
