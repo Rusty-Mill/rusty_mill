@@ -92,8 +92,9 @@ const TASK_REASONS: [&str; 2] = ["TaskTotal", "TaskPaused"];
 ///
 /// # Errors
 /// [`Error`] on text that is not JSON, not a list, or an entry missing `id`,
-/// `rev` or `reason`. One bad entry refuses the read: a half-shown inbox could
-/// hide a decision.
+/// `rev` or `reason`, or one whose `claim`, `candidates`, `reversible`, `stakes`
+/// or `card` is present and malformed. One bad entry refuses the read: a
+/// half-shown inbox could hide a decision.
 pub(crate) fn parse(text: &str) -> Result<Vec<Row>, Error> {
     let value = Value::parse(text).map_err(|e| Error::Json(e.to_string()))?;
     let items = value.as_array().ok_or(Error::NotAnArray)?;
@@ -108,21 +109,41 @@ fn row(index: usize, v: &Value) -> Result<Row, Error> {
         .get("reason")
         .and_then(Value::as_str)
         .ok_or(miss("reason"))?;
-    let text = |k| v.get(k).and_then(Value::as_str).map(str::to_owned);
+    // Absent or null is `None`; present and malformed refuses the entry, so a
+    // stuck question never shows only some of its options.
+    let opt = |name: &'static str| v.get(name).filter(|x| !x.is_null()).ok_or(());
+    let text = |name: &'static str| match opt(name) {
+        Ok(x) => x.as_str().map(|s| Some(s.to_owned())).ok_or(miss(name)),
+        Err(()) => Ok(None),
+    };
     Ok(Row {
         id: id.to_owned(),
         rev,
         // An unknown reason still shows, under the host's label or its name.
-        reason: text("label").unwrap_or_else(|| kind.to_owned()),
+        reason: text("label")?.unwrap_or_else(|| kind.to_owned()),
         task_level: TASK_REASONS.contains(&kind),
-        claim: v.get("claim").and_then(claim),
-        candidates: v
-            .get("candidates")
-            .and_then(Value::as_array)
-            .map_or_else(Vec::new, |a| a.iter().filter_map(claim).collect()),
-        reversible: v.get("reversible").and_then(Value::as_bool),
-        stakes: text("stakes"),
-        card: v.get("card").and_then(card),
+        claim: opt("claim")
+            .ok()
+            .map(|x| claim(x).ok_or(miss("claim")))
+            .transpose()?,
+        candidates: match opt("candidates") {
+            Err(()) => Vec::new(),
+            Ok(x) => x
+                .as_array()
+                .ok_or(miss("candidates"))?
+                .iter()
+                .map(|c| claim(c).ok_or(miss("candidates")))
+                .collect::<Result<_, _>>()?,
+        },
+        reversible: match opt("reversible") {
+            Err(()) => None,
+            Ok(x) => Some(x.as_bool().ok_or(miss("reversible"))?),
+        },
+        stakes: text("stakes")?,
+        card: opt("card")
+            .ok()
+            .map(|x| card(x).ok_or(miss("card")))
+            .transpose()?,
     })
 }
 
@@ -217,8 +238,23 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_claim_is_dropped_not_guessed() {
-        let rows = parse(r#"[{"id":"a","rev":1,"reason":"Stuck","claim":{"id":1}}]"#).unwrap();
-        assert!(rows[0].claim.is_none());
+    fn a_malformed_part_refuses_the_entry_and_null_or_absent_is_none() {
+        let entry = |extra: &str| format!(r#"[{{"id":"a","rev":1,"reason":"Stuck",{extra}}}]"#);
+        for (extra, name) in [
+            (r#""claim":{"id":1}"#, "claim"),
+            (r#""candidates":[{"id":1}]"#, "candidates"),
+            (r#""candidates":3"#, "candidates"),
+            (r#""reversible":"no""#, "reversible"),
+            (r#""stakes":4"#, "stakes"),
+            (r#""card":{"number":1}"#, "card"),
+        ] {
+            assert_eq!(
+                parse(&entry(extra)),
+                Err(Error::Field { index: 0, name }),
+                "{extra}"
+            );
+        }
+        let rows = parse(&entry(r#""claim":null,"card":null,"reversible":null"#)).unwrap();
+        assert!(rows[0].claim.is_none() && rows[0].card.is_none() && rows[0].reversible.is_none());
     }
 }
