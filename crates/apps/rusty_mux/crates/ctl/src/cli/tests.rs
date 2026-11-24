@@ -127,6 +127,86 @@ fn flags_take_a_separate_or_attached_value() {
     );
 }
 
+fn words(line: &str) -> Vec<String> {
+    line.split(' ').map(String::from).collect()
+}
+
+fn parsed(line: &str) -> Result<Vec<Call>, String> {
+    match parse(&words(line))?.command {
+        Command::Calls(calls) => Ok(calls),
+        other => panic!("not calls: {other:?}"),
+    }
+}
+
+fn stdin_of(calls: &[Call]) -> Option<&Value> {
+    calls.iter().find_map(|c| {
+        c.args.iter().find_map(|(n, a)| match a {
+            Arg::Value(v) if *n == "data" => Some(v),
+            _ => None,
+        })
+    })
+}
+
+#[test]
+fn a_stdin_flag_parses_to_a_placeholder_and_reads_nothing_yet() {
+    let calls = parsed(&format!("input --block {ID} --data-stdin")).expect("parses");
+    assert!(
+        calls[0]
+            .args
+            .iter()
+            .any(|(n, a)| *n == "data" && *a == Arg::Stdin)
+    );
+}
+
+#[test]
+fn the_filled_flag_carries_stdin_and_other_lines_never_touch_it() {
+    let mut calls = parsed(&format!("input --block {ID} --data-stdin")).expect("parses");
+    let mut input: &[u8] = b"big\npayload";
+    fill_stdin(&mut calls, Some(&mut input)).expect("filled");
+    assert_eq!(
+        stdin_of(&calls),
+        Some(&Value::Bytes(b"big\npayload".to_vec()))
+    );
+    let mut plain = parsed(&format!("input --block {ID} --data x")).expect("parses");
+    fill_stdin(&mut plain, None).expect("no stdin needed");
+}
+
+#[test]
+fn a_library_caller_without_stdin_refuses_the_flag() {
+    let mut calls = parsed(&format!("input --block {ID} --data-stdin")).expect("parses");
+    let err = fill_stdin(&mut calls, None).expect_err("no stdin");
+    assert!(err.contains("own stdin"), "{err}");
+}
+
+#[test]
+fn stdin_is_bounded_at_what_one_request_carries() {
+    let line = format!("input --block {ID} --data-stdin");
+    let mut calls = parsed(&line).expect("parses");
+    let mut at: &[u8] = &vec![b'x'; MAX_STDIN];
+    fill_stdin(&mut calls, Some(&mut at)).expect("at the limit");
+    let mut calls = parsed(&line).expect("parses");
+    let mut over: &[u8] = &vec![b'x'; MAX_STDIN + 1];
+    let err = fill_stdin(&mut calls, Some(&mut over)).expect_err("over");
+    assert!(err.contains("most one request carries"), "{err}");
+}
+
+#[test]
+fn a_stdin_flag_is_refused_beside_its_value_twice_or_with_a_value_of_its_own() {
+    for line in [
+        format!("input --block {ID} --data x --data-stdin"),
+        format!("input --block {ID} --data-stdin --data-stdin"),
+        format!("input --block {ID} --data-stdin=false"),
+        format!("resize --block {ID} --cols-stdin --rows 24"),
+    ] {
+        assert!(parsed(&line).is_err(), "{line}");
+    }
+    let two = format!("input --block {ID} --data-stdin + input --block {ID} --data-stdin");
+    let mut calls = parsed(&two).expect("each parses");
+    let mut input: &[u8] = b"x";
+    let err = fill_stdin(&mut calls, Some(&mut input)).expect_err("two");
+    assert!(err.contains("only one"), "{err}");
+}
+
 #[test]
 fn plus_chains_requests() {
     let line =
