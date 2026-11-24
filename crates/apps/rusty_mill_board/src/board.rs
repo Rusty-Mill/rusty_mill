@@ -156,6 +156,11 @@ impl<S> Board<S> {
     }
 }
 
+/// Whether `card` has started: it is claimed, or sits in a work column.
+fn started(flow: &Workflow, card: &Card) -> bool {
+    card.claim.is_some() || flow.kind(&card.column) == Some(crate::workflow::Kind::Work)
+}
+
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
 fn read<T: Clone>(lock: &RwLock<T>) -> T {
     lock.read()
@@ -1757,6 +1762,9 @@ impl<S: Store> Board<S> {
         listed: Card,
         by: &Actor,
     ) -> Result<Card, BoardError> {
+        // Held across the dependency check and the commit: `unclose` reopens a prerequisite
+        // under the same gate, so the check cannot go stale between them.
+        let _links = self.links();
         let id = listed.id;
         let queues = flow.work_queues();
         let works = |col: &Column| queues.contains(col) && flow.actionable(col, &by.caps);
@@ -2056,12 +2064,29 @@ impl<S: Store> Board<S> {
     }
 
     /// Undo the merge watch's close of a card: see [`Card::unclosed`]. Logged as a move by
-    /// `by`. Needs `Triage`.
+    /// `by`. Needs `Triage`. Refused while an open card that depends on this one has started
+    /// (claimed, or in a work column): reopening the prerequisite would pull the ground from
+    /// under it, so a person decides; one still waiting simply waits again.
     ///
     /// # Errors
-    /// A missing capability or card, or see [`Card::unclosed`].
+    /// A missing capability or card, a started dependent, or see [`Card::unclosed`].
     pub fn unclose(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
+        // Under the gate every dependency-checked take holds, so no card can start between
+        // the look at the dependents and the reopening.
+        let _links = self.links();
         let flow = self.flow();
+        if let Some(started) = self
+            .cards_in(&flow)?
+            .iter()
+            .find(|c| c.deps.contains(&id) && c.column != Column::DONE && started(&flow, c))
+        {
+            return Err(BoardError::Refused(format!(
+                "card {} depends on this one and has started; move or finish it first",
+                started
+                    .number
+                    .map_or_else(|| started.id.to_string(), |n| format!("#{n}"))
+            )));
+        }
         self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
             c.unclosed(&flow, by, now)
         })

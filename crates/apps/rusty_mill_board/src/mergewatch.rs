@@ -882,6 +882,151 @@ mod tests {
         ));
     }
 
+    /// A store that holds the commit of a claim on a card with dependencies until released.
+    struct Taking {
+        inner: MemStore,
+        entered: std::sync::mpsc::Sender<()>,
+        listed: std::sync::mpsc::Sender<()>,
+        held: std::sync::atomic::AtomicBool,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl Store for Taking {
+        fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+            self.inner.get(id)
+        }
+        fn list(&self) -> Result<Vec<Card>, BoardError> {
+            let cards = self.inner.list();
+            if self.held.load(std::sync::atomic::Ordering::SeqCst) {
+                self.listed.send(()).ok();
+            }
+            cards
+        }
+        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            self.inner.insert(card, event)
+        }
+        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            if card.claim.is_some() && !card.deps.is_empty() {
+                self.held.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.entered.send(()).expect("test is listening");
+                self.release.lock().expect("lock").recv().expect("released");
+            }
+            self.inner.replace(card, event)
+        }
+        fn events_since(
+            &self,
+            after: Option<Uuid>,
+            limit: usize,
+        ) -> Result<Vec<crate::domain::Event>, BoardError> {
+            self.inner.events_since(after, limit)
+        }
+        fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+            self.inner.last_event_id()
+        }
+        fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+            self.inner.reserve_number(card, floor)
+        }
+    }
+
+    #[test]
+    fn unclose_waits_for_a_take_of_a_dependent_and_then_refuses() {
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let (listed, checked) = std::sync::mpsc::channel();
+        let b: Shared = Board::new(
+            Box::new(Taking {
+                inner: MemStore::default(),
+                entered,
+                listed,
+                held: std::sync::atomic::AtomicBool::new(false),
+                release: std::sync::Mutex::new(held),
+            }) as Box<dyn Store>,
+            crate::board::Roles::default(),
+        )
+        .with_projects(Projects::parse(REGISTRY).expect("registry"));
+        let who = b.roles().actor("nano", "human").expect("role");
+        let prereq = b.add_in(&who, "p", "prereq", "", vec![]).expect("card");
+        let n = prereq.number.expect("n");
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        assert_eq!(b.get(prereq.id).expect("card").column, Column::DONE);
+        let dependent = b.add_in(&who, "p", "dependent", "", vec![]).expect("card");
+        b.plan(
+            dependent.id,
+            &who,
+            &crate::domain::Plan {
+                deps: Some(vec![prereq.id]),
+                ..Default::default()
+            },
+        )
+        .expect("planned");
+        b.move_card(dependent.id, &Column::READY, &who)
+            .expect("ready");
+        std::thread::scope(|s| {
+            // The take has checked the dependency and is committing.
+            let taking = s.spawn(|| b.take(&who, Some(dependent.id)));
+            started.recv().expect("the take is mid-commit");
+            let unclosing = s.spawn(|| b.unclose(prereq.id, &who).map(|c| c.id));
+            // Without the gate the unclose reads the board now, before the dependent has
+            // started; with it, nothing arrives until the take is released.
+            let _ = checked.recv_timeout(std::time::Duration::from_millis(300));
+            release.send(()).expect("release the take");
+            assert!(
+                taking
+                    .join()
+                    .expect("take thread")
+                    .expect("taken")
+                    .is_some()
+            );
+            assert!(matches!(
+                unclosing.join().expect("unclose thread"),
+                Err(BoardError::Refused(_))
+            ));
+        });
+        assert_eq!(b.get(prereq.id).expect("card").column, Column::DONE);
+    }
+
+    #[test]
+    fn unclose_lets_a_waiting_dependent_wait_again() {
+        let (b, who, prereq, n) = one_card();
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        let dependent = b.add_in(&who, "p", "dependent", "", vec![]).expect("card");
+        b.plan(
+            dependent.id,
+            &who,
+            &crate::domain::Plan {
+                deps: Some(vec![prereq.id]),
+                ..Default::default()
+            },
+        )
+        .expect("planned");
+        b.move_card(dependent.id, &Column::READY, &who)
+            .expect("ready");
+        let back = b.unclose(prereq.id, &who).expect("unclosed");
+        assert_eq!(back.column, Column::BACKLOG);
+        // It waits on the reopened prerequisite again: not takeable.
+        assert!(b.take(&who, Some(dependent.id)).is_err());
+        // Once started, the same reopening is refused.
+        let (b, who, prereq, n) = one_card();
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        let dependent = b.add_in(&who, "p", "dependent", "", vec![]).expect("card");
+        b.plan(
+            dependent.id,
+            &who,
+            &crate::domain::Plan {
+                deps: Some(vec![prereq.id]),
+                ..Default::default()
+            },
+        )
+        .expect("planned");
+        b.move_card(dependent.id, &Column::READY, &who)
+            .expect("ready");
+        b.take(&who, Some(dependent.id)).expect("taken");
+        assert!(matches!(
+            b.unclose(prereq.id, &who),
+            Err(BoardError::Refused(_))
+        ));
+    }
+
     const PR: &str = "https://github.com/o/r/pull/7";
 
     /// A store that holds a write of a child (a card with a parent) until released, and says

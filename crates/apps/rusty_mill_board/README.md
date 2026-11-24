@@ -95,7 +95,7 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   14 days after it was done or last restored (`board_list`'s `done_days`; 0 keeps every unarchived Done card). It is
   still Done: `card_get`, the roadmap, metrics and dependencies see it as before. `card_restore` puts any such card
   back, starting its 14 days again without changing its ship time. `card_archive` and `card_restore` need `close`;
-  `card_unclose` (needs `triage`) undoes a close by the merge watch (ADR-0008): the card returns to the column it was in and keeps its evidence; a close any other way is refused. `card_archive_done` archives every Done card at once (optionally one project's, done or restored at least
+  `card_unclose` (needs `triage`) undoes a close by the merge watch (ADR-0008): the card returns to the column it was in and keeps its evidence; a close any other way is refused, as is one while a card that depends on it has started. `card_archive_done` archives every Done card at once (optionally one project's, done or restored at least
   `older_than_days` ago), checks each card again as it commits, and needs `triage`. `board_list` with
   `archived: "only"` lists the archive. The state is an `archived:<ms>` or `restored:<ms>` tag on the rusty_tick
   task, beside `number:<n>`, so there is no migration.
