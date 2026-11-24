@@ -813,33 +813,26 @@ fn a_lost_answer_that_was_applied_keeps_its_card() {
     );
 }
 
-/// The send never reached BBP and another decision then closed the escalation: the retry
-/// finds nothing in the log and no send can apply now, so the card is closed.
+/// The send never reached BBP and another decision then closed the escalation: the log's
+/// silence proves nothing (a host may have dropped the id), so the card stays for a person.
 #[test]
-fn a_lost_answer_that_was_not_applied_closes_its_card() {
+fn a_lost_answer_that_was_not_applied_leaves_its_card_open() {
     let fake = Arc::new(Fake::with(vec![shipped()]));
     let (store, down) = fresh();
     let board = board_over(&store, &down, &fake, true);
-    // The card is written first, then the host cannot be reached.
     fake.refuse_next.store(true, Ordering::SeqCst);
     call(&board, &owner(), "inbox_act", reject()).unwrap();
-    assert!(remediate_cards(&board)[0].closed.is_none());
     // Someone else resolved the escalation meanwhile.
     fake.rows.lock().unwrap().clear();
 
     let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
-    assert_eq!(out["recorded"]["settled"], "not_applied", "{out}");
-    let card = &remediate_cards(&board)[0];
-    assert!(card.closed.is_some(), "{card:?}");
-    assert!(
-        last_comment(card).contains("nothing was dropped"),
-        "{card:?}"
-    );
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board)[0].closed.is_none());
 }
 
 /// The same, with the escalation still open but moved past the rev the send was read at.
 #[test]
-fn a_retry_at_a_stale_rev_settles_the_card() {
+fn a_retry_at_a_stale_rev_leaves_the_card_open() {
     let fake = Arc::new(Fake::with(vec![shipped()]));
     let (store, down) = fresh();
     let board = board_over(&store, &down, &fake, true);
@@ -848,11 +841,12 @@ fn a_retry_at_a_stale_rev_settles_the_card() {
     fake.rows.lock().unwrap()[0].rev = 9;
 
     let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
-    assert_eq!(out["recorded"]["settled"], "not_applied", "{out}");
-    assert!(remediate_cards(&board)[0].closed.is_some());
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board)[0].closed.is_none());
 }
 
-/// A send that loses the fence to another decision is settled at once: its card is closed.
+/// A send that loses the fence to another decision leaves its card open: the log can't say
+/// the winner dropped nothing.
 /// Losing to a send of the same decision keeps the card, since that send applied it.
 #[test]
 fn a_losing_send_settles_its_card_from_the_log() {
@@ -870,7 +864,7 @@ fn a_losing_send_settles_its_card_from_the_log() {
         remediate_cards(&board).remove(0)
     };
     let other = lose(false);
-    assert!(other.closed.is_some(), "{other:?}");
+    assert!(other.closed.is_none(), "{other:?}");
     let same = lose(true);
     assert!(same.closed.is_none(), "{same:?}");
     assert!(last_comment(&same).contains("applied"), "{same:?}");
@@ -1097,10 +1091,9 @@ fn a_send_with_no_answer_is_never_settled_as_not_applied() {
 }
 
 /// The host is rolled back between the capability probe and the send, so it applies the send
-/// without recording its id. The board notices the id is missing after the commit and files the
-/// legacy card, so a later retry is never settled as "not applied".
+/// without recording its id: the log is silent, so the card is never closed from it.
 #[test]
-fn a_send_whose_id_never_reached_the_log_is_marked_untracked() {
+fn a_send_whose_id_never_reached_the_log_leaves_its_card_open() {
     let fake = Arc::new(Fake {
         consume: true,
         ignore_id: AtomicBool::new(true),
@@ -1109,7 +1102,6 @@ fn a_send_whose_id_never_reached_the_log_is_marked_untracked() {
     let (store, down) = fresh();
     let board = board_over(&store, &down, &fake, true);
     call(&board, &owner(), "inbox_act", reject()).unwrap();
-    assert_eq!(remediate_cards(&board).len(), 2, "tracked and legacy cards");
 
     let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
     assert_eq!(out["recorded"]["settled"], "unknown", "{out}");

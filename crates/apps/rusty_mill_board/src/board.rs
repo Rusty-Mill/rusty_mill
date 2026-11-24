@@ -747,7 +747,7 @@ impl<S: Store> Board<S> {
                     action,
                 };
                 if let Some((card, tracked)) = self.remediation_card(by, project, &decision)? {
-                    let settled = self.settle(by, source, &e.task, &card, tracked, true)?;
+                    let settled = self.settle(by, source, &e.task, &card, tracked)?;
                     return Ok(InboxAnswer::Recorded {
                         card: InboxCard::of(&card),
                         settled,
@@ -806,14 +806,6 @@ impl<S: Store> Board<S> {
         // Only a send this board can track later carries an id: a card from before ids
         // (`tracked` false) may have been applied without one, so it is sent as it was.
         let id = tracked.then(|| card.id.to_string());
-        // Write ahead the uncertainty too: until BBP's answer proves what this send did, the
-        // card says a send of it may be in flight, so a retry or a process restart finds
-        // that mark and settles nothing. A host that dropped the id looks, in its log, like a
-        // send that never happened, so only evidence in hand can clear the mark.
-        let attempt = Uuid::now_v7();
-        if id.is_some() {
-            self.comment(card.id, by, &format!("{SEND_PENDING}{attempt}"))?;
-        }
         let outcome = source
             .act(&e, action, &answerer(&by.name), id.as_deref())
             .map_err(|err| match inbox_error(err) {
@@ -823,23 +815,6 @@ impl<S: Store> Board<S> {
                 )),
                 other => other,
             })?;
-        if let Some(sent) = &id {
-            // A committed send is proven when the log shows its id. If it does not, a host
-            // rolled back between the probe and the send, so nothing about it is provable:
-            // the mark stays and the legacy card is filed too (and from then on decides).
-            let proven = matches!(source.applied(&e.task, sent), Ok(Some(_)));
-            match &outcome {
-                Outcome::Done if !proven => {
-                    rusty_log::warn!(card = %card.id, "a committed send is not in BBP's log under its id: marking it untracked");
-                    self.remediate(by, &project, &e, &decision, &dropped, &dry, false)?;
-                }
-                // Applied, or refused before anything was written: this send is accounted for.
-                Outcome::Done | Outcome::Refused { step: 0, .. } => {
-                    self.comment(card.id, by, &format!("{SEND_RESOLVED}{attempt}"))?;
-                }
-                Outcome::Refused { .. } => {}
-            }
-        }
         if let Outcome::Refused { step: 0, code, .. } = &outcome {
             // A stale fence can never apply later, so BBP's log settles the card. For any
             // other refusal only this send is known to have written nothing: another send
@@ -848,14 +823,7 @@ impl<S: Store> Board<S> {
             let tracked = self
                 .remediation_card(by, &project, &decision)?
                 .is_some_and(|(_, tracked)| tracked);
-            let settled = self.settle(
-                by,
-                source,
-                &e.task,
-                &self.get(card.id)?,
-                tracked,
-                code == "StaleRev",
-            )?;
+            let settled = self.settle(by, source, &e.task, &self.get(card.id)?, tracked)?;
             if settled == Settled::Unknown {
                 self.comment(
                     card.id,
@@ -891,25 +859,18 @@ impl<S: Store> Board<S> {
         let (card, tracked) = self
             .remediation_card(by, &project, &decision)?
             .ok_or_else(closed)?;
-        // BBP itself no longer lists the escalation (the board's inbox also hides ones it
-        // cannot show), so its log has moved past `rev`: a send not applied by now never
-        // will be.
         let source = self.inbox_source(by)?;
-        let gone = source
-            .open(&[task.to_owned()])
-            .is_ok_and(|rows| rows.iter().all(|r| r.id != id));
-        let settled = self.settle(by, source, task, &card, tracked, gone)?;
+        let settled = self.settle(by, source, task, &card, tracked)?;
         Ok(InboxAnswer::Recorded {
             card: InboxCard::of(&card),
             settled,
         })
     }
 
-    /// Settle a Remediate `card` against BBP's log: keep it if the decision was applied,
-    /// close it if not. The log can only say "not applied yet" while a send may still
-    /// land, so `final_` says whether none can (its fence has passed); until then, or if
-    /// the host cannot say (it predates `bbp decision`), or the card's send carried no id
-    /// (`tracked` false), the card is left as it is.
+    /// Note on a Remediate `card` what BBP's log says of its decision. Only the log's word
+    /// that the id was applied is acted on (a note, once); the log's silence proves nothing
+    /// (a send may still land, or a host may have dropped the id), so the card is never
+    /// closed from it, and a card whose send carried no id (`tracked` false) says nothing.
     fn settle(
         &self,
         by: &Actor,
@@ -917,7 +878,6 @@ impl<S: Store> Board<S> {
         task: &str,
         card: &Card,
         tracked: bool,
-        final_: bool,
     ) -> Result<Settled, BoardError> {
         // Absence from the log means "not applied" only for a send that carried an id. A
         // card filed before ids existed may well have been applied: it stays for a person.
@@ -940,20 +900,7 @@ impl<S: Store> Board<S> {
             }
             return Ok(Settled::Applied { rev });
         }
-        // A send of this card whose answer was never seen may have committed without its id.
-        if !final_ || in_flight(card) {
-            return Ok(Settled::Unknown);
-        }
-        let note = "BBP's log holds no such decision and its escalation has moved on, so it can never apply: nothing was dropped.";
-        match self.close(card.id, CloseReason::WontDo, Some(note), by) {
-            Ok(_) | Err(BoardError::Terminal) => Ok(Settled::NotApplied),
-            // Started or claimed by someone: the card stays, whatever the log says.
-            Err(BoardError::Refused(why)) => {
-                rusty_log::warn!(card = %card.id, %why, "cannot close a Remediate card");
-                Ok(Settled::Unknown)
-            }
-            Err(err) => Err(err),
-        }
+        Ok(Settled::Unknown)
     }
 
     /// The project of the card linked to BBP task `task`, as `inbox` attaches it.
@@ -1048,7 +995,7 @@ impl<S: Store> Board<S> {
             dry.step.args.join(" "),
             events.join(", ")
         ));
-        body.push_str("\nFiled before the decision was sent to BBP. If BBP's log shows it was not applied, close this card.\n");
+        body.push_str("\nFiled before the decision was sent to BBP. If BBP's log does not show it was applied, check before closing this card.\n");
         let title = format!(
             "Remediate: {}",
             text(dropped.first().map_or(0, |x| x.claim))
@@ -2159,23 +2106,6 @@ impl<S: Store> Board<S> {
     }
 }
 
-/// Written to a Remediate card before a send that carries its id, and again with
-/// [`SEND_RESOLVED`] once BBP's answer proves what that send did.
-const SEND_PENDING: &str = "bbp-send-pending ";
-const SEND_RESOLVED: &str = "bbp-send-resolved ";
-
-/// Whether a send of `card` was begun and never accounted for (a lost answer, a crash).
-fn in_flight(card: &Card) -> bool {
-    let marks = |prefix: &str| -> Vec<&str> {
-        card.comments
-            .iter()
-            .filter_map(|c| c.text.strip_prefix(prefix))
-            .collect()
-    };
-    let resolved = marks(SEND_RESOLVED);
-    marks(SEND_PENDING).iter().any(|n| !resolved.contains(n))
-}
-
 /// `days` as milliseconds, or `None` for `0`: no window.
 fn window_ms(days: u32) -> Option<i64> {
     (days > 0).then(|| i64::from(days) * 24 * 60 * 60 * 1000)
@@ -2274,7 +2204,7 @@ pub enum InboxAnswer {
     Recorded {
         /// The Backlog card to undo or reconcile the work.
         card: InboxCard,
-        /// What BBP's log says of the send: kept if applied, closed if not.
+        /// What BBP's log says of the send: applied (noted), or unknown. The card is never closed from it.
         settled: Settled,
     },
 }
@@ -2288,8 +2218,6 @@ pub enum Settled {
         /// The task revision just after BBP recorded the send.
         rev: u64,
     },
-    /// Not applied, and no send can apply it now: the card was closed.
-    NotApplied,
     /// Not known: the send may still land, or the host cannot say. The card stays.
     Unknown,
 }
