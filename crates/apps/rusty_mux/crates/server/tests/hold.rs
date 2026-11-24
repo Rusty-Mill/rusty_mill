@@ -228,3 +228,41 @@ fn a_running_block_is_not_re_run() {
         "{answer:?}"
     );
 }
+
+#[test]
+fn a_block_whose_output_ended_before_its_program_is_not_re_run_until_reaped() {
+    let socket = start_server();
+    let mut client = Client::connect_with(&socket, HOLDING, None);
+    // Closing its terminal ends the block's output (the hang-up) while the
+    // program lives on: the window between hang-up and reap.
+    let block = created(&create(
+        &mut client,
+        launch("trap '' HUP; exec >&- 2>&- <&-; sleep 2", true),
+    ));
+    client.request(|req| Message::Attach { req, block });
+    client.wait_ready(block);
+    client.request(|req| Message::AcquireLease { req, block });
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        let answer = rerun(&mut client, block);
+        match answer.as_slice() {
+            [Message::Failed { reason, .. }] if reason.contains("not finished ending") => break,
+            [Message::Failed { reason, .. }] if reason.contains("still running") => {}
+            other => panic!("expected a refusal naming the unfinished run: {other:?}"),
+        }
+        assert!(std::time::Instant::now() < deadline, "never hung up");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Once reaped and announced, the same call goes through.
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        let answer = rerun(&mut client, block);
+        match answer.as_slice() {
+            [Message::Done { .. }] => break,
+            [Message::Failed { reason, .. }] if reason.contains("not finished ending") => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(std::time::Instant::now() < deadline, "never reaped");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
