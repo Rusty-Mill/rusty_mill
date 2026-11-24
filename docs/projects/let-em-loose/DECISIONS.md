@@ -175,6 +175,7 @@ Precise contracts used by this guide:
 | D165 | #600 builders: the Claude CLI in the v0 jail uses Nano's subscription (Q15) | [stated] 2026-11-19 (1318) |
 | D166 | #600 v0: the Claude CLI reads Nano's `~/.claude` login through a read-only jail root (written exception to D101, `same_user` v0, expires with the gateway #726) | [stated] 2026-11-19 (1318, 600) |
 | D167 | One paid run approved: the #1318 toy-claim acceptance run (2 builders, 45 min, one claim) after the Claude `no_overage` assertion is added; #1320 not approved | [stated] 2026-11-19 (1318) |
+| D168 | #703: new bbp CLI surface `bbp human --decision ID` and `bbp decision` approved | [stated] 2026-11-24 (703) |
 
 ## D1. Lenses, not stages
 
@@ -1673,3 +1674,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Source.** Nano, thread message `cmsg_01632CBKCXsWe6RyFWvE9dovNuNMU7fiwfx8bvmVJhWei4`, 2026-11-19T18:22:12Z: "concur", to `cmsg_01632CBKCXsWe6RyFWvE9dov4g3WihbLKaDjCJDV35SQxg`. Relates to D134, D140, D141, D165, `600-build-plan.md` section 4 defaults.
 **Confirmed.** Confirmed by name 2026-11-19 by Nano ("confirm D165, D166, D167"), thread message `cmsg_01632CBKCXsWe6RyFWvE9dovXnfgsvDuk5meRkwzs4GR7M`, 2026-11-19T18:57:26Z, answering the PR #1824 review.
 
+
+## D168. #703: the `bbp human --decision ID` and `bbp decision` CLI surface is approved
+
+**Decision.** Nano approves the new bbp CLI surface in PR #1844 (card #703). `bbp human --decision ID` writes the human op with `by:<as>/dec:ID`; it rides the existing `op_accepted`, so there is no log or schema change. `bbp decision --task T --decision ID[,..]` is read-only and prints `[{decision,applied,rev}]`, where `rev` is the task revision just after the `op_accepted` that carries the id. Nano: "I approve". This settles the ask-first public-API gate (a new CLI surface) for this surface only. CI, review by `dottiusmaximus` and the merge rules still apply.
+**Why.** Card #703 (decision ids for settling an uncertain send; QA.md, card #595 2026-11-03: backlog, not blocking v0) needs the board to learn whether a decision was applied, and a new CLI surface is a public API change.
+**Rejected.** None offered.
+**Tag.** [stated] · remind-me: mem_494a46793ab94f7aa5ea8eb891d99af4
+**Key.** lel:703:bbp-human-decision-id-cli-surface
+**Source.** Nano, Mill Board project thread, message `cmsg_017MoLbtrGAAcyE1PVPZXuN63jqD6m4iZ3CnxC8vRdurRk`, 2026-11-24T08:11:19Z: "I approve", replying to the caller's request to approve that CLI surface (relayed by the caller; the request message itself was not read). Applies D119's host-CLI trust model (`bbp human`); fulfils the QA.md § card #595 deferral of decision ids to #703.
