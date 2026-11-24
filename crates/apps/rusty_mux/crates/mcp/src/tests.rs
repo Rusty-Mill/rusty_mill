@@ -78,6 +78,7 @@ fn a_rerun_is_made_under_the_lease_and_says_it_runs_a_program() {
     assert_eq!(hints["openWorldHint"], true);
 }
 
+#[test]
 fn archiving_a_block_is_marked_destructive() {
     let hints = annotations(known("archive-block"));
     assert_eq!(hints["destructiveHint"], true);
