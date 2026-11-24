@@ -882,6 +882,9 @@ pub const MERGE_WATCH: &str = "merge-watch";
 /// How the comment of a close on merge begins; `unclosed` finds it again by this.
 const MERGED_PREFIX: &str = "Closed by merge:";
 
+/// How the comment that undoes such a close begins.
+const UNCLOSED_PREFIX: &str = "Unclosed:";
+
 /// What happened to a card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1314,11 +1317,19 @@ impl Card {
         if self.column != Column::DONE {
             return refuse("only a Done card can be unclosed");
         }
-        let Some(close) = self.comments.iter().rev().find(|c| {
-            c.by == MERGE_WATCH
-                && c.text.starts_with(MERGED_PREFIX)
-                && Some(c.at_ms) == self.done_ms
-        }) else {
+        // The newest comment that closes or undoes a close decides: a close the watch made and
+        // nobody has undone since. An earlier close, already undone, never counts, however the
+        // clock reads when the card reached Done again.
+        let Some(close) = self
+            .comments
+            .iter()
+            .rev()
+            .find(|c| {
+                c.text.starts_with(UNCLOSED_PREFIX)
+                    || (c.by == MERGE_WATCH && c.text.starts_with(MERGED_PREFIX))
+            })
+            .filter(|c| c.by == MERGE_WATCH && Some(c.at_ms) == self.done_ms)
+        else {
             return refuse("this card was not closed by the merge watch");
         };
         let was = close
@@ -1745,6 +1756,42 @@ mod tests {
 
     fn card() -> Card {
         Card::new("t", "", vec![], 0).expect("valid")
+    }
+
+    #[test]
+    fn unclose_binds_to_the_current_merge_close_not_to_an_equal_timestamp() {
+        let watch = actor(MERGE_WATCH, &[Capability::Record]);
+        let human = actor(
+            "nano",
+            &[Capability::Triage, Capability::Merge, Capability::Close],
+        );
+        let pr = "https://github.com/o/r/pull/7";
+        let ready = card()
+            .move_to(&flow(), &Column::READY, &human, 1)
+            .expect("ready");
+        // A fixed clock: the close, the undo and the later ordinary Done all read 5 ms.
+        let closed = ready
+            .closed_by_merge(&flow(), pr, &watch, 5)
+            .expect("closed");
+        let reopened = closed.unclosed(&flow(), &human, 5).expect("unclosed");
+        assert_eq!(
+            (reopened.column.clone(), reopened.done_ms),
+            (Column::READY, None)
+        );
+        let again = reopened
+            .move_freely(&flow(), &Column::DONE, &human, 5)
+            .expect("ordinary Done");
+        assert_eq!(
+            again.done_ms,
+            Some(5),
+            "the same millisecond as the old close"
+        );
+        assert!(matches!(
+            again.unclosed(&flow(), &human, 6),
+            Err(BoardError::Refused(_))
+        ));
+        // And the real, current close is still undone.
+        assert!(closed.unclosed(&flow(), &human, 6).is_ok());
     }
 
     #[test]
