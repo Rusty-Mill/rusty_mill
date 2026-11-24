@@ -101,6 +101,11 @@ impl Store {
         self.dir.join(format!("{block}.{SPOOL}"))
     }
 
+    /// The store directory.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Opens `block`'s history spool, making it if missing.
     pub(crate) fn spool(&self, block: BlockId) -> io::Result<Spool> {
         Spool::open(self.spool_dir(block))
