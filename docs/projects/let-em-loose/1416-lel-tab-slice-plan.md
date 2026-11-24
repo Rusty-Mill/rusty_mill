@@ -24,8 +24,8 @@ rusty_term does not depend on `rusty_mill_board` (sqlite, oauth, serve; ADR-0003
 
 1. **View model.** Pure parsing and fixtures; happy path, empty and error states; no UI.
 2. **Claims map and read-only intent panel** (D54-D56). Map from `claim_card`/`claims_delta`; groups derived from `domain` and `deps` (Q40 interim); undo log shows nothing or a static "not built" (Q41 interim). Stage strip derived read-only (D55).
-3. **Inbox list and top-strip chip** (D53, D22 pattern). Live wiring needs the data-source answer.
-4. **Approve, Reject, Choose** through host commands, Approve with the D58 confirm (Cancel focus first, Reject, "Accept claim"; no execution wording). "Try both builds": candidates side by side, nothing launched (Q43 interim). Needs the data-source answer.
+3. **Inbox list and top-strip chip** (D53, D22 pattern). Live wiring uses the Mill Board `inbox_list` endpoint (D173).
+4. **Approve, Reject, Choose** through host commands, Approve with the D58 confirm (Cancel focus first, Reject, "Accept claim"; no execution wording). "Try both builds": candidates side by side, nothing launched (Q43 interim). Uses `inbox_act` with the displayed revision as fence (D173).
 5. **Spend meter**: per-claim `spent` and `budget` only; lens list from orch config (Q42 interim).
 6. **Windows run**: paste-ready PowerShell prompt in `/mnt/project-files/let-em-loose/`; the GUI is judged on Windows (D63).
 

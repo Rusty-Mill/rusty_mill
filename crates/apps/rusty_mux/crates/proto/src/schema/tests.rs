@@ -102,12 +102,13 @@ fn catalog_covers_each_request_type_once() {
     // 0x1e and 0x1f focus, 0x20 NameSession. 0x21 to 0x23, the leases, and
     // 0x24 Shutdown (`rusty-mux-ctl server stop`) are not agent methods;
     // 0x25 and 0x26, the session share (C14), are; so are 0x2e and 0x2f,
-    // the floats (C42).
+    // the floats (C42), and 0x31 to 0x33, the archive (C84).
     let expected = (0x02..=0x14)
         .filter(|t| ![0x0d, 0x0f, 0x10].contains(t))
         .chain(0x16..=0x20)
         .chain(0x25..=0x26)
-        .chain(0x2e..=0x2f);
+        .chain(0x2e..=0x2f)
+        .chain(0x31..=0x33);
     assert_eq!(unique, expected.collect());
     assert!(block.iter().all(|m| ty(m) == 0x0f));
     assert_eq!(renames.len(), 4);
@@ -132,6 +133,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.process",
             "terminal.size",
             "terminal.list-dir",
+            "terminal.workspace-list",
             "terminal.reset",
             "terminal.set-theme",
             "terminal.modes",
@@ -159,6 +161,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
                 Features::BLOCK_CALL.union(Features::TERMINAL_FIND)
             }
             (_, _, "terminal.ports") => Features::BLOCK_CALL.union(Features::PORTS),
+            (_, _, "terminal.workspace-list") => Features::BLOCK_CALL.union(Features::WORKSPACE),
             (_, _, "terminal.list-dir") => Features::BLOCK_CALL.union(Features::DIR_LISTING),
             _ => Features::BLOCK_CALL,
         };
@@ -340,9 +343,15 @@ fn optional_parameters_add_their_features_only_when_given() {
             "arg",
             "cwd",
             "beside",
+            "card",
+            "label",
+            "why",
+            "card",
+            "before",
             "trim",
             "unwrap",
             "vt",
+            "path",
             "path",
             "foreground",
             "background",

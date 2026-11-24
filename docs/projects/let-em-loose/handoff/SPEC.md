@@ -37,7 +37,7 @@ Nano writes intent; critic lenses on different models post claims and evidence t
 Mill Board column per card, read 2026-11-10; decision numbers from ../DECISIONS.md (D121 is the latest row).
 - Done: #592, #593, #594 (all slices merged; a live paid run needs Nano's approval), #595 (follow-up #703; Remediate diffstat deferred), #597, #598, #704 (all slices merged through #1544; erosion is report-only and the limits are Nano's to set, D115), #706, #708 (no live run yet; paid calls need Nano's approval).
 - Building: #599 (track records merged; lessons, lens why and the canary re-run not built).
-- Blocked: #703 (waits on Nano's approval of the bbp CLI and log change).
+- Ready: #703 (PR #1844: `bbp human --decision` and `bbp decision`, approved by Nano 2026-11-24, D168; waits on review and merge).
 - Backlog: #596 (parked by Nano 2026-11-04), #600 (M2 epic, waits on M1 #1077), #705 (waits on #1320), #707 (waits on #1165).
 - Unticked questions that still need Nano or an unreachable source are in OPEN_QUESTIONS.md (14 at this refresh).
 

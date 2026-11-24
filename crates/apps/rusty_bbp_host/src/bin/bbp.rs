@@ -15,10 +15,11 @@
 //! bbp takeover-ended --dir D --task T --takeover N --reason released|expired|revoked|turn-ended|mux-lost   D104: orch ends a takeover (`released` only after `bbp human takeover-release N`)
 //! bbp golden-run DIR                        the golden: profile's case runner: checks the sign-off, runs each case in the current directory, prints verdicts only
 //! bbp inbox   --dir D --task T[,T2...] [--json yes]   open escalations of claims tasks as JSON: irreversible first, then by task as given, oldest first within a task
+//! bbp decision --dir D --task T --decision ID[,ID2...]   was each decision id (`bbp human --decision`) applied, and at which rev: `[{"decision":ID,"applied":bool,"rev":N|null}]`, read from the log
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
-//! bbp human   --dir D --task T [--rev N] [--as WHO] [--fence N] [--dry-run yes] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
+//! bbp human   --dir D --task T [--rev N] [--as WHO] [--fence N] [--decision ID (needs --fence)] [--dry-run yes] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
 //!                                          claims mode: claim MSG accept|drop|reopen | choose Q C | extend-claim MSG | withdraw-rerun ART | action-result MARK done|aborted | refine MSG|task BRIEF TEXT | close | holdout-updated DIGEST | takeover MSG SESSION CLIENT MINUTES REASON | takeover-release N
 //!                                          | intent FILE [claims=msg:1,msg:2] [domains=a,b] (#598: new brief; no list = every claim)
 //!                                          reject, rerun, resume, cancel and close need --rev, the card revision you saw; --dry-run prints the events without committing
@@ -48,9 +49,9 @@
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, admission, args::Args, baseline, broker, dry_run, golden, grade, holdout, human, inbox,
-    mcp, moderator, pairs, pins, profiles, report, response_json, runner, shadow, slots, tokens,
-    verify, why,
+    admin, admission, args::Args, baseline, broker, decision, dry_run, golden, grade, holdout,
+    human, inbox, mcp, moderator, pairs, pins, profiles, report, response_json, runner, shadow,
+    slots, tokens, verify, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -252,6 +253,9 @@ fn run() -> Result<String, String> {
         let mut tasks: Vec<TaskId> = task.0.split(',').map(|t| TaskId(t.to_owned())).collect();
         tasks.extend(a.positional.iter().map(|t| TaskId(t.clone())));
         return inbox::json(&dir, &tasks);
+    }
+    if sub == "decision" {
+        return decision::json(&dir, &task, a.flag("decision")?);
     }
     if sub == "cgroup-open" {
         return cgroup_open(&dir, &task, &PathBuf::from(a.flag("cgroup")?));
@@ -602,6 +606,13 @@ fn run() -> Result<String, String> {
                         .map_err(|_| "--rev must be a number".to_owned())
                 })
                 .transpose()?;
+            let by = a.flags.get("as").map_or(human::UNLABELLED, String::as_str);
+            let op = human::op_for(
+                by,
+                a.flags.get("op").map(String::as_str),
+                a.flags.get("decision").map(String::as_str),
+                a.flags.contains_key("fence"),
+            )?;
             if a.flags.get("dry-run").is_some_and(|v| v != "no") {
                 let preview = human::preview_fenced(
                     &dir,
@@ -618,7 +629,7 @@ fn run() -> Result<String, String> {
                                 .map_err(|_| "--fence must be a revision".to_owned())
                         })
                         .transpose()?,
-                    a.flags.get("op").map(|s| OpId(s.clone())),
+                    op,
                 )?;
                 return rusty_serde::json::to_string(&preview).map_err(|e| e.to_string());
             }
@@ -637,7 +648,7 @@ fn run() -> Result<String, String> {
                             .map_err(|_| "--fence must be a revision".to_owned())
                     })
                     .transpose()?,
-                a.flags.get("op").map(|s| OpId(s.clone())),
+                op,
             )?
         }
         other => return Err(format!("unknown subcommand {other}")),

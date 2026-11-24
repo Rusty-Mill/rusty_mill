@@ -23,6 +23,12 @@ impl<S: Read + Write> Conn<S> {
         &self.stream
     }
 
+    /// Writes bytes already framed, whole, so another writer's frames never
+    /// interleave with them while the caller holds this connection.
+    pub fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.stream.write_all(bytes)
+    }
+
     pub fn send(&mut self, message: &Message) -> io::Result<()> {
         let frame = encode(message).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         self.stream.write_all(&frame)
