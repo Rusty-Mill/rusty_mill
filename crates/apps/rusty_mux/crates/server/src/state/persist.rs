@@ -132,8 +132,6 @@ impl State {
             drop(parser.take_responses());
         }
         let cwd = before.as_ref().map(|b| b.cwd.clone());
-        // A relaunched shell keeps the workspace it was first launched in.
-        let workspace = before.as_ref().map(|b| b.workspace().to_owned());
         if let Some(command) = before.filter(|b| !b.shell) {
             let started = Started {
                 read_only: true,
@@ -154,7 +152,8 @@ impl State {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect(),
             cwd: config.cwd.to_string_lossy().into_owned(),
-            workspace: workspace.unwrap_or_else(|| config.cwd.to_string_lossy().into_owned()),
+            // The launch directory is not saved, so it is not known again.
+            workspace: String::new(),
         };
         let unscreened = self.start(Start {
             block: revive.block,

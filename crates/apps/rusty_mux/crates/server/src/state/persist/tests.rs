@@ -27,14 +27,14 @@ fn the_workspace_is_not_written_to_the_saved_record() {
 }
 
 #[test]
-fn the_workspace_is_the_launch_directory_not_the_last_known_one() {
+fn the_workspace_is_the_launch_directory_and_unknown_after_a_restart() {
     let mut s = started(true);
-    // A record from before the field: the last known directory stands in.
-    assert_eq!(s.workspace(), "/");
+    // Read back from a saved record: not known, never the last cwd.
+    assert_eq!(s.workspace(), None);
     // Later saves move `cwd` and leave the workspace where it was launched.
     s.workspace = "/repo".into();
     s.cwd = "/tmp".into();
-    assert_eq!(s.workspace(), "/repo");
+    assert_eq!(s.workspace(), Some("/repo"));
 }
 
 #[test]

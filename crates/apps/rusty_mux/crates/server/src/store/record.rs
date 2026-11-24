@@ -28,19 +28,16 @@ pub(crate) struct Started {
     /// The directory it was launched in: the root of its workspace (D337),
     /// kept as the program moves on. Not stored: the records are bincode, so
     /// a new field needs a schema bump (an owner call). After a restart it is
-    /// empty and the workspace is the last known `cwd`.
+    /// empty, the root is unknown and the workspace call is refused.
     #[serde(skip)]
     pub(crate) workspace: String,
 }
 
 impl Started {
-    /// The root of the block's workspace.
-    pub(crate) fn workspace(&self) -> &str {
-        if self.workspace.is_empty() {
-            &self.cwd
-        } else {
-            &self.workspace
-        }
+    /// The root of the block's workspace; `None` when it is not known,
+    /// which is every block after a server restart (see `workspace`).
+    pub(crate) fn workspace(&self) -> Option<&str> {
+        Some(self.workspace.as_str()).filter(|w| !w.is_empty())
     }
 }
 

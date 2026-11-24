@@ -2125,7 +2125,11 @@ impl State {
                 self.mux
                     .authorize_input(client, block)
                     .map_err(Refusal::from)?;
-                let root = rt.started.workspace().to_owned();
+                let root = rt
+                    .started
+                    .workspace()
+                    .ok_or("the workspace root is unknown after a server restart")?
+                    .to_owned();
                 let path = named.iter().find_map(|(n, v)| match (*n, v) {
                     ("path", Value::Text(p)) => Some(p.as_str()),
                     _ => None,
