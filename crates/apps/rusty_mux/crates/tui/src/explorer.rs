@@ -203,6 +203,12 @@ impl Tree {
             "." => Vec::new(),
             p => p.split('/').map(unescape).collect(),
         };
+        let held = self
+            .selectable()
+            .into_iter()
+            .nth(self.cursor)
+            .map(|r| r.at)
+            .unwrap_or_default();
         let mut node = &mut self.root;
         for name in &names {
             let Some(next) = node
@@ -214,9 +220,27 @@ impl Tree {
             };
             node = next;
         }
-        if node.kind == Kind::Dir {
-            fill(node, listing);
-            node.open = true;
+        if node.kind != Kind::Dir {
+            return;
+        }
+        fill(node, listing);
+        node.open = true;
+        self.reseat(held);
+    }
+
+    /// Puts the cursor back on the node at `held`, or else on its nearest
+    /// surviving ancestor, so a late reply never moves the selection.
+    fn reseat(&mut self, mut held: Vec<usize>) {
+        let rows = self.selectable();
+        loop {
+            if let Some(i) = rows.iter().position(|r| r.at == held) {
+                self.cursor = i;
+                return;
+            }
+            if held.pop().is_none() {
+                self.cursor = self.cursor.min(rows.len().saturating_sub(1));
+                return;
+            }
         }
     }
 
@@ -502,6 +526,17 @@ mod tests {
         assert_eq!(t.enter(), Want::Fetch("c\\d".into()));
         t.load(&parse("c\\\\d\nf\tx").unwrap());
         assert_eq!(t.render(40, 10).len(), 5);
+    }
+
+    #[test]
+    fn a_late_reply_does_not_move_the_selection() {
+        let mut t = Tree::new(&parse(".\nd\ta\nd\tb").unwrap());
+        t.step(1);
+        assert_eq!(t.enter(), Want::Fetch("a".into()));
+        t.step(1);
+        t.load(&parse("a\nf\tx\nf\ty").unwrap());
+        assert_eq!(t.selected_path(), "b");
+        assert!(t.render(40, 10).iter().any(|r| r.starts_with(">  + b/")));
     }
 
     #[test]
