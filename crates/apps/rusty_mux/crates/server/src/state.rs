@@ -447,6 +447,8 @@ pub(crate) struct State {
     base: Config,
     /// `base` with the config file's `server` section over it.
     config: Config,
+    /// Files downloads never read, as they were when the server started.
+    keep: Arc<download::Keep>,
     /// The listening socket's path, given to each block's program.
     socket: Option<PathBuf>,
     mux: Mux,
@@ -534,7 +536,16 @@ pub(crate) enum Kept {
 
 impl State {
     pub(crate) fn shared(config: Config, socket: Option<PathBuf>) -> Shared {
+        let keep = download::Keep::new(
+            config
+                .protected
+                .iter()
+                .chain(&config.config_file)
+                .cloned()
+                .collect(),
+        );
         Rc::new(RefCell::new(Self {
+            keep: Arc::new(keep),
             base: config.clone(),
             config,
             socket,
@@ -2166,13 +2177,7 @@ impl State {
                 let private = self.config.state_dir.clone();
                 // The config file, the TLS key, the tokens and the allowlist
                 // are as secret as the state directory.
-                let keep: Vec<_> = self
-                    .config
-                    .protected
-                    .iter()
-                    .chain(&self.config.config_file)
-                    .cloned()
-                    .collect();
+                let keep = Arc::clone(&self.keep);
                 let path = path.ok_or("terminal.download: missing path")?;
                 return Ok(Outcome::Blocking {
                     method: "terminal.download",
