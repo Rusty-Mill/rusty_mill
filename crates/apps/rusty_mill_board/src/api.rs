@@ -785,7 +785,7 @@ fn movement_note(rules: crate::domain::MoveRules) -> &'static str {
             "movement rules are on: a move needs a listed transition and its capability, and leaving a work column needs your claim; a role holding record may also move a claimed work card with a merged PR as evidence to done"
         }
         crate::domain::MoveRules::Open => {
-            "movement rules are off: any move except out of Done and through a gate is allowed, whatever the transition list shows; only a refusal from card_move means no"
+            "movement rules are off: the transition list is not enforced, but your role, project scope, claims, gates and the card's state still apply, and Done stays final; when a move is already yours to make, card_move reports any refusal with its reason"
         }
     }
 }
@@ -974,11 +974,12 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_columns",
-            "The board's columns in display order ({id, label, kind}: kind backlog, queue (waits to be taken), work (claimed; leaving needs the claim), done or blocked) and the moves between them ({from, to, cap, gate}: the capability a move needs; a gate also needs admin). Any open card may move to blocked. `movement` says whether the moves are enforced or open (an admin's switch: any move but out of Done and through a gate is allowed, whatever the list says), and `note` says so in words; a missing move in the list is not a refusal: try card_move and read the reason.",
+            "The board's columns in display order ({id, label, kind}: kind backlog, queue (waits to be taken), work (claimed; leaving needs the claim), done or blocked) and the moves between them ({from, to, cap, gate}: the capability a move needs; a gate also needs admin). Any open card may move to blocked. `movement` says whether the moves are enforced or open (an admin's switch: any move but out of Done and through a gate is allowed, whatever the list says), and `note` says so in words; a move missing from the list is not thereby forbidden, but this tool does not authorize it: your role, project scope, claims, gates and the card's state still apply.",
             |b, _, _: Nothing| {
+                let rules = b.move_rules();
                 let mut out = json!(b.workflow());
-                out["movement"] = json!(b.move_rules());
-                out["note"] = json!(movement_note(b.move_rules()));
+                out["movement"] = json!(rules);
+                out["note"] = json!(movement_note(rules));
                 to_json(out)
             },
         ),
@@ -1007,12 +1008,13 @@ pub fn ops() -> Vec<Op> {
             "board_whoami",
             "Who you are on this board: your actor name, role and what that role may do, and the nicknames an admin gave registered agents (agent id to nickname; display only).",
             |b, i, _: Nothing| {
+                let rules = b.move_rules();
                 let Some(i) = i else {
                     return to_json(json!({
                         "authenticated": false,
                         "note": "no per-model credential: pass actor and role on each call",
-                        "movement": b.move_rules(),
-                        "movement_note": movement_note(b.move_rules()),
+                        "movement": rules,
+                        "movement_note": movement_note(rules),
                         "nicknames": b.agent_nicknames()
                     }));
                 };
@@ -1022,8 +1024,8 @@ pub fn ops() -> Vec<Op> {
                     "actor": who.name,
                     "role": i.role,
                     "capabilities": who.caps,
-                    "movement": b.move_rules(),
-                    "movement_note": movement_note(b.move_rules()),
+                    "movement": rules,
+                    "movement_note": movement_note(rules),
                     "nicknames": b.agent_nicknames()
                 }))
             },
@@ -2382,6 +2384,21 @@ mod tests {
             json!({"id": card["card"]["id"], "to": "ready"}),
         );
         assert_eq!(moved.expect("backlog to ready")["card"]["column"], "ready");
+        // Open movement is not authorization: other checks still refuse.
+        let bad = call_as(
+            &board,
+            Some(&id),
+            "card_move",
+            json!({"id": card["card"]["id"], "to": "nowhere"}),
+        );
+        assert!(bad.is_err(), "an unknown column is still refused");
+        let none = call_as(
+            &board,
+            Some(&ident("claude", "no_such_role")),
+            "card_move",
+            json!({"id": card["card"]["id"], "to": "backlog"}),
+        );
+        assert!(none.is_err(), "a caller without a role is still refused");
     }
 
     #[test]
