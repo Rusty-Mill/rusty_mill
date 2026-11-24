@@ -888,3 +888,69 @@ fn a_drop_is_sent_under_its_cards_id() {
     let card = out["remediated"]["card"]["id"].as_str().unwrap().to_owned();
     assert_eq!(*fake.decided.lock().unwrap(), [card]);
 }
+
+/// A Remediate card filed before BBP recorded decision ids, at the id the old board gave it.
+/// Its send carried no id, so BBP's log cannot say whether it was applied.
+fn legacy_card(store: &MemStore) -> Card {
+    const NS: Uuid = Uuid::from_u128(0x6d69_6c6c_2d72_656d_6564_6961_7465_0595);
+    let action = serde_json::to_string(&Action::Reject { reason: None }).unwrap();
+    let key = format!("default\nT1/msg:1/3\n7\n{action}");
+    let card = Card {
+        id: Uuid::new_v5(&NS, key.as_bytes()),
+        ..Card::new(
+            "Remediate: ship it",
+            "filed before the send",
+            vec!["remediate:T1/msg:1/3".to_owned()],
+            1,
+        )
+        .unwrap()
+    };
+    let event = Event::of(&card, rusty_mill_board::domain::EventKind::Created, "nano");
+    store.insert(&card, event).unwrap();
+    card
+}
+
+/// After an upgrade, a retry of a decision the old board sent finds no id in BBP's log. That
+/// proves nothing: the old send may have applied. The card stays for a person.
+#[test]
+fn a_card_from_before_decision_ids_is_never_closed_on_absence() {
+    let fake = Arc::new(Fake::with(vec![]));
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    let legacy = legacy_card(&store);
+    // The old send applied and the escalation is gone; BBP holds no id for it.
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert_eq!(out["recorded"]["card"]["id"], legacy.id.to_string());
+    assert!(board.get(legacy.id).unwrap().closed.is_none());
+    assert_eq!(remediate_cards(&board).len(), 1, "no second card");
+    assert!(
+        fake.acted.lock().unwrap().is_empty(),
+        "nothing is sent again"
+    );
+}
+
+/// The escalation is still open at the same rev, so the retry is sent again: as the old
+/// board sent it, under no id, onto the card it already has. Refused or not, that card stays.
+#[test]
+fn a_retry_of_an_old_send_reuses_its_card_and_sends_no_id() {
+    let fake = Arc::new(Fake {
+        refuse_at: Some(0),
+        refuse_code: Some("StaleRev"),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    let legacy = legacy_card(&store);
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(
+        out["remediated"]["card"]["id"],
+        legacy.id.to_string(),
+        "{out}"
+    );
+    assert!(fake.decided.lock().unwrap().is_empty(), "no id was sent");
+    let card = board.get(legacy.id).unwrap();
+    assert!(card.closed.is_none(), "{card:?}");
+    assert!(last_comment(&card).contains("check BBP's log"), "{card:?}");
+    assert_eq!(remediate_cards(&board).len(), 1, "no second card");
+}

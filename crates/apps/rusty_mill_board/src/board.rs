@@ -746,8 +746,8 @@ impl<S: Store> Board<S> {
                     rev,
                     action,
                 };
-                if let Some(card) = self.remediation_card(by, project, &decision)? {
-                    let settled = self.settle(by, source, &e.task, &card, true)?;
+                if let Some((card, tracked)) = self.remediation_card(by, project, &decision)? {
+                    let settled = self.settle(by, source, &e.task, &card, tracked, true)?;
                     return Ok(InboxAnswer::Recorded {
                         card: InboxCard::of(&card),
                         settled,
@@ -787,10 +787,12 @@ impl<S: Store> Board<S> {
             rev,
             action,
         };
-        let card = self.remediate(by, &project, &e, &decision, &dropped, &dry)?;
-        let id = decision.card_id(&project)?.to_string();
+        let (card, tracked) = self.remediate(by, &project, &e, &decision, &dropped, &dry)?;
+        // Only a send this board can track later carries an id: a card from before ids
+        // (`tracked` false) may have been applied without one, so it is sent as it was.
+        let id = tracked.then(|| card.id.to_string());
         let outcome = source
-            .act(&e, action, &answerer(&by.name), Some(&id))
+            .act(&e, action, &answerer(&by.name), id.as_deref())
             .map_err(|err| match inbox_error(err) {
                 BoardError::Storage(why) => BoardError::Storage(format!(
                     "{why}; its Remediate card {} was written first, so retry to reconcile",
@@ -802,8 +804,14 @@ impl<S: Store> Board<S> {
             // A stale fence can never apply later, so BBP's log settles the card. For any
             // other refusal only this send is known to have written nothing: another send
             // of the same decision shares the card and may commit before or after a re-read.
-            let settled =
-                self.settle(by, source, &e.task, &self.get(card.id)?, code == "StaleRev")?;
+            let settled = self.settle(
+                by,
+                source,
+                &e.task,
+                &self.get(card.id)?,
+                tracked,
+                code == "StaleRev",
+            )?;
             if settled == Settled::Unknown {
                 self.comment(
                     card.id,
@@ -836,12 +844,12 @@ impl<S: Store> Board<S> {
             rev,
             action,
         };
-        let card = self
+        let (card, tracked) = self
             .remediation_card(by, &project, &decision)?
             .ok_or_else(closed)?;
         // The escalation is gone, so the log has moved past `rev`: a send that was not
         // applied by now never will be.
-        let settled = self.settle(by, self.inbox_source(by)?, task, &card, true)?;
+        let settled = self.settle(by, self.inbox_source(by)?, task, &card, tracked, true)?;
         Ok(InboxAnswer::Recorded {
             card: InboxCard::of(&card),
             settled,
@@ -851,15 +859,22 @@ impl<S: Store> Board<S> {
     /// Settle a Remediate `card` against BBP's log: keep it if the decision was applied,
     /// close it if not. The log can only say "not applied yet" while a send may still
     /// land, so `final_` says whether none can (its fence has passed); until then, or if
-    /// the host cannot say (it predates `bbp decision`), the card is left as it is.
+    /// the host cannot say (it predates `bbp decision`), or the card's send carried no id
+    /// (`tracked` false), the card is left as it is.
     fn settle(
         &self,
         by: &Actor,
         source: &Arc<dyn Escalations>,
         task: &str,
         card: &Card,
+        tracked: bool,
         final_: bool,
     ) -> Result<Settled, BoardError> {
+        // Absence from the log means "not applied" only for a send that carried an id. A
+        // card filed before ids existed may well have been applied: it stays for a person.
+        if !tracked {
+            return Ok(Settled::Unknown);
+        }
         let applied = match source.applied(task, &card.id.to_string()) {
             Ok(applied) => applied,
             Err(err) => {
@@ -897,21 +912,28 @@ impl<S: Store> Board<S> {
             .map_or_else(|| DEFAULT_PROJECT.to_owned(), |c| c.project))
     }
 
-    /// The Remediate card written for `decision` in `project`. It is found by its
-    /// derived id, never by its tag: a tag anyone can add to any card is no record.
+    /// The Remediate card written for `decision` in `project`, and whether its send is
+    /// tracked in BBP's log. It is found by its derived id, never by its tag: a tag anyone
+    /// can add to any card is no record. The id says which board wrote it: a card at the
+    /// legacy id was sent without a decision id, so BBP's log can say nothing of it.
     fn remediation_card(
         &self,
         by: &Actor,
         project: &str,
         decision: &Decision<'_>,
-    ) -> Result<Option<Card>, BoardError> {
+    ) -> Result<Option<(Card, bool)>, BoardError> {
         if !by.may_work_in(project) {
             return Ok(None);
         }
-        Ok(self
-            .store
-            .get(decision.card_id(project)?)?
-            .filter(|c| c.project == project))
+        for (id, tracked) in [
+            (decision.tracked_id(project)?, true),
+            (decision.card_id(project)?, false),
+        ] {
+            if let Some(card) = self.store.get(id)?.filter(|c| c.project == project) {
+                return Ok(Some((card, tracked)));
+            }
+        }
+        Ok(None)
     }
 
     /// The one Backlog "Remediate" card for `decision`'s dropped acted-on work (#595 §4),
@@ -926,9 +948,9 @@ impl<S: Store> Board<S> {
         decision: &Decision<'_>,
         dropped: &[&Acted],
         dry: &DryRun,
-    ) -> Result<InboxCard, BoardError> {
-        if let Some(card) = self.remediation_card(by, project, decision)? {
-            return Ok(InboxCard::of(&card));
+    ) -> Result<(InboxCard, bool), BoardError> {
+        if let Some((card, tracked)) = self.remediation_card(by, project, decision)? {
+            return Ok((InboxCard::of(&card), tracked));
         }
         let tag = format!("remediate:{}", e.id);
         let text = |id: u64| {
@@ -967,15 +989,15 @@ impl<S: Store> Board<S> {
             text(dropped.first().map_or(0, |x| x.claim))
         );
         let card = Card {
-            id: decision.card_id(project)?,
+            id: decision.tracked_id(project)?,
             ..Card::new(&title, &body, vec![tag], (self.clock)())?
         };
         match self.create(by, project, card) {
-            Ok(card) => Ok(InboxCard::of(&card)),
+            Ok(card) => Ok((InboxCard::of(&card), true)),
             // A concurrent retry of the same decision wrote it first.
             Err(BoardError::Conflict) => self
                 .remediation_card(by, project, decision)?
-                .map(|c| InboxCard::of(&c))
+                .map(|(c, tracked)| (InboxCard::of(&c), tracked))
                 .ok_or(BoardError::Conflict),
             Err(other) => Err(other),
         }
@@ -2198,12 +2220,27 @@ struct Decision<'a> {
 }
 
 impl Decision<'_> {
-    /// The id of this decision's Remediate card in `project`. Every other card id is
-    /// random, so a card at this id was written by [`Board::inbox_act`] for it.
-    fn card_id(&self, project: &str) -> Result<Uuid, BoardError> {
+    fn key(&self, project: &str) -> Result<String, BoardError> {
         let action =
             serde_json::to_string(self.action).map_err(|e| BoardError::Storage(e.to_string()))?;
-        let key = format!("{project}\n{}\n{}\n{action}", self.escalation, self.rev);
+        Ok(format!(
+            "{project}\n{}\n{}\n{action}",
+            self.escalation, self.rev
+        ))
+    }
+
+    /// The id of a Remediate card filed before BBP recorded decision ids: its send carried
+    /// none, so BBP's log can say nothing of it. Every other card id is random, so a card
+    /// at this id was written by [`Board::inbox_act`] for this decision.
+    fn card_id(&self, project: &str) -> Result<Uuid, BoardError> {
+        Ok(Uuid::new_v5(&REMEDIATION_NS, self.key(project)?.as_bytes()))
+    }
+
+    /// The id of this decision's Remediate card in `project`, and the decision id its send
+    /// carries to BBP. A card at this id was written by a board that sends under it, so
+    /// a log with no such id is positive proof the send was not applied.
+    fn tracked_id(&self, project: &str) -> Result<Uuid, BoardError> {
+        let key = format!("{}\ndecision-id", self.key(project)?);
         Ok(Uuid::new_v5(&REMEDIATION_NS, key.as_bytes()))
     }
 }
