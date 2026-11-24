@@ -40,7 +40,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     BoardError, Card, CloseReason, Closure, Column, Comment, DEFAULT_PROJECT, Event, EventKind,
-    ExecutionLink, Span, next_event_id, reserved_tag,
+    ExecutionLink, MergeClose, Span, next_event_id, reserved_tag,
 };
 use crate::external::{ExternalRef, Provider, RefState};
 use crate::http::Http;
@@ -458,8 +458,28 @@ fn task_tags(card: &Card) -> Vec<String> {
             .iter()
             .map(|c| format!("closed:{}:{}", c.reason.as_str(), c.at_ms)),
     );
+    tags.extend(
+        card.merged
+            .iter()
+            .map(|m| format!("merged:{}:{}", m.at_ms, m.was)),
+    );
     tags.extend(card.tags.iter().cloned());
     tags
+}
+
+/// The merge watch's close, from its `merged:<ms>:<column>` tag. Only a Done card has one; a
+/// tag on an open task, or an unreadable one, means nothing (the card then cannot be unclosed).
+fn merge_close_of(task: &Task, column: &Column) -> Option<MergeClose> {
+    if *column != Column::DONE {
+        return None;
+    }
+    task.tags.iter().find_map(|t| {
+        let (ms, was) = t.strip_prefix("merged:")?.split_once(':')?;
+        Some(MergeClose {
+            was: Column::new(was).ok()?,
+            at_ms: ms.parse().ok()?,
+        })
+    })
 }
 
 /// rusty_tick's status for a Done card: `wontdo` when it closed without shipping.
@@ -550,6 +570,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         .collect();
     let doc = doc.unwrap_or_default();
     let closed = closure_of(&task);
+    let merged = merge_close_of(&task, &column);
     Ok(Card {
         id: task.id,
         number,
@@ -587,6 +608,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         // Only shipped work has a ship date; won't-do is closed but never shipped.
         done_ms: task.completed_ms.filter(|_| task.status == "done"),
         closed,
+        merged,
         evidence: doc.evidence,
         archived_ms,
         restored_ms,

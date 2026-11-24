@@ -2075,17 +2075,21 @@ impl<S: Store> Board<S> {
         // the look at the dependents and the reopening.
         let _links = self.links();
         let flow = self.flow();
-        if let Some(started) = self
+        // Authorize and validate the card itself first: only then look at other cards, and
+        // never say more about them than that one has started.
+        let current = self.get_in(&flow, id)?;
+        if !by.may_work_in(&current.project) {
+            return Err(BoardError::OutOfScope(current.project));
+        }
+        current.unclosed(&flow, by, (self.clock)())?;
+        if self
             .cards_in(&flow)?
             .iter()
-            .find(|c| c.deps.contains(&id) && c.column != Column::DONE && started(&flow, c))
+            .any(|c| c.deps.contains(&id) && c.column != Column::DONE && started(&flow, c))
         {
-            return Err(BoardError::Refused(format!(
-                "card {} depends on this one and has started; move or finish it first",
-                started
-                    .number
-                    .map_or_else(|| started.id.to_string(), |n| format!("#{n}"))
-            )));
+            return Err(BoardError::Refused(
+                "an open card that depends on this one has started; move or finish it first".into(),
+            ));
         }
         self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
             c.unclosed(&flow, by, now)

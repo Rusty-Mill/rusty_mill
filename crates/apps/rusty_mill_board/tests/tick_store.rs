@@ -816,6 +816,49 @@ fn an_archived_card_is_one_tag_on_its_closed_task() {
 }
 
 #[test]
+fn a_merge_close_is_one_tag_that_unclose_removes() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board
+        .add_done_in(&human, "default", "shipped", "", vec![])
+        .expect("add done");
+    // Not closed by the merge watch: nothing to undo, whatever the task looks like.
+    assert!(matches!(
+        board.unclose(card.id, &human),
+        Err(BoardError::Refused(_))
+    ));
+    // The tag is the board's own: a caller cannot send it.
+    assert!(matches!(
+        board.add(&human, "a", "", vec!["merged:1:ready".into()]),
+        Err(BoardError::Invalid(_))
+    ));
+    // Read from the task, and only on a Done one.
+    tick.owner_edit(card.id, |t| {
+        t["tags"] = json!(["agent", "board:done", "merged:42:ready"]);
+    });
+    let read = board.get(card.id).expect("get");
+    assert_eq!(
+        read.merged.map(|m| (m.was, m.at_ms)),
+        Some((Column::READY, 42))
+    );
+    let open = board.add(&human, "open", "", vec![]).expect("add");
+    tick.owner_edit(open.id, |t| {
+        t["tags"] = json!(["agent", "board:backlog", "merged:42:ready"]);
+    });
+    assert_eq!(board.get(open.id).expect("get").merged, None);
+    // Unclose puts the card back and drops the tag.
+    let back = board.unclose(card.id, &human).expect("unclosed");
+    assert_eq!((back.column, back.merged), (Column::READY, None));
+    assert!(
+        !tick.task(card.id)["tags"]
+            .as_array()
+            .expect("tags")
+            .iter()
+            .any(|t| t.as_str().is_some_and(|t| t.starts_with("merged:")))
+    );
+}
+
+#[test]
 fn the_archived_tag_is_the_boards_own() {
     let (board, _tick) = board();
     let human = board.roles().actor("nano", "human").expect("role");

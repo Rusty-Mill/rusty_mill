@@ -378,12 +378,13 @@ pub fn reserved_tag(tag: &str) -> bool {
         || tag.starts_with("archived:")
         || tag.starts_with("restored:")
         || tag.starts_with("closed:")
+        || tag.starts_with("merged:")
 }
 
 fn check_tags(tags: &[String]) -> Result<(), BoardError> {
     if tags.iter().any(|t| reserved_tag(t)) {
         return Err(BoardError::Invalid(
-            "tags `agent`, `board:…`, `claim:…`, `number:…`, `archived:…`, `restored:…` and `closed:…` are the board's own",
+            "tags `agent`, `board:…`, `claim:…`, `number:…`, `archived:…`, `restored:…`, `closed:…` and `merged:…` are the board's own",
         ));
     }
     Ok(())
@@ -576,6 +577,16 @@ pub struct Closure {
     pub at_ms: i64,
 }
 
+/// How the merge watch closed a Done card: the typed record `card_unclose` relies on. Only the
+/// board writes it ([`Card::closed_by_merge`]); it is cleared when the close is undone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeClose {
+    /// The column the card was in.
+    pub was: Column,
+    /// When, Unix ms.
+    pub at_ms: i64,
+}
+
 /// One card. `rev` increases on every change and is the store's CAS token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Card {
@@ -674,6 +685,10 @@ pub struct Card {
     /// `done_ms`, and counts as dropped, never shipped. `None` for open and shipped cards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed: Option<Closure>,
+    /// Set when the merge watch closed the card ([`Card::closed_by_merge`]): which column it was
+    /// in. Reserved to the board (a `merged:` tag in rusty_tick); `card_unclose` needs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged: Option<MergeClose>,
     /// Links showing the work shipped: a merged PR, or any page that shows it ([`Card::add_evidence`]).
     /// A Done card counts as shipped only with one; without, it reports as a prototype.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -879,11 +894,8 @@ impl std::error::Error for BoardError {}
 /// may act under this name.
 pub const MERGE_WATCH: &str = "merge-watch";
 
-/// How the comment of a close on merge begins; `unclosed` finds it again by this.
+/// How the comment of a close on merge begins.
 const MERGED_PREFIX: &str = "Closed by merge:";
-
-/// How the comment that undoes such a close begins.
-const UNCLOSED_PREFIX: &str = "Unclosed:";
 
 /// What happened to a card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1044,6 +1056,7 @@ impl Card {
             updated_ms: now_ms,
             done_ms: None,
             closed: None,
+            merged: None,
             evidence: Vec::new(),
             archived_ms: None,
             restored_ms: None,
@@ -1296,19 +1309,23 @@ impl Card {
             column: Column::DONE,
             claim: None,
             done_ms: Some(now_ms),
+            merged: Some(MergeClose {
+                was: self.column.clone(),
+                at_ms: now_ms,
+            }),
             ..base
         })
     }
 
     /// Undo the merge watch's close: back to the column it was in, ship time cleared, evidence
-    /// and comments kept, and a comment saying who undid it. Only for a card whose current Done
-    /// is that close: the comment [`Card::closed_by_merge`] left (by [`MERGE_WATCH`], a name no
-    /// caller may use) carries the Done time and the column. Needs `Triage`.
+    /// and comments kept, and a comment saying who undid it. Only for a Done card carrying the
+    /// typed [`MergeClose`] that [`Card::closed_by_merge`] wrote (nothing else sets it, and
+    /// callers cannot send its `merged:` tag). Needs `Triage`.
     ///
     /// # Errors
     /// [`BoardError::Forbidden`] without `Triage`, and [`BoardError::Refused`] for a card that
-    /// is not Done, was closed any other way, or was closed before it last changed, or whose
-    /// earlier column is gone from the workflow.
+    /// is not Done, was not closed by the merge watch (including one closed before the record
+    /// existed), or whose earlier column is gone from the workflow.
     pub fn unclosed(&self, flow: &Workflow, by: &Actor, now_ms: i64) -> Result<Self, BoardError> {
         if !by.caps.contains(&Capability::Triage) {
             return Err(BoardError::Forbidden(Capability::Triage));
@@ -1317,30 +1334,13 @@ impl Card {
         if self.column != Column::DONE {
             return refuse("only a Done card can be unclosed");
         }
-        // The newest comment that closes or undoes a close decides: a close the watch made and
-        // nobody has undone since. An earlier close, already undone, never counts, however the
-        // clock reads when the card reached Done again.
-        let Some(close) = self
-            .comments
-            .iter()
-            .rev()
-            .find(|c| {
-                c.text.starts_with(UNCLOSED_PREFIX)
-                    || (c.by == MERGE_WATCH && c.text.starts_with(MERGED_PREFIX))
-            })
-            .filter(|c| c.by == MERGE_WATCH && Some(c.at_ms) == self.done_ms)
-        else {
+        let Some(close) = self.merged.as_ref() else {
             return refuse("this card was not closed by the merge watch");
         };
-        let was = close
-            .text
-            .rsplit_once("(was in ")
-            .and_then(|(_, rest)| rest.strip_suffix(")."))
-            .and_then(|c| Column::new(c).ok())
-            .filter(|c| *c != Column::DONE && flow.kind(c).is_some());
-        let Some(was) = was else {
+        let was = close.was.clone();
+        if was == Column::DONE || flow.kind(&was).is_none() {
             return refuse("the column the card was in is gone");
-        };
+        }
         let mut next = self.next(now_ms);
         next.comments.push(Comment {
             by: by.name.clone(),
@@ -1353,6 +1353,7 @@ impl Card {
         Ok(Self {
             column: was,
             done_ms: None,
+            merged: None,
             archived_ms: None,
             claim: None,
             ..next

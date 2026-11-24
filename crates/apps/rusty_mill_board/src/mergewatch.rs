@@ -986,6 +986,41 @@ mod tests {
     }
 
     #[test]
+    fn unclose_authorizes_before_it_looks_at_dependents_and_names_none() {
+        let (b, who, prereq, n) = one_card();
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        let dependent = b.add_in(&who, "p", "dependent", "", vec![]).expect("card");
+        b.plan(
+            dependent.id,
+            &who,
+            &crate::domain::Plan {
+                deps: Some(vec![prereq.id]),
+                ..Default::default()
+            },
+        )
+        .expect("planned");
+        b.move_card(dependent.id, &Column::READY, &who)
+            .expect("ready");
+        b.take(&who, Some(dependent.id)).expect("started");
+        // Outside the card's project: refused as out of scope, nothing about other cards.
+        let mut elsewhere = b.roles().actor("other", "human").expect("role");
+        elsewhere.projects = Some(["q".to_owned()].into());
+        assert!(matches!(
+            b.unclose(prereq.id, &elsewhere),
+            Err(BoardError::OutOfScope(_))
+        ));
+        // Inside it: refused because a dependent started, without saying which.
+        let Err(BoardError::Refused(why)) = b.unclose(prereq.id, &who) else {
+            panic!("expected a refusal");
+        };
+        let number = dependent.number.expect("n").to_string();
+        assert!(
+            !why.contains(&number) && !why.contains(&dependent.id.to_string()),
+            "{why}"
+        );
+    }
+
+    #[test]
     fn unclose_lets_a_waiting_dependent_wait_again() {
         let (b, who, prereq, n) = one_card();
         assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
