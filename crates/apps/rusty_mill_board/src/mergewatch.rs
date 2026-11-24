@@ -764,6 +764,124 @@ mod tests {
 
     const PR: &str = "https://github.com/o/r/pull/7";
 
+    /// A store that holds a write of a child (a card with a parent) until released, and says
+    /// when that write has begun: a parent link caught mid-commit.
+    struct Linking {
+        inner: MemStore,
+        entered: std::sync::mpsc::Sender<()>,
+        /// Told of each `list` once a link is held: the close reading the children.
+        listed: std::sync::mpsc::Sender<()>,
+        link_held: std::sync::atomic::AtomicBool,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl Linking {
+        fn hold(&self, card: &Card) {
+            if card.parent.is_some() {
+                self.link_held
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.entered.send(()).expect("test is listening");
+                self.release.lock().expect("lock").recv().expect("released");
+            }
+        }
+    }
+
+    impl Store for Linking {
+        fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+            self.inner.get(id)
+        }
+        fn list(&self) -> Result<Vec<Card>, BoardError> {
+            let cards = self.inner.list();
+            if self.link_held.load(std::sync::atomic::Ordering::SeqCst) {
+                self.listed.send(()).ok();
+            }
+            cards
+        }
+        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            self.hold(card);
+            self.inner.insert(card, event)
+        }
+        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            self.hold(card);
+            self.inner.replace(card, event)
+        }
+        fn events_since(
+            &self,
+            after: Option<Uuid>,
+            limit: usize,
+        ) -> Result<Vec<crate::domain::Event>, BoardError> {
+            self.inner.events_since(after, limit)
+        }
+        fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+            self.inner.last_event_id()
+        }
+        fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+            self.inner.reserve_number(card, floor)
+        }
+    }
+
+    /// While `link` is mid-commit (the child's parent link not yet stored), a close of the
+    /// parent must wait for it and then see the child: never close past a link in flight.
+    fn close_waits_for_link(link: impl FnOnce(&Shared, &Actor, &Card, &Card) + Send) {
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let (listed, checked) = std::sync::mpsc::channel();
+        let b: Shared = Board::new(
+            Box::new(Linking {
+                inner: MemStore::default(),
+                entered,
+                listed,
+                link_held: std::sync::atomic::AtomicBool::new(false),
+                release: std::sync::Mutex::new(held),
+            }) as Box<dyn Store>,
+            crate::board::Roles::default(),
+        )
+        .with_projects(Projects::parse(REGISTRY).expect("registry"));
+        let who = b.roles().actor("nano", "human").expect("role");
+        let parent = b.add_in(&who, "p", "parent", "", vec![]).expect("card");
+        let child = b.add_in(&who, "p", "child", "", vec![]).expect("card");
+        std::thread::scope(|s| {
+            let linking = s.spawn(|| link(&b, &who, &parent, &child));
+            started.recv().expect("the link is mid-commit");
+            let closing = s.spawn(|| {
+                b.close_merged(parent.id, parent.rev, PR, "o/r", &watcher("p"))
+                    .map(|c| c.id)
+            });
+            // Without the gate the close reads the children now, with the link still in
+            // flight; with it the close waits, so nothing arrives before the link is released.
+            let _ = checked.recv_timeout(std::time::Duration::from_millis(300));
+            release.send(()).expect("release the link");
+            linking.join().expect("link thread");
+            assert!(matches!(
+                closing.join().expect("close thread"),
+                Err(BoardError::Refused(_))
+            ));
+        });
+        assert_ne!(b.get(parent.id).expect("card").column, Column::DONE);
+        let cards = b.list(None).expect("cards");
+        assert!(cards.iter().any(|c| c.parent == Some(parent.id)));
+    }
+
+    #[test]
+    fn a_child_added_while_the_close_checks_blocks_the_close() {
+        close_waits_for_link(|b, who, parent, _| {
+            let mut new = NewCard::new("late child", "", vec![]);
+            new.parent = Some(parent.id);
+            b.add_card(who, "p", new).expect("child");
+        });
+    }
+
+    #[test]
+    fn a_parent_link_planned_while_the_close_checks_blocks_the_close() {
+        close_waits_for_link(|b, who, parent, child| {
+            let plan = crate::domain::Plan {
+                parent: Some(Some(parent.id)),
+                ..Default::default()
+            };
+            b.plan(child.id, who, &plan).expect("planned");
+        });
+    }
+
     #[test]
     fn the_write_rechecks_the_card_and_never_retries_a_stale_match() {
         let (b, who, card, _) = two_cards();

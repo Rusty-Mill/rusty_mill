@@ -137,11 +137,23 @@ pub struct Board<S> {
     milestones: Box<dyn MilestoneStore>,
     /// Agents registered on shared connectors.
     agents: Mutex<crate::agents::Registry>,
+    /// Held by every writer of a parent link and by the merge close, so a card cannot gain a
+    /// child between the close's childlessness check and its commit (#1620).
+    links: Mutex<()>,
     /// What the merge watch last found (#1620).
     merged_open: Mutex<(
         Vec<crate::mergewatch::MergedOpen>,
         crate::mergewatch::WatchStatus,
     )>,
+}
+
+/// The parent-link gate, even if a holder panicked: it guards no data.
+impl<S> Board<S> {
+    fn links(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -218,6 +230,7 @@ impl<S: Store> Board<S> {
             escalations: None,
             milestones: Box::new(MemMilestones::default()),
             agents: Mutex::default(),
+            links: Mutex::new(()),
             merged_open: Mutex::default(),
         }
     }
@@ -1411,6 +1424,7 @@ impl<S: Store> Board<S> {
         if !new.evidence.is_empty() {
             card.evidence = card.add_evidence(&new.evidence, card.created_ms)?.evidence;
         }
+        let _links = new.parent.map(|_| self.links());
         if let Some(p) = new.parent {
             // A new card has no children, so no parent can close a loop through it.
             self.store.get(p)?.ok_or(BoardError::NotFound(p))?;
@@ -1890,6 +1904,7 @@ impl<S: Store> Board<S> {
         repo: &str,
         by: &Actor,
     ) -> Result<Card, BoardError> {
+        let _links = self.links();
         let flow = self.flow();
         let current = self.get_in(&flow, id)?;
         if !by.may_work_in(&current.project) {
@@ -2070,6 +2085,7 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::NotFound(*linked));
             }
         }
+        let _links = plan.parent.map(|_| self.links());
         if let Some(Some(parent)) = plan.parent {
             self.check_parent(id, parent)?;
         }
