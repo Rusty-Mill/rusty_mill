@@ -11373,6 +11373,7 @@ dependencies = [
  "rusty_font",
  "rusty_gpu",
  "rusty_gui",
+ "rusty_json",
  "rusty_regx",
  "rusty_sha1",
  "rusty_term_core",

@@ -35,6 +35,8 @@ mod font;
 mod gpu;
 pub(crate) mod input;
 mod layout;
+#[allow(dead_code)] // wired by the tab in slice 2 (#1416)
+mod lel;
 mod link_policy;
 mod link_trust;
 mod motion;
