@@ -1427,6 +1427,43 @@ pub static CATALOG: &[Method] = &[
         build: |req, a| block_call(req, a, "terminal.list-dir"),
     },
     Method {
+        name: "terminal.upload",
+        doc: "Send a file to the server's host, a chunk at a time, into a folder kept for \
+              the block under the server's state directory. Each call appends `data` to \
+              the file `name` at `offset`, which must be the bytes received so far (0 \
+              starts the file again); the reply is then the bytes received, as a number. \
+              With `done` the file is committed and the reply is its absolute path. `name` \
+              is cleaned: a folder part, control and invisible format characters are \
+              dropped. A chunk is at most 1 MiB and a block keeps 2 GiB, the oldest files \
+              removed first; a file over that is refused. The folder goes with the block. \
+              Needs the lease and a server with a state directory.",
+        params: &[
+            BLOCK,
+            required(
+                "name",
+                Ty::Text,
+                "The file's name; its folder part is dropped.",
+            ),
+            required(
+                "offset",
+                Ty::Lines,
+                "The bytes already sent; 0 for the first chunk.",
+            ),
+            required("data", Ty::Bytes, "The next chunk, at most 1 MiB."),
+            Param {
+                name: "done",
+                ty: Ty::Flag,
+                doc: "Commit the file with this chunk and reply with its path.",
+                presence: Presence::Optional {
+                    needs: Features::NONE,
+                },
+            },
+        ],
+        needs: Features::BLOCK_CALL.union(Features::UPLOAD),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.upload"),
+    },
+    Method {
         name: "terminal.reset",
         doc: "Reset the terminal as its program sending RIS would, ending any sequence it \
               left unfinished: the screen and its scrollback are cleared, and modes, \

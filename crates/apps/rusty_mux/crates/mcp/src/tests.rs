@@ -17,7 +17,14 @@ fn every_catalog_method_has_a_shape_and_most_are_tools() {
         .filter(|m| shape(m) != Shape::Connection)
         .map(|m| m.name)
         .collect();
-    for name in ["attach", "detach", "acquire-lease", "release-lease", "sync"] {
+    for name in [
+        "attach",
+        "detach",
+        "acquire-lease",
+        "release-lease",
+        "sync",
+        "terminal.upload",
+    ] {
         assert!(!tools.contains(&name), "{name}");
     }
     for name in [
@@ -29,7 +36,7 @@ fn every_catalog_method_has_a_shape_and_most_are_tools() {
     ] {
         assert!(tools.contains(&name), "{name}");
     }
-    assert_eq!(tools.len(), CATALOG.len() - 5);
+    assert_eq!(tools.len(), CATALOG.len() - 6);
 }
 
 #[test]

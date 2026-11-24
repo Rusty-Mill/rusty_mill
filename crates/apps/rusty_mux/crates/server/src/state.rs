@@ -43,6 +43,7 @@ use crate::pty::{self, Process, Pty};
 use crate::spool::Spool;
 use crate::store::{Started, Store};
 use crate::terminal;
+use crate::upload;
 
 mod persist;
 pub(crate) use persist::save_periodically;
@@ -122,6 +123,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::FLOATS)
     .union(Features::TERMINAL_FIND)
     .union(Features::AGENT_META)
+    .union(Features::UPLOAD)
     .union(Features::PORT_FORWARD)
     .union(UNIX_ONLY);
 
@@ -2133,6 +2135,13 @@ impl State {
                     path: path.map(str::to_owned),
                 });
             }
+            "terminal.upload" => {
+                // It writes to the server's disk, so it takes the lease.
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                self.upload(block, &named)?
+            }
             "terminal.title" => rt.grid.title.clone(),
             "terminal.status" => rt.status.shown().bodies().join("\n"),
             "terminal.process" => {
@@ -3105,11 +3114,47 @@ impl State {
         self.flush();
     }
 
+    /// `terminal.upload`: one chunk of a file into `block`'s upload folder.
+    fn upload(&self, block: BlockId, named: &[(&str, Value)]) -> Result<String, Refusal> {
+        let text = |param| {
+            named.iter().find_map(|(n, v)| match v {
+                Value::Text(t) if *n == param => Some(t.as_str()),
+                _ => None,
+            })
+        };
+        let data = named.iter().find_map(|(n, v)| match v {
+            Value::Bytes(b) if *n == "data" => Some(b.as_slice()),
+            _ => None,
+        });
+        let done = named
+            .iter()
+            .any(|(n, v)| *n == "done" && matches!(v, Value::Flag(true)));
+        let (Some(name), Some(data)) = (text("name"), data) else {
+            return Err("terminal.upload: missing name or data".to_owned().into());
+        };
+        let offset = u64::from(lines(named, "offset"));
+        let store = self.store.as_ref().ok_or(
+            "terminal.upload: the server keeps no state directory to put files in".to_owned(),
+        )?;
+        let dir = store
+            .upload_dir(block)
+            .map_err(|e| format!("terminal.upload: {e}"))?;
+        let received = upload::receive(&dir, name, offset, data, done)
+            .map_err(|e| format!("terminal.upload: {e}"))?;
+        Ok(match received {
+            upload::Received::Partial(n) => n.to_string(),
+            upload::Received::Done(path) => path.display().to_string(),
+        })
+    }
+
     /// Deletes closed `block`'s spool by its path, whether or not a handle
     /// to it is left. A stopping server closes no block, so keeps them all.
     fn forget_history(&self, block: BlockId) {
         if let Some(Err(e)) = self.store.as_ref().map(|s| s.remove_spool(block)) {
             eprintln!("rusty-mux-server: removing block {block}'s history: {e}");
+        }
+        if let Some(Err(e)) = self.store.as_ref().map(|s| s.remove_uploads(block)) {
+            eprintln!("rusty-mux-server: removing block {block}'s uploads: {e}");
         }
     }
 

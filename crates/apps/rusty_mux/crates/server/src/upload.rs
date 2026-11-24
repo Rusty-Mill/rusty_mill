@@ -1,0 +1,260 @@
+//! `terminal.upload` (C82): a file sent to the server's host a chunk at a
+//! time, into a folder kept for one block.
+//!
+//! A file grows under `part/` and moves to the folder itself on commit, so a
+//! half-sent file is never taken for a whole one.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+/// The most bytes one chunk carries.
+pub(crate) const CHUNK_MAX: usize = 1 << 20;
+/// The most bytes a block keeps; the oldest files go first.
+pub(crate) const BLOCK_MAX: u64 = 2 << 30;
+/// The longest file name kept, in bytes.
+const NAME_MAX: usize = 200;
+/// Where a file under way grows.
+const PART: &str = "part";
+/// Device names Windows refuses as a file's name, whatever its extension.
+const RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Whether `c` is a control character or a format one that draws nothing
+/// (a zero-width space, a bidirectional override), either of which would
+/// make a name read as something else in a listing or a prompt.
+fn invisible(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{ad}' | '\u{61c}' | '\u{180e}' | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}'
+            | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{e0000}'..='\u{e007f}')
+}
+
+/// `raw` as a file name that is safe to make and to type: its last path
+/// part, with invisible characters dropped, the characters Windows refuses
+/// turned into `_`, no leading or trailing dot or space, and no device name.
+/// `None` when nothing is left.
+pub(crate) fn clean_name(raw: &str) -> Option<String> {
+    let last = raw.rsplit(['/', '\\']).next().unwrap_or_default();
+    let mut name: String = last
+        .chars()
+        .filter(|c| !invisible(*c))
+        .map(|c| if "<>:\"|?*".contains(c) { '_' } else { c })
+        .collect();
+    while name.len() > NAME_MAX {
+        name.pop();
+    }
+    let name = name.trim_matches(['.', ' ']);
+    let stem = name.split('.').next().unwrap_or_default();
+    let reserved = RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem));
+    (!name.is_empty() && !reserved).then(|| name.to_owned())
+}
+
+/// What `terminal.upload` did with one chunk.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Received {
+    /// The file has this many bytes so far.
+    Partial(u64),
+    /// The file is whole, at this absolute path.
+    Done(PathBuf),
+}
+
+/// Appends `data` to `name` at `offset` in `dir`; with `done` commits it.
+/// `offset` must be the bytes received so far, and 0 starts the file again.
+pub(crate) fn receive(
+    dir: &Path,
+    name: &str,
+    offset: u64,
+    data: &[u8],
+    done: bool,
+) -> Result<Received, String> {
+    let name = clean_name(name).ok_or("the file name is empty or not usable")?;
+    if data.len() > CHUNK_MAX {
+        return Err(format!("a chunk is at most {CHUNK_MAX} bytes"));
+    }
+    let end = offset + data.len() as u64;
+    if end > BLOCK_MAX {
+        return Err(format!("a file is at most {BLOCK_MAX} bytes"));
+    }
+    let io = |e: io::Error| format!("{name}: {e}");
+    let part_dir = dir.join(PART);
+    fs::create_dir_all(&part_dir).map_err(io)?;
+    let part = part_dir.join(&name);
+    if offset == 0 {
+        make_room(dir, &part, 0).map_err(io)?;
+    }
+    let mut file = open(&part, offset).map_err(|e| format!("{name}: {e}"))?;
+    file.write_all(data).map_err(io)?;
+    if !done {
+        return Ok(Received::Partial(end));
+    }
+    file.sync_all().map_err(io)?;
+    drop(file);
+    make_room(dir, &part, end).map_err(io)?;
+    let target = unique(dir, &name);
+    fs::rename(&part, &target).map_err(io)?;
+    std::path::absolute(&target).map(Received::Done).map_err(io)
+}
+
+/// `part` opened to append at `offset`, which must be its length; a file
+/// not yet there starts at 0 only.
+fn open(part: &Path, offset: u64) -> io::Result<File> {
+    if offset == 0 {
+        return File::create(part);
+    }
+    let have = fs::metadata(part).map(|m| m.len()).unwrap_or(0);
+    if have != offset {
+        return Err(io::Error::other(format!(
+            "the chunk starts at {offset} but {have} bytes were received"
+        )));
+    }
+    OpenOptions::new().append(true).open(part)
+}
+
+/// `name` in `dir`, or the first of `stem-1.ext`, `stem-2.ext`, ... that is
+/// free, so an upload never replaces an earlier one.
+fn unique(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(dot) if dot > 0 => name.split_at(dot),
+        _ => (name, ""),
+    };
+    (1u32..)
+        .map(|n| dir.join(format!("{stem}-{n}{ext}")))
+        .find(|p| !p.exists())
+        .unwrap_or(first)
+}
+
+/// Removes the oldest files of `dir` (and of its `part/`) until `keep_len`
+/// more bytes fit under [`BLOCK_MAX`]; `keep` is not touched or counted.
+fn make_room(dir: &Path, keep: &Path, keep_len: u64) -> io::Result<()> {
+    let mut files: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+    for folder in [dir.to_path_buf(), dir.join(PART)] {
+        let Ok(entries) = fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let meta = entry.metadata()?;
+            if meta.is_file() && entry.path() != keep {
+                files.push((meta.modified()?, meta.len(), entry.path()));
+            }
+        }
+    }
+    let mut total: u64 = files.iter().map(|f| f.1).sum::<u64>() + keep_len;
+    files.sort();
+    for (_, len, path) in files {
+        if total <= BLOCK_MAX {
+            break;
+        }
+        fs::remove_file(&path)?;
+        total -= len;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn scratch() -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "rusty-mux-upload-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn names_are_cleaned() {
+        assert_eq!(clean_name("a.txt").as_deref(), Some("a.txt"));
+        assert_eq!(clean_name("/etc/passwd").as_deref(), Some("passwd"));
+        assert_eq!(clean_name("..\\..\\x.sh").as_deref(), Some("x.sh"));
+        assert_eq!(
+            clean_name("a\u{202e}b\u{200b}.txt\n").as_deref(),
+            Some("ab.txt")
+        );
+        assert_eq!(clean_name("a:b?.txt").as_deref(), Some("a_b_.txt"));
+        assert_eq!(clean_name(" .hidden. ").as_deref(), Some("hidden"));
+    }
+
+    #[test]
+    fn unusable_names_are_refused() {
+        for raw in ["", ".", "..", "dir/", "\u{200b}", "NUL", "con.txt"] {
+            assert_eq!(clean_name(raw), None, "{raw:?}");
+        }
+        assert_eq!(clean_name(&"x".repeat(500)).unwrap().len(), NAME_MAX);
+    }
+
+    #[test]
+    fn chunks_make_one_file() {
+        let dir = scratch();
+        assert_eq!(
+            receive(&dir, "f.bin", 0, b"abc", false),
+            Ok(Received::Partial(3))
+        );
+        assert!(!dir.join("f.bin").exists(), "not whole yet");
+        let done = receive(&dir, "f.bin", 3, b"def", true).unwrap();
+        let Received::Done(path) = done else {
+            panic!("{done:?}")
+        };
+        assert!(path.is_absolute());
+        assert_eq!(fs::read(path).unwrap(), b"abcdef");
+        assert!(!dir.join(PART).join("f.bin").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_second_file_of_the_same_name_keeps_the_first() {
+        let dir = scratch();
+        for body in [&b"one"[..], b"two"] {
+            receive(&dir, "n.txt", 0, body, true).unwrap();
+        }
+        assert_eq!(fs::read(dir.join("n.txt")).unwrap(), b"one");
+        assert_eq!(fs::read(dir.join("n-1.txt")).unwrap(), b"two");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_chunk_out_of_place_is_refused() {
+        let dir = scratch();
+        receive(&dir, "f", 0, b"abc", false).unwrap();
+        let err = receive(&dir, "f", 2, b"x", false).unwrap_err();
+        assert!(err.contains("3 bytes were received"), "{err}");
+        let err = receive(&dir, "never", 5, b"x", false).unwrap_err();
+        assert!(err.contains("0 bytes were received"), "{err}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_oversize_chunk_or_file_is_refused() {
+        let dir = scratch();
+        let big = vec![0u8; CHUNK_MAX + 1];
+        assert!(receive(&dir, "f", 0, &big, false).is_err());
+        assert!(receive(&dir, "f", BLOCK_MAX, b"x", false).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_oldest_files_go_when_the_folder_is_full() {
+        let dir = scratch();
+        fs::write(dir.join("old"), b"1234").unwrap();
+        // Counting `keep_len` as the whole allowance leaves no room for it.
+        make_room(&dir, &dir.join("keep"), BLOCK_MAX).unwrap();
+        assert!(!dir.join("old").exists());
+        fs::write(dir.join("new"), b"1234").unwrap();
+        make_room(&dir, &dir.join("keep"), 0).unwrap();
+        assert!(dir.join("new").exists(), "room enough: nothing removed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+}

@@ -284,6 +284,12 @@ impl Features {
     /// server stores and echoes the three texts and never acts on them.
     pub const AGENT_META: Self = Self(1 << 52);
 
+    /// The block method `terminal.upload` (C82): a file sent in chunks to a
+    /// folder of the server's state directory, answered with its absolute
+    /// path. It travels as [`Message::BlockCall`], so the bit only says the
+    /// server knows it.
+    pub const UPLOAD: Self = Self(1 << 55);
+
     /// The block methods `terminal.prompts` and `terminal.find` (C55): the
     /// rows where the shell's prompts started (OSC 133/633 `A`) and the rows
     /// holding a text, over the block's scrollback and screen. They travel as
@@ -390,6 +396,7 @@ const NAMES: &[(Features, &str)] = &[
     (Features::PORTS, "listening ports of a block"),
     (Features::PORT_FORWARD, "port forwards"),
     (Features::AGENT_META, "agent, role and card on blocks"),
+    (Features::UPLOAD, "file upload to a block"),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
