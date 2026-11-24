@@ -2363,6 +2363,10 @@ mod tests {
             assert_eq!(cols["movement"], word);
             assert!(cols["note"].as_str().expect("note").contains(note));
             assert!(cols["columns"].is_array(), "the table is still listed");
+            assert!(
+                serde_json::from_value::<crate::workflow::Workflow>(cols.clone()).is_ok(),
+                "a board_columns reply still parses as a workflow (settings_workflow_set round trip)"
+            );
             let me = call_as(&board, Some(&id), "board_whoami", json!({})).expect("whoami");
             assert_eq!(me["movement"], word);
             assert!(me["movement_note"].as_str().expect("note").contains(note));
