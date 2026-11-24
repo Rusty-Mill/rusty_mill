@@ -46,7 +46,8 @@ enum Shape {
 fn shape(method: &Method) -> Shape {
     match method.name {
         // The file transfers move a file's bytes, which no tool argument can
-        // carry or a tool reply should.
+        // carry or a tool reply should; `rusty_mux_client::{upload, download}`
+        // do it (no ctl command yet).
         "attach" | "detach" | "acquire-lease" | "release-lease" | "sync" | "terminal.upload"
         | "terminal.download" => Shape::Connection,
         "input" | "resize" | "terminal.send-keys" | "terminal.reset" | "terminal.set-theme"

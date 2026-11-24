@@ -26,8 +26,38 @@ const NAME_MAX: usize = 200;
 const PART: &str = "part";
 /// Device names Windows refuses as a file's name, whatever its extension.
 const RESERVED: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "CONIN$",
+    "CONOUT$",
+    "COM0",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT0",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+    "COM\u{b9}",
+    "COM\u{b2}",
+    "COM\u{b3}",
+    "LPT\u{b9}",
+    "LPT\u{b2}",
+    "LPT\u{b3}",
 ];
 
 /// Whether `c` is a control character or a format one that draws nothing
@@ -56,7 +86,7 @@ pub(crate) fn clean_name(raw: &str) -> Option<String> {
         name.pop();
     }
     let name = name.trim_matches(['.', ' ']);
-    let stem = name.split('.').next().unwrap_or_default();
+    let stem = name.split('.').next().unwrap_or_default().trim_end();
     let reserved = RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem));
     (!name.is_empty() && !reserved).then(|| name.to_owned())
 }
@@ -195,7 +225,11 @@ impl Slot {
         self.closing.store(true, Ordering::SeqCst);
         let slot = Arc::clone(self);
         std::thread::spawn(move || {
-            if slot.busy.try_lock().is_ok() {
+            // A job that panicked poisons the lock; its folder still goes.
+            if !matches!(
+                slot.busy.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ) {
                 slot.clear(&dir);
             }
         });
@@ -318,6 +352,21 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn more_windows_device_names_are_refused() {
+        for bad in [
+            "COM0",
+            "lpt0.txt",
+            "CONIN$",
+            "conout$.log",
+            "CON .txt",
+            "COM\u{b2}",
+        ] {
+            assert_eq!(clean_name(bad), None, "{bad}");
+        }
+        assert_eq!(clean_name("console.txt").as_deref(), Some("console.txt"));
     }
 
     #[test]

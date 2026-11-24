@@ -648,9 +648,11 @@ impl State {
             let answer = match rusty_tokio::time::timeout(listing::DEADLINE, work).await {
                 Ok(Ok(listed)) => listed,
                 Ok(Err(e)) => Err(format!("the read failed: {e}")),
-                Err(_) if method == "terminal.upload" => Err("the chunk timed out and may \
-                     still be written: send it again, and the next refusal says how much arrived"
-                    .into()),
+                Err(_) if method == "terminal.upload" => {
+                    Err("the chunk timed out and may still be written, a last one \
+                     as the finished file: check what arrived before sending it again"
+                        .into())
+                }
                 Err(_) => Err("the read timed out".into()),
             };
             if let Some(shared) = weak.upgrade() {
@@ -3170,9 +3172,18 @@ impl State {
             })
         };
         let data = named.iter().find_map(|(n, v)| match v {
-            Value::Bytes(b) if *n == "data" => Some(b.clone()),
+            Value::Bytes(b) if *n == "data" => Some(b.as_slice()),
             _ => None,
         });
+        // Before a copy is made or a shared slot is taken.
+        if data.is_some_and(|d| d.len() > upload::CHUNK_MAX) {
+            return Err(format!(
+                "terminal.upload: a chunk is at most {} bytes",
+                upload::CHUNK_MAX
+            )
+            .into());
+        }
+        let data = data.map(<[u8]>::to_vec);
         let done = named
             .iter()
             .any(|(n, v)| *n == "done" && matches!(v, Value::Flag(true)));
