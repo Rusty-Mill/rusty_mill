@@ -1870,16 +1870,52 @@ impl<S: Store> Board<S> {
         self.apply(id, by, EventKind::Archived, |c, now| c.archive(now))
     }
 
-    /// Close a card because pull request `pr` merged and said so: see [`Card::closed_by_merge`].
-    /// Logged as a move by `by` (the merge watch). Needs `Record`.
+    /// Close a card because pull request `pr`, read from GitHub repository `repo`, merged and
+    /// said so: see [`Card::closed_by_merge`]. Logged as a move by `by` (the merge watch).
+    /// Needs `Record`.
+    ///
+    /// The match was made on a snapshot, so it is checked again on the card as it is now, and
+    /// committed once, never retried: the card must still be at revision `rev`, in a project `by`
+    /// may work in whose repositories include `repo`, and have no children.
     ///
     /// # Errors
-    /// A missing capability, a missing card, or see [`Card::closed_by_merge`].
-    pub fn close_merged(&self, id: Uuid, pr: &str, by: &Actor) -> Result<Card, BoardError> {
+    /// [`BoardError::Conflict`] if the card changed since `rev` or the commit lost a race,
+    /// [`BoardError::Refused`] if the repository no longer matches or the card is a parent,
+    /// a missing capability or card, or see [`Card::closed_by_merge`].
+    pub fn close_merged(
+        &self,
+        id: Uuid,
+        rev: u64,
+        pr: &str,
+        repo: &str,
+        by: &Actor,
+    ) -> Result<Card, BoardError> {
         let flow = self.flow();
-        self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
-            c.closed_by_merge(&flow, pr, by, now)
-        })
+        let current = self.get_in(&flow, id)?;
+        if !by.may_work_in(&current.project) {
+            return Err(BoardError::OutOfScope(current.project));
+        }
+        if current.rev != rev {
+            return Err(BoardError::Conflict);
+        }
+        let projects = self.projects();
+        if !projects
+            .repos_of(&current.project)
+            .any(|r| projects.github_of(r) == Some(repo))
+        {
+            return Err(BoardError::Refused(
+                "the pull request's repository is not the card's".into(),
+            ));
+        }
+        if self.cards()?.iter().any(|c| c.parent == Some(id)) {
+            return Err(BoardError::Refused(
+                "a parent closes with its children".into(),
+            ));
+        }
+        let next = current.closed_by_merge(&flow, pr, by, (self.clock)())?;
+        let event = Event::of(&next, EventKind::Moved, &by.name);
+        let rev = self.store.replace(&next, event)?;
+        Ok(Card { rev, ..next })
     }
 
     /// Put a shelved card (archived, or past the default Done window) back on the default

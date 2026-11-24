@@ -7,13 +7,14 @@
 //! only link a later step may close a card on. Evidence on the card and a plain `card #N`
 //! mention are weaker ([`Why::Evidence`], [`Why::Mention`]): they are only listed.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::api::Shared;
 use crate::backfill::pull_parts;
+use crate::board::Board;
 use crate::domain::{Actor, BoardError, Capability, Card, Column};
 
 /// A merged pull request, as the forge reports it.
@@ -169,8 +170,9 @@ fn without_inline_code(text: &str) -> String {
 }
 
 /// The prose lines of a pull request body: no fenced or indented code, HTML comments, quotes,
-/// or inline code, which may quote a directive without meaning it.
-fn prose(body: &str) -> Vec<String> {
+/// or inline code, which may quote a directive without meaning it. The flag says the line was
+/// literal: nothing had to be stripped from it, so what is left is what was written.
+fn prose(body: &str) -> Vec<(String, bool)> {
     let (mut open, mut comment) = (None::<(char, usize)>, false);
     let mut out = Vec::new();
     for raw in body.lines() {
@@ -207,7 +209,9 @@ fn prose(body: &str) -> Vec<String> {
                 break;
             }
         }
-        out.push(without_inline_code(&text).trim().to_owned());
+        let clean = without_inline_code(&text).trim().to_owned();
+        let literal = clean == raw.trim();
+        out.push((clean, literal));
     }
     out
 }
@@ -225,13 +229,15 @@ fn card_number(word: &str) -> Option<u64> {
 #[must_use]
 pub fn card_refs(body: &str) -> Vec<(u64, bool)> {
     let mut out = Vec::new();
-    for line in prose(body) {
+    for (line, literal) in prose(body) {
         let line = line
             .trim_start_matches(['-', '*'])
             .trim()
             .to_ascii_lowercase();
         let words: Vec<&str> = line.split_whitespace().collect();
-        if let [verb, "card", n] = words[..]
+        // A directive that needed stripping (code or a comment beside it) is not one to write on.
+        if literal
+            && let [verb, "card", n] = words[..]
             && VERBS.contains(&verb)
             && let Some(n) = card_number(n)
         {
@@ -333,34 +339,37 @@ pub fn scan(
     out
 }
 
-/// The actor merge watch writes as: `Record` only, no project limit.
-fn watcher() -> Actor {
-    Actor {
-        name: ACTOR.to_owned(),
-        caps: BTreeSet::from([Capability::Record]),
-        projects: None,
-    }
-}
-
 /// Who merge watch is on the board's history.
 pub const ACTOR: &str = "merge-watch";
 
-/// Close each listed card a merged pull request said `Closes card #N` for, unless it is a
-/// parent (its children decide), or [`Card::closed_by_merge`] refuses it (blocked, parked,
-/// gated): those stay listed. A card with only weaker links is never touched.
+/// The actor merge watch writes as for one card: `Record` only, limited to the card's project
+/// as the snapshot saw it, so a card moved to another project meanwhile is refused.
+fn watcher(project: &str) -> Actor {
+    Actor {
+        name: ACTOR.to_owned(),
+        caps: BTreeSet::from([Capability::Record]),
+        projects: Some(BTreeSet::from([project.to_owned()])),
+    }
+}
+
+/// Close each listed card a merged pull request said `Closes card #N` for. Each is checked
+/// again at the write ([`Board::close_merged`]: same revision, still the card's repository,
+/// not a parent) and tried once: a card that changed since the scan, or that
+/// [`Card::closed_by_merge`] refuses (blocked, parked, gated), stays listed for the next run
+/// or for a person. A card with only weaker links is never touched.
 fn close_marked(board: &Shared, cards: &[Card], found: &[MergedOpen]) {
-    let parents: HashSet<Uuid> = cards.iter().filter_map(|c| c.parent).collect();
-    let actor = watcher();
+    let by_id: HashMap<Uuid, &Card> = cards.iter().map(|c| (c.id, c)).collect();
     for o in found.iter().filter(|o| o.why == Why::Marker) {
-        let Some(pr) = o.prs.iter().find(|l| l.why == Why::Marker) else {
+        let (Some(pr), Some(card)) = (
+            o.prs.iter().find(|l| l.why == Why::Marker),
+            by_id.get(&o.id),
+        ) else {
             continue;
         };
-        if parents.contains(&o.id) {
-            continue;
-        }
-        match board.close_merged(o.id, &pr.url, &actor) {
+        let actor = watcher(&card.project);
+        match board.close_merged(o.id, card.rev, &pr.url, &pr.repo, &actor) {
             Ok(_) => rusty_log::info!(card = ?o.number, pr = %pr.url, "closed by merge"),
-            Err(BoardError::Refused(_) | BoardError::Terminal) => {}
+            Err(BoardError::Refused(_) | BoardError::Terminal | BoardError::Conflict) => {}
             Err(e) => rusty_log::warn!(card = ?o.number, error = %e, "merge close failed"),
         }
     }
@@ -480,6 +489,11 @@ mod tests {
             "```\n    ```\nCloses card #5\n```",
             "``Closes card #5``",
             "Closes card #+5",
+            "Closes card #5 <!-- x -->",
+            "<!-- x --> Closes card #5",
+            "`a` Closes card #5",
+            "Closes card #5 `x`",
+            "Closes card #5 <!-- start\nend -->",
         ] {
             assert!(
                 card_refs(body).iter().all(|(_, closes)| !closes),
@@ -490,7 +504,7 @@ mod tests {
             card_refs("Closes card #5\n```\nx\n```\nfixes card #6"),
             [(5, true), (6, true)]
         );
-        assert_eq!(card_refs("<!-- x --> Closes card #9"), [(9, true)]);
+        assert_eq!(card_refs("<!-- x --> Closes card #9"), [(9, false)]);
     }
 
     #[test]
@@ -747,5 +761,49 @@ mod tests {
         for id in [blocked.id, parked.id, parent.id] {
             assert_ne!(b.get(id).expect("card").column, Column::DONE);
         }
+    }
+
+    const PR: &str = "https://github.com/o/r/pull/7";
+
+    #[test]
+    fn the_write_rechecks_the_card_and_never_retries_a_stale_match() {
+        let (b, who, card, _) = two_cards();
+        let watcher = watcher("p");
+        // Edited since the scan: the revision fence refuses, the card is untouched.
+        let stale = card.rev;
+        b.comment(card.id, &who, "edited meanwhile")
+            .expect("comment");
+        assert_eq!(
+            b.close_merged(card.id, stale, PR, "o/r", &watcher)
+                .map(|c| c.id),
+            Err(BoardError::Conflict)
+        );
+        let fresh = b.get(card.id).expect("card");
+        assert_eq!(fresh.column, Column::BACKLOG);
+        // The repository must be one of the card's project's now.
+        assert!(matches!(
+            b.close_merged(card.id, fresh.rev, PR, "o/other", &watcher),
+            Err(BoardError::Refused(_))
+        ));
+        // The watcher is limited to the card's project: a card moved elsewhere is out of scope.
+        assert!(matches!(
+            b.close_merged(card.id, fresh.rev, PR, "o/r", &super::watcher("q")),
+            Err(BoardError::OutOfScope(_))
+        ));
+        // A parent closes with its children.
+        let mut child = NewCard::new("child", "", vec![]);
+        child.parent = Some(card.id);
+        b.add_card(&who, "p", child).expect("child");
+        assert!(matches!(
+            b.close_merged(card.id, fresh.rev, PR, "o/r", &watcher),
+            Err(BoardError::Refused(_))
+        ));
+        assert_eq!(b.get(card.id).expect("card").column, Column::BACKLOG);
+        // And when everything holds, it commits once.
+        let (b, _, card, _) = two_cards();
+        let done = b
+            .close_merged(card.id, card.rev, PR, "o/r", &watcher)
+            .expect("closed");
+        assert_eq!(done.column, Column::DONE);
     }
 }
