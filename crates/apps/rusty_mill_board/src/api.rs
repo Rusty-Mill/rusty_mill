@@ -2349,7 +2349,11 @@ mod tests {
         let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
         let id = ident("claude", "builder");
         for (rules, word, note) in [
-            (crate::domain::MoveRules::Enforced, "enforced", "rules are on"),
+            (
+                crate::domain::MoveRules::Enforced,
+                "enforced",
+                "rules are on",
+            ),
             (crate::domain::MoveRules::Open, "open", "rules are off"),
         ] {
             board.set_move_rules(rules);
