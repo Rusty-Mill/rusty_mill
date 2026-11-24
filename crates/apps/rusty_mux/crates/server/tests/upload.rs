@@ -34,7 +34,7 @@ fn state_dir() -> PathBuf {
 fn serve(state: Option<PathBuf>) -> PathBuf {
     start_server_with(Config {
         state_dir: state,
-        protected: Vec::new(),
+        protected: Default::default(),
         ..shell()
     })
 }

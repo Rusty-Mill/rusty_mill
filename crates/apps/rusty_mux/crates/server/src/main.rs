@@ -763,7 +763,7 @@ fn default_config(console_host: ConsoleHost, config_file: Option<PathBuf>) -> Co
         grapheme_clustering: false,
         config_file,
         state_dir: None,
-        protected: Vec::new(),
+        protected: Default::default(),
     }
 }
 
@@ -777,7 +777,7 @@ fn default_config(console_host: ConsoleHost, config_file: Option<PathBuf>) -> Co
         grapheme_clustering: false,
         config_file,
         state_dir: None,
-        protected: Vec::new(),
+        protected: Default::default(),
     }
 }
 

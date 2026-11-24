@@ -43,7 +43,7 @@ pub fn shell() -> Config {
             cwd: std::env::temp_dir().into_os_string(),
             console_host: ConsoleHost::from_env().expect("RUSTY_CONSOLE_HOST"),
             state_dir: None,
-            protected: Vec::new(),
+            protected: Default::default(),
             grapheme_clustering: false,
             config_file: None,
         }
@@ -54,7 +54,7 @@ pub fn shell() -> Config {
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
-            protected: Vec::new(),
+            protected: Default::default(),
             grapheme_clustering: false,
             config_file: None,
         }
@@ -84,7 +84,7 @@ pub fn start_server_on(host: ConsoleHost) -> PathBuf {
     start_server_with(Config {
         console_host: host,
         state_dir: None,
-        protected: Vec::new(),
+        protected: Default::default(),
         ..shell()
     })
 }

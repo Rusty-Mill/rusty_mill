@@ -119,7 +119,7 @@ fn real_server_with(udp: Option<Duration>) -> (PathBuf, Option<u16>) {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
                 state_dir: None,
-                protected: Vec::new(),
+                protected: Default::default(),
                 grapheme_clustering: false,
                 config_file: None,
             };

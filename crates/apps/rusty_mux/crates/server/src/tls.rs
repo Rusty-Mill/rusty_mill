@@ -22,7 +22,7 @@ use rusty_mux_core::{Principal, Transport};
 use rusty_tls::TlsAcceptor;
 use rusty_tokio::io::{AsyncReadExt, TcpListener};
 
-use crate::login::read_checked;
+use crate::login::{read_checked, read_identified};
 use crate::shared::{Allow, Guests};
 use crate::{conn, pem, state};
 use rusty_mux_script::token::{self, Tokens};
@@ -43,6 +43,9 @@ pub struct Tls {
     pub(crate) tokens_file: PathBuf,
     /// The private key's file, kept out of downloads.
     pub(crate) key_file: PathBuf,
+    /// What the key and the tokens were read from, for [`crate::Protected`].
+    pub(crate) key_id: crate::FileId,
+    pub(crate) tokens_id: crate::FileId,
     pub(crate) tokens: Rc<RefCell<Tokens>>,
     pub(crate) allow: Rc<RefCell<Allow>>,
 }
@@ -59,19 +62,19 @@ impl Tls {
     ) -> io::Result<Self> {
         let bad = |why: String| io::Error::new(io::ErrorKind::InvalidData, why);
         let key_file = key.to_path_buf();
-        let (chain, key) = pem::identity(
-            &read_checked(cert, "certificate")?,
-            &read_checked(key, "key")?,
-        )
-        .map_err(bad)?;
+        let (key_text, key_id) = read_identified(key, "key")?;
+        let (chain, key) =
+            pem::identity(&read_checked(cert, "certificate")?, &key_text).map_err(bad)?;
         let acceptor =
             TlsAcceptor::new(chain, key).map_err(|e| bad(format!("certificate: {e}")))?;
-        let tokens = read_tokens(&tokens_file)?;
+        let (tokens, tokens_id) = read_tokens(&tokens_file)?;
         Ok(Self {
             listener,
             acceptor,
             tokens_file,
             key_file,
+            key_id,
+            tokens_id,
             tokens: Rc::new(RefCell::new(tokens)),
             allow: Rc::default(),
         })
@@ -79,13 +82,15 @@ impl Tls {
 }
 
 /// The tokens in `path`, checked as the allowlist is.
-pub(crate) fn read_tokens(path: &Path) -> io::Result<Tokens> {
-    Tokens::parse(&read_checked(path, "token file")?).map_err(|e| {
+pub(crate) fn read_tokens(path: &Path) -> io::Result<(Tokens, crate::FileId)> {
+    let (text, id) = read_identified(path, "token file")?;
+    let tokens = Tokens::parse(&text).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("{}: {e}", path.display()),
         )
-    })
+    })?;
+    Ok((tokens, id))
 }
 
 /// Reads the token the peer sends first; returns its name and the bytes, if

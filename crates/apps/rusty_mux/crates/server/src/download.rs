@@ -7,6 +7,7 @@ use std::fs::{self, File};
 #[cfg(target_os = "linux")]
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// The most bytes one reply carries before base64.
 pub(crate) const CHUNK: usize = 192 << 10;
@@ -88,7 +89,7 @@ pub(crate) fn read(
     path: &str,
     offset: u32,
     private: Option<&Path>,
-    keep: &Keep,
+    keep: &Protected,
 ) -> Result<String, String> {
     // Only Linux can place the opened object by the kernel. Elsewhere a path
     // is not resolved at all (resolving may reach another machine) and a
@@ -103,36 +104,87 @@ pub(crate) fn read(
     read_linux(base, path, offset, private, keep)
 }
 
-/// The files downloads never read, and the identity (device and inode) of the
-/// objects they were when the server started. A file replaced or rotated
-/// since is still kept out under both its old identity (the object the
-/// configuration loaded, which a hard link can still reach) and its path now.
-#[derive(Default)]
-pub(crate) struct Keep {
-    files: Vec<PathBuf>,
-    #[cfg(target_os = "linux")]
-    loaded: Vec<(u64, u64)>,
+/// The device and inode of an opened file.
+pub type FileId = (u64, u64);
+
+/// The files downloads never read. A file is named by its path, looked up
+/// again at each download, and, where the server loaded it, by the identity
+/// of the very descriptor it was read from, so a rotated or hard-linked copy
+/// of what is in force stays out. Shared by clones: the server updates it
+/// when it reloads a file.
+#[derive(Clone, Debug, Default)]
+pub struct Protected(Arc<Mutex<Set>>);
+
+#[derive(Debug, Default)]
+struct Set {
+    /// Kept out by path alone (the config file).
+    paths: Vec<PathBuf>,
+    /// Kept out by path and by the identity of what was loaded; until that
+    /// is known, nothing is downloaded.
+    loaded: Vec<(PathBuf, Option<FileId>)>,
 }
 
-impl Keep {
-    /// Notes `files` as they are now; call once the configuration is loaded.
-    pub(crate) fn new(files: Vec<PathBuf>) -> Self {
-        #[cfg(target_os = "linux")]
-        let loaded = protected(&files)
-            .map(|v| v.into_iter().map(|(_, id)| id).collect())
-            .unwrap_or_default();
-        Self {
-            files,
-            #[cfg(target_os = "linux")]
-            loaded,
+impl PartialEq for Protected {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || {
+            let (a, b) = (self.set(), other.set());
+            a.paths == b.paths && a.loaded == b.loaded
+        }
+    }
+}
+impl Eq for Protected {}
+
+impl Protected {
+    fn set(&self) -> MutexGuard<'_, Set> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Keeps `path` out, by the path as it resolves at each download.
+    pub fn path(&self, path: PathBuf) {
+        let mut set = self.set();
+        if !set.paths.contains(&path) {
+            set.paths.push(path);
         }
     }
 
-    /// Their paths and identities now, with those noted at startup.
+    /// Keeps `path` out and expects its loaded identity: until
+    /// [`Protected::loaded`] gives it, no file is downloaded.
+    pub fn require(&self, path: PathBuf) {
+        let mut set = self.set();
+        if !set.loaded.iter().any(|(p, _)| *p == path) {
+            set.loaded.push((path, None));
+        }
+    }
+
+    /// `path` was loaded from a descriptor with this identity; the one it
+    /// replaces, if any, is no longer in force.
+    pub fn loaded(&self, path: &Path, id: FileId) {
+        let mut set = self.set();
+        match set.loaded.iter_mut().find(|(p, _)| p == path) {
+            Some(slot) => slot.1 = Some(id),
+            None => set.loaded.push((path.to_path_buf(), Some(id))),
+        }
+    }
+
+    /// Their paths and identities as they are now, or why that cannot be
+    /// told: then nothing is read.
     #[cfg(target_os = "linux")]
     fn secrets(&self) -> Result<Vec<Secret>, String> {
-        let mut now = protected(&self.files)?;
-        now.extend(self.loaded.iter().map(|id| (PathBuf::new(), *id)));
+        let set = self.set();
+        let mut files = set.paths.clone();
+        let mut ids = Vec::new();
+        for (path, id) in &set.loaded {
+            let Some(id) = id else {
+                return Err(format!(
+                    "{} has no identity from when it was loaded, so no file is read",
+                    path.display()
+                ));
+            };
+            files.push(path.clone());
+            ids.push(*id);
+        }
+        let mut now = protected(&files)?;
+        now.extend(ids.into_iter().map(|id| (PathBuf::new(), id)));
         Ok(now)
     }
 }
@@ -170,7 +222,7 @@ fn read_linux(
     path: &str,
     offset: u32,
     private: Option<&Path>,
-    keep: &Keep,
+    keep: &Protected,
 ) -> Result<String, String> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = locate(base, path)?;
@@ -221,7 +273,7 @@ fn read_linux(
 mod refusal_tests {
     #[test]
     fn nothing_is_read_where_the_opened_file_cannot_be_checked() {
-        let err = super::read(None, "f", 0, None, &super::Keep::default()).unwrap_err();
+        let err = super::read(None, "f", 0, None, &super::Protected::default()).unwrap_err();
         assert!(err.contains("not supported"), "{err}");
     }
 }
@@ -256,12 +308,20 @@ mod tests {
         let data: Vec<u8> = (0..CHUNK + 5).map(|i| i as u8).collect();
         fs::write(dir.join("f"), &data).unwrap();
         let base = dir.to_str();
-        let (size, first) = body(&read(base, "f", 0, None, &Keep::default()).unwrap());
+        let (size, first) = body(&read(base, "f", 0, None, &Protected::default()).unwrap());
         assert_eq!((size, first.len()), (data.len() as u64, CHUNK));
-        let (_, rest) = body(&read(base, "f", CHUNK as u32, None, &Keep::default()).unwrap());
+        let (_, rest) = body(&read(base, "f", CHUNK as u32, None, &Protected::default()).unwrap());
         assert_eq!(rest, data[CHUNK..]);
-        let (_, past) =
-            body(&read(base, "f", data.len() as u32 + 9, None, &Keep::default()).unwrap());
+        let (_, past) = body(
+            &read(
+                base,
+                "f",
+                data.len() as u32 + 9,
+                None,
+                &Protected::default(),
+            )
+            .unwrap(),
+        );
         assert!(past.is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -271,14 +331,14 @@ mod tests {
         let dir = scratch();
         let base = dir.to_str();
         assert!(
-            read(base, ".", 0, None, &Keep::default())
+            read(base, ".", 0, None, &Protected::default())
                 .unwrap_err()
                 .contains("not a regular file")
         );
-        assert!(read(base, "missing", 0, None, &Keep::default()).is_err());
-        assert!(read(None, "relative", 0, None, &Keep::default()).is_err());
+        assert!(read(base, "missing", 0, None, &Protected::default()).is_err());
+        assert!(read(None, "relative", 0, None, &Protected::default()).is_err());
         assert!(
-            read(None, "\\\\host\\share\\f", 0, None, &Keep::default())
+            read(None, "\\\\host\\share\\f", 0, None, &Protected::default())
                 .unwrap_err()
                 .contains("network")
         );
@@ -289,17 +349,34 @@ mod tests {
     fn the_state_directory_is_not_read() {
         let state = scratch();
         fs::write(state.join("key"), b"secret").unwrap();
-        let err = read(state.to_str(), "key", 0, Some(&state), &Keep::default()).unwrap_err();
+        let err = read(
+            state.to_str(),
+            "key",
+            0,
+            Some(&state),
+            &Protected::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("state directory"), "{err}");
         // A link out of a free folder into it is no way round.
         let free = scratch();
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(state.join("key"), free.join("l")).unwrap();
-            assert!(read(free.to_str(), "l", 0, Some(&state), &Keep::default()).is_err());
+            assert!(read(free.to_str(), "l", 0, Some(&state), &Protected::default()).is_err());
         }
         fs::remove_dir_all(state).unwrap();
         fs::remove_dir_all(free).unwrap();
+    }
+
+    fn id_of(path: &Path) -> FileId {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(path).unwrap();
+        (meta.dev(), meta.ino())
+    }
+
+    fn refused(dir: &Path, name: &str, keep: &Protected) -> String {
+        read(dir.to_str(), name, 0, None, keep).unwrap_err()
     }
 
     #[test]
@@ -307,33 +384,64 @@ mod tests {
         let dir = scratch();
         let key = dir.join("tls.key");
         fs::write(&key, b"secret").unwrap();
-        let link = dir.join("alias");
-        fs::hard_link(&key, &link).unwrap();
-        let keep = [key.clone(), dir.join("not-yet-made")];
+        fs::hard_link(&key, dir.join("alias")).unwrap();
+        let keep = Protected::default();
+        keep.path(key.clone());
+        keep.path(dir.join("not-yet-made"));
         for name in ["tls.key", "alias"] {
-            let err = read(dir.to_str(), name, 0, None, &Keep::new(keep.to_vec())).unwrap_err();
-            assert!(err.contains("keeps secret"), "{name}: {err}");
+            assert!(
+                refused(&dir, name, &keep).contains("keeps secret"),
+                "{name}"
+            );
         }
         fs::write(dir.join("plain"), b"ok").unwrap();
-        assert!(read(dir.to_str(), "plain", 0, None, &Keep::new(keep.to_vec())).is_ok());
+        assert!(read(dir.to_str(), "plain", 0, None, &keep).is_ok());
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn a_rotated_secret_stays_out_under_its_loaded_identity() {
+    fn a_rotated_secret_stays_out_until_a_reload_replaces_it() {
         let dir = scratch();
-        let key = dir.join("tls.key");
+        let key = dir.join("allow");
         fs::write(&key, b"old").unwrap();
-        let link = dir.join("alias");
-        fs::hard_link(&key, &link).unwrap();
-        let keep = Keep::new(vec![key.clone()]);
-        // Rotation: the path now names a new file; the loaded one lives on as `alias`.
+        fs::hard_link(&key, dir.join("old-copy")).unwrap();
+        let keep = Protected::default();
+        keep.require(key.clone());
+        keep.loaded(&key, id_of(&key));
+        // Rotation without a reload: the path names a new file; the loaded
+        // object lives on as `old-copy` and stays out.
         fs::remove_file(&key).unwrap();
         fs::write(&key, b"new").unwrap();
-        for name in ["tls.key", "alias"] {
-            let err = read(dir.to_str(), name, 0, None, &keep).unwrap_err();
-            assert!(err.contains("keeps secret"), "{name}: {err}");
+        fs::hard_link(&key, dir.join("new-copy")).unwrap();
+        for name in ["allow", "old-copy", "new-copy"] {
+            assert!(
+                refused(&dir, name, &keep).contains("keeps secret"),
+                "{name}"
+            );
         }
+        // The reload loads the new file: it is what is in force now, and the
+        // object it replaced is no longer secret.
+        keep.loaded(&key, id_of(&key));
+        for name in ["allow", "new-copy"] {
+            assert!(
+                refused(&dir, name, &keep).contains("keeps secret"),
+                "{name}"
+            );
+        }
+        assert!(read(dir.to_str(), "old-copy", 0, None, &keep).is_ok());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn nothing_is_read_while_a_required_identity_is_unknown() {
+        let dir = scratch();
+        fs::write(dir.join("plain"), b"ok").unwrap();
+        let keep = Protected::default();
+        keep.require(dir.join("allow"));
+        let err = refused(&dir, "plain", &keep);
+        assert!(err.contains("no identity"), "{err}");
+        keep.loaded(&dir.join("allow"), (1, 1));
+        assert!(read(dir.to_str(), "plain", 0, None, &keep).is_ok());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -344,7 +452,7 @@ mod tests {
         let fifo = dir.join("p");
         let made = std::process::Command::new("mkfifo").arg(&fifo).status();
         if made.is_ok_and(|s| s.success()) && fs::metadata(&fifo).unwrap().file_type().is_fifo() {
-            let err = read(dir.to_str(), "p", 0, None, &Keep::default()).unwrap_err();
+            let err = read(dir.to_str(), "p", 0, None, &Protected::default()).unwrap_err();
             assert!(err.contains("not a regular file"), "{err}");
         }
         fs::remove_dir_all(dir).unwrap();
@@ -355,7 +463,7 @@ mod tests {
         let dir = scratch();
         fs::write(dir.join("f"), b"x").unwrap();
         let gone = dir.join("no-such-state-dir");
-        let err = read(dir.to_str(), "f", 0, Some(&gone), &Keep::default()).unwrap_err();
+        let err = read(dir.to_str(), "f", 0, Some(&gone), &Protected::default()).unwrap_err();
         assert!(err.contains("cannot be resolved"), "{err}");
         fs::remove_dir_all(dir).unwrap();
     }

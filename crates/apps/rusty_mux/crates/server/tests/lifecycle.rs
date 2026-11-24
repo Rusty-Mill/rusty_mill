@@ -20,7 +20,7 @@ fn config(program: &str, args: &[&str]) -> Config {
         cwd: "/".into(),
         console_host: ConsoleHost::default(),
         state_dir: None,
-        protected: Vec::new(),
+        protected: Default::default(),
         grapheme_clustering: false,
         config_file: None,
     }

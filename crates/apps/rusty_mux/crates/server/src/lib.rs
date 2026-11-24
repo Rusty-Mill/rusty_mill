@@ -80,6 +80,7 @@ use rusty_tokio::io::UnixStream;
 use rusty_tokio::io::{UdpSocket, UnixListener};
 
 #[cfg(target_os = "linux")]
+pub use download::{FileId, Protected};
 pub use login::{
     Limits, Login, MAX_MAP, PamGate, Reload, bind as bind_front_door, serve_login, serve_login_with,
 };
@@ -113,8 +114,9 @@ pub struct Config {
     /// restarts (C45); `None` saves nothing.
     pub state_dir: Option<std::path::PathBuf>,
     /// Files `terminal.download` never reads whatever their path: the TLS
-    /// key, the tokens, the allowlist. The config file is kept out too.
-    pub protected: Vec<std::path::PathBuf>,
+    /// key, the tokens, the allowlist, and the config file. A shared server
+    /// fills in its own as it loads them.
+    pub protected: Protected,
 }
 
 /// The Windows console host behind each block.
