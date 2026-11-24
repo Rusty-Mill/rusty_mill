@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::api::Shared;
 use crate::github::{GithubConfig, GithubForge};
+use crate::mergewatch::watch;
 use crate::sync::reconcile;
 
 /// Shortest interval between runs, in seconds.
@@ -41,6 +42,7 @@ impl Syncer {
     /// # Errors
     /// If the HTTP client or the thread cannot start (an existing sync keeps running).
     pub fn start(&self, config: GithubConfig, repo: &str, every: Duration) -> Result<(), String> {
+        let pulls = config.merged()?;
         let forge = GithubForge::new(config).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let (flag, board, run) = (
@@ -55,6 +57,9 @@ impl Syncer {
                     {
                         let _one_at_a_time = run.lock().unwrap_or_else(PoisonError::into_inner);
                         if !flag.load(Ordering::SeqCst) {
+                            if let Err(e) = watch(&board, &pulls) {
+                                rusty_log::warn!(error = %e, "merge watch failed; will retry");
+                            }
                             match reconcile(&board, &forge) {
                                 Ok(r)
                                     if r.is_quiet()

@@ -4,7 +4,7 @@
 use crate::agents::{AgentInfo, Grant};
 use std::cell::Cell;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -137,6 +137,8 @@ pub struct Board<S> {
     milestones: Box<dyn MilestoneStore>,
     /// Agents registered on shared connectors.
     agents: Mutex<crate::agents::Registry>,
+    /// What the merge watch last found (#1620).
+    merged_open: Mutex<Vec<crate::mergewatch::MergedOpen>>,
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -213,6 +215,7 @@ impl<S: Store> Board<S> {
             escalations: None,
             milestones: Box::new(MemMilestones::default()),
             agents: Mutex::default(),
+            merged_open: Mutex::default(),
         }
     }
 
@@ -1101,7 +1104,25 @@ impl<S: Store> Board<S> {
     pub fn metrics(&self, keep: impl Fn(&Card) -> bool) -> Result<Metrics, BoardError> {
         let mut cards = self.cards()?;
         cards.retain(|c| keep(c));
-        Ok(metrics(&self.workflow(), &cards, (self.clock)()))
+        let mut m = metrics(&self.workflow(), &cards, (self.clock)());
+        let shown: HashSet<Uuid> = cards.iter().map(|c| c.id).collect();
+        m.merged_open = self
+            .merged_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|o| shown.contains(&o.id))
+            .cloned()
+            .collect();
+        Ok(m)
+    }
+
+    /// Replace what the merge watch found (see [`crate::mergewatch::scan`]).
+    pub fn set_merged_open(&self, found: Vec<crate::mergewatch::MergedOpen>) {
+        *self
+            .merged_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = found;
     }
 
     /// One card.
