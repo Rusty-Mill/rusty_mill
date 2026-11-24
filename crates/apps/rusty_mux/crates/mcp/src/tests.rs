@@ -198,6 +198,7 @@ fn tools_carry_the_catalog_schema_and_hints() {
         "terminal.shell",
         "terminal.history",
         "terminal.list-dir",
+        "terminal.workspace-list",
     ] {
         let reads = tool(known(name));
         assert_eq!(

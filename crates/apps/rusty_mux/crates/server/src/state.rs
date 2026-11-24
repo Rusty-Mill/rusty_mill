@@ -122,6 +122,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::FLOATS)
     .union(Features::TERMINAL_FIND)
     .union(Features::AGENT_META)
+    .union(Features::WORKSPACE)
     .union(Features::PORT_FORWARD)
     .union(UNIX_ONLY);
 
@@ -621,6 +622,7 @@ impl State {
         req: u64,
         base: Option<String>,
         path: Option<String>,
+        root: Option<String>,
     ) -> Result<oneshot::Receiver<()>, String> {
         let cancel = self
             .clients
@@ -635,7 +637,7 @@ impl State {
         let work = rusty_tokio::spawn_blocking(move || {
             // Held until the thread ends, not until the deadline.
             let _slot = slot;
-            lister(base.as_deref(), path.as_deref())
+            lister(base.as_deref(), path.as_deref(), root.as_deref())
         });
         let (done, finished) = oneshot::channel();
         let weak = Rc::downgrade(shared);
@@ -1199,8 +1201,8 @@ impl State {
             }
             Ok(Outcome::Write(write)) => Some(Pending::Write(write)),
             Ok(Outcome::Later(done)) => Some(Pending::Reload(done)),
-            Ok(Outcome::Listing { base, path }) => {
-                match this.list_dir(shared, client, req, base, path) {
+            Ok(Outcome::Listing { base, path, root }) => {
+                match this.list_dir(shared, client, req, base, path, root) {
                     Ok(done) => Some(Pending::Reload(done)),
                     Err(reason) => {
                         this.send(
@@ -2116,6 +2118,24 @@ impl State {
             }
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.pid())
                 .ok_or("the program's working directory is unknown")?,
+            "terminal.workspace-list" => {
+                // The same lease rule as `terminal.list-dir` (D316); the
+                // root is the directory the program was launched in, not
+                // where it has since moved (D337).
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                let root = rt.started.cwd.clone();
+                let path = named.iter().find_map(|(n, v)| match (*n, v) {
+                    ("path", Value::Text(p)) => Some(p.as_str()),
+                    _ => None,
+                });
+                return Ok(Outcome::Listing {
+                    base: Some(root.clone()),
+                    path: path.map(str::to_owned),
+                    root: Some(root),
+                });
+            }
             "terminal.list-dir" => {
                 // It shows the host's files as the server's account, so it
                 // takes what typing into the block takes: the lease, which
@@ -2131,6 +2151,7 @@ impl State {
                 return Ok(Outcome::Listing {
                     base,
                     path: path.map(str::to_owned),
+                    root: None,
                 });
             }
             "terminal.title" => rt.grid.title.clone(),
@@ -3379,6 +3400,8 @@ enum Outcome {
     Listing {
         base: Option<String>,
         path: Option<String>,
+        /// The directory the result must lie under, for the workspace call.
+        root: Option<String>,
     },
 }
 
@@ -3950,7 +3973,7 @@ mod regression {
             let (shared, _account, block, _inbox) = fixture();
             let (go, wait) = std::sync::mpsc::channel::<()>();
             let wait = std::sync::Mutex::new(wait);
-            shared.borrow_mut().lister = std::sync::Arc::new(move |_, _| {
+            shared.borrow_mut().lister = std::sync::Arc::new(move |_, _, _| {
                 wait.lock()
                     .map_err(|e| e.to_string())?
                     .recv()

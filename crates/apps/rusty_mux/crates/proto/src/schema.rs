@@ -1427,6 +1427,29 @@ pub static CATALOG: &[Method] = &[
         build: |req, a| block_call(req, a, "terminal.list-dir"),
     },
     Method {
+        name: "terminal.workspace-list",
+        doc: "List a directory under the block's workspace (the directory its program \
+              was launched in) for the workspace explorer, in the same text form as \
+              `terminal.list-dir`. The path is relative to the workspace and the result \
+              never leaves it: a path that resolves outside it, by `..` or by a link, is \
+              refused. Refused to a watch-only client.",
+        params: &[
+            BLOCK,
+            Param {
+                name: "path",
+                ty: Ty::Text,
+                doc: "The directory, relative to the workspace; by default the workspace \
+                      itself.",
+                presence: Presence::Optional {
+                    needs: Features::WORKSPACE,
+                },
+            },
+        ],
+        needs: Features::BLOCK_CALL.union(Features::WORKSPACE),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.workspace-list"),
+    },
+    Method {
         name: "terminal.reset",
         doc: "Reset the terminal as its program sending RIS would, ending any sequence it \
               left unfinished: the screen and its scrollback are cleared, and modes, \

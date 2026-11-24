@@ -17,7 +17,8 @@ const CONTROL: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_CONTROL)
     .union(Features::TERMINAL_MORE)
     .union(Features::TERMINAL_SHELL)
-    .union(Features::DIR_LISTING);
+    .union(Features::DIR_LISTING)
+    .union(Features::WORKSPACE);
 
 /// What a clear feeds the terminal.
 const CLEAR: &str = "\x1b[H\x1b[2J\x1b[3J";
@@ -109,6 +110,28 @@ fn size_follows_the_blocks_resizes() {
     let size = Size::new(100, 30).expect("size");
     client.request(|req| Message::Resize { req, block, size });
     assert_eq!(text(&mut client, block, "terminal.size"), "100x30");
+}
+
+#[test]
+fn workspace_list_reads_the_launch_directory_and_refuses_to_leave_it() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, CONTROL, None);
+    let block = block_for(&mut client);
+    let at = |p: &str| [("path", Value::Text(p.into()))];
+    assert!(
+        !text(&mut client, block, "terminal.workspace-list")
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .is_empty()
+    );
+    for outside in ["..", "/", "../.."] {
+        let reason = refusal(&mut client, block, "terminal.workspace-list", &at(outside));
+        assert!(
+            reason.contains("outside the workspace"),
+            "{outside}: {reason}"
+        );
+    }
 }
 
 #[test]
@@ -374,6 +397,7 @@ fn changes_need_the_lease_and_reads_do_not() {
             ("terminal.set-theme", &theme[..]),
             ("terminal.clear", &[][..]),
             ("terminal.list-dir", &[][..]),
+            ("terminal.workspace-list", &[][..]),
         ] {
             let reason = refusal(&mut other, block, method, args);
             assert!(
@@ -395,7 +419,12 @@ fn a_client_without_the_feature_is_refused() {
         .union(Features::BLOCK_CALL);
     let mut client = Client::connect_with(&path, older, None);
     let block = block_for(&mut client);
-    for method in ["terminal.size", "terminal.reset", "terminal.list-dir"] {
+    for method in [
+        "terminal.size",
+        "terminal.reset",
+        "terminal.list-dir",
+        "terminal.workspace-list",
+    ] {
         let reason = refusal(&mut client, block, method, &[]);
         assert!(
             reason.contains("requires feature bits"),

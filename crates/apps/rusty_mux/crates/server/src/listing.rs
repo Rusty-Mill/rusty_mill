@@ -40,7 +40,7 @@ fn is_network_path(path: &str) -> bool {
 
 /// What lists a directory: [`list`], or in tests a stand-in that stalls.
 pub(crate) type Lister =
-    Arc<dyn Fn(Option<&str>, Option<&str>) -> Result<String, String> + Send + Sync>;
+    Arc<dyn Fn(Option<&str>, Option<&str>, Option<&str>) -> Result<String, String> + Send + Sync>;
 
 /// The real [`Lister`].
 pub(crate) fn lister() -> Lister {
@@ -79,6 +79,8 @@ impl Drop for Slot {
 
 /// The listing of `path`, taken relative to `base` (the block's working
 /// directory) when it is not absolute, and `base` itself when `None`.
+/// With a `root` (the workspace, D337) the resolved directory must lie under
+/// it, links followed, or the listing is refused.
 ///
 /// The first line is the directory's resolved path. Every other line is
 /// `KIND<TAB>NAME`: `d` for a directory (a link to one too), `f` a file,
@@ -87,13 +89,18 @@ impl Drop for Slot {
 /// left out; `><TAB>N`, the directory has more entries than are read, so at
 /// least N were left out; `!<TAB>N`, N entries could not be read or have a name that is not UTF-8. Names
 /// are [`escape`]d, so none adds a field or a line.
-pub(crate) fn list(base: Option<&str>, path: Option<&str>) -> Result<String, String> {
-    list_with(base, path, READ_MAX, LISTED_MAX)
+pub(crate) fn list(
+    base: Option<&str>,
+    path: Option<&str>,
+    root: Option<&str>,
+) -> Result<String, String> {
+    list_with(base, path, root, READ_MAX, LISTED_MAX)
 }
 
 fn list_with(
     base: Option<&str>,
     path: Option<&str>,
+    root: Option<&str>,
     read_max: usize,
     listed_max: usize,
 ) -> Result<String, String> {
@@ -109,6 +116,12 @@ fn list_with(
         (None, Some(b)) => b.into(),
     };
     let dir = fs::canonicalize(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if let Some(root) = root {
+        let root = fs::canonicalize(root).map_err(|e| format!("{root}: {e}"))?;
+        if !dir.starts_with(&root) {
+            return Err("the path is outside the workspace".into());
+        }
+    }
     let mut read = fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let (mut entries, mut unread) = (Vec::new(), 0_usize);
     for item in read.by_ref().take(read_max) {
@@ -159,7 +172,7 @@ mod tests {
         fs::create_dir(dir.join("Alpha")).unwrap();
         fs::write(dir.join("b.txt"), "").unwrap();
         fs::write(dir.join("A.txt"), "").unwrap();
-        let text = list(Some(dir.to_str().unwrap()), None).unwrap();
+        let text = list(Some(dir.to_str().unwrap()), None, None).unwrap();
         let lines: Vec<_> = text.lines().skip(1).collect();
         assert_eq!(lines, ["d\tAlpha", "d\tzeta", "f\tA.txt", "f\tb.txt"]);
         fs::remove_dir_all(dir).unwrap();
@@ -170,7 +183,7 @@ mod tests {
         let dir = scratch("rel");
         fs::create_dir_all(dir.join("sub")).unwrap();
         fs::write(dir.join("sub").join("a.txt"), "").unwrap();
-        let text = list(Some(dir.to_str().unwrap()), Some("sub/../sub")).unwrap();
+        let text = list(Some(dir.to_str().unwrap()), Some("sub/../sub"), None).unwrap();
         let mut lines = text.lines();
         assert!(lines.next().unwrap().ends_with("sub"));
         assert_eq!(lines.collect::<Vec<_>>(), ["f\ta.txt"]);
@@ -183,7 +196,7 @@ mod tests {
     fn names_are_escaped() {
         let dir = scratch("esc");
         fs::write(dir.join("a\tb"), "").unwrap();
-        let text = list(Some(dir.to_str().unwrap()), None).unwrap();
+        let text = list(Some(dir.to_str().unwrap()), None, None).unwrap();
         assert_eq!(text.lines().last(), Some("f\ta\\tb"));
         fs::remove_dir_all(dir).unwrap();
     }
@@ -197,7 +210,7 @@ mod tests {
         std::os::unix::fs::symlink("real", dir.join("to-dir")).unwrap();
         std::os::unix::fs::symlink("file", dir.join("to-file")).unwrap();
         std::os::unix::fs::symlink("nowhere", dir.join("broken")).unwrap();
-        let text = list(Some(dir.to_str().unwrap()), None).unwrap();
+        let text = list(Some(dir.to_str().unwrap()), None, None).unwrap();
         let lines: Vec<_> = text.lines().skip(1).collect();
         assert_eq!(
             lines,
@@ -216,7 +229,7 @@ mod tests {
     fn what_is_left_out_is_counted() {
         let dir = scratch("many");
         files(&dir, 10);
-        let text = list_with(Some(dir.to_str().unwrap()), None, 100, 7).unwrap();
+        let text = list_with(Some(dir.to_str().unwrap()), None, None, 100, 7).unwrap();
         assert_eq!(text.lines().count(), 1 + 7 + 1);
         assert_eq!(text.lines().last(), Some("+\t3"));
         fs::remove_dir_all(dir).unwrap();
@@ -226,7 +239,7 @@ mod tests {
     fn a_scan_that_stops_early_says_the_count_is_a_lower_bound() {
         let dir = scratch("scan");
         files(&dir, 11);
-        let at = |max| list_with(Some(dir.to_str().unwrap()), None, max, 5).unwrap();
+        let at = |max| list_with(Some(dir.to_str().unwrap()), None, None, max, 5).unwrap();
         // The directory holds exactly what is read: the count is exact.
         assert_eq!(at(11).lines().last(), Some("+\t6"));
         // One more than is read: at least 6 are out (5 read, 1 never read).
@@ -245,10 +258,43 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_listing_stays_under_its_root() {
+        let dir = scratch("root");
+        fs::create_dir_all(dir.join("ws").join("sub")).unwrap();
+        fs::write(dir.join("outside.txt"), "").unwrap();
+        let root = dir.join("ws");
+        let root = root.to_str().unwrap();
+        let ok = list(Some(root), Some("sub"), Some(root)).unwrap();
+        assert!(ok.lines().next().unwrap().ends_with("sub"));
+        for escape in ["..", "sub/../..", dir.to_str().unwrap()] {
+            let reason = list(Some(root), Some(escape), Some(root)).unwrap_err();
+            assert!(
+                reason.contains("outside the workspace"),
+                "{escape}: {reason}"
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_workspace_is_refused() {
+        let dir = scratch("rootlink");
+        fs::create_dir_all(dir.join("ws")).unwrap();
+        fs::create_dir(dir.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("ws").join("out")).unwrap();
+        let root = dir.join("ws");
+        let root = root.to_str().unwrap();
+        let reason = list(Some(root), Some("out"), Some(root)).unwrap_err();
+        assert!(reason.contains("outside the workspace"), "{reason}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_missing_directory_or_base_is_refused() {
-        assert!(list(None, None).is_err());
-        assert!(list(None, Some("rel")).is_err());
-        assert!(list(Some("/"), Some("no/such/dir")).is_err());
+        assert!(list(None, None, None).is_err());
+        assert!(list(None, Some("rel"), None).is_err());
+        assert!(list(Some("/"), Some("no/such/dir"), None).is_err());
     }
 }
 
@@ -259,7 +305,7 @@ mod network_tests {
     #[test]
     fn a_unc_path_is_refused() {
         for path in ["\\\\host\\share", "\\\\?\\C:\\", "\\\\.\\pipe"] {
-            let reason = list(None, Some(path)).unwrap_err();
+            let reason = list(None, Some(path), None).unwrap_err();
             assert!(reason.contains("network"), "{path}: {reason}");
         }
     }
