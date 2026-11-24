@@ -787,7 +787,13 @@ impl<S: Store> Board<S> {
             rev,
             action,
         };
-        let (card, tracked) = self.remediate(by, &project, &e, &decision, &dropped, &dry)?;
+        // A host that predates `bbp decision` would ignore the id and apply the send
+        // untracked, so its card is filed at the legacy id, which is never settled.
+        let capable = source
+            .applied(&e.task, &decision.tracked_id(&project)?.to_string())
+            .is_ok();
+        let (card, tracked) =
+            self.remediate(by, &project, &e, &decision, &dropped, &dry, capable)?;
         // Only a send this board can track later carries an id: a card from before ids
         // (`tracked` false) may have been applied without one, so it is sent as it was.
         let id = tracked.then(|| card.id.to_string());
@@ -939,7 +945,9 @@ impl<S: Store> Board<S> {
     /// The one Backlog "Remediate" card for `decision`'s dropped acted-on work (#595 §4),
     /// at the id derived from `project` and the exact decision, so a retry of it finds
     /// the card rather than adding a second, and a different decision never reuses it.
-    /// Its `remediate:` tag is for people only.
+    /// Its `remediate:` tag is for people only. A new card is `tracked` when the host can
+    /// record the send's decision id; the second value says whether the card returned is.
+    #[allow(clippy::too_many_arguments)]
     fn remediate(
         &self,
         by: &Actor,
@@ -948,6 +956,7 @@ impl<S: Store> Board<S> {
         decision: &Decision<'_>,
         dropped: &[&Acted],
         dry: &DryRun,
+        tracked: bool,
     ) -> Result<(InboxCard, bool), BoardError> {
         if let Some((card, tracked)) = self.remediation_card(by, project, decision)? {
             return Ok((InboxCard::of(&card), tracked));
@@ -989,11 +998,15 @@ impl<S: Store> Board<S> {
             text(dropped.first().map_or(0, |x| x.claim))
         );
         let card = Card {
-            id: decision.tracked_id(project)?,
+            id: if tracked {
+                decision.tracked_id(project)?
+            } else {
+                decision.card_id(project)?
+            },
             ..Card::new(&title, &body, vec![tag], (self.clock)())?
         };
         match self.create(by, project, card) {
-            Ok(card) => Ok((InboxCard::of(&card), true)),
+            Ok(card) => Ok((InboxCard::of(&card), tracked)),
             // A concurrent retry of the same decision wrote it first.
             Err(BoardError::Conflict) => self
                 .remediation_card(by, project, decision)?

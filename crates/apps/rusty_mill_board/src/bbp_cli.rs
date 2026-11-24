@@ -202,13 +202,22 @@ impl Escalations for BbpCli {
         ];
         let rows: Vec<Applied> = serde_json::from_value(self.run(&argv)?)
             .map_err(|e| InboxError::Host(format!("unreadable decision: {e}")))?;
-        Ok(rows.into_iter().find(|r| r.applied).and_then(|r| r.rev))
+        // Absence is only evidence if the host answered for exactly this id and its row
+        // is consistent: anything else is an error, so nothing is settled from it.
+        match rows.as_slice() {
+            [row] if row.decision == argv[6] && row.applied == row.rev.is_some() => Ok(row.rev),
+            _ => Err(InboxError::Host(format!(
+                "decision lookup did not answer for {}",
+                argv[6]
+            ))),
+        }
     }
 }
 
 /// One row of `bbp decision`.
 #[derive(serde::Deserialize)]
 struct Applied {
+    decision: String,
     applied: bool,
     rev: Option<u64>,
 }

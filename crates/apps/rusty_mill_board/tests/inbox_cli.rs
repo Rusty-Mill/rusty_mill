@@ -35,6 +35,7 @@ case "$1" in inbox) cat <<'J'
 {INBOX}
 J
 exit 0;; esac
+case "$1" in decision) cat '{answer}'; exit $?;; esac
 line="$*"
 case "$line" in *"--dry-run yes"*)
   echo '{{"rev":0,"response":"Ok","events":[{{"A":1}},{{"B":2}}]}}'; exit 0;; esac
@@ -42,6 +43,7 @@ for f in {fences}; do case "$line" in *"--fence $f "*) echo '{{"Rejected":{{"cod
 echo '"Ok"'
 "#,
         calls = calls.display(),
+        answer = dir.join("decision.json").display(),
         fences = stale
             .iter()
             .map(u64::to_string)
@@ -170,4 +172,71 @@ fn a_failing_host_is_an_error_not_an_outcome() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let cli = BbpCli::new("/nonexistent/bbp".into(), "/srv/bbp".into());
     assert!(matches!(cli.open(&["C1".into()]), Err(InboxError::Host(_))));
+}
+
+fn answers(bin: &Path, json: &str) {
+    fs::write(bin.with_file_name("decision.json"), json).unwrap();
+}
+
+#[test]
+fn a_decision_id_is_sent_per_command_and_looked_up_by_its_first() {
+    let (bin, log, _serial) = fake("decision", &[]);
+    let cli = BbpCli::new(bin.clone(), "/srv/bbp".into());
+    let e = cli.open(&["C1".into()]).unwrap().remove(0);
+    assert_eq!(
+        cli.act(&e, &Action::Approve, "nano", Some("dec-1"))
+            .unwrap(),
+        Outcome::Done
+    );
+    let sent = calls(&log);
+    // Each command carries its own id, in the dry run and in the commit.
+    for (n, id) in [
+        (1, "dec-1.0"),
+        (2, "dec-1.0"),
+        (3, "dec-1.1"),
+        (4, "dec-1.1"),
+    ] {
+        assert!(sent[n].contains(&format!("--decision {id}")), "{sent:?}");
+    }
+
+    answers(&bin, r#"[{"decision":"dec-1.0","applied":true,"rev":19}]"#);
+    assert_eq!(cli.applied("C1", "dec-1").unwrap(), Some(19));
+    assert_eq!(
+        calls(&log).last().unwrap(),
+        "decision --dir /srv/bbp --task C1 --decision dec-1.0"
+    );
+    answers(
+        &bin,
+        r#"[{"decision":"dec-1.0","applied":false,"rev":null}]"#,
+    );
+    assert_eq!(cli.applied("C1", "dec-1").unwrap(), None);
+}
+
+/// Absence is evidence only from a host that answered for exactly this id: an empty
+/// answer, another id's row, two rows, an inconsistent row, or a host without the verb
+/// are errors, so nothing is ever settled from them.
+#[test]
+fn a_lookup_that_does_not_answer_for_its_id_is_an_error() {
+    let (bin, _log, _serial) = fake("decision-bad", &[]);
+    let cli = BbpCli::new(bin.clone(), "/srv/bbp".into());
+    for bad in [
+        "[]",
+        r#"[{"decision":"other.0","applied":false,"rev":null}]"#,
+        r#"[{"decision":"dec-1.0","applied":false,"rev":null},{"decision":"dec-1.0","applied":false,"rev":null}]"#,
+        r#"[{"decision":"dec-1.0","applied":true,"rev":null}]"#,
+        r#"[{"decision":"dec-1.0","applied":false,"rev":5}]"#,
+        r#"{"decision":"dec-1.0"}"#,
+    ] {
+        answers(&bin, bad);
+        assert!(
+            matches!(cli.applied("C1", "dec-1"), Err(InboxError::Host(_))),
+            "{bad}"
+        );
+    }
+    // An old host has no `decision` verb: its answer is an error exit.
+    fs::remove_file(bin.with_file_name("decision.json")).unwrap();
+    assert!(matches!(
+        cli.applied("C1", "dec-1"),
+        Err(InboxError::Host(_))
+    ));
 }

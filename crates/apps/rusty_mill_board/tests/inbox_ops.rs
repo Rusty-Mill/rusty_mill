@@ -36,7 +36,7 @@ struct Fake {
     /// Fail before the host is reached: nothing is applied or recorded.
     fail_before: AtomicBool,
     /// The host predates `bbp decision`.
-    old_host: bool,
+    old_host: AtomicBool,
     /// The decision ids the host applied, with the rev.
     decided: Mutex<Vec<String>>,
     /// The `verb args` of every command each act sent.
@@ -76,7 +76,7 @@ impl Escalations for Fake {
         })
     }
     fn applied(&self, _task: &str, decision: &str) -> Result<Option<u64>, InboxError> {
-        if self.old_host {
+        if self.old_host.load(Ordering::SeqCst) {
             return Err(InboxError::Host("unknown subcommand decision".into()));
         }
         let at = self
@@ -866,7 +866,7 @@ fn an_old_host_leaves_the_card_for_a_person() {
     let fake = Arc::new(Fake {
         consume: true,
         lose_answer: AtomicBool::new(true),
-        old_host: true,
+        old_host: AtomicBool::new(true),
         ..Fake::with(vec![shipped()])
     });
     let (store, down) = fresh();
@@ -953,4 +953,27 @@ fn a_retry_of_an_old_send_reuses_its_card_and_sends_no_id() {
     assert!(card.closed.is_none(), "{card:?}");
     assert!(last_comment(&card).contains("check BBP's log"), "{card:?}");
     assert_eq!(remediate_cards(&board).len(), 1, "no second card");
+}
+
+/// A host that predates `bbp decision` ignores `--decision`, so a drop sent to it is
+/// untracked. If the host is upgraded afterwards, the log's silence about that send must
+/// not close its card: the card was filed at the legacy id, which is never settled.
+#[test]
+fn a_drop_sent_to_a_host_that_cannot_track_it_is_never_closed_after_an_upgrade() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        lose_answer: AtomicBool::new(true),
+        old_host: AtomicBool::new(true),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    assert!(fake.decided.lock().unwrap().is_empty(), "no id was sent");
+
+    fake.old_host.store(false, Ordering::SeqCst); // the host is upgraded
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board)[0].closed.is_none());
+    assert_eq!(remediate_cards(&board).len(), 1);
 }
