@@ -89,6 +89,14 @@ pub struct Transition {
 struct Raw {
     columns: Vec<ColumnDef>,
     transitions: Vec<Transition>,
+    // `board_columns` adds the movement rules in force beside the table; a reply edited and sent
+    // back (`settings_workflow_set`) still parses. Both are read-only advice and dropped here.
+    #[serde(default)]
+    #[allow(dead_code)]
+    movement: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    note: Option<serde::de::IgnoredAny>,
 }
 
 /// A validated workflow: build it with [`Workflow::new`] (or deserialize it, which validates
