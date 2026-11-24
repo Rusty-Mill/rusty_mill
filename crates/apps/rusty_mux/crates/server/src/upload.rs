@@ -118,7 +118,8 @@ pub(crate) struct Limits {
     pub(crate) block_max: u64,
     pub(crate) partials: usize,
     pub(crate) stale: Duration,
-    /// Free bytes the disk must keep after a chunk is written.
+    /// Free bytes the disk should keep after a chunk is written; best effort,
+    /// not a reservation: other blocks and programs share the disk.
     pub(crate) free_min: u64,
     /// Free bytes under a path; `None` where it cannot be asked.
     pub(crate) free: fn(&Path) -> Option<u64>,
@@ -185,6 +186,13 @@ fn receive_within(
     fs::create_dir_all(&part_dir).map_err(io)?;
     let part = part_dir.join(&name);
     check_offset(&part, offset)?;
+    // Before anything is removed: a refusal for low space deletes nothing.
+    if (limits.free)(dir).is_some_and(|f| f < limits.free_min.saturating_add(data.len() as u64)) {
+        return Err(format!(
+            "the server's disk would be left with under {} bytes free",
+            limits.free_min
+        ));
+    }
     if offset == 0 {
         // A new file: what its senders left unfinished long ago goes, and
         // the rest is bounded.
@@ -194,12 +202,6 @@ fn receive_within(
         }
     }
     make_room(dir, &part, end, limits.block_max).map_err(io)?;
-    if (limits.free)(dir).is_some_and(|f| f < limits.free_min.saturating_add(data.len() as u64)) {
-        return Err(format!(
-            "the server's disk would be left with under {} bytes free",
-            limits.free_min
-        ));
-    }
     let mut file = open(&part, offset).map_err(io)?;
     file.write_all(data).map_err(io)?;
     if !done {
@@ -536,13 +538,23 @@ mod tests {
     #[test]
     fn a_chunk_that_would_leave_the_disk_too_full_is_refused() {
         let dir = scratch();
+        let old = receive_within(&dir, "old", 0, &[0; 90], true, SMALL).unwrap();
+        let Received::Done(old) = old else { panic!() };
         let tight = Limits {
             free_min: 100,
             free: |_| Some(105),
             ..SMALL
         };
-        let err = receive_within(&dir, "f", 0, &[0; 6], false, tight).unwrap_err();
+        let err = receive_within(&dir, "f", 0, &[0; 20], false, tight).unwrap_err();
         assert!(err.contains("under 100 bytes free"), "{err}");
+        // 90 + 20 is over the folder's 100, so room would have been made.
+        assert!(old.exists(), "a refused chunk must not evict other files");
+        let stale = Limits {
+            stale: Duration::ZERO,
+            ..tight
+        };
+        receive_within(&dir, "f", 0, &[0; 20], false, stale).unwrap_err();
+        assert!(old.exists());
         assert!(receive_within(&dir, "f", 0, &[0; 5], false, tight).is_ok());
         let unknown = Limits {
             free: |_| None,
