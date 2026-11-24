@@ -3,6 +3,11 @@
 //! pure: it parses replies, holds the tree and its cursor, and renders text
 //! rows. It sends nothing; a caller fetches the path [`Tree::enter`] names
 //! and hands the reply to [`Tree::load`].
+//!
+//! Rendering clips by terminal cell width (`char_width`); combining marks and
+//! grapheme clusters are not joined, which the server's escaping makes rare.
+
+use rusty_term_core::char_width;
 
 /// What a name is, as the server's `KIND` column says. A link is never
 /// followed, so only a directory can be opened.
@@ -158,7 +163,7 @@ pub enum Want {
 #[derive(Debug)]
 pub struct Tree {
     root: Node,
-    /// Index into [`Tree::rows`].
+    /// Index into the selectable rows (everything but cut summaries).
     cursor: usize,
 }
 
@@ -168,6 +173,8 @@ struct Row {
     /// Child indices from the root.
     at: Vec<usize>,
     text: String,
+    /// The cut-summary line: drawn, never under the cursor.
+    summary: bool,
 }
 
 impl Tree {
@@ -191,9 +198,10 @@ impl Tree {
     /// Puts `listing` under the directory it names. A path that is no longer
     /// in the tree (a stale reply) is ignored.
     pub fn load(&mut self, listing: &Listing) {
+        // The reply's path is escaped like its names: decode each part.
         let names: Vec<String> = match listing.path.as_str() {
             "." => Vec::new(),
-            p => p.split('/').map(str::to_owned).collect(),
+            p => p.split('/').map(unescape).collect(),
         };
         let mut node = &mut self.root;
         for name in &names {
@@ -214,18 +222,20 @@ impl Tree {
 
     /// Moves the cursor `by` rows, held to the first and last.
     pub fn step(&mut self, by: isize) {
-        let last = self.rows().len().saturating_sub(1);
+        let last = self.selectable().len().saturating_sub(1);
         self.cursor = self.cursor.saturating_add_signed(by).min(last);
     }
 
     /// Opens the directory under the cursor: a loaded one toggles, one not
     /// yet read asks for its listing. Files and links do nothing.
     pub fn enter(&mut self) -> Want {
-        let Some(at) = self.rows().into_iter().nth(self.cursor).map(|r| r.at) else {
+        let Some(at) = self.selectable().into_iter().nth(self.cursor).map(|r| r.at) else {
             return Want::Nothing;
         };
         let path = self.path_of(&at);
-        let node = self.node_mut(&at);
+        let Some(node) = self.node_mut(&at) else {
+            return Want::Nothing;
+        };
         match (node.kind, node.children.is_some()) {
             (Kind::Dir, true) => {
                 node.open = !node.open;
@@ -239,14 +249,17 @@ impl Tree {
     /// Closes the open directory under the cursor, or else moves to its
     /// parent.
     pub fn leave(&mut self) {
-        let Some(row) = self.rows().into_iter().nth(self.cursor) else {
+        let Some(row) = self.selectable().into_iter().nth(self.cursor) else {
             return;
         };
-        if self.node_mut(&row.at).open && !row.at.is_empty() {
-            self.node_mut(&row.at).open = false;
+        let Some(node) = self.node_mut(&row.at) else {
+            return;
+        };
+        if node.open && !row.at.is_empty() {
+            node.open = false;
         } else if let Some((_, parent)) = row.at.split_last() {
             let target = parent.to_vec();
-            if let Some(i) = self.rows().iter().position(|r| r.at == target) {
+            if let Some(i) = self.selectable().iter().position(|r| r.at == target) {
                 self.cursor = i;
             }
         }
@@ -255,7 +268,7 @@ impl Tree {
     /// The path of the row under the cursor, as [`Want::Fetch`] writes it.
     #[must_use]
     pub fn selected_path(&self) -> String {
-        self.rows()
+        self.selectable()
             .into_iter()
             .nth(self.cursor)
             .map(|r| self.path_of(&r.at))
@@ -267,15 +280,31 @@ impl Tree {
     #[must_use]
     pub fn render(&self, width: usize, height: usize) -> Vec<String> {
         let rows = self.rows();
-        let top = (self.cursor + 1).saturating_sub(height.max(1));
-        rows.iter()
+        // The cursor's place among all rows, to scroll by.
+        let mut seen = 0;
+        let mut here = 0;
+        let marked: Vec<bool> = rows
+            .iter()
             .enumerate()
+            .map(|(i, r)| {
+                let on = !r.summary && seen == self.cursor;
+                if !r.summary {
+                    seen += 1;
+                }
+                if on {
+                    here = i;
+                }
+                on
+            })
+            .collect();
+        let top = (here + 1).saturating_sub(height.max(1));
+        rows.iter()
+            .zip(marked)
             .skip(top)
             .take(height)
-            .map(|(i, r)| {
-                let mark = if i == self.cursor { '>' } else { ' ' };
-                let line = format!("{mark}{}{}", "  ".repeat(r.depth), r.text);
-                line.chars().take(width).collect()
+            .map(|(r, on)| {
+                let mark = if on { '>' } else { ' ' };
+                clip(&format!("{mark}{}{}", "  ".repeat(r.depth), r.text), width)
             })
             .collect()
     }
@@ -286,12 +315,16 @@ impl Tree {
         rows
     }
 
-    fn node_mut(&mut self, at: &[usize]) -> &mut Node {
+    fn selectable(&self) -> Vec<Row> {
+        self.rows().into_iter().filter(|r| !r.summary).collect()
+    }
+
+    fn node_mut(&mut self, at: &[usize]) -> Option<&mut Node> {
         let mut node = &mut self.root;
         for i in at {
-            node = &mut node.children.as_mut().expect("rows name loaded nodes")[*i];
+            node = node.children.as_mut()?.get_mut(*i)?;
         }
-        node
+        Some(node)
     }
 
     fn path_of(&self, at: &[usize]) -> String {
@@ -306,6 +339,17 @@ impl Tree {
         }
         parts.join("/")
     }
+}
+
+/// `line` cut to `width` terminal cells, never splitting a wide character.
+fn clip(line: &str, width: usize) -> String {
+    let mut used = 0;
+    line.chars()
+        .take_while(|c| {
+            used += char_width(*c);
+            used <= width
+        })
+        .collect()
 }
 
 fn fill(node: &mut Node, listing: &Listing) {
@@ -326,6 +370,7 @@ fn walk(node: &Node, depth: usize, at: &mut Vec<usize>, rows: &mut Vec<Row>) {
         depth,
         at: at.clone(),
         text: format!("{sign}{}{slash}", node.name),
+        summary: false,
     });
     if !node.open {
         return;
@@ -340,6 +385,7 @@ fn walk(node: &Node, depth: usize, at: &mut Vec<usize>, rows: &mut Vec<Row>) {
             depth: depth + 1,
             at: at.clone(),
             text: cut_line(node.cut),
+            summary: true,
         });
     }
 }
@@ -442,6 +488,38 @@ mod tests {
         t.step(1);
         assert_eq!(t.enter(), Want::Fetch("a\tb/in".into()));
         assert_eq!(t.selected_path(), "a\tb/in");
+    }
+
+    #[test]
+    fn escaped_names_attach_their_replies() {
+        // Exactly as the server writes a tab and a backslash in a name.
+        let mut t = Tree::new(&parse(".\nd\ta\\tb\nd\tc\\\\d").unwrap());
+        t.step(1);
+        assert_eq!(t.enter(), Want::Fetch("a\tb".into()));
+        t.load(&parse("a\\tb\nf\tin").unwrap());
+        assert_eq!(t.render(40, 10)[2], "       in");
+        t.step(2);
+        assert_eq!(t.enter(), Want::Fetch("c\\d".into()));
+        t.load(&parse("c\\\\d\nf\tx").unwrap());
+        assert_eq!(t.render(40, 10).len(), 5);
+    }
+
+    #[test]
+    fn the_cut_row_is_never_under_the_cursor() {
+        let mut t = Tree::new(&parse(".\nd\ta\n+\t2").unwrap());
+        t.step(5);
+        assert_eq!(t.selected_path(), "a");
+        let rows = t.render(40, 10);
+        assert!(rows[2].starts_with(' ') && rows[2].contains("not shown"));
+        assert_eq!(t.enter(), Want::Fetch("a".into()), "not the root toggle");
+    }
+
+    #[test]
+    fn wide_characters_are_clipped_by_cells() {
+        let t = Tree::new(&parse(".\nf\t\u{4e2d}\u{6587}").unwrap());
+        // Five columns of mark, indent and sign, then two 2-cell characters:
+        // 8 cells fit one, and the second is not split.
+        assert_eq!(t.render(8, 10)[1], "     \u{4e2d}");
     }
 
     #[test]
