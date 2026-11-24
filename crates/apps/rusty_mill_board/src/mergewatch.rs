@@ -61,8 +61,18 @@ pub struct MergedOpen {
     pub column: Column,
     /// The strongest link found.
     pub why: Why,
-    /// The merged pull requests, at most [`MAX_PRS`].
-    pub prs: Vec<String>,
+    /// The merged pull requests, strongest link first, at most [`MAX_PRS`]; a cap never drops
+    /// the pull request that makes `why`.
+    pub prs: Vec<PrLink>,
+}
+
+/// A merged pull request and how it points at a card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PrLink {
+    /// `https://github.com/OWNER/NAME/pull/N`.
+    pub url: String,
+    /// How it points at the card.
+    pub why: Why,
 }
 
 /// Most pull requests listed per card.
@@ -72,29 +82,78 @@ const VERBS: [&str; 9] = [
     "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
 ];
 
-/// The card numbers `body` names, as `(number, closes)`: `closes` for `Closes card #N`.
+/// The prose lines of a pull request body: no fenced code, HTML comments, quotes, or inline
+/// code, which may quote a directive without meaning it.
+fn prose(body: &str) -> Vec<String> {
+    let (mut fenced, mut comment) = (false, false);
+    let mut out = Vec::new();
+    for raw in body.lines() {
+        let line = raw.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced || line.starts_with('>') {
+            continue;
+        }
+        let mut text = String::new();
+        let mut rest = line;
+        while !rest.is_empty() {
+            if comment {
+                match rest.split_once("-->") {
+                    Some((_, after)) => (comment, rest) = (false, after),
+                    None => break,
+                }
+            } else if let Some((before, after)) = rest.split_once("<!--") {
+                text.push_str(before);
+                (comment, rest) = (true, after);
+            } else {
+                text.push_str(rest);
+                break;
+            }
+        }
+        let mut plain = String::new();
+        for (i, part) in text.split('`').enumerate() {
+            if i % 2 == 0 {
+                plain.push_str(part);
+            }
+        }
+        out.push(plain.trim().to_owned());
+    }
+    out
+}
+
+/// `N` of `#N` or `#N.`, nothing else.
+fn card_number(word: &str) -> Option<u64> {
+    word.strip_prefix('#')?.trim_end_matches('.').parse().ok()
+}
+
+/// The card numbers `body` names in prose, as `(number, closes)`. `closes` only for a line
+/// that is exactly `Closes card #N` (also Fixes/Resolves and their other forms, case
+/// ignored, one optional list bullet or trailing period); any other `card #N` is a mention.
 #[must_use]
 pub fn card_refs(body: &str) -> Vec<(u64, bool)> {
-    let words: Vec<String> = body
-        .split_whitespace()
-        .map(|w| w.to_ascii_lowercase())
-        .collect();
     let mut out = Vec::new();
-    for (i, w) in words.iter().enumerate() {
-        let Some(number) = (w == "card")
-            .then(|| words.get(i + 1))
-            .flatten()
-            .and_then(|n| n.strip_prefix('#'))
-            .map(|n| n.trim_end_matches(|c: char| !c.is_ascii_digit()))
-            .and_then(|n| n.parse::<u64>().ok())
-        else {
+    for line in prose(body) {
+        let line = line
+            .trim_start_matches(['-', '*'])
+            .trim()
+            .to_ascii_lowercase();
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if let [verb, "card", n] = words[..]
+            && VERBS.contains(&verb)
+            && let Some(n) = card_number(n)
+        {
+            out.push((n, true));
             continue;
-        };
-        let closes = i
-            .checked_sub(1)
-            .and_then(|p| words.get(p))
-            .is_some_and(|v| VERBS.contains(&v.trim_matches(|c: char| !c.is_alphabetic())));
-        out.push((number, closes));
+        }
+        for pair in words.windows(2) {
+            if pair[0] == "card"
+                && let Some(n) = card_number(pair[1].trim_end_matches([',', ';', ')']))
+            {
+                out.push((n, false));
+            }
+        }
     }
     out
 }
@@ -129,9 +188,15 @@ pub fn scan(cards: &[Card], prs: &[MergedPr]) -> Vec<MergedOpen> {
             prs: Vec::new(),
         });
         e.why = e.why.min(why);
-        if e.prs.len() < MAX_PRS && !e.prs.iter().any(|p| p == url) {
-            e.prs.push(url.to_owned());
+        match e.prs.iter_mut().find(|p| p.url == url) {
+            Some(p) => p.why = p.why.min(why),
+            None => e.prs.push(PrLink {
+                url: url.to_owned(),
+                why,
+            }),
         }
+        e.prs.sort_by_key(|p| p.why);
+        e.prs.truncate(MAX_PRS);
     };
     for pr in prs {
         for (n, closes) in card_refs(&pr.body) {
@@ -202,13 +267,50 @@ mod tests {
     #[test]
     fn refs_need_the_word_card_and_tell_closes_from_mention() {
         assert_eq!(card_refs("Closes card #12."), [(12, true)]);
-        assert_eq!(card_refs("fixes: card #3"), [(3, true)]);
+        assert_eq!(card_refs("- fixes card #3"), [(3, true)]);
         assert_eq!(
             card_refs("see card #7, and CARD #8"),
             [(7, false), (8, false)]
         );
         assert!(card_refs("Closes #12").is_empty());
         assert!(card_refs("Closes card #N").is_empty());
+    }
+
+    #[test]
+    fn only_a_standalone_directive_in_prose_closes() {
+        // Not the whole line, or not prose: a mention at most, never a marker.
+        for body in [
+            "This never closes card #5 by itself",
+            "Closes card #5 and card #6",
+            "fixes: card #3",
+            "> Closes card #5",
+            "`Closes card #5`",
+            "```\nCloses card #5\n```",
+            "<!-- Closes card #5 -->",
+            "<!--\nCloses card #5\n-->",
+        ] {
+            assert!(
+                card_refs(body).iter().all(|(_, closes)| !closes),
+                "{body:?}"
+            );
+        }
+        assert_eq!(
+            card_refs("Closes card #5\n```\nx\n```\nfixes card #6"),
+            [(5, true), (6, true)]
+        );
+        assert_eq!(card_refs("<!-- x --> Closes card #9"), [(9, true)]);
+    }
+
+    #[test]
+    fn the_cap_never_drops_the_marker_pull_request() {
+        let cards = [card(1, &[])];
+        let mut prs: Vec<MergedPr> = (1..=6).map(|n| pr(n, "see card #1")).collect();
+        prs.push(pr(7, "Closes card #1"));
+        let got = scan(&cards, &prs);
+        assert_eq!(got[0].prs.len(), MAX_PRS);
+        assert_eq!(got[0].why, Why::Marker);
+        assert_eq!(got[0].prs[0].why, Why::Marker);
+        assert!(got[0].prs[0].url.ends_with("/pull/7"));
     }
 
     #[test]
@@ -226,6 +328,8 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!((got[0].number, got[0].why), (Some(1), Why::Marker));
         assert_eq!(got[0].prs.len(), 2);
+        assert_eq!(got[0].prs[0].why, Why::Marker);
+        assert_eq!(got[0].prs[0].why, Why::Marker);
         assert_eq!((got[1].number, got[1].why), (Some(2), Why::Evidence));
     }
 
