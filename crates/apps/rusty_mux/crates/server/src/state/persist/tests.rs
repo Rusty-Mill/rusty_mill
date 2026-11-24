@@ -7,7 +7,19 @@ fn started(shell: bool) -> Started {
         program: "cargo".into(),
         args: vec!["build".into(), "\x1b]0;x\x07".into()],
         cwd: "/".into(),
+        workspace: String::new(),
     }
+}
+
+#[test]
+fn the_workspace_is_the_launch_directory_not_the_last_known_one() {
+    let mut s = started(true);
+    // A record from before the field: the last known directory stands in.
+    assert_eq!(s.workspace(), "/");
+    // Later saves move `cwd` and leave the workspace where it was launched.
+    s.workspace = "/repo".into();
+    s.cwd = "/tmp".into();
+    assert_eq!(s.workspace(), "/repo");
 }
 
 #[test]

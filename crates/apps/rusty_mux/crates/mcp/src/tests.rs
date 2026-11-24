@@ -67,6 +67,19 @@ fn keys_are_sent_under_the_lease() {
 }
 
 #[test]
+fn a_workspace_listing_is_made_under_the_lease() {
+    // The server refuses it without the lease, so a fresh connection must
+    // attach and take it first, as for typing.
+    let call = args(r#"{"block": "2", "path": "src"}"#);
+    assert_eq!(
+        argv(known("terminal.workspace-list"), Some(&call)).map(|a| a.join(" ")),
+        Ok("attach --block=2 + acquire-lease --block=2 + \
+            terminal.workspace-list --block=2 --path=src"
+            .into())
+    );
+}
+
+#[test]
 fn a_reset_and_a_theme_are_made_under_the_lease() {
     let reset = args(r#"{"block": "2"}"#);
     assert_eq!(

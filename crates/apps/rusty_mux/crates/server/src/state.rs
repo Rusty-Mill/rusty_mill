@@ -2125,7 +2125,7 @@ impl State {
                 self.mux
                     .authorize_input(client, block)
                     .map_err(Refusal::from)?;
-                let root = rt.started.cwd.clone();
+                let root = rt.started.workspace().to_owned();
                 let path = named.iter().find_map(|(n, v)| match (*n, v) {
                     ("path", Value::Text(p)) => Some(p.as_str()),
                     _ => None,
@@ -2456,6 +2456,7 @@ impl State {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect(),
             cwd: config.cwd.to_string_lossy().into_owned(),
+            workspace: config.cwd.to_string_lossy().into_owned(),
         };
         let rt = self.start(Start {
             block,
@@ -4845,6 +4846,7 @@ mod regression {
             program: "sh".into(),
             args: vec![],
             cwd: "/".into(),
+            workspace: String::new(),
         };
         BlockRt::read_only(grid, AnsiParser::new(), started)
     }

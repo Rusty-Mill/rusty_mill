@@ -25,6 +25,22 @@ pub(crate) struct Started {
     pub(crate) args: Vec<String>,
     /// Its last known working directory.
     pub(crate) cwd: String,
+    /// The directory it was launched in: the root of its workspace (D337),
+    /// kept as the program moves on and across a restart. Empty in a record
+    /// saved before this field, which then has its `cwd`.
+    #[serde(default)]
+    pub(crate) workspace: String,
+}
+
+impl Started {
+    /// The root of the block's workspace.
+    pub(crate) fn workspace(&self) -> &str {
+        if self.workspace.is_empty() {
+            &self.cwd
+        } else {
+            &self.workspace
+        }
+    }
 }
 
 /// The saved model with each block's [`Started`].
@@ -114,6 +130,7 @@ pub(crate) fn records(manifest: &Manifest) -> Vec<SessionRecord> {
         program: String::new(),
         args: Vec::new(),
         cwd: String::new(),
+        workspace: String::new(),
     };
     let block = |b: &SavedBlock| BlockRecord {
         id: to_uuid(b.id.uuid()),
@@ -231,6 +248,7 @@ mod tests {
             program: "/bin/sh".into(),
             args: args.iter().map(|a| a.to_string()).collect(),
             cwd: "/home/a b".into(),
+            workspace: String::new(),
         };
         Manifest {
             saved: mux.save(),
