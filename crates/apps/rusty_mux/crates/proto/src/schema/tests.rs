@@ -133,6 +133,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.size",
             "terminal.list-dir",
             "terminal.upload",
+            "terminal.download",
             "terminal.reset",
             "terminal.set-theme",
             "terminal.modes",
@@ -160,6 +161,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
                 Features::BLOCK_CALL.union(Features::TERMINAL_FIND)
             }
             (_, _, "terminal.ports") => Features::BLOCK_CALL.union(Features::PORTS),
+            (_, _, "terminal.download") => Features::BLOCK_CALL.union(Features::DOWNLOAD),
             (_, _, "terminal.upload") => Features::BLOCK_CALL.union(Features::UPLOAD),
             (_, _, "terminal.list-dir") => Features::BLOCK_CALL.union(Features::DIR_LISTING),
             _ => Features::BLOCK_CALL,

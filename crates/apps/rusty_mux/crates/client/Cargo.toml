@@ -15,6 +15,8 @@ layer = "apps"
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
 rusty_uuid = { workspace = true }
+# Decodes a download's chunks (C83); also the test certificate.
+rusty_base64 = { workspace = true }
 
 # Reaching a server over TLS (#506): a local relay in a thread of its own,
 # pinned to the server's certificate by fingerprint (rusty_term D236).
@@ -33,5 +35,3 @@ default = ["screen"]
 screen = ["rusty_mux_proto/screen"]
 
 [dev-dependencies]
-# Decodes the test certificate.
-rusty_base64 = { workspace = true }

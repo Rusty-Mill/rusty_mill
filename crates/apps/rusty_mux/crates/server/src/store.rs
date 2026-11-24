@@ -116,6 +116,11 @@ impl Store {
         }
     }
 
+    /// The state directory.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// `block`'s folder of uploaded files (C82), made owner-only if missing.
     pub(crate) fn upload_dir(&self, block: BlockId) -> io::Result<PathBuf> {
         make_private_dir(&self.dir.join(format!("{block}.{UPLOAD}")))

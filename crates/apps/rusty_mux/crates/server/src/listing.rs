@@ -65,7 +65,7 @@ impl Gate {
         let taken = self.0.fetch_add(1, Ordering::AcqRel);
         if taken >= MAX_RUNNING {
             self.0.fetch_sub(1, Ordering::AcqRel);
-            return Err("too many directory listings are still running".into());
+            return Err("too many file reads or listings are still running".into());
         }
         Ok(Slot(self.0.clone()))
     }

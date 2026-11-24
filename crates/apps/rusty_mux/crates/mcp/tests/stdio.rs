@@ -288,6 +288,7 @@ fn tools_list_is_the_catalog_without_connection_methods() {
         "release-lease",
         "sync",
         "terminal.upload",
+        "terminal.download",
     ];
     let expected: Vec<&str> = CATALOG
         .iter()

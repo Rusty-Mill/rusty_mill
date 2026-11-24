@@ -30,6 +30,7 @@ use rusty_uuid::Uuid;
 use crate::Config;
 use crate::checkpoint::validate_size;
 use crate::datagram::Registry;
+use crate::download;
 use crate::echo::Waiting;
 use crate::forward::{self, Forwards};
 use crate::history::History;
@@ -124,6 +125,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_FIND)
     .union(Features::AGENT_META)
     .union(Features::UPLOAD)
+    .union(Features::DOWNLOAD)
     .union(Features::PORT_FORWARD)
     .union(UNIX_ONLY);
 
@@ -612,43 +614,41 @@ impl State {
         Ok(Outcome::Later(finished))
     }
 
-    /// `terminal.list-dir`: reads the directory on the blocking pool under
-    /// [`listing::DEADLINE`], in a task of its own, and answers once read
-    /// ([`Self::listed`]). The connection waits for it before its next
-    /// request; no other client, PTY or task waits.
-    fn list_dir(
+    /// `terminal.list-dir` and `terminal.download`: runs `work` on the
+    /// blocking pool under [`listing::DEADLINE`], in a task of its own, and
+    /// answers once done ([`Self::listed`]). The connection waits for it
+    /// before its next request; no other client, PTY or task waits.
+    fn run_blocking(
         &mut self,
         shared: &Shared,
         client: ClientId,
         req: u64,
-        base: Option<String>,
-        path: Option<String>,
+        method: &'static str,
+        work: Blocking,
     ) -> Result<oneshot::Receiver<()>, String> {
         let cancel = self
             .clients
             .get(&client)
             .map(|out| out.cancel().clone())
             .ok_or("no such client")?;
-        let slot = self
-            .listings
-            .take()
-            .map_err(|e| format!("terminal.list-dir: {e}"))?;
-        let lister = self.lister.clone();
+        let slot = self.listings.take().map_err(|e| format!("{method}: {e}"))?;
         let work = rusty_tokio::spawn_blocking(move || {
             // Held until the thread ends, not until the deadline.
             let _slot = slot;
-            lister(base.as_deref(), path.as_deref())
+            work()
         });
         let (done, finished) = oneshot::channel();
         let weak = Rc::downgrade(shared);
         rusty_tokio::task::spawn_local(async move {
             let answer = match rusty_tokio::time::timeout(listing::DEADLINE, work).await {
                 Ok(Ok(listed)) => listed,
-                Ok(Err(e)) => Err(format!("the listing failed: {e}")),
-                Err(_) => Err("the listing timed out".into()),
+                Ok(Err(e)) => Err(format!("the read failed: {e}")),
+                Err(_) => Err("the read timed out".into()),
             };
             if let Some(shared) = weak.upgrade() {
-                shared.borrow_mut().listed(client, &cancel, req, answer);
+                shared
+                    .borrow_mut()
+                    .listed(client, &cancel, req, method, answer);
             }
             // The connection may have gone; nothing waits then.
             let _ = done.send(());
@@ -663,13 +663,14 @@ impl State {
         client: ClientId,
         cancel: &Rc<Notify>,
         req: u64,
+        method: &str,
         answer: Result<String, String>,
     ) {
         let message = match answer {
             Ok(text) => Message::Text { req, text },
             Err(reason) => Message::Failed {
                 req,
-                reason: format!("terminal.list-dir: {reason}"),
+                reason: format!("{method}: {reason}"),
                 code: None,
             },
         };
@@ -1201,8 +1202,8 @@ impl State {
             }
             Ok(Outcome::Write(write)) => Some(Pending::Write(write)),
             Ok(Outcome::Later(done)) => Some(Pending::Reload(done)),
-            Ok(Outcome::Listing { base, path }) => {
-                match this.list_dir(shared, client, req, base, path) {
+            Ok(Outcome::Blocking { method, work }) => {
+                match this.run_blocking(shared, client, req, method, work) {
                     Ok(done) => Some(Pending::Reload(done)),
                     Err(reason) => {
                         this.send(
@@ -2130,9 +2131,33 @@ impl State {
                     ("path", Value::Text(p)) => Some(p.as_str()),
                     _ => None,
                 });
-                return Ok(Outcome::Listing {
-                    base,
-                    path: path.map(str::to_owned),
+                let path = path.map(str::to_owned);
+                let lister = self.lister.clone();
+                return Ok(Outcome::Blocking {
+                    method: "terminal.list-dir",
+                    work: Box::new(move || lister(base.as_deref(), path.as_deref())),
+                });
+            }
+            "terminal.download" => {
+                // It reads any file the server's account can, as list-dir
+                // lists any directory: the lease, which a watch-only grant
+                // (C14) never holds.
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                let base = terminal::pwd(&rt.grid, rt.pid());
+                let path = named.iter().find_map(|(n, v)| match (*n, v) {
+                    ("path", Value::Text(p)) => Some(p.clone()),
+                    _ => None,
+                });
+                let offset = lines(&named, "offset");
+                let private = self.store.as_ref().map(|s| s.dir().to_path_buf());
+                let path = path.ok_or("terminal.download: missing path")?;
+                return Ok(Outcome::Blocking {
+                    method: "terminal.download",
+                    work: Box::new(move || {
+                        download::read(base.as_deref(), &path, offset, private.as_deref())
+                    }),
                 });
             }
             "terminal.upload" => {
@@ -3419,13 +3444,16 @@ enum Outcome {
     /// Answered later, by the task the request started; resolves once it
     /// has.
     Later(oneshot::Receiver<()>),
-    /// `terminal.list-dir`, to be read off this thread: the directory
-    /// `path` names from `base`.
-    Listing {
-        base: Option<String>,
-        path: Option<String>,
+    /// A read of the host's files (`terminal.list-dir`,
+    /// `terminal.download`), to run off this thread; its text is the reply.
+    Blocking {
+        method: &'static str,
+        work: Blocking,
     },
 }
+
+/// What a [`Outcome::Blocking`] runs.
+type Blocking = Box<dyn FnOnce() -> Result<String, String> + Send>;
 
 /// The line count `param` holds, 0 when left out.
 fn lines(named: &[(&str, Value)], param: &str) -> u32 {
