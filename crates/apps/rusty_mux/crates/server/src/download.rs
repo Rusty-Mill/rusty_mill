@@ -4,6 +4,7 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::fs::{self, File};
+#[cfg(target_os = "linux")]
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
