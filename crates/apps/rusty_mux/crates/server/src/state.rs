@@ -622,7 +622,7 @@ impl State {
         req: u64,
         base: Option<String>,
         path: Option<String>,
-        root: Option<String>,
+        root: Option<listing::Workspace>,
     ) -> Result<oneshot::Receiver<()>, String> {
         let cancel = self
             .clients
@@ -637,7 +637,7 @@ impl State {
         let work = rusty_tokio::spawn_blocking(move || {
             // Held until the thread ends, not until the deadline.
             let _slot = slot;
-            lister(base.as_deref(), path.as_deref(), root.as_deref())
+            lister(base.as_deref(), path.as_deref(), root.as_ref())
         });
         let (done, finished) = oneshot::channel();
         let weak = Rc::downgrade(shared);
@@ -2128,14 +2128,14 @@ impl State {
                 let root = rt
                     .started
                     .workspace()
-                    .ok_or("the workspace root is unknown after a server restart")?
-                    .to_owned();
+                    .ok_or("the workspace root is unknown, after a restart or on this platform")?
+                    .clone();
                 let path = named.iter().find_map(|(n, v)| match (*n, v) {
                     ("path", Value::Text(p)) => Some(p.as_str()),
                     _ => None,
                 });
                 return Ok(Outcome::Listing {
-                    base: Some(root.clone()),
+                    base: None,
                     path: path.map(str::to_owned),
                     root: Some(root),
                 });
@@ -2460,7 +2460,7 @@ impl State {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect(),
             cwd: config.cwd.to_string_lossy().into_owned(),
-            workspace: config.cwd.to_string_lossy().into_owned(),
+            workspace: listing::Workspace::open(std::path::Path::new(&config.cwd)),
         };
         let rt = self.start(Start {
             block,
@@ -3406,7 +3406,7 @@ enum Outcome {
         base: Option<String>,
         path: Option<String>,
         /// The directory the result must lie under, for the workspace call.
-        root: Option<String>,
+        root: Option<listing::Workspace>,
     },
 }
 
@@ -4850,7 +4850,7 @@ mod regression {
             program: "sh".into(),
             args: vec![],
             cwd: "/".into(),
-            workspace: String::new(),
+            workspace: Default::default(),
         };
         BlockRt::read_only(grid, AnsiParser::new(), started)
     }

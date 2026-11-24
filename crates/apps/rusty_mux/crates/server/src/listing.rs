@@ -46,8 +46,9 @@ fn is_network_path(path: &str) -> bool {
 }
 
 /// What lists a directory: [`list`], or in tests a stand-in that stalls.
-pub(crate) type Lister =
-    Arc<dyn Fn(Option<&str>, Option<&str>, Option<&str>) -> Result<String, String> + Send + Sync>;
+pub(crate) type Lister = Arc<
+    dyn Fn(Option<&str>, Option<&str>, Option<&Workspace>) -> Result<String, String> + Send + Sync,
+>;
 
 /// The real [`Lister`].
 pub(crate) fn lister() -> Lister {
@@ -101,7 +102,7 @@ impl Drop for Slot {
 pub(crate) fn list(
     base: Option<&str>,
     path: Option<&str>,
-    root: Option<&str>,
+    root: Option<&Workspace>,
 ) -> Result<String, String> {
     list_with(base, path, root, READ_MAX, LISTED_MAX)
 }
@@ -109,7 +110,7 @@ pub(crate) fn list(
 fn list_with(
     base: Option<&str>,
     path: Option<&str>,
-    root: Option<&str>,
+    root: Option<&Workspace>,
     read_max: usize,
     listed_max: usize,
 ) -> Result<String, String> {
@@ -117,7 +118,7 @@ fn list_with(
         return Err("a network path is not listed".into());
     }
     if let Some(root) = root {
-        let held = confined(Path::new(root), path.unwrap_or(""))?;
+        let held = confined(root, path.unwrap_or(""))?;
         return render(&held.read, &held.shown, false, read_max, listed_max);
     }
     let dir = match (path, base) {
@@ -152,7 +153,7 @@ const NOT_LISTED: &str = "that directory cannot be listed in the workspace";
 /// parent's descriptor with `O_NOFOLLOW` and the listing reads that
 /// descriptor, so nothing swapped into the tree after the check is followed.
 /// Elsewhere the call is refused: no atomic confinement exists there yet.
-fn confined(root: &Path, rel: &str) -> Result<Held, String> {
+fn confined(root: &Workspace, rel: &str) -> Result<Held, String> {
     let mut names = Vec::new();
     for part in Path::new(rel).components() {
         match part {
@@ -161,7 +162,7 @@ fn confined(root: &Path, rel: &str) -> Result<Held, String> {
             _ => return Err("the path is outside the workspace".into()),
         }
     }
-    let (read, anchor) = anchor(root, &names).map_err(|e| match e.kind() {
+    let (read, anchor) = root.anchor(&names).map_err(|e| match e.kind() {
         std::io::ErrorKind::Unsupported => UNSUPPORTED.to_owned(),
         _ => NOT_LISTED.to_owned(),
     })?;
@@ -181,6 +182,93 @@ fn confined(root: &Path, rel: &str) -> Result<Held, String> {
     })
 }
 
+/// The directory a block was launched in, held open (D337). The identity
+/// of that directory is fixed when the block starts, so a later rename or
+/// a link swapped in at its old path changes nothing: every listing walks
+/// down from this descriptor, never from the path. Unknown when it could
+/// not be opened, after a restart, and off Linux; the call is refused then.
+#[derive(Clone, Default)]
+pub(crate) struct Workspace(Option<Arc<Root>>);
+
+/// Compares equal to every other: which directory a block holds is not part
+/// of its saved record.
+impl PartialEq for Workspace {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Workspace {}
+
+impl std::fmt::Debug for Workspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Workspace(held)"
+        } else {
+            "Workspace(unknown)"
+        })
+    }
+}
+
+impl Workspace {
+    /// Whether the directory is held.
+    pub(crate) fn is_known(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct Root(i32);
+
+#[cfg(target_os = "linux")]
+impl Drop for Root {
+    fn drop(&mut self) {
+        let _ = rusty_libc::fd::close(self.0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Workspace {
+    /// Holds `dir` open as it is now. Unknown when it cannot be opened.
+    pub(crate) fn open(dir: &Path) -> Self {
+        use rusty_libc::fd::{AT_FDCWD, O_CLOEXEC, O_DIRECTORY, O_RDONLY, openat};
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+            return Self(None);
+        };
+        let flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
+        Self(
+            openat(AT_FDCWD, &path, flags, 0)
+                .ok()
+                .map(|fd| Arc::new(Root(fd))),
+        )
+    }
+
+    /// `names` walked down from the held directory, each opened from its
+    /// parent's descriptor with `O_NOFOLLOW`. The first descriptor is a new
+    /// one for the same directory (`.`), so the held one is never closed.
+    fn anchor(&self, names: &[&std::ffi::OsStr]) -> std::io::Result<(PathBuf, Anchor)> {
+        use rusty_libc::fd::{O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, openat};
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c = |b: &[u8]| {
+            CString::new(b).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+        };
+        let io_err = |e: rusty_libc::Errno| std::io::Error::other(format!("{e:?}"));
+        let root = self.0.as_ref().ok_or(std::io::ErrorKind::NotFound)?;
+        let flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
+        let mut held = Anchor(Vec::new());
+        let mut fd = openat(root.0, &c(b".")?, flags, 0).map_err(io_err)?;
+        held.0.push(fd);
+        for name in names {
+            fd = openat(fd, &c(name.as_bytes())?, flags, 0).map_err(io_err)?;
+            held.0.push(fd);
+        }
+        Ok((PathBuf::from(format!("/proc/self/fd/{fd}")), held))
+    }
+}
+
+/// The descriptors of one walk, closed when the listing is done.
 #[cfg(target_os = "linux")]
 struct Anchor(Vec<i32>);
 
@@ -193,41 +281,23 @@ impl Drop for Anchor {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn anchor(root: &Path, names: &[&std::ffi::OsStr]) -> std::io::Result<(PathBuf, Anchor)> {
-    use rusty_libc::fd::{AT_FDCWD, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, openat};
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let c = |b: &[u8]| {
-        CString::new(b).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
-    };
-    let io_err = |e: rusty_libc::Errno| std::io::Error::other(format!("{e:?}"));
-    let mut held = Anchor(Vec::new());
-    // The root is trusted (it is where the program started) and may be a link.
-    let mut fd = openat(
-        AT_FDCWD,
-        &c(root.as_os_str().as_bytes())?,
-        O_RDONLY | O_DIRECTORY | O_CLOEXEC,
-        0,
-    )
-    .map_err(io_err)?;
-    held.0.push(fd);
-    for name in names {
-        let flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
-        fd = openat(fd, &c(name.as_bytes())?, flags, 0).map_err(io_err)?;
-        held.0.push(fd);
-    }
-    Ok((PathBuf::from(format!("/proc/self/fd/{fd}")), held))
-}
-
 /// Only Linux has the descriptor walk, so elsewhere the call fails closed
 /// rather than offer a confinement a racing process could beat.
+#[cfg(not(target_os = "linux"))]
+struct Root;
+
 #[cfg(not(target_os = "linux"))]
 struct Anchor;
 
 #[cfg(not(target_os = "linux"))]
-fn anchor(_: &Path, _: &[&std::ffi::OsStr]) -> std::io::Result<(PathBuf, Anchor)> {
-    Err(std::io::ErrorKind::Unsupported.into())
+impl Workspace {
+    pub(crate) fn open(_: &Path) -> Self {
+        Self(None)
+    }
+
+    fn anchor(&self, _: &[&std::ffi::OsStr]) -> std::io::Result<(PathBuf, Anchor)> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
 }
 
 /// The listing text of the directory at `read`, headed by `shown`.
@@ -389,13 +459,23 @@ mod tests {
         fs::write(dir.join("ws").join("sub").join("a.txt"), "").unwrap();
         let root = dir.join("ws");
         let root = root.to_str().unwrap();
-        let ok = list(Some(root), Some("sub"), Some(root)).unwrap();
+        let ok = list(
+            Some(root),
+            Some("sub"),
+            Some(&Workspace::open(Path::new(root))),
+        )
+        .unwrap();
         // The first line is under the workspace, never an absolute path.
         assert_eq!(ok.lines().collect::<Vec<_>>(), ["sub", "f\ta.txt"]);
-        let top = list(Some(root), None, Some(root)).unwrap();
+        let top = list(Some(root), None, Some(&Workspace::open(Path::new(root)))).unwrap();
         assert_eq!(top.lines().next(), Some("."));
         for escape in ["..", "sub/../..", "/", dir.to_str().unwrap()] {
-            let reason = list(Some(root), Some(escape), Some(root)).unwrap_err();
+            let reason = list(
+                Some(root),
+                Some(escape),
+                Some(&Workspace::open(Path::new(root))),
+            )
+            .unwrap_err();
             assert!(
                 reason.contains("outside the workspace"),
                 "{escape}: {reason}"
@@ -414,7 +494,12 @@ mod tests {
         let root = dir.join("ws");
         let root = root.to_str().unwrap();
         for missing in ["no/such", "file"] {
-            let reason = list(Some(root), Some(missing), Some(root)).unwrap_err();
+            let reason = list(
+                Some(root),
+                Some(missing),
+                Some(&Workspace::open(Path::new(root))),
+            )
+            .unwrap_err();
             assert_eq!(reason, NOT_LISTED, "{missing}");
         }
         fs::remove_dir_all(dir).unwrap();
@@ -432,15 +517,45 @@ mod tests {
         let root = root.to_str().unwrap();
         // A link, even one that stays inside, is neither entered nor classified
         // by its target: it is `l`.
-        let top = list(Some(root), None, Some(root)).unwrap();
+        let top = list(Some(root), None, Some(&Workspace::open(Path::new(root)))).unwrap();
         assert_eq!(
             top.lines().skip(1).collect::<Vec<_>>(),
             ["d\tin", "l\tlocal", "l\tout"]
         );
         for link in ["out", "local"] {
-            let reason = list(Some(root), Some(link), Some(root)).unwrap_err();
+            let reason = list(
+                Some(root),
+                Some(link),
+                Some(&Workspace::open(Path::new(root))),
+            )
+            .unwrap_err();
             assert_eq!(reason, NOT_LISTED, "{link}");
         }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_launch_directory_is_held_not_its_path() {
+        let dir = scratch("held");
+        fs::create_dir_all(dir.join("ws")).unwrap();
+        fs::write(dir.join("ws").join("mine"), "").unwrap();
+        fs::create_dir(dir.join("other")).unwrap();
+        fs::write(dir.join("other").join("theirs"), "").unwrap();
+        let ws = Workspace::open(&dir.join("ws"));
+        // The path is renamed away and a link to somewhere else put in its place.
+        fs::rename(dir.join("ws"), dir.join("moved")).unwrap();
+        std::os::unix::fs::symlink(dir.join("other"), dir.join("ws")).unwrap();
+        let top = list(None, None, Some(&ws)).unwrap();
+        assert_eq!(top.lines().collect::<Vec<_>>(), [".", "f\tmine"]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_that_cannot_be_opened_is_not_a_workspace() {
+        let dir = scratch("gone");
+        assert!(!Workspace::open(&dir.join("missing")).is_known());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -449,7 +564,10 @@ mod tests {
     fn a_workspace_listing_is_refused_where_it_cannot_be_confined() {
         let dir = scratch("unsupported");
         let root = dir.to_str().unwrap();
-        assert_eq!(list(Some(root), None, Some(root)).unwrap_err(), UNSUPPORTED);
+        assert_eq!(
+            list(Some(root), None, Some(&Workspace::open(Path::new(root)))).unwrap_err(),
+            UNSUPPORTED
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::listing::Workspace;
 use rusty_multimodal_db_engine::generic::traits::{
     IndexedField, Record, ScannableField, SchemaTag,
 };
@@ -25,19 +26,20 @@ pub(crate) struct Started {
     pub(crate) args: Vec<String>,
     /// Its last known working directory.
     pub(crate) cwd: String,
-    /// The directory it was launched in: the root of its workspace (D337),
-    /// kept as the program moves on. Not stored: the records are bincode, so
-    /// a new field needs a schema bump (an owner call). After a restart it is
-    /// empty, the root is unknown and the workspace call is refused.
+    /// The directory it was launched in, held open: the root of its workspace
+    /// (D337), whatever happens to its path or to the program's cwd. Not
+    /// stored: the records are bincode, so a new field needs a schema bump (an
+    /// owner call). After a restart it is unknown and the workspace call is
+    /// refused.
     #[serde(skip)]
-    pub(crate) workspace: String,
+    pub(crate) workspace: Workspace,
 }
 
 impl Started {
     /// The root of the block's workspace; `None` when it is not known,
     /// which is every block after a server restart (see `workspace`).
-    pub(crate) fn workspace(&self) -> Option<&str> {
-        Some(self.workspace.as_str()).filter(|w| !w.is_empty())
+    pub(crate) fn workspace(&self) -> Option<&Workspace> {
+        Some(&self.workspace).filter(|w| w.is_known())
     }
 }
 
@@ -128,7 +130,7 @@ pub(crate) fn records(manifest: &Manifest) -> Vec<SessionRecord> {
         program: String::new(),
         args: Vec::new(),
         cwd: String::new(),
-        workspace: String::new(),
+        workspace: Workspace::default(),
     };
     let block = |b: &SavedBlock| BlockRecord {
         id: to_uuid(b.id.uuid()),
@@ -246,7 +248,7 @@ mod tests {
             program: "/bin/sh".into(),
             args: args.iter().map(|a| a.to_string()).collect(),
             cwd: "/home/a b".into(),
-            workspace: String::new(),
+            workspace: Workspace::default(),
         };
         Manifest {
             saved: mux.save(),

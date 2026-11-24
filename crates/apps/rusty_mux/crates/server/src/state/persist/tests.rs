@@ -1,4 +1,5 @@
 use super::*;
+use crate::listing::Workspace;
 
 fn started(shell: bool) -> Started {
     Started {
@@ -7,7 +8,7 @@ fn started(shell: bool) -> Started {
         program: "cargo".into(),
         args: vec!["build".into(), "\x1b]0;x\x07".into()],
         cwd: "/".into(),
-        workspace: String::new(),
+        workspace: Workspace::default(),
     }
 }
 
@@ -18,7 +19,7 @@ fn started(shell: bool) -> Started {
 fn the_workspace_is_not_written_to_the_saved_record() {
     let plain = started(true);
     let mut moved = started(true);
-    moved.workspace = "/repo".into();
+    moved.workspace = Workspace::open(std::path::Path::new("/"));
     assert_eq!(
         serde_json::to_string(&plain).unwrap(),
         serde_json::to_string(&moved).unwrap()
@@ -32,9 +33,9 @@ fn the_workspace_is_the_launch_directory_and_unknown_after_a_restart() {
     // Read back from a saved record: not known, never the last cwd.
     assert_eq!(s.workspace(), None);
     // Later saves move `cwd` and leave the workspace where it was launched.
-    s.workspace = "/repo".into();
+    s.workspace = Workspace::open(std::path::Path::new("/"));
     s.cwd = "/tmp".into();
-    assert_eq!(s.workspace(), Some("/repo"));
+    assert_eq!(s.workspace().is_some(), cfg!(target_os = "linux"));
 }
 
 #[test]

@@ -24,7 +24,7 @@ The mux has no worktree or git state today. Touched-file data is a new server ca
 
 ## Wire (D337)
 
-A server call limited to list, stat and touched-by, scoped to the session workspace. No file contents: opening is the editor's job. Paths are canonicalised so a symlink cannot escape the workspace. Slice 1 (Nano, 2026-11-24, decision card in the project thread) is a block method instead of a new message: `terminal.workspace-list`, behind `Features::WORKSPACE` (bit 53), rooted at the block's launch directory, lease holder only. Stat and touched-by follow. Old peers see the bit, so the same owner gate as D336 applies on its PR.
+A server call limited to list, stat and touched-by, scoped to the session workspace. No file contents: opening is the editor's job. Paths are canonicalised so a symlink cannot escape the workspace. Slice 1 (Nano, 2026-11-24, decision card in the project thread) is a block method instead of a new message: `terminal.workspace-list`, behind `Features::WORKSPACE` (bit 53), rooted at the block's launch directory, held open from launch so a renamed or swapped path changes nothing (an identity contract, not a path-prefix one), lease holder only. Stat and touched-by follow. Old peers see the bit, so the same owner gate as D336 applies on its PR.
 
 ## Order
 

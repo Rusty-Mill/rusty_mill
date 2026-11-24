@@ -34,7 +34,7 @@ fn one_block() -> (Manifest, BlockId) {
         program: "/bin/sh".into(),
         args: Vec::new(),
         cwd: "/".into(),
-        workspace: String::new(),
+        workspace: Default::default(),
     };
     let manifest = Manifest {
         saved: mux.save(),
