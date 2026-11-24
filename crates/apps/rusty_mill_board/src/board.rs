@@ -1109,25 +1109,40 @@ impl<S: Store> Board<S> {
         cards.retain(|c| keep(c));
         let mut m = metrics(&self.workflow(), &cards, (self.clock)());
         let live: HashMap<Uuid, &Card> = cards.iter().map(|c| (c.id, c)).collect();
+        let projects = self.projects();
         let seen = self
             .merged_open
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        // Re-check each cached match against the card as it is now: still open, unarchived and
-        // in scope, with its current number, project, title and column.
+        // Re-check every cached match against the card and registry as they are now: the card
+        // is open, unarchived and in scope, and each link's repository is one of its project's.
         m.merged_open = seen
             .0
             .iter()
             .filter_map(|o| {
                 let c = live.get(&o.id)?;
-                (c.column != Column::DONE && c.archived_ms.is_none()).then(|| {
-                    crate::mergewatch::MergedOpen {
-                        number: c.number,
-                        project: c.project.clone(),
-                        title: c.title.clone(),
-                        column: c.column.clone(),
-                        ..o.clone()
-                    }
+                if c.column == Column::DONE || c.archived_ms.is_some() {
+                    return None;
+                }
+                let mut prs: Vec<_> = o
+                    .prs
+                    .iter()
+                    .filter(|l| {
+                        projects
+                            .repos_of(&c.project)
+                            .any(|r| projects.github_of(r) == Some(l.repo.as_str()))
+                    })
+                    .cloned()
+                    .collect();
+                prs.sort_by_key(|l| l.why);
+                Some(crate::mergewatch::MergedOpen {
+                    number: c.number,
+                    project: c.project.clone(),
+                    title: c.title.clone(),
+                    column: c.column.clone(),
+                    why: prs.first()?.why,
+                    prs,
+                    ..o.clone()
                 })
             })
             .collect();
@@ -1146,18 +1161,18 @@ impl<S: Store> Board<S> {
             crate::mergewatch::WatchStatus {
                 checked_ms: Some((self.clock)()),
                 truncated,
-                error: None,
+                error: false,
             },
         );
     }
 
-    /// Record why the merge watch's latest run failed; the last list stays, marked as stale.
-    pub fn note_merge_watch_error(&self, error: &str) {
+    /// Record that the merge watch's latest run failed; the last list stays, marked as stale.
+    pub fn note_merge_watch_failed(&self) {
         self.merged_open
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .1
-            .error = Some(error.to_owned());
+            .error = true;
     }
 
     /// One card.

@@ -53,8 +53,9 @@ pub struct WatchStatus {
     pub checked_ms: Option<i64>,
     /// The last refresh read only the newest closed pull requests of some repository.
     pub truncated: bool,
-    /// Why the latest run failed; the list is then the last good one (see `checked_ms`).
-    pub error: Option<String>,
+    /// Whether the latest run failed, so the list is the last good one (see `checked_ms`). The
+    /// detail (repository, API response) is logged, never returned: it may be out of scope.
+    pub error: bool,
 }
 
 /// How a merged pull request points at a card, strongest first.
@@ -92,6 +93,8 @@ pub struct MergedOpen {
 /// A merged pull request and how it points at a card.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PrLink {
+    /// The `OWNER/NAME` it was read from; checked again against the card's project on every read.
+    pub repo: String,
     /// `https://github.com/OWNER/NAME/pull/N`.
     pub url: String,
     /// How it points at the card.
@@ -206,7 +209,7 @@ pub fn scan(
         .filter_map(|c| c.number.map(|n| (n, c)))
         .collect();
     let mut found: BTreeMap<Uuid, MergedOpen> = BTreeMap::new();
-    let mut note = |card: &Card, why: Why, url: &str| {
+    let mut note = |card: &Card, why: Why, repo: &str, url: &str| {
         let e = found.entry(card.id).or_insert_with(|| MergedOpen {
             id: card.id,
             number: card.number,
@@ -220,6 +223,7 @@ pub fn scan(
         match e.prs.iter_mut().find(|p| p.url == url) {
             Some(p) => p.why = p.why.min(why),
             None => e.prs.push(PrLink {
+                repo: repo.to_owned(),
                 url: url.to_owned(),
                 why,
             }),
@@ -238,13 +242,14 @@ pub fn scan(
                 note(
                     card,
                     if closes { Why::Marker } else { Why::Mention },
+                    &pr.repo,
                     &pr.url,
                 );
             }
         }
         for card in by_number.values().filter(|c| ours(c)) {
             if card.evidence.iter().any(|l| same_pull(l, &pr.url)) {
-                note(card, Why::Evidence, &pr.url);
+                note(card, Why::Evidence, &pr.repo, &pr.url);
             }
         }
     }
@@ -287,7 +292,7 @@ pub fn watch(board: &Shared, pulls: &dyn MergedPulls) -> Result<usize, String> {
             Ok(n)
         }
         Err(e) => {
-            board.note_merge_watch_error(&e);
+            board.note_merge_watch_failed();
             Err(e)
         }
     }
@@ -456,18 +461,15 @@ mod tests {
             (m.merged_open.len(), m.merged_open[0].why),
             (1, Why::Marker)
         );
-        assert!(m.merged_watch.truncated && m.merged_watch.error.is_none());
+        assert!(m.merged_watch.truncated && !m.merged_watch.error);
         assert!(m.merged_watch.checked_ms.is_some());
         // A failed refresh keeps the last list, flagged.
         assert!(watch(&b, &Fixed(Err("rate limit".into()))).is_err());
         let m = b.metrics(|_| true).expect("metrics");
         assert_eq!(m.merged_open.len(), 1);
-        assert!(
-            m.merged_watch
-                .error
-                .as_deref()
-                .is_some_and(|e| e.contains("rate limit"))
-        );
+        // The detail is for the log: the status says only that the refresh failed.
+        assert!(m.merged_watch.error);
+        assert!(!format!("{:?}", m.merged_watch).contains("rate limit"));
         // Out of the caller's scope: not shown.
         assert!(
             b.metrics(|_| false)
@@ -478,6 +480,19 @@ mod tests {
         // The card is Done before the next refresh: no longer listed.
         b.close(card.id, crate::domain::CloseReason::Superseded, None, &who)
             .expect("closed");
+        assert!(b.metrics(|_| true).expect("metrics").merged_open.is_empty());
+    }
+
+    #[test]
+    fn a_card_reassigned_to_another_repository_drops_the_old_links() {
+        let b = board();
+        let who = b.roles().actor("nano", "human").expect("role");
+        let card = b.add_in(&who, "p", "work", "", vec![]).expect("card");
+        let body = format!("Closes card #{}", card.number.expect("n"));
+        assert_eq!(watch(&b, &recent(vec![pr(1, &body)], false)), Ok(1));
+        assert_eq!(b.metrics(|_| true).expect("metrics").merged_open.len(), 1);
+        // Project q lives in repository o/other: the link read from o/r no longer applies.
+        b.assign(card.id, "q", &who).expect("assigned");
         assert!(b.metrics(|_| true).expect("metrics").merged_open.is_empty());
     }
 }
