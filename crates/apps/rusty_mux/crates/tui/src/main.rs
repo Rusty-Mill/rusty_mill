@@ -358,9 +358,7 @@ mod client {
     impl Drop for Abandoned {
         fn drop(&mut self) {
             self.panes.clear();
-            if let Some(reader) = self.reader.take() {
-                let _ = reader.join();
-            }
+            self.reader.take().into_iter().for_each(join_within);
         }
     }
 
@@ -1072,6 +1070,7 @@ mod client {
         // block prints lands after the restore. Shutting a socket ends
         // its read; an error only means the server already closed it.
         stop.store(true, Ordering::Release);
+        let _ = EXIT_BY.set(Instant::now() + EXIT_JOIN);
         // Detached, a server drops each block's client at once; one whose
         // connection just ends is kept a while for a reconnect, lease and
         // all. Shutting the socket below still delivers this first.
@@ -1086,7 +1085,8 @@ mod client {
         // Also stops the forward, once any login under way gives up.
         drop(app);
         drop(kept);
-        let _ = (reader.map(JoinHandle::join), keyboard.join());
+        reader.into_iter().for_each(join_within);
+        let _ = keyboard.join();
         restore(&mut term);
         if let Some(older) = &older {
             eprintln!("\r\nrusty-mux: {}", older.line("the server"));
@@ -1265,6 +1265,33 @@ mod client {
                 }
             }
         })
+    }
+
+    /// How long the whole exit waits for connection readers to end.
+    const EXIT_JOIN: Duration = Duration::from_secs(2);
+    /// How long dropping one connection in a running client waits for its
+    /// reader, so a stuck one cannot stall the screen.
+    const LIVE_JOIN: Duration = Duration::from_millis(250);
+    /// When the exit stops waiting for readers: one budget for all of them,
+    /// set once the client starts to leave.
+    static EXIT_BY: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+    /// Joins a reader that ends when its socket is shut, but not for ever.
+    /// On Windows shutting a socket does not wake a blocked read, so a
+    /// server that keeps the connection open would hang the exit; the
+    /// reader is left to the process end instead. At exit every join shares
+    /// the [`EXIT_JOIN`] budget; before it each waits at most [`LIVE_JOIN`].
+    fn join_within(reader: JoinHandle<()>) {
+        let deadline = EXIT_BY
+            .get()
+            .copied()
+            .unwrap_or_else(|| Instant::now() + LIVE_JOIN);
+        while !reader.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if reader.is_finished() {
+            let _ = reader.join();
+        }
     }
 
     /// Undoes the modes a block's program may have set on this terminal,
@@ -3172,9 +3199,7 @@ mod client {
     impl Drop for Pane {
         fn drop(&mut self) {
             self.hang_up();
-            if let Some(reader) = self.reader.take() {
-                let _ = reader.join();
-            }
+            self.reader.take().into_iter().for_each(join_within);
         }
     }
 

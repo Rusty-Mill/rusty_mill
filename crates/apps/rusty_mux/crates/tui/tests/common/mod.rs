@@ -104,6 +104,9 @@ pub enum End {
     Open,
 }
 
+/// How long a held connection stays open after the client leaves.
+const HOLD: Duration = Duration::from_secs(30);
+
 pub fn listen() -> (PathBuf, UnixListener) {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -362,6 +365,9 @@ pub struct Script {
     /// Once the right block is attached, the control connection drops it
     /// from the layout; later the block prints BYE and closes.
     pub close_right: bool,
+    /// Once the client leaves, every connection stays open, as a stalled
+    /// server's would: the client's exit must not wait for them to end.
+    pub hold: bool,
 }
 
 /// What the client asked of the blocks.
@@ -430,7 +436,12 @@ pub fn layout_server(script: Script) -> (PathBuf, Arc<Shared>) {
         let closer = control.try_clone().expect("clone");
         std::thread::spawn(move || {
             serve_control(control, &control_shared);
-            let _ = closer.shutdown(std::net::Shutdown::Both);
+            match control_shared.script.hold {
+                true => std::thread::sleep(HOLD),
+                false => {
+                    let _ = closer.shutdown(std::net::Shutdown::Both);
+                }
+            }
         });
         std::thread::spawn(move || {
             while let Ok(event) = queued.recv() {
@@ -439,8 +450,13 @@ pub fn layout_server(script: Script) -> (PathBuf, Arc<Shared>) {
         });
         while let Ok((stream, _)) = listener.accept() {
             let block = server.clone();
+            let kept = stream.try_clone().expect("clone");
             std::thread::spawn(move || {
-                serve_layout_block(handshake(stream, Features::CHECKPOINT_V6), &block)
+                serve_layout_block(handshake(stream, Features::CHECKPOINT_V6), &block);
+                if block.script.hold {
+                    std::thread::sleep(HOLD);
+                }
+                drop(kept);
             });
         }
     });
