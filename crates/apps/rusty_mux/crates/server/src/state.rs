@@ -2590,7 +2590,10 @@ impl State {
         let when = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        let id = format!("{when:012}-{}", &block.to_string()[..8]);
+        let id = format!(
+            "{when:012}-{}",
+            block.to_string().get(..8).unwrap_or_default()
+        );
         let exit = match rt.exit {
             Some(ExitStatus::Code(n)) => format!("code:{n}"),
             Some(ExitStatus::Signal(n)) => format!("signal:{n}"),
@@ -2605,7 +2608,10 @@ impl State {
             why: &why,
             by: &by,
             block: &block.to_string(),
-            program: &one_line(&rt.started.program),
+            program: &one_line(&rt.started.program)
+                .chars()
+                .take(256)
+                .collect::<String>(),
             sensitive: archive::sensitive(&transcript),
         };
         archive::write(&state, &record, &transcript)

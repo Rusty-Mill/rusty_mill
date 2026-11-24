@@ -77,19 +77,28 @@ pub(crate) fn write(state: &Path, record: &Record<'_>, transcript: &str) -> io::
         record.block,
         record.program,
     );
-    file.write_all(header.as_bytes())?;
-    file.write_all(transcript.as_bytes())?;
-    file.sync_all()?;
-    fs::rename(&tmp, &path)
+    // A failed write leaves no transcript behind: it may hold secrets.
+    let done = file
+        .write_all(header.as_bytes())
+        .and_then(|()| file.write_all(transcript.as_bytes()))
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::rename(&tmp, &path));
+    if done.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    done
 }
 
 #[cfg(unix)]
 fn make_dir(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::PermissionsExt;
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(dir)
+        .create(dir)?;
+    // A folder made earlier, or by something else, is made owner-only too.
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
 #[cfg(not(unix))]
