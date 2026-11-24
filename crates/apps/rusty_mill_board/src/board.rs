@@ -806,25 +806,40 @@ impl<S: Store> Board<S> {
         // Only a send this board can track later carries an id: a card from before ids
         // (`tracked` false) may have been applied without one, so it is sent as it was.
         let id = tracked.then(|| card.id.to_string());
-        let sent = source.act(&e, action, &answerer(&by.name), id.as_deref());
-        // A host rolled back between the probe and the send ignores `--decision`. Whether it
-        // committed is unknown after a lost answer, so unless the log shows the id, nothing
-        // about this send is provable and the legacy card is filed too (it then decides).
-        let unproven = id.as_ref().is_some_and(|sent_id| {
-            let committed = matches!(sent, Ok(Outcome::Done) | Err(_));
-            committed && !matches!(source.applied(&e.task, sent_id), Ok(Some(_)))
-        });
-        if unproven {
-            rusty_log::warn!(card = %card.id, "a send is not in BBP's log under its id: marking it untracked");
-            self.remediate(by, &project, &e, &decision, &dropped, &dry, false)?;
+        // Write ahead the uncertainty too: until BBP's answer proves what this send did, the
+        // card says a send of it may be in flight, so a retry or a process restart finds
+        // that mark and settles nothing. A host that dropped the id looks, in its log, like a
+        // send that never happened, so only evidence in hand can clear the mark.
+        let attempt = Uuid::now_v7();
+        if id.is_some() {
+            self.comment(card.id, by, &format!("{SEND_PENDING}{attempt}"))?;
         }
-        let outcome = sent.map_err(|err| match inbox_error(err) {
-            BoardError::Storage(why) => BoardError::Storage(format!(
-                "{why}; its Remediate card {} was written first, so retry to reconcile",
-                card.label()
-            )),
-            other => other,
-        })?;
+        let outcome = source
+            .act(&e, action, &answerer(&by.name), id.as_deref())
+            .map_err(|err| match inbox_error(err) {
+                BoardError::Storage(why) => BoardError::Storage(format!(
+                    "{why}; its Remediate card {} was written first, so retry to reconcile",
+                    card.label()
+                )),
+                other => other,
+            })?;
+        if let Some(sent) = &id {
+            // A committed send is proven when the log shows its id. If it does not, a host
+            // rolled back between the probe and the send, so nothing about it is provable:
+            // the mark stays and the legacy card is filed too (and from then on decides).
+            let proven = matches!(source.applied(&e.task, sent), Ok(Some(_)));
+            match &outcome {
+                Outcome::Done if !proven => {
+                    rusty_log::warn!(card = %card.id, "a committed send is not in BBP's log under its id: marking it untracked");
+                    self.remediate(by, &project, &e, &decision, &dropped, &dry, false)?;
+                }
+                // Applied, or refused before anything was written: this send is accounted for.
+                Outcome::Done | Outcome::Refused { step: 0, .. } => {
+                    self.comment(card.id, by, &format!("{SEND_RESOLVED}{attempt}"))?;
+                }
+                Outcome::Refused { .. } => {}
+            }
+        }
         if let Outcome::Refused { step: 0, code, .. } = &outcome {
             // A stale fence can never apply later, so BBP's log settles the card. For any
             // other refusal only this send is known to have written nothing: another send
@@ -925,7 +940,8 @@ impl<S: Store> Board<S> {
             }
             return Ok(Settled::Applied { rev });
         }
-        if !final_ {
+        // A send of this card whose answer was never seen may have committed without its id.
+        if !final_ || in_flight(card) {
             return Ok(Settled::Unknown);
         }
         let note = "BBP's log holds no such decision and its escalation has moved on, so it can never apply: nothing was dropped.";
@@ -2141,6 +2157,23 @@ impl<S: Store> Board<S> {
             c.comment(by, text, now)
         })
     }
+}
+
+/// Written to a Remediate card before a send that carries its id, and again with
+/// [`SEND_RESOLVED`] once BBP's answer proves what that send did.
+const SEND_PENDING: &str = "bbp-send-pending ";
+const SEND_RESOLVED: &str = "bbp-send-resolved ";
+
+/// Whether a send of `card` was begun and never accounted for (a lost answer, a crash).
+fn in_flight(card: &Card) -> bool {
+    let marks = |prefix: &str| -> Vec<&str> {
+        card.comments
+            .iter()
+            .filter_map(|c| c.text.strip_prefix(prefix))
+            .collect()
+    };
+    let resolved = marks(SEND_RESOLVED);
+    marks(SEND_PENDING).iter().any(|n| !resolved.contains(n))
 }
 
 /// `days` as milliseconds, or `None` for `0`: no window.

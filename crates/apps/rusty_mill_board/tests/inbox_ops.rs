@@ -1069,25 +1069,31 @@ fn a_host_rolled_back_after_a_tracked_card_never_closes_it() {
     assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
 }
 
-/// The same when the answer is lost: the send may have committed without its id, so the board
-/// cannot tell and files the legacy card, and a retry never settles it as "not applied".
+/// The uncertainty is written before the send: a send whose answer never came back (a lost
+/// answer, a crash, an unreachable host) leaves its mark on the card, so no retry, however it
+/// overlaps, settles the card as "not applied" from the log's silence.
 #[test]
-fn a_lost_answer_whose_id_is_not_in_the_log_is_marked_untracked() {
-    let fake = Arc::new(Fake {
-        consume: true,
-        ignore_id: AtomicBool::new(true),
-        lose_answer: AtomicBool::new(true),
-        ..Fake::with(vec![shipped()])
-    });
-    let (store, down) = fresh();
-    let board = board_over(&store, &down, &fake, true);
-    refused_storage(call(&board, &owner(), "inbox_act", reject()));
-    assert_eq!(remediate_cards(&board).len(), 2, "tracked and legacy cards");
+fn a_send_with_no_answer_is_never_settled_as_not_applied() {
+    for lose in [false, true] {
+        let fake = Arc::new(Fake {
+            consume: true,
+            ignore_id: AtomicBool::new(true),
+            lose_answer: AtomicBool::new(lose),
+            ..Fake::with(vec![shipped()])
+        });
+        fake.fail_before.store(!lose, Ordering::SeqCst);
+        let (store, down) = fresh();
+        let board = board_over(&store, &down, &fake, true);
+        refused_storage(call(&board, &owner(), "inbox_act", reject()));
+        fake.fail_before.store(false, Ordering::SeqCst);
+        fake.lose_answer.store(false, Ordering::SeqCst);
+        // Someone else resolved the escalation, and the host never recorded the id.
+        fake.rows.lock().unwrap().clear();
 
-    fake.lose_answer.store(false, Ordering::SeqCst);
-    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
-    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
-    assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
+        let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+        assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+        assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
+    }
 }
 
 /// The host is rolled back between the capability probe and the send, so it applies the send
