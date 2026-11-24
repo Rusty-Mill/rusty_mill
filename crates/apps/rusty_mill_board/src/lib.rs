@@ -9,6 +9,7 @@
 //! - [`workflow`]: the admin-edited columns and the moves between them.
 //! - [`roadmap`]: a project's roadmap lanes, derived from its cards.
 //! - [`trace`]: parent/child decomposition and milestone links, rolled up from cards.
+//! - [`mergewatch`]: open cards whose pull request already merged, found from the forge (card #1620).
 //! - [`metrics`]: work in progress, flow and lead time, derived from cards.
 //! - [`retag`]: re-filing cards when the workflow's columns change, with a rollback record.
 //! - [`lift`]: the one-off lift of headed body sections into the typed card fields, with a rollback record.
@@ -36,6 +37,7 @@ pub mod identities;
 pub mod inbox;
 pub mod lift;
 pub mod mcp;
+pub mod mergewatch;
 pub mod metrics;
 pub mod migrate;
 pub mod milestones;
