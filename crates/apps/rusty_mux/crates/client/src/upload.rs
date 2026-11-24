@@ -25,6 +25,12 @@ fn fill(file: &mut impl Read) -> io::Result<Vec<u8>> {
 /// Sends `file` as `name` and returns its absolute path on the server.
 /// Request numbers start at `first_req`; messages other than the reply
 /// (events, say) are skipped.
+///
+/// An error after the last chunk was sent (a lost reply, say) does not say
+/// the file failed: it may already be published in the server's folder. Look
+/// there before sending again; a resend from offset 0 is kept beside the
+/// first copy as `name-1`, and a resend at a later offset reports an unknown
+/// outcome.
 pub fn send<S: Read + Write>(
     conn: &mut Conn<S>,
     block: BlockId,
