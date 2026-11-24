@@ -19,7 +19,7 @@
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
-//! bbp human   --dir D --task T [--rev N] [--as WHO] [--fence N] [--decision ID] [--dry-run yes] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
+//! bbp human   --dir D --task T [--rev N] [--as WHO] [--fence N] [--decision ID (needs --fence)] [--dry-run yes] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
 //!                                          claims mode: claim MSG accept|drop|reopen | choose Q C | extend-claim MSG | withdraw-rerun ART | action-result MARK done|aborted | refine MSG|task BRIEF TEXT | close | holdout-updated DIGEST | takeover MSG SESSION CLIENT MINUTES REASON | takeover-release N
 //!                                          | intent FILE [claims=msg:1,msg:2] [domains=a,b] (#598: new brief; no list = every claim)
 //!                                          reject, rerun, resume, cancel and close need --rev, the card revision you saw; --dry-run prints the events without committing
@@ -607,12 +607,12 @@ fn run() -> Result<String, String> {
                 })
                 .transpose()?;
             let by = a.flags.get("as").map_or(human::UNLABELLED, String::as_str);
-            let op = match (a.flags.get("op"), a.flags.get("decision")) {
-                (Some(_), Some(_)) => return Err("--op and --decision are exclusive".into()),
-                (Some(op), None) => Some(OpId(op.clone())),
-                (None, Some(id)) => Some(human::decision_op(by, id)?),
-                (None, None) => None,
-            };
+            let op = human::op_for(
+                by,
+                a.flags.get("op").map(String::as_str),
+                a.flags.get("decision").map(String::as_str),
+                a.flags.contains_key("fence"),
+            )?;
             if a.flags.get("dry-run").is_some_and(|v| v != "no") {
                 let preview = human::preview_fenced(
                     &dir,

@@ -308,6 +308,25 @@ pub fn decision_op(by: &str, id: &str) -> Result<OpId, String> {
     Ok(OpId(format!("by:{by}/{DECISION_MARK}{id}")))
 }
 
+/// The op `bbp human` runs under, from its `--as`, `--op`, `--decision` and `--fence`: none
+/// (a fresh label), the caller's own `--op`, or [`decision_op`]. A decision id needs a
+/// fence: an unfenced send can still land after a lookup finds nothing, so its absence
+/// would never be final.
+pub fn op_for(
+    by: &str,
+    op: Option<&str>,
+    decision: Option<&str>,
+    fenced: bool,
+) -> Result<Option<OpId>, String> {
+    match (op, decision) {
+        (Some(_), Some(_)) => Err("--op and --decision are exclusive".into()),
+        (Some(op), None) => Ok(Some(OpId(op.to_owned()))),
+        (None, Some(_)) if !fenced => Err("--decision needs --fence".into()),
+        (None, Some(id)) => decision_op(by, id).map(Some),
+        (None, None) => Ok(None),
+    }
+}
+
 /// Whether `id` is a decision id [`decision_op`] takes.
 pub fn valid_decision(id: &str) -> bool {
     !id.is_empty()
@@ -846,7 +865,7 @@ mod tests {
             .store
             .events(task, 0)
             .unwrap();
-        crate::decision::lookup(&events, &[id.to_owned()]).remove(0)
+        crate::decision::lookup(&events, &PrincipalId("human".into()), &[id.to_owned()]).remove(0)
     }
 
     /// A send whose answer was lost is sent again with the same id and fence:
@@ -897,6 +916,54 @@ mod tests {
             "{again:?}"
         );
         assert_eq!(decision_log(&dir, &task, "d1"), applied);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_op_comes_from_op_or_a_fenced_decision_never_both() {
+        let id = |op: Option<OpId>| op.map(|o| o.0);
+        assert_eq!(id(op_for("o", None, None, false).unwrap()), None);
+        assert_eq!(
+            id(op_for("o", Some("mine"), None, false).unwrap()),
+            Some("mine".into())
+        );
+        assert_eq!(
+            id(op_for("o", None, Some("d1"), true).unwrap()),
+            Some("by:o/dec:d1".into())
+        );
+        assert!(op_for("o", Some("mine"), Some("d1"), true).is_err());
+        let unfenced = op_for("o", None, Some("d1"), false).unwrap_err();
+        assert!(unfenced.contains("--fence"), "{unfenced}");
+        assert!(op_for("o", None, Some("a/b"), true).is_err());
+    }
+
+    /// `bbp decision` answers one row per id, in order; an empty, malformed or unknown id is
+    /// a refusal or "not applied", never a guess.
+    #[test]
+    fn the_decision_lookup_answers_per_id_and_refuses_bad_ids() {
+        let (dir, task) = task("decision-json", false);
+        let rev = open_driver(&dir, &task).unwrap().state.rev.0;
+        let op = decision_op("owner", "d1").unwrap();
+        perform_fenced(
+            &dir,
+            &task,
+            "extend",
+            &["messages", "1000"],
+            None,
+            "owner",
+            Some(Rev(rev)),
+            Some(op),
+        )
+        .unwrap();
+        let rows = crate::decision::json(&dir, &task, "d1,nope,d1").unwrap();
+        let applied: Vec<bool> = rows
+            .match_indices("\"applied\":")
+            .map(|(i, m)| rows[i + m.len()..].starts_with("true"))
+            .collect();
+        assert_eq!(applied, [true, false, true], "{rows}");
+        for bad in ["", "a/b", "d1,", ",d1", "x y"] {
+            assert!(crate::decision::json(&dir, &task, bad).is_err(), "{bad:?}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

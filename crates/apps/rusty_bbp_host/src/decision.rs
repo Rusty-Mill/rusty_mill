@@ -25,13 +25,16 @@ pub struct Decision {
 }
 
 /// What `events` say of each of `ids`, in order. The first `op_accepted` of an
-/// id counts; a replay writes none.
-pub fn lookup(events: &[Event], ids: &[String]) -> Vec<Decision> {
+/// id counts; a replay writes none. Only the task's `human` principal counts:
+/// an agent chooses its own op strings, so one written as `by:x/dec:ID` is no
+/// answer of the human's.
+pub fn lookup(events: &[Event], human: &PrincipalId, ids: &[String]) -> Vec<Decision> {
     ids.iter()
         .map(|id| {
-            let at = events.iter().position(
-                |e| matches!(e, Event::OpAccepted { op, .. } if human::decision_of(op) == Some(id)),
-            );
+            let at = events.iter().position(|e| {
+                matches!(e, Event::OpAccepted { principal, op, .. }
+                    if principal == human && human::decision_of(op) == Some(id))
+            });
             Decision {
                 decision: id.clone(),
                 applied: at.is_some(),
@@ -49,16 +52,24 @@ pub fn json(dir: &Path, task: &TaskId, ids: &str) -> Result<String, String> {
     }
     let d = open_driver(dir, task)?;
     let events = d.store.events(task, 0).map_err(|e| format!("{e:?}"))?;
-    rusty_serde::json::to_string(&lookup(&events, &ids)).map_err(|e| e.to_string())
+    rusty_serde::json::to_string(&lookup(&events, &d.state.human, &ids)).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn human() -> PrincipalId {
+        PrincipalId("human".into())
+    }
+
     fn accepted(op: &str) -> Event {
+        accepted_by(human(), op)
+    }
+
+    fn accepted_by(principal: PrincipalId, op: &str) -> Event {
         Event::OpAccepted {
-            principal: PrincipalId("human".into()),
+            principal,
             op: OpId(op.into()),
             payload: Sha256::of(b"x"),
             response: Response::Ok,
@@ -73,7 +84,7 @@ mod tests {
             accepted("by:other/dec:b"),
         ];
         let ids = ["a.0", "b", "c"].map(str::to_owned);
-        let got = lookup(&log, &ids);
+        let got = lookup(&log, &human(), &ids);
         assert_eq!(
             got.iter().map(|d| (d.applied, d.rev)).collect::<Vec<_>>(),
             [(true, Some(2)), (true, Some(3)), (false, None)]
@@ -83,6 +94,14 @@ mod tests {
     #[test]
     fn an_old_log_without_ids_reads_as_not_applied() {
         let log = [accepted("auto-00"), accepted("by:nano/ff00")];
-        assert!(!lookup(&log, &["auto-00".to_owned()])[0].applied);
+        assert!(!lookup(&log, &human(), &["auto-00".to_owned()])[0].applied);
+    }
+
+    /// An agent picks its own op strings, so an op shaped like the human's decision
+    /// op, written by another principal, is not an answer.
+    #[test]
+    fn an_agent_op_that_imitates_a_decision_id_does_not_count() {
+        let log = [accepted_by(PrincipalId("agent:x".into()), "by:nano/dec:a")];
+        assert!(!lookup(&log, &human(), &["a".to_owned()])[0].applied);
     }
 }

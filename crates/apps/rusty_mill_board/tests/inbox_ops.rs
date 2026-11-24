@@ -37,6 +37,10 @@ struct Fake {
     fail_before: AtomicBool,
     /// The host predates `bbp decision`.
     old_host: AtomicBool,
+    /// The host ignores the decision id it is sent (rolled back between probe and send).
+    ignore_id: AtomicBool,
+    /// `open` answers only a lone task, not a list (so the board's inbox cannot see rows).
+    list_only_alone: AtomicBool,
     /// The decision ids the host applied, with the rev.
     decided: Mutex<Vec<String>>,
     /// The `verb args` of every command each act sent.
@@ -57,6 +61,9 @@ impl Fake {
 impl Escalations for Fake {
     fn open(&self, tasks: &[String]) -> Result<Vec<Escalation>, InboxError> {
         self.asked.lock().unwrap().push(tasks.to_vec());
+        if self.list_only_alone.load(Ordering::SeqCst) && tasks.len() != 1 {
+            return Ok(Vec::new());
+        }
         Ok(self
             .rows
             .lock()
@@ -113,7 +120,7 @@ impl Escalations for Fake {
             self.rows.lock().unwrap().retain(|r| r.id != e.id);
         }
         let record = |this: &Self| {
-            if let Some(id) = decision {
+            if let Some(id) = decision.filter(|_| !this.ignore_id.load(Ordering::SeqCst)) {
                 this.decided.lock().unwrap().push(id.to_owned());
             }
         };
@@ -1051,4 +1058,50 @@ fn a_host_rolled_back_after_a_tracked_card_never_closes_it() {
     let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
     assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
     assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
+}
+
+/// The host is rolled back between the capability probe and the send, so it applies the send
+/// without recording its id. The board notices the id is missing after the commit and files the
+/// legacy card, so a later retry is never settled as "not applied".
+#[test]
+fn a_send_whose_id_never_reached_the_log_is_marked_untracked() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        ignore_id: AtomicBool::new(true),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(remediate_cards(&board).len(), 2, "tracked and legacy cards");
+
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
+}
+
+/// The board's inbox can hide an escalation BBP still lists (here a host that answers a lone
+/// task and not a list). Gone from the board's view is not gone from BBP, so nothing settles.
+#[test]
+fn an_escalation_bbp_still_lists_is_not_gone() {
+    let fake = Arc::new(Fake {
+        list_only_alone: AtomicBool::new(true),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    let nano = board.roles().actor("nano", "human").unwrap();
+    let other = board.add(&nano, "another task", "", vec![]).unwrap();
+    board.bind_execution(other.id, link("T2"), &nano).unwrap();
+    fake.fail_before.store(true, Ordering::SeqCst);
+    // Sent while it was visible to the board? No: the board never lists it now, but a card
+    // for the decision exists from an earlier send.
+    fake.list_only_alone.store(false, Ordering::SeqCst);
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    fake.fail_before.store(false, Ordering::SeqCst);
+    fake.list_only_alone.store(true, Ordering::SeqCst);
+
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board)[0].closed.is_none());
 }

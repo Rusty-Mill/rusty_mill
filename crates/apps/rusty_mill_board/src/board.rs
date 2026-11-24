@@ -17,7 +17,7 @@ use crate::domain::{
     import_id, is_pull_link, text_hash,
 };
 use crate::external::Observation;
-use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
+use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome, plan};
 use crate::metrics::{Metrics, metrics};
 use crate::milestones::{MemMilestones, Milestone, MilestoneEdit, MilestoneStore};
 use crate::projects::{Projects, Statuses};
@@ -777,6 +777,13 @@ impl<S: Store> Board<S> {
                 "this decision drops acted-on work, and its Remediate card must be written to a durable store first: start the board with --tick-url".into(),
             ));
         }
+        // A decision id rides one command (a replay writes no events, so a later command
+        // would be fenced on the wrong rev): refuse before any card is written.
+        if plan(&e, action).map_err(inbox_error)?.len() != 1 {
+            return Err(BoardError::Refused(
+                "a decision that drops acted-on work must be one command".into(),
+            ));
+        }
         // Write ahead: the Remediate card is committed before BBP is asked to drop the
         // work, so no drop sent from here can lose its card. A retry finds the card by
         // its derived id, whether BBP's answer was lost or the escalation is already gone.
@@ -789,9 +796,11 @@ impl<S: Store> Board<S> {
         };
         // A host that predates `bbp decision` would ignore the id and apply the send
         // untracked, so its card is filed at the legacy id, which is never settled.
-        let capable = source
-            .applied(&e.task, &decision.tracked_id(&project)?.to_string())
-            .is_ok();
+        let probe = source.applied(&e.task, &decision.tracked_id(&project)?.to_string());
+        if let Err(err) = &probe {
+            rusty_log::warn!(task = %e.task, error = %err, "bbp cannot track decision ids: filing an untracked card");
+        }
+        let capable = probe.is_ok();
         let (card, tracked) =
             self.remediate(by, &project, &e, &decision, &dropped, &dry, capable)?;
         // Only a send this board can track later carries an id: a card from before ids
@@ -806,6 +815,15 @@ impl<S: Store> Board<S> {
                 )),
                 other => other,
             })?;
+        // A host rolled back between the probe and the send ignores `--decision`: if the
+        // log does not show the id of a send that committed, nothing about it is provable,
+        // so the legacy card is filed too (and from then on decides).
+        if let (Outcome::Done, Some(sent)) = (&outcome, &id)
+            && !matches!(source.applied(&e.task, sent), Ok(Some(_)))
+        {
+            rusty_log::warn!(card = %card.id, "a committed send is not in BBP's log under its id: marking it untracked");
+            self.remediate(by, &project, &e, &decision, &dropped, &dry, false)?;
+        }
         if let Outcome::Refused { step: 0, code, .. } = &outcome {
             // A stale fence can never apply later, so BBP's log settles the card. For any
             // other refusal only this send is known to have written nothing: another send
@@ -857,9 +875,14 @@ impl<S: Store> Board<S> {
         let (card, tracked) = self
             .remediation_card(by, &project, &decision)?
             .ok_or_else(closed)?;
-        // The escalation is gone, so the log has moved past `rev`: a send that was not
-        // applied by now never will be.
-        let settled = self.settle(by, self.inbox_source(by)?, task, &card, tracked, true)?;
+        // BBP itself no longer lists the escalation (the board's inbox also hides ones it
+        // cannot show), so its log has moved past `rev`: a send not applied by now never
+        // will be.
+        let source = self.inbox_source(by)?;
+        let gone = source
+            .open(&[task.to_owned()])
+            .is_ok_and(|rows| rows.iter().all(|r| r.id != id));
+        let settled = self.settle(by, source, task, &card, tracked, gone)?;
         Ok(InboxAnswer::Recorded {
             card: InboxCard::of(&card),
             settled,
@@ -906,8 +929,12 @@ impl<S: Store> Board<S> {
         }
         let note = "BBP's log holds no such decision and its escalation has moved on, so it can never apply: nothing was dropped.";
         match self.close(card.id, CloseReason::WontDo, Some(note), by) {
-            // Someone already closed or started it: leave it to them.
-            Ok(_) | Err(BoardError::Terminal | BoardError::Refused(_)) => Ok(Settled::NotApplied),
+            Ok(_) | Err(BoardError::Terminal) => Ok(Settled::NotApplied),
+            // Started or claimed by someone: the card stays, whatever the log says.
+            Err(BoardError::Refused(why)) => {
+                rusty_log::warn!(card = %card.id, %why, "cannot close a Remediate card");
+                Ok(Settled::Unknown)
+            }
             Err(err) => Err(err),
         }
     }
