@@ -1645,7 +1645,7 @@ pub static CATALOG: &[Method] = &[
     },
     Method {
         name: "terminal.rerun",
-        doc: "Start again the command a held or restored block's program was started \
+        doc: "Start again the command a held block's program was started \
               with (its program, arguments and last working directory), in the block, \
               under the lease; the screen stays and a line says when. Only once the \
               program is gone, and never for an agent's block, which is re-run through \
