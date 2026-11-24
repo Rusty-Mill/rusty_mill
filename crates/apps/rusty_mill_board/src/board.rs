@@ -1151,8 +1151,14 @@ impl<S: Store> Board<S> {
     }
 
     /// Replace what the merge watch found (see [`crate::mergewatch::scan`]); `truncated` when it
-    /// read only the newest closed pull requests of some repository.
-    pub fn set_merged_open(&self, found: Vec<crate::mergewatch::MergedOpen>, truncated: bool) {
+    /// read only the newest closed pull requests of some repository, `partial` when some
+    /// repository could not be read.
+    pub fn set_merged_open(
+        &self,
+        found: Vec<crate::mergewatch::MergedOpen>,
+        truncated: bool,
+        partial: bool,
+    ) {
         *self
             .merged_open
             .lock()
@@ -1161,7 +1167,7 @@ impl<S: Store> Board<S> {
             crate::mergewatch::WatchStatus {
                 checked_ms: Some((self.clock)()),
                 truncated,
-                error: false,
+                error: partial,
             },
         );
     }

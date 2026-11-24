@@ -108,26 +108,91 @@ const VERBS: [&str; 9] = [
     "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
 ];
 
-/// The prose lines of a pull request body: no fenced code, HTML comments, quotes, or inline
-/// code, which may quote a directive without meaning it.
+/// Columns of leading whitespace, a tab reaching the next multiple of four.
+fn indent(line: &str) -> usize {
+    let mut cols = 0;
+    for c in line.chars() {
+        match c {
+            ' ' => cols += 1,
+            '\t' => cols = (cols / 4 + 1) * 4,
+            _ => break,
+        }
+    }
+    cols
+}
+
+/// A code fence line: its character and length (three or more of `` ` `` or `~`).
+fn fence(line: &str) -> Option<(char, usize)> {
+    let t = line.trim_start();
+    let ch = t.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let len = t.chars().take_while(|c| *c == ch).count();
+    (len >= 3 && indent(line) < 4).then_some((ch, len))
+}
+
+/// `text` without its inline code spans: a run of backticks up to the next run of the same
+/// length. An unmatched run is literal.
+fn without_inline_code(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let run = |i: usize| chars[i..].iter().take_while(|c| **c == '`').count();
+    let (mut out, mut i) = (String::new(), 0);
+    while i < chars.len() {
+        if chars[i] != '`' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let n = run(i);
+        let mut j = i + n;
+        let close = loop {
+            if j >= chars.len() {
+                break None;
+            }
+            if chars[j] == '`' {
+                let m = run(j);
+                if m == n {
+                    break Some(j + m);
+                }
+                j += m;
+            } else {
+                j += 1;
+            }
+        };
+        match close {
+            Some(end) => i = end,
+            None => {
+                out.extend(std::iter::repeat_n('`', n));
+                i += n;
+            }
+        }
+    }
+    out
+}
+
+/// The prose lines of a pull request body: no fenced or indented code, HTML comments, quotes,
+/// or inline code, which may quote a directive without meaning it.
 fn prose(body: &str) -> Vec<String> {
-    let (mut fenced, mut comment) = (false, false);
+    let (mut open, mut comment) = (None::<(char, usize)>, false);
     let mut out = Vec::new();
     for raw in body.lines() {
-        // Four spaces or a tab of indentation make an (indented) code block, before any trimming.
-        if !fenced && !comment && (raw.starts_with("    ") || raw.starts_with('\t')) {
+        if let Some((ch, len)) = open {
+            // Only a bare fence of the same character, at least as long, closes it.
+            let t = raw.trim();
+            if indent(raw) < 4 && t.len() >= len && t.chars().all(|c| c == ch) {
+                open = None;
+            }
             continue;
         }
-        let line = raw.trim();
-        if line.starts_with("```") || line.starts_with("~~~") {
-            fenced = !fenced;
-            continue;
-        }
-        if fenced || line.starts_with('>') {
-            continue;
+        if !comment {
+            if let Some(f) = fence(raw) {
+                open = Some(f);
+                continue;
+            }
+            if indent(raw) >= 4 || raw.trim_start().starts_with('>') {
+                continue;
+            }
         }
         let mut text = String::new();
-        let mut rest = line;
+        let mut rest = raw;
         while !rest.is_empty() {
             if comment {
                 match rest.split_once("-->") {
@@ -142,20 +207,16 @@ fn prose(body: &str) -> Vec<String> {
                 break;
             }
         }
-        let mut plain = String::new();
-        for (i, part) in text.split('`').enumerate() {
-            if i % 2 == 0 {
-                plain.push_str(part);
-            }
-        }
-        out.push(plain.trim().to_owned());
+        out.push(without_inline_code(&text).trim().to_owned());
     }
     out
 }
 
-/// `N` of `#N` or `#N.`, nothing else.
+/// `N` of `#N` or `#N.`: digits only (no sign), nothing else.
 fn card_number(word: &str) -> Option<u64> {
-    word.strip_prefix('#')?.trim_end_matches('.').parse().ok()
+    let digits = word.strip_prefix('#')?.trim_end_matches('.');
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| digits.parse().ok())?
 }
 
 /// The card numbers `body` names in prose, as `(number, closes)`. `closes` only for a line
@@ -190,9 +251,10 @@ pub fn card_refs(body: &str) -> Vec<(u64, bool)> {
 
 /// Whether `link` is pull request `url`, ignoring a query, fragment or `/files`-style tail.
 fn same_pull(link: &str, url: &str) -> bool {
+    let (link, url) = (link.to_ascii_lowercase(), url.to_ascii_lowercase());
     let bare = link.split(['?', '#']).next().unwrap_or_default();
     let head = bare.split('/').take(7).collect::<Vec<_>>().join("/");
-    let (Some(a), Some(b)) = (pull_parts(&head), pull_parts(url)) else {
+    let (Some(a), Some(b)) = (pull_parts(&head), pull_parts(&url)) else {
         return false;
     };
     a == b
@@ -207,10 +269,19 @@ pub fn scan(
     prs: &[MergedPr],
     github_of: &dyn Fn(&str) -> Vec<String>,
 ) -> Vec<MergedOpen> {
-    let by_number: BTreeMap<u64, &Card> = cards
-        .iter()
-        .filter(|c| c.column != Column::DONE && c.archived_ms.is_none())
-        .filter_map(|c| c.number.map(|n| (n, c)))
+    // A number two cards share names neither: like `Board::get_number`, never guess.
+    let mut sharing: BTreeMap<u64, Vec<&Card>> = BTreeMap::new();
+    for c in cards {
+        if let Some(n) = c.number {
+            sharing.entry(n).or_default().push(c);
+        }
+    }
+    let by_number: BTreeMap<u64, &Card> = sharing
+        .into_iter()
+        .filter_map(|(n, v)| match v[..] {
+            [c] if c.column != Column::DONE && c.archived_ms.is_none() => Some((n, c)),
+            _ => None,
+        })
         .collect();
     let mut found: BTreeMap<Uuid, MergedOpen> = BTreeMap::new();
     let mut note = |card: &Card, why: Why, repo: &str, url: &str| {
@@ -240,7 +311,7 @@ pub fn scan(
         .map(|c| (c.id, github_of(&c.project)))
         .collect();
     for pr in prs {
-        let ours = |c: &Card| bound[&c.id].contains(&pr.repo);
+        let ours = |c: &Card| bound.get(&c.id).is_some_and(|b| b.contains(&pr.repo));
         for (n, closes) in card_refs(&pr.body) {
             if let Some(card) = by_number.get(&n).filter(|c| ours(c)) {
                 note(
@@ -264,42 +335,49 @@ pub fn scan(
 
 /// One watch run: read the recently merged pull requests of every registered GitHub
 /// repository, [`scan`] the board's cards and keep the result for `board_metrics`. Reads only.
-/// A failed read keeps the last list and records the error beside it ([`WatchStatus`]).
+/// A repository that cannot be read is skipped and flagged ([`WatchStatus::error`]); when none
+/// can be read the last list stays, flagged the same way.
 ///
 /// # Errors
-/// The first repository or board failure.
+/// Every repository (or the board) failed.
 pub fn watch(board: &Shared, pulls: &dyn MergedPulls) -> Result<usize, String> {
-    let run = || -> Result<(Vec<MergedOpen>, bool), String> {
-        let projects = board.projects();
-        let slugs: Vec<&str> = projects.github_slugs().collect();
-        let (mut merged, mut truncated) = (Vec::new(), false);
-        for slug in &slugs {
-            let recent = pulls
-                .recent_merged(slug)
-                .map_err(|e| format!("{slug}: {e}"))?;
-            truncated |= recent.truncated;
-            merged.extend(recent.prs);
-        }
-        let cards = board.list(None).map_err(|e| e.to_string())?;
-        let github_of = |project: &str| -> Vec<String> {
-            projects
-                .repos_of(project)
-                .filter_map(|r| projects.github_of(r).map(str::to_owned))
-                .collect()
-        };
-        Ok((scan(&cards, &merged, &github_of), truncated))
-    };
-    match run() {
-        Ok((found, truncated)) => {
-            let n = found.len();
-            board.set_merged_open(found, truncated);
-            Ok(n)
-        }
-        Err(e) => {
-            board.note_merge_watch_failed();
-            Err(e)
+    let projects = board.projects();
+    let slugs: Vec<&str> = projects.github_slugs().collect();
+    let (mut merged, mut truncated, mut failed) = (Vec::new(), false, Vec::new());
+    for slug in &slugs {
+        match pulls.recent_merged(slug) {
+            Ok(recent) => {
+                truncated |= recent.truncated;
+                merged.extend(recent.prs);
+            }
+            // One unreadable repository does not stop the others; the status flags it.
+            Err(e) => failed.push(format!("{slug}: {e}")),
         }
     }
+    if !slugs.is_empty() && failed.len() == slugs.len() {
+        board.note_merge_watch_failed();
+        return Err(failed.join("; "));
+    }
+    let cards = match board.list(None) {
+        Ok(cards) => cards,
+        Err(e) => {
+            board.note_merge_watch_failed();
+            return Err(e.to_string());
+        }
+    };
+    for f in &failed {
+        rusty_log::warn!(error = %f, "merge watch could not read a repository");
+    }
+    let github_of = |project: &str| -> Vec<String> {
+        projects
+            .repos_of(project)
+            .filter_map(|r| projects.github_of(r).map(str::to_owned))
+            .collect()
+    };
+    let found = scan(&cards, &merged, &github_of);
+    let n = found.len();
+    board.set_merged_open(found, truncated, !failed.is_empty());
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -358,6 +436,12 @@ mod tests {
             "<!--\nCloses card #5\n-->",
             "Example:\n\n    Closes card #5",
             "Example:\n\n\tCloses card #5",
+            "  \tCloses card #5",
+            "````\n```\nx\n```\nCloses card #5\n````",
+            "```\n~~~\nCloses card #5\n~~~\n```",
+            "```\n    ```\nCloses card #5\n```",
+            "``Closes card #5``",
+            "Closes card #+5",
         ] {
             assert!(
                 card_refs(body).iter().all(|(_, closes)| !closes),
@@ -500,5 +584,48 @@ mod tests {
         // Project q lives in repository o/other: the link read from o/r no longer applies.
         b.assign(card.id, "q", &who).expect("assigned");
         assert!(b.metrics(|_| true).expect("metrics").merged_open.is_empty());
+    }
+
+    #[test]
+    fn text_after_a_closed_fence_or_unmatched_ticks_is_still_prose() {
+        assert_eq!(card_refs("```\nx\n```\nCloses card #5"), [(5, true)]);
+        assert_eq!(card_refs("a ` tick\nCloses card #5"), [(5, true)]);
+    }
+
+    #[test]
+    fn numbers_two_cards_share_and_case_differences_are_handled() {
+        let a = card(1, &["https://github.com/O/R/pull/9"]);
+        let mut b = card(2, &[]);
+        b.title = "other".into();
+        let dup = card(2, &[]);
+        let prs = [pr(9, "Closes card #2")];
+        let got = scan(&[a, b, dup], &prs, &|_| vec!["o/r".to_owned()]);
+        // Card 2 is ambiguous: neither card is listed; card 1's evidence matches despite case.
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].number, got[0].why), (Some(1), Why::Evidence));
+    }
+
+    #[test]
+    fn an_unreadable_repository_is_skipped_and_flagged() {
+        struct Half;
+        impl MergedPulls for Half {
+            fn recent_merged(&self, slug: &str) -> Result<Recent, String> {
+                if slug == "o/other" {
+                    return Err("404".into());
+                }
+                Ok(Recent {
+                    prs: vec![pr(1, "Closes card #1")],
+                    truncated: false,
+                })
+            }
+        }
+        let b = board();
+        let who = b.roles().actor("nano", "human").expect("role");
+        b.add_in(&who, "p", "work", "", vec![]).expect("card");
+        assert_eq!(watch(&b, &Half), Ok(1));
+        let m = b.metrics(|_| true).expect("metrics");
+        assert_eq!(m.merged_open.len(), 1);
+        assert!(m.merged_watch.error);
+        assert!(m.merged_watch.checked_ms.is_some());
     }
 }

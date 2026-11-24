@@ -452,4 +452,45 @@ mod tests {
         assert!(forge.recent_merged("not a slug").is_err());
         assert!(server.join().expect("server")[0].starts_with("GET /repos/o/r/pulls?state=closed"));
     }
+
+    fn page(n: usize, merged: bool) -> String {
+        let merged_at = if merged {
+            r#""2026-11-20T00:00:00Z""#
+        } else {
+            "null"
+        };
+        let items: Vec<String> = (0..n)
+            .map(|i| {
+                format!(r#"{{"html_url":"https://github.com/o/r/pull/{i}","body":"b","merged_at":{merged_at}}}"#)
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    }
+
+    #[test]
+    fn recent_merged_reads_pages_and_flags_a_cut_off_read() {
+        let (full, short) = (page(PAGE, true), page(3, true));
+        // Two full pages then a short one: 203 merged, not truncated.
+        let (base, server) = serve(&[(200, &full), (200, &full), (200, &short)]);
+        let forge = GithubMerged::new(&base, "hunter2").expect("client");
+        let got = forge.recent_merged("o/r").expect("merged");
+        assert_eq!((got.prs.len(), got.truncated), (2 * PAGE + 3, false));
+        assert_eq!(server.join().expect("server").len(), 3);
+        // Five full pages: stops at the page cap and says so.
+        let replies = vec![(200, full.as_str()); WATCH_PAGES];
+        let (base, server) = serve(&replies);
+        let forge = GithubMerged::new(&base, "hunter2").expect("client");
+        let got = forge.recent_merged("o/r").expect("merged");
+        assert_eq!((got.prs.len(), got.truncated), (WATCH_PAGES * PAGE, true));
+        assert_eq!(server.join().expect("server").len(), WATCH_PAGES);
+    }
+
+    #[test]
+    fn recent_merged_fails_on_a_bad_status_or_body() {
+        let (base, server) = serve(&[(404, r#"{"message":"Not Found"}"#), (200, "not json")]);
+        let forge = GithubMerged::new(&base, "hunter2").expect("client");
+        assert!(forge.recent_merged("o/r").expect_err("404").contains("404"));
+        assert!(forge.recent_merged("o/r").is_err());
+        server.join().expect("server");
+    }
 }
