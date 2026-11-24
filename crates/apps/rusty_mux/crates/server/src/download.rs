@@ -10,20 +10,15 @@ pub(crate) const CHUNK: usize = 192 << 10;
 /// The largest file read; an offset is 32 bits, and this is the upload's limit.
 pub(crate) const FILE_MAX: u64 = 2 << 30;
 
-/// Whether `path` names another machine (a UNC path), which opening would
-/// make the server contact.
+/// Whether `path` names another machine (a UNC path, or what a Windows
+/// path resolves to on one), which opening would make the server contact.
 fn is_network_path(path: &str) -> bool {
     path.starts_with("\\\\") || (cfg!(windows) && path.starts_with("//"))
 }
 
 /// The file `path` names, taken relative to `base` (the block's working
-/// directory), resolved; refused when it is not a regular file, is over
-/// [`FILE_MAX`], or lies inside `private` (the server's state directory).
-fn resolve(
-    base: Option<&str>,
-    path: &str,
-    private: Option<&Path>,
-) -> Result<(PathBuf, u64), String> {
+/// directory), resolved to the path it really has.
+fn locate(base: Option<&str>, path: &str) -> Result<PathBuf, String> {
     if is_network_path(path) {
         return Err("a network path is not read".into());
     }
@@ -33,30 +28,89 @@ fn resolve(
         None => return Err("the program's working directory is unknown".into()),
     };
     let file = fs::canonicalize(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-    if private.is_some_and(|dir| fs::canonicalize(dir).is_ok_and(|d| file.starts_with(d))) {
-        return Err("the server's own state directory is not read".into());
+    // Windows resolves a mapped or redirected path to its UNC form.
+    if file.to_string_lossy().starts_with("\\\\?\\UNC\\") {
+        return Err("a network path is not read".into());
     }
-    let meta = fs::metadata(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-    if !meta.is_file() {
-        return Err(format!("{} is not a regular file", file.display()));
+    Ok(file)
+}
+
+/// The state directory as it really is, or why not. With one to keep out and
+/// no way to say where it is, nothing is read.
+fn private_root(private: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    private
+        .map(|dir| {
+            fs::canonicalize(dir).map_err(|e| {
+                format!("the server's state directory cannot be resolved ({e}), so no file is read")
+            })
+        })
+        .transpose()
+}
+
+/// Checks the object `f` really is, not the name it was opened by: it is
+/// the file `file` still names, and it is not inside `root`. Linux asks the
+/// kernel for the opened object's own path; elsewhere the name is resolved
+/// again and must still reach the same file.
+fn verify(f: &File, file: &Path, root: Option<&Path>) -> Result<(), String> {
+    let again = fs::canonicalize(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    if again != file {
+        return Err(format!("{} changed while it was opened", file.display()));
     }
-    if meta.len() > FILE_MAX {
-        return Err(format!("{} is over {FILE_MAX} bytes", file.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (opened, named) = (
+            f.metadata().map_err(|e| e.to_string())?,
+            fs::metadata(file).map_err(|e| e.to_string())?,
+        );
+        if (opened.dev(), opened.ino()) != (named.dev(), named.ino()) {
+            return Err(format!("{} changed while it was opened", file.display()));
+        }
     }
-    Ok((file, meta.len()))
+    #[cfg(target_os = "linux")]
+    if let Some(root) = root {
+        use std::os::fd::AsRawFd;
+        let real = fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd()))
+            .map_err(|e| format!("the opened file cannot be placed ({e}), so it is not read"))?;
+        if real.starts_with(root) {
+            return Err("the server's own state directory is not read".into());
+        }
+    }
+    let _ = (f, root);
+    Ok(())
 }
 
 /// The reply for `path` from `offset`: its size, a newline, then the base64
-/// of the next chunk (nothing past the end).
+/// of the next chunk (nothing past the end). A regular file of at most
+/// [`FILE_MAX`], outside `private` (the server's state directory), judged on
+/// the file as opened.
 pub(crate) fn read(
     base: Option<&str>,
     path: &str,
     offset: u32,
     private: Option<&Path>,
 ) -> Result<String, String> {
-    let (file, size) = resolve(base, path, private)?;
+    let file = locate(base, path)?;
+    let root = private_root(private)?;
+    if root.as_ref().is_some_and(|root| file.starts_with(root)) {
+        return Err("the server's own state directory is not read".into());
+    }
     let io = |e: std::io::Error| format!("{}: {e}", file.display());
+    // Before opening, which a pipe or device would make wait; the opened
+    // object is checked again below.
+    if !fs::metadata(&file).map_err(io)?.is_file() {
+        return Err(format!("{} is not a regular file", file.display()));
+    }
     let mut f = File::open(&file).map_err(io)?;
+    verify(&f, &file, root.as_deref())?;
+    let meta = f.metadata().map_err(io)?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file", file.display()));
+    }
+    let size = meta.len();
+    if size > FILE_MAX {
+        return Err(format!("{} is over {FILE_MAX} bytes", file.display()));
+    }
     f.seek(SeekFrom::Start(u64::from(offset))).map_err(io)?;
     let mut chunk = Vec::with_capacity(CHUNK);
     f.take(CHUNK as u64).read_to_end(&mut chunk).map_err(io)?;
@@ -136,5 +190,42 @@ mod tests {
         }
         fs::remove_dir_all(state).unwrap();
         fs::remove_dir_all(free).unwrap();
+    }
+
+    #[test]
+    fn no_file_is_read_when_the_state_directory_cannot_be_placed() {
+        let dir = scratch();
+        fs::write(dir.join("f"), b"x").unwrap();
+        let gone = dir.join("no-such-state-dir");
+        let err = read(dir.to_str(), "f", 0, Some(&gone)).unwrap_err();
+        assert!(err.contains("cannot be resolved"), "{err}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_swapped_after_it_was_named_is_refused() {
+        let dir = scratch();
+        let file = fs::canonicalize(&dir).unwrap().join("f");
+        fs::write(&file, b"first").unwrap();
+        let opened = File::open(&file).unwrap();
+        // Another file takes the name between the lookup and the open.
+        fs::remove_file(&file).unwrap();
+        fs::write(&file, b"second").unwrap();
+        let err = verify(&opened, &file, None).unwrap_err();
+        assert!(err.contains("changed while it was opened"), "{err}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_opened_object_is_placed_by_the_kernel_not_by_its_name() {
+        let state = fs::canonicalize(scratch()).unwrap();
+        let file = state.join("key");
+        fs::write(&file, b"secret").unwrap();
+        let opened = File::open(&file).unwrap();
+        let err = verify(&opened, &file, Some(&state)).unwrap_err();
+        assert!(err.contains("state directory"), "{err}");
+        fs::remove_dir_all(state).unwrap();
     }
 }
