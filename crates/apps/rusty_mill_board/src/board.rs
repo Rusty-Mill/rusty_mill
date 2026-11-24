@@ -738,7 +738,7 @@ impl<S: Store> Board<S> {
             return self.closed_escalation(by, id, rev, action, dry_run);
         };
         if e.rev != rev {
-            // An earlier send at `rev` may have lost its answer: its card is settled now.
+            // An earlier send at `rev` may have lost its answer: the log may now show it applied.
             if !dry_run {
                 let project = owner.as_ref().map_or(DEFAULT_PROJECT, |c| &c.project);
                 let decision = Decision {
@@ -816,20 +816,21 @@ impl<S: Store> Board<S> {
                 other => other,
             })?;
         if let Outcome::Refused { step: 0, code, .. } = &outcome {
-            // A stale fence can never apply later, so BBP's log settles the card. For any
-            // other refusal only this send is known to have written nothing: another send
-            // of the same decision shares the card and may commit before or after a re-read.
+            // Only this send is known to have written nothing: another send of the same
+            // decision shares the card and may commit before or after a re-read, so the log
+            // is asked whether it applied.
             // Read the card again: a concurrent send may have filed an untracked one since.
             let tracked = self
                 .remediation_card(by, &project, &decision)?
                 .is_some_and(|(_, tracked)| tracked);
             let settled = self.settle(by, source, &e.task, &self.get(card.id)?, tracked)?;
             if settled == Settled::Unknown {
-                self.comment(
-                    card.id,
-                    by,
-                    &format!("BBP refused this send ({code}). Another send of the same decision may still apply it, so check BBP's log before closing this card."),
-                )?;
+                let said = format!(
+                    "BBP refused this send ({code}). Another send of the same decision may still apply it, so check BBP's log before closing this card."
+                );
+                if !self.get(card.id)?.comments.iter().any(|c| c.text == said) {
+                    self.comment(card.id, by, &said)?;
+                }
             }
         }
         Ok(InboxAnswer::Remediated { outcome, card })
