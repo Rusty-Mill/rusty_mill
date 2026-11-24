@@ -3198,9 +3198,9 @@ impl WindowState<'_> {
         }
         // The forward may have ended since it answered (the pane's connection
         // was replaced): the link opens only on a forward that still runs.
-        let forwarded = forwarded.and_then(|local| {
-            match self.source.forwarded_port(key, target.port) == Some(local) {
-                true => Ok(local),
+        let forwarded = forwarded.and_then(|bound| {
+            match self.source.forwarded_port(key, target.port) == Some(bound) {
+                true => Ok(bound.local),
                 false => Err("the forward ended; click the link again".to_owned()),
             }
         });
