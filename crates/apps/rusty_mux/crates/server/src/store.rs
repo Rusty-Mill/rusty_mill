@@ -126,14 +126,6 @@ impl Store {
         make_private_dir(&self.dir.join(format!("{block}.{UPLOAD}")))
     }
 
-    /// Deletes `block`'s uploaded files, if any: the block closed.
-    pub(crate) fn remove_uploads(&self, block: BlockId) -> io::Result<()> {
-        match fs::remove_dir_all(self.dir.join(format!("{block}.{UPLOAD}"))) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        }
-    }
-
     /// Opens the session records and returns what they hold, `Ok(None)`
     /// when they hold no session. Records that cannot be read are an error; a screen
     /// that cannot be read is skipped with a warning, so its block

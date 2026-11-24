@@ -8,7 +8,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 /// The most bytes one chunk carries.
@@ -142,6 +142,16 @@ fn receive_within(
     std::path::absolute(&target).map(Received::Done).map_err(io)
 }
 
+/// Deletes a closed block's upload folder on a thread of its own.
+pub(crate) fn discard(dir: PathBuf) {
+    std::thread::spawn(move || match fs::remove_dir_all(&dir) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            eprintln!("rusty-mux-server: removing {}: {e}", dir.display());
+        }
+        _ => {}
+    });
+}
+
 /// One block's upload authority: its transfers run one at a time, so the
 /// offsets, the byte budget and the final names are decided by one party,
 /// and once the block closes none runs again. A job that holds the slot as
@@ -179,11 +189,16 @@ impl Slot {
 
     /// The block closed: no job runs after this. Its folder goes now, or
     /// when the job in flight ends.
-    pub(crate) fn close(&self, dir: &Path) {
+    ///
+    /// The deletion runs on a thread of its own, never on the caller's.
+    pub(crate) fn close(self: &Arc<Self>, dir: PathBuf) {
         self.closing.store(true, Ordering::SeqCst);
-        if self.busy.try_lock().is_ok() {
-            self.clear(dir);
-        }
+        let slot = Arc::clone(self);
+        std::thread::spawn(move || {
+            if slot.busy.try_lock().is_ok() {
+                slot.clear(&dir);
+            }
+        });
     }
 
     fn clear(&self, dir: &Path) {
@@ -261,10 +276,15 @@ fn unique(dir: &Path, name: &str) -> PathBuf {
 fn make_room(dir: &Path, keep: &Path, keep_len: u64, max: u64) -> io::Result<()> {
     let mut files: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
     for folder in [dir.to_path_buf(), dir.join(PART)] {
-        let Ok(entries) = fs::read_dir(&folder) else {
-            continue;
+        // A folder that cannot be read leaves the budget unknown: nothing
+        // is written. Only a missing one is empty.
+        let entries = match fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
         };
-        for entry in entries.filter_map(Result::ok) {
+        for entry in entries {
+            let entry = entry?;
             let meta = entry.metadata()?;
             if meta.is_file() && entry.path() != keep {
                 files.push((meta.modified()?, meta.len(), entry.path()));
@@ -287,7 +307,7 @@ fn make_room(dir: &Path, keep: &Path, keep_len: u64, max: u64) -> io::Result<()>
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
-    use std::sync::{Arc, mpsc};
+    use std::sync::mpsc;
 
     fn scratch() -> PathBuf {
         static N: AtomicU32 = AtomicU32::new(0);
@@ -483,7 +503,7 @@ mod tests {
             })
         };
         started.recv().unwrap();
-        slot.close(&dir);
+        slot.close(dir.clone());
         assert!(
             dir.join("f").exists(),
             "the transfer in flight is not cut off"
@@ -509,6 +529,31 @@ mod tests {
             Ok(())
         });
         assert!(out.is_err() && !ran);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn closing_an_idle_slot_clears_the_folder_off_the_callers_thread() {
+        let dir = scratch();
+        fs::write(dir.join("f"), b"x").unwrap();
+        let slot = Arc::new(Slot::default());
+        slot.close(dir.clone());
+        for _ in 0..200 {
+            if !dir.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the folder was not cleared");
+    }
+
+    #[test]
+    fn an_unreadable_folder_stops_the_budget_check() {
+        let dir = scratch();
+        // `part` is a file: reading it as a folder fails, which is not
+        // the same as there being nothing in it.
+        fs::write(dir.join(PART), b"x").unwrap();
+        assert!(make_room(&dir, &dir.join("keep"), 0, BLOCK_MAX).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 }

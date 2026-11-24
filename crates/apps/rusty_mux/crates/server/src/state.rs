@@ -647,6 +647,9 @@ impl State {
             let answer = match rusty_tokio::time::timeout(listing::DEADLINE, work).await {
                 Ok(Ok(listed)) => listed,
                 Ok(Err(e)) => Err(format!("the read failed: {e}")),
+                Err(_) if method == "terminal.upload" => Err("the chunk timed out and may \
+                     still be written: send it again, and the next refusal says how much arrived"
+                    .into()),
                 Err(_) => Err("the read timed out".into()),
             };
             if let Some(shared) = weak.upgrade() {
@@ -3195,12 +3198,8 @@ impl State {
         let slot = self.uploads.borrow_mut().remove(&block);
         match (slot, self.store.as_ref()) {
             // Transfers in flight end first; the slot clears the folder.
-            (Some(slot), Some(store)) => slot.close(&store.upload_path(block)),
-            (None, Some(store)) => {
-                if let Err(e) = store.remove_uploads(block) {
-                    eprintln!("rusty-mux-server: removing block {block}'s uploads: {e}");
-                }
-            }
+            (Some(slot), Some(store)) => slot.close(store.upload_path(block)),
+            (None, Some(store)) => upload::discard(store.upload_path(block)),
             _ => {}
         }
     }
