@@ -256,9 +256,9 @@ impl Workspace {
     /// The held directory as a path only a child of this process resolves
     /// to it: its inherited descriptor. For the spawn's `chdir`.
     pub(crate) fn spawn_cwd(&self) -> Option<PathBuf> {
-        self.0
-            .as_ref()
-            .map(|r| PathBuf::from(format!("/proc/self/fd/{}", r.0)))
+        let path = PathBuf::from(format!("/proc/self/fd/{}", self.0.as_ref()?.0));
+        // Without a usable `/proc` the program starts at its path instead.
+        path.is_dir().then_some(path)
     }
 
     /// `names` walked down from the held directory, each opened from its

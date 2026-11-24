@@ -2455,10 +2455,11 @@ impl State {
         // spawn changes into the held descriptor, not the configured path, so
         // the two cannot name different directories. Where it can't be held,
         // the program starts at the path and the workspace stays unknown.
-        let workspace = listing::Workspace::open(std::path::Path::new(&config.cwd));
+        let mut workspace = listing::Workspace::open(std::path::Path::new(&config.cwd));
         let mut spawn = config.clone();
-        if let Some(held) = workspace.spawn_cwd() {
-            spawn.cwd = held.into();
+        match workspace.spawn_cwd() {
+            Some(held) => spawn.cwd = held.into(),
+            None => workspace = listing::Workspace::default(),
         }
         let started = Started {
             shell: launch.program.is_none(),
