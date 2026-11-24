@@ -24,7 +24,9 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver as Inbox, RecvTimeoutError, Sender, SyncSender};
+use std::sync::mpsc::{
+    Receiver as Inbox, RecvTimeoutError, Sender, SyncSender, TrySendError, channel, sync_channel,
+};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -36,6 +38,7 @@ use rusty_mux_client::attach::{
     first_session_name, reach_with, take_over_with,
 };
 use rusty_mux_client::checkpoint::{HistoryReceiver, Receiver};
+use rusty_mux_client::forward::{self, Spec, Want};
 use rusty_mux_client::older::Older;
 use rusty_mux_core::{
     BlockId, ClientId, Event, Layout, Selection, SessionId, Side, Size, WindowId,
@@ -45,8 +48,8 @@ use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Entry, Features, Launch, Message, Program, ShowTo, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
-    Act, BlockInfo, Detached, Dir, Feed, Float as Pane, Link, ListDone, Listed, Notice, PaneIo,
-    Remote, Session, Show, Source, Take, Tree,
+    Act, BlockInfo, Bound, Detached, Dir, Feed, Float as Pane, ForwardDone, Link, ListDone, Listed,
+    Notice, PaneIo, Remote, Session, Show, Source, Take, Tree,
 };
 
 use crate::floats;
@@ -86,7 +89,8 @@ pub const BLOCK: Features = PANE
     .union(Features::LEASE_REQUESTS)
     .union(Features::BACKGROUND_HISTORY)
     .union(Features::BLOCK_CALL)
-    .union(Features::DIR_LISTING);
+    .union(Features::DIR_LISTING)
+    .union(Features::PORT_FORWARD);
 
 /// Never set: the handshakes here are not cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -528,6 +532,25 @@ impl Source for MuxSource {
     fn list_dir(&self, key: u64, path: Option<String>, done: ListDone) {
         match self.pane(key) {
             Some(block) => block.list_dir(path, done),
+            None => done(Err("the block is not open".into())),
+        }
+    }
+
+    fn forwards(&self, key: u64) -> bool {
+        self.pane(key).is_some_and(|b| b.forwards)
+    }
+
+    fn forwarded_port(&self, key: u64, port: u16) -> Option<Bound> {
+        let block = self.pane(key)?;
+        let forwarder = lock(&block.forwarder);
+        let run = forwarder.as_ref()?;
+        let local = *run.ports.get(&port)?;
+        Some(Bound { local, run: run.id })
+    }
+
+    fn forward(&self, key: u64, port: u16, done: ForwardDone) {
+        match self.pane(key) {
+            Some(block) => block.forward(port, done),
             None => done(Err("the block is not open".into())),
         }
     }
@@ -1430,6 +1453,65 @@ struct Block {
     clipboard: bool,
     /// Who waits for a listing, by request number.
     listings: Mutex<HashMap<u64, ListDone>>,
+    /// The server tunnels ports on this connection (C81).
+    forwards: bool,
+    /// The run that tunnels this pane's ports, once one was asked for.
+    forwarder: Mutex<Option<Forwarder>>,
+    /// Which connection the block is on: 0 at first, and one more at each
+    /// [`Block::revive`]. A forward belongs to the connection it started on.
+    conn_gen: AtomicU64,
+}
+
+/// Numbers the forward runs of every pane, so none is taken for another.
+static RUNS: AtomicU64 = AtomicU64::new(1);
+
+/// Request numbers of a pane's forwards start here, apart from
+/// [`Block::next`]'s.
+const FORWARD_REQ: u64 = 1 << 40;
+
+/// Frames queued for a pane's forward run, and asks queued for it.
+const FORWARD_FRAMES: usize = 1024;
+const FORWARD_WANTS: usize = 16;
+
+/// How long a port may take to be listened on.
+const LISTEN_WAIT: Duration = Duration::from_secs(10);
+
+/// A pane's running [`forward::run_fed`], and what it listens on.
+struct Forwarder {
+    /// This run's number (see [`RUNS`]).
+    id: u64,
+    /// The connection it tunnels over (see [`Block::conn_gen`]).
+    conn: u64,
+    /// What the reader passes it of the server's frames; bounded, so a run
+    /// that stalls never makes the reader wait or the queue grow.
+    frames: SyncSender<Message>,
+    wants: SyncSender<Want>,
+    stop: Arc<AtomicBool>,
+    /// The local port of each remote port listened on.
+    ports: HashMap<u16, u16>,
+}
+
+/// Writes frames to a block's connection, whole, under its lock, so they
+/// never interleave with the pane's own.
+struct ConnWriter(Arc<Block>, Arc<AtomicBool>, u64);
+
+impl std::io::Write for ConnWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // The check and the write are one step under the connection's lock,
+        // as is the swap of the connection (`Block::revive`), so a stopped
+        // run never writes through the connection that replaced its own.
+        let mut conn = lock(&self.0.conn);
+        // Stopped, or the block is on another connection than the run's.
+        if self.1.load(Ordering::SeqCst) || self.0.conn_gen.load(Ordering::SeqCst) != self.2 {
+            return Err(std::io::ErrorKind::BrokenPipe.into());
+        }
+        conn.write_raw(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Why a block's reader stopped reading a connection.
@@ -1471,6 +1553,9 @@ impl Block {
                 .contains(Features::BLOCK_CALL.union(Features::DIR_LISTING)),
             listings: Mutex::new(HashMap::new()),
             clipboard: opened.features.contains(Features::CLIPBOARD),
+            forwards: opened.features.contains(Features::PORT_FORWARD),
+            forwarder: Mutex::new(None),
+            conn_gen: AtomicU64::new(0),
         });
         shared.send(|req| Message::Attach { req, block });
         let (tx, feed) = std::sync::mpsc::sync_channel(FEED_AHEAD);
@@ -1500,7 +1585,16 @@ impl Block {
     /// asked for again if wanted, as silence may have lost it.
     fn revive(&self, opened: Opened) {
         *lock(&self.takeover) = opened.takeover;
-        *lock(&self.conn) = opened.writer;
+        {
+            // The runs of the old connection end before the new one is
+            // written to, under the writer's lock: no gap between them.
+            let mut conn = lock(&self.conn);
+            // Counted before the runs end: one started from here on is of
+            // the new connection, which it writes to once this lock is let go.
+            self.conn_gen.fetch_add(1, Ordering::SeqCst);
+            self.stop_forwards();
+            *conn = opened.writer;
+        }
         let old = std::mem::replace(&mut *lock(&self.stream), opened.stream);
         // The reader leaves the old connection once it ends.
         let _ = old.shutdown(Shutdown::Both);
@@ -1552,6 +1646,150 @@ impl Block {
     fn listed(&self, req: u64, answer: Listed) -> bool {
         let done = lock(&self.listings).remove(&req);
         done.map(|done| done(answer)).is_some()
+    }
+
+    /// Listens on this machine for `port` of the block's host (C81) and
+    /// calls `done` with the local port. Needs the lease, as the server
+    /// does; a port already listened on answers with its listener. What
+    /// the server later refuses closes the connection that asked.
+    fn forward(self: &Arc<Self>, port: u16, done: ForwardDone) {
+        if !self.lease().held {
+            return done(Err(
+                "Another client holds this block's input; take it over to forward.".into(),
+            ));
+        }
+        let (answer, answered) = channel();
+        let generation = {
+            let mut forwarder = lock(&self.forwarder);
+            if let Some((run, local)) = forwarder
+                .as_ref()
+                .and_then(|f| Some((f.id, *f.ports.get(&port)?)))
+            {
+                return done(Ok(Bound { local, run }));
+            }
+            let run = forwarder.get_or_insert_with(|| self.start_forwarder());
+            let generation = Arc::clone(&run.stop);
+            let want = Want {
+                spec: Spec {
+                    local: None,
+                    remote: port,
+                },
+                answer,
+            };
+            match run.wants.try_send(want) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    return done(Err("too many forwards are waiting; try again".into()));
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    *forwarder = None;
+                    return done(Err("the forward ended; try again".into()));
+                }
+            }
+            generation
+        };
+        let block = Arc::clone(self);
+        std::thread::spawn(move || {
+            let local = match answered.recv_timeout(LISTEN_WAIT) {
+                Ok(Ok(bound)) => bound.local,
+                Ok(Err(e)) => return done(Err(format!("could not listen here: {e}"))),
+                Err(_) => return done(Err("listening here took too long".into())),
+            };
+            // The run that listened may be gone, and another its replacement:
+            // only its own forward counts.
+            // Answered under the lock, so a replacement cannot slip between
+            // the check and the answer.
+            match lock(&block.forwarder).as_mut() {
+                Some(run) if Arc::ptr_eq(&run.stop, &generation) => {
+                    run.ports.insert(port, local);
+                    done(Ok(Bound { local, run: run.id }));
+                }
+                _ => done(Err("the forward ended; try again".into())),
+            }
+        });
+    }
+
+    /// Starts the run that tunnels this block's ports, over its own
+    /// connection: the reader passes it the frames it is for.
+    fn start_forwarder(self: &Arc<Self>) -> Forwarder {
+        let (frames_tx, frames) = sync_channel(FORWARD_FRAMES);
+        let (wants_tx, wants) = sync_channel(FORWARD_WANTS);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (block, flag) = (Arc::clone(self), Arc::clone(&stop));
+        let id = RUNS.fetch_add(1, Ordering::Relaxed);
+        let conn = self.conn_gen.load(Ordering::SeqCst);
+        let spawned = std::thread::Builder::new()
+            .name(format!("mux-forward-{}", self.block))
+            .spawn(move || {
+                let ended = forward::run_fed(
+                    block.block,
+                    // Apart from every other run's, which may still be closing
+                    // its tunnels on this connection.
+                    FORWARD_REQ + (id << 24),
+                    frames,
+                    &wants,
+                    ConnWriter(Arc::clone(&block), Arc::clone(&flag), conn),
+                    &|| flag.load(Ordering::SeqCst),
+                );
+                if let forward::Ended::Lost(e) = ended {
+                    eprintln!("rusty-mux-gui: block {}: forwards ended: {e}", block.block);
+                }
+                // Not a newer run of the same block.
+                let mut current = lock(&block.forwarder);
+                if current
+                    .as_ref()
+                    .is_some_and(|f| Arc::ptr_eq(&f.stop, &flag))
+                {
+                    *current = None;
+                }
+            });
+        if let Err(e) = spawned {
+            eprintln!(
+                "rusty-mux-gui: block {}: starting forwards: {e}",
+                self.block
+            );
+        }
+        Forwarder {
+            id,
+            conn,
+            frames: frames_tx,
+            wants: wants_tx,
+            stop,
+            ports: HashMap::new(),
+        }
+    }
+
+    /// Ends the block's forwards, if any: its connection is going away.
+    fn stop_forwards(&self) {
+        if let Some(run) = lock(&self.forwarder).take() {
+            run.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Ends the forwards of connection `conn`, which the reader of that
+    /// connection lost; the run of a newer connection is not its to end.
+    fn stop_forwards_of(&self, conn: u64) {
+        let mut forwarder = lock(&self.forwarder);
+        if let Some(run) = forwarder.take_if(|f| f.conn == conn) {
+            run.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Hands the forward run of connection `conn` a frame that connection
+    /// brought, if it is the run's.
+    fn to_forwards(&self, conn: u64, message: Message) {
+        let mut forwarder = lock(&self.forwarder);
+        let Some(run) = forwarder.as_ref().filter(|f| f.conn == conn) else {
+            return;
+        };
+        // The reader never waits: a run that cannot keep up is ended, and
+        // the next click starts a fresh one.
+        if let Err(TrySendError::Full(_)) = run.frames.try_send(message) {
+            eprintln!("rusty-mux-gui: block {}: forwards fell behind", self.block);
+            // Dropped, not stopped: its frames end, so the run closes its
+            // tunnels on the server while its writer still works.
+            forwarder.take();
+        }
     }
 
     /// Asks for the lease when `wanted`, or gives it back when not.
@@ -1623,21 +1861,29 @@ impl Block {
         revived: &Inbox<Conn<UnixStream>>,
         feed: &SyncSender<Feed>,
     ) {
-        while let Read::Lost = self.read_one(&mut conn, feed) {
+        // The connection this reader is on, counted as `conn_gen` is.
+        let mut on = 0;
+        while let Read::Lost = self.read_one(&mut conn, feed, on) {
             self.fail_listings("the connection to the server was lost");
+            // Its tunnels are gone with the connection, and only its own.
+            self.stop_forwards_of(on);
             match revived.recv() {
-                Ok(next) => conn = next,
+                Ok(next) => {
+                    conn = next;
+                    on += 1;
+                }
                 Err(_) => break,
             }
         }
         // The feed ends with the reader, which ends the pane.
         *lock(&self.to_window) = None;
         self.fail_listings("the block ended");
+        self.stop_forwards();
     }
 
     /// Reads one connection into feed steps; the screen comes first, as
     /// a checkpoint.
-    fn read_one(&self, conn: &mut Conn<UnixStream>, feed: &SyncSender<Feed>) -> Read {
+    fn read_one(&self, conn: &mut Conn<UnixStream>, feed: &SyncSender<Feed>, on: u64) -> Read {
         let block = self.block;
         let mut checkpoint = Some(Receiver::default());
         // `None` once the history stream failed: the rest is ignored.
@@ -1728,6 +1974,18 @@ impl Block {
                     ..
                 } if b == block && client == self.client => {
                     self.update(|lease, send| lease.granted(until.is_some(), send));
+                    continue;
+                }
+                forward @ (Message::ForwardData { .. }
+                | Message::ForwardAck { .. }
+                | Message::CloseForward { .. }) => {
+                    self.to_forwards(on, forward);
+                    continue;
+                }
+                answer @ (Message::Done { req, .. } | Message::Failed { req, .. })
+                    if req >= FORWARD_REQ =>
+                {
+                    self.to_forwards(on, answer);
                     continue;
                 }
                 Message::Text { req, text } => {
