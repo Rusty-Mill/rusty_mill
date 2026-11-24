@@ -4,11 +4,14 @@
 //! A file grows under `part/` and moves to the folder itself on commit, so a
 //! half-sent file is never taken for a whole one.
 //!
-//! A chunk whose reply was lost is retried safely: the offset check refuses
-//! it and names how many bytes arrived, and where nothing is under `part/`
-//! it says the file may be whole already, in the folder. A finished file is
-//! never replaced, so a blind resend of a one-chunk file would be kept
-//! beside the first as `name-1`; the sender looks first.
+//! A chunk whose reply was lost is not safe to retry blindly. The offset
+//! check refuses a chunk that does not continue the partial and names how
+//! many bytes arrived; where nothing is under `part/` the outcome is
+//! unknown: the file may already be published in the folder, or the partial
+//! may have been lost. A finished file is never replaced, so a blind resend
+//! of a one-chunk file would be kept beside the first as `name-1`; the
+//! sender looks at the folder first. A folder whose cleanup was skipped
+//! (queue full) is removed by the store's startup sweep.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -213,9 +216,17 @@ fn later(chore: Chore) {
             .expect("the cleanup thread starts");
         tx
     });
-    if let Err(e) = tx.try_send(chore) {
+    offer(tx, chore);
+}
+
+/// Hands `chore` to the cleanup queue without waiting; a full or closed
+/// queue drops it, logged, and the folder waits for the startup sweep.
+fn offer(tx: &std::sync::mpsc::SyncSender<Chore>, chore: Chore) -> bool {
+    let sent = tx.try_send(chore);
+    if let Err(e) = &sent {
         eprintln!("rusty-mux-server: upload cleanup skipped, the folder stays on disk: {e}");
     }
+    sent.is_ok()
 }
 
 /// One block's upload authority: its transfers run one at a time, so the
@@ -547,6 +558,22 @@ mod tests {
 
     fn soon() -> Instant {
         Instant::now() + Duration::from_secs(30)
+    }
+
+    #[test]
+    fn a_full_cleanup_queue_drops_the_chore_without_running_it() {
+        let (tx, rx) = mpsc::sync_channel::<Chore>(1);
+        let ran = Arc::new(AtomicBool::new(false));
+        assert!(offer(&tx, Box::new(|| {})));
+        let flag = Arc::clone(&ran);
+        let dropped = offer(&tx, Box::new(move || flag.store(true, Ordering::SeqCst)));
+        assert!(!dropped);
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "never run on the caller's thread"
+        );
+        drop(rx);
+        assert!(!offer(&tx, Box::new(|| {})), "a closed queue drops too");
     }
 
     #[test]

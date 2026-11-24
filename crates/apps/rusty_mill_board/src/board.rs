@@ -4,7 +4,7 @@
 use crate::agents::{AgentInfo, Grant};
 use std::cell::Cell;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -137,6 +137,11 @@ pub struct Board<S> {
     milestones: Box<dyn MilestoneStore>,
     /// Agents registered on shared connectors.
     agents: Mutex<crate::agents::Registry>,
+    /// What the merge watch last found (#1620).
+    merged_open: Mutex<(
+        Vec<crate::mergewatch::MergedOpen>,
+        crate::mergewatch::WatchStatus,
+    )>,
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -213,6 +218,7 @@ impl<S: Store> Board<S> {
             escalations: None,
             milestones: Box::new(MemMilestones::default()),
             agents: Mutex::default(),
+            merged_open: Mutex::default(),
         }
     }
 
@@ -1101,7 +1107,78 @@ impl<S: Store> Board<S> {
     pub fn metrics(&self, keep: impl Fn(&Card) -> bool) -> Result<Metrics, BoardError> {
         let mut cards = self.cards()?;
         cards.retain(|c| keep(c));
-        Ok(metrics(&self.workflow(), &cards, (self.clock)()))
+        let mut m = metrics(&self.workflow(), &cards, (self.clock)());
+        let live: HashMap<Uuid, &Card> = cards.iter().map(|c| (c.id, c)).collect();
+        let projects = self.projects();
+        let seen = self
+            .merged_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Re-check every cached match against the card and registry as they are now: the card
+        // is open, unarchived and in scope, and each link's repository is one of its project's.
+        m.merged_open = seen
+            .0
+            .iter()
+            .filter_map(|o| {
+                let c = live.get(&o.id)?;
+                if c.column == Column::DONE || c.archived_ms.is_some() {
+                    return None;
+                }
+                let mut prs: Vec<_> = o
+                    .prs
+                    .iter()
+                    .filter(|l| {
+                        projects
+                            .repos_of(&c.project)
+                            .any(|r| projects.github_of(r) == Some(l.repo.as_str()))
+                    })
+                    .cloned()
+                    .collect();
+                prs.sort_by_key(|l| l.why);
+                Some(crate::mergewatch::MergedOpen {
+                    number: c.number,
+                    project: c.project.clone(),
+                    title: c.title.clone(),
+                    column: c.column.clone(),
+                    why: prs.first()?.why,
+                    prs,
+                    ..o.clone()
+                })
+            })
+            .collect();
+        m.merged_watch = seen.1.clone();
+        Ok(m)
+    }
+
+    /// Replace what the merge watch found (see [`crate::mergewatch::scan`]); `truncated` when it
+    /// read only the newest closed pull requests of some repository, `partial` when some
+    /// repository could not be read.
+    pub fn set_merged_open(
+        &self,
+        found: Vec<crate::mergewatch::MergedOpen>,
+        truncated: bool,
+        partial: bool,
+    ) {
+        *self
+            .merged_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = (
+            found,
+            crate::mergewatch::WatchStatus {
+                checked_ms: Some((self.clock)()),
+                truncated,
+                error: partial,
+            },
+        );
+    }
+
+    /// Record that the merge watch's latest run failed; the last list stays, marked as stale.
+    pub fn note_merge_watch_failed(&self) {
+        self.merged_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .1
+            .error = true;
     }
 
     /// One card.
