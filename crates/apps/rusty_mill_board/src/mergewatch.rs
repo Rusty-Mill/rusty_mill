@@ -14,7 +14,6 @@ use uuid::Uuid;
 
 use crate::api::Shared;
 use crate::backfill::pull_parts;
-use crate::board::Board;
 use crate::domain::{Actor, BoardError, Capability, Card, Column};
 
 /// A merged pull request, as the forge reports it.
@@ -353,7 +352,7 @@ fn watcher(project: &str) -> Actor {
 }
 
 /// Close each listed card a merged pull request said `Closes card #N` for. Each is checked
-/// again at the write ([`Board::close_merged`]: same revision, still the card's repository,
+/// again at the write ([`crate::board::Board::close_merged`]: same revision, still the card's repository,
 /// not a parent) and tried once: a card that changed since the scan, or that
 /// [`Card::closed_by_merge`] refuses (blocked, parked, gated), stays listed for the next run
 /// or for a person. A card with only weaker links is never touched.
