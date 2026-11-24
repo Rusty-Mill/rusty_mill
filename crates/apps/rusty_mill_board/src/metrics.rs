@@ -8,6 +8,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::domain::{Card, CloseReason, Column, PRIORITIES};
+use crate::mergewatch::{MergedOpen, WatchStatus};
 use crate::workflow::{Kind, Workflow};
 
 /// Weeks of flow history, the current week last.
@@ -109,6 +110,12 @@ pub struct Metrics {
     pub lead_time: LeadTime,
     /// Up to [`IDLE_LIMIT`] open cards past Backlog, idle longest first.
     pub idle: Vec<IdleCard>,
+    /// Open cards whose pull request already merged (the merge watch, #1620); empty until it
+    /// has run. Filled by the board, which holds the watch's last result.
+    pub merged_open: Vec<MergedOpen>,
+    /// How current `merged_open` is: when refreshed, whether it read only the newest closed
+    /// pull requests, and why the latest run failed.
+    pub merged_watch: WatchStatus,
 }
 
 /// The metrics of `cards` as of `now_ms`.
@@ -153,6 +160,8 @@ pub fn metrics(flow: &Workflow, cards: &[Card], now_ms: i64) -> Metrics {
             .collect(),
         lead_time: lead_time(&recent),
         idle: idle(&open, now_ms),
+        merged_open: Vec::new(),
+        merged_watch: WatchStatus::default(),
     }
 }
 

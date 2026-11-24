@@ -28,6 +28,7 @@ use rusty_tokio::task::JoinHandle;
 use rusty_uuid::Uuid;
 
 use crate::Config;
+use crate::archive;
 use crate::checkpoint::validate_size;
 use crate::datagram::Registry;
 use crate::echo::Waiting;
@@ -40,7 +41,7 @@ use crate::passed::{Fd, Passed};
 use crate::ports;
 use crate::process;
 use crate::pty::{self, Process, Pty};
-use crate::spool::Spool;
+use crate::spool::{self, Spool};
 use crate::store::{Started, Store};
 use crate::terminal;
 
@@ -61,6 +62,9 @@ const CHUNK: usize = 16 << 10;
 const REPLY_MAX: usize = crate::outbox::BUDGET / 2;
 /// What a `Text` reply adds to its text: tags, request id and length prefix.
 const REPLY_FRAME: usize = 64;
+/// An archive record, header (under 2 KiB) and transcript, is read back in one
+/// `Text` reply (`archive-show`), so the largest one must fit in it.
+const _: () = assert!(archive::MAX_TRANSCRIPT + 2048 + REPLY_FRAME <= REPLY_MAX);
 
 /// Events kept for clients that reconnect.
 const HISTORY: usize = 4096;
@@ -123,6 +127,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_FIND)
     .union(Features::AGENT_META)
     .union(Features::PORT_FORWARD)
+    .union(Features::ARCHIVE)
     .union(UNIX_ONLY);
 
 /// What a float edit needs: floating takes a block out of the layout, as a
@@ -141,11 +146,13 @@ const SHOW_PERIOD: Duration = Duration::from_secs(1);
 /// Offered on Linux only: signal and release (C76) act on a Unix process
 /// group, and orch, their one client, runs there; the tailscale status
 /// event (C27) comes from a `tailscaled` this server asks on Linux, and
-/// `terminal.ports` (C80) reads the sockets from `/proc`.
+/// `terminal.ports` (C80) reads the sockets from `/proc`; the workspace
+/// call (D337) confines its walk with `openat`, which only Linux has here.
 #[cfg(target_os = "linux")]
 const UNIX_ONLY: Features = Features::SIGNAL_RELEASE
     .union(Features::TAILSCALE_STATUS)
-    .union(Features::PORTS);
+    .union(Features::PORTS)
+    .union(Features::WORKSPACE);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
 
@@ -262,6 +269,11 @@ struct BlockRt {
     /// Its PTY was released (C76): read-only, with its program, if still
     /// running, left to its owner.
     released: bool,
+    /// How its program ended, if it did while this server watched.
+    exit: Option<ExitStatus>,
+    /// Its output ended and its program is being reaped: still running as
+    /// far as its outcome goes, until [`State::exited`] records it.
+    reaping: bool,
 }
 
 /// A block's running program: its PTY and the task reading it.
@@ -350,6 +362,8 @@ impl BlockRt {
             hold: false,
             agent: None,
             released: false,
+            exit: None,
+            reaping: false,
         }
     }
 
@@ -621,6 +635,7 @@ impl State {
         req: u64,
         base: Option<String>,
         path: Option<String>,
+        root: Option<listing::Workspace>,
     ) -> Result<oneshot::Receiver<()>, String> {
         let cancel = self
             .clients
@@ -635,7 +650,7 @@ impl State {
         let work = rusty_tokio::spawn_blocking(move || {
             // Held until the thread ends, not until the deadline.
             let _slot = slot;
-            lister(base.as_deref(), path.as_deref())
+            lister(base.as_deref(), path.as_deref(), root.as_ref())
         });
         let (done, finished) = oneshot::channel();
         let weak = Rc::downgrade(shared);
@@ -1199,8 +1214,8 @@ impl State {
             }
             Ok(Outcome::Write(write)) => Some(Pending::Write(write)),
             Ok(Outcome::Later(done)) => Some(Pending::Reload(done)),
-            Ok(Outcome::Listing { base, path }) => {
-                match this.list_dir(shared, client, req, base, path) {
+            Ok(Outcome::Listing { base, path, root }) => {
+                match this.list_dir(shared, client, req, base, path, root) {
                     Ok(done) => Some(Pending::Reload(done)),
                     Err(reason) => {
                         this.send(
@@ -1378,6 +1393,27 @@ impl State {
                 req,
                 self.require(client, Features::FOCUS, "move-focus")
                     .and_then(|()| done(self.mux.move_focus(window, toward))),
+            ),
+            M::ArchiveBlock {
+                req,
+                block,
+                card,
+                label,
+                why,
+            } => (
+                req,
+                self.require(client, Features::ARCHIVE, "archive-block")
+                    .and_then(|()| self.archive_block(client, block, card, label, why)),
+            ),
+            M::ArchiveList { req, card, before } => (
+                req,
+                self.require(client, Features::ARCHIVE, "archive-list")
+                    .and_then(|()| self.archive_list(client, req, card, before)),
+            ),
+            M::ArchiveShow { req, id } => (
+                req,
+                self.require(client, Features::ARCHIVE, "archive-show")
+                    .and_then(|()| self.archive_show(client, req, id)),
             ),
             M::ReloadConfig { req } => (
                 req,
@@ -2116,6 +2152,28 @@ impl State {
             }
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.pid())
                 .ok_or("the program's working directory is unknown")?,
+            "terminal.workspace-list" => {
+                // The same lease rule as `terminal.list-dir` (D316); the
+                // root is the directory the program was launched in, not
+                // where it has since moved (D337).
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                let root = rt
+                    .started
+                    .workspace()
+                    .ok_or("the workspace root is unknown after a server restart")?
+                    .clone();
+                let path = named.iter().find_map(|(n, v)| match (*n, v) {
+                    ("path", Value::Text(p)) => Some(p.as_str()),
+                    _ => None,
+                });
+                return Ok(Outcome::Listing {
+                    base: None,
+                    path: path.map(str::to_owned),
+                    root: Some(root),
+                });
+            }
             "terminal.list-dir" => {
                 // It shows the host's files as the server's account, so it
                 // takes what typing into the block takes: the lease, which
@@ -2131,6 +2189,7 @@ impl State {
                 return Ok(Outcome::Listing {
                     base,
                     path: path.map(str::to_owned),
+                    root: None,
                 });
             }
             "terminal.title" => rt.grid.title.clone(),
@@ -2425,6 +2484,16 @@ impl State {
             .session();
         // The id is chosen first so the program starts knowing it.
         let block = BlockId::from_uuid(Uuid::new_v4());
+        // The program starts in the very directory the workspace holds: the
+        // spawn changes into the held descriptor, not the configured path, so
+        // the two cannot name different directories. Where it can't be held,
+        // the program starts at the path and the workspace stays unknown.
+        let mut workspace = listing::Workspace::open(std::path::Path::new(&config.cwd));
+        let mut spawn = config.clone();
+        match workspace.spawn_cwd() {
+            Some(held) => spawn.cwd = held.into(),
+            None => workspace = listing::Workspace::default(),
+        }
         let started = Started {
             shell: launch.program.is_none(),
             read_only: false,
@@ -2435,13 +2504,14 @@ impl State {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect(),
             cwd: config.cwd.to_string_lossy().into_owned(),
+            workspace,
         };
         let rt = self.start(Start {
             block,
             session,
             window,
             size,
-            config: &config,
+            config: &spawn,
             started,
             owned: launch.own,
             env: launch.env.as_deref(),
@@ -2513,6 +2583,116 @@ impl State {
             echo,
             started,
         })
+    }
+
+    /// `archive-block` (C84): saves a block whose program is gone, then
+    /// closes it, for whoever may close it. The record is written first, so
+    /// a failed write leaves the block as it was.
+    fn archive_block(
+        &mut self,
+        client: ClientId,
+        block: BlockId,
+        card: Option<String>,
+        label: Option<String>,
+        why: Option<String>,
+    ) -> Result<Outcome, Refusal> {
+        let (card, label, why) = (
+            card.unwrap_or_default(),
+            label.unwrap_or_default(),
+            why.unwrap_or_default(),
+        );
+        for (name, text) in [("card", &card), ("label", &label), ("why", &why)] {
+            archive::check_text(name, text).map_err(|e| format!("archive-block: {e}"))?;
+        }
+        let state = self
+            .store
+            .as_ref()
+            .map(|store| store.dir().to_path_buf())
+            .ok_or("archive-block: this server keeps no state directory")?;
+        self.mux
+            .authorize_close(client, block)
+            .map_err(Refusal::from)?;
+        let rt = self
+            .blocks
+            .get(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        if rt.live.is_some() || rt.released || rt.reaping {
+            return Err("archive-block: the block's program is still running".into());
+        }
+        let transcript = transcript(rt)?;
+        let by = self
+            .mux
+            .client(client)
+            .map_or_else(String::new, |c| c.principal().id().to_owned());
+        let when = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let id = format!(
+            "{when:012}-{}",
+            block.to_string().get(..8).unwrap_or_default()
+        );
+        let exit = match rt.exit {
+            Some(ExitStatus::Code(n)) => format!("code:{n}"),
+            Some(ExitStatus::Signal(n)) => format!("signal:{n}"),
+            None => "unknown".to_owned(),
+        };
+        let record = archive::Record {
+            id: &id,
+            when,
+            exit: &exit,
+            card: &card,
+            label: &label,
+            why: &why,
+            by: &by,
+            block: &block.to_string(),
+            program: &one_line(&rt.started.program)
+                .chars()
+                .take(256)
+                .collect::<String>(),
+            sensitive: archive::sensitive(&transcript),
+        };
+        archive::write(&state, &record, &transcript)
+            .map_err(|e| format!("archive-block: writing the record: {e}"))?;
+        self.mux.close_block(block).map_err(Refusal::from)?;
+        Ok(Outcome::Done(None))
+    }
+
+    /// The state directory, for a client that may read the archive: the
+    /// server's own account, or any client of a server one account uses.
+    fn archive_dir(&self, client: ClientId, what: &str) -> Result<PathBuf, Refusal> {
+        let asker = self.mux.client(client).ok_or("unknown client")?.principal();
+        if self.account.as_ref().is_some_and(|a| a.id() != asker.id()) {
+            return Err(
+                format!("{what}: only the server's own account may read the archive").into(),
+            );
+        }
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| format!("{what}: this server keeps no state directory"))?;
+        Ok(store.dir().to_path_buf())
+    }
+
+    fn archive_list(
+        &self,
+        client: ClientId,
+        req: u64,
+        card: Option<String>,
+        before: Option<String>,
+    ) -> Result<Outcome, Refusal> {
+        let dir = self.archive_dir(client, "archive-list")?;
+        let text = archive::list(&dir, card.as_deref(), before.as_deref())
+            .map_err(|e| format!("archive-list: reading the archive: {e}"))?;
+        reply("archive-list", &[Message::Text { req, text }])
+    }
+
+    fn archive_show(&self, client: ClientId, req: u64, id: String) -> Result<Outcome, Refusal> {
+        let dir = self.archive_dir(client, "archive-show")?;
+        let text = archive::show(&dir, &id).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => format!("archive-show: no record {id}"),
+            _ => format!("archive-show: reading the record: {e}"),
+        })?;
+        reply("archive-show", &[Message::Text { req, text }])
     }
 
     /// Where a block's program is, for `rusty-mux-ctl` run inside it.
@@ -3018,6 +3198,7 @@ impl State {
             rt.started.read_only = true;
             rt.unsaved = true;
             live.pty.release();
+            rt.reaping = true;
             return Some(live.process);
         }
         self.blocks.remove(&block).and_then(|rt| rt.release(false))
@@ -3031,6 +3212,10 @@ impl State {
             && self.mux.note_exit(block, status).is_err()
         {
             return;
+        }
+        if let Some(rt) = self.blocks.get_mut(&block) {
+            rt.exit = status;
+            rt.reaping = false;
         }
         let held = self.blocks.get(&block).is_some_and(|rt| rt.hold);
         if held {
@@ -3379,6 +3564,8 @@ enum Outcome {
     Listing {
         base: Option<String>,
         path: Option<String>,
+        /// The directory the result must lie under, for the workspace call.
+        root: Option<listing::Workspace>,
     },
 }
 
@@ -3412,6 +3599,59 @@ fn capture(named: &[(&str, Value)]) -> terminal::Capture {
 
 /// `terminal.history`: the spooled lines `named` asks for, as
 /// `terminal.format` would show them in `grid`, the block's.
+/// `rt`'s history past its scrollback and its screen, as one text, or why
+/// it is too long to archive.
+fn transcript(rt: &BlockRt) -> Result<String, Refusal> {
+    let capture = terminal::Capture {
+        history: u32::MAX,
+        trim: true,
+        unwrap: false,
+        vt: false,
+    };
+    let past = match &rt.spool {
+        Some(spool) => {
+            // One read gives at most READ_MAX lines; a longer history
+            // would be archived short, and the block deleted with the rest.
+            if spool.lines() > spool::READ_MAX {
+                return Err(format!(
+                    "archive-block: the history is over {} lines, more than one archive record keeps",
+                    spool::READ_MAX
+                )
+                .into());
+            }
+            let read = spool
+                .read(0, spool.lines())
+                .map_err(|e| format!("archive-block: reading the history: {e}"))?;
+            format_history(&read, &rt.grid, capture, archive::MAX_TRANSCRIPT)
+                .map_err(|_| "archive-block: the transcript is too long to archive")?
+        }
+        // Spooling stopped (a write failed): what it kept is still on disk,
+        // and closing the block would delete it unarchived.
+        None => {
+            return Err(
+                "archive-block: the block's history is not being kept, so it cannot be archived whole"
+                    .into(),
+            );
+        }
+    };
+    let screen = terminal::format(&rt.grid, capture, archive::MAX_TRANSCRIPT)
+        .ok_or("archive-block: the transcript is too long to archive")?;
+    if past.is_empty() {
+        return Ok(screen);
+    }
+    if past.len() + screen.len() >= archive::MAX_TRANSCRIPT {
+        return Err("archive-block: the transcript is too long to archive".into());
+    }
+    Ok(format!("{past}\n{screen}"))
+}
+
+/// `text` with anything that would break a header line made a space.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 fn history(spool: Option<&Spool>, grid: &Grid, named: &[(&str, Value)]) -> Result<String, Refusal> {
     let spool = spool.ok_or(
         "no history is kept past this block's scrollback: the server keeps no state, \
@@ -3950,7 +4190,7 @@ mod regression {
             let (shared, _account, block, _inbox) = fixture();
             let (go, wait) = std::sync::mpsc::channel::<()>();
             let wait = std::sync::Mutex::new(wait);
-            shared.borrow_mut().lister = std::sync::Arc::new(move |_, _| {
+            shared.borrow_mut().lister = std::sync::Arc::new(move |_, _, _| {
                 wait.lock()
                     .map_err(|e| e.to_string())?
                     .recv()
@@ -4822,6 +5062,7 @@ mod regression {
             program: "sh".into(),
             args: vec![],
             cwd: "/".into(),
+            workspace: Default::default(),
         };
         BlockRt::read_only(grid, AnsiParser::new(), started)
     }

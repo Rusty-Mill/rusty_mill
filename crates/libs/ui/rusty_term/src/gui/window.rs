@@ -59,7 +59,9 @@ use super::prefix::{self, Command};
 use super::render::{CpuRenderer, FloatLayer, PaneFrame, Renderer, Scene, SearchColors, blend};
 use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
-use super::source::{Act, Feed, Float, FloatAt, Listed, PaneIo, Remote, Show, Source, Tree};
+use super::source::{
+    Act, Feed, Float, FloatAt, Forwarded, Listed, PaneIo, Remote, Show, Source, Tree,
+};
 use super::strip::{self, Spot, StripState};
 use super::{link_policy, link_trust};
 use crate::backend::BackendHandle;
@@ -126,6 +128,58 @@ const DRAG_SCROLL_MARGIN: f64 = 24.0;
 /// Auto-scroll step cadence while the pointer is held past the edge.
 const DRAG_SCROLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// The forwards a window asked its source for and has no answer to yet, by
+/// pane and port. An answer counts only for the latest ask of its pane and
+/// port, once: a newer ask, or an answer already taken, makes it stale.
+#[derive(Default)]
+struct ForwardAsks {
+    made: u64,
+    open: std::collections::HashMap<(u64, u16), u64>,
+}
+
+impl ForwardAsks {
+    /// Records an ask for `port` of pane `key` and returns its number.
+    fn ask(&mut self, key: u64, port: u16) -> u64 {
+        self.made += 1;
+        self.open.insert((key, port), self.made);
+        self.made
+    }
+
+    /// Whether the answer to ask `op` is the one awaited; takes it.
+    fn answer(&mut self, key: u64, port: u16, op: u64) -> bool {
+        self.open.get(&(key, port)) == Some(&op) && self.open.remove(&(key, port)).is_some()
+    }
+}
+
+#[cfg(test)]
+mod forward_ask_tests {
+    use super::ForwardAsks;
+
+    #[test]
+    fn an_answer_counts_once() {
+        let mut asks = ForwardAsks::default();
+        let op = asks.ask(1, 3000);
+        assert!(asks.answer(1, 3000, op));
+        assert!(!asks.answer(1, 3000, op), "a repeat is stale");
+    }
+
+    #[test]
+    fn a_newer_ask_makes_the_older_answer_stale() {
+        let mut asks = ForwardAsks::default();
+        let (old, new) = (asks.ask(1, 3000), asks.ask(1, 3000));
+        assert!(!asks.answer(1, 3000, old));
+        assert!(asks.answer(1, 3000, new));
+    }
+
+    #[test]
+    fn another_pane_or_port_is_its_own_ask() {
+        let mut asks = ForwardAsks::default();
+        let (a, b, c) = (asks.ask(1, 3000), asks.ask(2, 3000), asks.ask(1, 4000));
+        assert!(asks.answer(2, 3000, b) && asks.answer(1, 4000, c) && asks.answer(1, 3000, a));
+        assert!(!asks.answer(9, 3000, a), "an answer for a pane never asked");
+    }
+}
+
 /// Wakeups sent from per-tab PTY reader threads into the winit loop, tagged
 /// with the tab id they concern.
 pub(crate) enum UserEvent {
@@ -171,6 +225,9 @@ pub(crate) enum UserEvent {
     /// A folder listing the palette's browse asked for finished, under
     /// the number the palette gave it (gui-design D78).
     Listed(u64, Listed),
+    /// A port forward the source was asked for ([`Source::forward`]).
+    /// A forward's answer: the pane and ask it is for, the link and the result.
+    Forwarded(u64, u64, super::link_policy::Loopback, Forwarded),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -733,6 +790,11 @@ struct WindowState<'a> {
     overview: OverviewUi,
     /// The trusted link origins (C63, D69-D72).
     links: link_policy::Policy,
+    /// The (pane, remote port) forwards the user agreed to, for this
+    /// window's life (C81, D341).
+    forward_trust: std::collections::HashSet<(u64, u16)>,
+    /// The forwards asked for and not yet answered.
+    forward_asks: ForwardAsks,
     /// The effective config; refreshed on live reload so new tabs follow it.
     config: Config,
     /// The config file in effect, for the open shortcut + reload re-reads.
@@ -3050,6 +3112,11 @@ impl WindowState<'_> {
     /// other http(s) and other apps ask, everything else is refused with a
     /// notice. The one way a link reaches [`open_link`].
     fn follow_link(&mut self, url: &str) {
+        if let Some(key) = self.focused().filter(|k| self.source.forwards(*k))
+            && let Some(target) = link_policy::loopback(url)
+        {
+            return self.follow_forward(key, target);
+        }
         let link = match link_policy::parse(url) {
             Ok(link) => link,
             Err(why) => return self.refuse_link(why),
@@ -3057,6 +3124,95 @@ impl WindowState<'_> {
         match self.links.verdict(&link) {
             link_policy::Verdict::Open => self.launch_link(&link),
             link_policy::Verdict::Ask { can_trust } => self.ask_link(link, can_trust),
+        }
+    }
+
+    /// A loopback link in a remote pane (C81): forward its port, asking
+    /// the first time, then open the link at the local port.
+    fn follow_forward(&mut self, key: u64, target: link_policy::Loopback) {
+        if target.v6 {
+            return self.show_notice(Some(super::source::Notice {
+                title: "Port not forwarded".to_owned(),
+                detail: "Forwards reach IPv4 only. Use 127.0.0.1 or localhost in the link."
+                    .to_owned(),
+            }));
+        }
+        if self.forward_trust.contains(&(key, target.port)) {
+            return self.start_forward(key, target);
+        }
+        let s = self.scale_factor as f32;
+        let width = self
+            .window
+            .as_ref()
+            .map_or(f32::MAX, |w| w.inner_size().width as f32);
+        let right = (self.mouse_pos.0 as f32 + confirm::LINK_WIDTH * s / 2.0)
+            .min(width)
+            .max(confirm::LINK_WIDTH * s);
+        let top = self.mouse_pos.1 as f32 + 12.0 * s;
+        self.confirm = Confirm::new(
+            Subject::Forward(key, target.clone()),
+            confirm::forward_copy(&target),
+            confirm::forward_buttons(),
+            (1, 0, confirm::LINK_WIDTH),
+            right,
+            top,
+            s,
+        );
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Ask the source to forward `target`'s port; the answer comes back as
+    /// [`UserEvent::Forwarded`].
+    fn start_forward(&mut self, key: u64, target: link_policy::Loopback) {
+        let proxy = self.proxy.clone();
+        // The answer is for this ask only: a newer one for the same pane and
+        // port, or a pane that has gone, makes it stale (see `forwarded`).
+        let op = self.forward_asks.ask(key, target.port);
+        self.source.forward(
+            key,
+            target.port,
+            Box::new(move |forwarded| {
+                let _ = proxy.send_event(UserEvent::Forwarded(key, op, target, forwarded));
+            }),
+        );
+    }
+
+    /// A forward the source was asked for is up, or is not: open the link
+    /// at its local port, or say why not.
+    fn forwarded(
+        &mut self,
+        key: u64,
+        op: u64,
+        target: &link_policy::Loopback,
+        forwarded: Forwarded,
+    ) {
+        // Only the latest ask of a pane and port is answered, and only while
+        // the user's yes still stands, so a late answer opens nothing.
+        if !self.forward_asks.answer(key, target.port, op) {
+            return;
+        }
+        if !self.forward_trust.contains(&(key, target.port)) {
+            return;
+        }
+        // The forward may have ended since it answered (the pane's connection
+        // was replaced): the link opens only on a forward that still runs.
+        let forwarded = forwarded.and_then(|bound| {
+            match self.source.forwarded_port(key, target.port) == Some(bound) {
+                true => Ok(bound.local),
+                false => Err("the forward ended; click the link again".to_owned()),
+            }
+        });
+        match forwarded {
+            Ok(local) => match link_policy::parse(&target.at(local)) {
+                Ok(link) => self.launch_link(&link),
+                Err(why) => self.refuse_link(why),
+            },
+            Err(why) => self.show_notice(Some(super::source::Notice {
+                title: "Port not forwarded".to_owned(),
+                detail: why,
+            })),
         }
     }
 
@@ -6075,6 +6231,10 @@ impl WindowState<'_> {
     fn confirm_pick(&mut self, subject: Subject, n: usize) {
         match subject {
             Subject::Block(key) => self.source.act(Act::TakeOver(key)),
+            Subject::Forward(key, target) => {
+                self.forward_trust.insert((key, target.port));
+                self.start_forward(key, target);
+            }
             Subject::Link(link) => {
                 // Button 2 is "Always trust": remember the origin, but only in
                 // memory once the file is saved, so what the notice says holds.
@@ -7171,6 +7331,8 @@ impl<'a> App<'a> {
             palette_origin: None,
             overview: OverviewUi::new().ok_or("the interface font failed to parse")?,
             links: load_trust(),
+            forward_trust: std::collections::HashSet::new(),
+            forward_asks: ForwardAsks::default(),
             config: self.config.clone(),
             config_path: self.config_path.clone(),
             profile_override: self.profile_override.clone(),
@@ -7327,6 +7489,12 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::ClipboardRead(id, primary) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(id)) {
                     w.answer_clipboard_read(id, primary);
+                }
+            }
+            UserEvent::Forwarded(key, op, target, forwarded) => {
+                // Only the window that still holds the pane takes the answer.
+                if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(key)) {
+                    w.forwarded(key, op, &target, forwarded);
                 }
             }
             UserEvent::Listed(ask, listed) => {
