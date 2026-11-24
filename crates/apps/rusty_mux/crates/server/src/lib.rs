@@ -79,8 +79,8 @@ use rusty_mux_core::{Principal, Transport};
 use rusty_tokio::io::UnixStream;
 use rusty_tokio::io::{UdpSocket, UnixListener};
 
-#[cfg(target_os = "linux")]
 pub use download::{FileId, Protected};
+#[cfg(target_os = "linux")]
 pub use login::{
     Limits, Login, MAX_MAP, PamGate, Reload, bind as bind_front_door, serve_login, serve_login_with,
 };
