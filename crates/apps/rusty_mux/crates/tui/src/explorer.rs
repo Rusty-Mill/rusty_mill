@@ -360,7 +360,10 @@ impl Tree {
                 on
             })
             .collect();
-        let top = (here + 1).saturating_sub(height.max(1));
+        // Keep the cut summary right under the cursor in view, so a long
+        // listing never looks complete.
+        let end = here + 1 + rows[here + 1..].iter().take_while(|r| r.summary).count();
+        let top = end.saturating_sub(height.max(1));
         rows.iter()
             .zip(marked)
             .skip(top)
@@ -688,5 +691,14 @@ mod tests {
     fn unescape_wants_braces() {
         assert_eq!(unescape(r"\uX41}"), r"\uX41}");
         assert_eq!(unescape(r"\u{41"), r"\u{41");
+    }
+
+    #[test]
+    fn the_cut_summary_is_reachable_in_a_short_view() {
+        let mut t = tree(&parse(".\nf\ta\nf\tb\nf\tc\n+\t2").unwrap());
+        t.step(10);
+        let rows = t.render(40, 3);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[1].starts_with('>') && rows[2].contains("2 not shown"));
     }
 }
