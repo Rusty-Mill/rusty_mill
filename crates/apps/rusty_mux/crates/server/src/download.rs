@@ -122,6 +122,9 @@ struct Set {
     /// Kept out by path and by the identity of what was loaded; until that
     /// is known, nothing is downloaded.
     loaded: Vec<(PathBuf, Option<FileId>)>,
+    /// Counts the changes to the two lists, so a download can tell that the
+    /// policy it judged a file by is no longer the one in force.
+    generation: u64,
 }
 
 impl PartialEq for Protected {
@@ -144,6 +147,7 @@ impl Protected {
         let mut set = self.set();
         if !set.paths.contains(&path) {
             set.paths.push(path);
+            set.generation += 1;
         }
     }
 
@@ -153,6 +157,7 @@ impl Protected {
         let mut set = self.set();
         if !set.loaded.iter().any(|(p, _)| *p == path) {
             set.loaded.push((path, None));
+            set.generation += 1;
         }
     }
 
@@ -161,31 +166,52 @@ impl Protected {
     pub fn loaded(&self, path: &Path, id: FileId) {
         let mut set = self.set();
         match set.loaded.iter_mut().find(|(p, _)| p == path) {
+            Some(slot) if slot.1 == Some(id) => return,
             Some(slot) => slot.1 = Some(id),
             None => set.loaded.push((path.to_path_buf(), Some(id))),
         }
+        set.generation += 1;
     }
 
-    /// Their paths and identities as they are now, or why that cannot be
-    /// told: then nothing is read.
+    /// Their paths and identities as they are now, with the generation of
+    /// the policy they came from, or why that cannot be told: then nothing
+    /// is read. The lock is held only to copy the lists; the paths are
+    /// resolved after it is let go, so a slow file system never holds up a
+    /// reload.
     #[cfg(target_os = "linux")]
-    fn secrets(&self) -> Result<Vec<Secret>, String> {
-        let set = self.set();
-        let mut files = set.paths.clone();
+    fn secrets(&self) -> Result<(Vec<Secret>, u64), String> {
+        self.secrets_with(protected)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn secrets_with(
+        &self,
+        resolve: impl FnOnce(&[PathBuf]) -> Result<Vec<Secret>, String>,
+    ) -> Result<(Vec<Secret>, u64), String> {
+        let (mut files, loaded, generation) = {
+            let set = self.set();
+            (set.paths.clone(), set.loaded.clone(), set.generation)
+        };
         let mut ids = Vec::new();
-        for (path, id) in &set.loaded {
+        for (path, id) in loaded {
             let Some(id) = id else {
                 return Err(format!(
                     "{} has no identity from when it was loaded, so no file is read",
                     path.display()
                 ));
             };
-            files.push(path.clone());
-            ids.push(*id);
+            files.push(path);
+            ids.push(id);
         }
-        let mut now = protected(&files)?;
+        let mut now = resolve(&files)?;
         now.extend(ids.into_iter().map(|id| (PathBuf::new(), id)));
-        Ok(now)
+        Ok((now, generation))
+    }
+
+    /// Whether the policy is still the one of `generation`.
+    #[cfg(target_os = "linux")]
+    fn is_current(&self, generation: u64) -> bool {
+        self.set().generation == generation
     }
 }
 
@@ -227,11 +253,11 @@ fn read_linux(
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = locate(base, path)?;
     let root = private_root(private)?;
-    let keep = keep.secrets()?;
+    let (secrets, generation) = keep.secrets()?;
     if root.as_ref().is_some_and(|root| file.starts_with(root)) {
         return Err("the server's own state directory is not read".into());
     }
-    if keep.iter().any(|(real, _)| *real == file) {
+    if secrets.iter().any(|(real, _)| *real == file) {
         return Err("a file the server keeps secret is not read".into());
     }
     let io = |e: std::io::Error| format!("{}: {e}", file.display());
@@ -250,8 +276,16 @@ fn read_linux(
     verify(&f, &file, root.as_deref())?;
     let meta = f.metadata().map_err(io)?;
     // A hard link to a secret file is that file.
-    if keep.iter().any(|(_, id)| *id == (meta.dev(), meta.ino())) {
+    if secrets
+        .iter()
+        .any(|(_, id)| *id == (meta.dev(), meta.ino()))
+    {
         return Err("a file the server keeps secret is not read".into());
+    }
+    // The file was judged by a policy a reload may since have replaced:
+    // nothing is read until it is judged again.
+    if !keep.is_current(generation) {
+        return Err("the server's access files changed during this download; try again".into());
     }
     if !meta.is_file() {
         return Err(format!("{} is not a regular file", file.display()));
@@ -430,6 +464,31 @@ mod tests {
         }
         assert!(read(dir.to_str(), "old-copy", 0, None, &keep).is_ok());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn resolving_paths_never_holds_the_lock_and_a_policy_change_is_seen() {
+        let keep = Protected::default();
+        keep.require(PathBuf::from("/allow"));
+        keep.loaded(Path::new("/allow"), (1, 1));
+        // A slow path lookup: the lock is free while it runs, and a reload
+        // landing meanwhile moves the generation.
+        let (_, generation) = keep
+            .secrets_with(|_| {
+                assert!(
+                    keep.0.try_lock().is_ok(),
+                    "the lock is held while resolving"
+                );
+                keep.loaded(Path::new("/allow"), (2, 2));
+                Ok(Vec::new())
+            })
+            .unwrap();
+        assert!(!keep.is_current(generation));
+        let (_, now) = keep.secrets_with(|_| Ok(Vec::new())).unwrap();
+        assert!(keep.is_current(now));
+        // The same identity loaded again is no change.
+        keep.loaded(Path::new("/allow"), (2, 2));
+        assert!(keep.is_current(now));
     }
 
     #[test]
