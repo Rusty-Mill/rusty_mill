@@ -45,6 +45,13 @@ pub fn fetch<S: Read + Write>(
                 "the file changed size while it was read",
             ));
         }
+        // Nothing past the declared size is written.
+        if offset + data.len() as u64 > size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the reply is longer than the file's declared size",
+            ));
+        }
         out.write_all(&data)?;
         offset += data.len() as u64;
         if offset >= size {
@@ -172,6 +179,33 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_reply_past_the_declared_size_is_refused_unwritten() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            let n = theirs.read(&mut chunk).unwrap();
+            let Some((Message::BlockCall { req, .. }, _)) = decode(&chunk[..n]).unwrap() else {
+                return;
+            };
+            let text = format!("3\n{}", rusty_base64::encode_standard(b"abcd"));
+            theirs
+                .write_all(&encode(&Message::Text { req, text }).unwrap())
+                .unwrap();
+        });
+        let mut out = Vec::new();
+        let err = fetch(
+            &mut Conn::new(ours),
+            BlockId::from_uuid(rusty_uuid::Uuid::nil()),
+            "f",
+            &mut out,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(out.is_empty());
     }
 
     #[test]

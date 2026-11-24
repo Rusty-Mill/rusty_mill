@@ -118,8 +118,11 @@ pub(crate) fn read(
         return Err(format!("{} is over {FILE_MAX} bytes", file.display()));
     }
     f.seek(SeekFrom::Start(u64::from(offset))).map_err(io)?;
-    let mut chunk = Vec::with_capacity(CHUNK);
-    f.take(CHUNK as u64).read_to_end(&mut chunk).map_err(io)?;
+    // No more than the size it announces: a file that grew since its
+    // metadata was read does not make the reply longer than it declared.
+    let left = size.saturating_sub(u64::from(offset)).min(CHUNK as u64);
+    let mut chunk = Vec::with_capacity(left as usize);
+    f.take(left).read_to_end(&mut chunk).map_err(io)?;
     Ok(format!("{size}\n{}", rusty_base64::encode_standard(&chunk)))
 }
 
