@@ -532,6 +532,10 @@ impl SqliteStore {
 }
 
 impl Store for SqliteStore {
+    fn keeps_merge_record(&self) -> bool {
+        true
+    }
+
     fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
         self.cards("SELECT doc FROM cards WHERE id = ?1", [id.to_string()])
             .map(|mut c| c.pop())

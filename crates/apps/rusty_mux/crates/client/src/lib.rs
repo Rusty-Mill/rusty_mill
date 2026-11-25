@@ -24,6 +24,7 @@ pub mod forward;
 pub mod ssh;
 #[cfg(unix)]
 pub mod tls;
+pub mod upload;
 
 pub use conn::Conn;
 pub use rusty_mux_proto::older;

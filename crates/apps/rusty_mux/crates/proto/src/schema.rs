@@ -1504,6 +1504,48 @@ pub static CATALOG: &[Method] = &[
         build: |req, a| block_call(req, a, "terminal.list-dir"),
     },
     Method {
+        name: "terminal.upload",
+        doc: "Refused on an agent's (jailed) block. Send a file to the server's host, a chunk at a time, into a folder kept for \
+              the block under the server's state directory. Each call appends `data` to \
+              the file `name` at `offset`, which must be the bytes received so far (0 \
+              starts the file again); the reply is then the bytes received, as a number. \
+              With `done` the file is committed and the reply is its absolute path. `name` \
+              is cleaned: a folder part, control and invisible format characters are \
+              dropped. A chunk is at most 1 MiB and a block keeps 2 GiB, the oldest files \
+              removed first, counted before each chunk is written, unfinished files too; a file \
+              over that is refused. At most 16 files are unfinished at once, and one untouched \
+              for 10 minutes is cleared by the next new file. The folder goes with the block. \
+              A lost reply to the last chunk is not safe to retry blindly: the file may \
+              already be in the folder (a resend from 0 is kept beside it as `name-1`), or \
+              its partial lost, and a nonzero offset then reports an unknown outcome; look \
+              at the folder first. Needs the lease and a server with a state directory.",
+        params: &[
+            BLOCK,
+            required(
+                "name",
+                Ty::Text,
+                "The file's name; its folder part is dropped.",
+            ),
+            required(
+                "offset",
+                Ty::Lines,
+                "The bytes already sent; 0 for the first chunk.",
+            ),
+            required("data", Ty::Bytes, "The next chunk, at most 1 MiB."),
+            Param {
+                name: "done",
+                ty: Ty::Flag,
+                doc: "Commit the file with this chunk and reply with its path.",
+                presence: Presence::Optional {
+                    needs: Features::NONE,
+                },
+            },
+        ],
+        needs: Features::BLOCK_CALL.union(Features::UPLOAD),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.upload"),
+    },
+    Method {
         name: "terminal.workspace-list",
         doc: "List a directory under the block's workspace (the directory its program \
               was launched in) for the workspace explorer, in the same text form as \

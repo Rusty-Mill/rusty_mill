@@ -3,10 +3,13 @@
 
 use std::sync::Arc;
 
-use rusty_mill_board::domain::{BoardError, Card, Column, Event, EventKind, Span};
+use rusty_mill_board::domain::{
+    Actor, BoardError, Capability, Card, Column, Event, EventKind, MERGE_WATCH, Span,
+};
 use rusty_mill_board::milestones::{Milestone, MilestoneStore};
 use rusty_mill_board::sqlite::SqliteStore;
 use rusty_mill_board::store::{MemStore, Store};
+use rusty_mill_board::workflow::Workflow;
 use rusty_sqlite::rusqlite::Connection;
 use uuid::Uuid;
 
@@ -433,6 +436,39 @@ fn a_field_this_board_does_not_know_survives_a_replace() {
         store.get(a.id).expect("get").expect("there").column,
         Column::DONE
     );
+}
+
+#[test]
+fn a_merge_close_record_survives_a_fresh_read_and_unclose_clears_it() {
+    let path = file("unclose");
+    let store = SqliteStore::open(&path).expect("open");
+    let flow = Workflow::default();
+    let actor = |name: &str, caps: &[Capability]| Actor {
+        name: name.into(),
+        caps: caps.iter().copied().collect(),
+        projects: None,
+    };
+    let watch = actor(MERGE_WATCH, &[Capability::Record]);
+    let human = actor("nano", &[Capability::Triage, Capability::Close]);
+    let pr = "https://github.com/o/r/pull/7";
+    let ready = card("a", 1)
+        .move_to(&flow, &Column::READY, &human, 2)
+        .expect("ready");
+    add(&store, &ready);
+    let closed = ready.closed_by_merge(&flow, pr, &watch, 3).expect("closed");
+    store
+        .replace(&closed, Event::of(&closed, EventKind::Moved, MERGE_WATCH))
+        .expect("replace");
+    let reread = SqliteStore::open(&path).expect("reopen");
+    let back = reread.get(ready.id).expect("get").expect("there");
+    assert!(back.merged.is_some(), "the record is stored with the card");
+    let open = back.unclosed(&flow, &human, 4).expect("unclosed");
+    reread
+        .replace(&open, Event::of(&open, EventKind::Moved, "nano"))
+        .expect("replace");
+    let fresh = SqliteStore::open(&path).expect("reopen");
+    let end = fresh.get(ready.id).expect("get").expect("there");
+    assert_eq!((end.column, end.merged), (Column::READY, None));
 }
 
 /// Every file in `path`'s directory with its bytes, to compare before and after a read.

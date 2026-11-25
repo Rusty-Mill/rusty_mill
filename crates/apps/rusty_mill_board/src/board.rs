@@ -137,8 +137,12 @@ pub struct Board<S> {
     milestones: Box<dyn MilestoneStore>,
     /// Agents registered on shared connectors.
     agents: Mutex<crate::agents::Registry>,
-    /// Held by every writer of a parent link and by the merge close, so a card cannot gain a
-    /// child between the close's childlessness check and its commit (#1620).
+    /// Held by every writer of a parent link or of dependencies (`add_card`, `plan`), by the
+    /// merge close and `unclose`, and by `take`, so a card cannot gain a child between the
+    /// close's childlessness check and its commit, and a dependency check by a take or a
+    /// dependency edit cannot go stale under an unclose (#1620). It does not cover `card_claim`
+    /// or a move into a work column. **Lock order: this gate first, then the workflow guard**;
+    /// never the other way, or a waiting workflow writer can deadlock the board.
     links: Mutex<()>,
     /// What the merge watch last found (#1620).
     merged_open: Mutex<(
@@ -154,6 +158,11 @@ impl<S> Board<S> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+/// Whether `card` has started: it is claimed, or sits in a work column.
+fn started(flow: &Workflow, card: &Card) -> bool {
+    card.claim.is_some() || flow.kind(&card.column) == Some(crate::workflow::Kind::Work)
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -317,6 +326,12 @@ impl<S: Store> Board<S> {
     pub fn with_move_rules(self, rules: MoveRules) -> Self {
         self.set_move_rules(rules);
         self
+    }
+
+    /// Whether the store keeps the record `card_unclose` needs: when it does not, the merge
+    /// watch closes nothing.
+    pub fn keeps_merge_record(&self) -> bool {
+        self.store.keeps_merge_record()
     }
 
     /// Use `workflow` instead of [`Workflow::default`].
@@ -1688,6 +1703,10 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::OutOfScope(p.to_owned()));
             }
         }
+        // The link gate is taken before the workflow guard, as everywhere (see `Board::links`),
+        // and held across every dependency check and commit below: `unclose` reopens a
+        // prerequisite under the same gate, so a take's check cannot go stale before its write.
+        let _links = self.links();
         let flow = self.flow();
         let queues = flow.work_queues();
         let rank = |c: &Card| queues.iter().position(|q| *q == c.column);
@@ -2009,6 +2028,11 @@ impl<S: Store> Board<S> {
         repo: &str,
         by: &Actor,
     ) -> Result<Card, BoardError> {
+        if !self.store.keeps_merge_record() {
+            return Err(BoardError::Refused(
+                "this store cannot keep the record that undoes a merge close".into(),
+            ));
+        }
         let _links = self.links();
         let flow = self.flow();
         let current = self.get_in(&flow, id)?;
@@ -2052,6 +2076,44 @@ impl<S: Store> Board<S> {
         let window = window_ms(DONE_WINDOW_DAYS);
         self.apply(id, by, EventKind::Restored, |c, now| {
             Ok(c.restore(now, window))
+        })
+    }
+
+    /// Undo the merge watch's close of a card: see [`Card::unclosed`]. Logged as a move by
+    /// `by`. Needs `Triage`. Refused while an open card that depends on this one has started
+    /// (claimed, or in a work column): reopening the prerequisite would pull the ground from
+    /// under it, so a person decides; one still waiting simply waits again.
+    ///
+    /// # Errors
+    /// A missing capability or card, a started dependent, or see [`Card::unclosed`].
+    pub fn unclose(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
+        // Under the gate every take holds, so no take can start a dependent between the look
+        // at the dependents and the reopening. Other ways to start work (`card_claim`, a move
+        // into a work column) do not hold it and are not covered.
+        let _links = self.links();
+        let flow = self.flow();
+        // Authorize and validate the card itself first: only then look at other cards, and
+        // never say more about them than that one has started.
+        let current = self.get_in(&flow, id)?;
+        if !by.may_work_in(&current.project) {
+            return Err(BoardError::OutOfScope(current.project));
+        }
+        current.unclosed(&flow, by, (self.clock)())?;
+        // Back into a work column: a paused project takes no new work.
+        if let Some(m) = &current.merged {
+            self.check_starts(&flow, &current, &m.was)?;
+        }
+        if self
+            .cards_in(&flow)?
+            .iter()
+            .any(|c| c.deps.contains(&id) && c.column != Column::DONE && started(&flow, c))
+        {
+            return Err(BoardError::Refused(
+                "an open card that depends on this one has started; move or finish it first".into(),
+            ));
+        }
+        self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
+            c.unclosed(&flow, by, now)
         })
     }
 
@@ -2192,7 +2254,8 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::NotFound(*linked));
             }
         }
-        let _links = plan.parent.map(|_| self.links());
+        // Parent and dependency edits are what the unclose scan reads: serialize them with it.
+        let _links = (plan.parent.is_some() || plan.deps.is_some()).then(|| self.links());
         if let Some(Some(parent)) = plan.parent {
             self.check_parent(id, parent)?;
         }

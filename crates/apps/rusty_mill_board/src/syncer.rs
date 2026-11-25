@@ -54,6 +54,11 @@ impl Syncer {
         every: Duration,
         auto_close: bool,
     ) -> Result<(), String> {
+        if auto_close && !self.board.keeps_merge_record() {
+            rusty_log::warn!(
+                "auto_close is on, but this store cannot keep the record that undoes a merge close: the merge watch will close nothing"
+            );
+        }
         let pulls = config.merged()?;
         let forge = GithubForge::new(config).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
