@@ -388,8 +388,19 @@ impl BlockRt {
     /// design (Nano, 2026-11-24, "Refuse on agent blocks"). It judges by the
     /// launch facts, not by the optional `AGENT_META`: a launch with an
     /// environment, descriptors or ownership, or the `lel-jail` program,
-    /// which is all a restored block still shows.
+    /// which is all a restored block still shows (and a block with no
+    /// program is refused outright).
     fn refuse_agent(&self, method: &str) -> Result<(), Refusal> {
+        // A block with no program is one restored read-only, whose launch
+        // facts were not kept (D72), or one that has exited: it cannot be
+        // told from an agent's, so it fails closed. A restored shell is
+        // started afresh with the default launch, so it is known not to be.
+        if self.live.is_none() {
+            return Err(format!(
+                "{method}: the block has no running program, so it is unknown whether it is an agent's"
+            )
+            .into());
+        }
         let jail = std::path::Path::new(&self.started.program)
             .file_name()
             .is_some_and(|n| n.to_string_lossy().starts_with("lel-jail"));

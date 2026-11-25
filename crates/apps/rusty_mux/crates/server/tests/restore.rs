@@ -512,3 +512,61 @@ fn a_held_exited_block_survives_a_restart() {
     server.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A restored command block keeps no launch facts, so an agent's cannot be
+/// told from another: it takes no upload, and nothing is written.
+#[cfg(unix)]
+#[test]
+fn a_restored_command_block_takes_no_upload() {
+    let dir = state_dir("upload-refused");
+    let server = Server::start(&dir);
+    let mut client = Client::connect_with(
+        &server.socket,
+        Features::CHECKPOINT_V6.union(Features::LAUNCH),
+        None,
+    );
+    let block = command_block(&mut client, "exec sleep 600");
+    client.wait_ready(block);
+    drop(client);
+    server.stop();
+
+    let server = Server::start(&dir);
+    let mut client = Client::connect_with(
+        &server.socket,
+        Features::CHECKPOINT_V6
+            .union(Features::BLOCK_CALL)
+            .union(Features::UPLOAD),
+        None,
+    );
+    client.request(|req| Message::Attach { req, block });
+    client.request(|req| Message::AcquireLease { req, block });
+    let answer = client.answer(|req| Message::BlockCall {
+        req,
+        block,
+        method: "terminal.upload".into(),
+        args: vec![
+            (
+                "name".into(),
+                rusty_mux_proto::schema::Value::Text("f".into()),
+            ),
+            ("offset".into(), rusty_mux_proto::schema::Value::Lines(0)),
+            (
+                "data".into(),
+                rusty_mux_proto::schema::Value::Bytes(b"x".to_vec()),
+            ),
+        ],
+    });
+    assert!(
+        matches!(answer.as_slice(), [Message::Failed { reason, .. }] if reason.contains("unknown whether")),
+        "{answer:?}"
+    );
+    let stored: Vec<_> = std::fs::read_dir(&dir)
+        .expect("state dir")
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains("upload"))
+        .collect();
+    assert!(stored.is_empty(), "{stored:?}");
+    drop(client);
+    server.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
