@@ -383,11 +383,8 @@ impl Ports for Live<'_> {
             .spawn_passing(&cmd, &[])
             .map_err(|e| format!("holder: {e}"))?;
         drop(cmd);
-        let mut first = String::new();
-        let read = BufReader::new(from_child).read_line(&mut first);
-        let slot = read
-            .map_err(|e| e.to_string())
-            .and_then(|_| slot_fd(&first))
+        let slot = first_line(from_child, HOLDER_WAIT)
+            .and_then(|first| slot_fd(&first))
             .and_then(|fd| child.dup_fd(fd).map_err(|e| format!("pidfd_getfd: {e}")));
         match slot {
             Ok(slot) => {
@@ -489,6 +486,20 @@ fn let_go(mut holder: Holder) -> Result<(), String> {
     Err(format!(
         "holder still running {HOLDER_WAIT:?} after its stdin closed; its deadline ends it"
     ))
+}
+
+/// The first line `from` writes, within `wait`: a holder that neither
+/// prints its slot nor exits (one too old to know `--slots`) must not hang
+/// the launch.
+fn first_line(from: std::io::PipeReader, wait: Duration) -> Result<String, String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut first = String::new();
+        let read = BufReader::new(from).read_line(&mut first);
+        let _ = tx.send(read.map(|_| first).map_err(|e| e.to_string()));
+    });
+    rx.recv_timeout(wait)
+        .map_err(|_| format!("the holder printed no slot within {wait:?}"))?
 }
 
 /// What a session's `jail.json` is made from.
@@ -648,6 +659,19 @@ mod tests {
         assert!(slot_fd("").is_err(), "every slot held: nothing printed");
         assert!(slot_fd("-1").is_err());
         assert!(slot_fd("slot 5").is_err());
+    }
+
+    #[test]
+    fn a_silent_holder_is_given_up_on() {
+        use std::io::Write;
+        let (r, mut w) = std::io::pipe().expect("pipe");
+        let wait = Duration::from_millis(100);
+        assert!(first_line(r, wait).unwrap_err().contains("no slot"));
+        let (r, w2) = std::io::pipe().expect("pipe");
+        let mut w2 = w2;
+        writeln!(w2, "5").expect("write");
+        assert_eq!(first_line(r, wait), Ok("5\n".to_owned()));
+        let _ = w.flush();
     }
 
     #[test]
