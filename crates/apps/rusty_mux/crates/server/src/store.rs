@@ -39,6 +39,7 @@ const SESSIONS: &str = "sessions.mmap";
 const LOCK: &str = "server.lock";
 const SCREEN: &str = "rtcp";
 const SPOOL: &str = "spool";
+const UPLOAD: &str = "upload";
 /// Saves between compactions of the engine's insert log.
 const COMPACT_EVERY: u32 = 64;
 
@@ -120,6 +121,16 @@ impl Store {
         }
     }
 
+    /// Where `block`'s uploaded files are kept, made or not.
+    pub(crate) fn upload_path(&self, block: BlockId) -> PathBuf {
+        self.dir.join(format!("{block}.{UPLOAD}"))
+    }
+
+    /// `block`'s folder of uploaded files (C82), made owner-only if missing.
+    pub(crate) fn upload_dir(&self, block: BlockId) -> io::Result<PathBuf> {
+        make_private_dir(&self.dir.join(format!("{block}.{UPLOAD}")))
+    }
+
     /// Opens the session records and returns what they hold, `Ok(None)`
     /// when they hold no session. Records that cannot be read are an error; a screen
     /// that cannot be read is skipped with a warning, so its block
@@ -156,8 +167,8 @@ impl Store {
         Ok(Some(Loaded { manifest, screens }))
     }
 
-    /// Deletes the spools of blocks `manifest` does not hold: closed while
-    /// a crash kept their spool. Only at load, before any block starts, so
+    /// Deletes the spools and uploads of blocks `manifest` does not hold:
+    /// closed while a crash kept them. Only at load, before any block starts, so
     /// a new block's spool is never taken for one. A failure is a warning.
     fn remove_orphan_spools(&self, manifest: &Manifest) {
         let Ok(entries) = fs::read_dir(&self.dir) else {
@@ -167,7 +178,10 @@ impl Store {
             let orphan = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .and_then(|n| n.strip_suffix(&format!(".{SPOOL}")))
+                .and_then(|n| {
+                    n.strip_suffix(&format!(".{SPOOL}"))
+                        .or_else(|| n.strip_suffix(&format!(".{UPLOAD}")))
+                })
                 .and_then(|id| id.parse().ok())
                 .map(BlockId::from_uuid)
                 .is_some_and(|block| !manifest.started.contains_key(&block));

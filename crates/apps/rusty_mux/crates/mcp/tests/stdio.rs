@@ -281,7 +281,14 @@ fn tools_list_is_the_catalog_without_connection_methods() {
         .iter()
         .filter_map(|t| t.get("name").and_then(Value::as_str))
         .collect();
-    let connection = ["attach", "detach", "acquire-lease", "release-lease", "sync"];
+    let connection = [
+        "attach",
+        "detach",
+        "acquire-lease",
+        "release-lease",
+        "sync",
+        "terminal.upload",
+    ];
     let expected: Vec<&str> = CATALOG
         .iter()
         .map(|m| m.name)
