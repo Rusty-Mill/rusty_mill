@@ -138,11 +138,13 @@ pub struct Board<S> {
     /// Agents registered on shared connectors.
     agents: Mutex<crate::agents::Registry>,
     /// Held by every writer of a parent link or of dependencies (`add_card`, `plan`), by the
-    /// merge close and `unclose`, and by `take`, `claim` and `move_card`, so a card cannot gain a child between the
-    /// close's childlessness check and its commit, and a dependency check by a take or a
-    /// dependency edit, a claim or a move that starts a card cannot go stale under an unclose
-    /// (#1620). **Lock order: this gate first, then the workflow guard**;
-    /// never the other way, or a waiting workflow writer can deadlock the board.
+    /// merge close and `unclose`, and by `take`, `claim` and `move_card`. So a card cannot gain
+    /// a child between the close's childlessness check and its commit, and a dependency edit,
+    /// a claim or a move that starts a card cannot go stale under an unclose (#1620). Every
+    /// claim and every move serializes on it, including moves into columns that are not work
+    /// columns: cheap in process, and simpler than reading the workflow first. **Lock order:
+    /// this gate first, then the workflow guard**; never the other way, or a waiting workflow
+    /// writer can deadlock the board.
     links: Mutex<()>,
     /// What the merge watch last found (#1620).
     merged_open: Mutex<(
@@ -2089,9 +2091,8 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// A missing capability or card, a started dependent, or see [`Card::unclosed`].
     pub fn unclose(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
-        // Under the gate every take holds, so no take can start a dependent between the look
-        // at the dependents and the reopening. Other ways to start work (`card_claim`, a move
-        // into a work column) do not hold it and are not covered.
+        // Under the gate every start of a card holds (take, claim, move), so none can start a
+        // dependent between the look at the dependents and the reopening.
         let _links = self.links();
         let flow = self.flow();
         // Authorize and validate the card itself first: only then look at other cards, and
