@@ -728,3 +728,50 @@ fn forward_refuses_what_is_not_a_port() {
         assert!(parse(&args(line)).is_err(), "{line}");
     }
 }
+
+#[test]
+fn upload_names_a_file_and_prepares_an_attach_and_a_lease() {
+    let upload = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Upload(upload)) => Ok(upload),
+        Ok(other) => panic!("expected upload, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    let parsed = upload(&format!("upload --block {ID} /tmp/a/pic.png")).unwrap();
+    assert_eq!(parsed.name, "pic.png");
+    assert_eq!(parsed.file, std::path::PathBuf::from("/tmp/a/pic.png"));
+    let names: Vec<&str> = parsed.prepare.iter().map(|c| c.method.name).collect();
+    assert_eq!(names, ["attach", "acquire-lease"]);
+    let named = upload(&format!("upload --block {ID} --name x.png pic.png")).unwrap();
+    assert_eq!(named.name, "x.png");
+    for bad in [
+        "upload",
+        "upload a b",
+        "upload --name",
+        "upload --out f a",
+        "upload ..",
+    ] {
+        assert!(parse(&args(bad)).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn download_names_a_path_and_where_it_goes() {
+    let download = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Download(download)) => Ok(download),
+        Ok(other) => panic!("expected download, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    let parsed = download(&format!("download --block {ID} notes.txt")).unwrap();
+    assert_eq!(parsed.path, "notes.txt");
+    assert_eq!(parsed.out, None);
+    let out = download(&format!("download --block {ID} --out here.txt /etc/x")).unwrap();
+    assert_eq!(out.out, Some(std::path::PathBuf::from("here.txt")));
+    for bad in [
+        "download",
+        "download a b",
+        "download --out",
+        "download --name n a",
+    ] {
+        assert!(parse(&args(bad)).is_err(), "{bad}");
+    }
+}

@@ -70,6 +70,10 @@ pub enum Command {
     Own,
     /// Tunnels loopback ports to the server's host (C81).
     Forward(Forward),
+    /// Sends a file of this machine to the server's host (C82).
+    Upload(Upload),
+    /// Fetches a file of the server's host (C83).
+    Download(Download),
     /// Prints a completion script for a shell.
     Completion(Shell),
     /// Stops the server cleanly and waits until it has (C36b).
@@ -420,6 +424,8 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "run" => run(rest, defaults).map(Command::Run),
         "agent" => agent(rest).map(Command::Agent),
         "forward" => forward(rest, defaults).map(Command::Forward),
+        "upload" => upload(rest, defaults).map(Command::Upload),
+        "download" => download(rest, defaults).map(Command::Download),
         "bridge" if rest.is_empty() => Ok(Command::Bridge),
         "bridge" => Err("bridge takes no arguments".into()),
         "own" if rest.is_empty() => Ok(Command::Own),
@@ -469,7 +475,14 @@ fn forward(args: &[String], defaults: &Defaults) -> Result<Forward, String> {
     if ports.is_empty() {
         return Err(usage.into());
     }
-    let prepare = ["attach", "acquire-lease"]
+    let prepare = lease_calls(&block, defaults)?;
+    Ok(Forward { prepare, ports })
+}
+
+/// The requests that attach to a block and take its input lease, which a
+/// forward, an upload and a download need first.
+fn lease_calls(block: &[String], defaults: &Defaults) -> Result<Vec<Call>, String> {
+    ["attach", "acquire-lease"]
         .into_iter()
         .map(|method| {
             let words: Vec<String> = std::iter::once(method.to_owned())
@@ -477,8 +490,98 @@ fn forward(args: &[String], defaults: &Defaults) -> Result<Forward, String> {
                 .collect();
             call(&words, defaults)
         })
-        .collect::<Result<_, _>>()?;
-    Ok(Forward { prepare, ports })
+        .collect()
+}
+
+/// `upload`: the local file to send, and the name it gets on the server.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Upload {
+    pub prepare: Vec<Call>,
+    pub file: PathBuf,
+    pub name: String,
+}
+
+/// `download`: the server's file to fetch, and where it goes (stdout when
+/// `out` is none).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Download {
+    pub prepare: Vec<Call>,
+    pub path: String,
+    pub out: Option<PathBuf>,
+}
+
+/// What `upload` and `download` take: one operand, `--block`, and the flag
+/// each names its other value with.
+struct Operands {
+    block: Vec<String>,
+    operand: String,
+    other: Option<String>,
+}
+
+fn operands(verb: &str, other: &str, args: &[String]) -> Result<Operands, String> {
+    let usage = format!("usage: {verb} [--block BLOCK] [{other} VALUE] OPERAND");
+    let (mut block, mut found, mut operand) = (Vec::new(), None, None);
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--block" => {
+                let value = rest
+                    .next()
+                    .ok_or(format!("{verb}: --block needs a value"))?;
+                block = vec!["--block".into(), value.clone()];
+            }
+            flag if flag == other => {
+                let value = rest
+                    .next()
+                    .ok_or(format!("{verb}: {other} needs a value"))?;
+                found = Some(value.clone());
+            }
+            flag if flag.starts_with('-') => return Err(format!("{verb}: unknown flag {flag}")),
+            value if operand.is_none() => operand = Some(value.to_owned()),
+            _ => return Err(usage),
+        }
+    }
+    let operand = operand.ok_or(usage)?;
+    Ok(Operands {
+        block,
+        operand,
+        other: found,
+    })
+}
+
+fn upload(args: &[String], defaults: &Defaults) -> Result<Upload, String> {
+    let Operands {
+        block,
+        operand,
+        other,
+    } = operands("upload", "--name", args)?;
+    let file = PathBuf::from(&operand);
+    let name = match other {
+        Some(name) => name,
+        None => file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("upload: {operand:?} has no file name; give --name"))?,
+    };
+    Ok(Upload {
+        prepare: lease_calls(&block, defaults)?,
+        file,
+        name,
+    })
+}
+
+fn download(args: &[String], defaults: &Defaults) -> Result<Download, String> {
+    let Operands {
+        block,
+        operand,
+        other,
+    } = operands("download", "--out", args)?;
+    Ok(Download {
+        prepare: lease_calls(&block, defaults)?,
+        path: operand,
+        out: other.map(PathBuf::from),
+    })
 }
 
 /// `REMOTE` or `LOCAL:REMOTE`, each a port from 1 to 65535.
@@ -1299,6 +1402,20 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
          \x20                  [LOCAL:]REMOTE...; attaches to the block and takes its input\n\
          \x20                  lease, so it fails while another client holds it; prints\n\
          \x20                  LOCAL and REMOTE for each port; not for use with +",
+    ),
+    (
+        "upload",
+        "Send a file of this machine to the server's host and print its\n\
+         \x20                  path there: upload [--block BLOCK] [--name NAME] FILE; takes\n\
+         \x20                  the block's input lease; refused on an agent's block; not for\n\
+         \x20                  use with +",
+    ),
+    (
+        "download",
+        "Copy a file of the server's host (absolute, or relative to the\n\
+         \x20                  block's directory) to stdout or --out FILE: download\n\
+         \x20                  [--block BLOCK] [--out FILE] PATH; takes the block's input\n\
+         \x20                  lease; refused on an agent's block; not for use with +",
     ),
     (
         "watch",

@@ -37,6 +37,12 @@
 //! machine's, printing `LOCAL<TAB>REMOTE` for each, until the block closes
 //! or it is stopped. It is not for chaining with `+`.
 //!
+//! `upload [--block B] [--name N] FILE` (C82) and `download [--block B]
+//! [--out FILE] PATH` (C83) attach to the block, take its input lease and
+//! move one file over that connection: upload prints the path the file got
+//! on the server, download writes to stdout or `--out`. Neither is for
+//! chaining with `+`.
+//!
 //! Output is text, or one JSON object per line with `--json`. The exit code
 //! is an [`Exit`]; an interrupt ends the process with the signal, which a
 //! shell reports as 130. An embedder bounds a command with [`run_until`].
@@ -532,6 +538,8 @@ fn run_with(
         | Command::Wait(_)
         | Command::Run(_)
         | Command::Forward(_)
+        | Command::Upload(_)
+        | Command::Download(_)
         | Command::Overview
         | Command::ServerStop => {}
     }
@@ -826,6 +834,8 @@ fn execute(
                 &mut *session.out,
             )
         }
+        Command::Upload(upload) => run_upload(&mut session, upload),
+        Command::Download(download) => run_download(&mut session, download),
         Command::Help(_)
         | Command::Api(_)
         | Command::Do { .. }
@@ -841,6 +851,103 @@ fn execute(
         | Command::Own
         | Command::Completion(_) => Ok(Exit::Ok),
     }
+}
+
+/// First request number of a transfer: past the few the preparing calls use.
+const TRANSFER_REQ: u64 = 1_000;
+
+/// Prepares a transfer: attaches to the block, takes its lease and checks
+/// the server offers `feature`. Returns a client connection on the same
+/// stream, and the block.
+#[cfg(any(unix, windows))]
+fn transfer(
+    session: &mut Session<'_, conn::Stream>,
+    prepare: &[cli::Call],
+    feature: Features,
+    verb: &str,
+) -> Result<(rusty_mux_client::Conn<conn::Stream>, BlockId), Failure> {
+    let (features, block) = session.calls_with(prepare, feature)?;
+    if !features.contains(feature) {
+        return Err(Failure::Failed(format!(
+            "{verb}: this server does not offer it"
+        )));
+    }
+    let block = block.ok_or_else(|| Failure::Failed(format!("{verb}: no block")))?;
+    let (reader, _writer, pending) = session.conn.split()?;
+    let conn = rusty_mux_client::Conn::with_pending(reader, pending);
+    Ok((conn, BlockId::from_uuid(block)))
+}
+
+/// A refusal of the server is a failure of the command, not a lost server.
+fn refused(verb: &str, e: io::Error) -> Failure {
+    match e.kind() {
+        io::ErrorKind::Other => Failure::Failed(format!("{verb}: {e}")),
+        _ => e.into(),
+    }
+}
+
+/// `upload`: sends the file and prints the path it got on the server.
+#[cfg(any(unix, windows))]
+fn run_upload(
+    session: &mut Session<'_, conn::Stream>,
+    upload: &cli::Upload,
+) -> Result<Exit, Failure> {
+    // Opened first, so a missing file fails before the lease is taken.
+    let mut file = std::fs::File::open(&upload.file)
+        .map_err(|e| Failure::Failed(format!("upload: {}: {e}", upload.file.display())))?;
+    let (mut conn, block) = transfer(session, &upload.prepare, Features::UPLOAD, "upload")?;
+    let path =
+        rusty_mux_client::upload::send(&mut conn, block, &upload.name, &mut file, TRANSFER_REQ)
+            .map_err(|e| refused("upload", e))?;
+    let line = match session.json {
+        true => rusty_json::Value::Object(
+            [("path".to_owned(), rusty_json::Value::from(path))]
+                .into_iter()
+                .collect(),
+        )
+        .to_json_string(),
+        false => path,
+    };
+    writeln!(session.out, "{line}")?;
+    Ok(Exit::Ok)
+}
+
+/// `download`: copies the file to `--out`, or to stdout. A partial file is
+/// removed on failure.
+#[cfg(any(unix, windows))]
+fn run_download(
+    session: &mut Session<'_, conn::Stream>,
+    download: &cli::Download,
+) -> Result<Exit, Failure> {
+    let (mut conn, block) = transfer(session, &download.prepare, Features::DOWNLOAD, "download")?;
+    let fetched = match &download.out {
+        None => rusty_mux_client::download::fetch(
+            &mut conn,
+            block,
+            &download.path,
+            &mut session.out,
+            TRANSFER_REQ,
+        ),
+        Some(out) => {
+            let mut file = std::fs::File::create(out)
+                .map_err(|e| Failure::Failed(format!("download: {}: {e}", out.display())))?;
+            let fetched = rusty_mux_client::download::fetch(
+                &mut conn,
+                block,
+                &download.path,
+                &mut file,
+                TRANSFER_REQ,
+            );
+            if fetched.is_err() {
+                drop(file);
+                // Best effort: the failure being reported is the fetch's.
+                let _gone = std::fs::remove_file(out);
+            }
+            fetched
+        }
+    };
+    fetched.map_err(|e| refused("download", e))?;
+    Ok(Exit::Ok)
 }
 
 /// `forward`: listens on each port and tunnels it until the block closes or
