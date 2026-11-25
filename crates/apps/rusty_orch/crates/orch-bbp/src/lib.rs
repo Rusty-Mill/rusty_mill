@@ -7,6 +7,8 @@
 pub mod acp;
 mod config;
 mod lease;
+#[cfg(target_os = "linux")]
+pub mod mux;
 mod supervisor;
 pub use config::{dry_run_args, Agent, Assignment, Config, Sandbox, Slots};
 pub use supervisor::{StdSupervisor, Supervised, Supervisor};
@@ -895,3 +897,6 @@ mod tests_confined;
 
 #[cfg(all(test, unix))]
 mod tests_acp;
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests_mux;

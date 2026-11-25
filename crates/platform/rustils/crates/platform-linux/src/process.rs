@@ -3,6 +3,7 @@
 //! follow). No `unsafe` here.
 
 use std::ffi::{OsStr, OsString};
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -46,6 +47,26 @@ impl LinuxChild {
             reaped: None,
             pipes: [None, None, None],
         }
+    }
+}
+
+impl LinuxChild {
+    /// A copy of this child's descriptor `fd`, sharing its open file
+    /// description (offsets, status flags and `flock` locks), close-on-exec
+    /// in this process. Through `pidfd_getfd(2)`, Linux 5.6+.
+    ///
+    /// Refused once the child has been reaped, since its pid may then name
+    /// another process. `PermissionDenied` when this process lacks ptrace
+    /// access to the child; an `EBADF` error when it has no `fd`.
+    pub fn dup_fd(&self, fd: i32) -> Result<OwnedFd> {
+        if self.reaped.is_some() {
+            return Err(PlatformError::new(
+                ErrorKind::InvalidInput,
+                OsCode::None,
+                "dup_fd: child already reaped",
+            ));
+        }
+        spawn::dup_from(self.pid, fd)
     }
 }
 
@@ -160,8 +181,13 @@ pub(crate) fn refuse_raw_args(cmd: &Command, op: &'static str) -> Result<()> {
     Err(PlatformError::new(ErrorKind::Unsupported, OsCode::None, op))
 }
 
-impl Spawner for LinuxSpawner {
-    fn spawn(&self, cmd: &Command) -> Result<Box<dyn Child>> {
+impl LinuxSpawner {
+    /// [`Spawner::spawn`] without the type erasure, also giving the child
+    /// `passed`, in order, at descriptors 3, 4, …. When `passed` is
+    /// nonempty, everything else above 2 is closed in the child. When it is
+    /// empty, this is a plain spawn. Linux only, so it stays off the
+    /// portable [`Command`], like [`crate::LinuxPty::spawn_passing`] (C75).
+    pub fn spawn_passing(&self, cmd: &Command, passed: &[BorrowedFd<'_>]) -> Result<LinuxChild> {
         refuse_raw_args(cmd, "spawn: raw_args is Windows only")?;
         if cmd.detached && matches!(cmd.group, GroupSpec::JoinGroup(_)) {
             // `Command::detach`'s contract (`docs/decision-request-
@@ -202,6 +228,7 @@ impl Spawner for LinuxSpawner {
             [&cmd.stdin, &cmd.stdout, &cmd.stderr],
             cmd.group,
             cmd.detached,
+            passed,
         )?;
         let group = match cmd.group {
             // `detached` alone already gives the child its own pgid via
@@ -214,12 +241,18 @@ impl Spawner for LinuxSpawner {
             GroupSpec::NewGroup => Some(pid),
             GroupSpec::JoinGroup(pgid) => Some(pgid as c::pid_t),
         };
-        Ok(Box::new(LinuxChild {
+        Ok(LinuxChild {
             pid,
             group,
             reaped: None,
             pipes,
-        }))
+        })
+    }
+}
+
+impl Spawner for LinuxSpawner {
+    fn spawn(&self, cmd: &Command) -> Result<Box<dyn Child>> {
+        Ok(Box::new(self.spawn_passing(cmd, &[])?))
     }
 
     /// Mechanism-level lookup (RFC v2 §5.4): a name containing `/` is used

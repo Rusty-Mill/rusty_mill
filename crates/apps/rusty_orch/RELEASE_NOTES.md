@@ -12,6 +12,16 @@ One entry per merged PR against `main`, newest first. No version tags yet.
   builder can't fake one of them.
 - Characters that reorder text on screen are shown as escapes.
 
+## Builder blocks in the mux
+**2026-11-25**
+
+- orch can now find (or make) a project's mux session and window, and
+  launch a builder there through its own `rusty-mux-ctl own` connection,
+  handing it the slot and the ACP socket, plus a read-only block that
+  shows `acp.log`.
+- If the mux goes away mid-launch, orch reports it as lost, so the builder
+  session is aborted rather than counted as failed.
+
 ## Builder ACP client
 **2026-11-25**
 
