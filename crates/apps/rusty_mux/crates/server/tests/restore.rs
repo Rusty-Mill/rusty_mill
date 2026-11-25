@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::{Client, PATIENCE, block_for, run_and_wait, shell};
 use rusty_mux_core::EntityId;
+#[cfg(unix)]
 use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Entry, Features, Message};
 use rusty_mux_server::{Config, serve_until};
