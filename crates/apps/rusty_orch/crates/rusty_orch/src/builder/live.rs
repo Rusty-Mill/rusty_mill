@@ -52,7 +52,7 @@ pub fn run(o: &Options) -> Result<String, String> {
     let base = rev_parse(base.root(), &o.base)?;
     let board = board(&o.dir, &o.task)?;
     let child = BbpChild::spawn(&o.bbp, &o.dir, &o.task, AGENT)?;
-    let mut seat = Seat::new(AGENT, child, &run_id()?);
+    let mut seat = Seat::new(AGENT, child, &run_id()?).follow_every_domain();
     seat.refresh(&config)?;
     let card = seat
         .cards(&config)

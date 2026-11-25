@@ -254,6 +254,9 @@ pub struct Session<R> {
     /// alien's) as of the last read, and those the run's state has jobs for.
     lenses: BTreeSet<String>,
     history: BTreeSet<String>,
+    /// Follow every domain, for a seat that is not a configured lens (the
+    /// #1318 builder).
+    every: bool,
 }
 
 /// A fresh run id, so a later run's posts never replay an earlier run's.
@@ -280,7 +283,15 @@ impl<R: Rpc> Session<R> {
             authors: BTreeMap::new(),
             lenses: BTreeSet::new(),
             history: BTreeSet::new(),
+            every: false,
         }
+    }
+
+    /// Follow every domain whatever the config's lenses say: the builder's
+    /// seat is not a lens, yet must see the claim it builds.
+    pub fn follow_every_domain(mut self) -> Self {
+        self.every = true;
+        self
     }
 
     /// Use `taints` for the cards and lines built from now on. A tainted
@@ -411,6 +422,7 @@ impl<R: Rpc> Session<R> {
     fn domains(&self, config: &LensConfig) -> BTreeSet<String> {
         let every = ["*".to_owned()];
         let follows: &[String] = match config.lens(&self.lens) {
+            _ if self.every => &every,
             Some(lens) => &lens.domains,
             None if config.alien.as_ref().is_some_and(|a| a.id == self.lens) => &every,
             None => return BTreeSet::new(),
@@ -1046,6 +1058,24 @@ mod tests {
                 assert_eq!(s.cards(&cfg).len(), 1);
             }
         }
+    }
+
+    #[test]
+    fn the_builder_seat_follows_every_domain() {
+        let fake = Fake::default()
+            .on("task_card", task_card(5))
+            .on("read", read(vec![claim(7)], false))
+            .on(
+                "claims_delta",
+                Response::Claims(vec![view(7, ClaimStatus::Open, &[])]),
+            );
+        let mut s = Session::new("claude-builder", fake, "r1").follow_every_domain();
+        s.refresh(&config()).expect("refresh");
+        assert_eq!(
+            word(s.rpc.args("claims_delta")[0], "domains"),
+            r#"["dedup"]"#
+        );
+        assert_eq!(s.cards(&config()).len(), 1);
     }
 
     #[test]
