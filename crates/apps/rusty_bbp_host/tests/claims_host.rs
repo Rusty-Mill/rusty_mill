@@ -826,6 +826,8 @@ fn an_acted_on_escalation_names_its_marks_and_refine_answers_it() {
     claims_task(&dir);
     let d = claim(&dir, "a", "foundation", true);
     let x = post_dep(&dir, "built-on-it", d);
+    let (stored, _) = put_candidate(&mut server(&dir, "a"), "kx", &"a".repeat(40), FLAG_ONLY, x);
+    assert!(stored.contains("Stored"), "{stored}");
     for c in [d, x] {
         human_ok(&dir, "claim", &[&format!("msg:{c}"), "accept"]);
     }
@@ -853,7 +855,18 @@ fn an_acted_on_escalation_names_its_marks_and_refine_answers_it() {
         rows[0].acted,
         [inbox::Acted {
             claim: MsgId(x),
-            marks: vec!["pr-7".into()]
+            marks: vec!["pr-7".into()],
+            diffstat: Some(rusty_bbp_host::diffstat::Diffstat {
+                files: 1,
+                added: 1,
+                removed: 1,
+                top: vec![rusty_bbp_host::diffstat::FileStat {
+                    path: "flag.txt".into(),
+                    added: 1,
+                    removed: 1
+                }],
+                more: 0,
+            }),
         }]
     );
 
