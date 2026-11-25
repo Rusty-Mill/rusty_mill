@@ -75,6 +75,9 @@ header.top{display:flex;align-items:center;gap:6px;padding:0 14px;min-height:52p
 /* The scope bar: repository, its projects, and the agents holding claims. Each only narrows the board. */
 #nav1{display:flex;align-items:center;gap:6px;padding:8px 14px;background:var(--card);border-bottom:1px solid var(--line);flex-wrap:wrap;white-space:nowrap}
 #nav1:empty{display:none}
+.datef{display:flex;align-items:center;gap:6px;padding:6px 14px;background:var(--card);border-bottom:1px solid var(--line);font-size:13px;color:var(--mute)}
+.datef select,.datef input{padding:3px 7px;font-size:13px}
+.datef .chip{border-radius:14px;padding:3px 10px;background:var(--ink);border-color:var(--ink);color:var(--card);font-size:13px}
 #nav1 .lbl{font-size:12px;font-weight:600;color:var(--mute);margin:0 2px 0 8px}
 #nav1 .sep{width:1px;align-self:stretch;background:var(--line);margin:2px 6px}
 #project{font-weight:600;padding:5px 8px;max-width:260px}
@@ -359,6 +362,11 @@ dialog h2{margin:0;font-size:18px}
   <button id="signout" type="button" class="icon" hidden title="Sign out" aria-label="sign out"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button>
 </header>
 <nav id="nav1" aria-label="projects and agents"></nav>
+<form id="datef" class="datef" aria-label="date filter">
+  <select id="df-field" aria-label="date field"><option value="">Any date</option><option value="created">Created</option><option value="updated">Updated</option><option value="moved">Moved</option></select>
+  <input id="df-from" type="date" aria-label="from date"><span aria-hidden="true">to</span><input id="df-to" type="date" aria-label="to date">
+  <button id="df-clear" type="button" class="chip" hidden title="Clear the date filter" aria-label="clear date filter"></button>
+</form>
 <nav id="strip" class="strip" aria-label="columns" hidden></nav>
 <main id="board"></main>
 <dialog id="dlg"></dialog>
@@ -391,7 +399,50 @@ const projects=()=>[...new Set(Object.values(repos).flat())];
 /* `default` is the Inbox: where a card that names no project lands (rusty_tick's Inbox list). Shown by that name only. */
 const INBOX="default",label=p=>p===INBOX?"Inbox":p;
 const statusShown=p=>p===sel.project||!statusSel||statusOf(p)===statusSel;
-const shown=k=>(!sel.project||k.project===sel.project)&&statusShown(k.project)&&(!sel.agent||k.claim===sel.agent);
+const shown=k=>(!sel.project||k.project===sel.project)&&(!dateIds||dateIds.has(k.id))&&statusShown(k.project)&&(!sel.agent||k.claim===sel.agent);
+/* The date filter: a field (created, updated or moved) and a day range, kept in the address (?date=updated&from=2026-11-01&to=2026-11-25)
+   so a reload restores it. The server decides (board_list's created_*, updated_*, moved_*: `moved` lives in its event log, not on the
+   card), and only which cards match comes back; the board keeps reading every card once. `to` is the whole day, local time. */
+const DATE_FIELDS=["created","updated","moved"];
+let dateSel={field:"",from:"",to:""},dateIds=null,dateSeq=0;
+const dayMs=(d,plus=0)=>{const[y,m,x]=d.split("-").map(Number);return new Date(y,m-1,x+plus).getTime()};
+const validDay=d=>/^\d{4}-\d\d-\d\d$/.test(d)&&!Number.isNaN(dayMs(d));
+const dateOn=()=>dateSel.field&&(dateSel.from||dateSel.to);
+function dateFromUrl(){
+  const q=new URLSearchParams(location.search),f=q.get("date")||"",from=q.get("from")||"",to=q.get("to")||"";
+  if(DATE_FIELDS.includes(f))dateSel={field:f,from:validDay(from)?from:"",to:validDay(to)?to:""};
+}
+function dateToUrl(){
+  const q=new URLSearchParams(location.search);
+  for(const k of["date","from","to"])q.delete(k);
+  if(dateOn()){q.set("date",dateSel.field);if(dateSel.from)q.set("from",dateSel.from);if(dateSel.to)q.set("to",dateSel.to)}
+  const s=q.toString();
+  try{history.replaceState(null,"",location.pathname+(s?"?"+s:""))}catch{}
+}
+async function loadDateIds(){
+  if(!dateOn()){dateSeq++;dateIds=null;return}
+  const f=dateSel.field,a={archived:"include",project_status:STATUSES};
+  if(dateSel.from)a[f+"_from"]=dayMs(dateSel.from);
+  if(dateSel.to)a[f+"_to"]=dayMs(dateSel.to,1);
+  const seq=++dateSeq;
+  let ids;
+  try{ids=new Set((await api("board_list",a)).cards.map(k=>k.id))}
+  catch(e){if(seq===dateSeq)throw e;return}   // an older request's failure must not undo a newer answer
+  if(seq===dateSeq)dateIds=ids;   // nor may its slower, older answer overwrite it
+}
+function renderDateFilter(){
+  const on=dateOn(),c=$("df-clear");
+  if(document.activeElement!==$("df-field"))$("df-field").value=dateSel.field;
+  if(document.activeElement!==$("df-from"))$("df-from").value=dateSel.from;
+  if(document.activeElement!==$("df-to"))$("df-to").value=dateSel.to;
+  c.hidden=!on;
+  if(on)c.textContent=dateSel.field+" "+(dateSel.from||"…")+" – "+(dateSel.to||"…")+" ×";
+}
+async function setDates(next){
+  dateSel=next;dateToUrl();
+  try{await loadDateIds()}catch(e){toast(e.message);dateIds=null}
+  render();
+}
 const count=f=>cards.filter(f).length;
 /* A Done card is shelved, off the board and in the Archive view, once archived or 14 days after it
    was done (closed without shipping: after its last change) or last restored. The server's
@@ -563,6 +614,7 @@ function renderStrip(){
 }
 
 function render(){
+  renderDateFilter();
   renderStrip();
   if(view==="decisions"){renderDecisions();return}
   if(view==="roadmap"){renderRoadmap();return}
@@ -1164,7 +1216,10 @@ async function catchUp(){
   cursor=r.cursor;cards=byPriority([...kept,...read.filter(c=>c&&!known.has(c.id))]);
   return true;
 }
-async function refresh(){await catchUp();await loadPending();render()}
+/* The date filter's matches are the server's answer, so any change to the board (here, or in another session) asks again.
+   A failed read keeps the last answer: stale beats a board that suddenly shows everything or nothing. */
+async function reloadDates(){try{await loadDateIds()}catch{}}
+async function refresh(){await catchUp();await loadPending();await reloadDates();render()}
 
 /* Decisions (#595): the open BBP escalations of the tasks linked from cards, read through inbox_list
    (admin only; Mill Board stores none of it). `pending` is null when this credential or board has no
@@ -1259,7 +1314,9 @@ async function poll(){
     let redraw=await pollColumns();
     redraw||=await stonesChanged();
     if(Date.now()-pendingAt>30000){const n=JSON.stringify([pending,pendingErr]);await loadPending();redraw||=n!==JSON.stringify([pending,pendingErr])}
-    redraw=await catchUp()||redraw;
+    const changed=await catchUp();
+    if(changed&&dateOn())await reloadDates();
+    redraw=changed||redraw;
     if(redraw)render();
   }catch(e){}
   setTimeout(poll,1500);
@@ -1283,6 +1340,7 @@ const SECTIONS=[
   ["rules","Rules","Whether card moves follow the Columns moves and each role's capabilities."],
   ["github","GitHub","Mirror a repository's issues onto the board."],
   ["apps","Apps","Apps signed in through OAuth, such as a claude.ai connector."],
+  ["history","History","What each settings change altered: when, who, and the old and new value. The newest 5000 are kept, within 2 MiB; a change too large to keep whole is kept without its values. Secrets are never recorded."],
   ["server","Server","How this board was started. Read-only; it changes with the server's flags and a restart."]];
 function drawSettings(){
   const d=$("settings"),box=el("div",null,"sheet");
@@ -1293,7 +1351,7 @@ function drawSettings(){
     b.onclick=()=>{tab=id;secret=null;flowDraft=null;drawSettings()};tabs.append(b)}
   const close=el("button","Close","close");close.type="button";close.onclick=()=>d.close();tabs.append(close);
   const [,title,about]=SECTIONS.find(([id])=>id===tab),pane=el("div",null,"pane");
-  pane.append(el("h2",title),el("p",about,"lead"),{agents:agentsTab,repos:reposTab,projects:projectsTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
+  pane.append(el("h2",title),el("p",about,"lead"),{agents:agentsTab,repos:reposTab,projects:projectsTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,history:historyTab,server:serverTab}[tab]());
   // Destructive actions read as such wherever a section puts them.
   pane.querySelectorAll("button").forEach(b=>{if(/^(Remove|Revoke|Turn sync off)/.test(b.textContent))b.classList.add("danger");
     else if(/^(Save (roles|columns)|Add (agent|role|column)$)/.test(b.textContent))b.classList.add("primary")});
@@ -1556,6 +1614,21 @@ function appsTab(){
 }
 
 /* How the server was started. Changed with its flags or board.env, then a restart. */
+function historyTab(){
+  const t=el("div"),body=el("div");t.append(body);
+  setting("settings_history",{limit:200}).then(r=>{
+    const es=(r.entries||[]).slice().reverse();
+    if(!es.length){body.append(el("p","No settings change has been recorded yet.","note"));return}
+    const tbl=el("table"),head=el("tr");["When","Who","Section","Old","New"].forEach(h=>head.append(el("th",h)));tbl.append(head);
+    const val=v=>{const c=el("code",v==null?"(none)":v.omitted_bytes!=null?"(too large to keep: "+v.omitted_bytes+" bytes)":JSON.stringify(v));c.style.whiteSpace="pre-wrap";c.style.wordBreak="break-all";return c};
+    for(const e of es){const tr=el("tr"),o=el("td"),n=el("td");o.append(val(e.old));n.append(val(e.new));
+      tr.append(el("td",new Date(e.at_ms).toLocaleString()),el("td",e.actor+(e.via_connector?" (connector)":"")),el("td",e.section+" · "+e.op),o,n);tbl.append(tr)}
+    body.append(tbl);
+    if(r.truncated)body.append(el("p","Older entries are not shown: the response was cut at its size limit. Ask for a section or a smaller limit with settings_history to see them.","note"));
+  }).catch(e=>body.append(el("p","Could not read the history: "+e.message,"err")));
+  return t;
+}
+
 function serverTab(){
   const t=el("div"),s=cfg.server||{},p=cfg.paths||{},tbl=el("table");
   const row=(k,v)=>{const tr=el("tr");tr.append(el("td",k),el("td",v));tbl.append(tr)};
@@ -1609,6 +1682,13 @@ async function loadMeta(){
   // Wire the controls first: loadMeta sets the actor field, and a click after that must not hit a dead button.
   $("actor").onchange=()=>pref("actor",$("actor").value);$("role").onchange=()=>pref("role",$("role").value);
   $("gear").onclick=openSettings;
+  dateFromUrl();
+  $("datef").onsubmit=e=>e.preventDefault();
+  const dateEdit=()=>{const f=$("df-field").value;
+    // Picking days with no field means "created": the likeliest meaning.
+    setDates({field:f||($("df-from").value||$("df-to").value?"created":""),from:$("df-from").value,to:$("df-to").value})};
+  for(const id of["df-field","df-from","df-to"])$(id).onchange=dateEdit;
+  $("df-clear").onclick=()=>setDates({field:"",from:"",to:""});
   $("view").onclick=()=>setView(view==="roadmap"?"board":"roadmap");
   $("metrics").onclick=()=>setView(view==="metrics"?"board":"metrics");pressed();
   $("decide").onclick=()=>setView(view==="decisions"?"board":"decisions");

@@ -10,6 +10,7 @@
 //! - [`check`]: `rusty_orch lens check`, a dry run of the above.
 //! - [`run`]: `rusty_orch lens run`, passes over every lens until quiet.
 //! - [`breaker`]: `rusty_orch lens breaker`, the #598 cost breaker's read-only report.
+//! - [`untested`]: `rusty_orch lens untested`, #600's open-time check for Windows-only intent lines.
 //! - [`container`]: the dedicated container a host-cleared provider runs in.
 //! - [`alien`]: `rusty_orch lens alien report`, the #708 alien lens's shadow numbers.
 //! - [`record`]: each lens's track record, from its stored blind reviews and
@@ -28,3 +29,4 @@ pub mod probes;
 pub mod record;
 pub mod registry;
 pub mod run;
+pub mod untested;
