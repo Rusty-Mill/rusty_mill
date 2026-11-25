@@ -1,7 +1,8 @@
 #!/bin/bash
 # #1092 Mill Board on BaileyAi with the decision inbox (D132): the `mill-board` user, the bbp guard,
 # the sudoers rule and the systemd drop-in from 1092-deploy-layout.md ("Users", "systemd", "Decision"),
-# then verification steps 1 and 5 and a toy escalation for step 4. No model is called ($0).
+# then verification steps 1, 5 and 4 on a toy escalation. No model is called ($0).
+# A separate inbox board on BaileyAi with its own SQLite file (Nano, 2026-11-25); the live board is untouched.
 # Run from a checkout as baileyrd, after 1092-deploy.sh at the same commit:
 #   bash docs/projects/let-em-loose/1092-deploy-board.sh
 # Idempotent. Never prints board.env. Never touches /srv/lel/experiment, lel-codex or an existing task.
@@ -16,7 +17,6 @@ D=/srv/lel/bbp
 TOY=/srv/lel/toy
 LIBEXEC=/usr/local/libexec
 STATE=/var/lib/mill-board
-OLD=/home/baileyrd/.mill-board
 UNIT=/etc/systemd/system/mill-board.service
 TASK=${TASK:-board-check}
 R="sudo -H -u orch-runner"   # orch-runner cannot enter baileyrd's directories: every call below runs from /
@@ -45,27 +45,18 @@ id mill-board >/dev/null 2>&1 \
 if id -nG mill-board | tr ' ' '\n' | grep -qx orch-runner; then die "mill-board is in the orch-runner group"; fi
 sudo install -d -o mill-board -g mill-board -m 0700 "$STATE" "$STATE/settings"
 
-# ---- 3. board.env: carried over from the old baileyrd board if there is one, else the example. Never printed.
+# ---- 3. board.env: a separate inbox board with its own SQLite file (Nano, 2026-11-25: second board on
+# BaileyAi; rusty_tick is retired). The live board elsewhere is not touched. Never printed.
 echo "=== 3. board.env"
-if ! sudo test -f "$STATE/board.env"; then
-  if [ -f "$OLD/board.env" ]; then
-    sudo install -o mill-board -g mill-board -m 0600 "$OLD/board.env" "$STATE/board.env"
-    if [ -d "$OLD/settings" ]; then sudo cp -a "$OLD/settings/." "$STATE/settings/"; fi
-    echo "carried over $OLD/board.env and settings/"
-  else
-    sudo install -o mill-board -g mill-board -m 0600 \
-      "$REPO/crates/apps/rusty_mill_board/deploy/board.env.example" "$STATE/board.env"
-    echo "new board.env from the example"
-  fi
-fi
+sudo test -f "$STATE/board.env" || sudo install -o mill-board -g mill-board -m 0600 \
+  "$REPO/crates/apps/rusty_mill_board/deploy/board.env.example" "$STATE/board.env"
+sudo sed -i -e '/^MILL_BOARD_TICK_URL=/d' -e '/^RUSTY_TICK_TOKEN=/d' -e '/^MILL_BOARD_DB=/d' \
+  -e "s|^MILL_BOARD_SETTINGS_DIR=.*|MILL_BOARD_SETTINGS_DIR=$STATE/settings|" "$STATE/board.env"
+echo "MILL_BOARD_DB=$STATE/board.db" | sudo tee -a "$STATE/board.env" >/dev/null
 sudo chown -R mill-board:mill-board "$STATE"
-sudo sed -i "s|^MILL_BOARD_SETTINGS_DIR=.*|MILL_BOARD_SETTINGS_DIR=$STATE/settings|" "$STATE/board.env"
-for k in MILL_BOARD_TICK_URL RUSTY_TICK_TOKEN; do
-  sudo grep -qE "^$k=.+" "$STATE/board.env" || die "$k is empty: set it with 'sudoedit $STATE/board.env', then rerun"
-done
 HTTP=$(sudo sed -n 's/^MILL_BOARD_HTTP=//p' "$STATE/board.env" | tail -n 1)
 HTTP=${HTTP:-127.0.0.1:8787}
-echo "tick: $(sudo sed -n 's/^MILL_BOARD_TICK_URL=//p' "$STATE/board.env" | tail -n 1)   board: $HTTP"
+echo "db: $STATE/board.db   board: $HTTP"
 
 # ---- 4. The bbp guard, its wrapper and the sudoers rule (layout "Directories"; the guard verbatim)
 echo "=== 4. guard and sudoers"
@@ -160,6 +151,38 @@ refused "$LIBEXEC/mill-board-bbp" inbox --dir /tmp/x --task "$TASK"
 refused "$LIBEXEC/mill-board-bbp" open --dir "$D"
 refused sudo -n -u orch-runner /bin/cat "$D/master"
 
-echo "=== done. Step 4 (link, inbox_list, inbox_act) is next: see the prompt."
+# ---- 9. Verification step 4: a card on this board linked to the task, inbox_list, inbox_act (dry run, then reject).
+# The admin token is the fresh board's first-admin.token, or MB_TOKEN; it stays in a variable and a header file
+# descriptor, never in argv or the output.
+echo "=== 9. step 4: inbox"
+TOKEN=${MB_TOKEN:-$(sudo cat "$STATE/settings/first-admin.token" 2>/dev/null || true)}
+[ -n "$TOKEN" ] || die "no admin token: set MB_TOKEN to an admin token of this board, then rerun"
+api() {   # api OP JSON -> the result body
+  curl -fsS -m 30 -H @<(printf 'Authorization: Bearer %s\n' "$TOKEN") \
+    -H 'Content-Type: application/json' -d "$2" "http://$HTTP/api/$1"
+}
+ROWS=$(api inbox_list '{}')
+if ! jq -e --arg t "$TASK" 'any(.[]; .task==$t)' <<<"$ROWS" >/dev/null; then
+  CARD=$(api card_add '{"title":"board-check: #1092 inbox verification","body":"Linked to BBP task board-check (A2 fixture, D146). Verification step 4 of 1092-deploy-layout.md."}' | jq -r '.card.number // .number')
+  [[ $CARD =~ ^[0-9]+$ ]] || die "card_add returned no card number"
+  api card_execution_link "{\"id\":\"$CARD\",\"execution\":\"$TASK\",\"goal\":\"$TASK\",\"bbp_task\":\"$TASK\",\"attempt\":\"1\",\"assignment\":\"$TASK\",\"generation\":1}" >/dev/null
+  echo "card #$CARD linked to $TASK"
+  ROWS=$(api inbox_list '{}')
+fi
+ROW=$(jq -c --arg t "$TASK" '[.[] | select(.task==$t)][0] // empty' <<<"$ROWS")
+[ -n "$ROW" ] || die "inbox_list does not show $TASK; bbp says: $($R "$BIN/bbp" inbox --dir "$D" --task "$TASK" --json yes)"
+echo "inbox_list: $(jq -c '{id, rev, reason, label, card}' <<<"$ROW")"
+ACT=$(jq -c '{id, rev, action: "reject"}' <<<"$ROW")
+echo "dry run: $(api inbox_act "$(jq -c '. + {dry_run: true}' <<<"$ACT")")"
+echo "reject:  $(api inbox_act "$ACT")"
+LEFT=$(api inbox_list '{}' | jq --arg t "$TASK" '[.[] | select(.task==$t)] | length')
+BBP_LEFT=$($R "$BIN/bbp" inbox --dir "$D" --task "$TASK" --json yes | jq length)
+[ "$LEFT" = 0 ] && [ "$BBP_LEFT" = 0 ] || die "escalation still open (board $LEFT, bbp $BBP_LEFT)"
+echo "ok: inbox_list and bbp inbox are empty for $TASK"
+
+echo "=== done. Steps 1, 4 and 5 passed."
+if sudo test -f "$STATE/settings/first-admin.token"; then
+  echo "This board's admin token is in $STATE/settings/first-admin.token: read it (sudo cat), keep it, then delete the file."
+fi
 echo "--- AVC denials (none expected)"
 sudo ausearch -m avc -ts recent 2>/dev/null | tail -5 || true
