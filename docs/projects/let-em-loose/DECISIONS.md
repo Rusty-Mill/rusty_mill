@@ -184,8 +184,8 @@ Precise contracts used by this guide:
 | D174 | #1416: the LEL tab view model and parsing live in rusty_term, fixtures from `bbp inbox --json` plus a drift test; no shared crate | [default] 2026-11-24 (1416) |
 | D175 | #1092: the inbox runs on a second Mill Board on BaileyAi with its own SQLite file; rusty_tick retired, live board untouched | [stated] 2026-11-25 (1092) |
 | D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
-| D177 | Nano's 2026-11-25 "Work cards 600, 723, 724, 726, 732, and 1234" releases those cards; for #723 it releases the design step (supersedes D164's "stays for later"); build waits for design approval | [stated] 2026-11-25 (general, 723) |
-| D178 | #723: the composition's project layer is DOMAIN.md + the Ai Env Manager manifest, not `.factory/overlay.md` | [stated] 2026-11-17, recorded 2026-11-25 (723) |
+| D185 | #723: Nano confirms "Work cards ... 723" means start the #723 design now (supersedes D164's hold for #723 only); build waits for design approval | [stated] 2026-11-25 (723) |
+| D186 | #723: the composition's project layer is DOMAIN.md + the Ai Env Manager manifest, not `.factory/overlay.md` | [stated] 2026-11-17, recorded 2026-11-25 (723) |
 
 ## D1. Lenses, not stages
 
@@ -1768,16 +1768,16 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:430:coedit-fold-on-rusty-crdt
 **Source.** Nano, project thread "Update Mill Board card statuses", message cmsg_014AqbZs58L565hMV2pFkCX5HGJTsB1QUY7avVobhzUMnP, 2026-11-25T01:15:31Z: "1", answering the three options in cmsg_014AqbZs58L565hMV2pFkCX5C5P4veGi9BERQNHB1fH2T3. Relayed by the caller; the message was not read.
 
-## D177. Nano's 2026-11-25 work request releases #600, #723, #724, #726, #732 and #1234; #723's design step is released
+## D185. #723: Nano's "Work cards ... 723" starts the #723 design now
 
-**Decision.** Nano asked for work on cards 600, 723, 724, 726, 732 and 1234. For #723 this supersedes D164's "the packs design (#723, D133, Q46 to Q48) ... stay for later": the #723 design is released now. Releasing work is not design approval: #723 builds nothing until Nano approves its design on the card (D25), and ask-first gates, spending and review/merge rules still apply to every card named.
-**Why.** It is a newer, explicit and attributable request that names #723, so it outranks D164 on that point. D164's other holds (#1456 and the other Backlog cards) are unchanged.
-**Rejected.** Reading it as approval to build #723 without a design review (D25).
+**Decision.** Nano's 2026-11-25 request "Work cards 600, 723, 724, 726, 732, and 1234" means start #723's design now. PR #1871 stays as the #723 design for his review. This supersedes D164's "the packs design (#723, D133, Q46 to Q48) ... stay for later" for #723 only; D164's other holds (#1456 and the other Backlog cards) stand. Building still waits for Nano's approval of the design on the card (D25), and ask-first gates and review/merge rules still apply.
+**Why.** Two expert readings of the work request conflicted, so it was put to Nano, and he chose this option.
+**Rejected.** b) D164's hold stands for #723. This corrects PR #1873's D180 clause "#723 keeps its own D25 step and D164's hold": the D25 step stays; the D164 hold does not.
 **Tag.** [stated] · remind-me: mem_4907327b4535417799f4d127827233d2
 **Key.** lel:general:work-cards-2026-11-25
-**Source.** Nano, Let Em Loose project chat, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4QwG5GgYDSPAb6XKLcSCLq1`, 2026-11-25T15:46:29Z, verbatim: "Work cards 600, 723, 724, 726, 732, and 1234". Supersedes D164 for #723 only. Numbered D177 after D176.
+**Source.** Nano tapped "Yes, design now" on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4T4ZHJJtg2RCmKbjJNGfpUU` ("Design lens composition for orch" thread), 2026-11-25T16:00:16Z, question "Did 'Work cards ... 723' mean start #723's design now?", option consequence "PR #1871 stays as the #723 design for your review; building still waits for your approval on the card." Interprets Nano's project chat message `cmsg_01WgyiM31RsSnZTgNuPX2VE4QwG5GgYDSPAb6XKLcSCLq1` (2026-11-25T15:46:29Z). Supersedes D164 for #723 only. Numbered D185 after #1874 (D177 to D179) and #1873 (D180 to D184).
 
-## D178. #723: the composition's project layer is DOMAIN.md plus the manifest, not `.factory/overlay.md`
+## D186. #723: the composition's project layer is DOMAIN.md plus the manifest, not `.factory/overlay.md`
 
 **Decision.** In the #723 lens composition, the project layer is the target repo's domain pack `DOMAIN.md` (a short digest, loaded every session) plus the manifest Ai Env Manager writes (it lists what to load). The project-expert pack is asked on demand and is not composed into every prompt. `.factory/overlay.md` is not an input. The #723 card body's "overlay" wording and D133 reading 1 ("role + overlay + knowledge") are stale on this point.
 **Why.** Nano decided on 2026-11-17 that the project overlay retires and the project layer becomes the expert pack, `DOMAIN.md` and the manifest. That is newer than the card body, and no DECISIONS entry adopted overlays (D135 rejected `overlays/` for lens files), so nothing [stated] or [agreed] is reversed.
@@ -1785,4 +1785,4 @@ The first three were approved first. The last three were added to Q35 after that
 **Not settled here.** The same memory also retires INTENT.md. That conflicts with QA.md § intent interview ([stated] card #600, 2026-11-02, "committed unchanged as INTENT.md") and #1234 in `600-build-plan.md`, so it was escalated and is not recorded.
 **Tag.** [stated] · remind-me: mem_a8b8311111ec4975b3f986915516e902
 **Key.** lel:723:project-layer-domain-pack-not-overlay
-**Source.** remind-me `mem_749600d25c4449ee9b617faa1476181c` (tag stated; Nano, claude.ai session, 2026-11-17; a model paraphrase with no message id). Related: `mem_215883a682504a6ebe57d931fb6e5a09` (domain packs are repo-level plus project-level, Nano 2026-11-13), D133. Numbered D178 after D177.
+**Source.** remind-me `mem_749600d25c4449ee9b617faa1476181c` (tag stated; Nano, claude.ai session, 2026-11-17; a model paraphrase with no message id). Related: `mem_215883a682504a6ebe57d931fb6e5a09` (domain packs are repo-level plus project-level, Nano 2026-11-13), D133. Numbered D186 after D185.

@@ -1,7 +1,7 @@
 # #723 Lens composition: design
 
 Status: draft for Nano's approval on card #723. Nothing is built until he approves (D25).
-Released by D177. Project layer per D178. Direction from D133.
+Released by D185. Project layer per D186. Direction from D133.
 
 ## Goal
 
@@ -28,8 +28,8 @@ mapped domains, the prefix is byte-for-byte today's.
 | Input | Source | Required |
 |---|---|---|
 | Lens prompt | Factory `lens.json` → `lenses/<id>.md` (D135) | yes |
-| Domain pack | target repo `DOMAIN.md` (D178), a short digest | no |
-| Manifest | target repo manifest written by Ai Env Manager (D178): extra knowledge topics and tools | no |
+| Domain pack | target repo `DOMAIN.md` (D186), a short digest | no |
+| Manifest | target repo manifest written by Ai Env Manager (D186): extra knowledge topics and tools | no |
 | Domain map | Factory `domains.toml` (new): domain token → knowledge and standards files | no |
 | Knowledge / standards | Factory `knowledge/*.md`, `standards/*.md` | only what the map selects |
 | Question domains | the claim's existing `domains` field (1–8 tokens); a question takes the union over the claims it references | yes |
@@ -37,7 +37,7 @@ mapped domains, the prefix is byte-for-byte today's.
 No BBP change: `domains` already exists on every claim and orch already reads it (`card.rs`,
 `config.rs` `Lens::follows`). Candidate diff paths are not used in v0.
 
-The project-expert pack is not composed into prompts; it stays asked on demand (D178).
+The project-expert pack is not composed into prompts; it stays asked on demand (D186).
 `.factory/overlay.md` is not an input.
 
 ## Domain map (`domains.toml`, in Factory)
@@ -130,7 +130,7 @@ as a `workspace = true` crate dependency (new to orch, not a new crate or versio
 
 **Q46. Where do knowledge and standards packs live for the composer?**
 - a) Factory `knowledge/` and `standards/`, read through the catalog adapter; lenses stay in
-  Factory `lenses/` (D135); DOMAIN.md stays in the target repo (D178). **Recommended**: Factory
+  Factory `lenses/` (D135); DOMAIN.md stays in the target repo (D186). **Recommended**: Factory
   is the source of truth (D19), and a later move only needs a new adapter.
 - b) A pack catalog in `baileyrd/pack-validation`.
 - c) Copied into each repo under `.agents/packs/`.
