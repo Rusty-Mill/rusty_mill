@@ -6,7 +6,9 @@ use std::fmt::Write as _;
 
 use rusty_mux_client::style::Style;
 use rusty_mux_core::{BlockId, FloatRect, Rect, Size};
-use rusty_term_core::{ATTR_REVERSE, ATTR_UNDERLINE, AnsiParser, Cell, Grid, WIDE_TRAILER};
+use rusty_term_core::{
+    ATTR_REVERSE, ATTR_UNDERLINE, AnsiParser, Cell, Grid, WIDE_TRAILER, char_width,
+};
 
 use crate::keys::Dir;
 use crate::predict::Overlay;
@@ -198,21 +200,37 @@ impl Frame {
     }
 
     /// Covers `rect` with `lines`, one per row from the top, the first
-    /// reversed as a title; rows past the lines are blank. The cursor goes
-    /// to the top left.
+    /// reversed as a title; rows past the lines are blank. A wide character
+    /// takes a leader and a trailer cell, and one that would not fit in the
+    /// row's last cell leaves a blank; zero-width ones are left out. The
+    /// cursor goes to the top left.
     pub fn panel(&mut self, rect: Rect, lines: &[String]) {
         let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
         for dy in 0..rows {
-            let mut chars = lines.get(dy).map(|l| l.chars());
-            for dx in 0..cols {
-                let ch = chars.as_mut().and_then(Iterator::next).unwrap_or(' ');
-                let mut glyph = Glyph::plain(ch, Style::of(&Cell::blank()));
-                if dy == 0 {
-                    glyph.style.attrs |= ATTR_REVERSE;
-                }
+            let mut style = Style::of(&Cell::blank());
+            if dy == 0 {
+                style.attrs |= ATTR_REVERSE;
+            }
+            let mut chars = lines.get(dy).map(|l| l.chars()).into_iter().flatten();
+            let mut dx = 0;
+            while dx < cols {
+                let ch = chars.next().unwrap_or(' ');
+                let (glyph, wide) = match char_width(ch) {
+                    0 => continue,
+                    2 if dx + 1 < cols => (Glyph::plain(ch, style), true),
+                    2 => (Glyph::plain(' ', style), false),
+                    _ => (Glyph::plain(ch, style), false),
+                };
                 // Both fit in u16: they are below the rect's size.
                 let i = self.index(rect.x + dx as u16, rect.y + dy as u16);
                 self.cells[i] = glyph;
+                dx += 1;
+                if wide {
+                    let mut trailer = Glyph::plain(' ', style);
+                    trailer.trailer = true;
+                    self.cells[i + 1] = trailer;
+                    dx += 1;
+                }
             }
         }
         self.cursor = Some((rect.x, rect.y));
@@ -1242,5 +1260,41 @@ mod tests {
             (' ', false),
             "the orphan trailer"
         );
+    }
+
+    /// A wide filename in the panel keeps its leader and trailer cells, so an
+    /// incremental redraw leaves the pane beside it where it was.
+    #[test]
+    fn a_panel_paints_wide_glyphs_as_two_cells() {
+        let layout: Layout = format!("cols50({},{})", id(1), id(2)).parse().unwrap();
+        let rects = layout.rects(size(9, 3));
+        let (a, b) = (grid(4, 3, "abcd"), grid(4, 3, "\r\nwxyz"));
+        let views: Vec<View<'_>> = rects
+            .iter()
+            .zip([&a, &b])
+            .map(|((block, rect), grid)| View {
+                block: *block,
+                rect: *rect,
+                grid: Some(grid),
+                overlay: None,
+                float: false,
+            })
+            .collect();
+        let before = compose(size(9, 3), &views, id(1));
+        let mut after = before.clone();
+        let lines = ["title".to_string(), "\u{754c}x\u{754c}".to_string()];
+        after.panel(rects[0].1, &lines);
+        let row = after.row(1);
+        // Leader, trailer, `x`, then a wide glyph with room for one cell
+        // only (4 columns) is blanked instead of split.
+        assert_eq!((row[0].ch, row[0].trailer), ('\u{754c}', false));
+        assert!(row[1].trailer);
+        assert_eq!((row[2].ch, row[3].ch), ('x', ' '));
+        assert!(!row[3].trailer);
+        assert_eq!(text(&after, 1), "\u{754c}x \u{2502}wxyz");
+        // The redraw writes the pane beside it from its own column.
+        let out = String::from_utf8(render(Some(&before), &after)).unwrap();
+        assert!(out.contains("\u{754c}x "), "{out:?}");
+        assert!(out.contains("wxyz"), "{out:?}");
     }
 }
