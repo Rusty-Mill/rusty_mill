@@ -1789,6 +1789,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_8515601b9f5d426e973dcad3c0524df4
 **Key.** lel:1405:windows-line-recognition
 **Source.** Caller question from the #600 thread, 2026-11-25; `600-builder-session-design.md` §2, §8 (approved, D66); D56, D63.
+
 ## D196. #724: the redrawn `factory-map.svg` is accepted as the Factory map for now
 
 **Decision.** `docs/projects/let-em-loose/factory-map.svg`, redrawn from card #724's description of what changed (Q45's interim choice) in PR #1876, is accepted as #724's Factory map for now. The original Factory map stays untouched. "For now": a later redraw, or the 2026-11-04 voice-chat source SVG if it is recovered, may replace it without a new decision on intent. This settles the drawing only; CI, review by `dottiusmaximus` and the merge rules still apply to PR #1876.
