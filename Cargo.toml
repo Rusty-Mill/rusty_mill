@@ -323,6 +323,8 @@ exclude = [
     "crates/apps/rush/fuzz",
     "crates/libs/ui/rusty_lines/bench",
     "crates/foundation/rusty_libc/bench",
+    # rusty_fuse Phase 0 spikes: throwaway, standalone, not built by workspace CI (D17).
+    "crates/libs/storage/rusty_fuse/spikes/fuse_hello",
     "crates/libs/net/rusty_tls/fuzz",
     "crates/libs/protocol/rusty_lsp/fuzz",
     "crates/platform/rustils/fuzz",
