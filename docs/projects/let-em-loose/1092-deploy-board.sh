@@ -149,7 +149,9 @@ refused() {   # the command must fail and print the guard's (or sudo's) refusal;
 refused "$LIBEXEC/mill-board-bbp" inbox --dir "$D" --dir /tmp/x --task "$TASK"
 refused "$LIBEXEC/mill-board-bbp" inbox --dir /tmp/x --task "$TASK"
 refused "$LIBEXEC/mill-board-bbp" open --dir "$D"
-refused sudo -n -u orch-runner /bin/cat "$D/master"
+# Through a shell, as the wrapper does: systemd (init_t) may not exec sudo directly under SELinux, which
+# would refuse the call before sudoers is consulted and prove nothing about the rule.
+refused /bin/sh -c "sudo -n -u orch-runner /bin/cat $D/master"
 
 # ---- 9. Verification step 4: a card on this board linked to the task, inbox_list, inbox_act (dry run, then reject).
 # The admin token is the fresh board's first-admin.token, or MB_TOKEN; it stays in a variable and a header file
