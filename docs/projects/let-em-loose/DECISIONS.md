@@ -186,6 +186,7 @@ Precise contracts used by this guide:
 | D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
 | D177 | #1404 build defaults from the recovered #600 design: builders_per_claim 1, max_live_builders 3; budget admission as approved; `builder_session` fields | [default] 2026-11-25 (1404) |
 | D178 | #1405: Windows-only intent lines are recognised by a frozen-input mapping file keyed by line; the check is orch's, no BBP change | [default] 2026-11-25 (1405) |
+| D197 | #1318 D167 toy-run runbook: BaileyAi as baileyrd from merged main, own BBP dir in ~, fresh toy repo, two concurrent `builder run`s, fail-closed checks, run record by PR | [default] 2026-11-25 (1318) |
 
 ## D1. Lenses, not stages
 
@@ -1788,3 +1789,20 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_8515601b9f5d426e973dcad3c0524df4
 **Key.** lel:1405:windows-line-recognition
 **Source.** Caller question from the #600 thread, 2026-11-25; `600-builder-session-design.md` §2, §8 (approved, D66); D56, D63.
+
+## D197. #1318: runbook defaults for the D167 toy-claim run
+
+**Decision.** Inside the approved design (`1318-builder-launch-slices.md` §4, D188) and D167's approved run:
+1. **Host and code.** BaileyAi (D53; LXC 107 was dropped there), as `baileyrd` (`same_user` v0, D161, D166). Only from merged `main` at a recorded sha: S1 to S6 merge first. `bbp`, `rusty_orch`, `lel-jail` and `rusty-mux-ctl` from that sha go to `/opt/lel/<sha>/bin` without flipping `/opt/lel/current`, so the inbox board's `bbp` and the 1092 drain rule are untouched; the script passes full paths.
+2. **Directories.** Its own BBP dir, orch state, slots dir and toy repo under `~baileyrd` (for example `~/toy-1318/`). `/srv/lel/bbp` is `orch-runner` 0700 and refused to `baileyrd` (`1092-deploy.sh`), so nothing under `/srv/lel` changes and the Mill Board inbox is not involved.
+3. **Repo, claim, task.** A fresh throwaway local git repo, not `dedup-manager` (#1234 serves #1320, which is not approved). Shell only, no external dependencies (empty mirror, D187 item 4), erosion off (D45 opt-out). Brief, roster (`architect`, `claude-builder` assigned as the builder seat, C-R1) and profiles are written inline as `1166-smoke-run.sh` does. The claim is a small fixture (D146), for example a `sweep --dry-run DIR DAYS` that lists and deletes nothing, posted by the script as `architect` through `bbp mcp` as `1166-seed-inbox.sh` does. No lens run.
+4. **Two builders.** Two concurrent `builder run` invocations on the one claim. `admit` refuses a new builder once the claim has a live candidate, so run one after the other only the first would build. Config `builders_per_claim` 2, `max_live_builders` at least 2, slot capacity 2.
+5. **Fail closed before any paid call.** The assertion entry (`provider` claude, `account` equal to what `claude auth status` reports, `checked` within the 30 days, D167); `claude` logged in; `claude-code-acp` resolvable from the jail's read roots (the script never installs it: Nano installs the pinned npm package for his user, and the script records the version); Nano's mux server running under his systemd user manager (`user@<uid>.service`), so `lel-store-<scope>` can be made there with `Delegate=yes` and no root write; `lel-jail` and Landlock present; `bbp verify` clean. Any `sudo` step is printed for Nano, never run by the script.
+6. **Result.** Both printed session rows, both `acp.log`s, `bbp card`, `bbp why --claim` and `bbp verify` kept under the run dir. The run record goes into a committed doc by PR, plus a remind-me fact and a comment on card #1318. Launch pass: both rows ended `stored` or `failed` by D188's rule (none left `running` or `aborted`), `acp.log` renders, cgroups empty, slots released, verify clean. A stored candidate is reported, not required. Whether #1320 then proceeds stays Nano's call (D167).
+7. **Docs.** No separate design note: script, prompt and run doc in one PR, as 1092 did. Committing them in the repo satisfies D94; a copy in `/mnt/project-files/` is optional.
+**Why.** Each is the most reversible choice inside an approved design and an approved run: no `current` flip, no `/srv/lel` change, no persistent root write, no repo for an unapproved card, and the one paid run spent on reviewed code.
+**Rejected.** Running from an unmerged branch (spends the one run on unreviewed code). Opening `/srv/lel/bbp` to `baileyrd` (undoes the 1092 separation). Using `dedup-manager`. Sequential builders. A `sudo` cgroup step baked into the script.
+**Drift.** `1318-builder-launch-slices.md` §4 says the `orch-runner` account isn't created in v0; `1092-deploy.sh` created it. Harmless here (the run is as `baileyrd`). `1092-deploy-layout.md`'s "mux runs as `orch-runner`" is superseded for v0 by D161.
+**Tag.** [default] · remind-me: mem_9fffb39370e843afbe00fb627cf7cd0c
+**Key.** lel:1318:toy-run-runbook-defaults
+**Source.** Caller question from the #1318 thread, 2026-11-25; D53, D161, D166, D167, D177, D187, D188, D189; `1318-builder-launch-slices.md` §4–§5; `1092-deploy.sh`; `1166-smoke-run.sh`; `orch-lens` `builder::admit`. Numbered D197 because D190 to D196 are taken on open PRs.
