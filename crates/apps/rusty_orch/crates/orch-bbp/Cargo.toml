@@ -16,6 +16,12 @@ orch-cli = { workspace = true }
 rusty_bbp = { workspace = true }
 rusty_serde = { workspace = true }
 rusty_atomic_file = { workspace = true }
+rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# #1318 S4: `own` is spawned with the slot and ACP end at fds 3 and 4.
+platform = { workspace = true }
+platform-linux = { workspace = true }
 
 [dev-dependencies]
 orch-dispatch = { workspace = true, features = ["fake"] }

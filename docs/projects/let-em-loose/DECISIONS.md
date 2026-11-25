@@ -192,6 +192,8 @@ Precise contracts used by this guide:
 | D193 | #447 step 6: only `approve-plan`/`approve-merge` need a receipt on an owned task; other verbs keep today's labels | [default] 2026-11-25 (447) |
 | D194 | #447 step 6: board approval public key committed at `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub`, compiled in | [default] 2026-11-25 (447) |
 | D195 | #447 step 6: the scratch-repo list is a host file in the BBP directory, changed by a bbp operator command that records each approval | [stated] 2026-11-25 (447) |
+| D187 | #1318 v0 builder launch defaults: ACP permission allow_once + logged; usage 0 when unreported; `tail -F acp.log` viewer; mirror from frozen inputs; no jail token before #1382 | [default] 2026-11-25 (1318) |
+| D188 | #1318 slice design approved; a builder's candidate reaches BBP only on `end_turn` with the `.lel/submit` marker and a non-empty diff, else the session ends Failed | [stated] 2026-11-25 (1318, 600) |
 
 ## D1. Lenses, not stages
 
@@ -1848,3 +1850,25 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_432e3566a5d04536a8db87ffed67790f
 **Key.** lel:447:scratch-repo-list
 **Source.** Nano, decision card in the #447 project thread, message `cmsg_014AqbZs58L565hMV2pFkCX5718KhbE8PUKcJ6AkWm8GFb`, 2026-11-25T19:50:24Z, answering the expert's escalation on where the list lives (relayed by the coordinator; the card was not read). Refines D191.
+## D187. #1318 v0 builder launch defaults
+
+**Decision.** Implementation choices for `1318-builder-launch-slices.md` (draft, awaiting Nano's approval), inside the approved designs (D66, D104, D107, D108):
+1. **Permission.** orch answers every ACP `session/request_permission` with the offered `allow_once` option (`allow_always` only when no `allow_once` is offered) and writes the request and the answer to `acp.log`.
+2. **Usage.** `tokens_in`/`tokens_out` come from the adapter's reported usage; when it reports none they are 0 and `acp.log` says "usage not reported". Before #596 compares token numbers, an unreported run must be told apart from 0 (a later change to the `builder_session` row, D177).
+3. **Viewer.** The display-only session block runs `tail -F <dir>/builders/<claim>/<n>/acp.log`, outside the jail, held after exit. No new viewer binary.
+4. **Mirror.** Its contents are fixed by the task's frozen inputs (600 design §4.3). The toy claim needs no external dependencies, so its mirror is an empty read-only root. For #1320: a read-only vendored directory made from the experiment repo's lock file at task open.
+5. **Token.** v0 `jail.json` has no `token` (optional, D107) until orch mints one in #1382; nothing inside the jail consumes one before the gateway.
+**Why.** A permission prompt is not a boundary; the jail confines and built-in tools stay on (D101, spike #727); `allow_once` keeps every request in the log. Zero usage is reversible. D104 item 4 says a viewer program is enough. The #726 design builds the minter last (726-sandbox-design.md §10, D180).
+**Rejected.** Denying or escalating permission requests; `allow_always` (the adapter stops asking and the log loses entries); an optional token column now (changes the #1404 row in the queue); a new viewer binary; a minted token with no consumer.
+**Tag.** [default] · remind-me: mem_98aa01df7ad849d2b9643cb5f5137207
+**Key.** lel:1318:builder-launch-v0-defaults
+**Source.** Caller question from the #600 thread on `1318-builder-launch-slices.md` §5, 2026-11-25; D66, D101, D104, D107, D177, D180; `600-builder-session-design.md` §4.3; `mux-hosted-agents-design.md` §6. Numbered D187 because D179 to D186 are taken on open PRs (#1871, #1872, #1873, #1877).
+
+## D188. #1318: slice design approved; a candidate reaches BBP on `end_turn` + `.lel/submit` + non-empty diff
+
+**Decision.** Nano approves `1318-builder-launch-slices.md` (S1 to S6, with D187's defaults) and picks option a for how a builder's candidate reaches BBP. After the turn, orch posts the diff and candidate under the builder's seat only when all three hold: the stop reason is `end_turn`, the builder wrote the submit marker `.lel/submit` in its worktree, and the diff is non-empty. Otherwise orch posts nothing, nothing is debited, and the session ends `failed`. This closes the §5 point that blocked S5.
+**Why.** The marker tells a deliberate submission apart from a builder that gave up, so half-done work never becomes a debited candidate (600 design §4 step 7). orch already decides what reaches the board (D104), and option a adds no tool surface before the #726 gateway.
+**Rejected.** b: post on any `end_turn` with a non-empty diff, even when the builder gave up. c: a BBP submit tool offered to the agent over ACP (an MCP server in `session/new`), which means more surface to build and test in v0. "Not yet, I have changes".
+**Tag.** [stated] · remind-me: mem_22f4ae32277a47aeb0ba09fa4deed541
+**Key.** lel:1318:design-approved-candidate-submit-marker
+**Source.** Nano, decision card in the #600 project thread, message `cmsg_01WgyiM31RsSnZTgNuPX2VE48sBVZYhJPE5kniVhcHSwk1`, tapped 2026-11-25T17:26:33Z: "Approve, marker + diff (a)". The question was "Approve the #1318 design, and how should a builder's candidate reach BBP?" This satisfies D25 for #1318. Review, merge and ask-first gates (the new public surface in §5) still apply per PR. Relates to D66, D104, D177, D187. Numbered D188 because D179 to D187 are taken on open PRs (#1871, #1872, #1873, #1877, #1880).
