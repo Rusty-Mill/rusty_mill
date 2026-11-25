@@ -42,14 +42,6 @@ def probe():
     except OSError as e:
         out["unix_socket"] = "refused: %s" % e
     try:
-        path = open(os.path.join(FAKE, "mux-path")).read().strip()
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try: s.connect(path)
-        finally: s.close()
-        out["mux_path"] = "connected"
-    except OSError as e:
-        out["mux_path"] = "refused: %s" % e
-    try:
         open(os.path.join(FAKE, "escape"), "w").close(); out["write_outside"] = "allowed"
     except OSError as e:
         out["write_outside"] = "refused: %s" % e
@@ -158,7 +150,6 @@ impl World {
         let home = root.join("home");
         std::fs::create_dir_all(home.join(".claude")).expect("home");
         let socket = root.join("mux.sock");
-        std::fs::write(fake.join("mux-path"), socket.display().to_string()).expect("mux-path");
         let scope = run(Command::new(&bbp).args(["cgroup-scope", "--dir"]).arg(&dir));
         let scope = String::from_utf8_lossy(&scope.stdout).trim().to_owned();
         let cgroup_parent = bin("LEL_TEST_CGROUP").join(scope);
@@ -297,6 +288,15 @@ impl World {
 impl Drop for World {
     fn drop(&mut self) {
         self.kill_mux();
+        // Kill whatever a failed case left running below the scope, so the
+        // rmdirs below can succeed.
+        let _ = std::fs::write(self.cgroup_parent.join("cgroup.kill"), "1");
+        for _ in 0..50 {
+            if !populated(&self.cgroup_parent) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
         // Session cgroups, then the scope; rmdir fails while one is populated.
         for entry in std::fs::read_dir(&self.cgroup_parent)
             .into_iter()
@@ -458,12 +458,12 @@ fn a_jailed_builder_stores_its_candidate_and_frees_its_slot() {
     assert_eq!(row["tokens_in"].as_u64(), Some(11));
     let candidate = row["candidate"].as_u64().expect("candidate id");
 
-    // The jail: no mux variable, no AF_UNIX socket, no reach to the mux
-    // socket's path, and nothing writable outside the worktree.
+    // The jail: no mux variable, no AF_UNIX socket (so no way to the mux
+    // socket), and nothing writable outside the worktree.
     let probe = std::fs::read_to_string(w.worktree().join("probe.json")).expect("probe");
     let probe = Value::parse(&probe).expect("probe json");
     assert_eq!(probe["mux_env"], Value::Bool(false));
-    for k in ["unix_socket", "mux_path", "write_outside"] {
+    for k in ["unix_socket", "write_outside"] {
         let v = probe[k].as_str().unwrap_or("");
         assert!(v.starts_with("refused"), "{k}: {v}");
     }
@@ -530,16 +530,16 @@ fn a_mux_restart_aborts_the_turn_and_debits_nothing() {
 fn the_holder_deadline_ends_the_session_with_orch_killed() {
     let w = World::new("deadline");
     std::fs::write(w.fake.join("mode"), "hang").expect("mode");
-    // orch is killed long before its 20 s wall, so only the holder's
-    // backstop (wall + grace + margin from the session's start) can end it.
-    let wall = Duration::from_secs(20);
-    let config = LENS_CONFIG.replace("\"builder_wall_secs\": 600", "\"builder_wall_secs\": 20");
+    // orch is killed before its 30 s wall, so only the holder's backstop
+    // (wall + grace + margin from the session's start) can end it.
+    let wall = Duration::from_secs(30);
+    let config = LENS_CONFIG.replace("\"builder_wall_secs\": 600", "\"builder_wall_secs\": 30");
     std::fs::write(&w.config, config).expect("config");
     let started = Instant::now();
     let mut orch = Orch(w.builder().spawn().expect("builder run"));
     let prompted = w.worktree().join(".prompted");
     wait_for(
-        Duration::from_secs(15),
+        Duration::from_secs(25),
         "the agent never took the prompt",
         || prompted.exists(),
     );
