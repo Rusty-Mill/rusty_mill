@@ -16,6 +16,7 @@ orch-cli = { workspace = true }
 rusty_bbp = { workspace = true }
 rusty_serde = { workspace = true }
 rusty_atomic_file = { workspace = true }
+rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 orch-dispatch = { workspace = true, features = ["fake"] }
