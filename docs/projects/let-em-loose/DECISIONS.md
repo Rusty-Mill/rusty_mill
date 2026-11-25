@@ -191,6 +191,7 @@ Precise contracts used by this guide:
 | D192 | #447 step 6: a receipted answer's op is `by:<approver>/rcpt:<sha>`; `--approval` excludes `--op` and `--decision` | [default] 2026-11-25 (447) |
 | D193 | #447 step 6: only `approve-plan`/`approve-merge` need a receipt on an owned task; other verbs keep today's labels | [default] 2026-11-25 (447) |
 | D194 | #447 step 6: board approval public key committed at `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub`, compiled in | [default] 2026-11-25 (447) |
+| D195 | #447 step 6: the scratch-repo list is a host file in the BBP directory, changed by a bbp operator command that records each approval | [stated] 2026-11-25 (447) |
 
 ## D1. Lenses, not stages
 
@@ -1838,3 +1839,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_c0b772bd5156447ba9f97c60696eb0e3
 **Key.** lel:447:board-key-path
 **Source.** Let Em Loose expert, 2026-11-25, answering the #447 step 6 builder's implementation questions. Design §7, D191; `rusty_pk/src/ed25519.rs` `verify`; `rusty_bbp_host/src/launchers.rs`.
+
+## D195. #447 step 6: the scratch-repo list is a host file in the BBP directory, changed by a bbp operator command that records each approval
+
+**Decision.** The list that `bbp open --gates scratch` checks lives in the BBP directory on the host, not in Orch's config. Only a `bbp` operator command changes it, and that command records where Nano approved each repo, like the erosion limits (`<dir>/erosion/limits.log`, D115). The host refuses `--gates scratch` at open unless the repo is on the list. Orch's per-goal config only asks for scratch. Tests use their own temp list. Nano chose option a, "Host file, operator command"; the card's option text: "A list in the BBP directory, changed by a bbp operator command that records where you approved each repo, like the erosion limits. Tests use their own temp list." This refines D191's wording "orch's scratch-repo list"; the rest of D191 stands.
+**Why.** Orch has no machine-wide hosting config: `orch-bbp` `Config` is per goal, so a list there could be written by the goal's own author, and the host could not enforce a list it never sees.
+**Rejected.** (b) a list committed in the repo and compiled into `bbp` (doesn't fit tests' temp repos without a test hook); (c) a `scratch_repos` field in orch-bbp `Config` that Orch checks, with the host trusting the flag.
+**Tag.** [stated] · remind-me: mem_432e3566a5d04536a8db87ffed67790f
+**Key.** lel:447:scratch-repo-list
+**Source.** Nano, decision card in the #447 project thread, message `cmsg_014AqbZs58L565hMV2pFkCX5718KhbE8PUKcJ6AkWm8GFb`, 2026-11-25T19:50:24Z, answering the expert's escalation on where the list lives (relayed by the coordinator; the card was not read). Refines D191.
