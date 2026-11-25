@@ -24,6 +24,7 @@ fn every_catalog_method_has_a_shape_and_most_are_tools() {
         "release-lease",
         "sync",
         "terminal.upload",
+        "terminal.download",
     ] {
         assert!(!tools.contains(&name), "{name}");
     }
@@ -36,7 +37,7 @@ fn every_catalog_method_has_a_shape_and_most_are_tools() {
     ] {
         assert!(tools.contains(&name), "{name}");
     }
-    assert_eq!(tools.len(), CATALOG.len() - 6);
+    assert_eq!(tools.len(), CATALOG.len() - 7);
 }
 
 #[test]

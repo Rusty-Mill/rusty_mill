@@ -298,6 +298,7 @@ mod regression {
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
                     state_dir: None,
+                    protected: Default::default(),
                     grapheme_clustering: false,
                     config_file: None,
                 },
@@ -395,6 +396,7 @@ mod tests {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
                 state_dir: None,
+                protected: Default::default(),
                 grapheme_clustering: false,
                 config_file: None,
             };
@@ -493,6 +495,7 @@ mod tests {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
                 state_dir: None,
+                protected: Default::default(),
                 grapheme_clustering: false,
                 config_file: Some("/stalled.json".into()),
             };

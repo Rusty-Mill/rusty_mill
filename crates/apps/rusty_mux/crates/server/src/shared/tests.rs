@@ -190,6 +190,7 @@ fn a_peer_tailscaled_cannot_name_is_closed_before_it_says_anything() {
         cwd: "/".into(),
         console_host: crate::ConsoleHost::default(),
         state_dir: None,
+        protected: Default::default(),
         grapheme_clustering: false,
         config_file: None,
     };

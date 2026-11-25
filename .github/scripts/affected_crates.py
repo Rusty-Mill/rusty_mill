@@ -29,6 +29,16 @@ from typing import Iterable, Optional
 CrateDirs = list[tuple[Path, str]]
 
 
+# Files that crates other than their owner read at build or test time (an
+# `include_str!` across crate directories): editing one also selects these
+# crates, which the dependency graph cannot see.
+SHARED_FILES: dict[str, tuple[str, ...]] = {
+    # The LEL tab's golden inbox reply; `rusty_mill_board` checks it against
+    # what its `inbox_list` sends (tests/lel_fixture_drift.rs).
+    "crates/libs/ui/rusty_term/src/gui/testdata/lel_inbox.json": ("rusty_mill_board",),
+}
+
+
 def is_prose_only_tls_adr(file_path: str) -> bool:
     """Match only audited TLS ADR Markdown, not other docs or build inputs."""
     # These decision records are linked in comments, never included/read by
@@ -136,6 +146,8 @@ def affected_packages(metadata: dict, changed_files: Iterable[str]) -> list[str]
         for owner in (owning_crate(f, crate_dirs, root_dir) for f in seeds)
         if owner is not None
     }
+    readers = {name for f in seeds for name in SHARED_FILES.get(f, ())}
+    changed_ids |= {pkg_id for pkg_id, pkg in packages.items() if pkg["name"] in readers}
     local_dirs = local_package_dirs(metadata, root_dir)
     changed_local = {
         owner

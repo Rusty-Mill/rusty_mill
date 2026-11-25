@@ -183,6 +183,7 @@ Precise contracts used by this guide:
 | D173 | #1416: the LEL tab in rusty_term reads BBP through the Mill Board HTTP API (inbox via `inbox_list`/`inbox_act`; new read endpoints for claims, intent and spend) | [stated] 2026-11-24 (1416) |
 | D174 | #1416: the LEL tab view model and parsing live in rusty_term, fixtures from `bbp inbox --json` plus a drift test; no shared crate | [default] 2026-11-24 (1416) |
 | D175 | #1092: the inbox runs on a second Mill Board on BaileyAi with its own SQLite file; rusty_tick retired, live board untouched | [stated] 2026-11-25 (1092) |
+| D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
 
 ## D1. Lenses, not stages
 
@@ -1755,3 +1756,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_72a5c92bf1a147acaae78dae66d4c2d1
 **Key.** lel:1092:inbox-second-board-baileyai
 **Source.** Nano, Let Em Loose thread, 2026-11-25: "rusty_tick is retired" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4BFfyyjHrARFenqpKUHKWkn`, 01:22Z); "Millboard is still in use" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4ELuF7quQwJY6RZ9pftamw9`, 01:26Z); tapped "Second board on BaileyAi" on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4XgzhpjMgWg7FpLVAyUKAmc`, 01:26:50Z, answering the expert's escalation. Relayed by the coordinator; the messages were not read. Confirmed by Nano in a GitHub comment by `baileyrd` on Rusty-Mill/rusty_mill#1857 (comment id 7164514947, 2026-11-25T13:56:36Z): "D175 confirmed: the #1092 inbox runs on a second Mill Board on BaileyAi with its own SQLite file, rusty_tick is retired, and the live board is untouched." Supersedes D132's tick dependency only (its `board.env` and `1092-deploy-layout.md` tick lines); amends D35's single-board picture for v0. Within D130 and D131. Numbered D175 because D173 and D174 are taken by #1416.
+
+## D176. #430: rusty_bbp's co-edit fold moves onto rusty_crdt as a pure swap
+
+**Decision.** Nano gave the go for #430 as option 1, "pure swap, keep the refusal". `rusty_bbp::coedit`'s fold uses `rusty_crdt`'s `Rga` as its core. Admission (the overlap/stale refusal) is unchanged, golden logs stay byte-identical, and a differential test against the old fold proves the swap, in one small PR. This supersedes the card's older wording that the swap "would change admission only". This settles what to build; CI, review by `dottiusmaximus` and the merge rules still apply.
+**Why.** It gives `rusty_crdt` its first user and puts the fold on a law-tested core without changing BBP log semantics.
+**Rejected.** Option 2, swapping and accepting overlapping edits (CRDT admission; changes BBP log semantics; ask-first). Option 3, dropping the card.
+**Tag.** [stated] · remind-me: mem_8d894a129917493782f8b8f1e8123b26
+**Key.** lel:430:coedit-fold-on-rusty-crdt
+**Source.** Nano, project thread "Update Mill Board card statuses", message cmsg_014AqbZs58L565hMV2pFkCX5HGJTsB1QUY7avVobhzUMnP, 2026-11-25T01:15:31Z: "1", answering the three options in cmsg_014AqbZs58L565hMV2pFkCX5C5P4veGi9BERQNHB1fH2T3. Relayed by the caller; the message was not read.

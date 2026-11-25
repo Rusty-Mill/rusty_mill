@@ -484,6 +484,7 @@ rusty_percent = { path = "crates/foundation/rusty_percent" }
 rusty_codec = { path = "crates/foundation/rusty_codec" }
 rusty_compress = { path = "crates/foundation/rusty_compress" }
 rusty_diff = { path = "crates/foundation/rusty_diff" }
+rusty_crdt = { path = "crates/foundation/rusty_crdt" }
 rusty_err = { path = "crates/foundation/rusty_err" }
 rusty_fedora = { path = "crates/libs/homelab/rusty_fedora" }
 rusty_font = { path = "crates/libs/ui/rusty_font" }

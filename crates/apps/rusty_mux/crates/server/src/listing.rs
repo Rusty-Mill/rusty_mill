@@ -41,7 +41,7 @@ fn kind(path: &Path, entry: &fs::DirEntry, follow: bool) -> Option<char> {
 
 /// Whether `path` names another machine (a UNC path), which opening would
 /// make the server contact.
-fn is_network_path(path: &str) -> bool {
+pub(crate) fn is_network_path(path: &str) -> bool {
     path.starts_with("\\\\") || (cfg!(windows) && path.starts_with("//"))
 }
 

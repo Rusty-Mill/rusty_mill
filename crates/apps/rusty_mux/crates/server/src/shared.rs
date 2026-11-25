@@ -38,7 +38,7 @@ use rusty_mux_core::{Principal, TailscaleState, Transport};
 use rusty_tokio::io::{TcpListener, UnixListener};
 use rusty_tokio::sync::{Notify, mpsc::UnboundedReceiver};
 
-use crate::login::{Reload, read_checked};
+use crate::login::{Reload, read_identified};
 use crate::tailnet::{Whois, is_tailnet_addr};
 use crate::tls::{Tls, read_tokens};
 use crate::{Config, Peer, conn, state};
@@ -412,7 +412,7 @@ pub struct Sharing {
 
 /// Reads the list at `path` on a thread of its own: a file on a hung file
 /// system, or a directory service that is slow, stalls only reloads.
-async fn load(path: PathBuf) -> io::Result<Allow> {
+async fn load(path: PathBuf) -> io::Result<(Allow, crate::FileId)> {
     let (tx, rx) = rusty_tokio::sync::oneshot::channel();
     std::thread::Builder::new()
         .name("rusty-mux-allow".into())
@@ -423,9 +423,9 @@ async fn load(path: PathBuf) -> io::Result<Allow> {
         .map_err(|_| io::Error::other("the allowlist reader stopped"))?
 }
 
-fn read(path: &std::path::Path) -> io::Result<Allow> {
-    let text = read_checked(path, "allowlist")?;
-    Allow::parse(
+fn read(path: &std::path::Path) -> io::Result<(Allow, crate::FileId)> {
+    let (text, id) = read_identified(path, "allowlist")?;
+    let allow = Allow::parse(
         &text,
         |user| platform_linux::account(user).map(|a| a.uid),
         platform_linux::user_name,
@@ -435,7 +435,8 @@ fn read(path: &std::path::Path) -> io::Result<Allow> {
             io::ErrorKind::InvalidData,
             format!("{}: {e}", path.display()),
         )
-    })
+    })?;
+    Ok((allow, id))
 }
 
 /// Reads the token file again, if there is one. A bad file is refused and
@@ -444,15 +445,17 @@ fn read(path: &std::path::Path) -> io::Result<Allow> {
 fn reload_tokens(
     tokens: &Option<(PathBuf, Rc<RefCell<rusty_mux_script::token::Tokens>>)>,
     guests: &Guests,
+    protected: &crate::Protected,
 ) -> io::Result<()> {
     let Some((file, kept)) = tokens else {
         return Ok(());
     };
-    let fresh = read_tokens(file).inspect_err(|err| {
+    let (fresh, id) = read_tokens(file).inspect_err(|err| {
         eprintln!("rusty-mux-server: tls: keeping the old tokens: {err}");
     })?;
     guests.revoke_tokens(&kept.borrow().changed(&fresh));
     *kept.borrow_mut() = fresh;
+    protected.loaded(file, id);
     Ok(())
 }
 
@@ -467,7 +470,13 @@ pub async fn serve_shared(
     mut reloads: UnboundedReceiver<Reload>,
     stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
-    let allow = Rc::new(RefCell::new(load(sharing.allow.clone()).await?));
+    // What the server serves from is kept out of downloads, by path and by
+    // the identity of the descriptor it was read from; a reload replaces it.
+    let protected = config.protected.clone();
+    protected.require(sharing.allow.clone());
+    let (first, allow_id) = load(sharing.allow.clone()).await?;
+    protected.loaded(&sharing.allow, allow_id);
+    let allow = Rc::new(RefCell::new(first));
     let tailnet = sharing.tailnet.map(|mut tailnet| {
         tailnet.allow = allow.clone();
         tailnet
@@ -476,6 +485,10 @@ pub async fn serve_shared(
         tls.allow = allow.clone();
         tls
     });
+    if let Some(tls) = &tls {
+        protected.loaded(&tls.key_file, tls.key_id);
+        protected.loaded(&tls.tokens_file, tls.tokens_id);
+    }
     let tokens = tls
         .as_ref()
         .map(|tls| (tls.tokens_file.clone(), tls.tokens.clone()));
@@ -494,13 +507,14 @@ pub async fn serve_shared(
             let result = load(sharing.allow.clone()).await.inspect_err(|err| {
                 eprintln!("rusty-mux-server: shared: keeping the old allowlist: {err}");
             });
-            if let Ok(fresh) = result.as_ref() {
+            if let Ok((fresh, id)) = result.as_ref() {
                 // No await between the swap and the closing: nobody is
                 // admitted on the old list in between.
                 guests.revoke_unlisted(fresh);
                 *allow.borrow_mut() = fresh.clone();
+                protected.loaded(&sharing.allow, *id);
             }
-            let result = result.and_then(|_| reload_tokens(&tokens, &guests));
+            let result = result.and_then(|_| reload_tokens(&tokens, &guests, &protected));
             let _ = answer.send(result);
         }
         std::future::pending::<()>().await;
