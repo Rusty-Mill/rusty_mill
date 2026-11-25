@@ -188,6 +188,9 @@ Precise contracts used by this guide:
 | D178 | #1405: Windows-only intent lines are recognised by a frozen-input mapping file keyed by line; the check is orch's, no BBP change | [default] 2026-11-25 (1405) |
 | D190 | #447 step 6: no claims-mode `bbp human` verb needs a signed receipt for now; claims-mode verbs unchanged | [stated] 2026-11-25 (447) |
 | D191 | #447 step 6: BBP human-gate schema/API items approved as a set (`task_opened.gates`, `bbp open --gates scratch`, `bbp human --approval`, `--op by:` refusal) | [stated] 2026-11-25 (447) |
+| D192 | #447 step 6: a receipted answer's op is `by:<approver>/rcpt:<sha>`; `--approval` excludes `--op` and `--decision` | [default] 2026-11-25 (447) |
+| D193 | #447 step 6: only `approve-plan`/`approve-merge` need a receipt on an owned task; other verbs keep today's labels | [default] 2026-11-25 (447) |
+| D194 | #447 step 6: board approval public key committed at `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub`, compiled in | [default] 2026-11-25 (447) |
 
 ## D1. Lenses, not stages
 
@@ -1808,3 +1811,30 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_8381b8074e314ea9a2eab66800286a48
 **Key.** lel:447:bbp-human-gates-api-approved
 **Source.** Nano, project thread message `cmsg_014AqbZs58L565hMV2pFkCX5CZatgThTCScc6TZfje7dmZ`, 2026-11-25T19:23:05Z, answering §10 of `docs/design/factory-roles/design.md` (PR #1881). Relayed verbatim by the caller; the message was not read. Design §7, §10 D4. Compatible with D168: `bbp human --decision` builds its `by:<as>/dec:ID` label from `--as`, not from a caller `--op`, but on owned tasks a label without a receipt now counts as self-approved in metrics; the build should check the #703 Remediate path against that.
+
+## D192. #447 step 6: a receipted answer's op is `by:<approver>/rcpt:<sha>`; `--approval` excludes `--op` and `--decision`
+
+**Decision.** A `bbp human --approval FILE` answer runs under op `by:<approver>/rcpt:<sha>`, where `<sha>` is the full 64-hex SHA-256 of the stored receipt blob, so `bbp metrics` fetches the receipt straight from the op. `--approval` together with `--op` or `--decision` is refused. A resend of the same receipt yields the same op and replays by R15, so retry stays idempotent; Orch drops its `orch-<sha>` `--op` when it passes a receipt. `bbp decision` does not look up receipted ops; no caller needs it, because the inbox sends only claims verbs (D190).
+**Why.** Keeps D191's label and D168's `by:<as>/dec:ID` format both unchanged; a receipt-derived op already gives the idempotent retry that `--decision` and Orch's stable `--op` exist for. Refusing the combination is the most reversible choice.
+**Rejected.** `by:<approver>/rcpt:<sha12>.dec:<id>` or `.../rcpt:<sha>/dec:<id>` (changes `decision_of` parsing and D168's documented op for no current caller); `by:<approver>/dec:<id>` with the receipt keyed by op (needs a blob index; drops D191's `rcpt:` label).
+**Tag.** [default] · remind-me: mem_10f69853db034ec8b4863f717c08d641
+**Key.** lel:447:receipt-op-shape
+**Source.** Let Em Loose expert, 2026-11-25, answering the #447 step 6 builder's implementation questions. `docs/design/factory-roles/design.md` §7 (PR #1881), D191, D168; `rusty_bbp_host/src/human.rs` `op_for`/`decision_of`; `orch-bbp/src/lib.rs` stable answer op.
+
+## D193. #447 step 6: only `approve-plan`/`approve-merge` need a receipt on an owned task; other verbs keep today's labels
+
+**Decision.** On an owned task only `approve-plan` and `approve-merge` need a receipt (D191). Every other `bbp human` verb keeps today's `--as`/`--decision` labelling: `reject`, `cancel`, `resume`, `rerun`, `receipt`, `decision`, `ask`, `answer`, `takeover`, `takeover-release`, `intent`, `holdout-updated` and the claims verbs, including the #703 Remediate/inbox sends (D190, D168). On a receipted answer the label is the receipt's approver and `--as` is ignored. `bbp metrics` re-verifies only plan and merge approval rows; rejection rows keep today's label logic. Enforcement sits in `rusty_bbp_host`'s library (`human::perform_as` and `perform_fenced`), not only in the binary; the `rusty_bbp` engine is unchanged.
+**Why.** Only `human_approval` and `human_rejection` feed `metrics::gate_answers`, so `self_approved` reads just those three verbs; a rejection is a refusal and needs no receipt (design §7); the board inbox passes `--as` on every claims verb (D190 keeps them unchanged); enforcing in the library stops library callers going around the CLI.
+**Rejected.** Refusing `--as` on owned tasks (breaks the inbox's claims verbs, against D190); receipts on `reject` (design §7 says refusals need none).
+**Tag.** [default] · remind-me: mem_e0c314c0ac2e4d35bf0a38a6a66eb8b9
+**Key.** lel:447:owned-task-labels
+**Source.** Let Em Loose expert, 2026-11-25, answering the #447 step 6 builder's implementation questions. Design §7, D190, D191; `rusty_bbp/src/metrics.rs` `gate_answers`; `rusty_mill_board/src/inbox.rs` step verbs; `rusty_bbp_host/src/report.rs`.
+
+## D194. #447 step 6: board approval public key committed at `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub`, compiled in
+
+**Decision.** The board's approval public key lives at `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub` (one line, 64 hex characters), is compiled into `bbp` with `include_str!` and is checked with `rusty_pk::ed25519::verify`. No env var or flag overrides it in the binary; tests sign with their own key through a library verify function that takes the key as a parameter. Until the board's key exists (build step 2) the file is empty and owned plan and merge answers are refused (fail closed; no owned tasks are live, design §7). The private key stays with the board and is never committed.
+**Why.** D191 requires the key committed in the repo and changed only by a reviewed PR; compiling it in leaves no runtime override. The host already compiles in assets this way (`launchers/author.txt`).
+**Rejected.** A runtime keyring file like nexus-plugins' `~/.nexus/keys/` (editable outside review); an env override (an agent could set it).
+**Tag.** [default] · remind-me: mem_c0b772bd5156447ba9f97c60696eb0e3
+**Key.** lel:447:board-key-path
+**Source.** Let Em Loose expert, 2026-11-25, answering the #447 step 6 builder's implementation questions. Design §7, D191; `rusty_pk/src/ed25519.rs` `verify`; `rusty_bbp_host/src/launchers.rs`.
