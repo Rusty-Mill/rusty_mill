@@ -102,6 +102,7 @@ pub mod nr {
     pub const PIDFD_OPEN: usize = 434;
     pub const CLONE3: usize = 435;
     pub const PIDFD_SEND_SIGNAL: usize = 424;
+    pub const PIDFD_GETFD: usize = 438;
     pub const SOCKET: usize = 41;
     pub const CONNECT: usize = 42;
     pub const ACCEPT: usize = 43;
