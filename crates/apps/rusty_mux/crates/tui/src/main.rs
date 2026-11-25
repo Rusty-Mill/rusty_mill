@@ -2443,6 +2443,11 @@ mod client {
             if action.on_focused_block() && !self.shows(focus) {
                 return bell();
             }
+            // Keys read in the same batch as the command that opened the
+            // tree belong to it.
+            if let (Some(_), Action::Input(data)) = (&self.exploring, &action) {
+                return self.explored(data);
+            }
             if self.browsing
                 && !matches!(
                     action,
@@ -4429,6 +4434,18 @@ mod client {
             app.act(Action::Explorer);
             assert!(app.exploring.is_none(), "no lease");
             assert!(workspace_calls(&sent(&far[0])).is_empty());
+        }
+
+        /// Keys read together with the command that opens the tree go to the
+        /// tree, not to the program under it.
+        #[cfg(unix)]
+        #[test]
+        fn keys_batched_after_the_tree_opens_stay_in_the_tree() {
+            let (mut app, _inbox, far) = app(None);
+            app.workspace = true;
+            app.take(Input::Keys(b"\x1dej\r".to_vec()));
+            assert!(app.exploring.is_some(), "still open");
+            assert!(typed_in(&sent(&far[0])).is_empty(), "nothing typed in");
         }
 
         /// The tree asks for the root, then a directory's listing when Enter
