@@ -159,7 +159,7 @@ fn maintain(argv: impl IntoIterator<Item = String>) -> ExitCode {
 }
 
 fn lens(argv: impl IntoIterator<Item = String>) -> ExitCode {
-    use rusty_orch::lens::{alien, breaker, check, record, run};
+    use rusty_orch::lens::{alien, breaker, check, record, run, untested};
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(error) => {
@@ -173,6 +173,7 @@ fn lens(argv: impl IntoIterator<Item = String>) -> ExitCode {
         Some("alien") => lens_command(alien::USAGE, alien::options(argv), alien::run),
         Some("record") => lens_command(record::USAGE, record::options(argv), record::run),
         Some("breaker") => lens_command(breaker::USAGE, breaker::options(argv), breaker::run),
+        Some("untested") => lens_command(untested::USAGE, untested::options(argv), untested::run),
         _ => lens_command(check::USAGE, check::options(argv, cwd), check::run),
     }
 }
