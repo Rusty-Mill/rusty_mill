@@ -23,7 +23,7 @@ One contract for the M3 step cards, so each builds against the same token, polic
 - **D165/D166**: v0 builders use Nano's subscription through a read-only `~/.claude` root. That exception
   **expires when the gateway lands**; the gateway then holds the login.
 - **D133**: packs load lazily, a role is defined by its lens, a domain pack will replace the project expert
-  once one exists and Nano confirms the swap (Q47); the expert stays until then. **D164**: #723 waits;
+  once one exists and Nano confirms the swap (Q47); the expert stays until then. **#723** has its own design step;
   this design does not need it (§5).
 - **D104 item 8**: lens sessions in blocks are decided "when #726 reaches lens sessions". This design
   does not reach them: lenses stay one-shot and orch-side. Everything here is for builder sessions; the
@@ -286,4 +286,4 @@ approves no §11 ask-first item; each needs its own yes.
   jailed agents fail closed.
 
 **Programme note.** M3 runs ahead of M2 (#600), and none of its code needs the M2 run
-(mem_931824b0). #723 is still held by D164 and is not part of this approval.
+(mem_931824b0). #723 is not part of this approval; it has its own design step.
