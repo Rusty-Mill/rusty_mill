@@ -50,9 +50,16 @@ fn an_owned_task_writes_no_gates_field() {
 fn a_scratch_task_records_its_gates_and_replays_them() {
     let (d, _) = open(Mode::Stages, Some(Gates::Scratch));
     assert_eq!(d.state.gates, Some(Gates::Scratch));
-    assert!(opened_json(&d).contains(r#""gates":"scratch""#), "{}", opened_json(&d));
+    assert!(
+        opened_json(&d).contains(r#""gates":"scratch""#),
+        "{}",
+        opened_json(&d)
+    );
     let events = d.store.events(&d.state.task, 0).expect("events");
-    assert_eq!(TaskState::fold(d.state.task.clone(), &events).gates, Some(Gates::Scratch));
+    assert_eq!(
+        TaskState::fold(d.state.task.clone(), &events).gates,
+        Some(Gates::Scratch)
+    );
 }
 
 #[test]
