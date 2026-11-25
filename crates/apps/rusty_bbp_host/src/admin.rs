@@ -155,6 +155,7 @@ fn open_mode(
     let profile_digest = profiles::freeze(dir, task, set)?;
     let blob = d.store.blob_put(brief);
     let cmd = Command::Open(OpenTask {
+        gates: None,
         claims,
         mode,
         task: task.clone(),

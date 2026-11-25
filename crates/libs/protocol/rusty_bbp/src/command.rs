@@ -116,6 +116,10 @@ pub struct OpenTask {
     /// host ran on the task's base before opening. `None` is greenfield.
     #[rusty_serde(default)]
     pub baseline_digest: Option<Sha256>,
+    /// `Some(Scratch)` opens a task whose human gates take an unsigned answer (#447). `None`,
+    /// the default, is owned. Refused with claims mode.
+    #[rusty_serde(default)]
+    pub gates: Option<crate::policy::Gates>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

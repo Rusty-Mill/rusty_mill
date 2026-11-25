@@ -133,6 +133,10 @@ pub enum Event {
         /// only when present.
         #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
         baseline_digest: Option<Sha256>,
+        /// #447: `Some(Scratch)` for a scratch task. Absent is owned and not written, so
+        /// owned logs stay byte for byte what they were.
+        #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+        gates: Option<crate::policy::Gates>,
     },
     Assigned {
         role: RoleId,

@@ -230,6 +230,7 @@ impl<S: Store> Fx<S> {
             shadows: Vec::new(),
         };
         let open = Command::Open(OpenTask {
+            gates: None,
             claims: None,
             mode: rusty_bbp::Mode::Stages,
             task,
