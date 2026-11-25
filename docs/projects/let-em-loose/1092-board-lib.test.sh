@@ -90,6 +90,12 @@ no uec 0 "$(show LoadState=masked)"
 no uec 0 "$(show "DropInPaths=$SU.d/lel.conf /etc/systemd/system/service.d/10-all.conf")"
 no uec 0 "$(show FragmentPath=/usr/lib/systemd/system/mill-board.service)"
 no uec 0 "$(show User=root)"
+# D132: the unit may not change the service's groups; the account check alone would miss these
+no uec 0 "$(show Group=orch-runner)"
+no uec 0 "$(show SupplementaryGroups=orch-runner)"
+no uec 0 "$(show "SupplementaryGroups=wheel orch-runner")"
+no uec 0 "$(show Group=mill-board)"                                 # any unit-set group differs from the approved unit
+ok uec 0 "$(show)"$'\n''Group='$'\n''SupplementaryGroups='       # empty, as systemctl prints an unset property
 no uec 0 "$(show "EnvironmentFiles=$S/board.env (ignore_errors=no) /etc/other.env (ignore_errors=yes)")"
 no uec 0 "$(show 'ExecStart={ path=/usr/bin/other ; argv[]=/usr/bin/other ; ignore_errors=no }')"
 # a noncanonical unit with the right executable: arguments, a second command, hooks, environment

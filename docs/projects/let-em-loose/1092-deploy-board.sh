@@ -105,6 +105,7 @@ sudo restorecon -R /opt/lel
 echo "=== 2. mill-board user"
 id mill-board >/dev/null 2>&1 \
   || { sudo useradd --system --no-create-home --home-dir "$STATE" --shell /usr/sbin/nologin mill-board; CHANGED=1; }
+if id -nG mill-board | tr ' ' '\n' | grep -qx orch-runner; then die "mill-board is in the orch-runner group"; fi
 sudo install -d -o mill-board -g mill-board -m 0700 "$STATE" "$STATE/settings"
 sudo install -d -o root -g root -m 0755 "$MARKER_DIR"
 

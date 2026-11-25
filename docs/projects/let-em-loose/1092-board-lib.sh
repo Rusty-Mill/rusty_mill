@@ -81,15 +81,16 @@ service_check() {
 }
 
 # The properties the approved unit is compared on, and how `systemctl show` is asked for them.
-UNIT_PROPS="LoadState FragmentPath DropInPaths User EnvironmentFiles Environment PassEnvironment UnsetEnvironment
+UNIT_PROPS="LoadState FragmentPath DropInPaths User Group SupplementaryGroups EnvironmentFiles Environment PassEnvironment UnsetEnvironment
 ExecCondition ExecStartPre ExecStart ExecStartPost ExecReload ExecStop ExecStopPost"
 
 # unit_expected UNIT STATE BIN LIBEXEC DIR: the approved effective unit, one PROP=VALUE per line in UNIT_PROPS
-# order: the shipped fragment, only this script's drop-in, mill-board, only board.env, exactly the drop-in's
+# order: the shipped fragment, only this script's drop-in, mill-board with no unit-set Group or
+# SupplementaryGroups (so the service keeps the account's groups, which exclude orch-runner), only board.env, exactly the drop-in's
 # Environment, no passed or unset variables, ExecStart with no arguments, and no other Exec hook.
 unit_expected() {
   local unit=$1 state=$2 bin=$3 libexec=$4 dir=$5
-  printf '%s\n' LoadState=loaded "FragmentPath=$unit" "DropInPaths=$unit.d/lel.conf" "User=$BOARD_USER" \
+  printf '%s\n' LoadState=loaded "FragmentPath=$unit" "DropInPaths=$unit.d/lel.conf" "User=$BOARD_USER" Group= SupplementaryGroups= \
     "EnvironmentFiles=$state/board.env" \
     "Environment=MILL_BOARD_BBP_BIN=$libexec/mill-board-bbp MILL_BOARD_BBP_ROOT=$dir" \
     PassEnvironment= UnsetEnvironment= ExecCondition= ExecStartPre= "ExecStart=$bin/rusty_mill_board" \
