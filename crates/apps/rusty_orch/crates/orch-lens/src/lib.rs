@@ -17,6 +17,7 @@
 //! - [`tier`]: routine or contested, and the cleared providers in order.
 //! - [`meter`]: integer micro-dollars, reserved before every call.
 //! - [`breaker`]: pause a task whose spend rises while its claims stay flat.
+//! - [`builder`]: #600 builder sessions: limits, admission, the session row.
 //! - [`schedule`]: which jobs run now; the blind-first, look-harder,
 //!   proposer, rebel and fairness rules as checks.
 //! - [`record`]: a lens's track record, one informational line.
@@ -30,6 +31,7 @@
 
 pub mod alien;
 pub mod breaker;
+pub mod builder;
 pub mod call;
 pub mod card;
 pub mod class;
