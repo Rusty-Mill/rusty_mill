@@ -1,6 +1,6 @@
 //! `TaskState`: the indexed fold over events that rules consult. `Card` is its projection.
 
-use crate::coedit::{Doc, LineId, Missing, Version};
+use crate::coedit::{Doc, LineId, Unapplied, Version};
 use crate::command::Response;
 use crate::event::{EscalateReason, Event};
 use crate::ids::*;
@@ -237,7 +237,7 @@ pub struct TaskState {
     pub heads: HashMap<ArtId, ArtId>,
     /// Logged co-edited versions that did not apply, with what they lacked.
     /// The engine never writes one; a foreign or damaged log can.
-    pub unapplied: BTreeMap<ArtId, Missing>,
+    pub unapplied: BTreeMap<ArtId, Unapplied>,
     pub messages: Vec<Message>,
     /// Live turns in grant order, at most one per role and `max_live_turns` in all.
     pub turns: Vec<Turn>,
@@ -571,7 +571,7 @@ impl TaskState {
             Some(b) => match self.versions.get(&b) {
                 Some(v) => (v.root, self.heads.get(&v.root).copied()),
                 None => {
-                    self.unapplied.insert(id, Missing::Base(b));
+                    self.unapplied.insert(id, Unapplied::Base(b));
                     return;
                 }
             },
@@ -580,8 +580,8 @@ impl TaskState {
         let on = prev.and_then(|p| self.doc(p)).unwrap_or(&empty);
         let doc = match on.apply(id, &e.ops) {
             Ok(doc) => doc,
-            Err(line) => {
-                self.unapplied.insert(id, Missing::Line(line));
+            Err(why) => {
+                self.unapplied.insert(id, why);
                 return;
             }
         };
