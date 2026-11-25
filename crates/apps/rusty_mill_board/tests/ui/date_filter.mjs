@@ -47,6 +47,24 @@ for (const field of ["created", "updated", "moved"]) {
   check((await titles()).length === 0, `${field} before today: no card`);
 }
 
+// Another client changes the board while a filter is active: the match set follows without a reload.
+for (const field of ["created", "moved"]) {
+  await page.selectOption("#df-field", field);
+  await page.fill("#df-from", day(0));
+  await page.fill("#df-to", day(0));
+  await settle();
+  const before = (await titles()).length;
+  await api("card_add", { title: `${field} elsewhere` });
+  await page.waitForFunction((t) => [...document.querySelectorAll(".card b")].some((b) => b.textContent === t), `${field} elsewhere`, { timeout: 8000 }).catch(() => {});
+  check((await titles()).includes(`${field} elsewhere`) && (await titles()).length === before + 1, `${field}: a card added by another client appears without a reload`);
+}
+await page.fill("#df-from", day(1));
+await page.fill("#df-to", day(2));
+await settle();
+await api("card_add", { title: "outside the range" });
+await page.waitForTimeout(3500);
+check((await titles()).length === 0, "a card outside the range stays hidden after the board changes");
+
 // The address keeps the filter; a reload restores it.
 await page.selectOption("#df-field", "updated");
 await page.fill("#df-from", day(1));
@@ -61,7 +79,7 @@ check((await titles()).length === 0, "and the narrowed board");
 // The chip clears it, address included.
 await page.click("#df-clear");
 await page.waitForSelector(".card");
-check((await titles()).join() === "dated card", "clearing brings the card back");
+check((await titles()).length === 4, "clearing brings every card back");
 check(!new URL(page.url()).searchParams.has("date") && (await page.inputValue("#df-field")) === "", "the address and controls are clear");
 
 check(errors.length === 0, `no page errors (${errors.join("; ")})`);

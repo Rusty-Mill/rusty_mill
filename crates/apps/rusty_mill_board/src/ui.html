@@ -1213,7 +1213,10 @@ async function catchUp(){
   cursor=r.cursor;cards=byPriority([...kept,...read.filter(c=>c&&!known.has(c.id))]);
   return true;
 }
-async function refresh(){await catchUp();await loadPending();await loadDateIds();render()}
+/* The date filter's matches are the server's answer, so any change to the board (here, or in another session) asks again.
+   A failed read keeps the last answer: stale beats a board that suddenly shows everything or nothing. */
+async function reloadDates(){try{await loadDateIds()}catch{}}
+async function refresh(){await catchUp();await loadPending();await reloadDates();render()}
 
 /* Decisions (#595): the open BBP escalations of the tasks linked from cards, read through inbox_list
    (admin only; Mill Board stores none of it). `pending` is null when this credential or board has no
@@ -1308,7 +1311,9 @@ async function poll(){
     let redraw=await pollColumns();
     redraw||=await stonesChanged();
     if(Date.now()-pendingAt>30000){const n=JSON.stringify([pending,pendingErr]);await loadPending();redraw||=n!==JSON.stringify([pending,pendingErr])}
-    redraw=await catchUp()||redraw;
+    const changed=await catchUp();
+    if(changed&&dateOn())await reloadDates();
+    redraw=changed||redraw;
     if(redraw)render();
   }catch(e){}
   setTimeout(poll,1500);
