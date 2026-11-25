@@ -138,10 +138,10 @@ pub struct Board<S> {
     /// Agents registered on shared connectors.
     agents: Mutex<crate::agents::Registry>,
     /// Held by every writer of a parent link or of dependencies (`add_card`, `plan`), by the
-    /// merge close and `unclose`, and by `take`, so a card cannot gain a child between the
+    /// merge close and `unclose`, and by `take`, `claim` and `move_card`, so a card cannot gain a child between the
     /// close's childlessness check and its commit, and a dependency check by a take or a
-    /// dependency edit cannot go stale under an unclose (#1620). It does not cover `card_claim`
-    /// or a move into a work column. **Lock order: this gate first, then the workflow guard**;
+    /// dependency edit, a claim or a move that starts a card cannot go stale under an unclose
+    /// (#1620). **Lock order: this gate first, then the workflow guard**;
     /// never the other way, or a waiting workflow writer can deadlock the board.
     links: Mutex<()>,
     /// What the merge watch last found (#1620).
@@ -1888,6 +1888,8 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::move_to`], or [`Card::move_freely`] when the rules are off.
     pub fn move_card(&self, id: Uuid, to: &Column, by: &Actor) -> Result<Card, BoardError> {
+        // A move into a work column starts the card: serialize it with `unclose`'s scan.
+        let _links = self.links();
         let flow = self.flow();
         match self.move_rules() {
             MoveRules::Enforced => self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
@@ -2173,6 +2175,8 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::claim`].
     pub fn claim(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
+        // A claim starts the card: serialize it with `unclose`'s scan (gate before workflow).
+        let _links = self.links();
         self.apply(id, by, EventKind::Claimed, |c, now| {
             self.check_accepts(&c.project)?;
             c.claim(by, now)

@@ -909,7 +909,8 @@ mod tests {
             self.inner.insert(card, event)
         }
         fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
-            if card.claim.is_some() && !card.deps.is_empty() {
+            let starting = card.claim.is_some() || card.column == Column::BUILDING;
+            if starting && !card.deps.is_empty() {
                 self.held.store(true, std::sync::atomic::Ordering::SeqCst);
                 self.entered.send(()).expect("test is listening");
                 self.release.lock().expect("lock").recv().expect("released");
@@ -1049,6 +1050,70 @@ mod tests {
         let open = b.get(card.id).expect("card");
         assert_eq!(open.column, card.column, "left open");
         assert!(open.merged.is_none());
+    }
+
+    /// A board over [`Taking`], a prerequisite closed by the watch, and a dependent in Ready
+    /// that waits on it; `start` begins the dependent while `unclose` scans, and must hold it.
+    fn unclose_waits_for_start(start: impl Fn(&Shared, &Actor, Uuid) + Sync) {
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let (listed, checked) = std::sync::mpsc::channel();
+        let b: Shared = Board::new(
+            Box::new(Taking {
+                inner: MemStore::default(),
+                entered,
+                listed,
+                held: std::sync::atomic::AtomicBool::new(false),
+                release: std::sync::Mutex::new(held),
+            }) as Box<dyn Store>,
+            crate::board::Roles::default(),
+        )
+        .with_projects(Projects::parse(REGISTRY).expect("registry"));
+        let who = b.roles().actor("nano", "human").expect("role");
+        let prereq = b.add_in(&who, "p", "prereq", "", vec![]).expect("card");
+        let n = prereq.number.expect("n");
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        let dependent = b.add_in(&who, "p", "dependent", "", vec![]).expect("card");
+        b.plan(
+            dependent.id,
+            &who,
+            &crate::domain::Plan {
+                deps: Some(vec![prereq.id]),
+                ..Default::default()
+            },
+        )
+        .expect("planned");
+        b.move_card(dependent.id, &Column::READY, &who)
+            .expect("ready");
+        std::thread::scope(|s| {
+            let starting = s.spawn(|| start(&b, &who, dependent.id));
+            started.recv().expect("the start is mid-commit");
+            let unclosing = s.spawn(|| b.unclose(prereq.id, &who).map(|c| c.id));
+            // Without the gate the unclose reads the board now, before the dependent has
+            // started; with it, nothing arrives until the start is released.
+            let _ = checked.recv_timeout(std::time::Duration::from_millis(300));
+            release.send(()).expect("release the start");
+            starting.join().expect("start thread");
+            assert!(matches!(
+                unclosing.join().expect("unclose thread"),
+                Err(BoardError::Refused(_))
+            ));
+        });
+        assert_eq!(b.get(prereq.id).expect("card").column, Column::DONE);
+    }
+
+    #[test]
+    fn unclose_waits_for_a_claim_of_a_dependent_and_then_refuses() {
+        unclose_waits_for_start(|b, who, id| {
+            b.claim(id, who).expect("claimed");
+        });
+    }
+
+    #[test]
+    fn unclose_waits_for_a_move_of_a_dependent_into_work_and_then_refuses() {
+        unclose_waits_for_start(|b, who, id| {
+            b.move_card(id, &Column::BUILDING, who).expect("moved");
+        });
     }
 
     #[test]
