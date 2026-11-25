@@ -2021,6 +2021,11 @@ impl<S: Store> Board<S> {
         repo: &str,
         by: &Actor,
     ) -> Result<Card, BoardError> {
+        if !self.store.keeps_merge_record() {
+            return Err(BoardError::Refused(
+                "this store cannot keep the record that undoes a merge close".into(),
+            ));
+        }
         let _links = self.links();
         let flow = self.flow();
         let current = self.get_in(&flow, id)?;

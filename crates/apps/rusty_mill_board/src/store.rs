@@ -57,6 +57,12 @@ pub trait Store: Send + Sync {
         cards.retain(|c| columns.contains(&c.column));
         Ok(cards)
     }
+    /// Whether this store keeps a card's [`MergeClose`](crate::domain::MergeClose) record,
+    /// which `card_unclose` needs. The merge watch closes nothing in a store that does not,
+    /// so no close is left that cannot be undone.
+    fn keeps_merge_record(&self) -> bool {
+        true
+    }
     /// Which of `ids` are cards on the board that are not Done. An id no longer on the board
     /// is not open. This default scans [`Store::list`]; an adapter that can read one card's
     /// state cheaply overrides it.
@@ -304,6 +310,9 @@ impl<T: Store + ?Sized> Store for Box<T> {
     }
     fn open_among(&self, ids: &[Uuid]) -> Result<BTreeSet<Uuid>, BoardError> {
         (**self).open_among(ids)
+    }
+    fn keeps_merge_record(&self) -> bool {
+        (**self).keeps_merge_record()
     }
     fn health(&self) -> Result<(), BoardError> {
         (**self).health()

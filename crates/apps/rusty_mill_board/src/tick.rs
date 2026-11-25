@@ -1173,6 +1173,11 @@ fn check_claim(card: &Card) -> Result<(), BoardError> {
 }
 
 impl<T: TickApi> Store for TickStore<T> {
+    /// rusty_tick has no field for it (retired, ADR-0007), so a merge close there cannot be undone.
+    fn keeps_merge_record(&self) -> bool {
+        false
+    }
+
     fn durable(&self) -> bool {
         true
     }

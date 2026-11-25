@@ -985,6 +985,56 @@ mod tests {
         assert_eq!(b.get(prereq.id).expect("card").column, Column::DONE);
     }
 
+    /// A store that cannot keep a merge close's record, as rusty_tick cannot.
+    struct NoRecord(MemStore);
+
+    impl Store for NoRecord {
+        fn keeps_merge_record(&self) -> bool {
+            false
+        }
+        fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+            self.0.get(id)
+        }
+        fn list(&self) -> Result<Vec<Card>, BoardError> {
+            self.0.list()
+        }
+        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            self.0.insert(card, event)
+        }
+        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            self.0.replace(card, event)
+        }
+        fn events_since(
+            &self,
+            after: Option<Uuid>,
+            limit: usize,
+        ) -> Result<Vec<crate::domain::Event>, BoardError> {
+            self.0.events_since(after, limit)
+        }
+        fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+            self.0.last_event_id()
+        }
+        fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+            self.0.reserve_number(card, floor)
+        }
+    }
+
+    #[test]
+    fn a_store_that_cannot_undo_a_close_is_never_closed_by_the_watch() {
+        let b: Shared = Board::new(
+            Box::new(NoRecord(MemStore::default())) as Box<dyn Store>,
+            crate::board::Roles::default(),
+        )
+        .with_projects(Projects::parse(REGISTRY).expect("registry"));
+        let who = b.roles().actor("nano", "human").expect("role");
+        let card = b.add_in(&who, "p", "work", "", vec![]).expect("card");
+        let n = card.number.expect("n");
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        let open = b.get(card.id).expect("card");
+        assert_eq!(open.column, card.column, "left open");
+        assert!(open.merged.is_none());
+    }
+
     #[test]
     fn unclose_waits_for_a_dependency_edit_of_a_started_card_and_then_refuses() {
         let (entered, started) = std::sync::mpsc::channel();
