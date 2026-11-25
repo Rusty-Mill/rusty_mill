@@ -51,7 +51,7 @@ pub fn of(patches: &[&[u8]]) -> Option<Diffstat> {
             removed,
         })
         .collect();
-    rows.sort_by(|a, b| (b.added + b.removed).cmp(&(a.added + a.removed)));
+    rows.sort_by_key(|f| std::cmp::Reverse(f.added + f.removed));
     rows.truncate(TOP);
     Some(Diffstat {
         files: total,
