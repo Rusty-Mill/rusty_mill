@@ -799,10 +799,8 @@ struct WindowState<'a> {
     /// The forwards asked for and not yet answered.
     forward_asks: ForwardAsks,
     /// Files waiting to be sent to a pane's host, one at a time so their
-    /// paths are typed in the order they were dropped (C82), and whether one
-    /// is on its way.
-    uploads: std::collections::VecDeque<(u64, std::path::PathBuf)>,
-    uploading: bool,
+    /// paths are typed in the order they were dropped (C82).
+    uploads: UploadQueue,
     /// The effective config; refreshed on live reload so new tabs follow it.
     config: Config,
     /// The config file in effect, for the open shortcut + reload re-reads.
@@ -6609,7 +6607,7 @@ impl WindowState<'_> {
         let Some(key) = self.focused().filter(|&k| self.source.uploads(k)) else {
             return false;
         };
-        self.uploads.push_back((key, path));
+        self.uploads.push(key, path);
         self.next_upload();
         true
     }
@@ -6617,14 +6615,12 @@ impl WindowState<'_> {
     /// Sends the next queued file unless one is on its way; the answer comes
     /// back as [`UserEvent::Uploaded`].
     fn next_upload(&mut self) {
-        while !self.uploading {
-            let Some((key, path)) = self.uploads.pop_front() else {
-                return;
-            };
-            if !self.has_pane(key) {
-                continue;
-            }
-            self.uploading = true;
+        let open: std::collections::HashSet<u64> = self
+            .tabs
+            .iter()
+            .flat_map(|t| t.panes.iter().map(|p| p.id))
+            .collect();
+        while let Some((key, path)) = self.uploads.next(|k| open.contains(&k)) {
             let proxy = self.proxy.clone();
             self.source.upload(
                 key,
@@ -6639,7 +6635,7 @@ impl WindowState<'_> {
     /// A file sent for pane `key` arrived: its path there is typed into the
     /// pane as a drop of a local file would be, or the notice says why not.
     fn uploaded(&mut self, key: u64, uploaded: Uploaded) {
-        self.uploading = false;
+        self.uploads.finish(key);
         match uploaded {
             Ok(path) => self.type_remote_path(key, &path),
             Err(why) => self.show_notice(Some(super::source::Notice {
@@ -7435,8 +7431,7 @@ impl<'a> App<'a> {
             links: load_trust(),
             forward_trust: std::collections::HashSet::new(),
             forward_asks: ForwardAsks::default(),
-            uploads: Default::default(),
-            uploading: false,
+            uploads: UploadQueue::default(),
             config: self.config.clone(),
             config_path: self.config_path.clone(),
             profile_override: self.profile_override.clone(),
@@ -7602,7 +7597,9 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                 }
             }
             UserEvent::Uploaded(key, uploaded) => {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(key)) {
+                // The window that asked, even if its pane has gone since: the
+                // answer still frees its queue.
+                if let Some(w) = self.windows.iter_mut().find(|w| w.uploads.busy_with(key)) {
                     w.uploaded(key, uploaded);
                 }
             }
@@ -8102,6 +8099,47 @@ fn shell_quote(path: &str) -> String {
     #[cfg(not(windows))]
     {
         format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
+/// Files to send to panes' hosts, one at a time.
+#[derive(Default)]
+struct UploadQueue {
+    waiting: std::collections::VecDeque<(u64, std::path::PathBuf)>,
+    /// The pane whose file is on its way.
+    active: Option<u64>,
+}
+
+impl UploadQueue {
+    fn push(&mut self, key: u64, path: std::path::PathBuf) {
+        self.waiting.push_back((key, path));
+    }
+
+    /// The next file to send, if none is on its way; files of a pane that
+    /// is no longer `open` are dropped.
+    fn next(&mut self, open: impl Fn(u64) -> bool) -> Option<(u64, std::path::PathBuf)> {
+        if self.active.is_some() {
+            return None;
+        }
+        while let Some((key, path)) = self.waiting.pop_front() {
+            if open(key) {
+                self.active = Some(key);
+                return Some((key, path));
+            }
+        }
+        None
+    }
+
+    /// Whether the file on its way is `key`'s.
+    fn busy_with(&self, key: u64) -> bool {
+        self.active == Some(key)
+    }
+
+    /// The file on its way is answered, whether or not its pane remains.
+    fn finish(&mut self, key: u64) {
+        if self.busy_with(key) {
+            self.active = None;
+        }
     }
 }
 
@@ -9292,6 +9330,25 @@ mod tests {
         assert_eq!(shell_quote("/tmp/plain"), "'/tmp/plain'");
         assert_eq!(shell_quote("/tmp/with space"), "'/tmp/with space'");
         assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
+    }
+
+    #[test]
+    fn an_upload_answered_after_its_pane_closed_frees_the_queue() {
+        let mut q = super::UploadQueue::default();
+        q.push(1, "a".into());
+        q.push(1, "b".into());
+        q.push(2, "c".into());
+        assert_eq!(q.next(|_| true), Some((1, "a".into())));
+        assert_eq!(q.next(|_| true), None, "one at a time");
+        assert!(q.busy_with(1) && !q.busy_with(2));
+        // Pane 1 is closed before its answer arrives: the answer still
+        // finishes the file, and what waits for pane 1 is dropped.
+        q.finish(1);
+        assert_eq!(q.next(|k| k != 1), Some((2, "c".into())));
+        q.finish(9);
+        assert!(q.busy_with(2), "an answer for another pane frees nothing");
+        q.finish(2);
+        assert_eq!(q.next(|_| true), None);
     }
 
     #[test]
