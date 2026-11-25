@@ -180,6 +180,7 @@ Precise contracts used by this guide:
 | D170 | #703: an uncertain inbox send is written ahead as a pending mark on the Remediate card; closed as not applied only on proof (SUPERSEDED by D171) | [stated] 2026-11-24 (703) |
 | D171 | #703: Mill Board never closes a Remediate card from BBP's log; it only notes once the decision id shows applied (with rev); supersedes D170 | [stated] 2026-11-24 (703) |
 | D172 | #703: PR #1844 surface approved as built, including required `--fence` on `bbp human --decision` (closes Q63) | [stated] 2026-11-24 (703) |
+| D173 | #1092: the inbox runs on a second Mill Board on BaileyAi with its own SQLite file; rusty_tick retired, live board untouched | [stated] 2026-11-25 (1092) |
 
 ## D1. Lenses, not stages
 
@@ -1725,3 +1726,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_f6abd383d5b9495c9e796c271eb42140
 **Key.** lel:703:approve-pr1844-surface-required-fence
 **Source.** Nano, GitHub comment by `baileyrd` on Rusty-Mill/rusty_mill#1844, comment id 7137833262, 2026-11-24T16:32:51Z: "I approve the surface it lists, in particular the required --fence (Q63)." Replying to review 6043258136. Relayed by the caller; the comment was not read.
+
+## D173. #1092: the inbox runs on a second Mill Board on BaileyAi with its own SQLite file; rusty_tick retired, live board untouched
+
+**Decision.** rusty_tick is retired. The live Mill Board (its own SQLite file) stays in use and is not touched by #1092. The #1092 inbox is served by a second, separate Mill Board on BaileyAi with its own SQLite file, `MILL_BOARD_DB=/var/lib/mill-board/board.db`, and no tick: `MILL_BOARD_TICK_URL`, `RUSTY_TICK_TOKEN` and the loopback tick on `127.0.0.1:8788` are dropped from `board.env` and `1092-deploy-layout.md`. Cards, including #1092, stay on the live board, so a card's link and the inbox it points at are on different boards. D132's `mill-board` user, `/var/lib/mill-board` state, root-owned wrapper, guard and sudoers rule stand unchanged. #1092's done-when (`inbox_list` shows a linked task's escalations, `inbox_act` writes the log) is checked on the BaileyAi board.
+**Why.** With the tick gone and the live board staying where it is, a board on the orch host keeps D35's rule (Mill Board reads BBP only through the host's `bbp`, so it runs on the orch host) and D132's guard as the only door to `bbp`, with no board code change and no remote path into `orch-runner`.
+**Rejected.** a) The live board reaching BaileyAi's `bbp` over an SSH forced-command key into the D132 guard (one board, but a new remote trust boundary and a guard change). c) Moving the live board to BaileyAi.
+**Tag.** [stated] · remind-me: mem_72a5c92bf1a147acaae78dae66d4c2d1
+**Key.** lel:1092:inbox-second-board-baileyai
+**Source.** Nano, Let Em Loose thread, 2026-11-25: "rusty_tick is retired" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4BFfyyjHrARFenqpKUHKWkn`, 01:22Z); "Millboard is still in use" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4ELuF7quQwJY6RZ9pftamw9`, 01:26Z); tapped "Second board on BaileyAi" on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4XgzhpjMgWg7FpLVAyUKAmc`, 01:26:50Z, answering the expert's escalation. Relayed by the coordinator; the messages were not read. Supersedes D132's tick dependency only (its `board.env` and `1092-deploy-layout.md` tick lines); amends D35's single-board picture for v0. Within D130 and D131.
