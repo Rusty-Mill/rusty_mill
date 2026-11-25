@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use orch_bbp::acp::{Client, Turn, TurnError};
 use orch_bbp::builder::{self as seq, Outcome, Ports, Ran, Refused};
-use orch_bbp::mux::{self, Ctl, Launch, MuxError, Own};
+use orch_bbp::mux::{self, Ctl, Launch, Line, MuxError, Own};
 use orch_jail::spec::{FileLimits, JailFile, JailSpec};
 use orch_lens::builder::{self as lens_builder, Session};
 use orch_lens::card::Card;
@@ -35,6 +35,9 @@ const KILL_WAIT: Duration = Duration::from_secs(10);
 /// How long the holder gets to exit once its stdin is closed and the
 /// cgroup is empty.
 const HOLDER_WAIT: Duration = Duration::from_secs(10);
+/// How long a broken turn waits for `own` to say whether the mux went
+/// away: its 25 s of reconnect tries, and a margin.
+const VERDICT_WAIT: Duration = Duration::from_secs(30);
 /// How often the turn's wait looks at the mux and the clock.
 const TICK: Duration = Duration::from_millis(500);
 /// System read roots, kept when they exist.
@@ -235,7 +238,7 @@ impl<'a> Live<'a> {
         loop {
             match rx.recv_timeout(TICK) {
                 Ok(Ok(turn)) => return Ran::Turn(turn),
-                Ok(Err(e)) => return Ran::Failed(format!("{e:?}")),
+                Ok(Err(e)) => return self.verdict(format!("{e:?}")),
                 Err(RecvTimeoutError::Disconnected) => {
                     return Ran::Failed("turn thread died".into())
                 }
@@ -250,6 +253,25 @@ impl<'a> Live<'a> {
                 return Ran::Wall;
             }
         }
+    }
+
+    /// A turn that broke off: lost when `own` says the mux went away
+    /// (it retries a dropped connection for up to 25 s before `lost`),
+    /// failed when the server reports the program exited or says nothing.
+    fn verdict(&mut self, error: String) -> Ran {
+        let Some(own) = self.own.as_mut() else {
+            return Ran::Failed(error);
+        };
+        let until = Instant::now() + VERDICT_WAIT;
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            match own.next_event(left) {
+                Err(MuxError::Lost(e)) => return Ran::Lost(e),
+                Ok(Some(Line::Event { kind, .. })) if kind == "program-exited" => break,
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
+            }
+        }
+        Ran::Failed(error)
     }
 
     fn cgroup_empty(&self) -> Result<bool, String> {
