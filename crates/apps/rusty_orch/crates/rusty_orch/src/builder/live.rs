@@ -15,6 +15,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use orch_bbp::acp::{Client, Turn, TurnError};
+use orch_bbp::bounded::output_within;
 use orch_bbp::builder::{self as seq, Outcome, Ports, Ran, Refused};
 use orch_bbp::mux::{self, Ctl, Launch, Line, MuxError, Own};
 use orch_jail::spec::{FileLimits, JailFile, JailSpec};
@@ -30,6 +31,8 @@ use super::{prompt, replace, row, with_store, Options, AGENT, PROGRAM, SUBMIT};
 use crate::lens::bbp::{run_id, Child as BbpChild, Session as Seat};
 use crate::lens::run::board;
 
+/// How long one step before the turn (`cgroup-open`, git) may take.
+const STEP_WAIT: Duration = Duration::from_secs(120);
 /// How long orch's own kill waits for the cgroup to empty.
 const KILL_WAIT: Duration = Duration::from_secs(10);
 /// How long the holder gets to exit once its stdin is closed and the
@@ -91,6 +94,9 @@ struct Paths {
     /// `<state>/wt/<claim>/<n>`: the only writable root.
     worktree: PathBuf,
     cgroup: PathBuf,
+    /// The worktree's own git dir under the repository's, read before the
+    /// agent runs; `.git` in the worktree is the agent's to rewrite.
+    git_dir: Option<PathBuf>,
 }
 
 /// The ports, and what each step leaves for the next.
@@ -107,6 +113,8 @@ struct Live<'a> {
     blocks: Vec<String>,
     acp: Option<UnixStream>,
     wall_secs: u64,
+    /// The builder block's program exited during the turn.
+    exited: bool,
 }
 
 /// The cgroup holder and what orch keeps of it.
@@ -136,6 +144,7 @@ impl<'a> Live<'a> {
                 "builder-{}-{}-{}",
                 session.claim.0, session.n, session.started
             )),
+            git_dir: None,
         };
         Self {
             o,
@@ -150,6 +159,7 @@ impl<'a> Live<'a> {
             blocks: Vec::new(),
             acp: None,
             wall_secs,
+            exited: false,
         }
     }
 
@@ -245,8 +255,10 @@ impl<'a> Live<'a> {
                 Err(RecvTimeoutError::Timeout) => {}
             }
             if let Some(own) = self.own.as_mut() {
-                if let Err(MuxError::Lost(e)) = own.next_event(Duration::ZERO) {
-                    return Ran::Lost(e);
+                match own.next_event(Duration::ZERO) {
+                    Err(MuxError::Lost(e)) => return Ran::Lost(e),
+                    Ok(Some(line)) => self.exited |= self.agent_exited(&line),
+                    _ => {}
                 }
             }
             if now_ms().map_or(true, |now| now >= deadline_ms) {
@@ -255,10 +267,23 @@ impl<'a> Live<'a> {
         }
     }
 
+    /// True for the builder block's `program-exited`: the mux is up, so
+    /// a broken turn is the agent's failure, not a lost mux.
+    fn agent_exited(&self, line: &Line) -> bool {
+        let Line::Event { kind, body } = line else {
+            return false;
+        };
+        let block = body.get("block").and_then(rusty_json::Value::as_str);
+        kind == "program-exited" && block == self.blocks.first().map(String::as_str)
+    }
+
     /// A turn that broke off: lost when `own` says the mux went away
     /// (it retries a dropped connection for up to 25 s before `lost`),
     /// failed when the server reports the program exited or says nothing.
     fn verdict(&mut self, error: String) -> Ran {
+        if self.exited {
+            return Ran::Failed(error);
+        }
         let Some(own) = self.own.as_mut() else {
             return Ran::Failed(error);
         };
@@ -299,8 +324,8 @@ impl<'a> Live<'a> {
         if !wt.join(SUBMIT).is_file() {
             return Ok(None);
         }
-        git(wt, &["add", "-A", "--", ".", ":(exclude).lel"])?;
-        let diff = git(wt, &["diff", "--cached", "--binary", &self.base])?;
+        let git_dir = self.paths.git_dir.as_deref().ok_or("no worktree git dir")?;
+        let diff = staged_diff(git_dir, wt, &self.base)?;
         if diff.trim().is_empty() {
             return Ok(None);
         }
@@ -334,7 +359,10 @@ impl Ports for Live<'_> {
         if let Some(parent) = p.worktree.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        let worktree = Repo::open(&self.o.repo)?.add_detached(&p.worktree, &self.base)?;
+        let repo = Repo::open(&self.o.repo)?;
+        let worktree = repo.add_detached(&p.worktree, &self.base)?;
+        // Read now, before the agent can rewrite `.git` in its worktree.
+        self.paths.git_dir = Some(admin_dir(&repo, &worktree)?);
         self.paths.worktree = worktree;
         bbp(
             &self.o.bbp,
@@ -424,11 +452,14 @@ impl Ports for Live<'_> {
         ran
     }
 
-    fn term(&mut self) -> Result<(), String> {
+    fn term(&mut self) -> Result<(), Refused> {
         let (Some(own), Some(block)) = (self.own.as_mut(), self.blocks.first()) else {
             return Ok(());
         };
-        own.signal(block, "term").map_err(|e| e.to_string())
+        own.signal(block, "term").map_err(|e| match e {
+            MuxError::Lost(e) => Refused::Lost(e),
+            other => Refused::Failed(other.to_string()),
+        })
     }
 
     fn empty_within(&mut self, grace: Duration) -> Result<bool, String> {
@@ -581,12 +612,94 @@ fn now_ms() -> Result<u64, String> {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = StdCommand::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
+    let mut cmd = StdCommand::new("git");
+    cmd.arg("-C").arg(dir).args(args);
+    git_out(cmd, args)
+}
+
+/// git on `work_tree` through orch's own record of its git dir, with
+/// hooks, fsmonitor and external diff and textconv drivers off: nothing
+/// the agent wrote in the worktree (a new `.git`, attributes) can make
+/// orch run a command outside the jail.
+fn sealed_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Result<String, String> {
+    let mut cmd = StdCommand::new("git");
+    cmd.arg("--git-dir")
+        .arg(git_dir)
+        .arg("--work-tree")
+        .arg(work_tree)
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(["-c", "core.untrackedCache=false", "-c", "diff.external="])
+        .current_dir(work_tree)
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_CONFIG",
+        "GIT_EXTERNAL_DIFF",
+    ] {
+        cmd.env_remove(var);
+    }
+    cmd.args(args);
+    git_out(cmd, args)
+}
+
+/// The candidate's diff: everything in `work_tree` but `.lel/`, staged,
+/// against `base`.
+fn staged_diff(git_dir: &Path, work_tree: &Path, base: &str) -> Result<String, String> {
+    sealed_git(
+        git_dir,
+        work_tree,
+        &["add", "-A", "--", ".", ":(exclude).lel"],
+    )?;
+    sealed_git(
+        git_dir,
+        work_tree,
+        &[
+            "diff",
+            "--cached",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+        ],
+    )
+}
+
+/// The git dir `git worktree add` made for `worktree`: the one its `.git`
+/// names, which must sit under the repository's `worktrees/`.
+fn admin_dir(repo: &Repo, worktree: &Path) -> Result<PathBuf, String> {
+    let dotgit = std::fs::read_to_string(worktree.join(".git"))
+        .map_err(|e| format!("{}/.git: {e}", worktree.display()))?;
+    let named = dotgit
+        .trim()
+        .strip_prefix("gitdir: ")
+        .ok_or_else(|| format!("{}/.git is not a worktree link", worktree.display()))?;
+    let admin = Path::new(named)
+        .canonicalize()
+        .map_err(|e| format!("{named}: {e}"))?;
+    let root = repo
+        .git_dir()
+        .join("worktrees")
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    match admin.starts_with(&root) {
+        true => Ok(admin),
+        false => Err(format!(
+            "{} is not under {}",
+            admin.display(),
+            root.display()
+        )),
+    }
+}
+
+fn git_out(cmd: StdCommand, args: &[&str]) -> Result<String, String> {
+    let out = output_within(cmd, STEP_WAIT).map_err(|e| format!("git {}: {e}", args.join(" ")))?;
     if !out.status.success() {
         return Err(format!(
             "git {}: {}",
@@ -608,13 +721,9 @@ fn rev_parse(repo: &Path, rev: &str) -> Result<String, String> {
 
 /// `bbp <args> <path> --dir <dir>`, failing on a non-zero exit.
 fn bbp(bin: &Path, args: &[&str], dir: &Path, path: &Path) -> Result<(), String> {
-    let out = StdCommand::new(bin)
-        .args(args)
-        .arg(path)
-        .arg("--dir")
-        .arg(dir)
-        .output()
-        .map_err(|e| format!("{}: {e}", bin.display()))?;
+    let mut cmd = StdCommand::new(bin);
+    cmd.args(args).arg(path).arg("--dir").arg(dir);
+    let out = output_within(cmd, STEP_WAIT).map_err(|e| format!("{}: {e}", bin.display()))?;
     if !out.status.success() {
         return Err(format!(
             "bbp {}: {}",
@@ -628,6 +737,49 @@ fn bbp(bin: &Path, args: &[&str], dir: &Path, path: &Path) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sh(dir: &Path, script: &str) {
+        let ok = StdCommand::new("sh")
+            .args(["-c", script])
+            .current_dir(dir)
+            .status()
+            .expect("sh runs")
+            .success();
+        assert!(ok, "{script}");
+    }
+
+    #[test]
+    fn the_diff_ignores_a_git_dir_the_agent_planted() {
+        let root = std::env::temp_dir().join(format!("orch-sealed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        sh(
+            &root,
+            "git init -q repo && cd repo && echo a > a && git add a && \
+             git -c user.name=t -c user.email=t@t commit -qm a",
+        );
+        let repo = Repo::open(&root.join("repo")).expect("repo");
+        let base = rev_parse(&root.join("repo"), "HEAD").expect("base");
+        let wt = repo
+            .add_detached(&root.join("wt"), &base)
+            .expect("worktree");
+        let admin = admin_dir(&repo, &wt).expect("admin dir");
+        // The agent swaps `.git` for a repo whose fsmonitor runs its script.
+        let marker = root.join("ran");
+        sh(
+            &root,
+            &format!(
+                "git init -q evil && printf '#!/bin/sh\\ntouch {m}\\n' > hook && chmod +x hook && \
+                 git -C evil config core.fsmonitor \"$PWD/hook\" && \
+                 rm wt/.git && echo \"gitdir: $PWD/evil/.git\" > wt/.git && echo b > wt/a",
+                m = marker.display()
+            ),
+        );
+        let diff = staged_diff(&admin, &wt, &base).expect("diff");
+        assert!(diff.contains("+b"), "{diff}");
+        assert!(!marker.exists(), "the planted fsmonitor ran");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn the_jail_file_holds_the_v0_contract() {

@@ -5,6 +5,7 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 pub mod acp;
+pub mod bounded;
 pub mod builder;
 mod config;
 mod lease;
