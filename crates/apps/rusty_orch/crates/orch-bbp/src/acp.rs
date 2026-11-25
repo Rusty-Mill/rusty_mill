@@ -28,6 +28,10 @@ use rusty_json::{json, Value};
 /// The ACP protocol version this client speaks.
 pub const PROTOCOL_VERSION: u64 = 1;
 
+/// The longest line an agent may send: well past any real ACP message, far
+/// short of what would hurt orch.
+pub const MAX_LINE: usize = 8 << 20;
+
 /// JSON-RPC "method not found": the answer to any agent request other than
 /// a permission request, since this client offers no fs or terminal.
 const METHOD_NOT_FOUND: i64 = -32601;
@@ -333,12 +337,10 @@ impl<R: BufRead, W: Write, L: Write> Client<R, W, L> {
     }
 
     fn read(&mut self) -> Result<Incoming, TurnError> {
-        let mut line = String::new();
         loop {
-            line.clear();
-            if self.from_agent.read_line(&mut line).map_err(io)? == 0 {
-                return Err(TurnError::Closed);
-            }
+            let line = read_line(&mut self.from_agent, MAX_LINE)?.ok_or(TurnError::Closed)?;
+            let line = String::from_utf8(line)
+                .map_err(|e| TurnError::Malformed(format!("not UTF-8: {e}")))?;
             if !line.trim().is_empty() {
                 return parse(&line);
             }
@@ -356,6 +358,51 @@ impl<R: BufRead, W: Write, L: Write> Client<R, W, L> {
     }
 }
 
+/// One line from `from`, without its newline, read at most `max` bytes at
+/// a time so an agent that never ends a line can't grow orch's memory;
+/// `None` at end of input.
+///
+/// # Errors
+/// [`TurnError::Malformed`] past `max` bytes, [`TurnError::Io`] on a read
+/// error.
+pub fn read_line(from: &mut impl BufRead, max: usize) -> Result<Option<Vec<u8>>, TurnError> {
+    let mut line = Vec::new();
+    loop {
+        let buf = from.fill_buf().map_err(io)?;
+        if buf.is_empty() {
+            return Ok((!line.is_empty()).then_some(line));
+        }
+        let (take, done) = match buf.iter().position(|b| *b == b'\n') {
+            Some(at) => (at + 1, true),
+            None => (buf.len(), false),
+        };
+        if line.len() + take > max.saturating_add(1) {
+            return Err(TurnError::Malformed(format!("a line over {max} bytes")));
+        }
+        line.extend_from_slice(&buf[..take]);
+        from.consume(take);
+        if done {
+            line.pop();
+            return Ok(Some(line));
+        }
+    }
+}
+
+/// `text` with every control character but (when `keep_newlines`) `\n`
+/// written as an escape, so agent text can't drive the viewer's terminal
+/// (ESC, CSI, OSC) or forge a log line of orch's.
+pub fn clean(text: &str, keep_newlines: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' if keep_newlines => out.push(c),
+            c if c.is_control() => out.push_str(&c.escape_default().to_string()),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Renders ACP traffic as `acp.log` text. Agent text streams in chunks and
 /// is written as it comes; every other event takes a line of its own.
 #[derive(Debug, Default)]
@@ -366,21 +413,25 @@ pub struct Render {
 impl Render {
     /// The text for one `session/update` payload.
     pub fn update(&mut self, update: &Value) -> String {
-        let str_of = |k: &str| update.get(k).and_then(Value::as_str).unwrap_or("");
-        match str_of("sessionUpdate") {
+        let str_of = |k: &str| clean(update.get(k).and_then(Value::as_str).unwrap_or(""), false);
+        match str_of("sessionUpdate").as_str() {
             "agent_message_chunk" => {
                 let text = update
                     .get("content")
                     .and_then(|c| c.get("text"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                self.mid_line = !text.is_empty() && !text.ends_with('\n');
-                text.to_owned()
+                if text.is_empty() {
+                    return String::new();
+                }
+                let text = clean(text, true);
+                self.mid_line = !text.ends_with('\n');
+                text
             }
             "tool_call" => self.line(&format!(
                 "[tool] {} ({})",
                 str_of("title"),
-                status_or(str_of("status"), "pending")
+                status_or(&str_of("status"), "pending")
             )),
             "tool_call_update" if !str_of("status").is_empty() => self.line(&format!(
                 "[tool] {} {}",
@@ -393,8 +444,9 @@ impl Render {
                     .into_iter()
                     .flatten()
                     .map(|e| {
-                        let s = |k: &str| e.get(k).and_then(Value::as_str).unwrap_or("");
-                        format!("[plan] {} {}", plan_mark(s("status")), s("content"))
+                        let s =
+                            |k: &str| clean(e.get(k).and_then(Value::as_str).unwrap_or(""), false);
+                        format!("[plan] {} {}", plan_mark(&s("status")), s("content"))
                     })
                     .collect();
                 self.line(&lines.join("\n"))
@@ -410,15 +462,16 @@ impl Render {
             .and_then(|t| t.get("title"))
             .and_then(Value::as_str)
             .unwrap_or("a tool call");
+        let title = clean(title, false);
         let answer = choice.map_or("cancelled (no allow option)".to_owned(), |c| {
-            format!("answered {c}")
+            format!("answered {}", clean(c, false))
         });
         self.line(&format!("[permission] {title}: {answer}"))
     }
 
     /// The line for an agent request this client does not offer.
     pub fn refused(&mut self, method: &str) -> String {
-        self.line(&format!("[refused] {method}: not offered"))
+        self.line(&format!("[refused] {}: not offered", clean(method, false)))
     }
 
     /// The closing lines: usage (or that none was reported) and the stop.
@@ -426,7 +479,7 @@ impl Render {
         let usage = turn.usage.map_or("[usage] not reported".to_owned(), |u| {
             format!("[usage] in {} out {}", u.tokens_in, u.tokens_out)
         });
-        self.line(&format!("{usage}\n[stop] {}", turn.stop.0))
+        self.line(&format!("{usage}\n[stop] {}", clean(&turn.stop.0, false)))
     }
 
     /// `text` on lines of its own, after a newline if agent text was mid-line.
