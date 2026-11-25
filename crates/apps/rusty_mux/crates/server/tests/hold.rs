@@ -249,11 +249,11 @@ fn a_re_run_starts_in_the_launch_directory_the_workspace_holds() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// If the launch pathname no longer names a directory, the re-run is
-/// refused and nothing starts.
+/// A rename of the launch directory, with nothing put in its place, does
+/// not stop the re-run: it goes on in the held directory.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_re_run_is_refused_when_the_launch_path_is_gone() {
+fn a_re_run_follows_the_held_directory_when_the_launch_path_is_gone() {
     let base = std::env::temp_dir().join(format!("rusty-mux-rerun-gone-{}", std::process::id()));
     let (orig, moved) = (base.join("orig"), base.join("moved"));
     let _ = std::fs::remove_dir_all(&base);
@@ -269,13 +269,17 @@ fn a_re_run_is_refused_when_the_launch_path_is_gone() {
     client.request(|req| Message::AcquireLease { req, block });
 
     std::fs::rename(&orig, &moved).unwrap();
-    let refused = rerun(&mut client, block);
+    assert!(!orig.exists());
+    let done = rerun(&mut client, block);
     assert!(
-        matches!(refused.as_slice(), [Message::Failed { reason, .. }] if reason.contains("not a directory")),
-        "{refused:?}"
+        matches!(done.as_slice(), [Message::Done { .. }]),
+        "{done:?}"
     );
+    wait_screen(&mut client, block, "-- re-run at");
+    wait_exited(&mut client, block);
     let marked = std::fs::read_to_string(moved.join("marker")).unwrap_or_default();
-    assert_eq!(marked.lines().count(), 1, "nothing ran again: {marked:?}");
+    assert_eq!(marked.lines().count(), 2, "{marked:?}");
+    assert!(!orig.exists(), "the old path was not recreated");
     let _ = std::fs::remove_dir_all(&base);
 }
 
