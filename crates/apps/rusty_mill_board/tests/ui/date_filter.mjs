@@ -65,6 +65,26 @@ await api("card_add", { title: "outside the range" });
 await page.waitForTimeout(3500);
 check((await titles()).length === 0, "a card outside the range stays hidden after the board changes");
 
+// An older request that fails after a newer one has rendered must not undo it. Requests with a from and no to
+// are held back and then fail; the final selection (from and to) answers at once and shows no card.
+await page.route("**/api/board_list", async (route) => {
+  const body = JSON.parse(route.request().postData() ?? "{}");
+  if (body.created_from != null && body.created_to == null) {
+    await new Promise((r) => setTimeout(r, 1500));
+    return route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"boom"}' });
+  }
+  return route.continue();
+});
+await page.selectOption("#df-field", "created");
+await page.fill("#df-to", "");
+await page.fill("#df-from", day(1));
+await page.fill("#df-to", day(2));
+await settle();
+check((await titles()).length === 0, "the newer match set is shown");
+await page.waitForTimeout(2500);
+check((await titles()).length === 0 && (await page.locator("#df-clear").isVisible()), "a late failure of an older request leaves it in place");
+await page.unroute("**/api/board_list");
+
 // The address keeps the filter; a reload restores it.
 await page.selectOption("#df-field", "updated");
 await page.fill("#df-from", day(1));

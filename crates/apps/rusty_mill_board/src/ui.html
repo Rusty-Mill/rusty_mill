@@ -424,8 +424,11 @@ async function loadDateIds(){
   const f=dateSel.field,a={archived:"include",project_status:STATUSES};
   if(dateSel.from)a[f+"_from"]=dayMs(dateSel.from);
   if(dateSel.to)a[f+"_to"]=dayMs(dateSel.to,1);
-  const seq=++dateSeq,ids=new Set((await api("board_list",a)).cards.map(k=>k.id));
-  if(seq===dateSeq)dateIds=ids;   // a slower, older answer must not overwrite a newer one
+  const seq=++dateSeq;
+  let ids;
+  try{ids=new Set((await api("board_list",a)).cards.map(k=>k.id))}
+  catch(e){if(seq===dateSeq)throw e;return}   // an older request's failure must not undo a newer answer
+  if(seq===dateSeq)dateIds=ids;   // nor may its slower, older answer overwrite it
 }
 function renderDateFilter(){
   const on=dateOn(),c=$("df-clear");
