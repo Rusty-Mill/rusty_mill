@@ -493,7 +493,7 @@ pub fn tools() -> Vec<SettingsTool> {
         ),
         tool(
             "settings_history",
-            "What each settings change altered (needs admin), oldest first: when, who, operation, section, old and new value; never a secret. Keeps the newest 5000 entries.",
+            "What each settings change altered (needs admin), oldest first: when, who, operation, section, old and new value; never a secret. Keeps the newest 5000 entries within 2 MiB; a response holds at most 256 KiB (`truncated` says it was cut), and a change too large to keep whole is kept without its values (`omitted_bytes`).",
             json!({"limit": {"type": "integer", "description": "How many of the newest entries (1-500, default 50)."},
                    "section": {"type": "string", "description": "Only this section: agents, registry, roles, github, rules, workflow, project_status or registered_agents."}}),
             &[],
@@ -996,9 +996,9 @@ impl Settings {
     fn history_read(&self, a: &HistoryRead) -> Res {
         let path = self.file(&self.files.history)?;
         let limit = a.limit.unwrap_or(50).clamp(1, 500);
-        let entries = history::read(&path, limit, a.section.as_deref())
+        let page = history::read(&path, limit, a.section.as_deref())
             .map_err(|e| refused(format!("{}: {e}", path.display())))?;
-        Ok(json!({ "entries": entries }))
+        Ok(json!({ "entries": page.entries, "truncated": page.truncated }))
     }
 
     /// The newest `limit` audit records, oldest first.
