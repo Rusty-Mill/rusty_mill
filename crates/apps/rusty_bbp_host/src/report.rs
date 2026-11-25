@@ -204,22 +204,32 @@ mod tests {
         let k = signer();
         let file = sign(&k, &receipt("plan", None));
         let sha = Sha256::of(&file);
-        let op = OpId(format!("by:nano/rcpt:{}", sha.hex()));
+        let answer = |op: String| metrics::GateAnswer {
+            gate: GateKind::PlanApproval,
+            op: OpId(op),
+            approved: Some(metrics::Approved {
+                subject: ArtId(2),
+                run: None,
+                rev: Rev(9),
+            }),
+        };
+        let op = answer(format!("by:nano/rcpt:{}", sha.hex()));
+        let t1 = TaskId("T1".into());
         let stored = |s: &Sha256| (*s == sha).then(|| file.clone());
-        assert!(receipt_holds(&op, Some(k.public_key()), &stored));
-        assert!(!receipt_holds(&op, None, &stored), "no key installed");
-        let forged = OpId(format!("by:evil/rcpt:{}", sha.hex()));
+        assert!(receipt_holds(&op, &t1, Some(k.public_key()), &stored));
+        assert!(!receipt_holds(&op, &t1, None, &stored), "no key installed");
+        let forged = answer(format!("by:evil/rcpt:{}", sha.hex()));
         assert!(
-            !receipt_holds(&forged, Some(k.public_key()), &stored),
+            !receipt_holds(&forged, &t1, Some(k.public_key()), &stored),
             "label is not the approver"
         );
         let other = rusty_pk::ed25519::SigningKey::from_seed(&[9; 32]).unwrap();
         assert!(
-            !receipt_holds(&op, Some(other.public_key()), &stored),
+            !receipt_holds(&op, &t1, Some(other.public_key()), &stored),
             "another key"
         );
         assert!(
-            !receipt_holds(&op, Some(k.public_key()), &|_| None),
+            !receipt_holds(&op, &t1, Some(k.public_key()), &|_| None),
             "receipt missing"
         );
     }
