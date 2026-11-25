@@ -1940,14 +1940,18 @@ impl<S: Store> Board<S> {
                 self.check_starts(&flow, c, to)?;
                 crate::duties::check_move(c, &flow, to, by)?;
                 let moved = c.move_to(&flow, to, by, now)?;
-                crate::duties::on_move(&moved, &flow, &c.column, by, now)
+                // The ledger records the move as made: a recorder's close holds `close`.
+                let (made_as, _) = c.recorder(&flow, by, to);
+                crate::duties::on_move(&moved, &flow, &c.column, &made_as, now)
             }),
             MoveRules::Open => {
                 let card = self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
                     self.check_starts(&flow, c, to)?;
                     crate::duties::check_move(c, &flow, to, by)?;
                     let moved = c.move_freely(&flow, to, by, now)?;
-                    crate::duties::on_move(&moved, &flow, &c.column, by, now)
+                    // The ledger records the move as made: a recorder's close holds `close`.
+                    let (made_as, _) = c.recorder(&flow, by, to);
+                    crate::duties::on_move(&moved, &flow, &c.column, &made_as, now)
                 })?;
                 rusty_log::info!(card = %id, actor = %by.name, to = %to, "card moved with movement rules off");
                 Ok(card)
@@ -2108,7 +2112,10 @@ impl<S: Store> Board<S> {
                 "a parent closes with its children".into(),
             ));
         }
-        let next = current.closed_by_merge(&flow, pr, by, (self.clock)())?;
+        let next = crate::duties::on_leave(
+            &current,
+            current.closed_by_merge(&flow, pr, by, (self.clock)())?,
+        );
         let event = Event::of(&next, EventKind::Moved, &by.name);
         let rev = self.store.replace(&next, event)?;
         Ok(Card { rev, ..next })

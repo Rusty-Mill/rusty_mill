@@ -204,7 +204,7 @@ fn a_close_into_done_is_not_recorded_as_an_approval() {
 }
 
 #[test]
-fn an_unblock_filed_on_old_text_cannot_be_confirmed() {
+fn an_unblock_filed_on_old_text_expires_and_the_owner_approves_their_own() {
     let b = board();
     let nano = who(&b, "nano", "human", "human");
     let proxy = who(&b, "nano-proxy", "approver", "human");
@@ -216,12 +216,100 @@ fn an_unblock_filed_on_old_text_cannot_be_confirmed() {
     let edited = b
         .edit(card.id, &nano, None, Some("body B"), None)
         .expect("edit");
+    let moved = b
+        .approve(card.id, &nano, &approval(&edited, &ready, None))
+        .expect("the stale filing does not lock the owner out");
+    assert_eq!(moved.column, ready);
+    let filed = |d: &&Duty| matches!(d, Duty::Approval { actor, .. } if actor == "nano-proxy");
+    assert!(
+        matches!(
+            approvals(&moved).into_iter().find(filed),
+            Some(Duty::Approval {
+                expired: true,
+                pending: false,
+                confirmed_by: None,
+                ..
+            })
+        ),
+        "{:?}",
+        moved.duties
+    );
+}
+
+#[test]
+fn a_recorders_close_is_not_recorded_as_an_approval() {
+    use Capability::*;
+    let b = board();
+    let nano = who(&b, "nano", "human", "human");
+    let maker = who(&b, "cloud#1", "maker", "anthropic");
+    let dots = who(&b, "dots", "reviewer", "openai");
+    let recorder = Actor {
+        name: "rec".into(),
+        caps: [Build, Record].into(),
+        projects: None,
+        provider: Some("other".into()),
+    };
+    let card = at_v_and_ving(&b, &nano, &maker, &dots);
+    let before = approvals(&card).len();
+    b.release(card.id, &dots).expect("release");
+    b.add_evidence(
+        card.id,
+        &["https://github.com/o/r/pull/1".to_owned()],
+        &nano,
+    )
+    .expect("evidence");
+    b.claim(card.id, &recorder).expect("claim");
+    let done = b
+        .move_card(card.id, &Column::DONE, &recorder)
+        .expect("record merged work");
+    assert_eq!(approvals(&done).len(), before, "{:?}", done.duties);
+}
+
+#[test]
+fn a_v_and_v_verdict_holds_the_merge_gate() {
+    let b = board();
+    let nano = who(&b, "nano", "human", "human");
+    let proxy = who(&b, "nano-proxy", "approver", "human");
+    let maker = who(&b, "cloud#1", "maker", "anthropic");
+    let dots = who(&b, "dots", "reviewer", "openai");
+    let card = at_v_and_ving(&b, &nano, &maker, &dots);
+    let done = Column::DONE;
+    let card = b.review(card.id, &dots, false, "tests fail").expect("fail");
     assert!(refused(b.approve(
         card.id,
-        &nano,
-        &approval(&edited, &ready, None)
+        &proxy,
+        &approval(&card, &done, Some("abc"))
     )));
-    assert_eq!(b.get(card.id).expect("get").column, col("blocked"));
+    let card = b.review(card.id, &dots, true, "fixed").expect("pass");
+    let filed = b
+        .approve(card.id, &proxy, &approval(&card, &done, Some("abc")))
+        .expect("filed");
+    assert!(
+        approvals(&filed)
+            .iter()
+            .any(|d| matches!(d, Duty::Approval { pending: true, .. }))
+    );
+}
+
+#[test]
+fn claim_cycles_do_not_grow_the_ledger() {
+    let b = board();
+    let nano = who(&b, "nano", "human", "human");
+    let maker = who(&b, "cloud#1", "maker", "anthropic");
+    let dots = who(&b, "dots", "reviewer", "openai");
+    let card = at_v_and_ving(&b, &nano, &maker, &dots);
+    let card = b.move_card(card.id, &col("building"), &nano).expect("back");
+    let len = |b: &Board<MemStore>| b.get(card.id).expect("get").duties.len();
+    b.claim(card.id, &maker).expect("claim");
+    b.release(card.id, &maker).expect("release");
+    let once = len(&b);
+    for _ in 0..50 {
+        b.claim(card.id, &dots).expect("other");
+        b.release(card.id, &dots).expect("release");
+        b.claim(card.id, &maker).expect("claim");
+        b.release(card.id, &maker).expect("release");
+    }
+    assert_eq!(len(&b), once);
 }
 
 #[test]

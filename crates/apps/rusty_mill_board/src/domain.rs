@@ -1178,7 +1178,12 @@ impl Card {
     /// `by`, counted as holding `Close` for a move to Done when it holds `Record` (and not
     /// `Close`), this card carries a pull request link, and the card is in a work column:
     /// recording merged work, narrowed. The flag says that this happened.
-    fn recorder<'a>(&self, flow: &Workflow, by: &'a Actor, to: &Column) -> (Cow<'a, Actor>, bool) {
+    pub(crate) fn recorder<'a>(
+        &self,
+        flow: &Workflow,
+        by: &'a Actor,
+        to: &Column,
+    ) -> (Cow<'a, Actor>, bool) {
         let applies = *to == Column::DONE
             && by.caps.contains(&Capability::Record)
             && !by.caps.contains(&Capability::Close)

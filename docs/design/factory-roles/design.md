@@ -203,6 +203,16 @@ What the build does with them:
     beside the merge gate does not count.
   - Nano's confirmation must match the digest the proxy filed.
   - A filing expires when the card leaves its gate.
+  - A recorder's close (`record` counted as `close`) is recorded as the close it is, not as an
+    approval.
+  - When the owner approves text that was edited after a filing, the filing expires and the
+    owner's own approval is recorded, so a stale filing cannot lock the owner out.
+  - The merge gate counts the V&Ving verdicts and the Building review. It needs one passing
+    verdict and none asking for changes. Each reviewer keeps only their newest verdict.
+  - Repeated facts move to the end of the ledger instead of adding entries: an author's
+    re-claim of a column, a reviewer's verdict on a column, and a filer's new filing for a
+    gate whose earlier filing expired. Only distinct identities still add entries. When the
+    ledger is full, others are refused, but the owner can write up to twice the cap.
   - An admin's `card_approve` needs a signed-in credential of its own, not a connector or a
     named role.
   - R4 needs a review of the work the gate rests on: Architecting's own for the design gate,
