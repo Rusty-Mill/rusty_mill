@@ -184,6 +184,7 @@ Precise contracts used by this guide:
 | D174 | #1416: the LEL tab view model and parsing live in rusty_term, fixtures from `bbp inbox --json` plus a drift test; no shared crate | [default] 2026-11-24 (1416) |
 | D175 | #1092: the inbox runs on a second Mill Board on BaileyAi with its own SQLite file; rusty_tick retired, live board untouched | [stated] 2026-11-25 (1092) |
 | D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
+| D179 | #1234: the dedup-manager experiment repo setup is approved | [stated] 2026-11-25 (1234, 600) |
 
 ## D1. Lenses, not stages
 
@@ -1765,3 +1766,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_8d894a129917493782f8b8f1e8123b26
 **Key.** lel:430:coedit-fold-on-rusty-crdt
 **Source.** Nano, project thread "Update Mill Board card statuses", message cmsg_014AqbZs58L565hMV2pFkCX5HGJTsB1QUY7avVobhzUMnP, 2026-11-25T01:15:31Z: "1", answering the three options in cmsg_014AqbZs58L565hMV2pFkCX5C5P4veGi9BERQNHB1fH2T3. Relayed by the caller; the message was not read.
+
+## D179. #1234: the dedup-manager experiment repo setup is approved
+
+**Decision.** The dedup experiment repo is `dedup-manager`, local-only on BaileyAi (D66 §8/§10), at `/srv/lel/dedup-manager`, owned by `orch-runner`. `/srv/lel/experiment` (lel-codex's mount) is not touched. It has one commit on `main` holding only `INTENT.md`: the bytes between the ```yaml fences of the "Intent v0.1 stage 1" comment on #600 (frozen 2026-11-02), fence lines left out, LF endings, one trailing newline; 1872 bytes, sha256 `79f66e7dca90a08ced8db1140d3a96ce52ab2c6f44fd0aa2b2ac186f8f4ec209`. No licence, .gitignore or README. This INTENT.md is the frozen experiment input (D18), not the agent-stack layer-3 INTENT.md that mem_749600d25c4449ee9b617faa1476181c retires. Nano creates the repo by running `let-em-loose/1234/create-repo-prompt.md` on BaileyAi. Approving this is also #1234's design approval (D25).
+**Why.** Builders get the intent only (D18). `bbp open --mode claims` takes brief, roster and profiles from outside the repo, so the host needs nothing else in it. An `orch-runner`-owned path under `/srv/lel` lets `bbp` and orch read it (D132, D142), the same pattern as `/srv/lel/toy/repo`. Stripping the fences keeps exactly the bytes Nano froze.
+**Rejected.** `~/repos/dedup-manager` (`orch-runner` may not be able to read it). Reusing `/srv/lel/experiment`. Adding a licence, .gitignore or README. Committing the fenced block.
+**Tag.** [stated] · remind-me: mem_422d9f277cd5480abbf0af36166202aa
+**Key.** lel:1234:experiment-repo-setup
+**Source.** Nano tapped "Approve as proposed" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE43HJnfjiZdhexUAAkyR3gfC, 2026-11-25T15:51:36Z; proposal in the #1234 card comment of 2026-11-25.
