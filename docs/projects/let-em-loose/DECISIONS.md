@@ -180,6 +180,8 @@ Precise contracts used by this guide:
 | D170 | #703: an uncertain inbox send is written ahead as a pending mark on the Remediate card; closed as not applied only on proof (SUPERSEDED by D171) | [stated] 2026-11-24 (703) |
 | D171 | #703: Mill Board never closes a Remediate card from BBP's log; it only notes once the decision id shows applied (with rev); supersedes D170 | [stated] 2026-11-24 (703) |
 | D172 | #703: PR #1844 surface approved as built, including required `--fence` on `bbp human --decision` (closes Q63) | [stated] 2026-11-24 (703) |
+| D173 | #1416: the LEL tab in rusty_term reads BBP through the Mill Board HTTP API (inbox via `inbox_list`/`inbox_act`; new read endpoints for claims, intent and spend) | [stated] 2026-11-24 (1416) |
+| D174 | #1416: the LEL tab view model and parsing live in rusty_term, fixtures from `bbp inbox --json` plus a drift test; no shared crate | [default] 2026-11-24 (1416) |
 
 ## D1. Lenses, not stages
 
@@ -1725,3 +1727,21 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_f6abd383d5b9495c9e796c271eb42140
 **Key.** lel:703:approve-pr1844-surface-required-fence
 **Source.** Nano, GitHub comment by `baileyrd` on Rusty-Mill/rusty_mill#1844, comment id 7137833262, 2026-11-24T16:32:51Z: "I approve the surface it lists, in particular the required --fence (Q63)." Replying to review 6043258136. Relayed by the caller; the comment was not read.
+
+## D173. #1416: the LEL tab in rusty_term reads BBP through the Mill Board HTTP API (inbox via `inbox_list`/`inbox_act`; new read endpoints for claims, intent and spend)
+
+**Decision.** The LEL tab on Nano's desktop reaches BBP on the orch host through Mill Board's HTTP API. The inbox reads through `inbox_list` and acts through `inbox_act`, with the same revision fence and `dry_run` (D35). Claims map, intent and spend need NEW read endpoints on Mill Board that wrap `bbp`. Those endpoints are a public API change: they get their own PR and an owner gate before slices 2, 5 and 6 of `1416-lel-tab-slice-plan.md` can show live data. Slice 1 (the view model) does not depend on them. No BBP or orch change (D55). Numbered D173 because D168 to D172 are taken by #703.
+**Why.** Smallest option: one writer path and one fence; `bbp` and the log live on the orch host while rusty_term runs on the desktop.
+**Rejected.** (b) `bbp` over SSH or a mux block (waits on Windows `--ssh`, C79, and credentials); (c) a new mux `Features` call proxying read-only BBP views and the actions (larger protocol change).
+**Tag.** [stated] · remind-me: mem_4366993b5c9f4930b82a48b3f0542bad
+**Key.** lel:1416:lel-tab-data-source-mill-board-http
+**Source.** Nano, decision card in the project thread, message `cmsg_014f6o52E2iAAAgMm9v8hh1wSELECQZe1co7b86n4Fniua`, 2026-11-24T08:07:40Z: tapped "Mill Board HTTP API", answering "How should the LEL tab on your desktop reach BBP on the orch host?". Relates to D35, D53 to D58, `1416-lel-tab-slice-plan.md`.
+
+## D174. #1416: the LEL tab view model and parsing live in rusty_term, fixtures from `bbp inbox --json` plus a drift test; no shared crate
+
+**Decision.** rusty_term does not depend on `rusty_mill_board` (sqlite, oauth, serve; ADR-0003 keeps `bbp` a process boundary). The view model and parsing live in rusty_term, with golden JSON fixtures copied from `bbp inbox --json` and a drift test that parses the same fixtures in both crates. Extracting a shared crate is a new crate and needs owner approval; it is not done.
+**Why.** Most reversible: no new crate and no heavy dependency in the terminal; a shared crate can be extracted later without changing the wire format.
+**Rejected.** A shared types crate now (owner gate); depending on `rusty_mill_board`.
+**Tag.** [default] · remind-me: mem_f0631ddd540840a0b878c4bc2590bb88
+**Key.** lel:1416:lel-tab-types-in-rusty-term
+**Source.** let-em-loose-expert default, 2026-11-24, for the Types section of `1416-lel-tab-slice-plan.md`. Follows D173.
