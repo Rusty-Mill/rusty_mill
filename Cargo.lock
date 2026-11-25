@@ -7233,6 +7233,7 @@ dependencies = [
  "orch-core",
  "orch-dispatch",
  "orch-lens",
+ "rusty_bbp",
  "rusty_multimodal_db_engine",
  "serde",
 ]
