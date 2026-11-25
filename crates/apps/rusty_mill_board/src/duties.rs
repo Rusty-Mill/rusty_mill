@@ -140,7 +140,7 @@ fn push_owner(card: &Card, duty: Duty) -> Result<Card, BoardError> {
 fn push_up_to(card: &Card, duty: Duty, max: usize) -> Result<Card, BoardError> {
     if card.duties.len() >= max {
         return Err(BoardError::Refused(format!(
-            "this card's duty ledger is full ({MAX_DUTIES} entries)"
+            "this card's duty ledger is full ({max} entries)"
         )));
     }
     let mut next = card.clone();
@@ -148,8 +148,27 @@ fn push_up_to(card: &Card, duty: Duty, max: usize) -> Result<Card, BoardError> {
     Ok(next)
 }
 
+/// `duty` at the end of the ledger in place of the entry `same` picks, so a repeated fact moves
+/// to its newest place (the ledger stays in time order) and never grows the ledger; a new fact
+/// is [`push`]ed.
+fn upsert(card: &Card, duty: Duty, same: impl Fn(&Duty) -> bool) -> Result<Card, BoardError> {
+    let Some(i) = card.duties.iter().position(same) else {
+        return push(card, duty);
+    };
+    let mut next = card.clone();
+    next.duties.remove(i);
+    next.duties.push(duty);
+    Ok(next)
+}
+
+/// A review by `actor` of the work in `column`.
+fn review_of<'a>(actor: &'a str, column: &'a Column) -> impl Fn(&Duty) -> bool + 'a {
+    move |d| matches!(d, Duty::Review { actor: a, column: c, .. } if a == actor && c == column)
+}
+
 /// `card` claimed by `by`: an [`Duty::Author`] entry when the claim is to make something,
-/// unless the last entry already says the same.
+/// unless the last entry already says the same. A repeat author of the column moves to the end
+/// (reviews before it no longer count, R4), so claim cycles do not grow the ledger.
 ///
 /// # Errors
 /// If the ledger is full.
@@ -162,14 +181,17 @@ pub fn on_claim(card: &Card, flow: &Workflow, by: &Actor, now_ms: i64) -> Result
     if repeat {
         return Ok(card.clone());
     }
-    push(
+    let column = card.column.clone();
+    let entry = Duty::Author {
+        actor: by.name.clone(),
+        provider: by.provider.clone(),
+        column: column.clone(),
+        at_ms: now_ms,
+    };
+    upsert(
         card,
-        Duty::Author {
-            actor: by.name.clone(),
-            provider: by.provider.clone(),
-            column: card.column.clone(),
-            at_ms: now_ms,
-        },
+        entry,
+        |d| matches!(d, Duty::Author { actor, column: c, .. } if *actor == by.name && *c == column),
     )
 }
 
@@ -221,7 +243,8 @@ pub fn check_move(card: &Card, flow: &Workflow, to: &Column, by: &Actor) -> Resu
     Ok(())
 }
 
-/// Record what a move from `from` did: a passing review for a review move, an approval for a
+/// Record what a move from `from` did. `by` is the actor the move was made as (a recorder
+/// counts as holding `close`, so its close is not an approval): a passing review for a review move, an approval for a
 /// gate an `Admin` holder crossed with `card_move`. `moved` is the card after the move.
 ///
 /// # Errors
@@ -234,17 +257,15 @@ pub fn on_move(
     now_ms: i64,
 ) -> Result<Card, BoardError> {
     if is_review_move(flow, from, &moved.column) {
-        return push(
-            moved,
-            Duty::Review {
-                actor: by.name.clone(),
-                provider: by.provider.clone(),
-                column: from.clone(),
-                pass: true,
-                note: String::new(),
-                at_ms: now_ms,
-            },
-        );
+        let entry = Duty::Review {
+            actor: by.name.clone(),
+            provider: by.provider.clone(),
+            column: from.clone(),
+            pass: true,
+            note: String::new(),
+            at_ms: now_ms,
+        };
+        return upsert(moved, entry, review_of(&by.name, from));
     }
     if !through_gate(flow, from, &moved.column, by) {
         return Ok(moved.clone());
@@ -345,36 +366,25 @@ pub fn review(
     };
     // A reviewer's newer verdict on the same work replaces their older one, so reviews cannot
     // fill the ledger.
-    let since = last_author(card).map_or(0, |i| i + 1);
-    let mine = card.duties[since..].iter().rposition(|d| {
-        matches!(d, Duty::Review { actor, column, .. } if *actor == by.name && *column == card.column)
-    });
-    let next = match mine {
-        Some(i) => {
-            let mut next = card.clone();
-            next.duties[since + i] = entry;
-            next
-        }
-        None => push(card, entry)?,
-    };
+    let next = upsert(card, entry, review_of(&by.name, &card.column))?;
     Ok(bumped(next, now_ms))
 }
 
-/// Whose work a gate out of `from` rests on (R4): `from`'s own when makers work there
-/// (Architecting), else the work last authored (Building, for a gate out of V&Ving).
-fn reviewed_work(flow: &Workflow, card: &Card, from: &Column) -> Column {
+/// Whose reviews a gate out of `from` rests on (R4): `from`'s own when makers work there
+/// (Architecting); else `from`'s verdicts and those of the work last authored (V&Ving's, and
+/// the Building review, for the merge gate).
+fn reviewed_work(flow: &Workflow, card: &Card, from: &Column) -> Vec<Column> {
     let makes = flow
         .column(from)
         .is_some_and(|d| MAKERS.iter().any(|m| d.takers.contains(m)));
-    if makes {
-        return from.clone();
+    let authored = last_author(card).and_then(|i| match &card.duties[i] {
+        Duty::Author { column, .. } => Some(column.clone()),
+        _ => None,
+    });
+    match authored {
+        Some(work) if !makes && work != *from => vec![work, from.clone()],
+        _ => vec![from.clone()],
     }
-    last_author(card)
-        .and_then(|i| match &card.duties[i] {
-            Duty::Author { column, .. } => Some(column.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| from.clone())
 }
 
 fn last_author(card: &Card) -> Option<usize> {
@@ -383,13 +393,21 @@ fn last_author(card: &Card) -> Option<usize> {
         .rposition(|d| matches!(d, Duty::Author { .. }))
 }
 
-/// Whether a passing review of the work in `column` follows the card's last authoring claim
-/// (R4): a review of an earlier column does not carry a later gate.
-fn reviewed_since_authored(card: &Card, column: &Column) -> bool {
+/// Whether the reviews of `columns` since the card's last authoring claim pass (R4): at least
+/// one passes and none asks for changes (each reviewer's newest verdict is the one kept). A
+/// review of an earlier column does not carry a later gate.
+fn reviewed_since_authored(card: &Card, columns: &[Column]) -> bool {
     let after = last_author(card).map_or(0, |i| i + 1);
-    card.duties[after..]
-        .iter()
-        .any(|d| matches!(d, Duty::Review { pass: true, column: c, .. } if c == column))
+    let verdicts = card.duties[after..].iter().filter_map(|d| match d {
+        Duty::Review { column, pass, .. } if columns.contains(column) => Some(*pass),
+        _ => None,
+    });
+    let (mut passed, mut failed) = (false, false);
+    for pass in verdicts {
+        passed |= pass;
+        failed |= !pass;
+    }
+    passed && !failed
 }
 
 /// Whether the gate `from` -> `to` needs the owner's confirmation: a merge (into Done) or an
@@ -469,13 +487,21 @@ fn approve_in(
     if flow.kind(&from) == Some(Kind::Work) {
         let work = reviewed_work(flow, card, &from);
         if !reviewed_since_authored(card, &work) {
+            let work: Vec<&str> = work.iter().map(Column::as_str).collect();
             return Err(BoardError::Refused(format!(
-                "separation of duties: this gate needs a passing review of the work in {work} after the last authoring claim (card_review)"
+                "separation of duties: this gate needs a passing review of the work in {}, and none asking for changes, after the last authoring claim (card_review)",
+                work.join(" or ")
             )));
         }
     }
     let pending = needs_confirmation(flow, &from, a.to);
-    let next = push(card, approval(by, &from, a, pr_head, pending, None, now_ms))?;
+    let entry = approval(by, &from, a, pr_head, pending, None, now_ms);
+    // A new filing replaces the filer's expired one for this gate, so gate cycles do not grow
+    // the ledger.
+    let next = upsert(card, entry, |d| {
+        matches!(d, Duty::Approval { actor, from: f, to, expired: true, .. }
+            if *actor == by.name && *f == from && to == a.to)
+    })?;
     Ok((next, !pending))
 }
 
@@ -504,7 +530,9 @@ fn approval(
     }
 }
 
-/// The owner's approval: confirm the newest pending one for this gate, else record their own.
+/// The owner's approval: confirm the newest pending one for this gate, else record their own. A
+/// filing on text edited since, or for another PR head, is not what the owner approved: it is
+/// expired (or kept), and the owner's own approval is recorded.
 fn confirm_or_record(
     card: &Card,
     by: &Actor,
@@ -527,14 +555,17 @@ fn confirm_or_record(
         confirmed_by,
         pr_head: filed_head,
         digest,
+        expired,
         ..
     }) = next.duties.get_mut(i)
     {
-        // The owner confirms what the proxy filed: text edited since is a different card.
+        // The owner confirms what the proxy filed: text edited since is a different card, so
+        // that filing expires and the owner's approval of the text they read stands alone.
         if *digest != a.digest {
-            return Err(BoardError::Refused(
-                "the card's title or body changed since the approval was filed: it must be filed again".into(),
-            ));
+            *pending = false;
+            *expired = true;
+            let mine = approval(by, from, a, pr_head, false, None, now_ms);
+            return push_owner(&next, mine).map(|c| (c, !merge));
         }
         // A different PR head is a new approval.
         if merge && filed_head.as_deref() != pr_head {
@@ -804,5 +835,25 @@ mod tests {
             approve(&c, &flow(), &dots, &approval_of(&c, &to), 3),
             Err(BoardError::Forbidden(Capability::Approve))
         ));
+    }
+
+    #[test]
+    fn the_owner_writes_past_a_ledger_others_filled() {
+        let mut c = at("blocked");
+        c.duties = (0..MAX_DUTIES)
+            .map(|i| Duty::Author {
+                actor: format!("a{i}"),
+                provider: None,
+                column: Column::new("building").expect("column"),
+                at_ms: 0,
+            })
+            .collect();
+        let to = Column::new("building").expect("column");
+        let filed = approve(&c, &flow(), &proxy(), &approval_of(&c, &to), 1);
+        assert!(matches!(filed, Err(BoardError::Refused(m)) if m.contains("full")));
+        let nano = actor("nano", None, &[Capability::Admin]);
+        let (c, moves) = approve(&c, &flow(), &nano, &approval_of(&c, &to), 1).expect("owner");
+        assert!(moves);
+        assert_eq!(c.duties.len(), MAX_DUTIES + 1);
     }
 }
