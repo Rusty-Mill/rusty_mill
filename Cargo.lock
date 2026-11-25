@@ -7137,6 +7137,8 @@ dependencies = [
  "orch-cli",
  "orch-core",
  "orch-dispatch",
+ "platform",
+ "platform-linux",
  "rusty_atomic_file",
  "rusty_bbp",
  "rusty_json",
