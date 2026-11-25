@@ -158,7 +158,8 @@ const UNIX_ONLY: Features = Features::SIGNAL_RELEASE
     .union(Features::PORTS)
     // Downloads are read through the kernel's own account of the opened file.
     .union(Features::DOWNLOAD)
-    .union(Features::WORKSPACE);
+    .union(Features::WORKSPACE)
+    .union(Features::WORKSPACE_STATUS);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
 
@@ -2218,6 +2219,32 @@ impl State {
                 return Ok(Outcome::Blocking {
                     method: "terminal.workspace-list",
                     work: Box::new(move || lister(None, path.as_deref(), Some(&root))),
+                });
+            }
+            "terminal.workspace-stat" | "terminal.workspace-touched" => {
+                // As `terminal.workspace-list`: the lease, and the held
+                // launch directory as the root (D337).
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                let root = rt
+                    .started
+                    .workspace()
+                    .ok_or("the workspace root is unknown after a server restart")?
+                    .clone();
+                let path = named.iter().find_map(|(n, v)| match (*n, v) {
+                    ("path", Value::Text(p)) => Some(p.clone()),
+                    _ => None,
+                });
+                let name = found.name;
+                return Ok(Outcome::Blocking {
+                    method: name,
+                    work: Box::new(move || match name {
+                        "terminal.workspace-stat" => {
+                            listing::stat(&root, path.as_deref().unwrap_or(""))
+                        }
+                        _ => listing::touched(&root),
+                    }),
                 });
             }
             "terminal.list-dir" => {

@@ -56,7 +56,9 @@ fn shape(method: &Method) -> Shape {
         | "terminal.reset"
         | "terminal.set-theme"
         | "terminal.clear"
-        | "terminal.workspace-list" => Shape::Leased,
+        | "terminal.workspace-list"
+        | "terminal.workspace-stat"
+        | "terminal.workspace-touched" => Shape::Leased,
         _ => Shape::Plain,
     }
 }
