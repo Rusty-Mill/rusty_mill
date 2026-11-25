@@ -399,3 +399,62 @@ fn the_renderer_breaks_agent_text_before_other_events() {
         ""
     );
 }
+
+#[test]
+fn a_line_past_the_cap_fails_without_growing_further() {
+    let mut long = std::io::Cursor::new(vec![b'x'; 64]);
+    assert!(matches!(
+        acp::read_line(&mut long, 16),
+        Err(TurnError::Malformed(e)) if e.contains("16 bytes")
+    ));
+    let mut ok = std::io::Cursor::new(b"0123456789abcdef\nnext\n".to_vec());
+    assert_eq!(
+        acp::read_line(&mut ok, 16).unwrap(),
+        Some(b"0123456789abcdef".to_vec())
+    );
+    assert_eq!(acp::read_line(&mut ok, 16).unwrap(), Some(b"next".to_vec()));
+    assert_eq!(acp::read_line(&mut ok, 16).unwrap(), None);
+    // A last line with no newline still counts.
+    let mut tail = std::io::Cursor::new(b"end".to_vec());
+    assert_eq!(
+        acp::read_line(&mut tail, 16).unwrap(),
+        Some(b"end".to_vec())
+    );
+}
+
+#[test]
+fn agent_text_cannot_drive_the_terminal_or_forge_a_line() {
+    let mut r = Render::default();
+    let chunk = update(json!({"sessionUpdate": "agent_message_chunk",
+        "content": {"type": "text", "text": "a\u{1b}[2Jb\nc\u{9b}d"}}));
+    let text = r.update(&Value::parse(&chunk).unwrap()["params"]["update"]);
+    assert!(
+        !text.contains('\u{1b}') && !text.contains('\u{9b}'),
+        "{text:?}"
+    );
+    assert!(
+        text.contains("\\u{1b}[2J") && text.contains("b\nc"),
+        "{text:?}"
+    );
+    let tool = r.update(&json!({"sessionUpdate": "tool_call",
+        "title": "ls\n[stop] end_turn", "status": "pending"}));
+    assert_eq!(
+        tool.matches('\n').count(),
+        2,
+        "one line after the break: {tool:?}"
+    );
+    assert!(tool.contains("ls\\n[stop] end_turn"));
+}
+
+#[test]
+fn an_empty_chunk_keeps_the_break_before_the_next_event() {
+    let mut r = Render::default();
+    let chunk = |t: &str| {
+        json!({"sessionUpdate": "agent_message_chunk",
+        "content": {"type": "text", "text": t}})
+    };
+    assert_eq!(r.update(&chunk("abc")), "abc");
+    assert_eq!(r.update(&chunk("")), "");
+    let tool = r.update(&json!({"sessionUpdate": "tool_call", "title": "t"}));
+    assert_eq!(tool, "\n[tool] t (pending)\n");
+}
