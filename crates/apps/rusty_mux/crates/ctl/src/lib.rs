@@ -893,8 +893,11 @@ fn run_upload(
     upload: &cli::Upload,
 ) -> Result<Exit, Failure> {
     // Opened first, so a missing file fails before the lease is taken.
-    let mut file = std::fs::File::open(&upload.file)
-        .map_err(|e| Failure::Failed(format!("upload: {}: {e}", upload.file.display())))?;
+    let local = |e: io::Error| Failure::Failed(format!("upload: {}: {e}", upload.file.display()));
+    let mut file = std::fs::File::open(&upload.file).map_err(local)?;
+    if !file.metadata().map_err(local)?.is_file() {
+        return Err(local(io::Error::other("not a regular file")));
+    }
     let (mut conn, block) = transfer(session, &upload.prepare, Features::UPLOAD, "upload")?;
     let path =
         rusty_mux_client::upload::send(&mut conn, block, &upload.name, &mut file, TRANSFER_REQ)
@@ -912,41 +915,53 @@ fn run_upload(
     Ok(Exit::Ok)
 }
 
-/// `download`: copies the file to `--out`, or to stdout. A partial file is
-/// removed on failure.
+/// `download`: copies the file to `--out`, or to stdout. `--out` is written
+/// beside itself and renamed over it only once the whole file is in, so a
+/// failure or an interrupt never touches what was there.
 #[cfg(any(unix, windows))]
 fn run_download(
     session: &mut Session<'_, conn::Stream>,
     download: &cli::Download,
 ) -> Result<Exit, Failure> {
+    // The preparing calls report on stdout in `--json`, ahead of the bytes.
+    if session.json && download.out.is_none() {
+        return Err(Failure::Failed(
+            "download: --json cannot share stdout with the file; give --out".into(),
+        ));
+    }
     let (mut conn, block) = transfer(session, &download.prepare, Features::DOWNLOAD, "download")?;
-    let fetched = match &download.out {
-        None => rusty_mux_client::download::fetch(
+    let Some(out) = &download.out else {
+        rusty_mux_client::download::fetch(
             &mut conn,
             block,
             &download.path,
             &mut session.out,
             TRANSFER_REQ,
-        ),
-        Some(out) => {
-            let mut file = std::fs::File::create(out)
-                .map_err(|e| Failure::Failed(format!("download: {}: {e}", out.display())))?;
-            let fetched = rusty_mux_client::download::fetch(
-                &mut conn,
-                block,
-                &download.path,
-                &mut file,
-                TRANSFER_REQ,
-            );
-            if fetched.is_err() {
-                drop(file);
-                // Best effort: the failure being reported is the fetch's.
-                let _gone = std::fs::remove_file(out);
-            }
-            fetched
-        }
+        )
+        .map_err(|e| refused("download", e))?;
+        return Ok(Exit::Ok);
     };
-    fetched.map_err(|e| refused("download", e))?;
+    let local = |e: io::Error| Failure::Failed(format!("download: {}: {e}", out.display()));
+    let mut part = out.clone().into_os_string();
+    part.push(format!(".part-{}", std::process::id()));
+    let part = PathBuf::from(part);
+    let mut file = std::fs::File::create(&part).map_err(local)?;
+    let fetched = rusty_mux_client::download::fetch(
+        &mut conn,
+        block,
+        &download.path,
+        &mut file,
+        TRANSFER_REQ,
+    );
+    let done = fetched
+        .map_err(|e| refused("download", e))
+        .and_then(|_| file.sync_all().map_err(local))
+        .and_then(|()| std::fs::rename(&part, out).map_err(local));
+    if done.is_err() {
+        // Best effort: the failure being reported is the first one.
+        let _gone = std::fs::remove_file(&part);
+    }
+    done?;
     Ok(Exit::Ok)
 }
 

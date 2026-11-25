@@ -743,8 +743,12 @@ fn upload_names_a_file_and_prepares_an_attach_and_a_lease() {
     assert_eq!(names, ["attach", "acquire-lease"]);
     let named = upload(&format!("upload --block {ID} --name x.png pic.png")).unwrap();
     assert_eq!(named.name, "x.png");
+    // `--` lets a file start with a dash.
+    let dashed = upload(&format!("upload --block {ID} -- -x")).unwrap();
+    assert_eq!(dashed.name, "-x");
     for bad in [
         "upload",
+        "upload --",
         "upload a b",
         "upload --name",
         "upload --out f a",

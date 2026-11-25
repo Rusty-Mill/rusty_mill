@@ -536,6 +536,10 @@ fn operands(verb: &str, other: &str, args: &[String]) -> Result<Operands, String
                     .ok_or(format!("{verb}: {other} needs a value"))?;
                 found = Some(value.clone());
             }
+            // After `--` the next word is the operand, even if it starts with `-`.
+            "--" if operand.is_none() => {
+                operand = Some(rest.next().ok_or(usage.clone())?.clone());
+            }
             flag if flag.starts_with('-') => return Err(format!("{verb}: unknown flag {flag}")),
             value if operand.is_none() => operand = Some(value.to_owned()),
             _ => return Err(usage),

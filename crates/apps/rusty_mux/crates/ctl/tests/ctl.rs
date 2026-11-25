@@ -3587,3 +3587,67 @@ fn download_writes_a_file_to_stdout_or_out() {
     assert!(!out.exists());
     let _gone = std::fs::remove_file(remote);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_download_leaves_an_existing_out_alone_and_json_keeps_stdout_clean() {
+    let socket = start_server();
+    let block = block(&socket);
+    let out = std::env::temp_dir().join(format!("ctl-keep-{}.txt", std::process::id()));
+    std::fs::write(&out, b"precious").expect("write");
+    let out_arg = out.to_str().expect("utf8");
+
+    let refused = ctl(
+        &socket,
+        &[
+            "download",
+            "--block",
+            &block,
+            "--out",
+            out_arg,
+            "/nonexistent/x",
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(std::fs::read(&out).expect("kept"), b"precious");
+
+    // The bytes and the preparing calls' JSON would share stdout.
+    let json = ctl(
+        &socket,
+        &["--json", "download", "--block", &block, "/etc/hostname"],
+    );
+    assert_eq!(json.status.code(), Some(1));
+    assert!(json.stdout.is_empty(), "{}", stdout(&json));
+    let _gone = std::fs::remove_file(out);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_file_over_one_chunk_goes_up_and_a_directory_is_refused() {
+    let state = std::env::temp_dir().join(format!("ctl-chunks-state-{}", std::process::id()));
+    let _gone = std::fs::remove_dir_all(&state);
+    let socket = start_server_with(Config {
+        state_dir: Some(state.clone()),
+        ..shell()
+    });
+    let block = block(&socket);
+    let local = std::env::temp_dir().join(format!("ctl-chunks-{}.bin", std::process::id()));
+    let bytes: Vec<u8> = (0..(5 << 19)).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&local, &bytes).expect("write");
+
+    let path = ok(
+        &socket,
+        &["upload", "--block", &block, local.to_str().expect("utf8")],
+    );
+    assert_eq!(std::fs::read(&path).expect("on the server"), bytes);
+
+    let dir = ctl(&socket, &["upload", "--block", &block, "/tmp"]);
+    assert_eq!(
+        dir.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&dir.stderr)
+    );
+    let _gone = std::fs::remove_file(local);
+    let _gone = std::fs::remove_dir_all(state);
+}
