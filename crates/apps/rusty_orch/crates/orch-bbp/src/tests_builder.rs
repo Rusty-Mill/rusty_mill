@@ -22,6 +22,7 @@ struct Fake {
     submit: Result<Option<ArtId>, String>,
     holder_deadline: Option<u64>,
     turn_deadline: Option<u64>,
+    term: Result<(), Refused>,
 }
 
 impl Default for Fake {
@@ -37,6 +38,7 @@ impl Default for Fake {
             submit: Ok(Some(ArtId(9))),
             holder_deadline: None,
             turn_deadline: None,
+            term: Ok(()),
         }
     }
 }
@@ -78,9 +80,9 @@ impl Ports for Fake {
         self.turn_deadline = Some(deadline_ms);
         self.ran.clone()
     }
-    fn term(&mut self) -> Result<(), String> {
+    fn term(&mut self) -> Result<(), Refused> {
         self.calls.push("term".into());
-        Ok(())
+        self.term.clone()
     }
     fn empty_within(&mut self, grace: Duration) -> Result<bool, String> {
         assert_eq!(grace, GRACE);
@@ -276,4 +278,27 @@ fn only_an_admitted_session_runs() {
         "nothing is touched: {:?}",
         fake.calls
     );
+}
+
+#[test]
+fn a_mux_lost_while_own_retried_ends_aborted_even_after_end_turn() {
+    let mut fake = Fake {
+        term: Err(Refused::Lost("connection lost".into())),
+        ..Fake::default()
+    };
+    let out = run(&mut fake);
+    assert_eq!(out.session.phase, ended(End::Aborted));
+    assert!(!fake.calls.contains(&"submit".to_owned()), "nothing posted");
+    assert!(fake.calls.contains(&"release".to_owned()));
+}
+
+#[test]
+fn a_refused_term_is_noted_and_the_end_path_goes_on() {
+    let mut fake = Fake {
+        term: Err(Refused::Failed("no such block".into())),
+        ..Fake::default()
+    };
+    let out = run(&mut fake);
+    assert_eq!(out.session.phase, ended(End::Stored(ArtId(9))));
+    assert_eq!(out.notes, ["term: no such block"]);
 }

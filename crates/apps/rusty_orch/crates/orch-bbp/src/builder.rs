@@ -73,8 +73,10 @@ pub trait Ports {
     fn open(&mut self) -> Result<(), Refused>;
     /// Run the ACP turn until it ends or `deadline_ms` passes.
     fn turn(&mut self, deadline_ms: u64) -> Ran;
-    /// Send the block `term`.
-    fn term(&mut self) -> Result<(), String>;
+    /// Send the block `term`. [`Refused::Lost`] when the mux connection
+    /// turns out to be gone, which ends the session `aborted` even after an
+    /// `end_turn` (own may still have been retrying when the turn ended).
+    fn term(&mut self) -> Result<(), Refused>;
     /// Wait up to `grace` for the cgroup to empty; true when it did.
     fn empty_within(&mut self, grace: Duration) -> Result<bool, String>;
     /// orch's own kill: write `cgroup.kill` and wait for it to empty.
@@ -141,18 +143,26 @@ pub fn run<P: Ports>(ports: &mut P, session: Session, wall: Duration) -> Result<
         }
     };
     save(ports, &session, &mut notes);
-    let ran = ports.turn(deadline);
-    stop(ports, &mut notes);
+    let ran = match (ports.turn(deadline), stop(ports, &mut notes)) {
+        (Ran::Turn(_), Some(lost)) => Ran::Lost(lost),
+        (ran, _) => ran,
+    };
     let (session, end) = settle(ports, session, ran, &mut notes);
     finish(ports, session, end, notes)
 }
 
 /// The end path: `term`, the grace, orch's kill if anything is left, then
-/// `release`. Each failure is noted and the path goes on.
-fn stop<P: Ports>(ports: &mut P, notes: &mut Vec<String>) {
-    if let Err(e) = ports.term() {
-        notes.push(format!("term: {e}"));
-    }
+/// `release`. Each failure is noted and the path goes on. Returns why the
+/// mux was lost, if `term` found it so.
+fn stop<P: Ports>(ports: &mut P, notes: &mut Vec<String>) -> Option<String> {
+    let lost = match ports.term() {
+        Ok(()) => None,
+        Err(Refused::Lost(e)) => Some(e),
+        Err(Refused::Failed(e)) => {
+            notes.push(format!("term: {e}"));
+            None
+        }
+    };
     let empty = ports.empty_within(GRACE).unwrap_or_else(|e| {
         notes.push(format!("cgroup: {e}"));
         false
@@ -165,6 +175,7 @@ fn stop<P: Ports>(ports: &mut P, notes: &mut Vec<String>) {
     if let Err(e) = ports.release() {
         notes.push(format!("release: {e}"));
     }
+    lost
 }
 
 /// How the turn ends the session, with its usage recorded (D188).
