@@ -525,7 +525,7 @@ pub fn owner_gate(
             state.task.0
         ))),
         (Some(v), _) => {
-            crate::approval::binds(&v.receipt, &state.task, fence, approve).map_err(refuse)?;
+            crate::approval::binds(v.receipt(), &state.task, fence, approve).map_err(refuse)?;
             Ok(Some(crate::approval::op(v)))
         }
     }
@@ -641,10 +641,13 @@ pub fn perform_fenced(
         Ok(cmd) => cmd,
         Err(rej) => return Ok(Response::Rejected(rej)),
     };
-    let blobs: Vec<&[u8]> = [brief.as_deref(), approval.map(|v| v.bytes.as_slice())]
-        .into_iter()
-        .flatten()
-        .collect();
+    let blobs: Vec<&[u8]> = [
+        brief.as_deref(),
+        approval.map(crate::approval::Verified::bytes),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     if !blobs.is_empty() {
         // Judge the command before its blobs (a brief, a receipt) are published: a refusal (bad
         // affects, a stale fence, the wrong state) and a replay of an op

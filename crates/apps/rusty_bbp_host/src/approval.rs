@@ -39,11 +39,25 @@ pub struct Receipt {
     pub issued_ms: i64,
 }
 
-/// A receipt whose signature verified, with the exact bytes it came from.
+/// A receipt whose signature verified, with its canonical bytes: the signed line, then the
+/// signature in lower-case hex, each ending in a newline. Only [`verify`] makes one, so holding
+/// one means the signature checked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verified {
-    pub receipt: Receipt,
-    pub bytes: Vec<u8>,
+    receipt: Receipt,
+    bytes: Vec<u8>,
+}
+
+impl Verified {
+    /// What the board vouched for.
+    pub fn receipt(&self) -> &Receipt {
+        &self.receipt
+    }
+
+    /// The canonical receipt file: what is stored, and what the op names.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 /// The board key from its hex text, or why it is unusable.
@@ -72,10 +86,24 @@ pub fn verify(key: &[u8; 32], file: &[u8]) -> Result<Verified, String> {
     let receipt: Receipt =
         rusty_serde::json::from_str(body).map_err(|e| format!("receipt: {e}"))?;
     crate::human::labelled_op(&receipt.approver).map_err(|_| "receipt: bad approver name")?;
+    // One receipt, one encoding: hex case, spacing or trailing newlines in the file given do
+    // not change the stored bytes or the op (D192).
+    let sig: String = sig.iter().map(|b| format!("{b:02x}")).collect();
     Ok(Verified {
         receipt,
-        bytes: file.to_vec(),
+        bytes: format!("{body}\n{sig}\n").into_bytes(),
     })
+}
+
+/// Whether `r` vouches for the logged approval `a` of `gate` on `task`: what `bbp metrics`
+/// checks, from the log, so a receipt moved to another answer does not count.
+pub fn vouches_for(r: &Receipt, task: &TaskId, gate: Gate, a: &metrics::Approved) -> bool {
+    let act = HumanAction::Approve {
+        gate,
+        subject: a.subject,
+        run: a.run,
+    };
+    binds(r, task, Some(a.rev), &act).is_ok()
 }
 
 /// Refuse a receipt that vouches for anything but this fenced approval on `task`.
@@ -201,10 +229,16 @@ pub(crate) mod tests {
         let k = signer();
         let file = sign(&k, &receipt("plan", None));
         let v = verify(k.public_key(), &file).unwrap();
-        assert_eq!(v.receipt.approver, "nano");
+        assert_eq!(v.receipt().approver, "nano");
         let op = op(&v);
         assert!(op.0.starts_with("by:nano/rcpt:"), "{}", op.0);
         assert_eq!(receipt_of(&op), Some(Sha256::of(&file)));
+        let upper = String::from_utf8(file.clone()).unwrap();
+        let (body, sig) = upper.trim_end().split_once('\n').unwrap();
+        let loose = format!("{body}\n {}\n\n\n", sig.to_uppercase());
+        let again = verify(k.public_key(), loose.as_bytes()).unwrap();
+        assert_eq!(super::op(&again), op, "the same receipt is the same op");
+        assert_eq!(again.bytes(), file.as_slice());
         assert_eq!(crate::human::answered_by(&op), "nano");
     }
 

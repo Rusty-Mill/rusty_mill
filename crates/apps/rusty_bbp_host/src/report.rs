@@ -49,20 +49,21 @@ pub struct GateReport {
 
 /// The gate answers of `events` against the declared `owner`. Unlabelled
 /// answers are never the owner's. On an owned task (`scratch` false) a plan or
-/// merge approval is the owner's only if `receipted` vouches for its op: the
-/// receipt it names is stored and verifies under the board key.
+/// merge approval is the owner's only if `receipted` vouches for the answer:
+/// the receipt its op names is stored, verifies under the board key, and is
+/// bound to what the log says was approved.
 pub fn gates(
     events: &[Event],
     owner: Option<&str>,
     scratch: bool,
-    receipted: &dyn Fn(&OpId) -> bool,
+    receipted: &dyn Fn(&metrics::GateAnswer) -> bool,
 ) -> Vec<GateReport> {
     metrics::gate_answers(events)
         .into_iter()
         .map(|g| {
             let by = human::answered_by(&g.op);
             let approval = g.gate != GateKind::Rejection;
-            let unsigned = approval && !scratch && !receipted(&g.op);
+            let unsigned = approval && !scratch && !receipted(&g);
             GateReport {
                 gate: g.gate,
                 self_approved: owner != Some(by) || by == human::UNLABELLED || unsigned,
@@ -72,20 +73,32 @@ pub fn gates(
         .collect()
 }
 
-/// Whether `op` names a stored receipt that verifies under `key` and whose approver is the op's
-/// label.
+/// Whether answer `g` on `task` names a stored receipt that verifies under `key`, whose
+/// approver is the op's label, and that is bound to the task, gate, artifact, run and revision
+/// the log records for `g` (a receipt copied onto another answer does not hold).
 fn receipt_holds(
-    op: &OpId,
+    g: &metrics::GateAnswer,
+    task: &TaskId,
     key: Option<&[u8; 32]>,
     blob: &dyn Fn(&Sha256) -> Option<Vec<u8>>,
 ) -> bool {
-    let (Some(key), Some(sha)) = (key, crate::approval::receipt_of(op)) else {
+    let (Some(key), Some(sha), Some(approved)) =
+        (key, crate::approval::receipt_of(&g.op), g.approved.as_ref())
+    else {
         return false;
+    };
+    let gate = match g.gate {
+        GateKind::PlanApproval => Gate::Plan,
+        GateKind::MergeApproval => Gate::Merge,
+        GateKind::Rejection => return false,
     };
     blob(&sha)
         .filter(|bytes| Sha256::of(bytes) == sha)
         .and_then(|bytes| crate::approval::verify(key, &bytes).ok())
-        .is_some_and(|v| v.receipt.approver == human::answered_by(op))
+        .is_some_and(|v| {
+            v.receipt().approver == human::answered_by(&g.op)
+                && crate::approval::vouches_for(v.receipt(), task, gate, approved)
+        })
 }
 
 /// Read `task`'s log and blobs and compute its [`Report`].
@@ -112,8 +125,8 @@ pub fn of_with_key(
     let unused_bytes = spec_attribution.unused_bytes();
     let scratch = d.state.gates == Some(Gates::Scratch);
     let stored = |sha: &Sha256| d.store.blob_get(sha).ok();
-    let gates = gates(&events, owner, scratch, &|op| {
-        receipt_holds(op, key, &stored)
+    let gates = gates(&events, owner, scratch, &|g| {
+        receipt_holds(g, task, key, &stored)
     });
     let self_approved = gates.iter().all(|g| g.self_approved);
     Ok(Report {
@@ -221,5 +234,41 @@ mod tests {
     #[test]
     fn no_gate_answered_means_nothing_to_vouch_for() {
         assert!(scratch(&[], Some("owner")).is_empty());
+    }
+
+    #[test]
+    fn a_receipt_holds_only_on_the_answer_the_log_says_it_approved() {
+        use crate::approval::tests::{receipt, sign, signer};
+        let k = signer();
+        let file = sign(&k, &receipt("plan", None));
+        let v = crate::approval::verify(k.public_key(), &file).unwrap();
+        let op = crate::approval::op(&v);
+        let blob = |sha: &Sha256| (*sha == Sha256::of(v.bytes())).then(|| v.bytes().to_vec());
+        let answer = |gate, subject, rev| metrics::GateAnswer {
+            gate,
+            op: op.clone(),
+            approved: Some(metrics::Approved {
+                subject: ArtId(subject),
+                run: None,
+                rev: Rev(rev),
+            }),
+        };
+        let t1 = TaskId("T1".into());
+        let holds =
+            |g: &metrics::GateAnswer, t: &TaskId| receipt_holds(g, t, Some(k.public_key()), &blob);
+        assert!(holds(&answer(GateKind::PlanApproval, 2, 9), &t1));
+        assert!(
+            !holds(&answer(GateKind::PlanApproval, 2, 9), &TaskId("T2".into())),
+            "task"
+        );
+        assert!(
+            !holds(&answer(GateKind::PlanApproval, 2, 10), &t1),
+            "revision"
+        );
+        assert!(
+            !holds(&answer(GateKind::PlanApproval, 3, 9), &t1),
+            "artifact"
+        );
+        assert!(!holds(&answer(GateKind::MergeApproval, 2, 9), &t1), "gate");
     }
 }

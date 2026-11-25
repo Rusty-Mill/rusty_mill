@@ -1269,9 +1269,17 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "approval_issue",
-            "Sign a receipt that you approved one BBP gate (a task's plan, or its merge at a run), for `bbp human --approval FILE` on an owned task. Read the gate back to the owner and ask \"Approve?\" first, as for `card_approve`; pass the revision the gate showed as `fence`, the readback and answer as `verbatim`, and the message link as `source`. The receipt names you as the approver. Returns the file's text in `receipt`. Needs `approve`.",
+            "Sign a receipt that you approved one BBP gate (a task's plan, or its merge at a run), for `bbp human --approval FILE` on an owned task. Read the gate back to the owner and ask \"Approve?\" first, as for `card_approve`; pass the revision the gate showed as `fence`, the readback and answer as `verbatim`, and the message link as `source`. The receipt names your credential as the approver, so it needs an authenticated credential, never a named actor and role. Returns the file's text in `receipt`. A plan needs `approve`; a merge needs `admin`, signed in as the owner.",
             |b, i, a: ApprovalIssueArgs| {
-                let who = acting(b, i, &a.who)?;
+                // A receipt carries the approver's name to BBP, so it is the credential's, never
+                // one the caller names (stdio, or open auth on loopback).
+                let who = bound_acting(b, i, &a.who)?;
+                let signed_in = i.is_some_and(|i| !i.connector);
+                if who.caps.contains(&crate::domain::Capability::Admin) && !signed_in {
+                    return Err(BoardError::Invalid(
+                        "an admin's receipt speaks for the owner: it needs a signed-in credential of your own, not a connector",
+                    ));
+                }
                 let r = crate::receipts::Receipt {
                     task: a.task,
                     gate: a.gate,
@@ -2353,10 +2361,31 @@ mod tests {
         assert!(format!("{err:?}").contains("approval key"), "{err:?}");
 
         let store: Box<dyn crate::store::Store> = Box::new(MemStore::default());
-        let board: Shared = Board::new(store, roles).with_approval_key(key);
+        let issued = std::env::temp_dir().join(format!("issued-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&issued);
+        let board: Shared = Board::new(store, roles).with_approval_key(key, issued.clone());
         let builder = ident("cloud", "builder");
         assert!(call_as(&board, Some(&builder), "approval_issue", args.clone()).is_err());
+        let mut named = args.clone();
+        named["actor"] = json!("nano");
+        named["role"] = json!("admin");
+        let err = call_as(&board, None, "approval_issue", named).expect_err("named");
+        assert!(format!("{err:?}").contains("authenticated"), "{err:?}");
+        let mut merge = args.clone();
+        merge["gate"] = json!("merge");
+        merge["run"] = json!(1);
+        assert!(
+            call_as(&board, Some(&proxy), "approval_issue", merge).is_err(),
+            "a merge receipt is the owner's"
+        );
         let out = call_as(&board, Some(&proxy), "approval_issue", args).expect("issue");
+        let recorded = std::fs::read_to_string(&issued).expect("recorded");
+        let _ = std::fs::remove_file(&issued);
+        assert_eq!(
+            recorded.lines().count(),
+            1,
+            "only the issued one is recorded"
+        );
         let file = out["receipt"].as_str().expect("receipt");
         let body: crate::receipts::Receipt =
             serde_json::from_str(file.lines().next().expect("line")).expect("json");

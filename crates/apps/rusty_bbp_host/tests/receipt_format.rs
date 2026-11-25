@@ -11,13 +11,13 @@ fn the_boards_receipt_verifies_and_parses() {
     let v = approval::verify(board.public_key(), file).expect("verifies");
     assert_eq!(
         (
-            v.receipt.task.as_str(),
-            v.receipt.gate.as_str(),
-            v.receipt.subject
+            v.receipt().task.as_str(),
+            v.receipt().gate.as_str(),
+            v.receipt().subject
         ),
         ("orch-abc", "merge", 4)
     );
-    assert_eq!((v.receipt.run, v.receipt.fence), (Some(1), 17));
-    assert_eq!(v.receipt.approver, "nano");
+    assert_eq!((v.receipt().run, v.receipt().fence), (Some(1), 17));
+    assert_eq!(v.receipt().approver, "nano");
     assert!(approval::op(&v).0.starts_with("by:nano/rcpt:"));
 }

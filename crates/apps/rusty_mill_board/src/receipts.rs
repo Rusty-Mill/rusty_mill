@@ -97,6 +97,31 @@ pub fn issue(key: &SigningKey, r: &Receipt) -> Result<String, String> {
     Ok(format!("{body}\n{}\n", hex(&sig)))
 }
 
+/// Append an issued receipt `file`'s receipt line to the `issued` record (owner-only), the
+/// board's audit trail of what it signed.
+///
+/// # Errors
+/// A record that cannot be written: the receipt is then not handed out.
+pub fn record(issued: &Path, file: &str) -> Result<(), String> {
+    use std::io::Write;
+    let body = file.lines().next().unwrap_or_default();
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(issued)
+        .and_then(|mut f| writeln!(f, "{body}"))
+        .map_err(|e| format!("could not record the receipt in {}: {e}", issued.display()))
+}
+
+/// The record of issued receipts kept beside the key at `key`.
+pub fn issued_path(key: &Path) -> std::path::PathBuf {
+    let mut name = key.as_os_str().to_owned();
+    name.push(".issued.jsonl");
+    name.into()
+}
+
 /// The public key `bbp` must hold to verify this board's receipts, as hex.
 pub fn public_hex(key: &SigningKey) -> String {
     hex(key.public_key())

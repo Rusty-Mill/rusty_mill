@@ -152,8 +152,9 @@ pub struct Board<S> {
         Vec<crate::mergewatch::MergedOpen>,
         crate::mergewatch::WatchStatus,
     )>,
-    /// Signs approval receipts for BBP human gates (#447); `None` refuses `approval_issue`.
-    approval_key: Option<Arc<rusty_pk::ed25519::SigningKey>>,
+    /// Signs approval receipts for BBP human gates (#447), and the file each issued receipt is
+    /// recorded in; `None` refuses `approval_issue`.
+    approval_key: Option<Arc<(rusty_pk::ed25519::SigningKey, std::path::PathBuf)>>,
 }
 
 /// The parent-link gate, even if a holder panicked: it guards no data.
@@ -250,29 +251,39 @@ impl<S: Store> Board<S> {
         }
     }
 
-    /// Sign BBP approval receipts with `key` (#447).
+    /// Sign BBP approval receipts with `key` (#447), recording each one issued in `issued` (one
+    /// receipt JSON per line, owner-only).
     #[must_use]
-    pub fn with_approval_key(mut self, key: rusty_pk::ed25519::SigningKey) -> Self {
-        self.approval_key = Some(Arc::new(key));
+    pub fn with_approval_key(
+        mut self,
+        key: rusty_pk::ed25519::SigningKey,
+        issued: std::path::PathBuf,
+    ) -> Self {
+        self.approval_key = Some(Arc::new((key, issued)));
         self
     }
 
     /// Sign a receipt that `by` approved one BBP gate in the words of `r.verbatim` (#447). The
-    /// approver is `by`, whatever `r` names, and the time is the board's. Needs `approve`, or
-    /// `admin` (the owner).
+    /// approver is `by`, whatever `r` names, and the time is the board's. A plan needs `approve`
+    /// or `admin`; a merge needs `admin` (the owner), as a merge `card_approve` waits for the
+    /// owner's confirmation (D1). Every receipt issued is recorded before it is returned.
     ///
     /// # Errors
-    /// `Forbidden` without the capability; `Refused` when no key is configured or `bbp` would
-    /// refuse the receipt.
+    /// `Forbidden` without the capability; `Refused` when no key is configured, `bbp` would
+    /// refuse the receipt, or it cannot be recorded.
     pub fn issue_approval(
         &self,
         by: &Actor,
         r: crate::receipts::Receipt,
     ) -> Result<String, BoardError> {
-        if !by.caps.contains(&Capability::Approve) && !by.caps.contains(&Capability::Admin) {
+        let admin = by.caps.contains(&Capability::Admin);
+        if r.gate == "merge" && !admin {
+            return Err(BoardError::Forbidden(Capability::Admin));
+        }
+        if !admin && !by.caps.contains(&Capability::Approve) {
             return Err(BoardError::Forbidden(Capability::Approve));
         }
-        let key = self.approval_key.as_ref().ok_or_else(|| {
+        let (key, issued) = self.approval_key.as_deref().ok_or_else(|| {
             BoardError::Refused("this board has no approval key (--approval-key)".into())
         })?;
         let r = crate::receipts::Receipt {
@@ -281,6 +292,7 @@ impl<S: Store> Board<S> {
             ..r
         };
         let file = crate::receipts::issue(key, &r).map_err(BoardError::Refused)?;
+        crate::receipts::record(issued, &file).map_err(BoardError::Refused)?;
         rusty_log::info!(approver = %r.approver, task = %r.task, gate = %r.gate, fence = r.fence, source = %r.source, "approval receipt issued");
         Ok(file)
     }

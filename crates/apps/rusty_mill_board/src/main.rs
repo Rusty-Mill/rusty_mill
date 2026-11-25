@@ -227,7 +227,8 @@ struct Cli {
     /// The Ed25519 seed (64 hex, chmod 600) the board signs BBP approval receipts with (#447,
     /// `approval_issue`). Created on first start; its public key is logged, and `bbp` verifies
     /// receipts only against the copy committed at
-    /// `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub`. Unset refuses `approval_issue`.
+    /// `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub`. Every receipt issued is
+    /// recorded in `<FILE>.issued.jsonl`. Unset refuses `approval_issue`.
     #[arg(long, env = "MILL_BOARD_APPROVAL_KEY")]
     approval_key: Option<PathBuf>,
     /// The orch host's `bbp` binary, for the decision inbox (#595). Mill Board runs it
@@ -627,7 +628,9 @@ fn run(cli: Cli) -> Result<(), String> {
     if let Some(path) = &cli.approval_key {
         let key = rusty_mill_board::receipts::load_or_create(path)?;
         rusty_log::info!(public_key = %rusty_mill_board::receipts::public_hex(&key), "approval receipts are signed with this key");
-        board = board.with_approval_key(key);
+        let issued = rusty_mill_board::receipts::issued_path(path);
+        rusty_log::info!(path = %issued.display(), "issued approval receipts are recorded here");
+        board = board.with_approval_key(key, issued);
     }
     if let (Some(bin), Some(root)) = (&cli.bbp_bin, &cli.bbp_root) {
         board = board.with_escalations(Arc::new(BbpCli::new(bin.clone(), root.clone())));
