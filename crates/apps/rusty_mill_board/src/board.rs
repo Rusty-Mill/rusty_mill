@@ -101,6 +101,7 @@ impl Roles {
             name: name.to_owned(),
             caps: caps.clone(),
             projects: None,
+            provider: None,
         })
     }
 }
@@ -1382,6 +1383,7 @@ impl<S: Store> Board<S> {
             name: NUMBERER.into(),
             caps: BTreeSet::new(),
             projects: None,
+            provider: None,
         };
         let cards = self.store.list()?;
         let on_board = cards.iter().filter_map(|c| c.number).max().unwrap_or(0);
@@ -1796,7 +1798,7 @@ impl<S: Store> Board<S> {
                     return Err(BoardError::Conflict);
                 }
                 self.check_takeable(c)?;
-                c.claim(by, now)
+                crate::duties::on_claim(&c.claim(by, now)?, flow, by, now)
             });
         };
         if !works(enter) {
@@ -1816,10 +1818,11 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::Claimed(holder.clone()));
             }
             let entered = c.move_to(flow, enter, by, now)?;
-            Ok(Card {
+            let claimed = Card {
                 claim: Some(by.name.clone()),
                 ..entered
-            })
+            };
+            crate::duties::on_claim(&claimed, flow, by, now)
         })
     }
 
@@ -1896,12 +1899,16 @@ impl<S: Store> Board<S> {
         match self.move_rules() {
             MoveRules::Enforced => self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
                 self.check_starts(&flow, c, to)?;
-                c.move_to(&flow, to, by, now)
+                crate::duties::check_move(c, &flow, to, by)?;
+                let moved = c.move_to(&flow, to, by, now)?;
+                crate::duties::on_move(&moved, &flow, &c.column, by, now)
             }),
             MoveRules::Open => {
                 let card = self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
                     self.check_starts(&flow, c, to)?;
-                    c.move_freely(&flow, to, by, now)
+                    crate::duties::check_move(c, &flow, to, by)?;
+                    let moved = c.move_freely(&flow, to, by, now)?;
+                    crate::duties::on_move(&moved, &flow, &c.column, by, now)
                 })?;
                 rusty_log::info!(card = %id, actor = %by.name, to = %to, "card moved with movement rules off");
                 Ok(card)
@@ -2178,9 +2185,60 @@ impl<S: Store> Board<S> {
     pub fn claim(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
         // A claim starts the card: serialize it with `unclose`'s scan (gate before workflow).
         let _links = self.links();
-        self.apply(id, by, EventKind::Claimed, |c, now| {
+        let flow = self.flow();
+        self.apply_in(&flow, id, by, EventKind::Claimed, |c, now| {
             self.check_accepts(&c.project)?;
-            c.claim(by, now)
+            crate::duties::on_claim(&c.claim(by, now)?, &flow, by, now)
+        })
+    }
+
+    /// Review the work of a card's current column (#447): passed, or changes asked for.
+    ///
+    /// # Errors
+    /// See [`crate::duties::review`].
+    pub fn review(&self, id: Uuid, by: &Actor, pass: bool, note: &str) -> Result<Card, BoardError> {
+        let flow = self.flow();
+        self.apply_in(&flow, id, by, EventKind::Reviewed, |c, now| {
+            crate::duties::review(c, &flow, by, pass, note, now)
+        })
+    }
+
+    /// Approve a gate on the owner's stated approval (#447): move the card through it, or file
+    /// the approval (pending for the proxy's merges and unblocks, recorded for a merge the
+    /// owner confirms).
+    ///
+    /// # Errors
+    /// See [`crate::duties::approve`]; a move into a work column also needs the card's
+    /// dependencies done, as any start does.
+    pub fn approve(
+        &self,
+        id: Uuid,
+        by: &Actor,
+        approval: &crate::duties::Approval<'_>,
+    ) -> Result<Card, BoardError> {
+        // A move into a work column starts the card: serialize it with `unclose`'s scan.
+        let _links = self.links();
+        let flow = self.flow();
+        let to = approval.to;
+        // Whether it moves decides the event, so ask first, and refuse a commit that would
+        // decide otherwise (the card changed in between).
+        let current = self.get_in(&flow, id)?;
+        let (_, moves) = crate::duties::approve(&current, &flow, by, approval, (self.clock)())?;
+        let kind = if moves {
+            EventKind::Moved
+        } else {
+            EventKind::Approved
+        };
+        self.apply_in(&flow, id, by, kind, |c, now| {
+            let (approved, move_it) = crate::duties::approve(c, &flow, by, approval, now)?;
+            if move_it != moves {
+                return Err(BoardError::Conflict);
+            }
+            if !move_it {
+                return Ok(approved);
+            }
+            self.check_starts(&flow, c, to)?;
+            Ok(approved.arrive(to, now))
         })
     }
 

@@ -303,6 +303,8 @@ struct AgentAdd {
     name: String,
     role: String,
     projects: Option<Vec<String>>,
+    /// The model provider behind it, for separation of duties (#447).
+    provider: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -312,6 +314,9 @@ struct AgentUpdate {
     /// Absent: unchanged. `null`: lift the limit. A list: limit to those projects.
     #[serde(default, deserialize_with = "present")]
     projects: Option<Option<Vec<String>>>,
+    /// Absent: unchanged. `null`: unset. A name: the model provider behind it (#447).
+    #[serde(default, deserialize_with = "present")]
+    provider: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -507,7 +512,7 @@ pub fn tools() -> Vec<SettingsTool> {
         ),
         tool(
             "settings_agent_update",
-            "Change a token credential's role or project limit (needs admin): `{agent: {name, role?, projects?}}`; `projects: null` lifts the limit. You can only give what you hold.",
+            "Change a token credential's role, project limit or provider (needs admin): `{agent: {name, role?, projects?, provider?}}`; `projects: null` lifts the limit; `provider` (anthropic, openai, local, human, ...) is what separation of duties compares, `null` unsets it. You can only give what you hold.",
             json!({"agent": {"type": "object"}}),
             &["agent"],
         ),
@@ -732,8 +737,13 @@ impl Settings {
             .0
             .get(&a.agent_role)
             .ok_or_else(|| refused(format!("there is no role {:?}", a.agent_role)))?;
-        if caps.contains(&Capability::Enrol) || caps.contains(&Capability::Admin) {
-            return Err(refused("a minted agent cannot hold enrol or admin"));
+        if [Capability::Enrol, Capability::Admin, Capability::Approve]
+            .iter()
+            .any(|c| caps.contains(c))
+        {
+            return Err(refused(
+                "a minted agent cannot hold enrol, admin or approve",
+            ));
         }
         if let Some(extra) = caps.iter().find(|c| !caller.caps.contains(c)) {
             return Err(refused(format!(
@@ -978,15 +988,22 @@ impl Settings {
         caps: impl Iterator<Item = Capability>,
     ) -> Result<(), BoardError> {
         let caps: Vec<Capability> = caps.collect();
-        let privileged = |c: &&Capability| matches!(c, Capability::Admin | Capability::Enrol);
+        let privileged = |c: &&Capability| {
+            matches!(
+                c,
+                Capability::Admin | Capability::Enrol | Capability::Approve
+            )
+        };
         if by.via_connector && caps.iter().any(|c| privileged(&c)) {
             return Err(refused(
-                "admin and enrol are granted by a person in Settings with their own token, not through a shared connector",
+                "admin, enrol and approve are granted by a person in Settings with their own token, not through a shared connector",
             ));
         }
         for cap in caps {
-            if !matches!(cap, Capability::Admin | Capability::Enrol)
-                && !by.actor.caps.contains(&cap)
+            if !matches!(
+                cap,
+                Capability::Admin | Capability::Enrol | Capability::Approve
+            ) && !by.actor.caps.contains(&cap)
             {
                 return Err(refused(format!(
                     "you do not hold {cap:?}, so you cannot grant it"
@@ -1193,11 +1210,15 @@ impl Settings {
     fn agent_add(&self, by: &Caller, a: &AgentAdd) -> Res {
         self.check_grant(&a.role, a.projects.as_deref())?;
         self.may_grant(by, Some(&a.role), a.projects.as_deref())?;
+        if let Some(p) = &a.provider {
+            crate::identities::check_provider(p).map_err(refused)?;
+        }
         let identity = Identity {
             actor: a.name.clone(),
             role: a.role.clone(),
             projects: a.projects.clone(),
             connector: false,
+            provider: a.provider.clone(),
         };
         let token = self.change_creds(|c| c.add(identity.clone()))?;
         Ok(json!({ "token": token, "agent": identity }))
@@ -1222,7 +1243,16 @@ impl Settings {
             Some(&role),
             a.projects.as_ref().and_then(Option::as_deref),
         )?;
-        self.change_creds(|c| c.update(&a.name, Some(role), a.projects.clone()))?;
+        if let Some(Some(p)) = &a.provider {
+            crate::identities::check_provider(p).map_err(refused)?;
+        }
+        self.change_creds(|c| {
+            c.update(&a.name, Some(role), a.projects.clone())?;
+            match &a.provider {
+                Some(p) => c.set_provider(&a.name, p.clone()),
+                None => Ok(()),
+            }
+        })?;
         let pruned = self.prune_minted()?;
         Ok(json!({ "ok": true, "removed": pruned }))
     }

@@ -464,7 +464,8 @@ fn roles_are_edited_live_and_written_to_their_file() {
             "record",
             "project",
             "admin",
-            "enrol"
+            "enrol",
+            "approve"
         ])
     );
     let mut roles = out["roles"].clone();
@@ -1024,6 +1025,7 @@ fn without_files_settings_can_be_read_but_not_changed() {
         role: "human".into(),
         projects: None,
         connector: false,
+        provider: None,
     };
     let get = settings
         .call("settings_get", Some(&human), json!({}))

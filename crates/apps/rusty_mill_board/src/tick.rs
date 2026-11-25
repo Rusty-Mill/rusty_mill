@@ -291,6 +291,8 @@ struct BoardDoc {
     external_refs: Vec<StoredRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    duties: Vec<crate::duties::Duty>,
     /// Fields this binary does not know, written back unchanged, so a newer board's fields
     /// survive this one's writes (a rollback loses nothing; ADR-0006).
     #[serde(flatten)]
@@ -322,6 +324,7 @@ impl BoardDoc {
                 .map(StoredRef::from)
                 .collect(),
             evidence: card.evidence.clone(),
+            duties: card.duties.clone(),
             unknown: serde_json::Map::new(),
         }
     }
@@ -592,6 +595,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         merged: None,
         unclosed_prs: Vec::new(),
         evidence: doc.evidence,
+        duties: doc.duties,
         archived_ms,
         restored_ms,
         target_ms: doc.target_ms,
