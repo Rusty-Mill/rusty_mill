@@ -83,7 +83,9 @@ pub const GUI: Features = CONTROL
 /// gate's grants and lease requests, so an owner-only block can be taken
 /// over (handoff D153), and folder listings, for the palette's directory
 /// browse (D78). [`PANE`] asks for clipboard reads (C54), which the
-/// window answers by its policy.
+/// window answers by its policy, and for `BLOCK_CALL` and `WORKSPACE`
+/// (D349), which the GUI does not use yet: they only let the pane's own
+/// connection carry a workspace listing once the panel exists.
 pub const BLOCK: Features = PANE
     .union(Features::INPUT_GATE)
     .union(Features::LEASE_REQUESTS)
