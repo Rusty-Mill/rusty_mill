@@ -2173,6 +2173,9 @@ mod client {
             // there is asked again here, and focus requests are forgotten,
             // the server's focus being taken from the path's List.
             self.follow = Follow::default();
+            // The workspace tree's listing was asked there too, and its
+            // capability and lease are not known here yet: close it.
+            self.exploring = None;
             if let Some(listing) = self.listing.take() {
                 self.wanted.merge(listing.wants);
             }
@@ -4463,6 +4466,48 @@ mod client {
             assert!(open.req.is_none() && !open.explorer.waiting());
             app.take(Input::Keys(b"q".to_vec()));
             assert!(app.exploring.is_none() && !app.browsing);
+        }
+
+        /// A listing asked on a path given up is never answered: the path
+        /// back closes the tree rather than leave it reading for ever, and a
+        /// reply from the old path is not taken for a new one's.
+        #[cfg(unix)]
+        #[test]
+        fn a_workspace_listing_lost_with_the_path_closes_the_tree() {
+            let (mut app, _inbox, far) = app(Some(Box::new(Never)));
+            let a = block(1);
+            app.workspace = true;
+            app.act(Action::Explorer);
+            let old = workspace_calls(&sent(&far[0]));
+            assert_eq!(old.len(), 1);
+            assert!(app.exploring.as_ref().is_some_and(|o| o.explorer.waiting()));
+            app.lose(false);
+            let (mut back, control, _a_new, _b_new) = back(takeover(1));
+            back.layout = Some(Shape {
+                layout: app.layout.clone(),
+                focused: Some(a),
+                ..Shape::default()
+            });
+            app.take(Input::Rejoined(Ok(back)));
+            assert!(app.exploring.is_none() && !app.browsing, "closed");
+            // A reply from the old path finds nothing waiting.
+            app.on_control(Message::Text {
+                req: old[0].0,
+                text: ".\nf\ta".into(),
+            });
+            assert!(app.exploring.is_none());
+            // Usable again once the new path holds the lease.
+            app.panes.get_mut(&a).expect("A").leased = true;
+            app.act(Action::Explorer);
+            assert!(app.exploring.is_some());
+            let asked = workspace_calls(&sent(&control));
+            assert_eq!(asked.len(), 1, "asked on the new path");
+            app.on_control(Message::Text {
+                req: asked[0].0,
+                text: ".\nf\ta".into(),
+            });
+            let open = app.exploring.as_ref().expect("open");
+            assert!(!open.explorer.waiting() && open.req.is_none());
         }
 
         /// Requests asked on a path given up are never answered: following
