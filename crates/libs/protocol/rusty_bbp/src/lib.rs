@@ -33,7 +33,7 @@ pub use claims::{
 };
 pub use claims_engine::{MAX_TAKEOVER_BATCH, MAX_TAKEOVER_MINUTES, TAKEOVER_DRAIN_MS};
 pub use codec::{decode_artifact, encode_artifact, spec_markdown, SpecFile};
-pub use coedit::{Doc, LineId, LineOp, Missing, SpecEdit, Version};
+pub use coedit::{Doc, LineId, LineOp, SpecEdit, Unapplied, Version};
 pub use command::{
     AgentAction, Code, Command, HostAction, HumanAction, OpenTask, Rejection, Response,
 };

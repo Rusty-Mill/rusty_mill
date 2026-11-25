@@ -283,7 +283,7 @@ fn a_version_that_does_not_apply_is_recorded_not_skipped() {
             ops: vec![LineOp::Delete { line: ghost }],
         },
     );
-    assert_eq!(fx.st().unapplied.get(&bad), Some(&Missing::Line(ghost)));
+    assert_eq!(fx.st().unapplied.get(&bad), Some(&Unapplied::Line(ghost)));
     assert_eq!(fx.st().head(v1), Some(v1), "the head did not move");
     let on_bad = edit(&mut fx, "planner", Some(bad), vec![ins(Some(a), &["x"])]);
     assert_eq!(rejected(on_bad), Code::RefUnresolved);
@@ -295,7 +295,7 @@ fn a_version_that_does_not_apply_is_recorded_not_skipped() {
             ops: vec![ins(None, &["y"])],
         },
     );
-    assert_eq!(fx.st().unapplied.get(&later), Some(&Missing::Base(bad)));
+    assert_eq!(fx.st().unapplied.get(&later), Some(&Unapplied::Base(bad)));
     assert_eq!(fx.st().head(later), None, "not a new spec of its own");
 }
 
@@ -587,10 +587,16 @@ fn the_fold_matches_the_old_splice_fold_on_the_edge_cases() {
         "intro\n# A\na1\nz\ny\ny2\nx\nafter-gone\n# B\nb1\nc1\nc1.5\nc2"
     );
     let unknown = [ins(Some(id(9, 9)), &["?"])];
-    assert_eq!(doc.apply(ArtId(9), &unknown), Err(id(9, 9)));
+    assert_eq!(
+        doc.apply(ArtId(9), &unknown),
+        Err(Unapplied::Line(id(9, 9)))
+    );
     assert_eq!(old.apply(ArtId(9), &unknown).err(), Some(id(9, 9)));
     let empty_unknown = [ins(Some(id(9, 9)), &[])];
-    assert_eq!(doc.apply(ArtId(9), &empty_unknown), Err(id(9, 9)));
+    assert_eq!(
+        doc.apply(ArtId(9), &empty_unknown),
+        Err(Unapplied::Line(id(9, 9)))
+    );
     assert_eq!(old.apply(ArtId(9), &empty_unknown).err(), Some(id(9, 9)));
 }
 
