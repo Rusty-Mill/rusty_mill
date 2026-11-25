@@ -2323,6 +2323,90 @@ fn the_cgroup_holder_kills_the_cgroup_at_the_deadline() {
     assert!(quiet && !cgroup.exists());
 }
 
+/// D108 item 2 (#1318 S2): with `--slots` the holder takes an agent slot
+/// itself, names the descriptor on stdout's first line, keeps the slot
+/// while the cgroup is populated and frees it once it is empty.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_cgroup_holder_takes_its_own_slot_and_names_its_descriptor() {
+    use std::io::BufRead;
+    use std::time::Duration;
+    let cgroup = match session_cgroup("own-slot") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-own-slot");
+    let (cgroup, _scope) = scoped(&dir, &cgroup);
+    claims_task(&dir);
+    rusty_bbp_host::cgroups::open(&dir, &task(), &cgroup).expect("open");
+    let slots = dir.join("slots");
+    let caps = rusty_bbp_host::slots::Capacity {
+        agents: 1,
+        validators: 1,
+    };
+    rusty_bbp_host::slots::Slots::open(&slots, caps).expect("slots");
+    let mut agent = sleeper_in(&cgroup);
+    let mut holder = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(["slot-hold", "--cgroup"])
+        .arg(&cgroup)
+        .arg("--slots")
+        .arg(&slots)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("slot-hold");
+    let mut line = String::new();
+    std::io::BufReader::new(holder.stdout.take().expect("stdout"))
+        .read_line(&mut line)
+        .expect("ready line");
+    let fd: u32 = line.trim().parse().expect("a descriptor number");
+    let target = std::fs::read_link(format!("/proc/{}/fd/{fd}", holder.id())).expect("its fd");
+    assert_eq!(target, slots.join("agent-0.lock"));
+    let slot = slots.join("agent-0.lock");
+    drop(holder.stdin.take()); // the caller (orch) is gone
+    assert!(!exits_within(&mut holder, Duration::from_millis(500)));
+    assert!(slot_held(&slot), "slot freed while the agent runs");
+    agent.kill().expect("kill");
+    agent.wait().expect("reap");
+    assert!(exits_within(&mut holder, Duration::from_secs(5)));
+    assert!(holder.wait().expect("status").success());
+    assert!(
+        !slot_held(&slot),
+        "slot still held after the cgroup emptied"
+    );
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+}
+
+/// `--slots` is refused without `--cgroup`, and a directory with no recorded
+/// capacity is refused before the holder waits on anything.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_cgroup_holder_refuses_slots_it_cannot_take() {
+    let dir = tempdir("cgroup-slots-refused");
+    let run = |args: &[&std::ffi::OsStr]| {
+        let out = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+            .arg("slot-hold")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("bbp");
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty(), "no ready line");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let err = run(&["--slots".as_ref(), dir.as_os_str()]);
+    assert!(err.contains("--slots needs --cgroup"), "{err}");
+    let err = run(&[
+        "--cgroup".as_ref(),
+        "/sys/fs/cgroup/lel-test-never-made-0".as_ref(),
+        "--slots".as_ref(),
+        dir.as_os_str(),
+    ]);
+    assert!(err.contains("capacity"), "{err}");
+}
+
 /// D108 (#1507 review): an open paused between its record and its cgroup
 /// is a claim no other task's open can take, so exactly one task owns the
 /// path, the loser leaves no record, and its quiesce can't touch the winner.
