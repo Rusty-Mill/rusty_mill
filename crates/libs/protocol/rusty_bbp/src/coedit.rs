@@ -6,14 +6,16 @@
 //! anchor by id rather than by position, and still applies on top of edits
 //! made after its author read the base. A version's text is its predecessor's
 //! with the edit's ops applied: inserted lines go directly after their anchor,
-//! newest first. That is RGA's order whenever ids follow the log (a new line
-//! is always the newest sibling), so this fold is already the CRDT fold. What
-//! a CRDT would change is admission: today an edit is refused when it is
-//! anchored on a line that an edit made since its base also anchored on
-//! ([`overlap`]); a CRDT accepts it.
+//! newest first. The fold is `rusty_crdt`'s [`Rga`]: each inserted line is an
+//! element whose parent is its anchor (or the line before it in the same op),
+//! and ids follow the log, so a new line is always the newest sibling. What a
+//! CRDT could change beyond that is admission, and it does not: an edit is
+//! still refused when it is anchored on a line that an edit made since its
+//! base also anchored on ([`overlap`]).
 
 use crate::command::{Code, Rejection};
 use crate::ids::{ArtId, Sha256};
+use rusty_crdt::{Applied, Op, Rga};
 use rusty_serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -58,26 +60,25 @@ pub struct SpecEdit {
     pub ops: Vec<LineOp>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Line {
-    id: LineId,
-    text: String,
-    live: bool,
+/// A co-edited spec's lines, tombstones included.
+#[derive(Clone, Debug, Default)]
+pub struct Doc {
+    rga: Rga<LineId, String>,
 }
 
-/// A co-edited spec's lines, tombstones included.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Doc {
-    lines: Vec<Line>,
+/// Equal when the lines, tombstones included, are equal in order.
+impl PartialEq for Doc {
+    fn eq(&self, other: &Self) -> bool {
+        self.rga.elements().eq(other.rga.elements())
+    }
 }
+
+impl Eq for Doc {}
 
 impl Doc {
     /// The visible lines, in order.
     pub fn lines(&self) -> impl Iterator<Item = (LineId, &str)> {
-        self.lines
-            .iter()
-            .filter(|l| l.live)
-            .map(|l| (l.id, l.text.as_str()))
+        self.rga.iter().map(|(id, t)| (*id, t.as_str()))
     }
 
     /// The visible text, one line per visible line.
@@ -86,43 +87,48 @@ impl Doc {
     }
 
     fn visible(&self, id: LineId) -> bool {
-        self.lines.iter().any(|l| l.id == id && l.live)
-    }
-
-    fn position(&self, id: LineId) -> Option<usize> {
-        self.lines.iter().position(|l| l.id == id)
+        self.lines().any(|(l, _)| l == id)
     }
 
     /// This doc with `ops` applied in order, inserted lines numbered under
     /// `at`. Fails with the first anchor that is not in the doc at all; a
-    /// tombstoned anchor is fine.
+    /// tombstoned anchor is fine. `at` must be newer than every version in
+    /// the doc, as log order guarantees; a reused `at` fails with the line id
+    /// it would reuse.
     pub fn apply(&self, at: ArtId, ops: &[LineOp]) -> Result<Doc, LineId> {
         let mut doc = self.clone();
         let mut n = 0;
         for op in ops {
             match op {
                 LineOp::Insert { after, lines } => {
-                    let start = match after {
-                        None => 0,
-                        Some(a) => doc.position(*a).ok_or(*a)? + 1,
-                    };
-                    let new = lines.iter().map(|text| {
+                    let mut parent = *after;
+                    for text in lines {
+                        let id = LineId { art: at, n };
                         n += 1;
-                        Line {
-                            id: LineId { art: at, n: n - 1 },
-                            text: text.clone(),
-                            live: true,
-                        }
-                    });
-                    doc.lines.splice(start..start, new.collect::<Vec<_>>());
+                        doc.put(
+                            id,
+                            Op::Insert {
+                                id,
+                                parent,
+                                value: text.clone(),
+                            },
+                        )?;
+                        parent = Some(id);
+                    }
                 }
-                LineOp::Delete { line } => {
-                    let i = doc.position(*line).ok_or(*line)?;
-                    doc.lines[i].live = false;
-                }
+                LineOp::Delete { line } => doc.put(*line, Op::Delete { target: *line })?,
             }
         }
         Ok(doc)
+    }
+
+    /// Apply one element op. `key` is the line it inserts or deletes.
+    fn put(&mut self, key: LineId, op: Op<LineId, String>) -> Result<(), LineId> {
+        match self.rga.apply(&op) {
+            Ok(Applied::Changed | Applied::Duplicate) => Ok(()),
+            Ok(Applied::Pending { missing }) => Err(missing),
+            Err(_) => Err(key),
+        }
     }
 }
 

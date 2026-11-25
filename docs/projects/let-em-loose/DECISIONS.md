@@ -180,6 +180,7 @@ Precise contracts used by this guide:
 | D170 | #703: an uncertain inbox send is written ahead as a pending mark on the Remediate card; closed as not applied only on proof (SUPERSEDED by D171) | [stated] 2026-11-24 (703) |
 | D171 | #703: Mill Board never closes a Remediate card from BBP's log; it only notes once the decision id shows applied (with rev); supersedes D170 | [stated] 2026-11-24 (703) |
 | D172 | #703: PR #1844 surface approved as built, including required `--fence` on `bbp human --decision` (closes Q63) | [stated] 2026-11-24 (703) |
+| D173 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
 
 ## D1. Lenses, not stages
 
@@ -1725,3 +1726,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_f6abd383d5b9495c9e796c271eb42140
 **Key.** lel:703:approve-pr1844-surface-required-fence
 **Source.** Nano, GitHub comment by `baileyrd` on Rusty-Mill/rusty_mill#1844, comment id 7137833262, 2026-11-24T16:32:51Z: "I approve the surface it lists, in particular the required --fence (Q63)." Replying to review 6043258136. Relayed by the caller; the comment was not read.
+
+## D173. #430: rusty_bbp's co-edit fold moves onto rusty_crdt as a pure swap
+
+**Decision.** Nano gave the go for #430 as option 1, "pure swap, keep the refusal". `rusty_bbp::coedit`'s fold uses `rusty_crdt`'s `Rga` as its core. Admission (the overlap/stale refusal) is unchanged, golden logs stay byte-identical, and a differential test against the old fold proves the swap, in one small PR. This supersedes the card's older wording that the swap "would change admission only". This settles what to build; CI, review by `dottiusmaximus` and the merge rules still apply.
+**Why.** It gives `rusty_crdt` its first user and puts the fold on a law-tested core without changing BBP log semantics.
+**Rejected.** Option 2, swapping and accepting overlapping edits (CRDT admission; changes BBP log semantics; ask-first). Option 3, dropping the card.
+**Tag.** [stated] · remind-me: mem_8d894a129917493782f8b8f1e8123b26
+**Key.** lel:430:coedit-fold-on-rusty-crdt
+**Source.** Nano, project thread "Update Mill Board card statuses", message cmsg_014AqbZs58L565hMV2pFkCX5HGJTsB1QUY7avVobhzUMnP, 2026-11-25T01:15:31Z: "1", answering the three options in cmsg_014AqbZs58L565hMV2pFkCX5C5P4veGi9BERQNHB1fH2T3. Relayed by the caller; the message was not read.

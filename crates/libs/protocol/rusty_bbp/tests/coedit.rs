@@ -500,3 +500,125 @@ proptest! {
         prop_assert_eq!(docs.last().unwrap().text(), rga.text());
     }
 }
+
+/// The fold as it was before #430 (D173): a vector of lines, each insert
+/// spliced in right after its anchor. The oracle for the swap onto
+/// `rusty_crdt`.
+#[derive(Default, Clone)]
+struct SpliceFold(Vec<(LineId, String, bool)>);
+
+impl SpliceFold {
+    fn apply(&self, at: ArtId, ops: &[LineOp]) -> Result<SpliceFold, LineId> {
+        let mut doc = self.clone();
+        let mut n = 0;
+        let pos = |d: &SpliceFold, id: LineId| d.0.iter().position(|l| l.0 == id).ok_or(id);
+        for op in ops {
+            match op {
+                LineOp::Insert { after, lines } => {
+                    let start = match after {
+                        None => 0,
+                        Some(a) => pos(&doc, *a)? + 1,
+                    };
+                    let new: Vec<_> = lines
+                        .iter()
+                        .map(|t| {
+                            n += 1;
+                            (LineId { art: at, n: n - 1 }, t.clone(), true)
+                        })
+                        .collect();
+                    doc.0.splice(start..start, new);
+                }
+                LineOp::Delete { line } => {
+                    let i = pos(&doc, *line)?;
+                    doc.0[i].2 = false;
+                }
+            }
+        }
+        Ok(doc)
+    }
+
+    fn lines(&self) -> Vec<(LineId, String)> {
+        self.0
+            .iter()
+            .filter(|l| l.2)
+            .map(|l| (l.0, l.1.clone()))
+            .collect()
+    }
+}
+
+fn doc_lines(d: &Doc) -> Vec<(LineId, String)> {
+    d.lines().map(|(id, t)| (id, t.to_string())).collect()
+}
+
+#[test]
+fn the_fold_matches_the_old_splice_fold_on_the_edge_cases() {
+    let id = |art: u64, n: u64| LineId { art: ArtId(art), n };
+    let ins = |after: Option<LineId>, lines: &[&str]| LineOp::Insert {
+        after,
+        lines: lines.iter().map(|s| s.to_string()).collect(),
+    };
+    let history: Vec<Vec<LineOp>> = vec![
+        // A multi-line block.
+        vec![ins(None, &["# A", "a1", "a2", "# B", "b1"])],
+        // Newest-first siblings on one anchor, inside one edit and across edits.
+        vec![
+            ins(Some(id(1, 1)), &["x"]),
+            ins(Some(id(1, 1)), &["y", "y2"]),
+        ],
+        vec![ins(Some(id(1, 1)), &["z"])],
+        // A tombstoned anchor still places an insert.
+        vec![LineOp::Delete { line: id(1, 2) }],
+        vec![ins(Some(id(1, 2)), &["after-gone"]), ins(None, &["intro"])],
+        // An anchor inside a block inserted in the same edit.
+        vec![
+            ins(Some(id(1, 4)), &["c1", "c2"]),
+            ins(Some(id(6, 0)), &["c1.5"]),
+        ],
+    ];
+    let (mut doc, mut old) = (Doc::default(), SpliceFold::default());
+    for (v, ops) in history.iter().enumerate() {
+        let at = ArtId(v as u64 + 1);
+        doc = doc.apply(at, ops).unwrap();
+        old = old.apply(at, ops).unwrap();
+        assert_eq!(doc_lines(&doc), old.lines(), "after version {}", v + 1);
+    }
+    assert_eq!(
+        doc.text(),
+        "intro\n# A\na1\nz\ny\ny2\nx\nafter-gone\n# B\nb1\nc1\nc1.5\nc2"
+    );
+    let unknown = [ins(Some(id(9, 9)), &["?"])];
+    assert_eq!(doc.apply(ArtId(9), &unknown), Err(id(9, 9)));
+    assert_eq!(old.apply(ArtId(9), &unknown).err(), Some(id(9, 9)));
+}
+
+proptest! {
+    /// Random histories with edits against random earlier versions, applied
+    /// in log order: the rusty_crdt fold gives the same visible lines, ids
+    /// included, as the old splice fold after every version (#430, D173).
+    #[test]
+    fn the_rusty_crdt_fold_matches_the_old_splice_fold(seed in any::<u64>()) {
+        let mut g = Gen(seed);
+        let mut docs = vec![Doc::default()];
+        let mut old = SpliceFold::default();
+        for v in 1..=16u64 {
+            let base = docs[g.next(docs.len())].clone();
+            let seen: Vec<LineId> = base.lines().map(|(id, _)| id).collect();
+            let mut ops = Vec::new();
+            for k in 0..1 + g.next(4) {
+                let anchor = (!seen.is_empty() && g.next(4) > 0).then(|| seen[g.next(seen.len())]);
+                match anchor {
+                    Some(line) if g.next(3) == 0 => ops.push(LineOp::Delete { line }),
+                    _ => {
+                        let lines = (0..1 + g.next(3)).map(|j| format!("{v}.{k}.{j}")).collect();
+                        ops.push(LineOp::Insert { after: anchor, lines });
+                    }
+                }
+            }
+            let at = ArtId(v);
+            let head = docs.last().unwrap().apply(at, &ops).unwrap();
+            old = old.apply(at, &ops).unwrap();
+            prop_assert_eq!(doc_lines(&head), old.lines());
+            docs.push(head);
+        }
+    }
+}
