@@ -98,6 +98,7 @@ pub mod nr {
     pub const PIDFD_OPEN: usize = 434;
     pub const CLONE3: usize = 435;
     pub const PIDFD_SEND_SIGNAL: usize = 424;
+    pub const PIDFD_GETFD: usize = 438;
     pub const MUNMAP: usize = 215;
     pub const MMAP: usize = 222;
     pub const MPROTECT: usize = 226;
