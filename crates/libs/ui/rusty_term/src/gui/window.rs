@@ -798,6 +798,11 @@ struct WindowState<'a> {
     forward_trust: std::collections::HashSet<(u64, u16)>,
     /// The forwards asked for and not yet answered.
     forward_asks: ForwardAsks,
+    /// Files waiting to be sent to a pane's host, one at a time so their
+    /// paths are typed in the order they were dropped (C82), and whether one
+    /// is on its way.
+    uploads: std::collections::VecDeque<(u64, std::path::PathBuf)>,
+    uploading: bool,
     /// The effective config; refreshed on live reload so new tabs follow it.
     config: Config,
     /// The config file in effect, for the open shortcut + reload re-reads.
@@ -3009,14 +3014,15 @@ impl WindowState<'_> {
     /// Paste the system clipboard into the active tab's child (Ctrl+Shift+V, and
     /// Ctrl+V on Windows).
     fn paste(&mut self) {
+        let uploads = self.focused().is_some_and(|k| self.source.uploads(k));
         let Some(cb) = self.clipboard.as_mut() else {
             return;
         };
         // Files copied in a file manager go as drops do, to a pane whose
         // host is elsewhere (C82); a local pane keeps pasting text.
-        if let Ok(files) = cb.get().file_list()
+        if uploads
+            && let Ok(files) = cb.get().file_list()
             && !files.is_empty()
-            && self.focused().is_some_and(|k| self.source.uploads(k))
         {
             for file in files {
                 self.start_upload(file);
@@ -6596,44 +6602,75 @@ impl WindowState<'_> {
         self.snap_to_bottom();
     }
 
-    /// Asks the focused pane's source to send `path` to its host; the answer
-    /// comes back as [`UserEvent::Uploaded`]. `false` when the pane's host is
-    /// this machine, so `path` is as good there as here.
+    /// Queues `path` to be sent to the focused pane's host, if that is
+    /// another machine: `false` when it is this one, so `path` is as good
+    /// there as here.
     fn start_upload(&mut self, path: std::path::PathBuf) -> bool {
         let Some(key) = self.focused().filter(|&k| self.source.uploads(k)) else {
             return false;
         };
-        let proxy = self.proxy.clone();
-        self.source.upload(
-            key,
-            path,
-            Box::new(move |uploaded| {
-                let _ = proxy.send_event(UserEvent::Uploaded(key, uploaded));
-            }),
-        );
+        self.uploads.push_back((key, path));
+        self.next_upload();
         true
+    }
+
+    /// Sends the next queued file unless one is on its way; the answer comes
+    /// back as [`UserEvent::Uploaded`].
+    fn next_upload(&mut self) {
+        while !self.uploading {
+            let Some((key, path)) = self.uploads.pop_front() else {
+                return;
+            };
+            if !self.has_pane(key) {
+                continue;
+            }
+            self.uploading = true;
+            let proxy = self.proxy.clone();
+            self.source.upload(
+                key,
+                path,
+                Box::new(move |uploaded| {
+                    let _ = proxy.send_event(UserEvent::Uploaded(key, uploaded));
+                }),
+            );
+        }
     }
 
     /// A file sent for pane `key` arrived: its path there is typed into the
     /// pane as a drop of a local file would be, or the notice says why not.
     fn uploaded(&mut self, key: u64, uploaded: Uploaded) {
-        let path = match uploaded {
-            Ok(path) => path,
-            Err(why) => {
-                return self.show_notice(Some(super::source::Notice {
-                    title: "File not sent".to_owned(),
-                    detail: why,
-                }));
-            }
+        self.uploading = false;
+        match uploaded {
+            Ok(path) => self.type_remote_path(key, &path),
+            Err(why) => self.show_notice(Some(super::source::Notice {
+                title: "File not sent".to_owned(),
+                detail: why,
+            })),
+        }
+        self.next_upload();
+    }
+
+    /// Types `path`, a file's place on pane `key`'s host, quoted for that
+    /// host's shell.
+    fn type_remote_path(&mut self, key: u64, path: &str) {
+        let Some(quoted) = quote_remote(path) else {
+            return self.show_notice(Some(super::source::Notice {
+                title: "File sent, path not typed".to_owned(),
+                detail: format!("{path} has characters a Windows shell would act on."),
+            }));
         };
         let Some(p) = self.pane_by_id_mut(key) else {
             return;
         };
         let bracketed = p.grid.lock().bracketed_paste;
-        if let Some(bytes) = dropped_file_paste(&path, bracketed, false) {
-            let _ = p.writer.write(&bytes);
+        let _ = p
+            .writer
+            .write(&encode_paste(&format!("{quoted} "), bracketed));
+        if p.grid.lock().reset_view()
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
         }
-        self.snap_to_bottom();
     }
 
     /// Type `text` into the focused block as a paste, without Enter
@@ -7398,6 +7435,8 @@ impl<'a> App<'a> {
             links: load_trust(),
             forward_trust: std::collections::HashSet::new(),
             forward_asks: ForwardAsks::default(),
+            uploads: Default::default(),
+            uploading: false,
             config: self.config.clone(),
             config_path: self.config_path.clone(),
             profile_override: self.profile_override.clone(),
@@ -8064,6 +8103,19 @@ fn shell_quote(path: &str) -> String {
     {
         format!("'{}'", path.replace('\'', "'\\''"))
     }
+}
+
+/// Quotes `path`, a file's place on a mux server's host, for that host's
+/// shell, which is not necessarily this machine's: a path from `/` is the
+/// server's POSIX one, single-quoted whatever it holds. Anything else is a
+/// Windows path, double-quoted only if cmd and PowerShell leave it alone
+/// inside quotes; with a `$`, backtick, `%`, `^`, `&` or the like, `None`.
+fn quote_remote(path: &str) -> Option<String> {
+    if path.starts_with('/') {
+        return Some(format!("'{}'", path.replace('\'', "'\\''")));
+    }
+    let plain = |c: char| c.is_alphanumeric() || " _.-:\\/()[]".contains(c);
+    (!path.is_empty() && path.chars().all(plain)).then(|| format!("\"{path}\""))
 }
 
 /// Hand `link` to the OS default handler. Only a parsed [`link_policy::Link`]
@@ -9240,6 +9292,41 @@ mod tests {
         assert_eq!(shell_quote("/tmp/plain"), "'/tmp/plain'");
         assert_eq!(shell_quote("/tmp/with space"), "'/tmp/with space'");
         assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
+    }
+
+    #[test]
+    fn a_remote_path_is_quoted_for_the_servers_shell_not_ours() {
+        // POSIX server: every byte stays inside the quotes.
+        assert_eq!(super::quote_remote("/up/a b").as_deref(), Some("'/up/a b'"));
+        assert_eq!(
+            super::quote_remote("/up/x;reboot").as_deref(),
+            Some("'/up/x;reboot'")
+        );
+        assert_eq!(
+            super::quote_remote("/up/$(rm -rf ~) a.txt").as_deref(),
+            Some("'/up/$(rm -rf ~) a.txt'")
+        );
+        assert_eq!(
+            super::quote_remote("/up/it's").as_deref(),
+            Some("'/up/it'\\''s'")
+        );
+        // Windows server: quoted, or not typed at all.
+        assert_eq!(
+            super::quote_remote("C:\\up\\a b.txt").as_deref(),
+            Some("\"C:\\up\\a b.txt\"")
+        );
+        for hostile in [
+            "C:\\up\\a&b",
+            "C:\\up\\$(x)",
+            "C:\\up\\%PATH%",
+            "C:\\up\\a`b",
+            "C:\\up\\a^b",
+            "C:\\up\\a;b",
+            "C:\\up\\a'b",
+            "",
+        ] {
+            assert_eq!(super::quote_remote(hostile), None, "{hostile}");
+        }
     }
 
     #[test]

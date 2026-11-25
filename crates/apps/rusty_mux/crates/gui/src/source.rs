@@ -1489,6 +1489,11 @@ const FORWARD_REQ: u64 = 1 << 40;
 const FORWARD_FRAMES: usize = 1024;
 const FORWARD_WANTS: usize = 16;
 
+/// Bytes in one chunk of an upload. Each is written under the lock typing
+/// shares, so a small one keeps a slow link from holding up keystrokes for
+/// long.
+const UPLOAD_CHUNK: usize = 64 << 10;
+
 /// How long the server may take to answer one chunk of an upload.
 const UPLOAD_WAIT: Duration = Duration::from_secs(30);
 
@@ -1680,7 +1685,7 @@ impl Block {
             return Err(format!("{} is not a file", path.display()));
         }
         let id = self.block;
-        rusty_mux_client::upload::send_with(name, &mut file, |args| {
+        rusty_mux_client::upload::send_with(name, &mut file, UPLOAD_CHUNK, |args| {
             let (tx, rx) = channel();
             let mut args = Some(args);
             let req = self.send(|req| {
