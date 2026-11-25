@@ -623,7 +623,9 @@ impl Store {
             .map_or(Ok(Vec::new()), |r| r.into_sessions(board))
     }
 
-    /// Save `sessions` as every builder session of `board`.
+    /// Save `sessions` as every builder session of `board`, replacing the
+    /// board's record without checking its revision: load, admit and save
+    /// under the one `&mut Store` the directory lock gives a process.
     ///
     /// # Errors
     ///

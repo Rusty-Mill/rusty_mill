@@ -12,7 +12,11 @@
 //! holds, checked in this order:
 //!
 //! - the claim is not open;
-//! - the claim has a live candidate: a stored one whose run has not failed;
+//! - the claim has a live candidate: its latest stored candidate's run has
+//!   not failed. The card's own candidate (`Card::current`, BBP's view) wins
+//!   over the session rows, so a candidate BBP stored and debited before orch
+//!   saved its session still counts; the caller builds the card with that
+//!   candidate visible;
 //! - the claim already has `builders_per_claim` live sessions;
 //! - `max_live_builders` sessions are live across the board;
 //! - the claim's budget is spent (`spent < budget` fails). This is BBP's own
@@ -20,6 +24,13 @@
 //!
 //! A session that ends without storing a candidate debits nothing (design
 //! §4.7, §7), so the next admission simply starts a fresh one.
+//!
+//! Admission is check-then-insert: it is only safe while one caller holds
+//! the store from loading the board's sessions through saving the admitted
+//! one. orch-store's directory lock gives that today.
+//!
+//! `builder_wall_secs` is carried here; enforcing it is the launcher's
+//! (#1318).
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -149,13 +160,15 @@ impl Session {
         }
     }
 
-    /// The live session ends at `at` (ms).
+    /// The live session ends at `at` (ms), no earlier than it started.
     ///
     /// # Errors
     ///
-    /// When it has already ended.
+    /// When it has already ended, when `at` is before `started`, or when it
+    /// stores a candidate without having been launched.
     pub fn end(self, end: End, at: u64) -> Result<Self, Transition> {
-        if !self.live() {
+        let unlaunched_store = matches!(end, End::Stored(_)) && self.phase != Phase::Running;
+        if !self.live() || at < self.started || unlaunched_store {
             return Err(Transition::new(&self, "end"));
         }
         Ok(Self {
@@ -263,7 +276,7 @@ pub fn admit(
         return Err(Refusal::NotOpen(card.status));
     }
     let mine: Vec<&Session> = sessions.iter().filter(|s| s.claim == card.id).collect();
-    if let Some(a) = latest_live_candidate(&mine) {
+    if let Some(a) = live_candidate(card, &mine) {
         return Err(Refusal::LiveCandidate(a));
     }
     if live(mine.iter().copied()) >= limits.per_claim {
@@ -298,8 +311,21 @@ pub fn admit(
     })
 }
 
+/// The claim's latest candidate, when its run has not failed: the card's
+/// own when it has one, else the latest storing session's.
+fn live_candidate(card: &Card, mine: &[&Session]) -> Option<ArtId> {
+    match card.current {
+        Some(a) => (!mine.iter().any(|s| s.candidate() == Some(a) && failed(s))).then_some(a),
+        None => latest_live_session(mine),
+    }
+}
+
+fn failed(s: &Session) -> bool {
+    s.run.as_ref().is_some_and(RunResult::failed)
+}
+
 /// The candidate of the claim's latest storing session, when it is live.
-fn latest_live_candidate(mine: &[&Session]) -> Option<ArtId> {
+fn latest_live_session(mine: &[&Session]) -> Option<ArtId> {
     let latest = mine
         .iter()
         .filter(|s| s.candidate().is_some())
@@ -316,7 +342,9 @@ fn live<'a>(sessions: impl Iterator<Item = &'a Session>) -> u32 {
 }
 
 /// After a restart nothing is still running: every live session ends as
-/// aborted at `now` (ms), debiting nothing.
+/// aborted at `now` (ms). Its own row debits nothing, but BBP may have
+/// stored and debited its candidate just before the crash; [`admit`] reads
+/// that from the card, so no second builder joins it.
 pub fn recover(sessions: Vec<Session>, now: u64) -> Vec<Session> {
     sessions
         .into_iter()
@@ -347,6 +375,14 @@ pub fn check(sessions: &[Session]) -> Result<(), String> {
         }
         if !seen.insert((s.claim, s.n)) {
             return Err(format!("builder session {} #{} twice", s.claim, s.n));
+        }
+        if let Phase::Ended { at, .. } = s.phase {
+            if at < s.started {
+                return Err(format!(
+                    "builder session {} #{} ends before it starts",
+                    s.claim, s.n
+                ));
+            }
         }
         if s.run.is_some() && s.candidate().is_none() {
             return Err(format!(
@@ -600,7 +636,45 @@ mod tests {
             erosion_delta: Some(-2),
         };
         assert_eq!(e.report(run.clone()).unwrap().run, Some(run));
-        assert!(s.end(End::Aborted, 3).is_ok(), "admitted can be aborted");
+        assert!(
+            s.clone().end(End::Aborted, 3).is_ok(),
+            "admitted can be aborted"
+        );
+        assert_eq!(
+            s.clone().end(End::Stored(ArtId(4)), 3).unwrap_err().what,
+            "end",
+            "an unlaunched session stores nothing"
+        );
+        assert_eq!(
+            s.end(End::Failed, 0).unwrap_err().what,
+            "end",
+            "before start"
+        );
+    }
+
+    #[test]
+    fn the_cards_candidate_counts_even_without_a_stored_row() {
+        // BBP stored and debited art:9, then orch crashed before saving.
+        let rows = recover(vec![session(7, 1, Phase::Running)], 50);
+        let mut c = claim(1, 16);
+        c.current = Some(ArtId(9));
+        assert_eq!(
+            admit_default(&c, &rows),
+            Err(Refusal::LiveCandidate(ArtId(9)))
+        );
+    }
+
+    #[test]
+    fn the_cards_candidate_frees_the_claim_once_its_run_failed() {
+        let mut c = claim(1, 16);
+        c.current = Some(ArtId(3));
+        let failed = [stored(7, 1, 3, Some(false))];
+        assert_eq!(admit_default(&c, &failed).unwrap().n, 2);
+        let passed = [stored(7, 1, 3, Some(true))];
+        assert_eq!(
+            admit_default(&c, &passed),
+            Err(Refusal::LiveCandidate(ArtId(3)))
+        );
     }
 
     #[test]
@@ -639,5 +713,10 @@ mod tests {
             ..ended(7, 1, End::Failed)
         };
         assert!(check(&[orphan_run]).is_err());
+        let backwards = Session {
+            started: 10,
+            ..ended(7, 1, End::Failed)
+        };
+        assert!(check(&[backwards]).is_err(), "ends before it starts");
     }
 }
