@@ -195,5 +195,19 @@ What the build does with them:
   mode until a receipt rule exists for it.
 - **D4 approved:** `task_opened.gates`, `bbp open --gates`, `bbp human --approval`, the `--op by:`
   refusal, `card_review` / `card_approve` / `approval_issue`, and `provider` on credentials.
+- **R5 under D1 = C.** Every unblock the proxy files waits for Nano's tap, and the tap shows its
+  target, so the build does not record the column a card left for Blocked. The proxy may file
+  any unblock; only Nano's confirmation moves the card.
+- **Review build notes (PR #1881 review).**
+  - A move records an approval only when it went through the gated route. A `close` into Done
+    beside the merge gate does not count.
+  - Nano's confirmation must match the digest the proxy filed.
+  - A filing expires when the card leaves its gate.
+  - An admin's `card_approve` needs a signed-in credential of its own, not a connector or a
+    named role.
+  - R4 needs a review of the work the gate rests on: Architecting's own for the design gate,
+    the last authored column for V&Ving.
+  - A reviewer's newer review of the same work replaces their older one, so reviews cannot
+    fill the ledger.
 - **R1 while providers are unset.** An actor with no provider is compared by name only, so
   setting providers is what turns on the cross-provider rule. Fail-closed comes with D2.
