@@ -141,8 +141,10 @@ pub(crate) fn acting(
 ) -> Result<Actor, BoardError> {
     let actor = acting_as(b, identity, who)?;
     // The board's own writers sign history under these names; a caller never may (an
-    // `/instance` label included), or `card_unclose` could not tell them apart.
-    if RESERVED_ACTORS.contains(&actor.name.split('/').next().unwrap_or_default()) {
+    // `/instance` label included, case and surrounding spaces ignored), so a comment or an
+    // event under one is the board's own.
+    let base = actor.name.split('/').next().unwrap_or_default();
+    if RESERVED_ACTORS.contains(&base.trim().to_lowercase().as_str()) {
         return Err(BoardError::Invalid("that actor name is the board's own"));
     }
     Ok(actor)
@@ -1196,6 +1198,14 @@ pub fn ops() -> Vec<Op> {
             |b, i, a: IdArgs| {
                 let who = acting(b, i, &a.who)?;
                 card(b.restore(card_ref(b, &a.id)?, &who)?)
+            },
+        ),
+        op(
+            "card_unclose",
+            "Undo a wrong close by the merge watch: the card goes back to the column it was in, keeps its evidence, and a comment records who undid it. Only for a card whose current Done is the merge watch's close; any other close is refused. Needs `triage`.",
+            |b, i, a: IdArgs| {
+                let who = acting(b, i, &a.who)?;
+                card(b.unclose(card_ref(b, &a.id)?, &who)?)
             },
         ),
         op(
@@ -2519,7 +2529,13 @@ mod tests {
     #[test]
     fn the_boards_own_writers_are_not_nameable() {
         let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
-        for name in ["merge-watch", "github-sync", "merge-watch/x"] {
+        for name in [
+            "merge-watch",
+            "github-sync",
+            "merge-watch/x",
+            "Merge-Watch",
+            " github-sync ",
+        ] {
             let who = Who {
                 actor: Some(name.into()),
                 role: Some("human".into()),

@@ -68,6 +68,7 @@ mod terminal;
 #[cfg(target_os = "linux")]
 mod tls;
 mod udp_ports;
+mod upload;
 
 use std::ffi::{OsStr, OsString};
 use std::io;

@@ -501,7 +501,7 @@ proptest! {
     }
 }
 
-/// The fold as it was before #430 (D173): a vector of lines, each insert
+/// The fold as it was before #430 (D176): a vector of lines, each insert
 /// spliced in right after its anchor. The oracle for the swap onto
 /// `rusty_crdt`.
 #[derive(Default, Clone)]
@@ -589,12 +589,15 @@ fn the_fold_matches_the_old_splice_fold_on_the_edge_cases() {
     let unknown = [ins(Some(id(9, 9)), &["?"])];
     assert_eq!(doc.apply(ArtId(9), &unknown), Err(id(9, 9)));
     assert_eq!(old.apply(ArtId(9), &unknown).err(), Some(id(9, 9)));
+    let empty_unknown = [ins(Some(id(9, 9)), &[])];
+    assert_eq!(doc.apply(ArtId(9), &empty_unknown), Err(id(9, 9)));
+    assert_eq!(old.apply(ArtId(9), &empty_unknown).err(), Some(id(9, 9)));
 }
 
 proptest! {
     /// Random histories with edits against random earlier versions, applied
     /// in log order: the rusty_crdt fold gives the same visible lines, ids
-    /// included, as the old splice fold after every version (#430, D173).
+    /// included, as the old splice fold after every version (#430, D176).
     #[test]
     fn the_rusty_crdt_fold_matches_the_old_splice_fold(seed in any::<u64>()) {
         let mut g = Gen(seed);

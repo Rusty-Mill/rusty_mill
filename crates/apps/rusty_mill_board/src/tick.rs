@@ -587,6 +587,10 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         // Only shipped work has a ship date; won't-do is closed but never shipped.
         done_ms: task.completed_ms.filter(|_| task.status == "done"),
         closed,
+        // rusty_tick is retired (ADR-0007): its tasks carry no merge record, so a card read
+        // from it cannot be unclosed.
+        merged: None,
+        unclosed_prs: Vec::new(),
         evidence: doc.evidence,
         archived_ms,
         restored_ms,
@@ -1170,6 +1174,11 @@ fn check_claim(card: &Card) -> Result<(), BoardError> {
 }
 
 impl<T: TickApi> Store for TickStore<T> {
+    /// rusty_tick has no field for it (retired, ADR-0007), so a merge close there cannot be undone.
+    fn keeps_merge_record(&self) -> bool {
+        false
+    }
+
     fn durable(&self) -> bool {
         true
     }

@@ -323,9 +323,12 @@ pub fn scan(
         let ours = |c: &Card| bound.get(&c.id).is_some_and(|b| b.contains(&pr.repo));
         for (n, closes) in card_refs(&pr.body) {
             if let Some(card) = by_number.get(&n).filter(|c| ours(c)) {
+                // Closed by this pull request once and undone (`card_unclose`): its marker does
+                // not close the card again.
+                let handled = card.unclosed_from(&pr.url);
                 note(
                     card,
-                    if closes && pr.may_close {
+                    if closes && pr.may_close && !handled {
                         Why::Marker
                     } else {
                         Why::Mention
@@ -347,7 +350,7 @@ pub fn scan(
 }
 
 /// Who merge watch is on the board's history.
-pub const ACTOR: &str = "merge-watch";
+pub const ACTOR: &str = crate::domain::MERGE_WATCH;
 
 /// The actor merge watch writes as for one card: `Record` only, limited to the card's project
 /// as the snapshot saw it, so a card moved to another project meanwhile is refused.
@@ -827,6 +830,488 @@ mod tests {
             b.close_merged(done.id, done.rev, PR, "o/r", &watcher("p")),
             Err(BoardError::Terminal)
         ));
+    }
+
+    #[test]
+    fn unclose_undoes_only_the_merge_watchs_close_and_it_is_not_repeated() {
+        let (b, who, card, n) = one_card();
+        b.move_card(card.id, &Column::READY, &who).expect("ready");
+        let body = format!("Closes card #{n}");
+        assert_eq!(merged(&b, &body), Ok(1));
+        assert_eq!(b.get(card.id).expect("card").column, Column::DONE);
+
+        // Needs triage.
+        let builder = b.roles().actor("bot", "builder").expect("role");
+        assert!(matches!(
+            b.unclose(card.id, &builder),
+            Err(BoardError::Forbidden(_))
+        ));
+        let back = b.unclose(card.id, &who).expect("unclosed");
+        assert_eq!((back.column, back.done_ms), (Column::READY, None));
+        assert_eq!(back.evidence, [PR.to_owned()], "the evidence stays");
+        let last = back.comments.last().expect("comment");
+        assert_eq!(last.by, "nano");
+        assert!(last.text.contains("ready"), "{}", last.text);
+        // Not Done any more, so a second call has nothing to undo.
+        assert!(matches!(
+            b.unclose(card.id, &who),
+            Err(BoardError::Refused(_))
+        ));
+        // The marker is still in the merged PR, but its PR is evidence now: it lists, never closes.
+        assert_eq!(merged(&b, &body), Ok(1));
+        assert_eq!(b.get(card.id).expect("card").column, Column::READY);
+        assert_eq!(
+            b.metrics(|_| true).expect("metrics").merged_open[0].why,
+            Why::Evidence
+        );
+    }
+
+    #[test]
+    fn unclose_refuses_a_card_closed_any_other_way() {
+        let (b, who, card, _) = one_card();
+        b.close(card.id, crate::domain::CloseReason::Superseded, None, &who)
+            .expect("closed");
+        assert!(matches!(
+            b.unclose(card.id, &who),
+            Err(BoardError::Refused(_))
+        ));
+        let (b, who, open, _) = one_card();
+        assert!(matches!(
+            b.unclose(open.id, &who),
+            Err(BoardError::Refused(_))
+        ));
+    }
+
+    /// A store that holds the commit of a claim on a card with dependencies until released.
+    struct Taking {
+        inner: MemStore,
+        entered: std::sync::mpsc::Sender<()>,
+        listed: std::sync::mpsc::Sender<()>,
+        held: std::sync::atomic::AtomicBool,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl Store for Taking {
+        fn keeps_merge_record(&self) -> bool {
+            true
+        }
+        fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+            self.inner.get(id)
+        }
+        fn list(&self) -> Result<Vec<Card>, BoardError> {
+            let cards = self.inner.list();
+            if self.held.load(std::sync::atomic::Ordering::SeqCst) {
+                self.listed.send(()).ok();
+            }
+            cards
+        }
+        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            self.inner.insert(card, event)
+        }
+        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            if card.claim.is_some() && !card.deps.is_empty() {
+                self.held.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.entered.send(()).expect("test is listening");
+                self.release.lock().expect("lock").recv().expect("released");
+            }
+            self.inner.replace(card, event)
+        }
+        fn events_since(
+            &self,
+            after: Option<Uuid>,
+            limit: usize,
+        ) -> Result<Vec<crate::domain::Event>, BoardError> {
+            self.inner.events_since(after, limit)
+        }
+        fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+            self.inner.last_event_id()
+        }
+        fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+            self.inner.reserve_number(card, floor)
+        }
+    }
+
+    #[test]
+    fn unclose_waits_for_a_take_of_a_dependent_and_then_refuses() {
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let (listed, checked) = std::sync::mpsc::channel();
+        let b: Shared = Board::new(
+            Box::new(Taking {
+                inner: MemStore::default(),
+                entered,
+                listed,
+                held: std::sync::atomic::AtomicBool::new(false),
+                release: std::sync::Mutex::new(held),
+            }) as Box<dyn Store>,
+            crate::board::Roles::default(),
+        )
+        .with_projects(Projects::parse(REGISTRY).expect("registry"));
+        let who = b.roles().actor("nano", "human").expect("role");
+        let prereq = b.add_in(&who, "p", "prereq", "", vec![]).expect("card");
+        let n = prereq.number.expect("n");
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        assert_eq!(b.get(prereq.id).expect("card").column, Column::DONE);
+        let dependent = b.add_in(&who, "p", "dependent", "", vec![]).expect("card");
+        b.plan(
+            dependent.id,
+            &who,
+            &crate::domain::Plan {
+                deps: Some(vec![prereq.id]),
+                ..Default::default()
+            },
+        )
+        .expect("planned");
+        b.move_card(dependent.id, &Column::READY, &who)
+            .expect("ready");
+        std::thread::scope(|s| {
+            // The take has checked the dependency and is committing.
+            let taking = s.spawn(|| b.take(&who, Some(dependent.id)));
+            started.recv().expect("the take is mid-commit");
+            let unclosing = s.spawn(|| b.unclose(prereq.id, &who).map(|c| c.id));
+            // Without the gate the unclose reads the board now, before the dependent has
+            // started; with it, nothing arrives until the take is released.
+            let _ = checked.recv_timeout(std::time::Duration::from_millis(300));
+            release.send(()).expect("release the take");
+            assert!(
+                taking
+                    .join()
+                    .expect("take thread")
+                    .expect("taken")
+                    .is_some()
+            );
+            assert!(matches!(
+                unclosing.join().expect("unclose thread"),
+                Err(BoardError::Refused(_))
+            ));
+        });
+        assert_eq!(b.get(prereq.id).expect("card").column, Column::DONE);
+    }
+
+    /// A store that cannot keep a merge close's record, as rusty_tick cannot.
+    struct NoRecord(MemStore);
+
+    impl Store for NoRecord {
+        fn keeps_merge_record(&self) -> bool {
+            false
+        }
+        fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+            self.0.get(id)
+        }
+        fn list(&self) -> Result<Vec<Card>, BoardError> {
+            self.0.list()
+        }
+        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            self.0.insert(card, event)
+        }
+        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            self.0.replace(card, event)
+        }
+        fn events_since(
+            &self,
+            after: Option<Uuid>,
+            limit: usize,
+        ) -> Result<Vec<crate::domain::Event>, BoardError> {
+            self.0.events_since(after, limit)
+        }
+        fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+            self.0.last_event_id()
+        }
+        fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+            self.0.reserve_number(card, floor)
+        }
+    }
+
+    #[test]
+    fn a_note_that_looks_like_an_undo_does_not_stop_the_first_close() {
+        let (b, who, card, n) = one_card();
+        b.comment(
+            card.id,
+            &who,
+            "Unclosed: the merge watch's close of https://github.com/o/r/pull/7 is undone, back to backlog.",
+        )
+        .expect("note");
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        assert_eq!(b.get(card.id).expect("card").column, Column::DONE);
+    }
+
+    #[test]
+    fn a_store_that_cannot_undo_a_close_is_never_closed_by_the_watch() {
+        let b: Shared = Board::new(
+            Box::new(NoRecord(MemStore::default())) as Box<dyn Store>,
+            crate::board::Roles::default(),
+        )
+        .with_projects(Projects::parse(REGISTRY).expect("registry"));
+        let who = b.roles().actor("nano", "human").expect("role");
+        let card = b.add_in(&who, "p", "work", "", vec![]).expect("card");
+        let n = card.number.expect("n");
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        let open = b.get(card.id).expect("card");
+        assert_eq!(open.column, card.column, "left open");
+        assert!(open.merged.is_none());
+    }
+
+    #[test]
+    fn unclose_waits_for_a_dependency_edit_of_a_started_card_and_then_refuses() {
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let (listed, checked) = std::sync::mpsc::channel();
+        let b: Shared = Board::new(
+            Box::new(Taking {
+                inner: MemStore::default(),
+                entered,
+                listed,
+                held: std::sync::atomic::AtomicBool::new(false),
+                release: std::sync::Mutex::new(held),
+            }) as Box<dyn Store>,
+            crate::board::Roles::default(),
+        )
+        .with_projects(Projects::parse(REGISTRY).expect("registry"));
+        let who = b.roles().actor("nano", "human").expect("role");
+        let prereq = b.add_in(&who, "p", "prereq", "", vec![]).expect("card");
+        let n = prereq.number.expect("n");
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        // Started with no dependencies; the edit gives it one while the unclose scans.
+        let dependent = b.add_in(&who, "p", "dependent", "", vec![]).expect("card");
+        b.move_card(dependent.id, &Column::READY, &who)
+            .expect("ready");
+        b.take(&who, Some(dependent.id)).expect("started");
+        std::thread::scope(|s| {
+            let editing = s.spawn(|| {
+                b.plan(
+                    dependent.id,
+                    &who,
+                    &crate::domain::Plan {
+                        deps: Some(vec![prereq.id]),
+                        ..Default::default()
+                    },
+                )
+            });
+            started.recv().expect("the edit is mid-commit");
+            let unclosing = s.spawn(|| b.unclose(prereq.id, &who).map(|c| c.id));
+            let _ = checked.recv_timeout(std::time::Duration::from_millis(300));
+            release.send(()).expect("release the edit");
+            editing.join().expect("edit thread").expect("planned");
+            assert!(matches!(
+                unclosing.join().expect("unclose thread"),
+                Err(BoardError::Refused(_))
+            ));
+        });
+        assert_eq!(b.get(prereq.id).expect("card").column, Column::DONE);
+    }
+
+    #[test]
+    fn unclose_authorizes_before_it_looks_at_dependents_and_names_none() {
+        let (b, who, prereq, n) = one_card();
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        let dependent = b.add_in(&who, "p", "dependent", "", vec![]).expect("card");
+        b.plan(
+            dependent.id,
+            &who,
+            &crate::domain::Plan {
+                deps: Some(vec![prereq.id]),
+                ..Default::default()
+            },
+        )
+        .expect("planned");
+        b.move_card(dependent.id, &Column::READY, &who)
+            .expect("ready");
+        b.take(&who, Some(dependent.id)).expect("started");
+        // Outside the card's project: refused as out of scope, nothing about other cards.
+        let mut elsewhere = b.roles().actor("other", "human").expect("role");
+        elsewhere.projects = Some(["q".to_owned()].into());
+        assert!(matches!(
+            b.unclose(prereq.id, &elsewhere),
+            Err(BoardError::OutOfScope(_))
+        ));
+        // Inside it: refused because a dependent started, without saying which.
+        let Err(BoardError::Refused(why)) = b.unclose(prereq.id, &who) else {
+            panic!("expected a refusal");
+        };
+        let number = dependent.number.expect("n").to_string();
+        assert!(
+            !why.contains(&number) && !why.contains(&dependent.id.to_string()),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn unclose_lets_a_waiting_dependent_wait_again() {
+        let (b, who, prereq, n) = one_card();
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        let dependent = b.add_in(&who, "p", "dependent", "", vec![]).expect("card");
+        b.plan(
+            dependent.id,
+            &who,
+            &crate::domain::Plan {
+                deps: Some(vec![prereq.id]),
+                ..Default::default()
+            },
+        )
+        .expect("planned");
+        b.move_card(dependent.id, &Column::READY, &who)
+            .expect("ready");
+        let back = b.unclose(prereq.id, &who).expect("unclosed");
+        assert_eq!(back.column, Column::BACKLOG);
+        // It waits on the reopened prerequisite again: not takeable.
+        assert!(b.take(&who, Some(dependent.id)).is_err());
+        // Once started, the same reopening is refused.
+        let (b, who, prereq, n) = one_card();
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        let dependent = b.add_in(&who, "p", "dependent", "", vec![]).expect("card");
+        b.plan(
+            dependent.id,
+            &who,
+            &crate::domain::Plan {
+                deps: Some(vec![prereq.id]),
+                ..Default::default()
+            },
+        )
+        .expect("planned");
+        b.move_card(dependent.id, &Column::READY, &who)
+            .expect("ready");
+        b.take(&who, Some(dependent.id)).expect("taken");
+        assert!(matches!(
+            b.unclose(prereq.id, &who),
+            Err(BoardError::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn evidence_added_before_the_merge_does_not_stop_the_first_close() {
+        let (b, who, card, n) = one_card();
+        b.add_evidence(card.id, &[PR.to_owned()], &who)
+            .expect("evidence");
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        assert_eq!(b.get(card.id).expect("card").column, Column::DONE);
+    }
+
+    /// A store that parks the Nth `get` after being armed, to hold a caller at a known place.
+    struct Parking {
+        inner: MemStore,
+        countdown: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl Store for Parking {
+        fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            if self.countdown.load(SeqCst) > 0 && self.countdown.fetch_sub(1, SeqCst) == 1 {
+                self.entered.send(()).expect("test is listening");
+                self.release.lock().expect("lock").recv().expect("released");
+            }
+            self.inner.get(id)
+        }
+        fn list(&self) -> Result<Vec<Card>, BoardError> {
+            self.inner.list()
+        }
+        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            self.inner.insert(card, event)
+        }
+        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
+            self.inner.replace(card, event)
+        }
+        fn events_since(
+            &self,
+            after: Option<Uuid>,
+            limit: usize,
+        ) -> Result<Vec<crate::domain::Event>, BoardError> {
+            self.inner.events_since(after, limit)
+        }
+        fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+            self.inner.last_event_id()
+        }
+        fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+            self.inner.reserve_number(card, floor)
+        }
+    }
+
+    /// Lock order: the link gate before the workflow guard, everywhere. A take that held the
+    /// workflow guard while it waited for the gate, a parent `plan` that held the gate while it
+    /// asked for the workflow, and a workflow writer queued between them, blocked each other
+    /// for good (a waiting writer holds back new readers).
+    #[test]
+    fn a_take_a_parent_plan_and_a_workflow_change_do_not_deadlock() {
+        use std::sync::{Arc, atomic::AtomicUsize, mpsc};
+        use std::time::Duration;
+        let (entered, started) = mpsc::channel();
+        let (release, held) = mpsc::channel();
+        let countdown = Arc::new(AtomicUsize::new(0));
+        let parking = Parking {
+            inner: MemStore::default(),
+            countdown: Arc::clone(&countdown),
+            entered,
+            release: std::sync::Mutex::new(held),
+        };
+        let arm = |n| countdown.store(n, std::sync::atomic::Ordering::SeqCst);
+        let b: Arc<Shared> = Arc::new(
+            Board::new(
+                Box::new(parking) as Box<dyn Store>,
+                crate::board::Roles::default(),
+            )
+            .with_projects(Projects::parse(REGISTRY).expect("registry")),
+        );
+        let who = b.roles().actor("nano", "human").expect("role");
+        let parent = b.add_in(&who, "p", "parent", "", vec![]).expect("card");
+        let child = b.add_in(&who, "p", "child", "", vec![]).expect("card");
+        let ready = b.add_in(&who, "p", "ready", "", vec![]).expect("card");
+        b.move_card(ready.id, &Column::READY, &who).expect("ready");
+
+        let (done, finished) = mpsc::channel();
+        let run = |name: &'static str, f: Box<dyn FnOnce() + Send>| {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                f();
+                done.send(name).ok();
+            });
+        };
+        // A: `plan` with a parent holds the gate and parks at its parent-chain read, before it
+        // asks for the workflow (the second `get`: the first is its linked-card check).
+        arm(2);
+        let (bb, w) = (Arc::clone(&b), who.clone());
+        let (pid, cid) = (parent.id, child.id);
+        run(
+            "plan",
+            Box::new(move || {
+                let plan = crate::domain::Plan {
+                    parent: Some(Some(pid)),
+                    ..Default::default()
+                };
+                bb.plan(cid, &w, &plan).expect("planned");
+            }),
+        );
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("plan parked");
+        // C: a take of another card. B: a workflow change, which queues for the write lock.
+        let (bb, w, rid) = (Arc::clone(&b), who.clone(), ready.id);
+        run(
+            "take",
+            Box::new(move || {
+                bb.take(&w, Some(rid)).expect("take");
+            }),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        let (bb, flow) = (Arc::clone(&b), b.workflow());
+        run(
+            "workflow",
+            Box::new(move || {
+                bb.set_workflow(flow, |_| Ok(())).expect("workflow");
+            }),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        release.send(()).expect("release the plan");
+        let mut ended = Vec::new();
+        for _ in 0..3 {
+            ended.push(
+                finished
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("every thread finishes: no lock-order deadlock"),
+            );
+        }
+        ended.sort_unstable();
+        assert_eq!(ended, ["plan", "take", "workflow"]);
     }
 
     const PR: &str = "https://github.com/o/r/pull/7";

@@ -101,6 +101,11 @@ impl Doc {
         for op in ops {
             match op {
                 LineOp::Insert { after, lines } => {
+                    // Checked here too, so an insert with no lines still
+                    // fails on a missing anchor, as the splice fold did.
+                    if let Some(a) = after.filter(|a| !doc.rga.contains(a)) {
+                        return Err(a);
+                    }
                     let mut parent = *after;
                     for text in lines {
                         let id = LineId { art: at, n };
@@ -122,12 +127,16 @@ impl Doc {
         Ok(doc)
     }
 
-    /// Apply one element op. `key` is the line it inserts or deletes.
+    /// Apply one element op. `key` is the line it inserts or deletes. An
+    /// insert must add a new line: a replayed one is a reused id and fails
+    /// with `key`. Deleting a tombstone again is fine.
     fn put(&mut self, key: LineId, op: Op<LineId, String>) -> Result<(), LineId> {
+        let insert = matches!(op, Op::Insert { .. });
         match self.rga.apply(&op) {
-            Ok(Applied::Changed | Applied::Duplicate) => Ok(()),
+            Ok(Applied::Changed) => Ok(()),
+            Ok(Applied::Duplicate) if !insert => Ok(()),
             Ok(Applied::Pending { missing }) => Err(missing),
-            Err(_) => Err(key),
+            Ok(Applied::Duplicate) | Err(_) => Err(key),
         }
     }
 }
@@ -255,6 +264,34 @@ mod tests {
             d.apply(at(5), &[ins(Some(id(9, 0)), &["?"])]),
             Err(id(9, 0))
         );
+    }
+
+    #[test]
+    fn a_reused_line_id_fails_even_when_the_insert_is_identical() {
+        let d = two_sections();
+        let same = [ins(None, &["# A", "a1", "a2", "# B", "b1"])];
+        assert_eq!(d.apply(at(2), &same), Err(id(2, 0)));
+        let other = [ins(Some(id(2, 4)), &["new"])];
+        assert_eq!(d.apply(at(2), &other), Err(id(2, 0)));
+    }
+
+    #[test]
+    fn deleting_a_tombstone_again_is_fine() {
+        let d = two_sections();
+        let del = [LineOp::Delete { line: id(2, 1) }];
+        let once = d.apply(at(3), &del).unwrap();
+        let twice = once.apply(at(4), &del).unwrap();
+        assert_eq!(twice, once);
+        let both = d.apply(at(3), &[del[0].clone(), del[0].clone()]).unwrap();
+        assert_eq!(both, once);
+    }
+
+    #[test]
+    fn an_empty_insert_still_fails_on_a_missing_anchor() {
+        let d = two_sections();
+        assert_eq!(d.apply(at(3), &[ins(Some(id(9, 0)), &[])]), Err(id(9, 0)));
+        assert_eq!(d.apply(at(3), &[ins(Some(id(2, 1)), &[])]), Ok(d.clone()));
+        assert_eq!(d.apply(at(3), &[ins(None, &[])]), Ok(d));
     }
 
     #[test]

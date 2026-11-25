@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
@@ -44,6 +45,7 @@ use crate::pty::{self, Process, Pty};
 use crate::spool::{self, Spool};
 use crate::store::{Started, Store};
 use crate::terminal;
+use crate::upload;
 
 mod persist;
 pub(crate) use persist::save_periodically;
@@ -126,6 +128,7 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::FLOATS)
     .union(Features::TERMINAL_FIND)
     .union(Features::AGENT_META)
+    .union(Features::UPLOAD)
     .union(Features::PORT_FORWARD)
     .union(Features::ARCHIVE)
     .union(UNIX_ONLY);
@@ -263,6 +266,9 @@ struct BlockRt {
     /// Launched with `hold` (C78): the block stays, read-only, once its
     /// program exits.
     hold: bool,
+    /// Its launch passed an environment, descriptors or ownership (C75, C46),
+    /// as an agent's jailed block is launched. Not known for a restored block.
+    custom: bool,
     /// Who works it, as its launcher named them (D336). Stored and echoed,
     /// never acted on; not kept across a restart.
     agent: Option<AgentMeta>,
@@ -360,6 +366,7 @@ impl BlockRt {
             spool: None,
             input_seq: 0,
             hold: false,
+            custom: false,
             agent: None,
             released: false,
             exit: None,
@@ -372,6 +379,32 @@ impl BlockRt {
             live: Some(live),
             ..self
         }
+    }
+
+    /// Refuses `method` on an agent's block, until there is a jail-aware
+    /// design (Nano, 2026-11-24, "Refuse on agent blocks"). It judges by the
+    /// launch facts, not by the optional `AGENT_META`: a launch with an
+    /// environment, descriptors or ownership, or the `lel-jail` program,
+    /// which is all a restored block still shows (and a block with no
+    /// program is refused outright).
+    fn refuse_agent(&self, method: &str) -> Result<(), Refusal> {
+        // A block with no program is one restored read-only, whose launch
+        // facts were not kept (D72), or one that has exited: it cannot be
+        // told from an agent's, so it fails closed. A restored shell is
+        // started afresh with the default launch, so it is known not to be.
+        if self.live.is_none() {
+            return Err(format!(
+                "{method}: the block has no running program, so it is unknown whether it is an agent's"
+            )
+            .into());
+        }
+        let jail = std::path::Path::new(&self.started.program)
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("lel-jail"));
+        if self.custom || self.agent.is_some() || jail {
+            return Err(format!("{method}: refused on an agent's block").into());
+        }
+        Ok(())
     }
 
     /// The program, or a refusal saying the block is read-only.
@@ -503,6 +536,8 @@ pub(crate) struct State {
     listings: listing::Gate,
     /// Where sessions are saved across restarts, with `Config::state_dir`.
     store: Option<Store>,
+    /// Each block's upload authority (C82), made at its first upload.
+    uploads: RefCell<HashMap<BlockId, Arc<upload::Slot>>>,
     /// The event number the store last saved the model at.
     saved_at: Option<u64>,
     /// Numbers each save, newest highest.
@@ -570,6 +605,7 @@ impl State {
             lister: listing::lister(),
             listings: listing::Gate::default(),
             store: None,
+            uploads: RefCell::default(),
             saved_at: None,
             generation: 0,
             account: None,
@@ -624,44 +660,46 @@ impl State {
         Ok(Outcome::Later(finished))
     }
 
-    /// `terminal.list-dir`: reads the directory on the blocking pool under
-    /// [`listing::DEADLINE`], in a task of its own, and answers once read
-    /// ([`Self::listed`]). The connection waits for it before its next
-    /// request; no other client, PTY or task waits.
-    fn list_dir(
+    /// `terminal.list-dir` and `terminal.download`: runs `work` on the
+    /// blocking pool under [`listing::DEADLINE`], in a task of its own, and
+    /// answers once done ([`Self::listed`]). The connection waits for it
+    /// before its next request; no other client, PTY or task waits.
+    fn run_blocking(
         &mut self,
         shared: &Shared,
         client: ClientId,
         req: u64,
-        base: Option<String>,
-        path: Option<String>,
-        root: Option<listing::Workspace>,
+        method: &'static str,
+        work: Blocking,
     ) -> Result<oneshot::Receiver<()>, String> {
         let cancel = self
             .clients
             .get(&client)
             .map(|out| out.cancel().clone())
             .ok_or("no such client")?;
-        let slot = self
-            .listings
-            .take()
-            .map_err(|e| format!("terminal.list-dir: {e}"))?;
-        let lister = self.lister.clone();
+        let slot = self.listings.take().map_err(|e| format!("{method}: {e}"))?;
         let work = rusty_tokio::spawn_blocking(move || {
             // Held until the thread ends, not until the deadline.
             let _slot = slot;
-            lister(base.as_deref(), path.as_deref(), root.as_ref())
+            work()
         });
         let (done, finished) = oneshot::channel();
         let weak = Rc::downgrade(shared);
         rusty_tokio::task::spawn_local(async move {
             let answer = match rusty_tokio::time::timeout(listing::DEADLINE, work).await {
                 Ok(Ok(listed)) => listed,
-                Ok(Err(e)) => Err(format!("the listing failed: {e}")),
-                Err(_) => Err("the listing timed out".into()),
+                Ok(Err(e)) => Err(format!("the read failed: {e}")),
+                Err(_) if method == "terminal.upload" => {
+                    Err("the chunk timed out and may still be written, a last one \
+                     as the finished file: check what arrived before sending it again"
+                        .into())
+                }
+                Err(_) => Err("the read timed out".into()),
             };
             if let Some(shared) = weak.upgrade() {
-                shared.borrow_mut().listed(client, &cancel, req, answer);
+                shared
+                    .borrow_mut()
+                    .listed(client, &cancel, req, method, answer);
             }
             // The connection may have gone; nothing waits then.
             let _ = done.send(());
@@ -676,13 +714,14 @@ impl State {
         client: ClientId,
         cancel: &Rc<Notify>,
         req: u64,
+        method: &str,
         answer: Result<String, String>,
     ) {
         let message = match answer {
             Ok(text) => Message::Text { req, text },
             Err(reason) => Message::Failed {
                 req,
-                reason: format!("terminal.list-dir: {reason}"),
+                reason: format!("{method}: {reason}"),
                 code: None,
             },
         };
@@ -1214,8 +1253,8 @@ impl State {
             }
             Ok(Outcome::Write(write)) => Some(Pending::Write(write)),
             Ok(Outcome::Later(done)) => Some(Pending::Reload(done)),
-            Ok(Outcome::Listing { base, path, root }) => {
-                match this.list_dir(shared, client, req, base, path, root) {
+            Ok(Outcome::Blocking { method, work }) => {
+                match this.run_blocking(shared, client, req, method, work) {
                     Ok(done) => Some(Pending::Reload(done)),
                     Err(reason) => {
                         this.send(
@@ -2168,10 +2207,11 @@ impl State {
                     ("path", Value::Text(p)) => Some(p.as_str()),
                     _ => None,
                 });
-                return Ok(Outcome::Listing {
-                    base: None,
-                    path: path.map(str::to_owned),
-                    root: Some(root),
+                let path = path.map(str::to_owned);
+                let lister = self.lister.clone();
+                return Ok(Outcome::Blocking {
+                    method: "terminal.workspace-list",
+                    work: Box::new(move || lister(None, path.as_deref(), Some(&root))),
                 });
             }
             "terminal.list-dir" => {
@@ -2186,10 +2226,22 @@ impl State {
                     ("path", Value::Text(p)) => Some(p.as_str()),
                     _ => None,
                 });
-                return Ok(Outcome::Listing {
-                    base,
-                    path: path.map(str::to_owned),
-                    root: None,
+                let path = path.map(str::to_owned);
+                let lister = self.lister.clone();
+                return Ok(Outcome::Blocking {
+                    method: "terminal.list-dir",
+                    work: Box::new(move || lister(base.as_deref(), path.as_deref(), None)),
+                });
+            }
+            "terminal.upload" => {
+                rt.refuse_agent("terminal.upload")?;
+                // It writes to the server's disk, so it takes the lease.
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                return Ok(Outcome::Blocking {
+                    method: "terminal.upload",
+                    work: self.upload(block, &named)?,
                 });
             }
             "terminal.title" => rt.grid.title.clone(),
@@ -2530,6 +2582,7 @@ impl State {
         );
         let mut rt = rt.screened(shared, grid, parser);
         rt.hold = launch.hold;
+        rt.custom = launch.env.is_some() || launch.fds > 0 || launch.own;
         rt.agent = launch.agent.clone();
         self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
@@ -3290,11 +3343,65 @@ impl State {
         self.flush();
     }
 
+    /// `terminal.upload`: one chunk of a file into `block`'s upload folder.
+    fn upload(&self, block: BlockId, named: &[(&str, Value)]) -> Result<Blocking, Refusal> {
+        let text = |param| {
+            named.iter().find_map(|(n, v)| match v {
+                Value::Text(t) if *n == param => Some(t.clone()),
+                _ => None,
+            })
+        };
+        let data = named.iter().find_map(|(n, v)| match v {
+            Value::Bytes(b) if *n == "data" => Some(b.as_slice()),
+            _ => None,
+        });
+        // Before a copy is made or a shared slot is taken.
+        if data.is_some_and(|d| d.len() > upload::CHUNK_MAX) {
+            return Err(format!(
+                "terminal.upload: a chunk is at most {} bytes",
+                upload::CHUNK_MAX
+            )
+            .into());
+        }
+        let data = data.map(<[u8]>::to_vec);
+        let done = named
+            .iter()
+            .any(|(n, v)| *n == "done" && matches!(v, Value::Flag(true)));
+        let (Some(name), Some(data)) = (text("name"), data) else {
+            return Err("terminal.upload: missing name or data".to_owned().into());
+        };
+        let offset = u64::from(lines(named, "offset"));
+        let store = self.store.clone().ok_or(
+            "terminal.upload: the server keeps no state directory to put files in".to_owned(),
+        )?;
+        let slot = Arc::clone(self.uploads.borrow_mut().entry(block).or_default());
+        let deadline = Instant::now() + listing::DEADLINE;
+        // The disk work runs off the event loop, like a listing, and one
+        // block's transfers take turns.
+        Ok(Box::new(move || {
+            let dir = store.upload_path(block);
+            slot.run(&dir, deadline, || {
+                let dir = store.upload_dir(block).map_err(|e| e.to_string())?;
+                Ok(match upload::receive(&dir, &name, offset, &data, done)? {
+                    upload::Received::Partial(n) => n.to_string(),
+                    upload::Received::Done(path) => path.display().to_string(),
+                })
+            })
+        }))
+    }
+
     /// Deletes closed `block`'s spool by its path, whether or not a handle
     /// to it is left. A stopping server closes no block, so keeps them all.
     fn forget_history(&self, block: BlockId) {
         if let Some(Err(e)) = self.store.as_ref().map(|s| s.remove_spool(block)) {
             eprintln!("rusty-mux-server: removing block {block}'s history: {e}");
+        }
+        let slot = self.uploads.borrow_mut().remove(&block);
+        match (slot, self.store.as_ref()) {
+            // Transfers in flight end first; the slot clears the folder.
+            (Some(slot), Some(store)) => slot.close(store.upload_path(block)),
+            (None, Some(store)) => upload::discard(store.upload_path(block)),
+            _ => {}
         }
     }
 
@@ -3559,15 +3666,16 @@ enum Outcome {
     /// Answered later, by the task the request started; resolves once it
     /// has.
     Later(oneshot::Receiver<()>),
-    /// `terminal.list-dir`, to be read off this thread: the directory
-    /// `path` names from `base`.
-    Listing {
-        base: Option<String>,
-        path: Option<String>,
-        /// The directory the result must lie under, for the workspace call.
-        root: Option<listing::Workspace>,
+    /// A read of the host's files (`terminal.list-dir`,
+    /// `terminal.download`), to run off this thread; its text is the reply.
+    Blocking {
+        method: &'static str,
+        work: Blocking,
     },
 }
+
+/// What a [`Outcome::Blocking`] runs.
+type Blocking = Box<dyn FnOnce() -> Result<String, String> + Send>;
 
 /// The line count `param` holds, 0 when left out.
 fn lines(named: &[(&str, Value)], param: &str) -> u32 {
