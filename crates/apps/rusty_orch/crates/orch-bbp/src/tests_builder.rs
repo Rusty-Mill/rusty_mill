@@ -23,6 +23,7 @@ struct Fake {
     holder_deadline: Option<u64>,
     turn_deadline: Option<u64>,
     term: Result<(), Refused>,
+    kill: Result<(), String>,
 }
 
 impl Default for Fake {
@@ -39,6 +40,7 @@ impl Default for Fake {
             holder_deadline: None,
             turn_deadline: None,
             term: Ok(()),
+            kill: Ok(()),
         }
     }
 }
@@ -91,7 +93,7 @@ impl Ports for Fake {
     }
     fn kill(&mut self) -> Result<(), String> {
         self.calls.push("kill".into());
-        Ok(())
+        self.kill.clone()
     }
     fn release(&mut self) -> Result<(), String> {
         self.calls.push("release".into());
@@ -301,4 +303,26 @@ fn a_refused_term_is_noted_and_the_end_path_goes_on() {
     let out = run(&mut fake);
     assert_eq!(out.session.phase, ended(End::Stored(ArtId(9))));
     assert_eq!(out.notes, ["term: no such block"]);
+}
+
+#[test]
+fn a_failed_kill_after_end_turn_submits_nothing() {
+    let mut fake = Fake {
+        empty: false,
+        kill: Err("cgroup still populated 10s after the kill".into()),
+        ..Fake::default()
+    };
+    let out = run(&mut fake);
+    assert_eq!(out.session.phase, ended(End::Failed));
+    assert!(
+        !fake.calls.contains(&"submit".to_owned()),
+        "{:?}",
+        fake.calls
+    );
+    assert!(fake.calls.contains(&"release".to_owned()));
+    assert!(
+        out.notes.iter().any(|n| n.contains("not confirmed empty")),
+        "{:?}",
+        out.notes
+    );
 }

@@ -144,17 +144,33 @@ pub fn run<P: Ports>(ports: &mut P, session: Session, wall: Duration) -> Result<
     };
     save(ports, &session, &mut notes);
     let ran = match (ports.turn(deadline), stop(ports, &mut notes)) {
-        (Ran::Turn(_), Some(lost)) => Ran::Lost(lost),
+        (
+            Ran::Turn(_),
+            Stopped {
+                lost: Some(lost), ..
+            },
+        ) => Ran::Lost(lost),
+        // Submit reads the worktree as orch: not while the agent may run.
+        (Ran::Turn(_), Stopped { empty: false, .. }) => {
+            Ran::Failed("the cgroup was not confirmed empty: nothing submitted".into())
+        }
         (ran, _) => ran,
     };
     let (session, end) = settle(ports, session, ran, &mut notes);
     finish(ports, session, end, notes)
 }
 
+/// What the end path found.
+struct Stopped {
+    /// Why the mux was lost, if `term` found it so.
+    lost: Option<String>,
+    /// The cgroup was seen empty, after the grace or orch's kill.
+    empty: bool,
+}
+
 /// The end path: `term`, the grace, orch's kill if anything is left, then
-/// `release`. Each failure is noted and the path goes on. Returns why the
-/// mux was lost, if `term` found it so.
-fn stop<P: Ports>(ports: &mut P, notes: &mut Vec<String>) -> Option<String> {
+/// `release`. Each failure is noted and the path goes on.
+fn stop<P: Ports>(ports: &mut P, notes: &mut Vec<String>) -> Stopped {
     let lost = match ports.term() {
         Ok(()) => None,
         Err(Refused::Lost(e)) => Some(e),
@@ -167,15 +183,18 @@ fn stop<P: Ports>(ports: &mut P, notes: &mut Vec<String>) -> Option<String> {
         notes.push(format!("cgroup: {e}"));
         false
     });
-    if !empty {
-        if let Err(e) = ports.kill() {
-            notes.push(format!("kill: {e}"));
-        }
-    }
+    let empty = empty
+        || ports.kill().map_or_else(
+            |e| {
+                notes.push(format!("kill: {e}"));
+                false
+            },
+            |()| true,
+        );
     if let Err(e) = ports.release() {
         notes.push(format!("release: {e}"));
     }
-    lost
+    Stopped { lost, empty }
 }
 
 /// How the turn ends the session, with its usage recorded (D188).
