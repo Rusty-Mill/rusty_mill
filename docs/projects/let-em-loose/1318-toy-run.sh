@@ -6,15 +6,19 @@
 # stop the read-back (the builders themselves are detached and keep running either way):
 #   tmux new -s toy 'bash docs/projects/let-em-loose/1318-toy-run.sh; exec bash'
 
-# Everything lives in ~/toy-1318 (TASK=toy-1318b for a second try). It never uses sudo: when the binaries
+# Everything lives in ~/toy-1318 (TOY_TASK=toy-1318b for a second try). It never uses sudo: when the binaries
 # are missing from /opt/lel/<sha>/bin it prints the install lines for you and stops. Nothing under /srv/lel,
 # /opt/lel/current or the inbox board changes.
 set -euo pipefail
 unset CDPATH   # a set CDPATH makes `cd` print the directory
+# Builders use the subscription login only (D165): no API key reaches them.
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 
-TASK=${TASK:-toy-1318}
-[[ $TASK =~ ^[a-z0-9-]+$ ]] || { echo "STOP: TASK must be lowercase letters, digits and -" >&2; exit 1; }
+# Its own variable, not TASK, so an exported TASK can't point the run (and its cleanup) at another dir.
+TASK=${TOY_TASK:-toy-1318}
+[[ $TASK =~ ^toy-1318[a-z0-9-]*$ ]] || { echo "STOP: TOY_TASK must start toy-1318 (letters, digits, -)" >&2; exit 1; }
 T=$HOME/$TASK
+MARK=$T/.lel-toy-run                        # only a dir holding this mark is ever removed
 WALL=2700                                   # D167: 45 minutes per builder
 UNIT=lel-$TASK-mux                          # the run's own mux server, a delegated user unit
 REPO_ROOT=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
@@ -37,7 +41,8 @@ git -C "$REPO_ROOT" fetch -q origin main
 git -C "$REPO_ROOT" merge-base --is-ancestor HEAD origin/main || die "HEAD $SHA is not on origin/main (D197: run merged code only)"
 [ -f "$REPO_ROOT/crates/apps/rusty_orch/crates/rusty_orch/src/builder/e2e.rs" ] || die "#1318 S6 is not merged at $SHA"
 grep -qw landlock /sys/kernel/security/lsm || die "Landlock is not active"
-[ ! -e "$D" ] || die "$D exists: a run already opened this task. Rerun with TASK=toy-1318b"
+[ ! -e "$D" ] || die "$D exists: a run already opened this task. Rerun with TOY_TASK=toy-1318b"
+[ ! -e "$T" ] || [ -f "$MARK" ] || die "$T exists and this script didn't make it: move it, or use another TOY_TASK"
 
 # ---- 1. Binaries from this sha (built here; installing needs sudo, so it is printed, never run)
 echo "=== 1. binaries in $BIN"
@@ -57,8 +62,10 @@ fi
 
 # ---- 2. The no-overage assertion and the login (D167): fail closed before anything is made
 echo "=== 2. assertion and login"
-rm -rf "$T"   # nothing paid has run in it: the task dir check above
+# Ours (the mark) and unpaid (no task dir, checked above), so it is safe to start clean.
+[ ! -e "$T" ] || rm -rf "$T"
 mkdir -p "$T" "$OUT"
+touch "$MARK"
 LOG=$OUT/script-$(date -u +%Y%m%dT%H%M%SZ).log
 exec > >(tee -a "$LOG") 2>&1
 echo "log: $LOG"
@@ -80,7 +87,7 @@ cat > "$CFG" <<EOF
 }
 EOF
 CHECK=$("$BIN/rusty_orch" lens check "$CFG")
-echo "$CHECK"
+echo "$CHECK" | sed 's/[^[:space:]]*@[^[:space:]]*/<account>/g'   # the log is sent back: no email in it
 ACCOUNT=$(sed -n 's/^claude[[:space:]].*ready if logged in as \([^[:space:]]*\).*/\1/p' <<<"$CHECK")
 [ -n "$ACCOUNT" ] || die "no valid Claude no-overage assertion in /etc/let-em-loose/assertions.json (it lapses 2026-12-25)"
 claude auth status 2>&1 | grep -qF "$ACCOUNT" || die "claude is not logged in as the asserted account"
@@ -110,11 +117,17 @@ CG=/sys/fs/cgroup$(systemctl --user show -P ControlGroup "$UNIT")
 # ---- 4. No-cost handshake: claude-code-acp starts in the jail and answers initialize and session/new.
 # No prompt is sent, so no model is asked. A failure here stops the run before any paid call.
 echo "=== 4. jailed handshake (no prompt)"
-systemd-run --user --quiet --scope -p Delegate=yes \
+if ! systemd-run --user --quiet --scope -p Delegate=yes \
   python3 -I "$HERE/1318-acp-handshake.py" "$BIN/lel-jail" "$T/acp-check" "${ROOTS[@]}" \
-  | tee "$OUT/handshake.txt"
+  | tee "$OUT/handshake.txt"; then
+  die "the jailed handshake failed: see $OUT/handshake.txt"
+fi
 grep -q '^handshake ok$' "$OUT/handshake.txt" || die "the jailed handshake failed: see $OUT/handshake.txt"
 rm -rf "$T/acp-check"
+
+# Everything free has passed. Nothing is made for the task until the paid run is confirmed.
+read -r -p "Type RUN to make the task and start the two paid builders (anything else stops here): " GO
+[ "$GO" = RUN ] || die "not confirmed: nothing was made and nothing paid ran"
 
 # ---- 5. Toy repo, task and claim (D197 item 3)
 echo "=== 5. toy repo, task, claim"

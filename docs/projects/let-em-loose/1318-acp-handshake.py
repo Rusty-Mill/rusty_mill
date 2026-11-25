@@ -69,7 +69,7 @@ def call(sock: socket.socket, mid: int, method: str, params: dict, buf: bytearra
 
 def main() -> None:
     jail, work, extra = sys.argv[1], sys.argv[2], sys.argv[3:]
-    wt, status, spec_path = (os.path.join(work, n) for n in ("wt", "status", "jail.json"))
+    wt, status, spec_path, err_path = (os.path.join(work, n) for n in ("wt", "status", "jail.json", "stderr"))
     os.makedirs(wt, exist_ok=True)
     open(status, "w").close()
     cgroup = os.path.join(own_cgroup(), "acp-check")
@@ -85,9 +85,12 @@ def main() -> None:
         os.dup2(slot, 3)
         os.dup2(acp, 4)
 
+    # stderr goes to a file, not a pipe, so a chatty jail can't block on a full pipe.
+    err_file = open(err_path, "wb")
     proc = subprocess.Popen([jail, spec_path], preexec_fn=fds, pass_fds=(3, 4),
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE)
+                            stderr=err_file)
+    err_file.close()
     theirs.close()
     os.close(acp)
     try:
@@ -104,7 +107,8 @@ def main() -> None:
         with open(os.path.join(cgroup, "cgroup.kill"), "w") as f:
             f.write("1")
         proc.wait(timeout=30)
-        err = proc.stderr.read().decode(errors="replace").strip()
+        with open(err_path, "rb") as f:
+            err = f.read().decode(errors="replace").strip()
         if err:
             print("lel-jail stderr:", err[-2000:])
         jail_status = open(status).read().strip()
