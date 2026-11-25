@@ -1283,6 +1283,7 @@ const SECTIONS=[
   ["rules","Rules","Whether card moves follow the Columns moves and each role's capabilities."],
   ["github","GitHub","Mirror a repository's issues onto the board."],
   ["apps","Apps","Apps signed in through OAuth, such as a claude.ai connector."],
+  ["history","History","What each settings change altered: when, who, and the old and new value. The newest 5000 are kept; secrets are never recorded."],
   ["server","Server","How this board was started. Read-only; it changes with the server's flags and a restart."]];
 function drawSettings(){
   const d=$("settings"),box=el("div",null,"sheet");
@@ -1293,7 +1294,7 @@ function drawSettings(){
     b.onclick=()=>{tab=id;secret=null;flowDraft=null;drawSettings()};tabs.append(b)}
   const close=el("button","Close","close");close.type="button";close.onclick=()=>d.close();tabs.append(close);
   const [,title,about]=SECTIONS.find(([id])=>id===tab),pane=el("div",null,"pane");
-  pane.append(el("h2",title),el("p",about,"lead"),{agents:agentsTab,repos:reposTab,projects:projectsTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
+  pane.append(el("h2",title),el("p",about,"lead"),{agents:agentsTab,repos:reposTab,projects:projectsTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,history:historyTab,server:serverTab}[tab]());
   // Destructive actions read as such wherever a section puts them.
   pane.querySelectorAll("button").forEach(b=>{if(/^(Remove|Revoke|Turn sync off)/.test(b.textContent))b.classList.add("danger");
     else if(/^(Save (roles|columns)|Add (agent|role|column)$)/.test(b.textContent))b.classList.add("primary")});
@@ -1556,6 +1557,20 @@ function appsTab(){
 }
 
 /* How the server was started. Changed with its flags or board.env, then a restart. */
+function historyTab(){
+  const t=el("div"),body=el("div");t.append(body);
+  setting("settings_history",{limit:200}).then(r=>{
+    const es=(r.entries||[]).slice().reverse();
+    if(!es.length){body.append(el("p","No settings change has been recorded yet.","note"));return}
+    const tbl=el("table"),head=el("tr");["When","Who","Section","Old","New"].forEach(h=>head.append(el("th",h)));tbl.append(head);
+    const val=v=>{const c=el("code",v==null?"(none)":JSON.stringify(v));c.style.whiteSpace="pre-wrap";c.style.wordBreak="break-all";return c};
+    for(const e of es){const tr=el("tr"),o=el("td"),n=el("td");o.append(val(e.old));n.append(val(e.new));
+      tr.append(el("td",new Date(e.at_ms).toLocaleString()),el("td",e.actor+(e.via_connector?" (connector)":"")),el("td",e.section+" · "+e.op),o,n);tbl.append(tr)}
+    body.append(tbl);
+  }).catch(e=>body.append(el("p","Could not read the history: "+e.message,"err")));
+  return t;
+}
+
 function serverTab(){
   const t=el("div"),s=cfg.server||{},p=cfg.paths||{},tbl=el("table");
   const row=(k,v)=>{const tr=el("tr");tr.append(el("td",k),el("td",v));tbl.append(tr)};
