@@ -44,7 +44,7 @@ impl Cover {
             return Ok(Self::Shadow);
         }
         match word.strip_prefix("golden:") {
-            Some(case) if !case.trim().is_empty() => Ok(Self::Golden(case.to_owned())),
+            Some(case) if !case.trim().is_empty() => Ok(Self::Golden(case.trim().to_owned())),
             _ => Err(format!(
                 "covered_by {word:?}: \"golden:<case>\", \"shadow\" or null required"
             )),
@@ -132,7 +132,11 @@ fn entry(v: &Value) -> Result<Entry, String> {
     Ok(Entry { line, cover })
 }
 
-/// A line as compared: trimmed, without a leading YAML list dash.
+/// A line as compared: trimmed, without a leading YAML list dash. That fits
+/// the frozen intent's YAML; `*` bullets, numbered items or a tab after the
+/// dash are not stripped, and the same text in two sections is one line.
+/// Whether a `golden:` case exists is checked by the golden run (#1238),
+/// not here.
 pub fn normal(line: &str) -> String {
     let t = line.trim();
     t.strip_prefix("- ").unwrap_or(t).trim().to_owned()
@@ -259,5 +263,9 @@ mod tests {
         for w in ["shadow", "golden:unc-paths"] {
             assert_eq!(Cover::parse(w).unwrap().word(), w);
         }
+        assert_eq!(
+            Cover::parse("golden: unc-paths ").unwrap(),
+            Cover::Golden("unc-paths".to_owned())
+        );
     }
 }
