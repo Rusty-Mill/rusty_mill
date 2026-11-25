@@ -24,7 +24,8 @@ An MCP client configuration for Claude Code, one per role, looks like:
 ```text
 bbp mcp                                   serve one turn (BBP_TURN) or a session (BBP_SESSION=yes) over stdio
 bbp metrics --dir D --task T              concurrency metrics of a task's log, as JSON (`bbp mod` prints `elapsed_ms`)
-bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven]
+bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven] [--gates scratch|owned]
+bbp gates   --dir D scratch-add --repo R --source REF [--as WHO] | scratch-list
 bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 bbp card    --dir D --task T              the core card plus the task's scheduling `policy`, as JSON
 bbp why     --dir D (--task T | T) [--turn N]   why each turn was granted, replayed from the log, as JSON
@@ -32,11 +33,15 @@ bbp why     --dir D (--task T | T) --claim ID [--at REV]   how one claim moved a
 bbp tick    --dir D --task T              fire deadlines and grant the first turn; `bbp mod` does this itself
 bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
-bbp human   --dir D --task T [--rev N] VERB ARGS...
+bbp human   --dir D --task T [--rev N] [--fence N] [--as WHO] [--approval FILE] VERB ARGS...
   approve-plan ART | approve-merge ART RUN | reject STATE REASON... | decision MSG accept|reject NOTE...
   ask ROLE TEXT... | answer MSG TEXT... | rerun ART | receipt ART REVISION | resume STATE
   extend FIELD LIMIT | cancel REASON...
 ```
+
+**Who answers a gate (#447, D190-D195).** A task opens *owned* by default: its `approve-plan` and `approve-merge` need `--approval FILE`, a receipt Mill Board signs (`approval_issue`) for an `approve` holder. The receipt is the receipt's JSON line, then the hex Ed25519 signature over those bytes. `bbp` checks it against the board key compiled in from `keys/board-approval.ed25519.pub`, which only a reviewed PR changes. The receipt must name this task, gate, artifact and (for a merge) run, and the `--fence` revision the answer runs under. It is stored as a task blob, and the answer runs under the op `by:<approver>/rcpt:<sha256>`, so a resend replays. `--approval` excludes `--op` and `--decision`, and an `--op` may not start with `by:`. Every other verb, and every claims-mode verb, keeps its `--as` label. `bbp metrics` verifies each owned approval's receipt again: an owned approval without one that verifies is `self_approved`, and the report says `scratch`. While the key file is empty, every owned approval is refused.
+
+`--gates scratch` opens a scratch or evidence task whose approvals take a plain `--as` answer. It is refused, before anything is written, unless the repo is on `<dir>/gates/scratch-repos.log`. Only `bbp gates scratch-add` writes that file, with `--source` naming where Nano approved the repo (D195). The host records the source and does not verify it, as with the erosion limits. Claims mode refuses `--gates` (D190).
 
 `extend` refuses on an evidence run (a task a capped `bbp mod` started, so it carries an evidence marker), for every field: an evidence run runs under the budget it was opened with, and one that exhausts a task budget (`messages`, `bytes`, `reads`, `turns` or `iterations`) stays escalated. `extend-claim` refuses on an evidence run the same way. A capped first start refuses a task whose log already holds an extension of either kind. `bbp pairs` loads a run whose log holds an extension anyway as a failed run (`budget extended`), its costs kept, with no replacement.
 

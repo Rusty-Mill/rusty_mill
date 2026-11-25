@@ -10884,6 +10884,7 @@ dependencies = [
  "rusty_mcp_server",
  "rusty_oauth",
  "rusty_oauth_server",
+ "rusty_pk",
  "rusty_rand",
  "rusty_request",
  "rusty_serve",

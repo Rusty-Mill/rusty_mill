@@ -4,6 +4,14 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Owned BBP gates
+**2026-11-25**
+
+- A BBP config can set `gates: scratch` for a sandbox or evidence goal. Its
+  tasks then take plain gate answers, provided the operator has listed the
+  repo. Every other goal opens owned tasks, which need a signed approval
+  from Mill Board.
+
 ## Cost breaker and taint in lens runs
 **2026-11-17**
 

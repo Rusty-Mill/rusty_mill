@@ -44,6 +44,7 @@ pub mod migrate;
 pub mod milestones;
 pub mod page;
 pub mod projects;
+pub mod receipts;
 pub mod retag;
 pub mod roadmap;
 pub mod settings;

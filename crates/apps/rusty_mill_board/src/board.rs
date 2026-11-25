@@ -152,6 +152,8 @@ pub struct Board<S> {
         Vec<crate::mergewatch::MergedOpen>,
         crate::mergewatch::WatchStatus,
     )>,
+    /// Signs approval receipts for BBP human gates (#447); `None` refuses `approval_issue`.
+    approval_key: Option<Arc<rusty_pk::ed25519::SigningKey>>,
 }
 
 /// The parent-link gate, even if a holder panicked: it guards no data.
@@ -244,7 +246,43 @@ impl<S: Store> Board<S> {
             agents: Mutex::default(),
             links: Mutex::new(()),
             merged_open: Mutex::default(),
+            approval_key: None,
         }
+    }
+
+    /// Sign BBP approval receipts with `key` (#447).
+    #[must_use]
+    pub fn with_approval_key(mut self, key: rusty_pk::ed25519::SigningKey) -> Self {
+        self.approval_key = Some(Arc::new(key));
+        self
+    }
+
+    /// Sign a receipt that `by` approved one BBP gate in the words of `r.verbatim` (#447). The
+    /// approver is `by`, whatever `r` names, and the time is the board's. Needs `approve`, or
+    /// `admin` (the owner).
+    ///
+    /// # Errors
+    /// `Forbidden` without the capability; `Refused` when no key is configured or `bbp` would
+    /// refuse the receipt.
+    pub fn issue_approval(
+        &self,
+        by: &Actor,
+        r: crate::receipts::Receipt,
+    ) -> Result<String, BoardError> {
+        if !by.caps.contains(&Capability::Approve) && !by.caps.contains(&Capability::Admin) {
+            return Err(BoardError::Forbidden(Capability::Approve));
+        }
+        let key = self.approval_key.as_ref().ok_or_else(|| {
+            BoardError::Refused("this board has no approval key (--approval-key)".into())
+        })?;
+        let r = crate::receipts::Receipt {
+            approver: by.name.clone(),
+            issued_ms: (self.clock)(),
+            ..r
+        };
+        let file = crate::receipts::issue(key, &r).map_err(BoardError::Refused)?;
+        rusty_log::info!(approver = %r.approver, task = %r.task, gate = %r.gate, fence = r.fence, source = %r.source, "approval receipt issued");
+        Ok(file)
     }
 
     /// Serve these projects instead of only `default`.

@@ -34,6 +34,8 @@ rusty_oauth = { workspace = true }
 # OAuth 2.1 sign-in for /mcp (claude.ai connectors), beside the bearer tokens.
 rusty_oauth_server = { workspace = true, features = ["serve"] }
 rusty_crypto_key = { workspace = true }
+# Ed25519 signing of approval receipts for BBP human gates (#447).
+rusty_pk = { workspace = true }
 rusty_rand = { workspace = true }
 rusty_atomic_file = { workspace = true }
 # The board's own SQLite store (ADR-0007): the workspace wrapper, so pragmas and migrations are shared.
