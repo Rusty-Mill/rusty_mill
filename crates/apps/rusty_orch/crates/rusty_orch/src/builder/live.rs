@@ -352,6 +352,7 @@ impl Ports for Live<'_> {
         if let Some(parent) = p.worktree.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
+        refuse_gitlinks(&git(&self.o.repo, &["ls-tree", "-r", "-z", &self.base])?)?;
         let repo = Repo::open(&self.o.repo)?;
         let worktree = repo.add_detached(&p.worktree, &self.base)?;
         // Read now, before the agent can rewrite `.git` in its worktree.
@@ -610,10 +611,6 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     git_out(cmd, args)
 }
 
-/// git on `work_tree` through orch's own record of its git dir, with
-/// hooks, fsmonitor and external diff and textconv drivers off: nothing
-/// the agent wrote in the worktree (a new `.git`, attributes) can make
-/// orch run a command outside the jail.
 /// True for `block`'s `program-exited`: the mux is up, so a broken turn
 /// is the agent's failure, not a lost mux. The viewer's exit doesn't count.
 fn exits(line: &Line, block: Option<&str>) -> bool {
@@ -625,15 +622,27 @@ fn exits(line: &Line, block: Option<&str>) -> bool {
         && body.get("block").and_then(rusty_json::Value::as_str) == block
 }
 
+/// The most entries [`nested_repo`] looks at before it gives up.
+const WALK_ENTRIES: usize = 1_000_000;
+
 /// The first nested `.git` (file or directory) below `root`, its own
 /// `.git` aside. `git add` steps into a nested repository and reads its
 /// config (a `filter.*.clean` there runs as orch), so any one refuses
-/// the diff. Symlinks are not followed.
+/// the diff. Symlinks are not followed; a symlink at a submodule path is
+/// [`refuse_gitlinks`]'s. Bounded by [`WALK_ENTRIES`] and [`STEP_WAIT`].
 fn nested_repo(root: &Path) -> Result<Option<PathBuf>, String> {
+    let until = Instant::now() + STEP_WAIT;
+    let mut seen = 0usize;
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
         let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         for entry in entries {
+            seen += 1;
+            if seen > WALK_ENTRIES || Instant::now() >= until {
+                return Err(format!(
+                    "worktree walk passed {WALK_ENTRIES} entries or {STEP_WAIT:?}: no diff taken"
+                ));
+            }
             let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
             let path = entry.path();
             if entry.file_name() == ".git" {
@@ -653,8 +662,32 @@ fn nested_repo(root: &Path) -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
+/// The first gitlink (mode 160000) in an `ls-tree -r -z` listing refuses
+/// the base: git follows whatever sits at a submodule path, a symlink to
+/// another repository included, and runs `submodule status` there, whose
+/// config (fsmonitor, filters) would run as orch.
+fn refuse_gitlinks(listing: &str) -> Result<(), String> {
+    let Some(entry) = listing.split('\0').find(|e| e.starts_with("160000 ")) else {
+        return Ok(());
+    };
+    let path = entry.split_once('\t').map_or(entry, |(_, path)| path);
+    Err(format!(
+        "the base has a submodule at {path}: builders take no base with submodules"
+    ))
+}
+
+/// git on `work_tree` through orch's own record of its git dir, with
+/// hooks, fsmonitor and external diff and textconv drivers off: nothing
+/// the agent wrote in the worktree (a new `.git`, attributes) can make
+/// orch run a command outside the jail.
 fn sealed_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = StdCommand::new("git");
+    // Inherited `GIT_*` goes first, so the sealed values below stay.
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(name);
+        }
+    }
     cmd.arg("--git-dir")
         .arg(git_dir)
         .arg("--work-tree")
@@ -668,20 +701,19 @@ fn sealed_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Result<String,
         .args(["-c", "core.untrackedCache=false", "-c", "diff.external="])
         .current_dir(work_tree)
         .env("GIT_CONFIG_NOSYSTEM", "1");
-    for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with("GIT_") {
-            cmd.env_remove(name);
-        }
-    }
     cmd.args(args);
     git_out(cmd, args)
 }
 
-/// The candidate's diff: everything in `work_tree` but `.lel/`, staged,
-/// against `base`.
-/// The worktree's diff against `base`, refused while any nested
-/// repository is present (see [`nested_repo`]).
+/// The worktree's diff against `base`, refused for a base with a
+/// submodule (see [`refuse_gitlinks`]; prepare checked it too) and while
+/// any nested repository is present (see [`nested_repo`]).
 fn candidate_diff(git_dir: &Path, work_tree: &Path, base: &str) -> Result<String, String> {
+    refuse_gitlinks(&sealed_git(
+        git_dir,
+        work_tree,
+        &["ls-tree", "-r", "-z", base],
+    )?)?;
     if let Some(nested) = nested_repo(work_tree)? {
         return Err(format!(
             "nested repository at {}: no diff taken",
@@ -691,6 +723,8 @@ fn candidate_diff(git_dir: &Path, work_tree: &Path, base: &str) -> Result<String
     staged_diff(git_dir, work_tree, base)
 }
 
+/// The candidate's diff: everything in `work_tree` but `.lel/`, staged,
+/// against `base`.
 fn staged_diff(git_dir: &Path, work_tree: &Path, base: &str) -> Result<String, String> {
     sealed_git(
         git_dir,
@@ -788,14 +822,13 @@ mod tests {
         assert!(ok, "{script}");
     }
 
-    #[test]
-    fn a_nested_repo_at_a_submodule_path_is_refused_before_git_runs() {
-        let root = std::env::temp_dir().join(format!("orch-nested-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("temp dir");
+    /// A repo with a submodule at `sub`, its worktree and admin dir.
+    fn with_submodule(root: &Path) -> (PathBuf, String, PathBuf) {
+        let _ = std::fs::remove_dir_all(root);
+        std::fs::create_dir_all(root).expect("temp dir");
         let c = "git -c user.name=t -c user.email=t@t -c protocol.file.allow=always";
         sh(
-            &root,
+            root,
             &format!(
                 "git init -q lib && cd lib && echo l > l && git add l && {c} commit -qm l && cd .. && \
                  git init -q repo && cd repo && echo a > a && git add a && \
@@ -808,6 +841,13 @@ mod tests {
             .add_detached(&root.join("wt"), &base)
             .expect("worktree");
         let admin = admin_dir(&repo, &wt).expect("admin dir");
+        (wt, base, admin)
+    }
+
+    #[test]
+    fn a_nested_repo_at_a_submodule_path_is_refused_before_git_runs() {
+        let root = std::env::temp_dir().join(format!("orch-nested-{}", std::process::id()));
+        let (wt, base, admin) = with_submodule(&root);
         // The agent makes `sub` a repo whose clean filter runs its script.
         let marker = root.join("ran");
         sh(
@@ -821,8 +861,62 @@ mod tests {
             ),
         );
         let err = candidate_diff(&admin, &wt, &base).expect_err("refused");
-        assert!(err.contains("nested repository"), "{err}");
+        assert!(err.contains("submodule at sub"), "{err}");
         assert!(!marker.exists(), "the nested repo's filter ran");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_symlink_at_a_submodule_path_is_refused_before_git_runs() {
+        let root = std::env::temp_dir().join(format!("orch-gitlink-{}", std::process::id()));
+        let (wt, base, admin) = with_submodule(&root);
+        // The agent points its own `.git` at a repo whose fsmonitor runs
+        // its script and makes `sub` a symlink back to the worktree.
+        let marker = root.join("ran");
+        sh(
+            &root,
+            &format!(
+                "git init -q evil && printf '#!/bin/sh\\ntouch {m}\\n' > hook && chmod +x hook && \
+                 git -C evil config core.fsmonitor \"$PWD/hook\" && \
+                 rm wt/.git && echo \"gitdir: $PWD/evil/.git\" > wt/.git && \
+                 rm -rf wt/sub && ln -s . wt/sub",
+                m = marker.display()
+            ),
+        );
+        let err = candidate_diff(&admin, &wt, &base).expect_err("refused");
+        assert!(err.contains("submodule at sub"), "{err}");
+        assert!(!marker.exists(), "the planted fsmonitor ran");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_listing_without_gitlinks_passes() {
+        let listing = "100644 blob 0a\ta\x00040000 tree 1b\td\0";
+        assert_eq!(refuse_gitlinks(listing), Ok(()));
+        let err =
+            refuse_gitlinks("100644 blob 0a\ta\x00160000 commit 2c\tx y\0").expect_err("gitlink");
+        assert!(err.contains("submodule at x y"), "{err}");
+    }
+
+    #[test]
+    fn a_nested_repo_elsewhere_refuses_the_diff() {
+        let root = std::env::temp_dir().join(format!("orch-nested2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        sh(
+            &root,
+            "git init -q repo && cd repo && echo a > a && git add a && \
+             git -c user.name=t -c user.email=t@t commit -qm a",
+        );
+        let repo = Repo::open(&root.join("repo")).expect("repo");
+        let base = rev_parse(&root.join("repo"), "HEAD").expect("base");
+        let wt = repo
+            .add_detached(&root.join("wt"), &base)
+            .expect("worktree");
+        let admin = admin_dir(&repo, &wt).expect("admin dir");
+        sh(&wt, "mkdir -p d && git init -q d/inner");
+        let err = candidate_diff(&admin, &wt, &base).expect_err("refused");
+        assert!(err.contains("nested repository"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
