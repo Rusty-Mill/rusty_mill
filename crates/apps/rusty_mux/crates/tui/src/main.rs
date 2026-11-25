@@ -1343,9 +1343,16 @@ mod client {
         /// Whether the server lists this block's workspace, on this
         /// connection: [`Features::WORKSPACE`] over [`Features::BLOCK_CALL`].
         workspace: bool,
-        /// The workspace listing asked for and not yet answered.
-        listing: Option<u64>,
+        /// The workspace listings asked for and not yet answered: a tree
+        /// closed and opened again leaves its first one outstanding, and its
+        /// refusal is not the lease's. The oldest are forgotten past
+        /// [`LISTINGS`].
+        listings: Vec<u64>,
     }
+
+    /// How many workspace listings a block's connection remembers asking
+    /// for, until each is answered.
+    const LISTINGS: usize = 8;
 
     /// The workspace tree open over `block`, and the listing request it
     /// waits on.
@@ -1488,12 +1495,12 @@ mod client {
                 }
                 // The listing is the tree's: a refusal of it says nothing
                 // of the lease.
-                Message::Text { req, text } if self.listing == Some(req) => {
-                    self.listing = None;
+                Message::Text { req, text } if self.listings.contains(&req) => {
+                    self.listings.retain(|r| *r != req);
                     return Ok(Change::Listed(req, Ok(text)));
                 }
-                Message::Failed { req, reason, .. } if self.listing == Some(req) => {
-                    self.listing = None;
+                Message::Failed { req, reason, .. } if self.listings.contains(&req) => {
+                    self.listings.retain(|r| *r != req);
                     return Ok(Change::Listed(req, Err(reason)));
                 }
                 Message::Failed { req, .. } => {
@@ -2638,7 +2645,10 @@ mod client {
                     .into_iter()
                     .collect(),
             });
-            pane.listing = Some(req);
+            if pane.listings.len() == LISTINGS {
+                pane.listings.remove(0);
+            }
+            pane.listings.push(req);
             open.req = Some(req);
         }
 
@@ -3166,7 +3176,7 @@ mod client {
                 workspace: opened
                     .features
                     .contains(Features::BLOCK_CALL.union(Features::WORKSPACE)),
-                listing: None,
+                listings: Vec::new(),
             };
             if opened.resumed.is_none() {
                 pane.attach = pane.send(|req| Message::Attach { req, block });
@@ -4559,6 +4569,46 @@ mod client {
             );
             assert!(!app.panes[&a].leased);
             assert!(app.exploring.is_none() && !app.browsing, "closed");
+        }
+
+        /// A listing refused after the tree was closed and opened again is
+        /// the old one's: it costs neither the new tree nor the lease.
+        #[cfg(unix)]
+        #[test]
+        fn an_older_listings_refusal_leaves_the_new_tree_and_the_lease() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.act(Action::Explorer);
+            let first = workspace_calls(&sent(&far[1]))[0].0;
+            app.take(Input::Keys(b"q".to_vec()));
+            assert!(app.exploring.is_none());
+            app.act(Action::Explorer);
+            let second = workspace_calls(&sent(&far[1]))[0].0;
+            assert_ne!(first, second);
+            pane_says(
+                &mut app,
+                a,
+                Message::Failed {
+                    req: first,
+                    reason: "outside the workspace".into(),
+                    code: None,
+                },
+            );
+            assert!(app.panes[&a].leased, "the lease stands");
+            assert!(app.exploring.as_ref().is_some_and(|o| o.explorer.waiting()));
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: second,
+                    text: ".\nf\ta".into(),
+                },
+            );
+            assert!(
+                app.exploring
+                    .as_ref()
+                    .is_some_and(|o| !o.explorer.waiting())
+            );
         }
 
         /// A listing asked on a path given up is never answered: the path
