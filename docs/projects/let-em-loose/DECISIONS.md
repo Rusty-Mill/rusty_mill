@@ -186,8 +186,8 @@ Precise contracts used by this guide:
 | D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
 | D177 | #1404 build defaults from the recovered #600 design: builders_per_claim 1, max_live_builders 3; budget admission as approved; `builder_session` fields | [default] 2026-11-25 (1404) |
 | D178 | #1405: Windows-only intent lines are recognised by a frozen-input mapping file keyed by line; the check is orch's, no BBP change | [default] 2026-11-25 (1405) |
-| D179 | #447 step 6: no claims-mode `bbp human` verb needs a signed receipt for now; claims-mode verbs unchanged | [stated] 2026-11-25 (447) |
-| D180 | #447 step 6: BBP human-gate schema/API items approved as a set (`task_opened.gates`, `bbp open --gates scratch`, `bbp human --approval`, `--op by:` refusal) | [stated] 2026-11-25 (447) |
+| D190 | #447 step 6: no claims-mode `bbp human` verb needs a signed receipt for now; claims-mode verbs unchanged | [stated] 2026-11-25 (447) |
+| D191 | #447 step 6: BBP human-gate schema/API items approved as a set (`task_opened.gates`, `bbp open --gates scratch`, `bbp human --approval`, `--op by:` refusal) | [stated] 2026-11-25 (447) |
 
 ## D1. Lenses, not stages
 
@@ -1791,7 +1791,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1405:windows-line-recognition
 **Source.** Caller question from the #600 thread, 2026-11-25; `600-builder-session-design.md` §2, §8 (approved, D66); D56, D63.
 
-## D179. #447 step 6: no claims-mode `bbp human` verb needs a signed receipt for now
+## D190. #447 step 6: no claims-mode `bbp human` verb needs a signed receipt for now
 
 **Decision.** For card #447 step 6 (BBP human gates, folded in from #22), no claims-mode `bbp human` verb needs a board-signed approval receipt for now. Claims-mode human verbs (`claim accept`, `choose`, `holdout-updated`, `extend`, `extend-claim`, `close`, `rerun`, `receipt`) are unchanged. Nano: "D3. None for now". This answers the expert's 2026-11-04 escalation. Build consequence recorded in the design (§12, the author's reading, not Nano's words): `bbp open --gates scratch` is refused together with claims mode until a receipt rule exists for claims mode.
 **Why.** Claims mode has no plan or merge gates (addendum lines 10, 250); Nano deferred receipts for its accept verbs.
@@ -1800,7 +1800,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:447:claims-verbs-no-receipt
 **Source.** Nano, project thread message `cmsg_014AqbZs58L565hMV2pFkCX5CZatgThTCScc6TZfje7dmZ`, 2026-11-25T19:23:05Z, answering §10 of `docs/design/factory-roles/design.md` (PR #1881). Relayed verbatim by the caller; the message was not read. Design §10 D3.
 
-## D180. #447 step 6: BBP human-gate schema/API items approved as a set
+## D191. #447 step 6: BBP human-gate schema/API items approved as a set
 
 **Decision.** Nano approved as a set the ask-first items of `docs/design/factory-roles/design.md` §7 and §10 D4. The BBP and host parts recorded here: (1) optional `task_opened.gates` field, value `scratch`; absent means owned and is not serialized, so there is no `LOG_SCHEMA` bump and N=1 goldens stay byte-identical; (2) `bbp open --gates scratch`, refused at open (before any turn or cost) unless the repo is on orch's scratch-repo list; (3) `bbp human --approval FILE`: on an owned task `approve-plan` and `approve-merge` need an Ed25519 receipt signed by the board (`rusty_pk`), bound to the human-view fence, artifact and (merge) run, verified against the board public key committed in the repo, stored as a task blob, op labelled `by:<approver>/rcpt:<sha>`, and re-verified by `bbp metrics`; (4) the host refuses a caller `--op` with a `by:` prefix; labels come only from `--as` (scratch) or a receipt (owned). Nano: "D4. I Approve them as a set." The board items in the same set (`card_review`, `card_approve`, `approval_issue`, `provider` on board credentials) are Mill Board's, outside this pack, and are not recorded here. This clears the ask-first gate only; CI, review by `dottiusmaximus` and the merge rules still apply.
 **Why.** A new event field and new public CLI flags are ask-first (D59, D62 precedent); Nano approved them so the build can proceed.
