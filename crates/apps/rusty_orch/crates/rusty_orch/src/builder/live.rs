@@ -257,7 +257,9 @@ impl<'a> Live<'a> {
             if let Some(own) = self.own.as_mut() {
                 match own.next_event(Duration::ZERO) {
                     Err(MuxError::Lost(e)) => return Ran::Lost(e),
-                    Ok(Some(line)) => self.exited |= self.agent_exited(&line),
+                    Ok(Some(line)) => {
+                        self.exited |= exits(&line, self.blocks.first().map(String::as_str));
+                    }
                     _ => {}
                 }
             }
@@ -267,16 +269,6 @@ impl<'a> Live<'a> {
         }
     }
 
-    /// True for the builder block's `program-exited`: the mux is up, so
-    /// a broken turn is the agent's failure, not a lost mux.
-    fn agent_exited(&self, line: &Line) -> bool {
-        let Line::Event { kind, body } = line else {
-            return false;
-        };
-        let block = body.get("block").and_then(rusty_json::Value::as_str);
-        kind == "program-exited" && block == self.blocks.first().map(String::as_str)
-    }
-
     /// A turn that broke off: lost when `own` says the mux went away
     /// (it retries a dropped connection for up to 25 s before `lost`),
     /// failed when the server reports the program exited or says nothing.
@@ -284,6 +276,7 @@ impl<'a> Live<'a> {
         if self.exited {
             return Ran::Failed(error);
         }
+        let builder = self.blocks.first().cloned();
         let Some(own) = self.own.as_mut() else {
             return Ran::Failed(error);
         };
@@ -291,7 +284,7 @@ impl<'a> Live<'a> {
         while let Some(left) = until.checked_duration_since(Instant::now()) {
             match own.next_event(left) {
                 Err(MuxError::Lost(e)) => return Ran::Lost(e),
-                Ok(Some(Line::Event { kind, .. })) if kind == "program-exited" => break,
+                Ok(Some(line)) if exits(&line, builder.as_deref()) => break,
                 Ok(Some(_)) => {}
                 Ok(None) | Err(_) => break,
             }
@@ -325,7 +318,7 @@ impl<'a> Live<'a> {
             return Ok(None);
         }
         let git_dir = self.paths.git_dir.as_deref().ok_or("no worktree git dir")?;
-        let diff = staged_diff(git_dir, wt, &self.base)?;
+        let diff = candidate_diff(git_dir, wt, &self.base)?;
         if diff.trim().is_empty() {
             return Ok(None);
         }
@@ -621,6 +614,45 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// hooks, fsmonitor and external diff and textconv drivers off: nothing
 /// the agent wrote in the worktree (a new `.git`, attributes) can make
 /// orch run a command outside the jail.
+/// True for `block`'s `program-exited`: the mux is up, so a broken turn
+/// is the agent's failure, not a lost mux. The viewer's exit doesn't count.
+fn exits(line: &Line, block: Option<&str>) -> bool {
+    let Line::Event { kind, body } = line else {
+        return false;
+    };
+    kind == "program-exited"
+        && block.is_some()
+        && body.get("block").and_then(rusty_json::Value::as_str) == block
+}
+
+/// The first nested `.git` (file or directory) below `root`, its own
+/// `.git` aside. `git add` steps into a nested repository and reads its
+/// config (a `filter.*.clean` there runs as orch), so any one refuses
+/// the diff. Symlinks are not followed.
+fn nested_repo(root: &Path) -> Result<Option<PathBuf>, String> {
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+            let path = entry.path();
+            if entry.file_name() == ".git" {
+                if dir != root {
+                    return Ok(Some(path));
+                }
+                continue;
+            }
+            let kind = entry
+                .file_type()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            if kind.is_dir() {
+                dirs.push(path);
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn sealed_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = StdCommand::new("git");
     cmd.arg("--git-dir")
@@ -636,14 +668,10 @@ fn sealed_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Result<String,
         .args(["-c", "core.untrackedCache=false", "-c", "diff.external="])
         .current_dir(work_tree)
         .env("GIT_CONFIG_NOSYSTEM", "1");
-    for var in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_CONFIG",
-        "GIT_EXTERNAL_DIFF",
-    ] {
-        cmd.env_remove(var);
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(name);
+        }
     }
     cmd.args(args);
     git_out(cmd, args)
@@ -651,6 +679,18 @@ fn sealed_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Result<String,
 
 /// The candidate's diff: everything in `work_tree` but `.lel/`, staged,
 /// against `base`.
+/// The worktree's diff against `base`, refused while any nested
+/// repository is present (see [`nested_repo`]).
+fn candidate_diff(git_dir: &Path, work_tree: &Path, base: &str) -> Result<String, String> {
+    if let Some(nested) = nested_repo(work_tree)? {
+        return Err(format!(
+            "nested repository at {}: no diff taken",
+            nested.display()
+        ));
+    }
+    staged_diff(git_dir, work_tree, base)
+}
+
 fn staged_diff(git_dir: &Path, work_tree: &Path, base: &str) -> Result<String, String> {
     sealed_git(
         git_dir,
@@ -749,6 +789,59 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_repo_at_a_submodule_path_is_refused_before_git_runs() {
+        let root = std::env::temp_dir().join(format!("orch-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let c = "git -c user.name=t -c user.email=t@t -c protocol.file.allow=always";
+        sh(
+            &root,
+            &format!(
+                "git init -q lib && cd lib && echo l > l && git add l && {c} commit -qm l && cd .. && \
+                 git init -q repo && cd repo && echo a > a && git add a && \
+                 {c} submodule -q add ../lib sub && {c} commit -qm a"
+            ),
+        );
+        let repo = Repo::open(&root.join("repo")).expect("repo");
+        let base = rev_parse(&root.join("repo"), "HEAD").expect("base");
+        let wt = repo
+            .add_detached(&root.join("wt"), &base)
+            .expect("worktree");
+        let admin = admin_dir(&repo, &wt).expect("admin dir");
+        // The agent makes `sub` a repo whose clean filter runs its script.
+        let marker = root.join("ran");
+        sh(
+            &root,
+            &format!(
+                "printf '#!/bin/sh\\ntouch {m}\\ncat\\n' > hook && chmod +x hook && \
+                 cd wt/sub && git init -q && git fetch -q ../../lib && git checkout -q FETCH_HEAD && \
+                 git config filter.e.clean \"$PWD/../../hook\" && \
+                 echo '* filter=e' > .gitattributes && git add .gitattributes && rm {m} && touch l .gitattributes",
+                m = marker.display()
+            ),
+        );
+        let err = candidate_diff(&admin, &wt, &base).expect_err("refused");
+        assert!(err.contains("nested repository"), "{err}");
+        assert!(!marker.exists(), "the nested repo's filter ran");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_worktree_s_own_git_is_not_a_nested_repo() {
+        let root = std::env::temp_dir().join(format!("orch-own-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("a/b")).expect("dirs");
+        std::fs::write(root.join(".git"), "gitdir: x").expect("own .git");
+        assert_eq!(nested_repo(&root).expect("walk"), None);
+        std::fs::write(root.join("a/b/.git"), "gitdir: y").expect("nested .git");
+        assert_eq!(
+            nested_repo(&root).expect("walk"),
+            Some(root.join("a/b/.git"))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn the_diff_ignores_a_git_dir_the_agent_planted() {
         let root = std::env::temp_dir().join(format!("orch-sealed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -775,7 +868,7 @@ mod tests {
                 m = marker.display()
             ),
         );
-        let diff = staged_diff(&admin, &wt, &base).expect("diff");
+        let diff = candidate_diff(&admin, &wt, &base).expect("diff");
         assert!(diff.contains("+b"), "{diff}");
         assert!(!marker.exists(), "the planted fsmonitor ran");
         let _ = std::fs::remove_dir_all(&root);

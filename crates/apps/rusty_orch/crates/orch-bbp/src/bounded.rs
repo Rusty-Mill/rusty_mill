@@ -2,7 +2,9 @@
 //! runs before or after a builder turn (git, `bbp`, `rusty-mux-ctl`) must
 //! answer within a bound.
 
+use std::io::Read;
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 /// `cmd`'s output, or an error once `wait` has passed (it is killed then),
@@ -12,34 +14,14 @@ use std::time::{Duration, Instant};
 ///
 /// When `cmd` cannot be spawned or waited on, or `wait` passes.
 pub fn output_within(mut cmd: Command, wait: Duration) -> Result<std::process::Output, String> {
-    use std::io::Read;
     let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| e.to_string())?;
-    let drain = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut bytes);
-            }
-            bytes
-        })
-    };
-    let out = drain(
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let err = drain(
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
     let until = Instant::now() + wait;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
@@ -53,11 +35,32 @@ pub fn output_within(mut cmd: Command, wait: Duration) -> Result<std::process::O
         }
         std::thread::sleep(Duration::from_millis(20));
     };
+    // A grandchild can hold a pipe open past the child's exit.
+    let left = || until.saturating_duration_since(Instant::now());
+    let stdout = out
+        .recv_timeout(left())
+        .map_err(|_| format!("output still open after {wait:?}"))?;
+    let stderr = err
+        .recv_timeout(left())
+        .map_err(|_| format!("output still open after {wait:?}"))?;
     Ok(std::process::Output {
         status,
-        stdout: out.join().unwrap_or_default(),
-        stderr: err.join().unwrap_or_default(),
+        stdout,
+        stderr,
     })
+}
+
+/// Read `pipe` to its end on a thread; the bytes arrive on the receiver.
+fn drain(pipe: Option<impl Read + Send + 'static>) -> Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut p) = pipe {
+            let _ = p.read_to_end(&mut bytes);
+        }
+        let _ = tx.send(bytes);
+    });
+    rx
 }
 
 #[cfg(test)]
@@ -81,6 +84,16 @@ mod tests {
         let start = Instant::now();
         let err = output_within(cmd, Duration::from_millis(200)).expect_err("times out");
         assert!(err.contains("no answer"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_grandchild_holding_the_pipe_does_not_hang_it() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30 & echo started"]);
+        let start = Instant::now();
+        let err = output_within(cmd, Duration::from_millis(500)).expect_err("pipe held");
+        assert!(err.contains("still open"), "{err}");
         assert!(start.elapsed() < Duration::from_secs(5));
     }
 
