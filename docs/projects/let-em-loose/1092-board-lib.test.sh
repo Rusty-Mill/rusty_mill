@@ -119,6 +119,13 @@ no scr active mill-board 77 "$L1"                                  # the port be
 no scr failed mill-board 42 ""
 no scr activating mill-board 42 "$L1"
 
+# ---- account_check: group enumeration must succeed before membership is read
+ok account_check 0 "mill-board"
+no account_check 0 "mill-board orch-runner"
+no account_check 1 ""                                     # id failed: not "not in orch-runner"
+no account_check 1 "mill-board"                           # failed even with output
+no account_check 0 ""                                     # nothing listed
+
 # ---- lookup_state: absent only on bbp's own unknown-task error
 eq "$(lookup_state 0 '')" exists "lookup: exit 0 -> exists"
 eq "$(lookup_state 1 'bbp: UnknownTask')" absent "lookup: UnknownTask -> absent"

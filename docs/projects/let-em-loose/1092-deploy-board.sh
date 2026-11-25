@@ -31,6 +31,7 @@ R="sudo -H -u orch-runner"   # orch-runner cannot enter baileyrd's directories: 
 TASK=$FIXTURE_TASK
 
 die() { echo "STOP: $*" >&2; exit 1; }
+account_groups() { local g rc=0; g=$(id -nG mill-board) || rc=$?; account_check "$rc" "$g"; }
 cd /
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -53,7 +54,7 @@ host_check "$(hostname)" "$LEL_HOST" || die "wrong host"
 $R test -d "$D" || die "$D missing: run 1092-deploy.sh first"
 if id mill-board >/dev/null 2>&1; then
   [ "$(getent passwd mill-board | cut -d: -f6)" = "$STATE" ] || die "user mill-board exists with another home: not ours"
-  if id -nG mill-board | tr ' ' '\n' | grep -qx orch-runner; then die "mill-board is in the orch-runner group"; fi
+  account_groups || die "mill-board's groups are not as D132 requires"
 fi
 if sudo test -e "$STATE"; then
   [ "$(sudo stat -c %U "$STATE")" = mill-board ] || die "$STATE is not owned by mill-board: not ours"
@@ -105,7 +106,7 @@ sudo restorecon -R /opt/lel
 echo "=== 2. mill-board user"
 id mill-board >/dev/null 2>&1 \
   || { sudo useradd --system --no-create-home --home-dir "$STATE" --shell /usr/sbin/nologin mill-board; CHANGED=1; }
-if id -nG mill-board | tr ' ' '\n' | grep -qx orch-runner; then die "mill-board is in the orch-runner group"; fi
+account_groups || die "mill-board's groups are not as D132 requires"
 sudo install -d -o mill-board -g mill-board -m 0700 "$STATE" "$STATE/settings"
 sudo install -d -o root -g root -m 0755 "$MARKER_DIR"
 

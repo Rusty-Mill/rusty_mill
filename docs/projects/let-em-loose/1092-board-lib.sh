@@ -139,6 +139,14 @@ unit_effective_check() {
   [ -z "$diff" ] || refuse "mill-board.service is not the approved unit:"$'\n'"$diff"
 }
 
+# account_check STATUS GROUPS: `id -nG mill-board` exited STATUS and printed GROUPS. A failed or empty
+# enumeration is refused, not read as "not in orch-runner"; then orch-runner must not be among the groups.
+account_check() {
+  [ "$1" = 0 ] || refuse "cannot list mill-board's groups (exit $1)" || return 1
+  [ -n "$2" ] || refuse "mill-board's group list is empty" || return 1
+  if tr ' ' '\n' <<<"$2" | grep -qx orch-runner; then refuse "mill-board is in the orch-runner group"; return 1; fi
+}
+
 # lookup_state STATUS STDERR -> exists | absent. `bbp card` exited STATUS; only bbp's own unknown-task error
 # counts as absent. Any other failure is a failed lookup, not an absent task.
 lookup_state() {
