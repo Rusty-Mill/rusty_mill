@@ -4,8 +4,10 @@ Card #1318 (bbp_factory, child of epic #600): orch launches each #600 builder se
 mux-hosted pty whose process is `lel-jail`, which execs the Claude CLI's ACP adapter, with the
 lifecycle held by orch through the cgroup holder. This finishes the Let Em Loose side of #732.
 
-Status: **draft for Nano's approval** (2026-11-25). Nano asked for it on 2026-11-25 ("Yes,
-design it now", decision card in the #600 thread). No code until he approves it on the card.
+Status: **approved by Nano** (2026-11-25, D188). Nano asked for it on 2026-11-25 ("Yes,
+design it now", decision card in the #600 thread) and approved it on the next decision card in
+that thread ("Approve, marker + diff (a)", message
+`cmsg_01WgyiM31RsSnZTgNuPX2VE48sBVZYhJPE5kniVhcHSwk1`, 2026-11-25T17:26:33Z).
 
 What this decides is only how to build it. The behaviour is already approved:
 mux-hosted-agents-design.md §2–§4, §6 and §11 (D104), 600-builder-session-design.md §4 (D66),
@@ -127,7 +129,8 @@ sequence is tested with fakes:
 6. **End.** On the stop reason, the wall clock, or giving up: `signal term`, 60 s grace, then
    **orch** writes `cgroup.kill` if anything is left, waits for empty, and sends `release` (D104 §2
    step 7). The holder's deadline kill is only the backstop for when orch is dead. The row ends
-   `stored`, `failed` or `aborted`; how a candidate reaches BBP is the open point in §5.
+   `stored`, `failed` or `aborted`. A candidate reaches BBP only as D188 says (§5): on `end_turn`
+   with `.lel/submit` written and a non-empty diff; anything else ends `failed`, nothing posted.
    A mux loss or an orch restart ends it `aborted` (`orch_lens::builder::recover`), never debited by
    orch; admission reads the card's own candidate if BBP stored one first.
 
@@ -164,11 +167,11 @@ when S6 is green. #1320 stays unapproved.
 
 ## 5. Open points
 
-**For Nano, with this design:**
+**Answered by Nano with this design (D188, 2026-11-25):**
 
 | Point | Proposal |
 |---|---|
-| **How a candidate reaches BBP, and submit vs. gave up** (blocks S5; the jail has no socket but fd 4 and there is no gateway yet) | **a (recommended):** orch posts the diff and candidate under the builder's seat after the turn, only when the stop reason is `end_turn`, the agent wrote a submit marker (`.lel/submit` in the worktree) and the diff is non-empty; anything else stores and debits nothing. **b:** orch posts on any `end_turn` with a non-empty diff. **c:** orch offers BBP to the agent as a tool over ACP (an MCP server in `session/new`). a keeps "gives up and posts nothing" (600 design §4 step 7) from turning half-done work into a debited candidate, and orch already decides what reaches the board (D104); c adds a surface before #726. |
+| **How a candidate reaches BBP, and submit vs. gave up** (blocked S5; the jail has no socket but fd 4 and there is no gateway yet) | **Answered: a** (D188; Nano, decision card in the #600 thread, `cmsg_01WgyiM31RsSnZTgNuPX2VE48sBVZYhJPE5kniVhcHSwk1`, 2026-11-25T17:26:33Z; anything that fails the rule ends the session `failed`). **a (recommended):** orch posts the diff and candidate under the builder's seat after the turn, only when the stop reason is `end_turn`, the agent wrote a submit marker (`.lel/submit` in the worktree) and the diff is non-empty; anything else stores and debits nothing. **b:** orch posts on any `end_turn` with a non-empty diff. **c:** orch offers BBP to the agent as a tool over ACP (an MCP server in `session/new`). a keeps "gives up and posts nothing" (600 design §4 step 7) from turning half-done work into a debited candidate, and orch already decides what reaches the board (D104); c adds a surface before #726. |
 | New public surface | S1 `rusty_libc::pidfd_getfd` and rustils `spawn_with_fds`; S5 `rusty_orch builder run` |
 | `claude-code-acp` for the toy run | A third-party npm package installed for Nano's user on BaileyAi, not a repo dependency |
 
