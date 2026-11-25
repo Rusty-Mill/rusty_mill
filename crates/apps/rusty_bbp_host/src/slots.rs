@@ -65,6 +65,17 @@ impl Capacity {
     fn text(self) -> String {
         format!("agents={} validators={}\n", self.agents, self.validators)
     }
+
+    /// The inverse of [`Capacity::text`], exactly.
+    fn parse(text: &str) -> Option<Capacity> {
+        let rest = text.strip_suffix('\n')?.strip_prefix("agents=")?;
+        let (agents, validators) = rest.split_once(" validators=")?;
+        let capacity = Capacity {
+            agents: agents.parse().ok()?,
+            validators: validators.parse().ok()?,
+        };
+        (capacity.text() == text).then_some(capacity)
+    }
 }
 
 /// One slot directory with its recorded capacity.
@@ -110,6 +121,21 @@ impl Slots {
             dir: dir.to_path_buf(),
             capacity,
         })
+    }
+
+    /// Open `dir` with the capacity a moderator already recorded there, for
+    /// a process that takes a slot without a configuration of its own (`bbp
+    /// slot-hold --cgroup --slots`, D108 item 2).
+    ///
+    /// # Errors
+    /// When no capacity is recorded or the record does not parse.
+    pub fn recorded(dir: &Path) -> Result<Slots, String> {
+        let path = dir.join("capacity");
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let capacity = Capacity::parse(&text)
+            .ok_or_else(|| format!("{}: not a capacity record: {}", path.display(), text.trim()))?;
+        Slots::open(dir, capacity)
     }
 
     /// The slot directory.
@@ -213,6 +239,14 @@ impl Slot {
     /// When the holder cannot be started.
     pub fn holder(&self, bbp: &Path) -> Result<Child, String> {
         holder(bbp, Some(self), None)
+    }
+
+    /// The descriptor this process holds the slot on, for a holder that
+    /// tells its parent which one to copy (`pidfd_getfd`, D108 item 2).
+    #[cfg(unix)]
+    pub fn fd(&self) -> i32 {
+        use std::os::fd::AsRawFd;
+        self.file.as_raw_fd()
     }
 
     /// Its index within its class.
@@ -421,6 +455,28 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bbp_slots_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn a_recorded_capacity_is_read_back_and_a_missing_or_bad_one_refused() -> Result<(), String> {
+        let d = dir("recorded");
+        assert!(Slots::recorded(&d).is_err(), "nothing recorded yet");
+        let caps = Capacity {
+            agents: 2,
+            validators: 3,
+        };
+        Slots::open(&d, caps)?;
+        assert_eq!(Slots::recorded(&d)?.capacity, caps);
+        for bad in [
+            "agents=2 validators=3",
+            "agents=0 validators=3\n",
+            "agents=x validators=3\n",
+        ] {
+            std::fs::write(d.join("capacity"), bad).map_err(|e| e.to_string())?;
+            assert!(Slots::recorded(&d).is_err(), "{bad:?}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+        Ok(())
     }
 
     /// The next free slot of `class`, awaited briefly: another test's fork
