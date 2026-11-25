@@ -5,6 +5,7 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 pub mod acp;
+pub mod builder;
 mod config;
 mod lease;
 #[cfg(target_os = "linux")]
@@ -900,3 +901,6 @@ mod tests_acp;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests_mux;
+
+#[cfg(test)]
+mod tests_builder;

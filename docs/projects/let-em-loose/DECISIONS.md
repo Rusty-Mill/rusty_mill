@@ -186,6 +186,7 @@ Precise contracts used by this guide:
 | D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
 | D177 | #1404 build defaults from the recovered #600 design: builders_per_claim 1, max_live_builders 3; budget admission as approved; `builder_session` fields | [default] 2026-11-25 (1404) |
 | D178 | #1405: Windows-only intent lines are recognised by a frozen-input mapping file keyed by line; the check is orch's, no BBP change | [default] 2026-11-25 (1405) |
+| D189 | #1318 S5 `builder run` defaults: explicit launcher flags, holder deadline past orch's grace, `sh` fd-4 wrapper, no recover in `builder run`, built-in prompt, `claude-builder` seat and op ids, store opened per step | [default] 2026-11-25 (1318) |
 
 ## D1. Lenses, not stages
 
@@ -1676,7 +1677,7 @@ The first three were approved first. The last three were added to Q35 after that
 ## D167. One paid run approved: the #1318 toy-claim acceptance run (2 builders, 45 min, one claim) after the Claude `no_overage` assertion is added; #1320 not approved
 
 **Decision.** Nano approves ONE paid run: the toy-claim acceptance run for #1318, with `builders_per_claim` 2, `builder_wall_secs` 2700 (45 minutes each) and one claim. This supersedes D134 for that run only, as D140 did for its run. Before it, the Claude `no_overage` assertion must be added to `/etc/let-em-loose/assertions.json` so the run fails closed. The dedup run (#1320) is NOT approved; it waits on M1 and the toy-run result, and any further paid call stays ask-first. The subscription is flat-rate, so the cost is usage limit, not dollars.
-**Open action for Nano (not done).** Adding the `no_overage` assertion is a host write on BaileyAi. Nano hasn't done it and hasn't authorised an agent to. Entry shape (from `mem_fe5132a19f51456190c6017e94955e0a`): `{provider: claude, account: <email as `claude auth status` reports it for the running account>, checked: YYYY-MM-DD}`. The run does not start until it is in place.
+**Open action for Nano (done 2026-11-25).** Adding the `no_overage` assertion is a host write on BaileyAi; Nano did it himself. Nano: "Done", #732 project thread, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4XwVns9yHdxFK1rGRYvyaUf`, 2026-11-25T19:02:38Z (usage credits off, account matches; remind-me `mem_5e7dc428234b4b71be3504e17bc8f228`). The entry is dated 2026-11-25 and lapses 2026-12-25: the toy run happens before then or Nano re-dates it. Entry shape (from `mem_fe5132a19f51456190c6017e94955e0a`): `{provider: claude, account: <email as `claude auth status` reports it for the running account>, checked: YYYY-MM-DD}`. The run did not start until it was in place.
 **Why.** The smallest paid run that tests builder launch; the assertion makes it fail closed; the dedup run needs evidence from the first.
 **Rejected.** Approving #1320 as well.
 **Tag.** [stated] · remind-me: mem_77c0be9609544059ae911c7e2ccdb2f9
@@ -1788,3 +1789,19 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_8515601b9f5d426e973dcad3c0524df4
 **Key.** lel:1405:windows-line-recognition
 **Source.** Caller question from the #600 thread, 2026-11-25; `600-builder-session-design.md` §2, §8 (approved, D66); D56, D63.
+
+## D189. #1318 S5 `rusty_orch builder run` implementation defaults
+
+**Decision.** Inside the approved S5 (D188, `1318-builder-launch-slices.md` §S5):
+1. **Flags.** Beyond `<config> --bbp --dir --task --claim --state`: `--repo`, `--base`, `--cgroup-parent` (a delegated cgroup dir holding the `lel-store-<scope>` name), `--slots`, `--mux-ctl`, optional `--mux-socket`. No orch config schema change. `--base` is the caller-passed task baseline (the protected set's `baseline`) until 600 §4 step 2's claim-base rule is coded, then it becomes optional. The flags ride the command's existing ask-first note in the PR.
+2. **Holder deadline.** `--deadline-ms` = now + `builder_wall_secs` + 60 s grace + 30 s margin, so orch's end path (term, grace, `cgroup.kill`, `release`) always runs first and the holder's kill stays the backstop for a dead orch (§S5 step 6).
+3. **fd 4 to stdio.** Jail program `/bin/sh` with `-c 'exec claude-code-acp <&4 >&4 4>&-'`; stderr stays on the pty; `/bin` and `/usr` in read roots. Closing fd 4 keeps the agent's tool subprocesses off the ACP channel. `lel-jail` is unchanged.
+4. **Recover.** `builder run` does not call `orch_lens::builder::recover`; #1320's loop owns it, since a sibling `builder run` (D167, `builders_per_claim` 2) would be aborted. A crashed run's row stays `running` and counts toward `max_live_builders` until then.
+5. **Prompt.** A short built-in prompt: claim id and text, the worktree, "build it; run the visible tests as often as you like; when it is ready write `.lel/submit` and end your turn; to give up, end your turn without it". `.lel/` is excluded from the posted diff. Failing-profile names (600 §4 Retries) are added when the card carries them.
+6. **Seat and posts.** Through `bbp mcp` with `BBP_PRINCIPAL=claude-builder` (the agent file's id; it must be the task's assigned builder seat, addendum C-R1) and `BBP_SESSION`, as lenses do. Diff then candidate, op ids `builder-<claim>-<n>-diff` and `builder-<claim>-<n>-candidate` (`n` is unique per claim from `admit`), so a lost answer replays. Diff: `git add -A` excluding `.lel`, then `git diff --cached --binary <base>`.
+7. **Store.** Each step opens the store briefly (load, replace this row, save), retrying briefly on `DirLock` `Held`; admission is one such step. Rows saved at admitted, running and ended.
+**Why.** Each is implementation detail inside the approved design and the most reversible choice: no config schema, BBP or merged-crate change, and the holder deadline keeps the design's stated order.
+**Rejected.** Deadline at exactly the wall (the holder kill would always beat orch's end path). Teaching `lel-jail` to dup fd 4 onto 0/1 (a change to merged `orch-jail` for what a wrapper does). Calling `recover` at startup (aborts a live sibling). New orch config fields for the launcher paths.
+**Tag.** [default] · remind-me: mem_f09b470e92384f13befd1e1adce9a0ed
+**Key.** lel:1318:s5-builder-run-defaults
+**Source.** Caller question from the #1318 S5 implementation, 2026-11-25; `1318-builder-launch-slices.md` §S5; D104, D167, D177, D187, D188; addendum C-R1. Numbered D189 because D179 to D188 are taken on open PRs (#1871, #1872, #1873, #1877, #1880).

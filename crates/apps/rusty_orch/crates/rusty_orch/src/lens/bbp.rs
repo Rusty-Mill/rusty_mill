@@ -446,6 +446,45 @@ impl<R: Rpc> Session<R> {
         self.brief
     }
 
+    /// Store `diff` and a candidate on `base` for `claim` (#1318 S5, D188):
+    /// a diff artifact, then the candidate naming it, which submits a run
+    /// and debits the claim. Each call's op id is `op` with `-diff` or
+    /// `-candidate`, so a call whose answer was lost is sent once more and
+    /// BBP replays it if the first one landed.
+    pub fn put_candidate(
+        &mut self,
+        op: &str,
+        base: &str,
+        diff: &str,
+        claim: MsgId,
+    ) -> Result<ArtId, String> {
+        let diff = self.store(map(vec![
+            ("op", format!("{op}-diff").into()),
+            ("kind", "diff".into()),
+            ("body", diff.into()),
+        ]))?;
+        self.store(map(vec![
+            ("op", format!("{op}-candidate").into()),
+            ("kind", "candidate".into()),
+            ("base", base.into()),
+            ("diffs", Value::Seq(vec![diff.0.into()])),
+            ("claim", claim.0.into()),
+        ]))
+    }
+
+    /// One `put_artifact`, retried once on a lost answer.
+    fn store(&mut self, args: Value) -> Result<ArtId, String> {
+        const TOOL: &str = "put_artifact";
+        let reply = match self.rpc.call(TOOL, args.clone()) {
+            Err(CallError::Lost(_)) => self.rpc.call(TOOL, args),
+            first => first,
+        };
+        match answer(reply, TOOL)? {
+            Response::Stored(id) => Ok(id),
+            other => Err(format!("{TOOL} answered {other:?}")),
+        }
+    }
+
     /// The task brief's text: the intent every lens prefix starts with.
     /// Charged once per call (R11), so the shell reads it once per run.
     pub fn brief(&mut self) -> Result<String, String> {
@@ -1911,5 +1950,37 @@ done
             Some(r#""lens-r1-1""#)
         );
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_candidate_is_its_diff_then_the_candidate_with_stable_ops() {
+        let rpc = Fake::default()
+            .on("put_artifact", Response::Stored(ArtId(40)))
+            .fail("put_artifact", "timeout")
+            .on("put_artifact", Response::Stored(ArtId(41)));
+        let mut s = Session::new("claude-builder", rpc, "r");
+        let got = s.put_candidate("builder-7-1", &"a".repeat(40), "--- a\n+++ b\n", MsgId(7));
+        assert_eq!(got, Ok(ArtId(41)));
+        let calls = s.rpc.args("put_artifact");
+        assert_eq!(calls.len(), 3, "the lost candidate is sent once more");
+        assert_eq!(calls[0]["op"], Value::from("builder-7-1-diff"));
+        assert_eq!(calls[0]["kind"], Value::from("diff"));
+        assert_eq!(calls[1], calls[2]);
+        assert_eq!(calls[1]["op"], Value::from("builder-7-1-candidate"));
+        assert_eq!(calls[1]["diffs"], Value::Seq(vec![40u64.into()]));
+        assert_eq!(calls[1]["claim"], Value::from(7u64));
+
+        let rpc = Fake::default().refuse(
+            "put_artifact",
+            rusty_bbp::Rejection::new(Code::ProtectedPath, "tests/x.rs"),
+        );
+        let mut s = Session::new("claude-builder", rpc, "r");
+        let err = s.put_candidate("op", "b", "d", MsgId(7)).unwrap_err();
+        assert!(err.contains("ProtectedPath"), "{err}");
+        assert_eq!(
+            s.rpc.args("put_artifact").len(),
+            1,
+            "a refusal is not retried"
+        );
     }
 }

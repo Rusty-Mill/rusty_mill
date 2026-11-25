@@ -23,6 +23,10 @@ fn main() -> ExitCode {
         Some("maintain") => return maintain(argv),
         Some("lens") => return lens(argv),
         Some("watch") => return watch(argv),
+        Some("builder") => {
+            use rusty_orch::builder;
+            return lens_command(builder::USAGE, builder::options(argv), builder::run);
+        }
         Some("dry-run") => {
             use rusty_orch::dry_run;
             let argv = std::iter::once("dry-run".to_owned()).chain(argv);
