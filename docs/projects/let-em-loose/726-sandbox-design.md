@@ -1,6 +1,6 @@
 # Project sandbox and tool gateway: umbrella design (M3, cards #726 / #1407)
 
-Let Em Loose, 2026-11-25. Status: **draft, waiting for Nano's approval on card #1407** (D25).
+Let Em Loose, 2026-11-25. Status: **approved by Nano, 2026-11-25** (D180; O1 a = D181, O2 a = D182; O3 and O4 defaults = D183, D184). Satisfies D25 for #1375–#1382 and #1412, not #723; no §11 ask-first item is approved.
 Security-sensitive (tokens, identity, isolation, egress): independent review requested.
 
 One contract for the M3 step cards, so each builds against the same token, policy and layout:

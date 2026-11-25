@@ -184,6 +184,11 @@ Precise contracts used by this guide:
 | D174 | #1416: the LEL tab view model and parsing live in rusty_term, fixtures from `bbp inbox --json` plus a drift test; no shared crate | [default] 2026-11-24 (1416) |
 | D175 | #1092: the inbox runs on a second Mill Board on BaileyAi with its own SQLite file; rusty_tick retired, live board untouched | [stated] 2026-11-25 (1092) |
 | D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
+| D180 | #726/#1407 umbrella sandbox and gateway design approved; satisfies D25 for #1375–#1382 and #1412 (not #723); approves no §11 ask-first item | [stated] 2026-11-25 (726, 1407) |
+| D181 | #726 tool authority (O1 a): reviewed Factory policy PRs grant in-scope tools, Nano's inbox approve per token for widening, no model in the grant path | [stated] 2026-11-25 (726, 1407) |
+| D182 | #726 sccache (O2 a): jailed builders write per session only; orch's trusted build of `main` refills the shared cache; rewords D101 | [stated] 2026-11-25 (726, 1380) |
+| D183 | #726 witness output posts as non-scoring messages; only a witness/ACP mismatch posts as `cited` `counter` evidence; no BBP schema change (O3) | [default] 2026-11-25 (726, 1412) |
+| D184 | #726 remind-me through the gateway is read-only for jailed agents; writes fail closed until rusty-remind-me takes a trusted identity (O4) | [default] 2026-11-25 (726, 1376) |
 
 ## D1. Lenses, not stages
 
@@ -989,6 +994,7 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [stated] · remind-me: mem_b37d92b6e738462b95873adb4d4250ea
 **Key.** lel:726:gateway-and-jailed-agent
 **Source.** Mill Board card #726, comment by claude-cloud at 1793816610843 ms, "Decisions, Nano, 2026-11-04 (after spike #727)", D-a. Nano asked for it to be in this file in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z). Numbered D79 on PR #1496's branch; moved to D101 on 2026-11-05 because main assigned D78–D88 first.
+**Amended 2026-11-25 by D182.** The sccache clause now reads: shared sccache is read-only to every agent; builders write per session only, and orch's trusted build of `main` refills the shared cache.
 
 ## D102. orch and the gateway stay separate
 
@@ -1765,3 +1771,48 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_8d894a129917493782f8b8f1e8123b26
 **Key.** lel:430:coedit-fold-on-rusty-crdt
 **Source.** Nano, project thread "Update Mill Board card statuses", message cmsg_014AqbZs58L565hMV2pFkCX5HGJTsB1QUY7avVobhzUMnP, 2026-11-25T01:15:31Z: "1", answering the three options in cmsg_014AqbZs58L565hMV2pFkCX5C5P4veGi9BERQNHB1fH2T3. Relayed by the caller; the message was not read.
+
+## D180. #726/#1407: the umbrella sandbox and gateway design is approved
+
+**Decision.** `726-sandbox-design.md` (PR #1873) is approved as a whole, as recommended. It satisfies D25 for #1375, #1376, #1377, #1378, #1379, #1380, #1381, #1382 and #1412: those cards go straight to code against it, and a step card that departs from the design posts a delta for approval first. It does not cover #723 (lens composition), which keeps its own D25 step and D164's hold; Nano's 2026-11-25 "Work cards 600, 723, 724, 726, 732, and 1234" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4QwG5GgYDSPAb6XKLcSCLq1`) is not read here as lifting that hold. It approves no §11 ask-first item (public API and config fields, the `per_session` default change, any BBP schema change, BaileyAi host writes, deployment, credentials); each needs its own yes. Review, CI and merge rules still apply.
+**Why.** One contract (token, policy, layout) for the M3 step cards, so each builds against the same design.
+**Rejected.** Approving the step cards one by one.
+**Tag.** [stated] · remind-me: mem_a48bea21749345abab71a1bc6a25aa04
+**Key.** lel:726:sandbox-design-approved
+**Source.** Nano tapped option A "Approve as recommended" on hearthbot decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4UmRMyg6TsaZCy6uWjcZ6eV` ("Approve the #726 sandbox design with O1 a and O2 a?"), 2026-11-25T15:55:52Z, in thread `cmsg_01WgyiM31RsSnZTgNuPX2VE47DLYRSRrL6WScMCmXFcSyV`. The option read: "Design approved for #1375-#1382 and #1412; Factory policy PRs grant tools, inbox for widening; builders write sccache per session only." The card's reason: "This keeps a model out of the grant path, and a jailed builder can't poison the shared compile cache." Relayed by the caller; the card was not read here. Numbered from D180 because D177 to D179 are taken on open branches (PR #1871, PR #1874, #1234).
+
+## D181. #726: tool authority keeps a model out of the grant path (O1 a)
+
+**Decision.** Grants inside a role's scope are what the Factory lens policy lists, and a policy changes only by a reviewed PR to Factory. Anything that widens what can go wrong (a `[grants]` entry: egress host, push, a secret) is a board escalation before orch mints; Nano's approve in the inbox adds it to that one token's `lel.grants`, for that session only. This replaces #726's card-body wording that names the project expert as tool authority.
+**Why.** Deterministic and auditable; no model in the grant path.
+**Rejected.** b) The project expert (later the domain pack) approves in-scope grants. c) Only Nano, for every grant.
+**Tag.** [stated] · remind-me: mem_722eadbce1cd448fa0ad4829b28f7f75
+**Key.** lel:726:tool-authority
+**Source.** Nano tapped option A "Approve as recommended" on hearthbot decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4UmRMyg6TsaZCy6uWjcZ6eV` ("Approve the #726 sandbox design with O1 a and O2 a?"), 2026-11-25T15:55:52Z, in thread `cmsg_01WgyiM31RsSnZTgNuPX2VE47DLYRSRrL6WScMCmXFcSyV`. The option read: "Design approved for #1375-#1382 and #1412; Factory policy PRs grant tools, inbox for widening; builders write sccache per session only." The card's reason: "This keeps a model out of the grant path, and a jailed builder can't poison the shared compile cache." Relayed by the caller; the card was not read here. Design §5.3 and §12 O1.
+
+## D182. #726: jailed builders write sccache per session only (O2 a)
+
+**Decision.** The shared compile cache (`/srv/lel/<project>/base/sccache/`) is read-only to every agent, builders included. A jailed builder writes only to its own per-session cache; the shared cache is refilled only by orch's trusted build of `main` outside any jail. This rewords D101's "shared sccache (read-only for critics, content-keyed writes for builders)"; the rest of D101 stands.
+**Why.** sccache keys are input hashes, not content hashes, so a jailed builder could write a poisoned object under a valid key that every later build reads.
+**Rejected.** b) Shared writes verified by a reproducible rebuild. c) No sccache in the jail.
+**Tag.** [stated] · remind-me: mem_257f45d703f342129f835a177ac364c2
+**Key.** lel:726:sccache-writes
+**Source.** Nano tapped option A "Approve as recommended" on hearthbot decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4UmRMyg6TsaZCy6uWjcZ6eV` ("Approve the #726 sandbox design with O1 a and O2 a?"), 2026-11-25T15:55:52Z, in thread `cmsg_01WgyiM31RsSnZTgNuPX2VE47DLYRSRrL6WScMCmXFcSyV`. The option read: "Design approved for #1375-#1382 and #1412; Factory policy PRs grant tools, inbox for widening; builders write sccache per session only." The card's reason: "This keeps a model out of the grant path, and a jailed builder can't poison the shared compile cache." Relayed by the caller; the card was not read here. Design §7 and §12 O2. Amends D101 (sccache clause only).
+
+## D183. #726: witness output posts as non-scoring messages; only a mismatch is evidence (O3)
+
+**Decision.** The witness's digests (upper-layer diff hash, hash-chained gateway call log, exec log), denials and out-of-scope writes post on the claim as non-scoring messages. Only a witness/ACP mismatch posts as `cited` evidence in the `counter` direction, citing the gateway call-log artifact (addendum C-R4). No BBP schema change; a new evidence kind or field would be ask-first.
+**Why.** Every BBP evidence kind scores, and a clean digest is not support; D101 already settles that a mismatch counts against the claim. This fits the existing schema and is reversible.
+**Rejected.** Posting every digest as evidence; a new evidence kind (schema bump).
+**Tag.** [default] · remind-me: mem_405c70aeb80348f19d90032f92292c11
+**Key.** lel:726:witness-digests-as-messages
+**Source.** let-em-loose-expert, 2026-11-25: the design's proposed default (§9.6, §12 O3), within D101 and addendum C-R4. The decision card did not ask about it.
+
+## D184. #726: remind-me is read-only for jailed agents until it takes a trusted identity (O4)
+
+**Decision.** Through the gateway, jailed agents get remind-me read tools only. Writes fail closed until rusty-remind-me accepts scoped tokens or a trusted `written_by` header; that is a rusty-remind-me card, and ask-first as a public API change. D102's target (the gateway sets `written_by` from the token) stands; this departs from #1407's prompt only as an interim.
+**Why.** Until rusty-remind-me can take a trusted identity, a write would carry a missing or agent-supplied `written_by`, which D102 forbids. Failing closed is the reversible interim.
+**Rejected.** Letting writes through with the gateway's own identity only (loses the agent attribution D102 requires).
+**Tag.** [default] · remind-me: mem_a876641a5b4149d5bd2ff3a6f2167631
+**Key.** lel:726:remind-me-writes-fail-closed
+**Source.** let-em-loose-expert, 2026-11-25: the design's proposed default (§3, §12 O4), within D102. The decision card did not ask about it.
