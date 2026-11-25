@@ -1,9 +1,8 @@
 # Factory roles, separation of duties and approval proxy (#447), design rev 3
 
-> **Status: parked, not approved (Nano, 2026-11-04).** Mill Board card #447. Saved here so the
-> design survives; nothing in it is built. Section 1 and the code references describe `main`
-> and the live board as of 2026-11-04; re-check them before resuming. Decisions D1-D4 in
-> section 10 are still open.
+> **Status: approved for build (Nano, 2026-11-25), with the answers in section 12.** Mill Board
+> card #447. Section 1 and the code references describe `main` and the live board as of
+> 2026-11-04; the build re-checks them.
 
 2026-11-04. Rev 2 was reviewed by a fresh-context Goldfish pass
 (`goldfish-review.md`, 2 blockers, 10 majors) and the Let Em Loose expert (BBP gates).
@@ -175,3 +174,26 @@ receipt makes that forgery detectable by `bbp metrics`; it does not prevent it.
 | M12 undo needs back moves | via Blocked (§6) |
 | M13 cut flag, "sandbox" clash | kept per card, renamed `scratch`, in D4 |
 | Nits | 14 §4 R4; 15 cut approvals log; 17 actor names; 18 `move_freely`; 19 provider at claim time; 20 Nano exempt; 21 in-flight note; 22 verbatim defined |
+
+## 12. Nano's answers (2026-11-25, project thread message cmsg_014AqbZs58L565hMV2pFkCX5CZatgThTCScc6TZfje7dmZ)
+
+> D1. Voice is enough for the design gates
+> D2. Not yet
+> D3. None for now
+> D4. I Approve them as a set.
+
+What the build does with them:
+
+- **D1 = C.** The proxy crosses Backlog→Ready and Architecting→Building on a spoken approval.
+  For the merge gate and unblocks it only files a *pending* approval; Nano confirms it with one
+  tap in the board web UI. Inbox claims stay with Nano.
+- **D2 = not yet.** claude-cloud keeps its role. Gates take `approve` **or** `admin`, and an
+  actor holding `admin` is the owner's override: R3–R5 bind every other actor, and the ledger
+  records admin actions too, so self-reviews stay visible. Narrowing claude-cloud later drops it
+  from that override with no code change.
+- **D3 = none.** Claims-mode human verbs are unchanged; `--gates scratch` is refused with claims
+  mode until a receipt rule exists for it.
+- **D4 approved:** `task_opened.gates`, `bbp open --gates`, `bbp human --approval`, the `--op by:`
+  refusal, `card_review` / `card_approve` / `approval_issue`, and `provider` on credentials.
+- **R1 while providers are unset.** An actor with no provider is compared by name only, so
+  setting providers is what turns on the cross-provider rule. Fail-closed comes with D2.
