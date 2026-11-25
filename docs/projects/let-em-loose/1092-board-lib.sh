@@ -99,6 +99,12 @@ fixture_row() {
   jq -c '.[0]' <<<"$mine"
 }
 
+# dry_run_ok BODY: inbox_act's dry run answered, BBP would accept the first command, and it would write events.
+dry_run_ok() {
+  jq -e '(.dry_run.response | has("Accepted")) and (.dry_run.events | length) > 0' <<<"$1" >/dev/null 2>&1 \
+    || refuse "the dry run is not an accepted preview with events; no real request sent"
+}
+
 # fixture_verify: verification step 4 on the script-owned fixture. The caller defines the hooks:
 #   hook_marker_read, hook_marker_write JSON, hook_task_exists, hook_seed (prints A2's id),
 #   hook_api OP JSON (prints the body), hook_bbp_open (prints bbp's open row count for the task).
@@ -138,10 +144,12 @@ fixture_verify() {
   row=$(fixture_row "$(hook_api inbox_list '{}')" "$m") || return 1
   echo "inbox_list: $(jq -c '{id, rev, reason, label, card: .card.number}' <<<"$row")"
   act=$(jq -c '{id, rev, action: "reject"}' <<<"$row")
-  out=$(hook_api inbox_act "$(jq -c '. + {dry_run: true}' <<<"$act")") || return 1
+  out=$(hook_api inbox_act "$(jq -c '. + {dry_run: true}' <<<"$act")") || refuse "the dry run failed" || return 1
   echo "dry run: $out"
-  out=$(hook_api inbox_act "$act") || return 1
+  dry_run_ok "$out" || return 1
+  out=$(hook_api inbox_act "$act") || refuse "the reject request failed" || return 1
   echo "reject:  $out"
+  jq -e '.outcome == "Done"' <<<"$out" >/dev/null 2>&1 || refuse "the reject did not end Done" || return 1
   left=$(hook_api inbox_list '{}' | jq --arg t "$FIXTURE_TASK" '[.[] | select(.task == $t)] | length') || return 1
   bleft=$(hook_bbp_open) || return 1
   [ "$left" = 0 ] && [ "$bleft" = 0 ] || refuse "escalation still open (board $left, bbp $bleft)" || return 1

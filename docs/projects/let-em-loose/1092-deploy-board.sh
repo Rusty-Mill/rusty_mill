@@ -206,17 +206,20 @@ as_board() {
     -p ProtectSystem=strict -p ProtectHome=read-only -p PrivateTmp=yes -p "ReadWritePaths=$RW" "$@"
 }
 as_board "$LIBEXEC/mill-board-bbp" inbox --dir "$D" --task "$TASK" --json yes | jq -c 'length as $n | "inbox rows: \($n)"'
-refused() {   # the command must fail and print the guard's (or sudo's) refusal; bbp must not run
-  local out
+refused() {   # refused PATTERN CMD...: CMD fails and prints the expected denial; any other failure is not a pass
+  local want=$1 out; shift
   if out=$(as_board "$@" 2>&1); then echo "FAIL: allowed: $*"; echo "$out"; exit 1; fi
-  echo "ok refused: $* -> $(tail -n 1 <<<"$out")"
+  grep -qiE "$want" <<<"$out" || { echo "FAIL: $* failed without the expected denial ($want):"; echo "$out"; exit 1; }
+  echo "ok refused: $* -> $(grep -iE "$want" <<<"$out" | tail -n 1)"
 }
-refused "$LIBEXEC/mill-board-bbp" inbox --dir "$D" --dir /tmp/x --task "$TASK"
-refused "$LIBEXEC/mill-board-bbp" inbox --dir /tmp/x --task "$TASK"
-refused "$LIBEXEC/mill-board-bbp" open --dir "$D"
+refused 'mill-board-bbp-guard: second --dir refused' "$LIBEXEC/mill-board-bbp" inbox --dir "$D" --dir /tmp/x --task "$TASK"
+refused 'mill-board-bbp-guard: --dir refused' "$LIBEXEC/mill-board-bbp" inbox --dir /tmp/x --task "$TASK"
+refused 'mill-board-bbp-guard: verb refused' "$LIBEXEC/mill-board-bbp" open --dir "$D"
 # Through a shell, as the wrapper does: systemd (init_t) may not exec sudo directly under SELinux, which
-# would refuse the call before sudoers is consulted and prove nothing about the rule.
-refused /bin/sh -c "sudo -n -u orch-runner /bin/cat $D/master"
+# would refuse the call before sudoers is consulted and prove nothing about the rule. Only sudo's own
+# policy refusal counts.
+refused '(^sudo: a password is required|sorry, user mill-board is not allowed)' \
+  /bin/sh -c "sudo -n -u orch-runner /bin/cat $D/master"
 
 echo "=== done. Steps 1, 4 and 5 passed."
 if sudo test -f "$STATE/settings/first-admin.token"; then

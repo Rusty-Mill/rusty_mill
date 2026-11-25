@@ -83,7 +83,8 @@ no fixture_row "[]" "$M"
 
 # ---- fixture_verify against an in-memory BBP and board
 # State: MARKER (file), TASKS (bbp tasks), OPEN (open escalations of the fixture task), CALLS (api writes).
-reset() { : >"$T/marker"; printf '%s\n' "$@" >"$T/tasks"; echo 0 >"$T/open"; : >"$T/calls"; echo 0 >"$T/card"; }
+DRY_OK='{"dry_run":{"step":{},"response":{"Accepted":{"Ok":null}},"events":[{"ClaimDecided":{}}],"then":[]}}'
+reset() { echo "$DRY_OK" >"$T/dry"; : >"$T/marker"; printf '%s\n' "$@" >"$T/tasks"; echo 0 >"$T/open"; : >"$T/calls"; echo 0 >"$T/card"; }
 hook_marker_read()  { cat "$T/marker"; }
 hook_marker_write() { echo "$1" >"$T/marker"; }
 hook_task_exists()  { grep -qx "$FIXTURE_TASK" "$T/tasks"; }
@@ -94,8 +95,9 @@ hook_api() {
     inbox_list) if [ "$(cat "$T/open")" = 1 ]; then echo "[$(row lel-1092-fixture "$(cat "$T/card")" 11 false),$(row board-check 1 5 false)]"; else echo "[$(row board-check 1 5 false)]"; fi ;;
     card_add) echo 3 >"$T/card"; echo "$1" >>"$T/calls"; echo '{"card":{"number":3}}' ;;
     inbox_act) echo "$1 $2" >>"$T/calls"
-      jq -e .dry_run <<<"$2" >/dev/null || { jq -e '.id | startswith("lel-1092-fixture/")' <<<"$2" >/dev/null && echo 0 >"$T/open"; }
-      echo '{}' ;;
+      if jq -e .dry_run <<<"$2" >/dev/null; then cat "$T/dry"; return; fi
+      jq -e '.id | startswith("lel-1092-fixture/")' <<<"$2" >/dev/null && echo 0 >"$T/open"
+      echo '{"outcome":"Done"}' ;;
     *) echo "$1" >>"$T/calls"; echo '{}' ;;
   esac
 }
@@ -123,6 +125,19 @@ echo "$FIXTURE_TASK" >>"$T/tasks"; echo 1 >"$T/open"; echo 3 >"$T/card"
 ok fixture_verify
 eq "$(grep -c '^card_add' "$T/calls" || true)" 0 "resume: no second card"
 eq "$(jq -r .state "$T/marker")" verified "resume: marker verified"
+
+# ---- dry_run_ok
+ok dry_run_ok "$DRY_OK"
+no dry_run_ok '{"dry_run":{"response":{"Rejected":{"code":"StaleRev","detail":"x"}},"events":[]}}'
+no dry_run_ok '{"dry_run":{"response":{"Accepted":{}},"events":[]}}'
+no dry_run_ok ''
+no dry_run_ok '{"outcome":"Done"}'
+
+reset board-check                           # a refused dry run: the real reject is never sent
+echo '{"dry_run":{"response":{"Rejected":{"code":"StaleRev","detail":"x"}},"events":[]}}' >"$T/dry"
+no fixture_verify
+eq "$(grep -c '^inbox_act' "$T/calls")" 1 "refused dry run: only the dry run was sent"
+eq "$(jq -r .state "$T/marker")" linked "refused dry run: marker stays linked"
 
 reset board-check                           # the fixture row changed under us: no real reject
 hook_seed() { echo "$FIXTURE_TASK" >>"$T/tasks"; echo 1 >"$T/open"; echo 12; }
