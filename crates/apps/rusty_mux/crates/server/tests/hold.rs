@@ -214,6 +214,41 @@ fn a_held_block_is_re_run_under_the_lease_and_keeps_its_screen() {
     assert_eq!(shown.matches("FIRST-RUN").count(), 2, "{shown}");
 }
 
+/// The block starts again in the directory it was launched in, which its
+/// workspace holds, even if that path now names another directory.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_re_run_starts_in_the_launch_directory_the_workspace_holds() {
+    let base = std::env::temp_dir().join(format!("rusty-mux-rerun-cwd-{}", std::process::id()));
+    let (orig, moved) = (base.join("orig"), base.join("moved"));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&orig).unwrap();
+    let socket = start_server();
+    let mut client = Client::connect_with(&socket, HOLDING, None);
+    let mut spec = launch("echo ran >> marker; exit 0", true);
+    spec.cwd = Some(orig.to_string_lossy().into_owned());
+    let block = created(&create(&mut client, spec));
+    wait_exited(&mut client, block);
+    client.request(|req| Message::Attach { req, block });
+    client.wait_ready(block);
+    client.request(|req| Message::AcquireLease { req, block });
+
+    // The launch path now names a different directory.
+    std::fs::rename(&orig, &moved).unwrap();
+    std::fs::create_dir(&orig).unwrap();
+    let done = rerun(&mut client, block);
+    assert!(
+        matches!(done.as_slice(), [Message::Done { .. }]),
+        "{done:?}"
+    );
+    wait_screen(&mut client, block, "-- re-run at");
+    wait_exited(&mut client, block);
+    let marked = std::fs::read_to_string(moved.join("marker")).unwrap_or_default();
+    assert_eq!(marked.lines().count(), 2, "{marked:?}");
+    assert!(!orig.join("marker").exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn a_running_block_is_not_re_run() {
     let socket = start_server();

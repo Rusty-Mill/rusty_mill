@@ -2677,24 +2677,23 @@ impl State {
             .ok_or(rusty_mux_core::Error::UnknownWindow(window))?
             .session();
         // What it was started as, even a default shell: a config reloaded
-        // since would otherwise start something else. The directory is the
-        // last one the program reported, if it still exists.
-        // A shell's is the last one it reported; any other program's output
-        // could name one for it, so it keeps the one it was started in.
-        let dir_exists = |d: &String| std::path::Path::new(d).is_dir();
-        let reported = terminal::pwd(&rt.grid, None).filter(dir_exists);
-        let cwd = reported
-            .filter(|_| rt.started.shell)
-            .or_else(|| Some(rt.started.cwd.clone()).filter(|d| !d.is_empty()));
+        // since would otherwise start something else. It starts in the
+        // directory it was launched in, the one the workspace explorer
+        // shows (D337), not wherever its shell last went.
         let launch = Launch {
             program: Some(Program {
                 command: rt.started.program.clone(),
                 args: rt.started.args.clone(),
             }),
-            cwd,
+            cwd: Some(rt.started.cwd.clone()).filter(|d| !d.is_empty()),
             ..Launch::default()
         };
-        let config = launched(&self.config, &launch)?;
+        let mut config = launched(&self.config, &launch)?;
+        // As a first launch: into the directory the workspace holds, so the
+        // two cannot name different directories.
+        if let Some(held) = rt.started.workspace.spawn_cwd() {
+            config.cwd = held.into();
+        }
         let started = Started {
             read_only: false,
             ..rt.started.clone()
