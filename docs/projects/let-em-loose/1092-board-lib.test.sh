@@ -20,7 +20,7 @@ no host_check ms-01 baileyai
 ok loopback_check 127.0.0.1:8787
 ok loopback_check '[::1]:8787'
 no loopback_check 0.0.0.0:8787
-no loopback_check 192.168.1.20:8787
+no loopback_check 203.0.113.20:8787
 
 # ---- board.env: checked, never rewritten
 S=/var/lib/mill-board
@@ -176,6 +176,7 @@ hook_api() {
     card_add) echo 3 >"$T/card"; echo "$1" >>"$T/calls"; echo '{"card":{"number":3}}' ;;
     inbox_act) echo "$1 $2" >>"$T/calls"
       if jq -e .dry_run <<<"$2" >/dev/null; then cat "$T/dry"; return; fi
+      jq -r .state "$T/marker" >"$T/state_at_reject"
       jq -e '.id | startswith("lel-1092-fixture/")' <<<"$2" >/dev/null && echo 0 >"$T/open"
       echo '{"outcome":"Done"}' ;;
     *) echo "$1" >>"$T/calls"; echo '{}' ;;
@@ -189,7 +190,7 @@ eq "$(grep -c '^inbox_act' "$T/calls")" 2 "fresh run: one dry run and one reject
 eq "$(grep -c 'board-check/' "$T/calls" || true)" 0 "fresh run: the unrelated task's row is never acted on"
 
 : >"$T/calls"
-out=$(fixture_verify)
+out=$(fixture_verify 2>&1 || true)
 eq "$(cat "$T/calls")" "" "completed rerun: no board writes"
 eq "$(grep -c "$FIXTURE_TASK" "$T/tasks")" 1 "completed rerun: not seeded again"
 eq "$out" "ok: $FIXTURE_TASK already verified; nothing to do" "completed rerun: reports a no-op"
@@ -223,6 +224,25 @@ reset board-check                           # the fixture row changed under us: 
 echo 12 >"$T/a2"
 no fixture_verify
 eq "$(grep -c '^inbox_act' "$T/calls" || true)" 0 "identity mismatch: no inbox_act at all"
+
+# ---- a run that stopped between the reject and the verified marker
+reset board-check
+hook_marker_write '{"task":"lel-1092-fixture","a2":11,"card":3,"state":"rejecting","escalation":"lel-1092-fixture/11/9"}'
+echo "$FIXTURE_TASK" >>"$T/tasks"; echo 0 >"$T/open"; echo 3 >"$T/card"   # the reject had landed
+ok fixture_verify
+eq "$(jq -r .state "$T/marker")" verified "stopped after reject: marker verified on rerun"
+eq "$(grep -c '^inbox_act' "$T/calls" || true)" 0 "stopped after reject: nothing sent again"
+
+reset board-check                           # stopped before the reject landed: it is sent again, once
+hook_marker_write '{"task":"lel-1092-fixture","a2":11,"card":3,"state":"rejecting","escalation":"lel-1092-fixture/11/9"}'
+echo "$FIXTURE_TASK" >>"$T/tasks"; echo 1 >"$T/open"; echo 3 >"$T/card"
+ok fixture_verify
+eq "$(grep -c '^inbox_act' "$T/calls")" 2 "reject not landed: one dry run and one reject"
+eq "$(jq -r .state "$T/marker")" verified "reject not landed: marker verified"
+
+reset board-check                           # the marker reads rejecting while the real reject is sent
+ok fixture_verify
+eq "$(cat "$T/state_at_reject")" rejecting "the marker reads rejecting when the real reject is sent"
 
 # ---- fail closed on creation and lookup
 reset board-check; touch "$T/open_fail"     # bbp open fails

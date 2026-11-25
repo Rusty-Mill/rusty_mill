@@ -169,7 +169,7 @@ fixture_plan() {
   [ "$exists" = 1 ] || refuse "the marker records $FIXTURE_TASK but bbp has no such task" || return 1
   case $state in
     verified) echo "done" ;;
-    seeded|carded|linked) echo resume ;;
+    seeded|carded|linked|rejecting) echo resume ;;
     *) refuse "the fixture marker has state '$state'" ;;
   esac
 }
@@ -218,7 +218,7 @@ fixture_seed() {
 #   hook_api OP JSON (prints the body), hook_bbp_open (prints bbp's open row count for the task).
 # A completed fixture is a no-op: it only re-reads that nothing is open.
 fixture_verify() {
-  local m exists=0 tstate plan a2 card row act out left bleft
+  local m exists=0 tstate plan a2 card row act out bleft
   m=$(hook_marker_read) || refuse "the fixture marker could not be read" || return 1
   tstate=$(hook_task_state) || return 1
   case $tstate in exists) exists=1 ;; absent) exists=0 ;; *) refuse "task lookup said '$tstate'"; return 1 ;; esac
@@ -249,18 +249,31 @@ fixture_verify() {
     hook_marker_write "$m" || return 1
     echo "card #$(jq -r .card <<<"$m") linked to $FIXTURE_TASK"
   fi
+  # A run that stopped after sending the reject: if the board and bbp both show nothing open, the reject landed.
+  if [ "$(jq -r .state <<<"$m")" = rejecting ]; then
+    fixture_closed "$m" && return 0
+    echo "the recorded reject did not land; trying again"
+  fi
   row=$(fixture_row "$(hook_api inbox_list '{}')" "$m") || return 1
   echo "inbox_list: $(jq -c '{id, rev, reason, label, card: .card.number}' <<<"$row")"
   act=$(jq -c '{id, rev, action: "reject"}' <<<"$row")
   out=$(hook_api inbox_act "$(jq -c '. + {dry_run: true}' <<<"$act")") || refuse "the dry run failed" || return 1
   echo "dry run: $out"
   dry_run_ok "$out" || return 1
+  m=$(jq -c --arg e "$(jq -r .id <<<"$row")" '.state = "rejecting" | .escalation = $e' <<<"$m")
+  hook_marker_write "$m" || return 1
   out=$(hook_api inbox_act "$act") || refuse "the reject request failed" || return 1
   echo "reject:  $out"
   jq -e '.outcome == "Done"' <<<"$out" >/dev/null 2>&1 || refuse "the reject did not end Done" || return 1
+  fixture_closed "$m" || refuse "escalation still open after the reject" || return 1
+}
+
+# fixture_closed MARKER: the board and bbp show nothing open for the fixture; then the marker reads verified.
+fixture_closed() {
+  local left bleft
   left=$(hook_api inbox_list '{}' | jq --arg t "$FIXTURE_TASK" '[.[] | select(.task == $t)] | length') || return 1
   bleft=$(hook_bbp_open) || return 1
-  [ "$left" = 0 ] && [ "$bleft" = 0 ] || refuse "escalation still open (board $left, bbp $bleft)" || return 1
-  hook_marker_write "$(jq -c '.state = "verified"' <<<"$m")" || return 1
+  [ "$left" = 0 ] && [ "$bleft" = 0 ] || { echo "open for $FIXTURE_TASK: board $left, bbp $bleft" >&2; return 1; }
+  hook_marker_write "$(jq -c '.state = "verified"' <<<"$1")" || return 1
   echo "ok: inbox_list and bbp inbox are empty for $FIXTURE_TASK"
 }
