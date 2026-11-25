@@ -1345,8 +1345,8 @@ mod client {
         workspace: bool,
         /// The workspace listings asked for and not yet answered: a tree
         /// closed and opened again leaves its first one outstanding, and its
-        /// refusal is not the lease's. The oldest are forgotten past
-        /// [`LISTINGS`].
+        /// refusal is not the lease's. No more than [`LISTINGS`] are asked
+        /// for until one is answered.
         listings: Vec<u64>,
     }
 
@@ -2636,6 +2636,14 @@ mod client {
             let Some(pane) = self.panes.get_mut(&block) else {
                 return;
             };
+            // Each is kept to know its refusal from the lease's, so none
+            // is forgotten: ask for no more until the server answers.
+            if pane.listings.len() >= LISTINGS {
+                open.explorer
+                    .refuse("the server has not answered earlier listings");
+                open.req = None;
+                return;
+            }
             let req = pane.send(|req| Message::BlockCall {
                 req,
                 block,
@@ -2645,9 +2653,6 @@ mod client {
                     .into_iter()
                     .collect(),
             });
-            if pane.listings.len() == LISTINGS {
-                pane.listings.remove(0);
-            }
             pane.listings.push(req);
             open.req = Some(req);
         }
@@ -4609,6 +4614,37 @@ mod client {
                     .as_ref()
                     .is_some_and(|o| !o.explorer.waiting())
             );
+        }
+
+        /// At the bound on unanswered listings no more are asked, so none is
+        /// forgotten: the first one's late refusal still is not the lease's.
+        #[cfg(unix)]
+        #[test]
+        fn listings_unanswered_up_to_the_bound_are_not_asked_past_it() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            let mut asked = Vec::new();
+            for _ in 0..LISTINGS {
+                app.act(Action::Explorer);
+                asked.extend(workspace_calls(&sent(&far[1])));
+                app.take(Input::Keys(b"q".to_vec()));
+            }
+            assert_eq!(asked.len(), LISTINGS);
+            app.act(Action::Explorer);
+            assert!(workspace_calls(&sent(&far[1])).is_empty(), "not asked");
+            let open = app.exploring.as_ref().expect("open, with a note");
+            assert!(open.req.is_none() && !open.explorer.waiting());
+            pane_says(
+                &mut app,
+                a,
+                Message::Failed {
+                    req: asked[0].0,
+                    reason: "outside the workspace".into(),
+                    code: None,
+                },
+            );
+            assert!(app.panes[&a].leased, "the lease stands");
+            assert!(app.exploring.is_some(), "and so does the tree");
         }
 
         /// A listing asked on a path given up is never answered: the path
