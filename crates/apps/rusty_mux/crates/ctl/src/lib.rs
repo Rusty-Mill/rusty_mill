@@ -1041,12 +1041,23 @@ fn copy_side(
     Ok((reached, conn, block))
 }
 
-/// A chunk stream between the download and the upload: a failed download
-/// reaches the upload as an error, so a short file is never committed.
+/// What the download hands the upload.
+#[cfg(any(unix, windows))]
+enum Item {
+    Data(Vec<u8>),
+    /// The download finished: only this makes the upload's input complete.
+    End,
+    Failed(io::ErrorKind, String),
+}
+
+/// The upload's input. The end of the file is the download's `End`; a
+/// closed channel without one (a panicked download, say) and a `Failed` are
+/// errors, and stay errors on every later read.
 #[cfg(any(unix, windows))]
 struct Pipe {
-    chunks: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    chunks: std::sync::mpsc::Receiver<Item>,
     pending: std::io::Cursor<Vec<u8>>,
+    ended: Option<Result<(), (io::ErrorKind, String)>>,
 }
 
 #[cfg(any(unix, windows))]
@@ -1057,30 +1068,112 @@ impl io::Read for Pipe {
             if n > 0 || buf.is_empty() {
                 return Ok(n);
             }
+            match &self.ended {
+                Some(Ok(())) => return Ok(0),
+                Some(Err((kind, why))) => return Err(io::Error::new(*kind, why.clone())),
+                None => {}
+            }
             match self.chunks.recv() {
-                Ok(chunk) => self.pending = std::io::Cursor::new(chunk?),
-                Err(_) => return Ok(0),
+                Ok(Item::Data(chunk)) => self.pending = std::io::Cursor::new(chunk),
+                Ok(Item::End) => self.ended = Some(Ok(())),
+                // Never `Interrupted`: a reader would retry it.
+                Ok(Item::Failed(kind, why)) => {
+                    let kind = match kind {
+                        io::ErrorKind::Interrupted => io::ErrorKind::Other,
+                        kind => kind,
+                    };
+                    self.ended = Some(Err((kind, why)));
+                }
+                Err(_) => {
+                    let why = "the download ended before the whole file arrived".to_owned();
+                    self.ended = Some(Err((io::ErrorKind::UnexpectedEof, why)));
+                }
             }
         }
     }
 }
 
+/// The error a [`Feed`] write fails with once the upload has stopped
+/// reading: the upload's own error is the cause, not the download's.
+#[cfg(any(unix, windows))]
+#[derive(Debug)]
+struct UploadStopped;
+
+#[cfg(any(unix, windows))]
+impl std::fmt::Display for UploadStopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the upload stopped")
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl std::error::Error for UploadStopped {}
+
 /// The writing end of [`Pipe`]: a few chunks ahead, then it waits.
 #[cfg(any(unix, windows))]
-struct Feed(std::sync::mpsc::SyncSender<io::Result<Vec<u8>>>);
+struct Feed(std::sync::mpsc::SyncSender<Item>);
 
 #[cfg(any(unix, windows))]
 impl Write for Feed {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0
-            .send(Ok(buf.to_vec()))
-            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+            .send(Item::Data(buf.to_vec()))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, UploadStopped))?;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// Which end of a copy failed.
+#[cfg(any(unix, windows))]
+#[derive(Debug)]
+enum Side {
+    Download(io::Error),
+    Upload(io::Error),
+}
+
+/// Runs `download` and `upload` at once, the first feeding the second. The
+/// upload sees the end of the file only if the download finished.
+#[cfg(any(unix, windows))]
+fn stream<D, U>(download: D, upload: U) -> Result<String, Side>
+where
+    D: FnOnce(&mut Feed) -> io::Result<()> + Send,
+    U: FnOnce(&mut Pipe) -> io::Result<String>,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel(4);
+    let mut pipe = Pipe {
+        chunks: rx,
+        pending: std::io::Cursor::new(Vec::new()),
+        ended: None,
+    };
+    std::thread::scope(|scope| {
+        let reading = scope.spawn(move || {
+            let mut feed = Feed(tx);
+            let done = download(&mut feed);
+            let _ = feed.0.send(match &done {
+                Ok(()) => Item::End,
+                Err(e) => Item::Failed(e.kind(), e.to_string()),
+            });
+            done
+        });
+        let sent = upload(&mut pipe);
+        // Unblocks a download still waiting to hand a chunk over.
+        drop(pipe);
+        let fetched = reading
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("the download panicked")));
+        match (fetched, sent) {
+            (Err(e), Err(up)) if e.get_ref().is_some_and(|r| r.is::<UploadStopped>()) => {
+                Err(Side::Upload(up))
+            }
+            (Err(e), _) => Err(Side::Download(e)),
+            (Ok(()), Err(e)) => Err(Side::Upload(e)),
+            (Ok(()), Ok(path)) => Ok(path),
+        }
+    })
 }
 
 /// `copy`: streams a file of one host's server into another's upload folder
@@ -1114,51 +1207,24 @@ fn run_copy(
             Failure::Failed(reason) => (Exit::Failed, format!("{host}: {reason}")),
             _ => (Exit::Unreachable, format!("{host}: connection lost")),
         };
-        let (tx, rx) = std::sync::mpsc::sync_channel(4);
-        let mut pipe = Pipe {
-            chunks: rx,
-            pending: std::io::Cursor::new(Vec::new()),
-        };
-        std::thread::scope(|scope| {
-            let reading = scope.spawn(move || {
-                let fetched = rusty_mux_client::download::fetch(
+        stream(
+            |feed| {
+                rusty_mux_client::download::fetch(
                     &mut source,
                     from_block,
                     &copy.path,
-                    &mut Feed(tx.clone()),
+                    feed,
                     TRANSFER_REQ,
-                );
-                // Past the last chunk, the error that ended it, if any.
-                match fetched {
-                    Ok(_) => Ok(()),
-                    Err(e) => {
-                        let kept = io::Error::new(e.kind(), e.to_string());
-                        let _ = tx.send(Err(kept));
-                        Err(e)
-                    }
-                }
-            });
-            let sent = rusty_mux_client::upload::send(
-                &mut sink,
-                to_block,
-                &copy.name,
-                &mut pipe,
-                TRANSFER_REQ,
-            );
-            // Unblocks a download still waiting to hand a chunk over.
-            drop(pipe);
-            let fetched = reading
-                .join()
-                .unwrap_or_else(|_| Err(io::Error::other("the download panicked")));
-            // A broken pipe is the upload ending first; its error is the cause.
-            match (fetched, sent) {
-                (Err(e), _) if e.kind() != io::ErrorKind::BrokenPipe => {
-                    Err(failed("download", &copy.from_host, e))
-                }
-                (_, Err(e)) => Err(failed("upload", &copy.to_host, e)),
-                (Err(e), Ok(_)) => Err(failed("download", &copy.from_host, e)),
-                (Ok(()), Ok(path)) => Ok(path),
-            }
+                )
+                .map(drop)
+            },
+            |pipe| {
+                rusty_mux_client::upload::send(&mut sink, to_block, &copy.name, pipe, TRANSFER_REQ)
+            },
+        )
+        .map_err(|side| match side {
+            Side::Download(e) => failed("download", &copy.from_host, e),
+            Side::Upload(e) => failed("upload", &copy.to_host, e),
         })
     };
     match copied() {
@@ -1974,5 +2040,65 @@ mod tests {
             Err(Failure::Failed(why)) if why == "the server does not support create-session without --name"
         ));
         assert!(require(Features::SESSION_NAMES, &unnamed).is_ok());
+    }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod copy_tests {
+    use std::io::Read as _;
+
+    use super::*;
+
+    fn slurp(pipe: &mut Pipe) -> io::Result<String> {
+        let mut text = String::new();
+        pipe.read_to_string(&mut text)?;
+        Ok(text)
+    }
+
+    #[test]
+    fn a_finished_download_ends_the_upload_cleanly() {
+        let sent = stream(|feed| feed.write_all(b"whole"), slurp);
+        assert_eq!(sent.expect("copied"), "whole");
+    }
+
+    #[test]
+    fn a_download_that_panics_mid_stream_is_not_an_end_of_file() {
+        let sent = stream(
+            |feed| {
+                feed.write_all(b"half").expect("fed");
+                panic!("stops mid-stream");
+            },
+            slurp,
+        );
+        assert!(matches!(sent, Err(Side::Download(_))), "{sent:?}");
+    }
+
+    #[test]
+    fn an_interrupted_download_error_stays_an_error() {
+        let sent = stream(
+            |feed| {
+                feed.write_all(b"half")?;
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            },
+            slurp,
+        );
+        assert!(matches!(sent, Err(Side::Download(_))), "{sent:?}");
+    }
+
+    #[test]
+    fn a_dead_source_is_not_blamed_on_the_upload() {
+        let sent = stream(|_| Err(io::Error::from(io::ErrorKind::BrokenPipe)), slurp);
+        assert!(matches!(sent, Err(Side::Download(_))), "{sent:?}");
+    }
+
+    #[test]
+    fn a_stopped_upload_names_the_upload() {
+        let sent = stream(
+            |feed| loop {
+                feed.write_all(&[0; 1024])?;
+            },
+            |_| Err(io::Error::other("refused")),
+        );
+        assert!(matches!(sent, Err(Side::Upload(_))), "{sent:?}");
     }
 }
