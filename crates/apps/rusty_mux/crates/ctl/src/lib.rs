@@ -43,6 +43,10 @@
 //! on the server, download writes to stdout or `--out`. Neither is for
 //! chaining with `+`.
 //!
+//! `copy --block B --to-block B [--name N] HOST:PATH HOST` (C83) moves a
+//! file from one saved host's server to another's upload folder, streaming
+//! through this machine, and prints its path there.
+//!
 //! Output is text, or one JSON object per line with `--json`. The exit code
 //! is an [`Exit`]; an interrupt ends the process with the signal, which a
 //! shell reports as 130. An embedder bounds a command with [`run_until`].
@@ -513,6 +517,12 @@ fn run_with(
             return terminfo::run(&command, &ssh, out)
                 .unwrap_or_else(|(exit, reason)| report(err, exit, &reason));
         }
+        Command::Copy(copy) => {
+            if invocation.host.is_some() || invocation.socket.is_some() {
+                return report(err, Exit::Usage, COPY_HOSTS);
+            }
+            return run_copy(&copy, env, stop, out, err);
+        }
         Command::Agent(AgentCommand::Report(hook)) => {
             return send_hook_report(hook_socket.as_deref(), env, &hook, stop);
         }
@@ -838,6 +848,7 @@ fn execute(
         Command::Download(download) => run_download(&mut session, download),
         Command::Help(_)
         | Command::Api(_)
+        | Command::Copy(_)
         | Command::Do { .. }
         | Command::Config(_)
         | Command::Hosts(_)
@@ -984,6 +995,181 @@ fn run_download(
     }
     done?;
     Ok(Exit::Ok)
+}
+
+const COPY_HOSTS: &str = "copy names its hosts itself: --host and --socket do not apply";
+
+/// Prepares one side of a `copy`: reaches `host`, attaches and takes the
+/// lease. The `Reached` keeps an ssh forward alive and goes with the
+/// connection.
+#[cfg(any(unix, windows))]
+fn copy_side(
+    host: &str,
+    prepare: &[cli::Call],
+    feature: Features,
+    verb: &str,
+    env: &Env,
+    stop: &Stop,
+) -> Result<
+    (
+        hosts::Reached,
+        rusty_mux_client::Conn<conn::Stream>,
+        BlockId,
+    ),
+    (Exit, String),
+> {
+    let lost = |failure: Failure| match failure {
+        Failure::Failed(reason) => (Exit::Failed, format!("{host}: {reason}")),
+        Failure::TimedOut => (Exit::TimedOut, format!("{host}: timed out")),
+        Failure::Missing(reason) => (Exit::Target, format!("{host}: {reason}")),
+        Failure::Unreachable(e) => (Exit::Unreachable, format!("{host}: {e}")),
+    };
+    let reached = hosts::resolve(host, env, stop)?;
+    let mut conn = Conn::new(
+        conn::connect(&reached.socket, stop).map_err(|e| lost(e.into()))?,
+        stop.clone(),
+    );
+    // The preparing calls' reports are not the copy's output.
+    let mut sink = io::sink();
+    let mut session = Session {
+        conn: &mut conn,
+        out: &mut sink,
+        json: false,
+        here: None,
+    };
+    let (conn, block) = transfer(&mut session, prepare, feature, verb).map_err(lost)?;
+    Ok((reached, conn, block))
+}
+
+/// A chunk stream between the download and the upload: a failed download
+/// reaches the upload as an error, so a short file is never committed.
+#[cfg(any(unix, windows))]
+struct Pipe {
+    chunks: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    pending: std::io::Cursor<Vec<u8>>,
+}
+
+#[cfg(any(unix, windows))]
+impl io::Read for Pipe {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let n = self.pending.read(buf)?;
+            if n > 0 || buf.is_empty() {
+                return Ok(n);
+            }
+            match self.chunks.recv() {
+                Ok(chunk) => self.pending = std::io::Cursor::new(chunk?),
+                Err(_) => return Ok(0),
+            }
+        }
+    }
+}
+
+/// The writing end of [`Pipe`]: a few chunks ahead, then it waits.
+#[cfg(any(unix, windows))]
+struct Feed(std::sync::mpsc::SyncSender<io::Result<Vec<u8>>>);
+
+#[cfg(any(unix, windows))]
+impl Write for Feed {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0
+            .send(Ok(buf.to_vec()))
+            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `copy`: streams a file of one host's server into another's upload folder
+/// and prints its path there. Nothing is kept on this machine.
+#[cfg(any(unix, windows))]
+fn run_copy(
+    copy: &cli::Copy,
+    env: &Env,
+    stop: &Stop,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit {
+    let copied = || -> Result<String, (Exit, String)> {
+        let (_from, mut source, from_block) = copy_side(
+            &copy.from_host,
+            &copy.from_prepare,
+            Features::DOWNLOAD,
+            "download",
+            env,
+            stop,
+        )?;
+        let (_to, mut sink, to_block) = copy_side(
+            &copy.to_host,
+            &copy.to_prepare,
+            Features::UPLOAD,
+            "upload",
+            env,
+            stop,
+        )?;
+        let failed = |verb: &str, host: &str, e: io::Error| match refused(verb, e) {
+            Failure::Failed(reason) => (Exit::Failed, format!("{host}: {reason}")),
+            _ => (Exit::Unreachable, format!("{host}: connection lost")),
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let mut pipe = Pipe {
+            chunks: rx,
+            pending: std::io::Cursor::new(Vec::new()),
+        };
+        std::thread::scope(|scope| {
+            let reading = scope.spawn(move || {
+                let fetched = rusty_mux_client::download::fetch(
+                    &mut source,
+                    from_block,
+                    &copy.path,
+                    &mut Feed(tx.clone()),
+                    TRANSFER_REQ,
+                );
+                // Past the last chunk, the error that ended it, if any.
+                match fetched {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        let kept = io::Error::new(e.kind(), e.to_string());
+                        let _ = tx.send(Err(kept));
+                        Err(e)
+                    }
+                }
+            });
+            let sent = rusty_mux_client::upload::send(
+                &mut sink,
+                to_block,
+                &copy.name,
+                &mut pipe,
+                TRANSFER_REQ,
+            );
+            // Unblocks a download still waiting to hand a chunk over.
+            drop(pipe);
+            let fetched = reading
+                .join()
+                .unwrap_or_else(|_| Err(io::Error::other("the download panicked")));
+            // A broken pipe is the upload ending first; its error is the cause.
+            match (fetched, sent) {
+                (Err(e), _) if e.kind() != io::ErrorKind::BrokenPipe => {
+                    Err(failed("download", &copy.from_host, e))
+                }
+                (_, Err(e)) => Err(failed("upload", &copy.to_host, e)),
+                (Err(e), Ok(_)) => Err(failed("download", &copy.from_host, e)),
+                (Ok(()), Ok(path)) => Ok(path),
+            }
+        })
+    };
+    match copied() {
+        Ok(path) => write_line(out, &path),
+        Err((exit, reason)) => report(err, exit, &reason),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn run_copy(_: &cli::Copy, _: &Env, _: &Stop, _: &mut dyn Write, err: &mut dyn Write) -> Exit {
+    report(err, Exit::Unreachable, "rusty-mux-ctl needs Unix sockets")
 }
 
 /// `forward`: listens on each port and tunnels it until the block closes or
