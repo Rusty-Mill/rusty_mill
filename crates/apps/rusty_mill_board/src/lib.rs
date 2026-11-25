@@ -32,6 +32,7 @@ pub mod domain;
 pub mod drain;
 pub mod external;
 pub mod github;
+pub mod history;
 pub mod http;
 pub mod identities;
 pub mod inbox;
