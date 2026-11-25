@@ -125,7 +125,7 @@ fn an_agents_block_refuses_an_upload() {
     client.request(|req| Message::Attach { req, block });
     client.request(|req| Message::AcquireLease { req, block });
     let err = chunk(&mut client, block, "f", 0, b"x", true).unwrap_err();
-    assert!(err.contains("agent"), "{err}");
+    assert!(err.contains("refused on an agent's block"), "{err}");
     let _ = fs::remove_dir_all(state);
 }
 

@@ -431,6 +431,23 @@ mod tests {
     use std::sync::atomic::AtomicU32;
     use std::sync::mpsc;
 
+    /// `super::receive` without the disk check, so these tests do not
+    /// depend on how full the machine's disk is.
+    fn receive(
+        dir: &Path,
+        name: &str,
+        offset: u64,
+        data: &[u8],
+        done: bool,
+    ) -> Result<Received, String> {
+        let limits = Limits {
+            free_min: 0,
+            free: |_| None,
+            ..LIMITS
+        };
+        receive_within(dir, name, offset, data, done, limits)
+    }
+
     fn scratch() -> PathBuf {
         static N: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
