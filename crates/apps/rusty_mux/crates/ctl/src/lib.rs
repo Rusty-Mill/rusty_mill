@@ -915,6 +915,30 @@ fn run_upload(
     Ok(Exit::Ok)
 }
 
+/// Creates, exclusively, a file beside `out` to stage a download in: a name
+/// already taken is never opened, so nothing existing is truncated.
+#[cfg(any(unix, windows))]
+fn stage(out: &Path) -> io::Result<(PathBuf, std::fs::File)> {
+    for attempt in 0..100 {
+        let mut name = out.as_os_str().to_owned();
+        name.push(format!(".part-{}-{attempt}", std::process::id()));
+        let path = PathBuf::from(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free staging name beside the output",
+    ))
+}
+
 /// `download`: copies the file to `--out`, or to stdout. `--out` is written
 /// beside itself and renamed over it only once the whole file is in, so a
 /// failure or an interrupt never touches what was there.
@@ -942,10 +966,7 @@ fn run_download(
         return Ok(Exit::Ok);
     };
     let local = |e: io::Error| Failure::Failed(format!("download: {}: {e}", out.display()));
-    let mut part = out.clone().into_os_string();
-    part.push(format!(".part-{}", std::process::id()));
-    let part = PathBuf::from(part);
-    let mut file = std::fs::File::create(&part).map_err(local)?;
+    let (part, mut file) = stage(out).map_err(local)?;
     let fetched = rusty_mux_client::download::fetch(
         &mut conn,
         block,
@@ -1569,6 +1590,30 @@ fn require_sync(features: Features) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn staging_never_opens_a_name_that_exists() {
+        let dir = std::env::temp_dir().join(format!("ctl-stage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let out = dir.join("out.bin");
+        std::fs::write(&out, b"output").expect("out");
+        // The first names this process would pick are taken.
+        let taken: Vec<PathBuf> = (0..3)
+            .map(|n| dir.join(format!("out.bin.part-{}-{n}", std::process::id())))
+            .collect();
+        for path in &taken {
+            std::fs::write(path, b"someone else's").expect("taken");
+        }
+        let (part, mut file) = stage(&out).expect("a free name");
+        write!(file, "staged").expect("write");
+        assert!(!taken.contains(&part), "{}", part.display());
+        for path in &taken {
+            assert_eq!(std::fs::read(path).expect("kept"), b"someone else's");
+        }
+        assert_eq!(std::fs::read(&out).expect("kept"), b"output");
+        let _gone = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn ssh_home_is_the_profile_on_windows_and_home_elsewhere() {

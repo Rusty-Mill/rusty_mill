@@ -3651,3 +3651,34 @@ fn a_file_over_one_chunk_goes_up_and_a_directory_is_refused() {
     let _gone = std::fs::remove_file(local);
     let _gone = std::fs::remove_dir_all(state);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_download_replaces_an_existing_out_and_leaves_no_staging_file() {
+    let socket = start_server();
+    let block = block(&socket);
+    let dir = std::env::temp_dir().join(format!("ctl-replace-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let (remote, out) = (dir.join("remote.txt"), dir.join("out.txt"));
+    std::fs::write(&remote, b"new").expect("remote");
+    std::fs::write(&out, b"old").expect("out");
+    ok(
+        &socket,
+        &[
+            "download",
+            "--block",
+            &block,
+            "--out",
+            out.to_str().expect("utf8"),
+            remote.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(std::fs::read(&out).expect("out"), b"new");
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .expect("read")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["out.txt", "remote.txt"]);
+    let _gone = std::fs::remove_dir_all(dir);
+}
