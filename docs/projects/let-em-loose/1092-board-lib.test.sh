@@ -62,30 +62,56 @@ no sc active mill-board 42 "$L1"$'\n''LISTEN 0 128 127.0.0.1:8787 0.0.0.0:* user
 no sc active mill-board 42 'LISTEN 0 128 127.0.0.1:8787 0.0.0.0:*'                                   # owner not visible
 no sc active mill-board 42 'LISTEN 0 128 0.0.0.0:8787 0.0.0.0:* users:(("rusty_mill_boar",pid=42,fd=9))'
 
-# ---- effective unit (systemctl show)
+# ---- effective unit (systemctl show): the approved configuration, compared property by property
 B=/opt/lel/current/bin
 SU=/etc/systemd/system/mill-board.service
-show() {   # show [KEY=VALUE overrides...]: a loaded unit as this script installs it
+LX=/usr/local/libexec
+DD=/srv/lel/bbp
+EXP=$(unit_expected "$SU" "$S" "$B" "$LX" "$DD")
+X="{ path=$B/rusty_mill_board ; argv[]=$B/rusty_mill_board ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
+show() {   # show [KEY=VALUE overrides...]: `systemctl show` of the unit as this script installs it
   local base="LoadState=loaded
 FragmentPath=$SU
 DropInPaths=$SU.d/lel.conf
 User=mill-board
 EnvironmentFiles=$S/board.env (ignore_errors=no)
-ExecStart={ path=$B/rusty_mill_board ; argv[]=$B/rusty_mill_board ; ignore_errors=no }" kv
+Environment=MILL_BOARD_BBP_BIN=$LX/mill-board-bbp MILL_BOARD_BBP_ROOT=$DD
+ExecStart=$X" kv
   for kv in "$@"; do base=$(sed "/^${kv%%=*}=/d" <<<"$base"); base+=$'\n'"$kv"; done
   echo "$base"
 }
-uec() { unit_effective_check "$SU" "$S" "$B" "$1" <<<"$2"; }
+uec() { unit_effective_check "$EXP" "$1" <<<"$2"; }
 ok uec 0 'LoadState=not-found'
 no uec 1 'LoadState=not-found'
 ok uec 1 "$(show)"
 ok uec 0 "$(show)"
+ok uec 0 "$(show)"$'\n'"ExecStartPre="$'\n'"PassEnvironment="     # empty properties printed explicitly
 no uec 0 "$(show LoadState=masked)"
 no uec 0 "$(show "DropInPaths=$SU.d/lel.conf /etc/systemd/system/service.d/10-all.conf")"
 no uec 0 "$(show FragmentPath=/usr/lib/systemd/system/mill-board.service)"
 no uec 0 "$(show User=root)"
 no uec 0 "$(show "EnvironmentFiles=$S/board.env (ignore_errors=no) /etc/other.env (ignore_errors=yes)")"
 no uec 0 "$(show 'ExecStart={ path=/usr/bin/other ; argv[]=/usr/bin/other ; ignore_errors=no }')"
+# a noncanonical unit with the right executable: arguments, a second command, hooks, environment
+no uec 0 "$(show "ExecStart={ path=$B/rusty_mill_board ; argv[]=$B/rusty_mill_board --http 0.0.0.0:8787 ; ignore_errors=no }")"
+no uec 0 "$(show "ExecStart={ path=$B/rusty_mill_board ; argv[]=/bin/sh -c x ; ignore_errors=no }")"
+no uec 0 "$(show "ExecStart=$X ; { path=/bin/sh ; argv[]=/bin/sh -c x ; ignore_errors=no }")"
+no uec 0 "$(show 'ExecStartPre={ path=/bin/sh ; argv[]=/bin/sh -c x ; ignore_errors=no }')"
+no uec 0 "$(show 'ExecStartPost={ path=/bin/sh ; argv[]=/bin/sh -c x ; ignore_errors=no }')"
+no uec 0 "$(show 'ExecCondition={ path=/bin/true ; argv[]=/bin/true ; ignore_errors=no }')"
+no uec 0 "$(show 'ExecStopPost={ path=/bin/sh ; argv[]=/bin/sh -c x ; ignore_errors=no }')"
+no uec 0 "$(show "Environment=MILL_BOARD_BBP_BIN=/tmp/fake MILL_BOARD_BBP_ROOT=$DD")"
+no uec 0 "$(show "Environment=MILL_BOARD_BBP_BIN=$LX/mill-board-bbp MILL_BOARD_BBP_ROOT=$DD MILL_BOARD_HTTP=0.0.0.0:8787")"
+no uec 0 "$(show PassEnvironment=MILL_BOARD_HTTP)"
+no uec 0 "$(show UnsetEnvironment=MILL_BOARD_DB)"
+
+# ---- after start, before any fixture request: the service is up and holds the port
+scr() { service_check "$1" "$2" "$3" 1 <<<"$4"; }
+ok scr active mill-board 42 "$L1"
+no scr active mill-board 42 ""                                     # running but not listening
+no scr active mill-board 77 "$L1"                                  # the port belongs to another process
+no scr failed mill-board 42 ""
+no scr activating mill-board 42 "$L1"
 
 # ---- lookup_state: absent only on bbp's own unknown-task error
 eq "$(lookup_state 0 '')" exists "lookup: exit 0 -> exists"

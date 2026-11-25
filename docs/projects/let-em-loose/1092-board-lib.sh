@@ -54,11 +54,12 @@ unit_check() {
   [ -z "$extra" ] || refuse "$d has other drop-ins: $extra"
 }
 
-# service_check ACTIVE USER MAIN_PID < ss_output: a running mill-board.service runs as mill-board, and every
-# listener on the board's port (`ss -Hltnp`, all lines) is that service's main pid on a loopback address.
-# A line without a pid, or an address that is not loopback, is unknown ownership and refused.
+# service_check ACTIVE USER MAIN_PID [RUNNING] < ss_output: a running mill-board.service runs as mill-board, and
+# every listener on the board's port (`ss -Hltnp`, all lines) is that service's main pid on a loopback address.
+# A line without a pid, or an address that is not loopback, is unknown ownership and refused. With RUNNING=1
+# (after start, before any fixture request) the service must be active and hold at least one listener.
 service_check() {
-  local active=$1 user=$2 main=$3 line addr pids p
+  local active=$1 user=$2 main=$3 running=${4:-0} line addr pids p seen=0
   if [ "$active" = active ] && [ "$user" != "$BOARD_USER" ]; then
     refuse "mill-board.service runs as '${user:-root}', not $BOARD_USER"; return 1
   fi
@@ -72,31 +73,69 @@ service_check() {
       [ "$active" = active ] && [ "$p" = "$main" ] \
         || refuse "the board's port is held by pid $p, not mill-board.service (main pid ${main:-none})" || return 1
     done
+    seen=1
+  done
+  [ "$running" = 0 ] && return 0
+  [ "$active" = active ] || refuse "mill-board.service is '$active' after start" || return 1
+  [ "$seen" = 1 ] || refuse "mill-board.service holds no listener on the board's port"
+}
+
+# The properties the approved unit is compared on, and how `systemctl show` is asked for them.
+UNIT_PROPS="LoadState FragmentPath DropInPaths User EnvironmentFiles Environment PassEnvironment UnsetEnvironment
+ExecCondition ExecStartPre ExecStart ExecStartPost ExecReload ExecStop ExecStopPost"
+
+# unit_expected UNIT STATE BIN LIBEXEC DIR: the approved effective unit, one PROP=VALUE per line in UNIT_PROPS
+# order: the shipped fragment, only this script's drop-in, mill-board, only board.env, exactly the drop-in's
+# Environment, no passed or unset variables, ExecStart with no arguments, and no other Exec hook.
+unit_expected() {
+  local unit=$1 state=$2 bin=$3 libexec=$4 dir=$5
+  printf '%s\n' LoadState=loaded "FragmentPath=$unit" "DropInPaths=$unit.d/lel.conf" "User=$BOARD_USER" \
+    "EnvironmentFiles=$state/board.env" \
+    "Environment=MILL_BOARD_BBP_BIN=$libexec/mill-board-bbp MILL_BOARD_BBP_ROOT=$dir" \
+    PassEnvironment= UnsetEnvironment= ExecCondition= ExecStartPre= "ExecStart=$bin/rusty_mill_board" \
+    ExecStartPost= ExecReload= ExecStop= ExecStopPost=
+}
+
+# exec_argv VALUE: a `systemctl show` Exec value as its argv, or `<invalid>` unless it is exactly one command
+# whose argv[0] is its path. Empty stays empty.
+exec_argv() {
+  local v=$1 path argv
+  [ -n "$v" ] || return 0
+  if [ "$(grep -o '{ path=' <<<"$v" | wc -l)" != 1 ]; then echo '<invalid: not exactly one command>'; return 0; fi
+  path=$(sed -n 's/^{ path=\([^ ]*\) ;.*/\1/p' <<<"$v")
+  argv=$(sed -n 's/.* argv\[\]=\(.*\) ; ignore_errors=.*/\1/p' <<<"$v")
+  [ -n "$path" ] && [ "${argv%% *}" = "$path" ] || { echo '<invalid: argv does not start with path>'; return 0; }
+  echo "$argv"
+}
+
+# unit_normalize < `systemctl show` output: UNIT_PROPS as PROP=VALUE lines, missing ones empty, Exec values as
+# their argv, environment files without their ignore_errors flags.
+unit_normalize() {
+  local show k v
+  show=$(cat)
+  for k in $UNIT_PROPS; do
+    v=$(env_value "$k" <<<"$show")
+    case $k in
+      Exec*) v=$(exec_argv "$v") ;;
+      EnvironmentFiles) v=${v// (ignore_errors=no)/}; v=${v// (ignore_errors=yes)/} ;;
+    esac
+    echo "$k=$v"
   done
 }
 
-# unit_effective_check UNIT STATE BIN LOADED < `systemctl show` output: what systemd will actually run. With
-# LOADED=0 a unit that does not exist yet passes; a loaded unit must use UNIT, only UNIT.d/lel.conf as a
-# drop-in (from any directory), User=mill-board, only STATE/board.env, and BIN/rusty_mill_board.
+# unit_effective_check EXPECTED LOADED < `systemctl show` output: what systemd will actually run equals the
+# approved unit (unit_expected) on every property in UNIT_PROPS. With LOADED=0 a unit that does not exist yet
+# passes. Any difference is refused, naming the property.
 unit_effective_check() {
-  local unit=$1 state=$2 bin=$3 loaded=$4 show load
+  local expected=$1 loaded=$2 show got diff
   show=$(cat)
-  load=$(env_value LoadState <<<"$show")
-  if [ "$load" = not-found ]; then
+  if [ "$(env_value LoadState <<<"$show")" = not-found ]; then
     [ "$loaded" = 0 ] || refuse "mill-board.service is not loaded after install" || return 1
     return 0
   fi
-  [ "$load" = loaded ] || refuse "mill-board.service LoadState is '$load'" || return 1
-  [ "$(env_value FragmentPath <<<"$show")" = "$unit" ] \
-    || refuse "mill-board.service loads from '$(env_value FragmentPath <<<"$show")', not $unit" || return 1
-  [ "$(env_value DropInPaths <<<"$show")" = "$unit.d/lel.conf" ] \
-    || refuse "mill-board.service drop-ins are '$(env_value DropInPaths <<<"$show")', not only $unit.d/lel.conf" || return 1
-  [ "$(env_value User <<<"$show")" = "$BOARD_USER" ] \
-    || refuse "mill-board.service would run as '$(env_value User <<<"$show")', not $BOARD_USER" || return 1
-  [ "$(env_value EnvironmentFiles <<<"$show" | sed 's/ (ignore_errors=[^)]*)$//')" = "$state/board.env" ] \
-    || refuse "mill-board.service reads environment files other than only $state/board.env" || return 1
-  [[ $(env_value ExecStart <<<"$show") == "{ path=$bin/rusty_mill_board ;"* ]] \
-    || refuse "mill-board.service would start something other than $bin/rusty_mill_board" || return 1
+  got=$(unit_normalize <<<"$show")
+  diff=$(diff <(echo "$expected") <(echo "$got") | sed -n 's/^> /  got /p; s/^< /  want /p') || true
+  [ -z "$diff" ] || refuse "mill-board.service is not the approved unit:"$'\n'"$diff"
 }
 
 # lookup_state STATUS STDERR -> exists | absent. `bbp card` exited STATUS; only bbp's own unknown-task error

@@ -69,9 +69,10 @@ HTTP=${HTTP:-127.0.0.1:8787}
 loopback_check "$HTTP" || die "listener"
 unit_check "$UNIT" "$STATE" || die "mill-board.service is not this inbox board's"
 # What systemd would actually run, every drop-in directory included. A failed inspection stops the script.
-SHOW=$(systemctl show -p LoadState,FragmentPath,DropInPaths,User,EnvironmentFiles,ExecStart mill-board) \
-  || die "cannot inspect mill-board.service"
-unit_effective_check "$UNIT" "$STATE" "$BIN" 0 <<<"$SHOW" || die "mill-board.service is not this inbox board's"
+EXPECTED=$(unit_expected "$UNIT" "$STATE" "$BIN" "$LIBEXEC" "$D")
+unit_show() { systemctl show -p "$(tr -s ' \n' ',' <<<"$UNIT_PROPS" | sed 's/,$//')" mill-board; }
+SHOW=$(unit_show) || die "cannot inspect mill-board.service"
+unit_effective_check "$EXPECTED" 0 <<<"$SHOW" || die "mill-board.service is not the approved unit; nothing changed"
 SVC=$(systemctl show -p ActiveState,User,MainPID mill-board) || die "cannot inspect mill-board.service"
 ACTIVE=$(env_value ActiveState <<<"$SVC")
 MAIN=$(env_value MainPID <<<"$SVC")
@@ -169,9 +170,8 @@ Environment=MILL_BOARD_BBP_BIN=$LIBEXEC/mill-board-bbp MILL_BOARD_BBP_ROOT=$D
 EOF
 put "$TMP/lel.conf" "$UNIT.d/lel.conf" 0644
 sudo systemctl daemon-reload
-SHOW=$(systemctl show -p LoadState,FragmentPath,DropInPaths,User,EnvironmentFiles,ExecStart mill-board) \
-  || die "cannot inspect mill-board.service"
-unit_effective_check "$UNIT" "$STATE" "$BIN" 1 <<<"$SHOW" || die "the installed unit is not what systemd would run; not started"
+SHOW=$(unit_show) || die "cannot inspect mill-board.service"
+unit_effective_check "$EXPECTED" 1 <<<"$SHOW" || die "the installed unit is not the approved unit; not started"
 sudo systemctl enable mill-board >/dev/null
 if [ "$CHANGED" = 1 ] || [ "$ACTIVE" != active ]; then
   sudo systemctl restart mill-board
@@ -184,6 +184,14 @@ echo "=== 6. step 1: health"
 for _ in $(seq 1 30); do curl -fsS -m 2 "http://$HTTP/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS -m 2 "http://$HTTP/health" || { sudo journalctl -u mill-board -n 30 --no-pager; die "board not healthy"; }
 echo
+# Whoever answered is the approved service: still the approved unit, active, and the only owner of the port.
+SHOW=$(unit_show) || die "cannot inspect mill-board.service"
+unit_effective_check "$EXPECTED" 1 <<<"$SHOW" || die "mill-board.service changed after start"
+SVC=$(systemctl show -p ActiveState,User,MainPID mill-board) || die "cannot inspect mill-board.service"
+SS=$(sudo ss -Hltnp "( sport = :${HTTP##*:} )") || die "cannot list the listeners on port ${HTTP##*:}"
+service_check "$(env_value ActiveState <<<"$SVC")" "$(env_value User <<<"$SVC")" "$(env_value MainPID <<<"$SVC")" 1 <<<"$SS" \
+  || die "the board's port is not held by mill-board.service; no fixture request sent"
+echo "ok: port ${HTTP##*:} is held by mill-board.service (pid $(env_value MainPID <<<"$SVC")) only"
 
 # ---- 7. Verification step 4 on the script-owned fixture (D146's A2 only; no lens run): a card on this board
 # linked to it, inbox_list, inbox_act (dry run, then reject) on that exact row. The marker records each stage, so a
