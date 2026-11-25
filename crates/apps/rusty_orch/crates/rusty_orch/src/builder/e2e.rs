@@ -25,8 +25,8 @@ const CLAIM_TEXT: &str = "Add a greeting file";
 
 /// The fake `claude-code-acp`: answers `initialize` and `session/new`;
 /// on the prompt, probes the jail into `probe.json`, edits the worktree,
-/// writes `.lel/submit` and ends the turn, or hangs when `$FAKE/mode`
-/// says `hang`.
+/// writes `.lel/submit` and ends the turn, or, when `$FAKE/mode` says
+/// `hang`, writes `.prompted` in the worktree and hangs.
 const AGENT: &str = r#"#!/usr/bin/python3
 import json, os, socket, sys, time
 FAKE = os.path.dirname(os.path.realpath(__file__))
@@ -43,7 +43,10 @@ def probe():
         out["unix_socket"] = "refused: %s" % e
     try:
         path = open(os.path.join(FAKE, "mux-path")).read().strip()
-        open(path, "rb").close(); out["mux_path"] = "opened"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try: s.connect(path)
+        finally: s.close()
+        out["mux_path"] = "connected"
     except OSError as e:
         out["mux_path"] = "refused: %s" % e
     try:
@@ -60,6 +63,7 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "s1"}})
     elif method == "session/prompt":
         if mode() == "hang":
+            open(os.path.join(os.getcwd(), ".prompted"), "w").close()
             while True: time.sleep(1)
         cwd = os.getcwd()
         json.dump(probe(), open(os.path.join(cwd, "probe.json"), "w"))
@@ -293,7 +297,46 @@ impl World {
 impl Drop for World {
     fn drop(&mut self) {
         self.kill_mux();
+        // Session cgroups, then the scope; rmdir fails while one is populated.
+        for entry in std::fs::read_dir(&self.cgroup_parent)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if entry.path().is_dir() {
+                let _ = std::fs::remove_dir(entry.path());
+            }
+        }
+        let _ = std::fs::remove_dir(&self.cgroup_parent);
         let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// A running `builder run`, killed on drop so a failed assert leaks no orch.
+struct Orch(Process);
+
+impl Drop for Orch {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Everything left in `pipe`.
+fn read_all(pipe: Option<impl std::io::Read>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if let Some(mut p) = pipe {
+        p.read_to_end(&mut bytes).expect("pipe");
+    }
+    bytes
+}
+
+/// Wait up to `wait` for `done`, panicking with `what` past it.
+fn wait_for(wait: Duration, what: &str, mut done: impl FnMut() -> bool) {
+    let until = Instant::now() + wait;
+    while !done() {
+        assert!(Instant::now() < until, "{what}");
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -438,6 +481,7 @@ fn a_jailed_builder_stores_its_candidate_and_frees_its_slot() {
         "the slot is released once the cgroup is empty"
     );
     assert!(!populated(&w.cgroup_parent));
+    println!("BBP_ACCEPTANCE PASS builder-stored");
 }
 
 #[test]
@@ -445,31 +489,32 @@ fn a_jailed_builder_stores_its_candidate_and_frees_its_slot() {
 fn a_mux_restart_aborts_the_turn_and_debits_nothing() {
     let mut w = World::new("restart");
     std::fs::write(w.fake.join("mode"), "hang").expect("mode");
-    let mut orch = w
-        .builder()
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("builder run");
-    // The agent is running once its cgroup is populated; then give it
-    // time to answer initialize and session/new and sit in its prompt.
-    let until = Instant::now() + Duration::from_secs(60);
-    while !populated(&w.cgroup_parent) {
-        if Instant::now() >= until {
-            let _ = orch.kill();
-            panic!("the agent never started");
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    std::thread::sleep(Duration::from_secs(2));
+    let mut orch = Orch(
+        w.builder()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("builder run"),
+    );
+    // The agent sits in its prompt once it has written `.prompted`.
+    let prompted = w.worktree().join(".prompted");
+    wait_for(
+        Duration::from_secs(60),
+        "the agent never took the prompt",
+        || prompted.exists(),
+    );
     w.kill_mux();
     w.start_mux();
-    let until = Instant::now() + Duration::from_secs(180);
-    while orch.try_wait().expect("wait").is_none() {
-        assert!(Instant::now() < until, "builder run never ended");
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    let out = orch.wait_with_output().expect("output");
+    wait_for(Duration::from_secs(180), "builder run never ended", || {
+        orch.0.try_wait().ok().flatten().is_some()
+    });
+    let stdout = read_all(orch.0.stdout.take());
+    let stderr = read_all(orch.0.stderr.take());
+    let out = Output {
+        status: orch.0.wait().expect("status"),
+        stdout,
+        stderr,
+    };
     let row = row(&out);
     assert_eq!(row["state"], Value::from("aborted"), "{row:?}");
     assert_eq!(row["candidate"], Value::Null);
@@ -477,6 +522,7 @@ fn a_mux_restart_aborts_the_turn_and_debits_nothing() {
     assert_eq!((card.current, card.spent), (None, 0), "nothing debited");
     assert!(w.slot_free());
     assert!(!populated(&w.cgroup_parent));
+    println!("BBP_ACCEPTANCE PASS builder-mux-restart");
 }
 
 #[test]
@@ -484,29 +530,41 @@ fn a_mux_restart_aborts_the_turn_and_debits_nothing() {
 fn the_holder_deadline_ends_the_session_with_orch_killed() {
     let w = World::new("deadline");
     std::fs::write(w.fake.join("mode"), "hang").expect("mode");
-    // A one-second wall: the holder's backstop fires at wall + grace + margin.
-    let config = LENS_CONFIG.replace("\"builder_wall_secs\": 600", "\"builder_wall_secs\": 1");
+    // orch is killed long before its 20 s wall, so only the holder's
+    // backstop (wall + grace + margin from the session's start) can end it.
+    let wall = Duration::from_secs(20);
+    let config = LENS_CONFIG.replace("\"builder_wall_secs\": 600", "\"builder_wall_secs\": 20");
     std::fs::write(&w.config, config).expect("config");
-    let mut orch = w.builder().spawn().expect("builder run");
-    let until = Instant::now() + Duration::from_secs(60);
-    while !populated(&w.cgroup_parent) {
-        if Instant::now() >= until {
-            let _ = orch.kill();
-            panic!("the agent never started");
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    // orch dies before its own end path can run.
-    orch.kill().expect("kill orch");
-    orch.wait().expect("reap orch");
+    let started = Instant::now();
+    let mut orch = Orch(w.builder().spawn().expect("builder run"));
+    let prompted = w.worktree().join(".prompted");
+    wait_for(
+        Duration::from_secs(15),
+        "the agent never took the prompt",
+        || prompted.exists(),
+    );
+    orch.0.kill().expect("kill orch");
+    orch.0.wait().expect("reap orch");
+    assert!(
+        started.elapsed() < wall,
+        "orch reached its wall before the kill"
+    );
     assert!(
         !w.slot_free(),
         "the holder keeps the slot while the agent runs"
     );
-    let backstop = orch_bbp::builder::GRACE + orch_bbp::builder::HOLDER_MARGIN;
-    let until = Instant::now() + backstop + Duration::from_secs(30);
-    while populated(&w.cgroup_parent) || !w.slot_free() {
-        assert!(Instant::now() < until, "the deadline never ended the agent");
-        std::thread::sleep(Duration::from_millis(500));
-    }
+
+    let backstop = wall + orch_bbp::builder::GRACE + orch_bbp::builder::HOLDER_MARGIN;
+    wait_for(
+        backstop + Duration::from_secs(30),
+        "the deadline never ended the agent",
+        || !populated(&w.cgroup_parent) && w.slot_free(),
+    );
+    // Nothing but the holder's deadline could have ended it this late.
+    let ended = started.elapsed();
+    assert!(
+        ended + Duration::from_secs(2) >= backstop,
+        "ended after {ended:?}, before the holder's deadline {backstop:?}"
+    );
+    println!("BBP_ACCEPTANCE PASS builder-deadline");
 }
