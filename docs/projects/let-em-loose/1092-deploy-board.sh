@@ -68,13 +68,29 @@ fi
 HTTP=${HTTP:-127.0.0.1:8787}
 loopback_check "$HTTP" || die "listener"
 unit_check "$UNIT" "$STATE" || die "mill-board.service is not this inbox board's"
-ACTIVE=$(systemctl is-active mill-board 2>/dev/null || true)
-SUSER=$(systemctl show -p User --value mill-board 2>/dev/null || true)
-MAIN=$(systemctl show -p MainPID --value mill-board 2>/dev/null || true)
-LISTENER=$(sudo ss -Hltnp "( sport = :${HTTP##*:} )" | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2 || true)
-service_check "$ACTIVE" "$SUSER" "$MAIN" "$LISTENER" || die "the board's service or port is not this inbox board's"
-FIX=$(sudo cat "$MARKER" 2>/dev/null || true)
-EXISTS=0; if $R "$BIN/bbp" card --dir "$D" --task "$TASK" >/dev/null 2>&1; then EXISTS=1; fi
+# What systemd would actually run, every drop-in directory included. A failed inspection stops the script.
+SHOW=$(systemctl show -p LoadState,FragmentPath,DropInPaths,User,EnvironmentFiles,ExecStart mill-board) \
+  || die "cannot inspect mill-board.service"
+unit_effective_check "$UNIT" "$STATE" "$BIN" 0 <<<"$SHOW" || die "mill-board.service is not this inbox board's"
+SVC=$(systemctl show -p ActiveState,User,MainPID mill-board) || die "cannot inspect mill-board.service"
+ACTIVE=$(env_value ActiveState <<<"$SVC")
+MAIN=$(env_value MainPID <<<"$SVC")
+SS=$(sudo ss -Hltnp "( sport = :${HTTP##*:} )") || die "cannot list the listeners on port ${HTTP##*:}"
+service_check "$ACTIVE" "$(env_value User <<<"$SVC")" "$MAIN" <<<"$SS" \
+  || die "the board's service or port is not this inbox board's"
+fixture_marker() {   # the recorded fixture, empty when there is none; a marker that cannot be read stops
+  sudo test -e "$MARKER" || return 0
+  [ "$(sudo stat -c %U:%G "$MARKER")" = root:root ] || die "$MARKER is not root-owned"
+  sudo cat "$MARKER" || die "cannot read $MARKER"
+}
+task_state() {   # exists | absent; any other bbp failure is a failed lookup
+  local err rc=0
+  err=$($R "$BIN/bbp" card --dir "$D" --task "$TASK" 2>&1 >/dev/null) || rc=$?
+  lookup_state "$rc" "$err"
+}
+FIX=$(fixture_marker)
+TSTATE=$(task_state) || die "cannot tell whether $TASK exists"
+EXISTS=0; [ "$TSTATE" = absent ] || EXISTS=1
 PLAN=$(fixture_plan "$FIX" "$EXISTS") || die "the fixture task is not this script's"
 echo "host $(hostname), board $HTTP, fixture $TASK: $PLAN"
 
@@ -153,6 +169,9 @@ Environment=MILL_BOARD_BBP_BIN=$LIBEXEC/mill-board-bbp MILL_BOARD_BBP_ROOT=$D
 EOF
 put "$TMP/lel.conf" "$UNIT.d/lel.conf" 0644
 sudo systemctl daemon-reload
+SHOW=$(systemctl show -p LoadState,FragmentPath,DropInPaths,User,EnvironmentFiles,ExecStart mill-board) \
+  || die "cannot inspect mill-board.service"
+unit_effective_check "$UNIT" "$STATE" "$BIN" 1 <<<"$SHOW" || die "the installed unit is not what systemd would run; not started"
 sudo systemctl enable mill-board >/dev/null
 if [ "$CHANGED" = 1 ] || [ "$ACTIVE" != active ]; then
   sudo systemctl restart mill-board
@@ -171,23 +190,25 @@ echo
 # rerun resumes, and a verified fixture is a no-op. The admin token is the fresh board's first-admin.token, or
 # MB_TOKEN; it stays in a variable and a header file descriptor, never in argv or the output.
 echo "=== 7. step 4: inbox ($PLAN)"
-hook_marker_read()  { sudo cat "$MARKER" 2>/dev/null || true; }
+hook_marker_read()  { fixture_marker; }
 hook_marker_write() { printf '%s\n' "$1" >"$TMP/marker" && sudo install -o root -g root -m 0644 "$TMP/marker" "$MARKER"; }
-hook_task_exists()  { $R "$BIN/bbp" card --dir "$D" --task "$TASK" >/dev/null 2>&1; }
+hook_task_state()   { task_state; }
 hook_bbp_open()     { $R "$BIN/bbp" inbox --dir "$D" --task "$TASK" --json yes | jq length; }
-hook_seed() {   # opens the toy task, assigns the toy roster as 1166-smoke-run.sh does, seeds A2; prints A2's id
-  local f r brief
+hook_open() {   # the toy task (tree from 1166-smoke-run.sh); fails if any input is missing or bbp refuses
+  local f
   for f in repo brief.md roster.json profiles.json holdout-profiles.json holdout; do
     $R test -e "$TOY/$f" || { echo "$TOY/$f missing: the toy tree comes from 1166-smoke-run.sh" >&2; return 1; }
   done
   $R "$BIN/bbp" open --mode claims --dir "$D" --task "$TASK" --repo "$TOY/repo" \
     --brief "$TOY/brief.md" --roster "$TOY/roster.json" --profiles "$TOY/profiles.json" \
     --holdout-profiles "$TOY/holdout-profiles.json" --holdout-root "$TOY/holdout" >&2
-  for r in seed architect adversary operator seed-s1 seed-s2; do
-    $R "$BIN/bbp" assign --dir "$D" --task "$TASK" --role "$r" --principal "$r" --vendor local >&2
-  done
-  brief=$($R "$BIN/bbp" card --dir "$D" --task "$TASK" | jq -r .brief)
-  bash "$HERE/1166-seed-inbox.sh" "$D" "$TASK" "$brief" "$BIN" | sed -n 's/^A2=//p'
+}
+hook_assign() { $R "$BIN/bbp" assign --dir "$D" --task "$TASK" --role "$1" --principal "$1" --vendor local >&2; }
+hook_seed_a2() {   # prints A2's id; fails if the brief id or the seed script fails
+  local brief out
+  brief=$($R "$BIN/bbp" card --dir "$D" --task "$TASK" | jq -er .brief) || return 1
+  out=$(bash "$HERE/1166-seed-inbox.sh" "$D" "$TASK" "$brief" "$BIN") || return 1
+  sed -n 's/^A2=//p' <<<"$out"
 }
 if [ "$PLAN" != "done" ]; then
   TOKEN=${MB_TOKEN:-$(sudo cat "$STATE/settings/first-admin.token" 2>/dev/null || true)}

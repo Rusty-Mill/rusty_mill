@@ -50,12 +50,49 @@ rm "$U.d/zz-local.conf"; rm "$U"
 no unit_check "$U" "$S"                       # drop-ins without a unit
 
 # ---- service and port owner
-ok service_check inactive "" 0 ""
-ok service_check active mill-board 42 42
-ok service_check active mill-board 42 ""
-no service_check active root 42 42
-no service_check active mill-board 42 77
-no service_check inactive "" 0 77
+L1='LISTEN 0 128 127.0.0.1:8787 0.0.0.0:* users:(("rusty_mill_boar",pid=42,fd=9))'
+sc() { service_check "$1" "$2" "$3" <<<"$4"; }
+ok sc inactive "" 0 ""
+ok sc active mill-board 42 "$L1"
+ok sc active mill-board 42 ""
+no sc active root 42 "$L1"
+no sc active mill-board 77 "$L1"                                   # someone else holds the port
+no sc inactive "" 0 "$L1"
+no sc active mill-board 42 "$L1"$'\n''LISTEN 0 128 127.0.0.1:8787 0.0.0.0:* users:(("nc",pid=77,fd=3))'   # a second listener
+no sc active mill-board 42 'LISTEN 0 128 127.0.0.1:8787 0.0.0.0:*'                                   # owner not visible
+no sc active mill-board 42 'LISTEN 0 128 0.0.0.0:8787 0.0.0.0:* users:(("rusty_mill_boar",pid=42,fd=9))'
+
+# ---- effective unit (systemctl show)
+B=/opt/lel/current/bin
+SU=/etc/systemd/system/mill-board.service
+show() {   # show [KEY=VALUE overrides...]: a loaded unit as this script installs it
+  local base="LoadState=loaded
+FragmentPath=$SU
+DropInPaths=$SU.d/lel.conf
+User=mill-board
+EnvironmentFiles=$S/board.env (ignore_errors=no)
+ExecStart={ path=$B/rusty_mill_board ; argv[]=$B/rusty_mill_board ; ignore_errors=no }" kv
+  for kv in "$@"; do base=$(sed "/^${kv%%=*}=/d" <<<"$base"); base+=$'\n'"$kv"; done
+  echo "$base"
+}
+uec() { unit_effective_check "$SU" "$S" "$B" "$1" <<<"$2"; }
+ok uec 0 'LoadState=not-found'
+no uec 1 'LoadState=not-found'
+ok uec 1 "$(show)"
+ok uec 0 "$(show)"
+no uec 0 "$(show LoadState=masked)"
+no uec 0 "$(show "DropInPaths=$SU.d/lel.conf /etc/systemd/system/service.d/10-all.conf")"
+no uec 0 "$(show FragmentPath=/usr/lib/systemd/system/mill-board.service)"
+no uec 0 "$(show User=root)"
+no uec 0 "$(show "EnvironmentFiles=$S/board.env (ignore_errors=no) /etc/other.env (ignore_errors=yes)")"
+no uec 0 "$(show 'ExecStart={ path=/usr/bin/other ; argv[]=/usr/bin/other ; ignore_errors=no }')"
+
+# ---- lookup_state: absent only on bbp's own unknown-task error
+eq "$(lookup_state 0 '')" exists "lookup: exit 0 -> exists"
+eq "$(lookup_state 1 'bbp: UnknownTask')" absent "lookup: UnknownTask -> absent"
+no lookup_state 1 'bbp: master: Permission denied'
+no lookup_state 1 'sudo: a password is required'
+no lookup_state 1 ''
 
 # ---- fixture_plan
 eq "$(fixture_plan "" 0)" create "plan: nothing recorded, no task -> create"
@@ -84,11 +121,15 @@ no fixture_row "[]" "$M"
 # ---- fixture_verify against an in-memory BBP and board
 # State: MARKER (file), TASKS (bbp tasks), OPEN (open escalations of the fixture task), CALLS (api writes).
 DRY_OK='{"dry_run":{"step":{},"response":{"Accepted":{"Ok":null}},"events":[{"ClaimDecided":{}}],"then":[]}}'
-reset() { echo "$DRY_OK" >"$T/dry"; : >"$T/marker"; printf '%s\n' "$@" >"$T/tasks"; echo 0 >"$T/open"; : >"$T/calls"; echo 0 >"$T/card"; }
+reset() { rm -f "$T/lookup_fail" "$T/open_fail" "$T/open_partial" "$T/assign_fail"; echo 11 >"$T/a2"; echo "$DRY_OK" >"$T/dry"; : >"$T/marker"; printf '%s\n' "$@" >"$T/tasks"; echo 0 >"$T/open"; : >"$T/calls"; echo 0 >"$T/card"; }
 hook_marker_read()  { cat "$T/marker"; }
 hook_marker_write() { echo "$1" >"$T/marker"; }
-hook_task_exists()  { grep -qx "$FIXTURE_TASK" "$T/tasks"; }
-hook_seed()         { echo "$FIXTURE_TASK" >>"$T/tasks"; echo 1 >"$T/open"; echo 11; }
+hook_task_state()   { if [ -e "$T/lookup_fail" ]; then echo "lookup failed" >&2; return 1; fi
+                      if grep -qx "$FIXTURE_TASK" "$T/tasks"; then echo exists; else echo absent; fi; }
+hook_open()         { echo "open" >>"$T/calls"; [ ! -e "$T/open_partial" ] || { echo "$FIXTURE_TASK" >>"$T/tasks"; return 1; }
+                      [ ! -e "$T/open_fail" ] || return 1; echo "$FIXTURE_TASK" >>"$T/tasks"; }
+hook_assign()       { echo "assign $1" >>"$T/calls"; [ "$1" != "$(cat "$T/assign_fail" 2>/dev/null)" ]; }
+hook_seed_a2()      { echo "seed" >>"$T/calls"; echo 1 >"$T/open"; cat "$T/a2"; }
 hook_bbp_open()     { cat "$T/open"; }
 hook_api() {
   case $1 in
@@ -140,9 +181,38 @@ eq "$(grep -c '^inbox_act' "$T/calls")" 1 "refused dry run: only the dry run was
 eq "$(jq -r .state "$T/marker")" linked "refused dry run: marker stays linked"
 
 reset board-check                           # the fixture row changed under us: no real reject
-hook_seed() { echo "$FIXTURE_TASK" >>"$T/tasks"; echo 1 >"$T/open"; echo 12; }
+echo 12 >"$T/a2"
 no fixture_verify
 eq "$(grep -c '^inbox_act' "$T/calls" || true)" 0 "identity mismatch: no inbox_act at all"
+
+# ---- fail closed on creation and lookup
+reset board-check; touch "$T/open_fail"     # bbp open fails
+no fixture_verify
+eq "$(cat "$T/calls")" "open" "failed create: no assign, seed, card or inbox call"
+eq "$(cat "$T/marker")" "" "failed create: nothing recorded"
+
+reset board-check; touch "$T/open_partial"  # bbp open fails after writing the task
+no fixture_verify
+eq "$(cat "$T/calls")" "open" "failed create that left a task: no assign, seed, card or inbox call"
+eq "$(cat "$T/marker")" "" "failed create that left a task: nothing recorded"
+
+reset board-check; echo architect >"$T/assign_fail"   # an assignment fails
+no fixture_verify
+eq "$(grep -c '^seed\|^card_add\|^inbox_act' "$T/calls" || true)" 0 "failed assign: no seed, card or inbox_act"
+eq "$(tail -n 1 "$T/calls")" "assign architect" "failed assign: stops at the failing role"
+
+reset board-check; echo "not-a-number" >"$T/a2"       # seeding prints no id
+no fixture_verify
+eq "$(grep -c '^card_add\|^inbox_act' "$T/calls" || true)" 0 "no A2 id: no card or inbox_act"
+
+reset board-check; touch "$T/lookup_fail"             # a failed lookup is not an absent task
+no fixture_verify
+eq "$(cat "$T/calls")" "" "failed lookup: nothing opened or sent"
+
+reset board-check                                     # open succeeds but the task is still not there
+hook_open() { echo "open" >>"$T/calls"; }
+no fixture_verify
+eq "$(cat "$T/calls")" "open" "open without a task: no assign, seed or inbox call"
 
 echo
 if [ "$fails" != 0 ]; then echo "$fails failed"; exit 1; fi
