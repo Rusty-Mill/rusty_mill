@@ -10403,6 +10403,7 @@ dependencies = [
  "rusty_bbp",
  "rusty_codec",
  "rusty_libc",
+ "rusty_pk",
  "rusty_rand",
  "rusty_sandbox",
  "rusty_serde",

@@ -118,7 +118,7 @@ fn happy_run_polling(
     let dir = tempdir(tag);
     let (repo, base) = repo(&dir);
     let task = TaskId("T1".into());
-    admin::open_task(
+    open_scratch(
         &dir,
         &task,
         "local",
@@ -328,7 +328,7 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
     let dir = tempdir("forfeit");
     let (repo, _) = repo(&dir);
     let task = TaskId("T1".into());
-    admin::open_task(
+    open_scratch(
         &dir,
         &task,
         "local",
@@ -461,7 +461,7 @@ fn launchers_file_may_omit_roles() {
 
 /// Open `task` with every role assigned and `set` as its profile set.
 fn open_assigned(dir: &Path, task: &TaskId, set: &ProfileSet) {
-    admin::open_task(
+    open_scratch(
         dir,
         task,
         "local",
@@ -777,7 +777,7 @@ fn a_roster_without_a_finalizer_is_refused_at_open() {
     for r in &mut roster {
         r.final_decision = false;
     }
-    let r = admin::open_task(
+    let r = open_scratch(
         &dir,
         &TaskId("T1".into()),
         "local",
@@ -797,7 +797,7 @@ fn a_roster_without_a_finalizer_is_refused_at_open() {
     // A refused open writes nothing, so the corrected roster opens the same task.
     let logs = std::fs::read_dir(dir.join("tasks")).map_or(0, Iterator::count);
     assert_eq!(logs, 0, "no log was written");
-    let r = admin::open_task(
+    let r = open_scratch(
         &dir,
         &TaskId("T1".into()),
         "local",
@@ -868,7 +868,7 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
     second.id = RoleId("coder2".into());
     second.turn_order = 9;
     roster.push(second);
-    admin::open_task_live(
+    open_scratch_live(
         &dir,
         &task,
         "local",
@@ -1097,7 +1097,7 @@ fn capped_run_by(
     let dir = tempdir(tag);
     let (repo, _) = repo(&dir);
     let task = TaskId("T1".into());
-    admin::open_task(
+    open_scratch(
         &dir,
         &task,
         "local",
@@ -1269,7 +1269,7 @@ fn opened(tag: &str) -> (PathBuf, TaskId, PathBuf) {
     let dir = tempdir(tag);
     let (repo, _) = repo(&dir);
     let task = TaskId("T1".into());
-    admin::open_task(
+    open_scratch(
         &dir,
         &task,
         "local",
@@ -2801,4 +2801,53 @@ fn session_launchers_are_refused_naming_a_turn() {
     assert!(moderator::run(&cfg).unwrap_err().contains("drop {turn}"));
     assert_eq!(card(&dir, &task).state, State::Planning, "nothing ran");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #447: the fixture's tasks answer their gates with `--as`, so they open scratch, their repo
+/// listed first as the operator would (D195).
+#[allow(clippy::too_many_arguments, dead_code)]
+fn open_scratch_live(
+    dir: &std::path::Path,
+    task: &rusty_bbp::TaskId,
+    repo: &str,
+    brief: &[u8],
+    human: &rusty_bbp::PrincipalId,
+    set: &rusty_bbp_host::profiles::ProfileSet,
+    roster: Vec<rusty_bbp::Role>,
+    live: u32,
+    policy: rusty_bbp::SchedulingPolicy,
+) -> Result<rusty_bbp::Response, String> {
+    use rusty_bbp_host::scratch_repos;
+    if scratch_repos::check(dir, repo).is_err() {
+        scratch_repos::add(
+            dir,
+            scratch_repos::Record::new(repo, "test", "test fixture", rusty_bbp::Time(0)),
+        )?;
+    }
+    rusty_bbp_host::admin::open_task_gated(
+        dir,
+        task,
+        repo,
+        brief,
+        human,
+        set,
+        roster,
+        (live, policy),
+        Some(rusty_bbp::Gates::Scratch),
+    )
+}
+
+/// [`open_scratch_live`] with one live turn, as `admin::open_task` opens.
+#[allow(dead_code)]
+fn open_scratch(
+    dir: &std::path::Path,
+    task: &rusty_bbp::TaskId,
+    repo: &str,
+    brief: &[u8],
+    human: &rusty_bbp::PrincipalId,
+    set: &rusty_bbp_host::profiles::ProfileSet,
+    roster: Vec<rusty_bbp::Role>,
+) -> Result<rusty_bbp::Response, String> {
+    let policy = rusty_bbp_host::admin::default_policy(1);
+    open_scratch_live(dir, task, repo, brief, human, set, roster, 1, policy)
 }

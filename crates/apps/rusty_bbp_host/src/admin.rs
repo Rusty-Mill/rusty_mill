@@ -84,6 +84,37 @@ pub fn open_task_live(
     max_live_turns: u32,
     policy: SchedulingPolicy,
 ) -> Result<Response, String> {
+    open_task_gated(
+        dir,
+        task,
+        repo,
+        brief,
+        human,
+        set,
+        roster,
+        (max_live_turns, policy),
+        None,
+    )
+}
+
+/// As [`open_task_live`], with `gates`: `Some(Scratch)` opens a task whose human gates take an
+/// unsigned `--as` answer, and is refused before anything is written unless `repo` is on the
+/// scratch list ([`crate::scratch_repos`], D195). `None` opens it owned.
+#[allow(clippy::too_many_arguments)]
+pub fn open_task_gated(
+    dir: &Path,
+    task: &TaskId,
+    repo: &str,
+    brief: &[u8],
+    human: &PrincipalId,
+    set: &ProfileSet,
+    roster: Vec<Role>,
+    (max_live_turns, policy): (u32, SchedulingPolicy),
+    gates: Option<Gates>,
+) -> Result<Response, String> {
+    if gates == Some(Gates::Scratch) {
+        crate::scratch_repos::check(dir, repo)?;
+    }
     open_mode(
         dir,
         task,
@@ -94,7 +125,7 @@ pub fn open_task_live(
         roster,
         max_live_turns,
         policy,
-        (Mode::Stages, None, || Ok((None, None))),
+        (Mode::Stages, None, gates, || Ok((None, None))),
     )
 }
 
@@ -131,9 +162,10 @@ fn open_mode(
     roster: Vec<Role>,
     max_live_turns: u32,
     policy: SchedulingPolicy,
-    (mode, claims, stage): (
+    (mode, claims, gates, stage): (
         Mode,
         Option<ClaimsConfig>,
+        Option<Gates>,
         impl FnOnce() -> Result<Staged, String>,
     ),
 ) -> Result<Response, String> {
@@ -155,7 +187,7 @@ fn open_mode(
     let profile_digest = profiles::freeze(dir, task, set)?;
     let blob = d.store.blob_put(brief);
     let cmd = Command::Open(OpenTask {
-        gates: None,
+        gates,
         claims,
         mode,
         task: task.clone(),
@@ -300,7 +332,7 @@ pub fn open_claims_task(
         roster,
         1,
         SchedulingPolicy::TurnBased,
-        (Mode::Claims, Some(cfg), stage),
+        (Mode::Claims, Some(cfg), None, stage),
     )
 }
 

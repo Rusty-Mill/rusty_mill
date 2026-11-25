@@ -16,6 +16,8 @@ layer = "apps"
 # First-party only (ADR-0002 Tier S).
 rusty_bbp = { workspace = true }
 rusty_serde = { workspace = true }
+# Ed25519 checks of board-signed approval receipts (#447).
+rusty_pk = { workspace = true }
 # Operation ids for reads the agent did not name.
 rusty_rand = { workspace = true }
 # Golden cases and sign-offs are TOML (#597); first-party, no_std.

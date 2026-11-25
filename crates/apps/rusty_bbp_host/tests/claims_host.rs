@@ -500,6 +500,7 @@ fn an_irreversible_claim_reaches_the_inbox_and_a_dry_run_commits_nothing() {
         "owner",
         Some(e.rev),
         None,
+        None,
     )
     .unwrap();
     assert_eq!(preview.response, Response::Ok);
@@ -518,6 +519,7 @@ fn an_irreversible_claim_reaches_the_inbox_and_a_dry_run_commits_nothing() {
         "owner",
         Some(e.rev),
         None,
+        None,
     )
     .unwrap();
     assert_eq!(r, Response::Ok);
@@ -532,6 +534,7 @@ fn an_irreversible_claim_reaches_the_inbox_and_a_dry_run_commits_nothing() {
             None,
             "owner",
             Some(e.rev),
+            None,
             None,
         )
         .unwrap(),
@@ -746,6 +749,7 @@ fn human_ok(dir: &Path, verb: &str, args: &[&str]) {
         "owner",
         Some(rev),
         None,
+        None,
     )
     .expect(verb);
     assert!(
@@ -790,6 +794,7 @@ fn extend_claim_is_refused_on_an_evidence_task_and_applies_elsewhere() {
         "owner",
         Some(rev),
         None,
+        None,
     )
     .expect("fenced");
     let (code, detail) = rejected(fenced);
@@ -805,6 +810,7 @@ fn extend_claim_is_refused_on_an_evidence_task_and_applies_elsewhere() {
         Some(rev),
         "owner",
         Some(rev),
+        None,
         None,
     )
     .expect("preview");
@@ -995,6 +1001,7 @@ fn intent_stores_the_new_brief_and_reopens_or_escalates_what_it_affects() {
         Some(rev),
         "owner",
         Some(rev),
+        None,
         None,
     );
     assert!(matches!(twice, Ok(Response::Rejected(r)) if r.code == Code::BadHumanInput));
@@ -1360,6 +1367,7 @@ fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
             "owner",
             Some(fence),
             op(),
+            None,
         )
         .unwrap()
     };
@@ -1388,6 +1396,7 @@ fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
         "owner",
         Some(rev),
         op(),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1421,6 +1430,7 @@ fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
             "owner",
             Some(fence),
             Some(OpId(op.into())),
+            None,
         )
         .unwrap();
         (r, Sha256::of(format!("brief {name}").as_bytes()))
@@ -1458,6 +1468,7 @@ fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
         "owner",
         Some(Rev(rev.0 - fresh.events.len() as u64)),
         op(),
+        None,
     )
     .unwrap();
     assert_eq!(again, applied, "an idempotent retry replays");
