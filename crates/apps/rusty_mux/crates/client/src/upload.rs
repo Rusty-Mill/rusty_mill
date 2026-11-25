@@ -38,27 +38,42 @@ pub fn send<S: Read + Write>(
     file: &mut impl Read,
     first_req: u64,
 ) -> io::Result<String> {
+    let mut req = first_req;
+    send_with(name, file, |args| {
+        let method = "terminal.upload".into();
+        conn.send(&Message::BlockCall {
+            req,
+            block,
+            method,
+            args,
+        })?;
+        let text = reply(conn, req);
+        req += 1;
+        text
+    })
+}
+
+/// [`send`] for a caller that owns the connection's reads: `call` takes
+/// each chunk's `terminal.upload` arguments, makes the call and returns its
+/// reply text. The same outcome rules as [`send`] apply.
+pub fn send_with(
+    name: &str,
+    file: &mut impl Read,
+    mut call: impl FnMut(Vec<(String, Value)>) -> io::Result<String>,
+) -> io::Result<String> {
     let mut chunk = fill(file)?;
     let mut offset = 0u32;
-    let mut req = first_req;
     loop {
         // One chunk ahead, to know which is the last.
         let next = fill(file)?;
         let done = next.is_empty();
         let len = u32::try_from(chunk.len()).map_err(io::Error::other)?;
-        let args = vec![
+        let text = call(vec![
             ("name".to_owned(), Value::Text(name.to_owned())),
             ("offset".to_owned(), Value::Lines(offset)),
             ("data".to_owned(), Value::Bytes(std::mem::take(&mut chunk))),
             ("done".to_owned(), Value::Flag(done)),
-        ];
-        conn.send(&Message::BlockCall {
-            req,
-            block,
-            method: "terminal.upload".into(),
-            args,
-        })?;
-        let text = reply(conn, req)?;
+        ])?;
         if done {
             return Ok(text);
         }
@@ -66,7 +81,6 @@ pub fn send<S: Read + Write>(
             io::Error::new(io::ErrorKind::InvalidInput, "a file is at most 2 GiB")
         })?;
         chunk = next;
-        req += 1;
     }
 }
 

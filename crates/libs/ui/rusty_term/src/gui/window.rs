@@ -60,7 +60,7 @@ use super::render::{CpuRenderer, FloatLayer, PaneFrame, Renderer, Scene, SearchC
 use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use super::source::{
-    Act, Feed, Float, FloatAt, Forwarded, Listed, PaneIo, Remote, Show, Source, Tree,
+    Act, Feed, Float, FloatAt, Forwarded, Listed, PaneIo, Remote, Show, Source, Tree, Uploaded,
 };
 use super::strip::{self, Spot, StripState};
 use super::{link_policy, link_trust};
@@ -228,6 +228,9 @@ pub(crate) enum UserEvent {
     /// A port forward the source was asked for ([`Source::forward`]).
     /// A forward's answer: the pane and ask it is for, the link and the result.
     Forwarded(u64, u64, super::link_policy::Loopback, Forwarded),
+    /// A file dropped or pasted on a pane was sent to its host (C82): the
+    /// pane and the file's path there, or why not.
+    Uploaded(u64, Uploaded),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -3006,6 +3009,20 @@ impl WindowState<'_> {
     /// Paste the system clipboard into the active tab's child (Ctrl+Shift+V, and
     /// Ctrl+V on Windows).
     fn paste(&mut self) {
+        let Some(cb) = self.clipboard.as_mut() else {
+            return;
+        };
+        // Files copied in a file manager go as drops do, to a pane whose
+        // host is elsewhere (C82); a local pane keeps pasting text.
+        if let Ok(files) = cb.get().file_list()
+            && !files.is_empty()
+            && self.focused().is_some_and(|k| self.source.uploads(k))
+        {
+            for file in files {
+                self.start_upload(file);
+            }
+            return;
+        }
         let Some(cb) = self.clipboard.as_mut() else {
             return;
         };
@@ -6559,6 +6576,66 @@ impl WindowState<'_> {
         }
     }
 
+    /// A file dropped on the window: typed as a path, or, on a pane whose
+    /// host is elsewhere, sent there first (C82).
+    fn drop_file(&mut self, path: std::path::PathBuf) {
+        if self.overview.is_open() {
+            return;
+        }
+        if self.start_upload(path.clone()) {
+            return;
+        }
+        let Some(p) = self.pane_mut() else {
+            return;
+        };
+        let bracketed = p.grid.lock().bracketed_paste;
+        let Some(bytes) = dropped_file_paste(&path.to_string_lossy(), bracketed, false) else {
+            return;
+        };
+        let _ = p.writer.write(&bytes);
+        self.snap_to_bottom();
+    }
+
+    /// Asks the focused pane's source to send `path` to its host; the answer
+    /// comes back as [`UserEvent::Uploaded`]. `false` when the pane's host is
+    /// this machine, so `path` is as good there as here.
+    fn start_upload(&mut self, path: std::path::PathBuf) -> bool {
+        let Some(key) = self.focused().filter(|&k| self.source.uploads(k)) else {
+            return false;
+        };
+        let proxy = self.proxy.clone();
+        self.source.upload(
+            key,
+            path,
+            Box::new(move |uploaded| {
+                let _ = proxy.send_event(UserEvent::Uploaded(key, uploaded));
+            }),
+        );
+        true
+    }
+
+    /// A file sent for pane `key` arrived: its path there is typed into the
+    /// pane as a drop of a local file would be, or the notice says why not.
+    fn uploaded(&mut self, key: u64, uploaded: Uploaded) {
+        let path = match uploaded {
+            Ok(path) => path,
+            Err(why) => {
+                return self.show_notice(Some(super::source::Notice {
+                    title: "File not sent".to_owned(),
+                    detail: why,
+                }));
+            }
+        };
+        let Some(p) = self.pane_by_id_mut(key) else {
+            return;
+        };
+        let bracketed = p.grid.lock().bracketed_paste;
+        if let Some(bytes) = dropped_file_paste(&path, bracketed, false) {
+            let _ = p.writer.write(&bytes);
+        }
+        self.snap_to_bottom();
+    }
+
     /// Type `text` into the focused block as a paste, without Enter
     /// (gui-design D78).
     fn type_text(&mut self, text: &str) {
@@ -6641,19 +6718,7 @@ impl WindowState<'_> {
                     window.request_redraw();
                 }
             }
-            WindowEvent::DroppedFile(path) => {
-                let overview = self.overview.is_open();
-                let Some(p) = self.pane_mut() else {
-                    return;
-                };
-                let bracketed = p.grid.lock().bracketed_paste;
-                let Some(bytes) = dropped_file_paste(&path.to_string_lossy(), bracketed, overview)
-                else {
-                    return;
-                };
-                let _ = p.writer.write(&bytes);
-                self.snap_to_bottom();
-            }
+            WindowEvent::DroppedFile(path) => self.drop_file(path),
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::Resized(size) => {
                 self.apply_size(size.width, size.height);
@@ -7495,6 +7560,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                 // Only the window that still holds the pane takes the answer.
                 if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(key)) {
                     w.forwarded(key, op, &target, forwarded);
+                }
+            }
+            UserEvent::Uploaded(key, uploaded) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(key)) {
+                    w.uploaded(key, uploaded);
                 }
             }
             UserEvent::Listed(ask, listed) => {

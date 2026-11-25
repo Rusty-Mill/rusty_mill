@@ -28,6 +28,11 @@ const PATIENCE: Duration = Duration::from_secs(20);
 
 /// Starts a server running `/bin/sh` on a fresh socket.
 fn start_server() -> PathBuf {
+    start_server_in(None)
+}
+
+/// [`start_server`] keeping its state (and uploads) in `state_dir`.
+fn start_server_in(state_dir: Option<PathBuf>) -> PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -37,7 +42,7 @@ fn start_server() -> PathBuf {
         args: Vec::new(),
         cwd: "/".into(),
         console_host: ConsoleHost::default(),
-        state_dir: None,
+        state_dir,
         protected: Default::default(),
         grapheme_clustering: false,
         config_file: None,
@@ -1392,4 +1397,39 @@ fn a_window_asks_another_to_show_a_session_and_the_asked_hears_who() {
 
     assert!(a.source.show_in(session, Show::All));
     next_out(&b_outs, |o| matches!(o, Out::Shown(..)));
+}
+
+#[test]
+fn a_file_is_sent_to_the_blocks_host_once_the_pane_holds_the_lease() {
+    let state = std::env::temp_dir().join(format!("rusty-mux-gui-up-{}", std::process::id()));
+    std::fs::create_dir_all(&state).expect("mkdir");
+    let socket = start_server_in(Some(state.clone()));
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (mut writer, feed) = feed_of(attached.source.open(key, 80, 24).expect("opened"));
+    assert!(attached.source.uploads(key), "the server takes files");
+    assert!(!attached.source.uploads(key + 99), "no such pane");
+    type_until_echoed(writer.as_mut(), &feed, 1);
+
+    let ask = |path: &std::path::Path| {
+        let (tx, rx) = channel();
+        attached
+            .source
+            .upload(key, path.to_owned(), Box::new(move |r| drop(tx.send(r))));
+        rx.recv_timeout(PATIENCE).expect("an answer")
+    };
+    let local = state.join("local.bin");
+    let body: Vec<u8> = (0..(3 << 20) + 5).map(|i| i as u8).collect();
+    std::fs::write(&local, &body).expect("write");
+    let sent = ask(&local).expect("sent");
+    assert!(sent.ends_with("local.bin"), "{sent}");
+    assert_eq!(std::fs::read(&sent).expect("on the server"), body);
+
+    let missing = ask(&state.join("nope")).expect_err("no such file");
+    assert!(missing.contains("nope"), "{missing}");
+    let folder = ask(&state).expect_err("a folder is not a file");
+    assert!(folder.contains("not a file"), "{folder}");
+    std::fs::remove_dir_all(&state).expect("cleanup");
 }
