@@ -10389,6 +10389,7 @@ dependencies = [
  "proptest",
  "rusty_atomic_file",
  "rusty_base64",
+ "rusty_crdt",
  "rusty_diff",
  "rusty_rsa",
  "rusty_serde",

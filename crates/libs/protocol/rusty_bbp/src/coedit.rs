@@ -6,14 +6,16 @@
 //! anchor by id rather than by position, and still applies on top of edits
 //! made after its author read the base. A version's text is its predecessor's
 //! with the edit's ops applied: inserted lines go directly after their anchor,
-//! newest first. That is RGA's order whenever ids follow the log (a new line
-//! is always the newest sibling), so this fold is already the CRDT fold. What
-//! a CRDT would change is admission: today an edit is refused when it is
-//! anchored on a line that an edit made since its base also anchored on
-//! ([`overlap`]); a CRDT accepts it.
+//! newest first. The fold is `rusty_crdt`'s [`Rga`]: each inserted line is an
+//! element whose parent is its anchor (or the line before it in the same op),
+//! and ids follow the log, so a new line is always the newest sibling. What a
+//! CRDT could change beyond that is admission, and it does not: an edit is
+//! still refused when it is anchored on a line that an edit made since its
+//! base also anchored on ([`overlap`]).
 
 use crate::command::{Code, Rejection};
 use crate::ids::{ArtId, Sha256};
+use rusty_crdt::{Applied, Op, Rga};
 use rusty_serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -58,26 +60,25 @@ pub struct SpecEdit {
     pub ops: Vec<LineOp>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Line {
-    id: LineId,
-    text: String,
-    live: bool,
+/// A co-edited spec's lines, tombstones included.
+#[derive(Clone, Debug, Default)]
+pub struct Doc {
+    rga: Rga<LineId, String>,
 }
 
-/// A co-edited spec's lines, tombstones included.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Doc {
-    lines: Vec<Line>,
+/// Equal when the lines, tombstones included, are equal in order.
+impl PartialEq for Doc {
+    fn eq(&self, other: &Self) -> bool {
+        self.rga.elements().eq(other.rga.elements())
+    }
 }
+
+impl Eq for Doc {}
 
 impl Doc {
     /// The visible lines, in order.
     pub fn lines(&self) -> impl Iterator<Item = (LineId, &str)> {
-        self.lines
-            .iter()
-            .filter(|l| l.live)
-            .map(|l| (l.id, l.text.as_str()))
+        self.rga.iter().map(|(id, t)| (*id, t.as_str()))
     }
 
     /// The visible text, one line per visible line.
@@ -86,43 +87,57 @@ impl Doc {
     }
 
     fn visible(&self, id: LineId) -> bool {
-        self.lines.iter().any(|l| l.id == id && l.live)
-    }
-
-    fn position(&self, id: LineId) -> Option<usize> {
-        self.lines.iter().position(|l| l.id == id)
+        self.lines().any(|(l, _)| l == id)
     }
 
     /// This doc with `ops` applied in order, inserted lines numbered under
     /// `at`. Fails with the first anchor that is not in the doc at all; a
-    /// tombstoned anchor is fine.
+    /// tombstoned anchor is fine. `at` must be newer than every version in
+    /// the doc, as log order guarantees; a reused `at` fails with the line id
+    /// it would reuse.
     pub fn apply(&self, at: ArtId, ops: &[LineOp]) -> Result<Doc, LineId> {
         let mut doc = self.clone();
         let mut n = 0;
         for op in ops {
             match op {
                 LineOp::Insert { after, lines } => {
-                    let start = match after {
-                        None => 0,
-                        Some(a) => doc.position(*a).ok_or(*a)? + 1,
-                    };
-                    let new = lines.iter().map(|text| {
+                    // Checked here too, so an insert with no lines still
+                    // fails on a missing anchor, as the splice fold did.
+                    if let Some(a) = after.filter(|a| !doc.rga.contains(a)) {
+                        return Err(a);
+                    }
+                    let mut parent = *after;
+                    for text in lines {
+                        let id = LineId { art: at, n };
                         n += 1;
-                        Line {
-                            id: LineId { art: at, n: n - 1 },
-                            text: text.clone(),
-                            live: true,
-                        }
-                    });
-                    doc.lines.splice(start..start, new.collect::<Vec<_>>());
+                        doc.put(
+                            id,
+                            Op::Insert {
+                                id,
+                                parent,
+                                value: text.clone(),
+                            },
+                        )?;
+                        parent = Some(id);
+                    }
                 }
-                LineOp::Delete { line } => {
-                    let i = doc.position(*line).ok_or(*line)?;
-                    doc.lines[i].live = false;
-                }
+                LineOp::Delete { line } => doc.put(*line, Op::Delete { target: *line })?,
             }
         }
         Ok(doc)
+    }
+
+    /// Apply one element op. `key` is the line it inserts or deletes. An
+    /// insert must add a new line: a replayed one is a reused id and fails
+    /// with `key`. Deleting a tombstone again is fine.
+    fn put(&mut self, key: LineId, op: Op<LineId, String>) -> Result<(), LineId> {
+        let insert = matches!(op, Op::Insert { .. });
+        match self.rga.apply(&op) {
+            Ok(Applied::Changed) => Ok(()),
+            Ok(Applied::Duplicate) if !insert => Ok(()),
+            Ok(Applied::Pending { missing }) => Err(missing),
+            Ok(Applied::Duplicate) | Err(_) => Err(key),
+        }
     }
 }
 
@@ -249,6 +264,34 @@ mod tests {
             d.apply(at(5), &[ins(Some(id(9, 0)), &["?"])]),
             Err(id(9, 0))
         );
+    }
+
+    #[test]
+    fn a_reused_line_id_fails_even_when_the_insert_is_identical() {
+        let d = two_sections();
+        let same = [ins(None, &["# A", "a1", "a2", "# B", "b1"])];
+        assert_eq!(d.apply(at(2), &same), Err(id(2, 0)));
+        let other = [ins(Some(id(2, 4)), &["new"])];
+        assert_eq!(d.apply(at(2), &other), Err(id(2, 0)));
+    }
+
+    #[test]
+    fn deleting_a_tombstone_again_is_fine() {
+        let d = two_sections();
+        let del = [LineOp::Delete { line: id(2, 1) }];
+        let once = d.apply(at(3), &del).unwrap();
+        let twice = once.apply(at(4), &del).unwrap();
+        assert_eq!(twice, once);
+        let both = d.apply(at(3), &[del[0].clone(), del[0].clone()]).unwrap();
+        assert_eq!(both, once);
+    }
+
+    #[test]
+    fn an_empty_insert_still_fails_on_a_missing_anchor() {
+        let d = two_sections();
+        assert_eq!(d.apply(at(3), &[ins(Some(id(9, 0)), &[])]), Err(id(9, 0)));
+        assert_eq!(d.apply(at(3), &[ins(Some(id(2, 1)), &[])]), Ok(d.clone()));
+        assert_eq!(d.apply(at(3), &[ins(None, &[])]), Ok(d));
     }
 
     #[test]

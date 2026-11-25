@@ -182,6 +182,7 @@ Precise contracts used by this guide:
 | D172 | #703: PR #1844 surface approved as built, including required `--fence` on `bbp human --decision` (closes Q63) | [stated] 2026-11-24 (703) |
 | D173 | #1416: the LEL tab in rusty_term reads BBP through the Mill Board HTTP API (inbox via `inbox_list`/`inbox_act`; new read endpoints for claims, intent and spend) | [stated] 2026-11-24 (1416) |
 | D174 | #1416: the LEL tab view model and parsing live in rusty_term, fixtures from `bbp inbox --json` plus a drift test; no shared crate | [default] 2026-11-24 (1416) |
+| D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
 
 ## D1. Lenses, not stages
 
@@ -1745,3 +1746,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_f0631ddd540840a0b878c4bc2590bb88
 **Key.** lel:1416:lel-tab-types-in-rusty-term
 **Source.** let-em-loose-expert default, 2026-11-24, for the Types section of `1416-lel-tab-slice-plan.md`. Follows D173.
+
+## D176. #430: rusty_bbp's co-edit fold moves onto rusty_crdt as a pure swap
+
+**Decision.** Nano gave the go for #430 as option 1, "pure swap, keep the refusal". `rusty_bbp::coedit`'s fold uses `rusty_crdt`'s `Rga` as its core. Admission (the overlap/stale refusal) is unchanged, golden logs stay byte-identical, and a differential test against the old fold proves the swap, in one small PR. This supersedes the card's older wording that the swap "would change admission only". This settles what to build; CI, review by `dottiusmaximus` and the merge rules still apply.
+**Why.** It gives `rusty_crdt` its first user and puts the fold on a law-tested core without changing BBP log semantics.
+**Rejected.** Option 2, swapping and accepting overlapping edits (CRDT admission; changes BBP log semantics; ask-first). Option 3, dropping the card.
+**Tag.** [stated] · remind-me: mem_8d894a129917493782f8b8f1e8123b26
+**Key.** lel:430:coedit-fold-on-rusty-crdt
+**Source.** Nano, project thread "Update Mill Board card statuses", message cmsg_014AqbZs58L565hMV2pFkCX5HGJTsB1QUY7avVobhzUMnP, 2026-11-25T01:15:31Z: "1", answering the three options in cmsg_014AqbZs58L565hMV2pFkCX5C5P4veGi9BERQNHB1fH2T3. Relayed by the caller; the message was not read.
