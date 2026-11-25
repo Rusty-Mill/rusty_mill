@@ -1680,9 +1680,16 @@ impl Block {
     }
 
     fn upload_file(&self, path: &std::path::Path, name: &str) -> Result<String, String> {
+        // Looked at before it is opened: opening a FIFO would wait for a
+        // writer for ever and the upload would never answer.
+        let not_file = || format!("{} is not a file", path.display());
+        let looked = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !looked.is_file() {
+            return Err(not_file());
+        }
         let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-            return Err(format!("{} is not a file", path.display()));
+        if !file.metadata().is_ok_and(|m| m.is_file()) {
+            return Err(not_file());
         }
         let id = self.block;
         rusty_mux_client::upload::send_with(name, &mut file, UPLOAD_CHUNK, |args| {

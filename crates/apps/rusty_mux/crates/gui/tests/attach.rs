@@ -1431,5 +1431,12 @@ fn a_file_is_sent_to_the_blocks_host_once_the_pane_holds_the_lease() {
     assert!(missing.contains("nope"), "{missing}");
     let folder = ask(&state).expect_err("a folder is not a file");
     assert!(folder.contains("not a file"), "{folder}");
+    // A FIFO would block the open for ever: refused before it is opened.
+    let fifo = state.join("fifo");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    if made.is_ok_and(|s| s.success()) {
+        let refused = ask(&fifo).expect_err("a FIFO is not a file");
+        assert!(refused.contains("not a file"), "{refused}");
+    }
     std::fs::remove_dir_all(&state).expect("cleanup");
 }
