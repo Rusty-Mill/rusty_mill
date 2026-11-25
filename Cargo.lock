@@ -7139,6 +7139,7 @@ dependencies = [
  "orch-dispatch",
  "rusty_atomic_file",
  "rusty_bbp",
+ "rusty_json",
  "rusty_serde",
 ]
 

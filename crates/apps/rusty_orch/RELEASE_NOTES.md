@@ -4,6 +4,17 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Builder ACP client
+**2026-11-25**
+
+- orch can now hold one Agent Client Protocol conversation with a #600
+  builder: it starts the session in the builder's worktree, sends the
+  prompt, answers permission requests with "allow once", and reports why
+  the builder stopped and the tokens it used, if it said.
+- Everything the builder does is rendered into `acp.log`, a readable view
+  for the mux, never evidence. A dead or garbled builder ends the turn as
+  failed rather than hanging.
+
 ## Cost breaker and taint in lens runs
 **2026-11-17**
 

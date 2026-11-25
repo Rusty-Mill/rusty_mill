@@ -4,6 +4,7 @@
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
+pub mod acp;
 mod config;
 mod lease;
 mod supervisor;
@@ -891,3 +892,6 @@ mod tests_e2e;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests_confined;
+
+#[cfg(all(test, unix))]
+mod tests_acp;
