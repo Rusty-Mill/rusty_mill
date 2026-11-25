@@ -1,0 +1,61 @@
+[
+  {
+    "id": "T1/msg:12/3",
+    "task": "T1",
+    "brief": 2,
+    "rev": 41,
+    "seq": 3,
+    "reason": "Irreversible",
+    "claim": {
+      "id": 12, "text": "Drop the legacy export table", "status": "Open",
+      "score": 4, "confidence": 72, "epoch": 0, "spent": 30, "budget": 100,
+      "evidence": [], "candidates": []
+    },
+    "stakes": "High",
+    "reversible": false,
+    "evidence": [],
+    "candidates": [],
+    "mark": null,
+    "candidate": null,
+    "acted": [],
+    "label": "Irreversible action",
+    "card": { "id": "6f1d0b7e-2a49-4c1e-9d3b-0a5f2c8e7b11", "number": 1416, "title": "LEL tab", "project": "rusty_term" }
+  },
+  {
+    "id": "T2/msg:20/5",
+    "task": "T2",
+    "brief": null,
+    "rev": 9,
+    "seq": 5,
+    "reason": "Stuck",
+    "claim": {
+      "id": 20, "text": "Pick the layout", "status": "Open",
+      "score": 0, "confidence": 50, "epoch": 1, "spent": 90, "budget": 100,
+      "evidence": [], "candidates": [21, 22]
+    },
+    "stakes": "Low",
+    "reversible": true,
+    "evidence": [],
+    "candidates": [
+      { "id": 21, "text": "Two columns", "status": "Open", "score": 2, "confidence": 55, "epoch": 1, "spent": 10, "budget": 50, "evidence": [], "candidates": [] },
+      { "id": 22, "text": "One column", "status": "Open", "score": 2, "confidence": 45, "epoch": 1, "spent": 12, "budget": 50, "evidence": [], "candidates": [] }
+    ],
+    "label": "Taste call or deadlock",
+    "card": null
+  },
+  {
+    "id": "T3/task/7",
+    "task": "T3",
+    "rev": 3,
+    "seq": 7,
+    "reason": "TaskTotal",
+    "claim": null,
+    "stakes": null,
+    "reversible": null,
+    "evidence": [],
+    "candidates": [],
+    "totals": [{ "field": "Messages", "spent": 200, "limit": 200, "allowance": 200 }],
+    "label": "Whole task paused",
+    "card": null
+  }
+]
