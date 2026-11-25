@@ -4,6 +4,14 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Builder text in acp.log can't pose as orch's
+**2026-11-25**
+
+- In `acp.log`, everything the builder writes is now indented, and orch's
+  own lines (tools, permissions, usage, stop) start at the left edge, so a
+  builder can't fake one of them.
+- Characters that reorder text on screen are shown as escapes.
+
 ## Builder ACP client
 **2026-11-25**
 

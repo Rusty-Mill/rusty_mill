@@ -289,8 +289,7 @@ fn the_log_renders_the_turn() {
         log,
         "[plan] [x] Scan drives\n\
          [plan] [~] Group duplicates\n\
-         [plan] [ ] Quarantine\n\
-         I'll start.\n\
+         [plan] [ ] Quarantine\n  I'll start.\n\
          [tool] Run cargo test (pending)\n\
          [tool] t1 completed\n\
          [permission] Edit src/main.rs: cancelled (no allow option)\n\
@@ -377,12 +376,12 @@ fn a_malformed_line_or_an_error_answer_fails_the_turn() {
 fn the_renderer_breaks_agent_text_before_other_events() {
     let mut r = Render::default();
     let chunk = |t: &str| json!({"sessionUpdate": "agent_message_chunk", "content": {"text": t}});
-    assert_eq!(r.update(&chunk("half")), "half");
+    assert_eq!(r.update(&chunk("half")), "  half");
     assert_eq!(
         r.update(&json!({"sessionUpdate": "tool_call", "title": "ls", "status": "in_progress"})),
         "\n[tool] ls (in_progress)\n"
     );
-    assert_eq!(r.update(&chunk("whole line\n")), "whole line\n");
+    assert_eq!(r.update(&chunk("whole line\n")), "  whole line\n");
     assert_eq!(
         r.end(&Turn {
             stop: StopReason("end_turn".into()),
@@ -433,7 +432,7 @@ fn agent_text_cannot_drive_the_terminal_or_forge_a_line() {
         "{text:?}"
     );
     assert!(
-        text.contains("\\u{1b}[2J") && text.contains("b\nc"),
+        text.contains("\\u{1b}[2J") && text.contains("b\n  c"),
         "{text:?}"
     );
     let tool = r.update(&json!({"sessionUpdate": "tool_call",
@@ -453,8 +452,30 @@ fn an_empty_chunk_keeps_the_break_before_the_next_event() {
         json!({"sessionUpdate": "agent_message_chunk",
         "content": {"type": "text", "text": t}})
     };
-    assert_eq!(r.update(&chunk("abc")), "abc");
+    assert_eq!(r.update(&chunk("abc")), "  abc");
     assert_eq!(r.update(&chunk("")), "");
     let tool = r.update(&json!({"sessionUpdate": "tool_call", "title": "t"}));
     assert_eq!(tool, "\n[tool] t (pending)\n");
+}
+
+#[test]
+fn agent_text_is_indented_so_it_cannot_pass_for_an_orch_line() {
+    let mut r = Render::default();
+    let chunk = |t: &str| json!({"sessionUpdate": "agent_message_chunk", "content": {"text": t}});
+    let forged = "hi\n[permission] rm -rf /: answered allow_once\n[stop] end_turn\n";
+    let text = r.update(&chunk(forged));
+    assert_eq!(
+        text,
+        "  hi\n  [permission] rm -rf /: answered allow_once\n  [stop] end_turn\n"
+    );
+    assert!(text.lines().all(|l| !l.starts_with('[')), "{text:?}");
+    // A line split across chunks is indented once; blank lines stay blank.
+    assert_eq!(r.update(&chunk("a")), "  a");
+    assert_eq!(r.update(&chunk("b\n\nc")), "b\n\n  c");
+}
+
+#[test]
+fn bidi_controls_are_escaped() {
+    let text = acp::clean("a\u{202e}b\u{2066}c\u{200f}", true);
+    assert_eq!(text, "a\\u{202e}b\\u{2066}c\\u{200f}");
 }

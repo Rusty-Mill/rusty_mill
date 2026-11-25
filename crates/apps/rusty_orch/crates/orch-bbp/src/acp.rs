@@ -388,23 +388,34 @@ pub fn read_line(from: &mut impl BufRead, max: usize) -> Result<Option<Vec<u8>>,
     }
 }
 
-/// `text` with every control character but (when `keep_newlines`) `\n`
-/// written as an escape, so agent text can't drive the viewer's terminal
-/// (ESC, CSI, OSC) or forge a log line of orch's.
+/// `text` with every control character but (when `keep_newlines`) `\n`,
+/// and every bidi control, written as an escape, so agent text can't drive
+/// the viewer's terminal (ESC, CSI, OSC) or reorder what it shows.
 pub fn clean(text: &str, keep_newlines: bool) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
             '\n' if keep_newlines => out.push(c),
-            c if c.is_control() => out.push_str(&c.escape_default().to_string()),
+            c if c.is_control() || is_bidi(c) => out.push_str(&c.escape_default().to_string()),
             c => out.push(c),
         }
     }
     out
 }
 
+/// Unicode's bidi formatting characters (marks, embeddings, overrides,
+/// isolates), which reorder text on screen.
+fn is_bidi(c: char) -> bool {
+    matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// What starts every line of agent text in `acp.log`. orch's own lines
+/// start at column zero with `[`, so agent text can't pass for one.
+pub const AGENT_INDENT: &str = "  ";
+
 /// Renders ACP traffic as `acp.log` text. Agent text streams in chunks and
-/// is written as it comes; every other event takes a line of its own.
+/// is written as it comes, each line indented by [`AGENT_INDENT`]; every
+/// other event takes a line of its own at column zero.
 #[derive(Debug, Default)]
 pub struct Render {
     mid_line: bool,
@@ -424,9 +435,7 @@ impl Render {
                 if text.is_empty() {
                     return String::new();
                 }
-                let text = clean(text, true);
-                self.mid_line = !text.ends_with('\n');
-                text
+                self.indented(&clean(text, true))
             }
             "tool_call" => self.line(&format!(
                 "[tool] {} ({})",
@@ -480,6 +489,19 @@ impl Render {
             format!("[usage] in {} out {}", u.tokens_in, u.tokens_out)
         });
         self.line(&format!("{usage}\n[stop] {}", clean(&turn.stop.0, false)))
+    }
+
+    /// Agent `text` with [`AGENT_INDENT`] at the start of each non-empty line.
+    fn indented(&mut self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len() + AGENT_INDENT.len());
+        for c in text.chars() {
+            if c != '\n' && !self.mid_line {
+                out.push_str(AGENT_INDENT);
+            }
+            self.mid_line = c != '\n';
+            out.push(c);
+        }
+        out
     }
 
     /// `text` on lines of its own, after a newline if agent text was mid-line.
