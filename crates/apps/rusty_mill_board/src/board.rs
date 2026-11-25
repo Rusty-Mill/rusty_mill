@@ -2242,7 +2242,8 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::NotFound(*linked));
             }
         }
-        let _links = plan.parent.map(|_| self.links());
+        // Parent and dependency edits are what the unclose scan reads: serialize them with it.
+        let _links = (plan.parent.is_some() || plan.deps.is_some()).then(|| self.links());
         if let Some(Some(parent)) = plan.parent {
             self.check_parent(id, parent)?;
         }

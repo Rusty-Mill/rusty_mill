@@ -986,6 +986,55 @@ mod tests {
     }
 
     #[test]
+    fn unclose_waits_for_a_dependency_edit_of_a_started_card_and_then_refuses() {
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let (listed, checked) = std::sync::mpsc::channel();
+        let b: Shared = Board::new(
+            Box::new(Taking {
+                inner: MemStore::default(),
+                entered,
+                listed,
+                held: std::sync::atomic::AtomicBool::new(false),
+                release: std::sync::Mutex::new(held),
+            }) as Box<dyn Store>,
+            crate::board::Roles::default(),
+        )
+        .with_projects(Projects::parse(REGISTRY).expect("registry"));
+        let who = b.roles().actor("nano", "human").expect("role");
+        let prereq = b.add_in(&who, "p", "prereq", "", vec![]).expect("card");
+        let n = prereq.number.expect("n");
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        // Started with no dependencies; the edit gives it one while the unclose scans.
+        let dependent = b.add_in(&who, "p", "dependent", "", vec![]).expect("card");
+        b.move_card(dependent.id, &Column::READY, &who)
+            .expect("ready");
+        b.take(&who, Some(dependent.id)).expect("started");
+        std::thread::scope(|s| {
+            let editing = s.spawn(|| {
+                b.plan(
+                    dependent.id,
+                    &who,
+                    &crate::domain::Plan {
+                        deps: Some(vec![prereq.id]),
+                        ..Default::default()
+                    },
+                )
+            });
+            started.recv().expect("the edit is mid-commit");
+            let unclosing = s.spawn(|| b.unclose(prereq.id, &who).map(|c| c.id));
+            let _ = checked.recv_timeout(std::time::Duration::from_millis(300));
+            release.send(()).expect("release the edit");
+            editing.join().expect("edit thread").expect("planned");
+            assert!(matches!(
+                unclosing.join().expect("unclose thread"),
+                Err(BoardError::Refused(_))
+            ));
+        });
+        assert_eq!(b.get(prereq.id).expect("card").column, Column::DONE);
+    }
+
+    #[test]
     fn unclose_authorizes_before_it_looks_at_dependents_and_names_none() {
         let (b, who, prereq, n) = one_card();
         assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));

@@ -898,6 +898,8 @@ const MERGED_PREFIX: &str = "Closed by merge:";
 
 /// How the comment that undoes such a close begins.
 const UNCLOSED_PREFIX: &str = "Unclosed:";
+/// The start of an undo comment that names its pull request, which follows.
+const UNCLOSED_OF: &str = "Unclosed: the merge watch's close of ";
 
 /// What happened to a card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1320,12 +1322,14 @@ impl Card {
     }
 
     /// Whether the merge watch's close on pull request `pr` was undone ([`Card::unclosed`]):
-    /// its comment names the pull request, so the same marker does not close the card again.
-    /// A person's comment can only add to this, which only withholds a close.
+    /// its comment names exactly this pull request (the whole link, never a prefix of one), so
+    /// the same marker does not close the card again. A person's comment can only add to
+    /// this, which only withholds a close.
     pub fn unclosed_from(&self, pr: &str) -> bool {
         self.comments
             .iter()
-            .any(|c| c.text.starts_with(UNCLOSED_PREFIX) && c.text.contains(pr))
+            .filter_map(|c| c.text.strip_prefix(UNCLOSED_OF))
+            .any(|rest| rest.split_whitespace().next() == Some(pr))
     }
 
     /// Undo the merge watch's close: back to the column it was in, ship time cleared, evidence
@@ -1777,6 +1781,32 @@ mod tests {
 
     fn card() -> Card {
         Card::new("t", "", vec![], 0).expect("valid")
+    }
+
+    #[test]
+    fn an_undo_names_exactly_one_pull_request() {
+        let watch = actor(MERGE_WATCH, &[Capability::Record]);
+        let human = actor("nano", &[Capability::Triage, Capability::Close]);
+        let seven = "https://github.com/o/r/pull/7";
+        let seventy = "https://github.com/o/r/pull/70";
+        let ready = card()
+            .move_to(&flow(), &Column::READY, &human, 1)
+            .expect("ready");
+        let undone = ready
+            .closed_by_merge(&flow(), seventy, &watch, 2)
+            .and_then(|c| c.unclosed(&flow(), &human, 3))
+            .expect("undone");
+        assert!(undone.unclosed_from(seventy));
+        assert!(!undone.unclosed_from(seven), "#7 is not #70");
+        assert!(!undone.unclosed_from("https://github.com/o/r/pull/700"));
+        // A person's note that merely mentions the pull request withholds nothing.
+        let mut noted = ready;
+        noted.comments.push(Comment {
+            by: "nano".into(),
+            at_ms: 4,
+            text: format!("Unclosed? see {seven}"),
+        });
+        assert!(!noted.unclosed_from(seven));
     }
 
     #[test]
