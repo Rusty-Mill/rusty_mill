@@ -59,9 +59,9 @@ pub trait Store: Send + Sync {
     }
     /// Whether this store keeps a card's [`MergeClose`](crate::domain::MergeClose) record,
     /// which `card_unclose` needs. The merge watch closes nothing in a store that does not,
-    /// so no close is left that cannot be undone.
+    /// so no close is left that cannot be undone. Defaults to `false`: a store opts in.
     fn keeps_merge_record(&self) -> bool {
-        true
+        false
     }
     /// Which of `ids` are cards on the board that are not Done. An id no longer on the board
     /// is not open. This default scans [`Store::list`]; an adapter that can read one card's
@@ -231,6 +231,10 @@ impl MemStore {
 }
 
 impl Store for MemStore {
+    fn keeps_merge_record(&self) -> bool {
+        true
+    }
+
     fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
         Ok(self.log.lock().map_err(poisoned)?.get(id))
     }

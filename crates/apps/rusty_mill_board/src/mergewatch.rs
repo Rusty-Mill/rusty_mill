@@ -892,6 +892,9 @@ mod tests {
     }
 
     impl Store for Taking {
+        fn keeps_merge_record(&self) -> bool {
+            true
+        }
         fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
             self.inner.get(id)
         }

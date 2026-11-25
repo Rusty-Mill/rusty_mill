@@ -137,11 +137,12 @@ pub struct Board<S> {
     milestones: Box<dyn MilestoneStore>,
     /// Agents registered on shared connectors.
     agents: Mutex<crate::agents::Registry>,
-    /// Held by every writer of a parent link, by the merge close and `unclose`, and by `take`,
-    /// so a card cannot gain a child between the close's childlessness check and its commit, and
-    /// a dependency check by a take cannot go stale under an unclose (#1620). **Lock order:
-    /// this gate first, then the workflow guard**; never the other way, or a waiting workflow
-    /// writer can deadlock the board.
+    /// Held by every writer of a parent link or of dependencies (`add_card`, `plan`), by the
+    /// merge close and `unclose`, and by `take`, so a card cannot gain a child between the
+    /// close's childlessness check and its commit, and a dependency check by a take or a
+    /// dependency edit cannot go stale under an unclose (#1620). It does not cover `card_claim`
+    /// or a move into a work column. **Lock order: this gate first, then the workflow guard**;
+    /// never the other way, or a waiting workflow writer can deadlock the board.
     links: Mutex<()>,
     /// What the merge watch last found (#1620).
     merged_open: Mutex<(
@@ -325,6 +326,12 @@ impl<S: Store> Board<S> {
     pub fn with_move_rules(self, rules: MoveRules) -> Self {
         self.set_move_rules(rules);
         self
+    }
+
+    /// Whether the store keeps the record `card_unclose` needs: when it does not, the merge
+    /// watch closes nothing.
+    pub fn keeps_merge_record(&self) -> bool {
+        self.store.keeps_merge_record()
     }
 
     /// Use `workflow` instead of [`Workflow::default`].
