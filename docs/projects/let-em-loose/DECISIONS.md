@@ -184,6 +184,7 @@ Precise contracts used by this guide:
 | D174 | #1416: the LEL tab view model and parsing live in rusty_term, fixtures from `bbp inbox --json` plus a drift test; no shared crate | [default] 2026-11-24 (1416) |
 | D175 | #1092: the inbox runs on a second Mill Board on BaileyAi with its own SQLite file; rusty_tick retired, live board untouched | [stated] 2026-11-25 (1092) |
 | D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
+| D196 | #724: the redrawn `factory-map.svg` is accepted as the Factory map for now | [stated] 2026-11-25 (724) |
 
 ## D1. Lenses, not stages
 
@@ -1765,3 +1766,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_8d894a129917493782f8b8f1e8123b26
 **Key.** lel:430:coedit-fold-on-rusty-crdt
 **Source.** Nano, project thread "Update Mill Board card statuses", message cmsg_014AqbZs58L565hMV2pFkCX5HGJTsB1QUY7avVobhzUMnP, 2026-11-25T01:15:31Z: "1", answering the three options in cmsg_014AqbZs58L565hMV2pFkCX5C5P4veGi9BERQNHB1fH2T3. Relayed by the caller; the message was not read.
+
+## D196. #724: the redrawn `factory-map.svg` is accepted as the Factory map for now
+
+**Decision.** `docs/projects/let-em-loose/factory-map.svg`, redrawn from card #724's description of what changed (Q45's interim choice) in PR #1876, is accepted as #724's Factory map for now. The original Factory map stays untouched. "For now": a later redraw, or the 2026-11-04 voice-chat source SVG if it is recovered, may replace it without a new decision on intent. This settles the drawing only; CI, review by `dottiusmaximus` and the merge rules still apply to PR #1876.
+**Why.** The source SVG from the 2026-11-04 voice chat was not reachable from a repo session; Nano reviewed the redraw on the PR and found it good enough.
+**Rejected.** Waiting for the source SVG before landing #724's map.
+**Tag.** [stated] · remind-me: mem_b5e76a2c6dde43489fec5e501929dd57
+**Key.** lel:724:factory-map-redraw-accepted
+**Source.** Nano, project thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YM1e34fpJeXfgbUJqq3Mf5`, 2026-11-25T20:13:53Z: "Goood enough for now", after reviewing the drawing on PR #1876. Relayed by the caller; the message was not read. Resolves OPEN_QUESTIONS Q45. Numbered D196 because D177 to D195 are taken on `main` and open branches.
