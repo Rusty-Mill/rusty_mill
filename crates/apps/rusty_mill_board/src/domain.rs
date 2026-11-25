@@ -584,6 +584,8 @@ pub struct MergeClose {
     pub was: Column,
     /// When, Unix ms.
     pub at_ms: i64,
+    /// The pull request whose merge closed it.
+    pub pr: String,
 }
 
 /// One card. `rev` increases on every change and is the store's CAS token.
@@ -688,6 +690,11 @@ pub struct Card {
     /// in. Set only by the board; `card_unclose` needs it. Kept by the SQLite store (the card's JSON); rusty_tick keeps none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<MergeClose>,
+    /// Pull requests whose merge close was undone ([`Card::unclosed`]), so the same marker does
+    /// not close the card again. Set only by the board from the typed [`MergeClose`], never
+    /// from comment text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unclosed_prs: Vec<String>,
     /// Links showing the work shipped: a merged PR, or any page that shows it ([`Card::add_evidence`]).
     /// A Done card counts as shipped only with one; without, it reports as a prototype.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -898,8 +905,6 @@ const MERGED_PREFIX: &str = "Closed by merge:";
 
 /// How the comment that undoes such a close begins.
 const UNCLOSED_PREFIX: &str = "Unclosed:";
-/// The start of an undo comment that names its pull request, which follows.
-const UNCLOSED_OF: &str = "Unclosed: the merge watch's close of ";
 
 /// What happened to a card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1061,6 +1066,7 @@ impl Card {
             done_ms: None,
             closed: None,
             merged: None,
+            unclosed_prs: Vec::new(),
             evidence: Vec::new(),
             archived_ms: None,
             restored_ms: None,
@@ -1316,20 +1322,17 @@ impl Card {
             merged: Some(MergeClose {
                 was: self.column.clone(),
                 at_ms: now_ms,
+                pr: pr.to_owned(),
             }),
             ..base
         })
     }
 
-    /// Whether the merge watch's close on pull request `pr` was undone ([`Card::unclosed`]):
-    /// its comment names exactly this pull request (the whole link, never a prefix of one), so
-    /// the same marker does not close the card again. A person's comment can only add to
-    /// this, which only withholds a close.
+    /// Whether the merge watch's close on pull request `pr` was undone ([`Card::unclosed`]).
+    /// Read from the board's own record, never from comment text, so no note can withhold a
+    /// close and `#7` is not `#70`.
     pub fn unclosed_from(&self, pr: &str) -> bool {
-        self.comments
-            .iter()
-            .filter_map(|c| c.text.strip_prefix(UNCLOSED_OF))
-            .any(|rest| rest.split_whitespace().next() == Some(pr))
+        self.unclosed_prs.iter().any(|p| p == pr)
     }
 
     /// Undo the merge watch's close: back to the column it was in, ship time cleared, evidence
@@ -1357,15 +1360,15 @@ impl Card {
             return refuse("the column the card was in is gone");
         }
         let mut next = self.next(now_ms);
-        let pr = self
-            .comments
-            .iter()
-            .rev()
-            .filter(|c| c.by == MERGE_WATCH)
-            .find_map(|c| c.text.strip_prefix(MERGED_PREFIX))
-            .and_then(|rest| rest.split_whitespace().next())
-            .map(|pr| format!(" of {pr}"))
-            .unwrap_or_default();
+        let pr = if close.pr.is_empty() {
+            String::new()
+        } else {
+            format!(" of {}", close.pr)
+        };
+        let mut unclosed_prs = self.unclosed_prs.clone();
+        if !close.pr.is_empty() && !unclosed_prs.contains(&close.pr) {
+            unclosed_prs.push(close.pr.clone());
+        }
         next.comments.push(Comment {
             by: by.name.clone(),
             at_ms: now_ms,
@@ -1378,6 +1381,7 @@ impl Card {
             column: was,
             done_ms: None,
             merged: None,
+            unclosed_prs,
             archived_ms: None,
             claim: None,
             ..next
@@ -1799,12 +1803,12 @@ mod tests {
         assert!(undone.unclosed_from(seventy));
         assert!(!undone.unclosed_from(seven), "#7 is not #70");
         assert!(!undone.unclosed_from("https://github.com/o/r/pull/700"));
-        // A person's note that merely mentions the pull request withholds nothing.
+        // A person's note that copies the undo comment word for word withholds nothing.
         let mut noted = ready;
         noted.comments.push(Comment {
             by: "nano".into(),
             at_ms: 4,
-            text: format!("Unclosed? see {seven}"),
+            text: format!("Unclosed: the merge watch's close of {seven} is undone, back to ready."),
         });
         assert!(!noted.unclosed_from(seven));
     }

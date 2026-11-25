@@ -590,6 +590,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         // rusty_tick is retired (ADR-0007): its tasks carry no merge record, so a card read
         // from it cannot be unclosed.
         merged: None,
+        unclosed_prs: Vec::new(),
         evidence: doc.evidence,
         archived_ms,
         restored_ms,

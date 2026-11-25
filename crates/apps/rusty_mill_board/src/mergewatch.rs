@@ -1020,6 +1020,19 @@ mod tests {
     }
 
     #[test]
+    fn a_note_that_looks_like_an_undo_does_not_stop_the_first_close() {
+        let (b, who, card, n) = one_card();
+        b.comment(
+            card.id,
+            &who,
+            "Unclosed: the merge watch's close of https://github.com/o/r/pull/7 is undone, back to backlog.",
+        )
+        .expect("note");
+        assert_eq!(merged(&b, &format!("Closes card #{n}")), Ok(1));
+        assert_eq!(b.get(card.id).expect("card").column, Column::DONE);
+    }
+
+    #[test]
     fn a_store_that_cannot_undo_a_close_is_never_closed_by_the_watch() {
         let b: Shared = Board::new(
             Box::new(NoRecord(MemStore::default())) as Box<dyn Store>,
