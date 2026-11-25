@@ -1546,6 +1546,34 @@ pub static CATALOG: &[Method] = &[
         build: |req, a| block_call(req, a, "terminal.upload"),
     },
     Method {
+        name: "terminal.download",
+        doc: "Refused on an agent's (jailed) block. Read a file of the server's host a chunk at a time, for a copy to the \
+              client. The reply is the file's size in bytes on the first line, then the \
+              base64 of at most 192 KiB of it from `offset` (empty past the end); ask \
+              again from `offset` plus the bytes got until the size is reached. `path` is \
+              absolute or relative to the program's working directory; a directory, \
+              another kind of file, a network path, a file over 2 GiB and a file in the \
+              server's state directory are refused. Read off the server's main thread and \
+              refused after 5 seconds. Needs the lease, as reading any file of the host \
+              is more than watching a block.",
+        params: &[
+            BLOCK,
+            required(
+                "path",
+                Ty::Text,
+                "The file, absolute or relative to the working directory.",
+            ),
+            required(
+                "offset",
+                Ty::Lines,
+                "The bytes already read; 0 for the first call.",
+            ),
+        ],
+        needs: Features::BLOCK_CALL.union(Features::DOWNLOAD),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.download"),
+    },
+    Method {
         name: "terminal.workspace-list",
         doc: "List a directory under the block's workspace (the directory its program \
               was launched in) for the workspace explorer, in the same text form as \

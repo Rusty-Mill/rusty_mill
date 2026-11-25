@@ -11,7 +11,8 @@ use crate::Features;
 const CONDITIONAL: Features = Features::DATAGRAM
     .union(Features::TAILSCALE_STATUS)
     .union(Features::PORTS)
-    .union(Features::WORKSPACE);
+    .union(Features::WORKSPACE)
+    .union(Features::DOWNLOAD);
 
 /// A server older than this client: what to tell the user, once per
 /// connection.
@@ -91,6 +92,13 @@ mod tests {
     fn udp_missing_says_nothing_about_age() {
         let asked = Features::LAYOUT.union(Features::DATAGRAM);
         assert_eq!(Older::check(asked, Features::LAYOUT, None), None);
+    }
+
+    #[test]
+    fn file_download_missing_says_nothing_about_age() {
+        // Only a Linux server offers it; a Windows one is not older.
+        let asked = Features::LAYOUT.union(Features::DOWNLOAD);
+        assert_eq!(Older::check(asked, Features::LAYOUT, Some("0.1.0")), None);
     }
 
     #[test]

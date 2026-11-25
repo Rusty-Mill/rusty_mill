@@ -32,6 +32,7 @@ use crate::Config;
 use crate::archive;
 use crate::checkpoint::validate_size;
 use crate::datagram::Registry;
+use crate::download;
 use crate::echo::Waiting;
 use crate::forward::{self, Forwards};
 use crate::history::History;
@@ -155,6 +156,8 @@ const SHOW_PERIOD: Duration = Duration::from_secs(1);
 const UNIX_ONLY: Features = Features::SIGNAL_RELEASE
     .union(Features::TAILSCALE_STATUS)
     .union(Features::PORTS)
+    // Downloads are read through the kernel's own account of the opened file.
+    .union(Features::DOWNLOAD)
     .union(Features::WORKSPACE);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
@@ -575,6 +578,9 @@ pub(crate) enum Kept {
 
 impl State {
     pub(crate) fn shared(config: Config, socket: Option<PathBuf>) -> Shared {
+        if let Some(file) = &config.config_file {
+            config.protected.path(file.clone());
+        }
         Rc::new(RefCell::new(Self {
             base: config.clone(),
             config,
@@ -2231,6 +2237,34 @@ impl State {
                 return Ok(Outcome::Blocking {
                     method: "terminal.list-dir",
                     work: Box::new(move || lister(base.as_deref(), path.as_deref(), None)),
+                });
+            }
+            "terminal.download" => {
+                rt.refuse_agent("terminal.download")?;
+                // It reads any file the server's account can, as list-dir
+                // lists any directory: the lease, which a watch-only grant
+                // (C14) never holds.
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                let base = terminal::pwd(&rt.grid, rt.pid());
+                let path = named.iter().find_map(|(n, v)| match (*n, v) {
+                    ("path", Value::Text(p)) => Some(p.clone()),
+                    _ => None,
+                });
+                let offset = lines(&named, "offset");
+                // The configured directory, not the opened store's: a store that failed
+                // to open still leaves its directory out of reach.
+                let private = self.config.state_dir.clone();
+                // The config file, the TLS key, the tokens and the allowlist
+                // are as secret as the state directory.
+                let keep = self.config.protected.clone();
+                let path = path.ok_or("terminal.download: missing path")?;
+                return Ok(Outcome::Blocking {
+                    method: "terminal.download",
+                    work: Box::new(move || {
+                        download::read(base.as_deref(), &path, offset, private.as_deref(), &keep)
+                    }),
                 });
             }
             "terminal.upload" => {
@@ -3954,6 +3988,7 @@ mod regression {
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
                     state_dir: None,
+                    protected: Default::default(),
                     grapheme_clustering: false,
                     config_file: None,
                 },
@@ -3984,6 +4019,7 @@ mod regression {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
                 state_dir: None,
+                protected: Default::default(),
                 grapheme_clustering: clustering,
                 config_file: None,
             },
@@ -4750,6 +4786,7 @@ mod regression {
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            protected: Default::default(),
             grapheme_clustering: false,
             config_file: Some("/stalled.json".into()),
         };
@@ -5093,6 +5130,7 @@ mod regression {
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
                     state_dir: None,
+                    protected: Default::default(),
                     grapheme_clustering: false,
                     config_file: None,
                 },

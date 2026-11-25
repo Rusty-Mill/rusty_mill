@@ -38,6 +38,7 @@ fn start_server() -> PathBuf {
         cwd: "/".into(),
         console_host: ConsoleHost::default(),
         state_dir: None,
+        protected: Default::default(),
         grapheme_clustering: false,
         config_file: None,
     };

@@ -70,6 +70,7 @@ fn shell() -> Config {
         cwd,
         console_host,
         state_dir: None,
+        protected: Default::default(),
         grapheme_clustering: false,
         config_file: None,
     }
@@ -288,6 +289,7 @@ fn tools_list_is_the_catalog_without_connection_methods() {
         "release-lease",
         "sync",
         "terminal.upload",
+        "terminal.download",
     ];
     let expected: Vec<&str> = CATALOG
         .iter()
