@@ -389,24 +389,35 @@ pub fn read_line(from: &mut impl BufRead, max: usize) -> Result<Option<Vec<u8>>,
 }
 
 /// `text` with every control character but (when `keep_newlines`) `\n`,
-/// and every bidi control, written as an escape, so agent text can't drive
-/// the viewer's terminal (ESC, CSI, OSC) or reorder what it shows.
+/// and every hidden character (see [`is_hidden`]), written as an escape,
+/// so agent text can't drive the viewer's terminal (ESC, CSI, OSC), break
+/// a line in an editor, or reorder or hide what it shows.
 pub fn clean(text: &str, keep_newlines: bool) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
             '\n' if keep_newlines => out.push(c),
-            c if c.is_control() || is_bidi(c) => out.push_str(&c.escape_default().to_string()),
+            c if c.is_control() || is_hidden(c) => out.push_str(&c.escape_default().to_string()),
             c => out.push(c),
         }
     }
     out
 }
 
-/// Unicode's bidi formatting characters (marks, embeddings, overrides,
-/// isolates), which reorder text on screen.
-fn is_bidi(c: char) -> bool {
-    matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+/// Characters that change what a viewer shows without showing themselves:
+/// Unicode's bidi controls (marks, embeddings, overrides, isolates), the
+/// line and paragraph separators editors break lines on, and zero-width
+/// characters.
+fn is_hidden(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
+    )
 }
 
 /// What starts every line of agent text in `acp.log`. orch's own lines

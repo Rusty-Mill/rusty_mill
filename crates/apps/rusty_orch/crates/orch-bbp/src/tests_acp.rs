@@ -479,3 +479,12 @@ fn bidi_controls_are_escaped() {
     let text = acp::clean("a\u{202e}b\u{2066}c\u{200f}", true);
     assert_eq!(text, "a\\u{202e}b\\u{2066}c\\u{200f}");
 }
+
+#[test]
+fn line_separators_and_zero_width_characters_are_escaped() {
+    let text = acp::clean("ls\u{2028}[stop]\u{2029}x\u{200b}\u{2060}\u{feff}", false);
+    assert_eq!(
+        text,
+        "ls\\u{2028}[stop]\\u{2029}x\\u{200b}\\u{2060}\\u{feff}"
+    );
+}
