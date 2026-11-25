@@ -88,6 +88,9 @@ pub enum Duty {
         /// Who confirmed it, when it needed confirming.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         confirmed_by: Option<String>,
+        /// The card left the gate while this waited, so it can no longer be confirmed.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        expired: bool,
         /// When.
         at_ms: i64,
     },
@@ -126,7 +129,16 @@ fn authoring(flow: &Workflow, column: &Column, by: &Actor) -> bool {
 }
 
 fn push(card: &Card, duty: Duty) -> Result<Card, BoardError> {
-    if card.duties.len() >= MAX_DUTIES {
+    push_up_to(card, duty, MAX_DUTIES)
+}
+
+/// [`push`] for the owner: past a ledger others filled, so a full ledger never locks them out.
+fn push_owner(card: &Card, duty: Duty) -> Result<Card, BoardError> {
+    push_up_to(card, duty, 2 * MAX_DUTIES)
+}
+
+fn push_up_to(card: &Card, duty: Duty, max: usize) -> Result<Card, BoardError> {
+    if card.duties.len() >= max {
         return Err(BoardError::Refused(format!(
             "this card's duty ledger is full ({MAX_DUTIES} entries)"
         )));
@@ -234,12 +246,10 @@ pub fn on_move(
             },
         );
     }
-    let gate =
-        matches!(flow.transition(from, &moved.column), Ok(Some(ts)) if ts.iter().any(|t| t.gate));
-    if !gate {
+    if !through_gate(flow, from, &moved.column, by) {
         return Ok(moved.clone());
     }
-    push(
+    push_owner(
         moved,
         Duty::Approval {
             actor: by.name.clone(),
@@ -252,9 +262,39 @@ pub fn on_move(
             pr_head: None,
             pending: false,
             confirmed_by: None,
+            expired: false,
             at_ms: now_ms,
         },
     )
+}
+
+/// Whether `by`'s move `from` -> `to` went through a gate: some route is a gate, and no ungated
+/// route is open to them (a `close` into Done beside the merge gate is not an approval).
+fn through_gate(flow: &Workflow, from: &Column, to: &Column, by: &Actor) -> bool {
+    let Ok(Some(ts)) = flow.transition(from, to) else {
+        return false;
+    };
+    ts.iter().any(|t| t.gate) && !ts.iter().any(|t| !t.gate && by.caps.contains(&t.cap))
+}
+
+/// Expire the pending approvals of a card that changed column: what was filed for a gate the
+/// card has left can no longer be confirmed, even if it comes back.
+pub fn on_leave(before: &Card, mut after: Card) -> Card {
+    if before.column == after.column {
+        return after;
+    }
+    for d in &mut after.duties {
+        if let Duty::Approval {
+            pending: pending @ true,
+            expired,
+            ..
+        } = d
+        {
+            *pending = false;
+            *expired = true;
+        }
+    }
+    after
 }
 
 /// `card` as a new revision at `now_ms`, for a ledger change that is not also a move or claim
@@ -295,30 +335,61 @@ pub fn review(
     }
     check_len(note, MAX_SHORT, "a review note is at most 400 bytes")?;
     refuse_same_hand(card, by, "review")?;
-    let next = push(
-        card,
-        Duty::Review {
-            actor: by.name.clone(),
-            provider: by.provider.clone(),
-            column: card.column.clone(),
-            pass,
-            note: note.to_owned(),
-            at_ms: now_ms,
-        },
-    )?;
+    let entry = Duty::Review {
+        actor: by.name.clone(),
+        provider: by.provider.clone(),
+        column: card.column.clone(),
+        pass,
+        note: note.to_owned(),
+        at_ms: now_ms,
+    };
+    // A reviewer's newer verdict on the same work replaces their older one, so reviews cannot
+    // fill the ledger.
+    let since = last_author(card).map_or(0, |i| i + 1);
+    let mine = card.duties[since..].iter().rposition(|d| {
+        matches!(d, Duty::Review { actor, column, .. } if *actor == by.name && *column == card.column)
+    });
+    let next = match mine {
+        Some(i) => {
+            let mut next = card.clone();
+            next.duties[since + i] = entry;
+            next
+        }
+        None => push(card, entry)?,
+    };
     Ok(bumped(next, now_ms))
 }
 
-/// Whether a passing review follows the card's last authoring claim (and there is one).
-fn reviewed_since_authored(card: &Card) -> bool {
-    let last_author = card
-        .duties
+/// Whose work a gate out of `from` rests on (R4): `from`'s own when makers work there
+/// (Architecting), else the work last authored (Building, for a gate out of V&Ving).
+fn reviewed_work(flow: &Workflow, card: &Card, from: &Column) -> Column {
+    let makes = flow
+        .column(from)
+        .is_some_and(|d| MAKERS.iter().any(|m| d.takers.contains(m)));
+    if makes {
+        return from.clone();
+    }
+    last_author(card)
+        .and_then(|i| match &card.duties[i] {
+            Duty::Author { column, .. } => Some(column.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| from.clone())
+}
+
+fn last_author(card: &Card) -> Option<usize> {
+    card.duties
         .iter()
-        .rposition(|d| matches!(d, Duty::Author { .. }));
-    let after = last_author.map_or(0, |i| i + 1);
+        .rposition(|d| matches!(d, Duty::Author { .. }))
+}
+
+/// Whether a passing review of the work in `column` follows the card's last authoring claim
+/// (R4): a review of an earlier column does not carry a later gate.
+fn reviewed_since_authored(card: &Card, column: &Column) -> bool {
+    let after = last_author(card).map_or(0, |i| i + 1);
     card.duties[after..]
         .iter()
-        .any(|d| matches!(d, Duty::Review { pass: true, .. }))
+        .any(|d| matches!(d, Duty::Review { pass: true, column: c, .. } if c == column))
 }
 
 /// Whether the gate `from` -> `to` needs the owner's confirmation: a merge (into Done) or an
@@ -395,10 +466,13 @@ fn approve_in(
         return confirm_or_record(card, by, &from, a, pr_head, merge, now_ms);
     }
     refuse_same_hand(card, by, "approve")?;
-    if flow.kind(&from) == Some(Kind::Work) && !reviewed_since_authored(card) {
-        return Err(BoardError::Refused(
-            "separation of duties: this gate needs a passing review after the last authoring claim (card_review)".into(),
-        ));
+    if flow.kind(&from) == Some(Kind::Work) {
+        let work = reviewed_work(flow, card, &from);
+        if !reviewed_since_authored(card, &work) {
+            return Err(BoardError::Refused(format!(
+                "separation of duties: this gate needs a passing review of the work in {work} after the last authoring claim (card_review)"
+            )));
+        }
     }
     let pending = needs_confirmation(flow, &from, a.to);
     let next = push(card, approval(by, &from, a, pr_head, pending, None, now_ms))?;
@@ -425,6 +499,7 @@ fn approval(
         pr_head: pr_head.map(str::to_owned),
         pending,
         confirmed_by,
+        expired: false,
         at_ms: now_ms,
     }
 }
@@ -444,20 +519,27 @@ fn confirm_or_record(
     });
     let Some(i) = pending else {
         let mine = approval(by, from, a, pr_head, false, None, now_ms);
-        return push(card, mine).map(|c| (c, !merge));
+        return push_owner(card, mine).map(|c| (c, !merge));
     };
     let mut next = card.clone();
     if let Some(Duty::Approval {
         pending,
         confirmed_by,
         pr_head: filed_head,
+        digest,
         ..
     }) = next.duties.get_mut(i)
     {
-        // The owner confirms what they were shown; a different PR head is a new approval.
+        // The owner confirms what the proxy filed: text edited since is a different card.
+        if *digest != a.digest {
+            return Err(BoardError::Refused(
+                "the card's title or body changed since the approval was filed: it must be filed again".into(),
+            ));
+        }
+        // A different PR head is a new approval.
         if merge && filed_head.as_deref() != pr_head {
             let mine = approval(by, from, a, pr_head, false, None, now_ms);
-            return push(card, mine).map(|c| (c, false));
+            return push_owner(card, mine).map(|c| (c, false));
         }
         *pending = false;
         *confirmed_by = Some(by.name.clone());

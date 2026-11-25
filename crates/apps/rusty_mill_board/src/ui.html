@@ -1147,7 +1147,7 @@ function syncDialog(){
   }
   f.ev.replaceChildren(...(k.evidence??[]).map(l=>{const d=el("div"),a=el("a",l);a.href=l;a.target="_blank";a.rel="noopener noreferrer";d.append(a);return d}));
   // Gate approvals the proxy filed for the owner to confirm (#447): a merge or an unblock waits for this tap.
-  f.ap.replaceChildren(...(k.duties??[]).filter(d=>d.duty==="approval"&&d.pending).map(d=>{
+  f.ap.replaceChildren(...(k.duties??[]).filter(d=>d.duty==="approval"&&d.pending&&!d.expired&&d.from===k.column).map(d=>{
     const r=el("div",null,"pending"),b=el("button","Confirm");b.type="button";
     r.append(el("span","Approval waiting: "+colLabel(d.from)+" → "+colLabel(d.to)+(d.pr_head?" at "+d.pr_head:"")+", filed by "+d.actor+". "),el("q",d.verbatim)," ",b);
     b.onclick=async()=>{b.disabled=true;try{const g=await api("card_get",{id:k.id});

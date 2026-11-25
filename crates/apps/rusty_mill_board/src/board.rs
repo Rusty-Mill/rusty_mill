@@ -1870,7 +1870,8 @@ impl<S: Store> Board<S> {
             if !by.may_work_in(&current.project) {
                 return Err(BoardError::OutOfScope(current.project));
             }
-            let next = op(&current, (self.clock)())?;
+            // A card that leaves a gate expires what was filed for it (#447).
+            let next = crate::duties::on_leave(&current, op(&current, (self.clock)())?);
             // Domain operations may deliberately return the unchanged aggregate
             // for an idempotent replay.  Such a replay is already durable and
             // must not be sent through the store's rev + 1 CAS.
@@ -2223,6 +2224,10 @@ impl<S: Store> Board<S> {
         // Whether it moves decides the event, so ask first, and refuse a commit that would
         // decide otherwise (the card changed in between).
         let current = self.get_in(&flow, id)?;
+        // Scope first, so an out-of-scope caller learns nothing of the card from a refusal.
+        if !by.may_work_in(&current.project) {
+            return Err(BoardError::OutOfScope(current.project));
+        }
         let (_, moves) = crate::duties::approve(&current, &flow, by, approval, (self.clock)())?;
         let kind = if moves {
             EventKind::Moved
