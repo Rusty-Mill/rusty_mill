@@ -1990,6 +1990,7 @@ jobs:
       - name: Build real host and Orch binaries and acceptance tests
         run: |
           cargo build --locked -p rusty_orch -p rusty_bbp_host -p rusty_mill_board -p rusty_erosion
+          cargo build --locked -p rusty_mux_server -p rusty_mux_ctl -p orch-jail
           cargo test --locked -p orch-bbp --lib --no-run
           cargo test --locked -p rusty_orch --lib --no-run
           cargo test --locked -p rusty_bbp_host --test moderator_e2e --test rust_lld_profile --test claims_host --no-run
@@ -2002,6 +2003,16 @@ jobs:
           export ORCH_TEST_BIN="$PWD/target/debug/rusty_orch"
           export MILLBOARD_TEST_BIN="$PWD/target/debug/rusty_mill_board"
           export EROSION_TEST_BIN="$PWD/target/debug/erosion"
+          export MUX_SERVER_TEST_BIN="$PWD/target/debug/rusty-mux-server"
+          export MUX_CTL_TEST_BIN="$PWD/target/debug/rusty-mux-ctl"
+          export JAIL_TEST_BIN="$PWD/target/debug/lel-jail"
+          # #1318 S6: a cgroup2 subtree this user owns, with this shell (and so
+          # every test) inside it, so a builder's lel-jail can move itself into
+          # its session cgroup (cgroup v2 needs the common ancestor writable).
+          sudo mkdir -p /sys/fs/cgroup/lel-ci/runner
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/lel-ci
+          echo $$ | sudo tee /sys/fs/cgroup/lel-ci/runner/cgroup.procs > /dev/null
+          export LEL_TEST_CGROUP=/sys/fs/cgroup/lel-ci
           python3 .github/scripts/orch_bbp_acceptance.py --output acceptance-results
       - name: Publish each mode's result
         if: always()

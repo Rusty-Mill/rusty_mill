@@ -245,3 +245,6 @@ pub fn run(_: &Options) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod e2e;
