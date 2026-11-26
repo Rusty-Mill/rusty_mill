@@ -13,6 +13,7 @@
 //! | `D` | detach the focused block from the layout; it keeps running |
 //! | `/` | find in the focused block's scrollback (Enter or Ctrl-N next, Ctrl-P previous, Esc leaves) |
 //! | `e` | open the focused block's workspace tree, read-only (j/k or arrows move, Enter or l opens, h up, q or Esc leaves); needs the lease and a server with `workspace explorer` |
+//! | `r` | re-run the focused block's command once its program has ended (D338); needs the lease and a server with `terminal.rerun` |
 //! | `[` or `]` | scroll the focused block to the previous or next prompt (OSC 133) |
 //! | Ctrl-] | type a Ctrl-] |
 //!
@@ -63,6 +64,8 @@ pub enum Action {
     Find,
     /// Open the workspace tree of the focused block (card #1573).
     Explorer,
+    /// Start the focused block's ended command again (D338, card #1569).
+    Rerun,
     /// Focus the next block shown, floats last, wrapping: the way to a
     /// float that overlaps the tile under it, which no direction reaches.
     Cycle,
@@ -180,6 +183,7 @@ impl Keys {
             b'D' => Action::DetachBlock,
             b'/' => Action::Find,
             b'e' => Action::Explorer,
+            b'r' => Action::Rerun,
             b'n' => Action::Cycle,
             b'f' => Action::Float,
             b'u' => Action::Stack { top: true },
@@ -302,6 +306,7 @@ mod tests {
             (b"\x1dD", Action::DetachBlock),
             (b"\x1d/", Action::Find),
             (b"\x1de", Action::Explorer),
+            (b"\x1dr", Action::Rerun),
             (b"\x1d[", Action::Prompt { next: false }),
             (b"\x1d]", Action::Prompt { next: true }),
             (b"\x1dq", Action::Unknown),

@@ -56,6 +56,7 @@ pub const FLOATING: Features = CONTROL.union(Features::FLOATS);
 /// `BLOCK_CALL`, `WORKSPACE` and `WORKSPACE_STATUS` let the connection that
 /// holds the lease list the block's workspace and read what is in it (D349): a call is authorised on the block's
 /// own connection, not on the control one.
+/// `HOLD` lets the same connection re-run a held block's ended command (`terminal.rerun`, D338).
 pub const PANE: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_CONTROL)
     .union(Features::CLIPBOARD)
@@ -64,7 +65,8 @@ pub const PANE: Features = Features::CHECKPOINT_V6
     .union(Features::SYNC)
     .union(Features::BLOCK_CALL)
     .union(Features::WORKSPACE)
-    .union(Features::WORKSPACE_STATUS);
+    .union(Features::WORKSPACE_STATUS)
+    .union(Features::HOLD);
 
 /// How long the server may take over the answers to bring a path back,
 /// or to open a block's connection from the main loop.
