@@ -722,6 +722,15 @@ impl Explorer {
         self.stats.insert(path, stat);
     }
 
+    /// Forgets that the marks were asked for and the stats that failed, so
+    /// [`Self::wants`] asks for them again: after a call was cut off with
+    /// the connection or the lease.
+    pub fn retry_status(&mut self) {
+        self.touched_asked = false;
+        self.stat_wait = None;
+        self.stats.retain(|_, stat| stat.is_some());
+    }
+
     /// The size and age of the row under the cursor at time `now` (seconds
     /// since the epoch), once read.
     #[must_use]
@@ -882,6 +891,23 @@ mod tests {
         assert_eq!(size_text(1023), "1023 B");
         assert!(parse_stat("f\tbig\t1").is_err());
         assert!(parse_stat("f").is_err());
+    }
+
+    #[test]
+    fn retry_status_asks_for_the_marks_and_failed_stats_again() {
+        let mut ex = Explorer::opened(true);
+        ex.load(".\nf\ta\n");
+        assert_eq!(ex.wants(), Some(Call::Touched));
+        assert_eq!(ex.wants(), Some(Call::Stat(".".into())));
+        ex.load_stat(None);
+        assert_eq!(ex.wants(), None, "asked once");
+        ex.retry_status();
+        assert_eq!(ex.wants(), Some(Call::Touched));
+        assert_eq!(ex.wants(), Some(Call::Stat(".".into())));
+        ex.load_stat(Some("d\t1\t0"));
+        ex.retry_status();
+        assert_eq!(ex.wants(), Some(Call::Touched));
+        assert_eq!(ex.wants(), None, "a stat that was read stays read");
     }
 
     #[test]
