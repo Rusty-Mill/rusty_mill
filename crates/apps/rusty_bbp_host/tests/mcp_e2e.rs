@@ -440,6 +440,17 @@ fn an_owned_plan_gate_takes_only_a_receipt_bound_to_it() {
     assert!(refused(answer(&other, &k)).contains("task"));
 
     let (k, good) = signed(&receipt(rev.0, "T1"));
+    // A receipt that can't be stored refuses the answer and leaves the gate.
+    let blob = dir.join("blobs").join(Sha256::of(&good).hex());
+    std::fs::create_dir_all(&blob).expect("block the blob path");
+    assert!(answer(&good, &k)
+        .expect_err("unstored")
+        .contains("not stored"));
+    assert_eq!(
+        admin::card(&dir, &task).expect("card").state,
+        State::PlanGate
+    );
+    std::fs::remove_dir(&blob).expect("unblock");
     assert_eq!(answer(&good, &k).expect("host"), Response::Ok);
     assert_eq!(admin::card(&dir, &task).expect("card").state, State::Build);
     let d = open_driver(&dir, &task).expect("driver");

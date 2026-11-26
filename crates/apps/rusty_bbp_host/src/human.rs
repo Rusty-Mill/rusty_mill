@@ -660,7 +660,12 @@ pub fn perform_fenced(
             return Ok(judged.response);
         }
         for bytes in blobs {
-            d.store.blob_put(bytes);
+            // `blob_put` cannot report a failed write: read it back, so a
+            // command never lands without the brief or receipt it names.
+            let blob = d.store.blob_put(bytes);
+            d.store
+                .blob_get(&blob.sha)
+                .map_err(|e| format!("blob {} was not stored: {e:?}", blob.sha.hex()))?;
         }
     }
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
