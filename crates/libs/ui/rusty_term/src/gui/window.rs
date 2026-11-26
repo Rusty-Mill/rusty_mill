@@ -3199,13 +3199,18 @@ impl WindowState<'_> {
         }
     }
 
-    /// The trust entry for `port` of pane `key`'s host. A source with no
-    /// host name trusts the pane itself, for this window only.
+    /// The trust entry for `port` of pane `key`'s host, and whether it may be
+    /// saved. A host with no usable name trusts the pane itself, for this
+    /// window only.
     fn forward_entry(&self, key: u64, port: u16) -> Option<(String, bool)> {
-        match self.source.host_id(key) {
-            Some(host) => link_trust::forward_entry(&host, port).map(|e| (e, true)),
-            None => link_trust::forward_entry(&format!("pane {key}"), port).map(|e| (e, false)),
-        }
+        self.source
+            .host_id(key)
+            .and_then(|host| link_trust::forward_entry(&host, port))
+            .map(|entry| (entry, true))
+            .or_else(|| {
+                // No name, or one that cannot be written down: this window only.
+                link_trust::forward_entry(&format!("pane {key}"), port).map(|e| (e, false))
+            })
     }
 
     fn forward_trusted(&self, key: u64, port: u16) -> bool {

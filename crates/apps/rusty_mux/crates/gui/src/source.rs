@@ -177,6 +177,7 @@ pub fn attach_with(
     let (asks, inbox) = std::sync::mpsc::channel();
     let state = Arc::new(State {
         socket: socket.to_owned(),
+        host: host_id(socket),
         control: Mutex::new(Conn::new(clone(&stream)?)),
         next: AtomicU64::new(next),
         tells_focus: welcomed.features.contains(Features::FOCUS),
@@ -226,6 +227,17 @@ pub fn attach_with(
     })
 }
 
+/// A name for the server at `socket` that holds across folders and links:
+/// its resolved absolute path. A path that is not UTF-8 gets none rather than
+/// a lossy name.
+fn host_id(socket: &Path) -> Option<String> {
+    let path = socket
+        .canonicalize()
+        .or_else(|_| std::path::absolute(socket))
+        .ok()?;
+    path.to_str().map(str::to_owned)
+}
+
 /// Connects to `socket` and says the GUI's Hello, asking for no takeover.
 fn hello(socket: &Path) -> Result<(UnixStream, Conn<UnixStream>), String> {
     let stream = connect(socket)?;
@@ -252,6 +264,8 @@ enum Ask {
 /// What the client and the window share.
 struct State {
     socket: PathBuf,
+    /// [`host_id`] of `socket`, taken at attach.
+    host: Option<String>,
     control: Mutex<Conn<UnixStream>>,
     next: AtomicU64,
     /// The server takes `FocusBlock` (C41).
@@ -543,18 +557,12 @@ impl Source for MuxSource {
         self.pane(key).is_some_and(|b| b.forwards)
     }
 
-    /// The server's socket as an absolute path: the same on every connection
-    /// to it, and what a saved forward trust belongs to.
+    /// The server's socket as an absolute path, resolved once when this
+    /// client attached, so a socket later retargeted never renames the host
+    /// an open pane reaches: what a saved forward trust belongs to.
     fn host_id(&self, key: u64) -> Option<String> {
         self.pane(key)?;
-        // Absolute, so the same relative name in another folder is another
-        // host; a path that is not UTF-8 gets no name rather than a lossy one.
-        let path = self
-            .0
-            .socket
-            .canonicalize()
-            .or_else(|_| std::path::absolute(&self.0.socket));
-        path.ok()?.to_str().map(str::to_owned)
+        self.0.host.clone()
     }
 
     fn uploads(&self, key: u64) -> bool {
@@ -2218,6 +2226,18 @@ impl Drop for PaneWriter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_host_is_named_by_its_absolute_utf8_path() {
+        let rel = host_id(Path::new("s.sock")).expect("a name");
+        assert!(Path::new(&rel).is_absolute(), "{rel}");
+        assert!(rel.ends_with("s.sock"));
+        let other = host_id(Path::new("/a/s.sock"));
+        assert_eq!(other.as_deref(), Some("/a/s.sock"));
+        use std::os::unix::ffi::OsStrExt;
+        let raw = Path::new(std::ffi::OsStr::from_bytes(b"/a/\xff.sock"));
+        assert_eq!(host_id(raw), None, "no lossy name");
+    }
+
     use std::ffi::OsString;
 
     use rusty_mux_core::{BlockId, InputMode, SessionId, Size, WindowId};
