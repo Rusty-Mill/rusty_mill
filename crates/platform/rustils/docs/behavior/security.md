@@ -188,9 +188,10 @@ as the filesystem rules, so one call applies both in one domain.
   with no Landlock at all both are `NotEnforced`. The scope is
   per-domain, so a seccomp fallback was rejected: seccomp cannot tell a
   job's own child from any other process of the user.
-- The trait's default, used by every backend without a mechanism (and
-  the mock), confines the filesystem only and reports signals
-  `Unsupported`.
+- The trait's default delegates to `confine_filesystem`, returns its
+  status unchanged, and reports signals `Unsupported`. Every backend
+  except Linux uses it, so Windows and the mock return
+  `(Unsupported, Unsupported)` and confine nothing.
 - Live-verified in `crates/platform-linux/tests/security_sandbox.rs`: a
   confined process cannot signal a process outside its domain but can
   signal a child it started.
