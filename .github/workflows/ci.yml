@@ -178,6 +178,7 @@ jobs:
       # The erosion calibration summary (#704 slice 5): row format, percentiles, and the
       # committed run reproducing the published tables.
       - run: python3 -I -m unittest discover -s crates/tools/rusty_erosion/calibrate -p 'test_*.py' -v
+      - run: python3 -I -m unittest discover -s crates/tools/rusty_erosion/scb -p 'test_*.py' -v
       # The #1092 inbox board deploy script's checks and fixture flow, against in-memory fakes:
       # no sudo, no bbp, no board (bash and jq only).
       - run: bash docs/projects/let-em-loose/1092-board-lib.test.sh
