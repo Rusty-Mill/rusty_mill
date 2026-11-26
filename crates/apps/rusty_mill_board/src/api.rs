@@ -1269,17 +1269,16 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "approval_issue",
-            "Sign a receipt that you approved one BBP gate (a task's plan, or its merge at a run), for `bbp human --approval FILE` on an owned task. Read the gate back to the owner and ask \"Approve?\" first, as for `card_approve`; pass the revision the gate showed as `fence`, the readback and answer as `verbatim`, and the message link as `source`. The receipt names your credential as the approver, so it needs an authenticated credential, never a named actor and role. Returns the file's text in `receipt`. A plan needs `approve`; a merge needs `admin`, signed in as the owner.",
+            "Sign a receipt that you approved one BBP gate (a task's plan, or its merge at a run), for `bbp human --approval FILE` on an owned task. Read the gate back to the owner and ask \"Approve?\" first, as for `card_approve`; pass the revision the gate showed as `fence`, the readback and answer as `verbatim`, and the message link as `source`. The receipt names your credential as the approver, so only a token credential of your own can get one: never a named actor and role, and never a claude.ai connector. Returns the file's text in `receipt`. A plan needs `approve`; a merge needs `admin`, and any admin counts as the owner.",
             |b, i, a: ApprovalIssueArgs| {
-                // A receipt carries the approver's name to BBP, so it is the credential's, never
-                // one the caller names (stdio, or open auth on loopback).
-                let who = bound_acting(b, i, &a.who)?;
-                let signed_in = i.is_some_and(|i| !i.connector);
-                if who.caps.contains(&crate::domain::Capability::Admin) && !signed_in {
+                // A receipt carries the approver's name to BBP, so it is a token credential's
+                // own, never one the caller names (stdio, open auth) or a connector's agent.
+                if !i.is_some_and(|i| !i.connector) {
                     return Err(BoardError::Invalid(
-                        "an admin's receipt speaks for the owner: it needs a signed-in credential of your own, not a connector",
+                        "a receipt names its approver: it needs a token credential of your own, not a named actor and role or a connector",
                     ));
                 }
+                let who = acting(b, i, &a.who)?;
                 let r = crate::receipts::Receipt {
                     task: a.task,
                     gate: a.gate,
@@ -2370,7 +2369,10 @@ mod tests {
         named["actor"] = json!("nano");
         named["role"] = json!("admin");
         let err = call_as(&board, None, "approval_issue", named).expect_err("named");
-        assert!(format!("{err:?}").contains("authenticated"), "{err:?}");
+        assert!(format!("{err:?}").contains("token credential"), "{err:?}");
+        let mut connector = ident("claude-cloud", "approver");
+        connector.connector = true;
+        assert!(call_as(&board, Some(&connector), "approval_issue", args.clone()).is_err());
         let mut merge = args.clone();
         merge["gate"] = json!("merge");
         merge["run"] = json!(1);

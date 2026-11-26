@@ -104,14 +104,18 @@ pub fn issue(key: &SigningKey, r: &Receipt) -> Result<String, String> {
 /// A record that cannot be written: the receipt is then not handed out.
 pub fn record(issued: &Path, file: &str) -> Result<(), String> {
     use std::io::Write;
-    let body = file.lines().next().unwrap_or_default();
+    // One write of the whole line, so receipts issued at once do not interleave in the append.
+    let line = format!("{}\n", file.lines().next().unwrap_or_default());
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options
         .open(issued)
-        .and_then(|mut f| writeln!(f, "{body}"))
+        .and_then(|mut f| {
+            f.write_all(line.as_bytes())?;
+            f.sync_data()
+        })
         .map_err(|e| format!("could not record the receipt in {}: {e}", issued.display()))
 }
 
