@@ -580,6 +580,8 @@ impl Remote {
     /// What the explorer panel shows now for pane `key`'s tree (gui-design
     /// D99); one for a pane the panel is not open on is dropped.
     pub fn explorer(&self, key: u64, snapshot: super::explorer::Snapshot) -> bool {
-        self.0.send_event(UserEvent::Explorer(key, snapshot)).is_ok()
+        self.0
+            .send_event(UserEvent::Explorer(key, snapshot))
+            .is_ok()
     }
 }
