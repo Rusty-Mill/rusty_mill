@@ -327,6 +327,8 @@ impl Workspace {
     }
 }
 
+const NOT_A_WORK_TREE: &str = "the workspace is not in a git work tree it belongs to";
+
 const NOT_STATTED: &str = "that entry cannot be read in the workspace";
 
 /// `terminal.workspace-stat`: what one entry under the workspace is, as
@@ -375,14 +377,26 @@ const TOUCHED_DEADLINE: Duration = Duration::from_secs(4);
 /// The repository belongs to whoever works in it, so what `git` would run
 /// for it is turned off: no fsmonitor hook, no hooks directory, no pager,
 /// no prompt, no optional lock. Killed after [`TOUCHED_DEADLINE`].
+#[cfg(target_os = "linux")]
 fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     use std::io::Read;
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let mut child = Command::new("git")
         .args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
         .args(["-c", "core.hooksPath=/dev/null", "--no-pager"])
         .args(args)
         .current_dir(dir)
+        // Its own process group, so the deadline ends what git started (a
+        // clean filter) as well as git.
+        .process_group(0)
+        // The repository is the one the directory is in, never one the
+        // server's environment names.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
@@ -410,8 +424,12 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         // SIGPIPE, so a flood needs no check here.
     };
     let ok = status.is_some_and(|s| s.success());
+    // The group is ended either way: a finished git may leave a filter behind.
+    let group = i32::try_from(child.id()).unwrap_or(0);
+    if group > 0 {
+        let _ = rusty_libc::process::killpg(group, rusty_libc::signal::SIGKILL);
+    }
     if status.is_none() {
-        let _ = child.kill();
         let _ = child.wait();
     }
     let buf = reader
@@ -426,6 +444,18 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+#[cfg(not(target_os = "linux"))]
+fn git(_: &Path, _: &[&str]) -> Result<Vec<u8>, String> {
+    Err(UNSUPPORTED.into())
+}
+
+/// Git's two status bytes as text, a space as `.`.
+fn code_of(code: &[u8]) -> String {
+    code.iter()
+        .map(|b| if *b == b' ' { '.' } else { *b as char })
+        .collect()
+}
+
 /// `terminal.workspace-touched`: what `git status` says changed under the
 /// workspace, for the explorer's overlay. The first line is `.`; each other
 /// is `XY<TAB>PATH`, `XY` being git's two status letters with a space as `.`
@@ -437,8 +467,22 @@ pub(crate) fn touched(root: &Workspace) -> Result<String, String> {
         std::io::ErrorKind::Unsupported => UNSUPPORTED.to_owned(),
         _ => NOT_LISTED.to_owned(),
     })?;
-    let prefix = git(&dir, &["rev-parse", "--show-prefix"])?;
-    let prefix = String::from_utf8_lossy(&prefix).trim_end().to_owned();
+    // Git's own account of where it is: the work tree it uses must hold this
+    // directory, at the prefix it reports. A `core.worktree` that points
+    // elsewhere fails that, and nothing of the other tree is listed.
+    let top = git(&dir, &["rev-parse", "--show-toplevel", "--show-prefix"])?;
+    let top = String::from_utf8_lossy(&top);
+    let mut lines = top.lines();
+    let (top, prefix) = (lines.next().unwrap_or(""), lines.next().unwrap_or(""));
+    let here = fs::canonicalize(&dir).map_err(|_| NOT_LISTED.to_owned())?;
+    let inside = here
+        .strip_prefix(top)
+        .ok()
+        .map(|r| r.to_string_lossy().into_owned());
+    if inside.as_deref().map(|r| r.trim_end_matches('/')) != Some(prefix.trim_end_matches('/')) {
+        return Err(NOT_A_WORK_TREE.into());
+    }
+    let prefix = prefix.to_owned();
     let raw = git(
         &dir,
         &[
@@ -460,11 +504,9 @@ pub(crate) fn touched(root: &Workspace) -> Result<String, String> {
         let Some(path) = path.strip_prefix(prefix.as_str()) else {
             continue;
         };
-        let code: String = code
-            .iter()
-            .map(|b| if *b == b' ' { '.' } else { *b as char })
-            .collect();
-        out.push_str(&format!("\n{code}\t{}", escape(path)));
+        // An untracked workspace is one record naming itself, `sub/`.
+        let path = if path.is_empty() { "." } else { path };
+        out.push_str(&format!("\n{}\t{}", code_of(code), escape(path)));
     }
     Ok(out)
 }
@@ -776,6 +818,27 @@ mod tests {
             text.lines().collect::<Vec<_>>(),
             [".", ".M\ttracked", "??\tnew file"]
         );
+        // An untracked workspace is one record for itself.
+        let fresh = dir.join("fresh");
+        fs::create_dir(&fresh).unwrap();
+        fs::write(fresh.join("x"), "").unwrap();
+        assert_eq!(
+            touched(&Workspace::open(&fresh))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [".", "??\t."]
+        );
+        // A `core.worktree` pointing elsewhere is refused, listing nothing of it.
+        let elsewhere = scratch("touched-elsewhere");
+        fs::write(elsewhere.join("secret"), "").unwrap();
+        git(&["config", "core.worktree", elsewhere.to_str().unwrap()]);
+        assert_eq!(
+            touched(&Workspace::open(&ws_dir)),
+            Err(NOT_A_WORK_TREE.into())
+        );
+        git(&["config", "--unset", "core.worktree"]);
+        fs::remove_dir_all(elsewhere).unwrap();
         // A directory that is no work tree is refused, naming nothing.
         let plain = scratch("touched-plain");
         let reason = touched(&Workspace::open(&plain)).unwrap_err();
