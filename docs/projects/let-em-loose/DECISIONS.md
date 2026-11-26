@@ -188,8 +188,8 @@ Precise contracts used by this guide:
 | D178 | #1405: Windows-only intent lines are recognised by a frozen-input mapping file keyed by line; the check is orch's, no BBP change | [default] 2026-11-25 (1405) |
 | D187 | #1318 v0 builder launch defaults: ACP permission allow_once + logged; usage 0 when unreported; `tail -F acp.log` viewer; mirror from frozen inputs; no jail token before #1382 | [default] 2026-11-25 (1318) |
 | D188 | #1318 slice design approved; a builder's candidate reaches BBP only on `end_turn` with the `.lel/submit` marker and a non-empty diff, else the session ends Failed | [stated] 2026-11-25 (1318, 600) |
-| D196 | #724: the redrawn `factory-map.svg` is accepted as the Factory map for now | [stated] 2026-11-25 (724) |
 | D189 | #1318 S5 `builder run` defaults: explicit launcher flags, holder deadline past orch's grace, `sh` fd-4 wrapper, no recover in `builder run`, built-in prompt, `claude-builder` seat and op ids, store opened per step | [default] 2026-11-25 (1318) |
+| D196 | #724: the redrawn `factory-map.svg` is accepted as the Factory map for now | [stated] 2026-11-25 (724) |
 
 ## D1. Lenses, not stages
 
@@ -1816,14 +1816,6 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1318:design-approved-candidate-submit-marker
 **Source.** Nano, decision card in the #600 project thread, message `cmsg_01WgyiM31RsSnZTgNuPX2VE48sBVZYhJPE5kniVhcHSwk1`, tapped 2026-11-25T17:26:33Z: "Approve, marker + diff (a)". The question was "Approve the #1318 design, and how should a builder's candidate reach BBP?" This satisfies D25 for #1318. Review, merge and ask-first gates (the new public surface in §5) still apply per PR. Relates to D66, D104, D177, D187. Numbered D188 because D179 to D187 are taken on open PRs (#1871, #1872, #1873, #1877, #1880).
 
-## D196. #724: the redrawn `factory-map.svg` is accepted as the Factory map for now
-
-**Decision.** `docs/projects/let-em-loose/factory-map.svg`, redrawn from card #724's description of what changed (Q45's interim choice) in PR #1876, is accepted as #724's Factory map for now. The original Factory map stays untouched. "For now": a later redraw, or the 2026-11-04 voice-chat source SVG if it is recovered, may replace it without a new decision on intent. This settles the drawing only; CI, review by `dottiusmaximus` and the merge rules still apply to PR #1876.
-**Why.** The source SVG from the 2026-11-04 voice chat was not reachable from a repo session; Nano reviewed the redraw on the PR and found it good enough.
-**Rejected.** Waiting for the source SVG before landing #724's map.
-**Tag.** [stated] · remind-me: mem_b5e76a2c6dde43489fec5e501929dd57
-**Key.** lel:724:factory-map-redraw-accepted
-**Source.** Nano, project thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YM1e34fpJeXfgbUJqq3Mf5`, 2026-11-25T20:13:53Z: "Goood enough for now", after reviewing the drawing on PR #1876. Relayed by the caller; the message was not read. Resolves OPEN_QUESTIONS Q45. Numbered D196 because D177 to D195 are taken on `main` and open branches.
 ## D189. #1318 S5 `rusty_orch builder run` implementation defaults
 
 **Decision.** Inside the approved S5 (D188, `1318-builder-launch-slices.md` §S5):
@@ -1839,3 +1831,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_f09b470e92384f13befd1e1adce9a0ed
 **Key.** lel:1318:s5-builder-run-defaults
 **Source.** Caller question from the #1318 S5 implementation, 2026-11-25; `1318-builder-launch-slices.md` §S5; D104, D167, D177, D187, D188; addendum C-R1. Numbered D189 because D179 to D188 are taken on open PRs (#1871, #1872, #1873, #1877, #1880).
+
+## D196. #724: the redrawn `factory-map.svg` is accepted as the Factory map for now
+
+**Decision.** `docs/projects/let-em-loose/factory-map.svg`, redrawn from card #724's description of what changed (Q45's interim choice) in PR #1876, is accepted as #724's Factory map for now. The original Factory map stays untouched. "For now": a later redraw, or the 2026-11-04 voice-chat source SVG if it is recovered, may replace it without a new decision on intent. This settles the drawing only; CI, review by `dottiusmaximus` and the merge rules still apply to PR #1876.
+**Why.** The source SVG from the 2026-11-04 voice chat was not reachable from a repo session; Nano reviewed the redraw on the PR and found it good enough.
+**Rejected.** Waiting for the source SVG before landing #724's map.
+**Tag.** [stated] · remind-me: mem_b5e76a2c6dde43489fec5e501929dd57
+**Key.** lel:724:factory-map-redraw-accepted
+**Source.** Nano, project thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YM1e34fpJeXfgbUJqq3Mf5`, 2026-11-25T20:13:53Z: "Goood enough for now", after reviewing the drawing on PR #1876. Relayed by the caller; the message was not read. Resolves OPEN_QUESTIONS Q45. Numbered D196 because D177 to D195 are taken on `main` and open branches.

@@ -15,8 +15,6 @@ One entry per merged PR against `main`, newest first. No version tags yet.
   nothing is posted and nothing is charged.
 - If the mux goes away the session is recorded as aborted, not failed.
 
----
-
 ## Builder text in acp.log can't pose as orch's
 **2026-11-25**
 
@@ -27,8 +25,6 @@ One entry per merged PR against `main`, newest first. No version tags yet.
   quoted yet, so they can still hold misleading text within orch's line.
 - Characters that reorder, hide or break text on screen are shown as
   escapes.
-
----
 
 ## Builder blocks in the mux
 **2026-11-25**
