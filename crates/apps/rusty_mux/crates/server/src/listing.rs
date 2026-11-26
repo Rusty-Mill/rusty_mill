@@ -368,8 +368,10 @@ pub(crate) fn stat(root: &Workspace, rel: &str) -> Result<String, String> {
 }
 
 /// Output of `git status` read at most; more is a refusal, not a cut list.
+#[cfg(target_os = "linux")]
 const TOUCHED_MAX: usize = 256 * 1024;
 /// How long `git` may run before it is killed.
+#[cfg(target_os = "linux")]
 const TOUCHED_DEADLINE: Duration = Duration::from_secs(4);
 
 /// Runs `git` in the held workspace directory and returns its stdout.
