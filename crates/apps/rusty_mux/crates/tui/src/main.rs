@@ -120,6 +120,7 @@ mod client {
         backoff, clone, connect, first_session_name, reach, shape_of, take_over,
     };
     use rusty_mux_client::checkpoint::Receiver;
+    use rusty_mux_client::clipboard::osc52_set;
     use rusty_mux_core::{
         Axis, BlockId, Event, Float, FloatRect, Layout, Rect, SessionId, Share, Side, Size, Toward,
         WindowId,
@@ -2712,6 +2713,24 @@ mod client {
                 Explored::Fetch(path) => {
                     self.list_workspace(Some(path));
                     self.ask_workspace();
+                    self.draw();
+                }
+                Explored::Copy(path) => {
+                    // Asked for by a key; the terminal may ignore OSC 52, so
+                    // the note says what was sent, not that it landed.
+                    let seq = osc52_set(&path);
+                    // A write that fails ends the client, as every other
+                    // terminal write does; only the size is the note's.
+                    if let Some(seq) = &seq {
+                        write(seq.as_bytes(), &mut self.ended);
+                    }
+                    if let Some(open) = self.exploring.as_mut() {
+                        open.explorer.say(if seq.is_some() {
+                            "path sent to the clipboard (needs OSC 52)"
+                        } else {
+                            "path not copied: too long"
+                        });
+                    }
                     self.draw();
                 }
             }

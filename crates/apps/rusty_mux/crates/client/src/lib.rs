@@ -19,6 +19,7 @@
 pub mod attach;
 #[cfg(any(target_os = "linux", windows))]
 pub mod autostart;
+pub mod clipboard;
 pub mod conn;
 pub mod download;
 pub mod forward;
