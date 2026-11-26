@@ -46,7 +46,10 @@ struct Inner {
 /// Which call a reply answers.
 #[derive(Clone, Copy)]
 enum Which {
-    List,
+    /// The workspace root; retired by a lease change.
+    Root,
+    /// A directory of a loaded tree; still fills it after one.
+    Dir,
     Touched,
     Stat,
 }
@@ -66,7 +69,7 @@ impl Workspace {
             live: AtomicBool::new(true),
         });
         if held {
-            this.ask(Which::List, "terminal.workspace-list", Vec::new());
+            this.ask(Which::Root, "terminal.workspace-list", Vec::new());
         } else {
             // Nothing is on its way until the lease comes.
             this.lock().explorer.set_waiting(false);
@@ -107,7 +110,7 @@ impl Workspace {
         };
         if root {
             self.lock().explorer.set_waiting(true);
-            self.ask(Which::List, "terminal.workspace-list", Vec::new());
+            self.ask(Which::Root, "terminal.workspace-list", Vec::new());
         }
         self.pump();
     }
@@ -146,7 +149,7 @@ impl Workspace {
 
     fn list(self: &Arc<Self>, path: &str) {
         let args = vec![("path".to_owned(), Value::Text(path.to_owned()))];
-        self.ask(Which::List, "terminal.workspace-list", args);
+        self.ask(Which::Dir, "terminal.workspace-list", args);
     }
 
     /// Sends one call; its reply comes back through [`Self::reply`].
@@ -175,17 +178,16 @@ impl Workspace {
         }
         {
             let mut inner = self.lock();
-            let stale = epoch != inner.epoch;
-            // Old status replies never apply. An old root reply is retired
-            // too: the lease change asked for a new one. An old directory
-            // reply still fills the tree it was asked for.
-            if stale && (!matches!(which, Which::List) || inner.explorer.tree().is_none()) {
+            // Old status and root replies never apply: the lease change
+            // cut them off and asked afresh. An old directory reply still
+            // fills the tree it was asked for.
+            if epoch != inner.epoch && !matches!(which, Which::Dir) {
                 return;
             }
             let ex = &mut inner.explorer;
             match (which, reply) {
-                (Which::List, Ok(text)) => ex.load(&text),
-                (Which::List, Err(why)) => ex.refuse(&why),
+                (Which::Root | Which::Dir, Ok(text)) => ex.load(&text),
+                (Which::Root | Which::Dir, Err(why)) => ex.refuse(&why),
                 (Which::Touched, Ok(text)) => ex.load_touched(&text),
                 (Which::Touched, Err(_)) => {}
                 (Which::Stat, Ok(text)) => ex.load_stat(Some(&text)),
@@ -504,6 +506,38 @@ mod tests {
         );
         fake.answer(Ok(ROOT.into()));
         assert_eq!(fake.last().state, State::Tree);
+    }
+
+    #[test]
+    fn a_late_old_root_reply_does_not_touch_the_fresh_tree() {
+        let (fake, ws) = open(true, false);
+        ws.lease(false);
+        ws.lease(true);
+        // The replacement root answers first, then the old one fails late.
+        let old = fake.waiting.lock().unwrap().remove(0);
+        fake.answer(Ok(ROOT.into()));
+        old(Err("the connection to the server was lost".into()));
+        let s = fake.last();
+        assert_eq!(s.state, State::Tree, "no refusal over the fresh tree");
+        assert_eq!(s.rows.len(), 3);
+    }
+
+    #[test]
+    fn a_late_old_root_reply_does_not_clear_a_pending_directory() {
+        let (fake, ws) = open(true, false);
+        let old = fake.waiting.lock().unwrap().remove(0);
+        ws.lease(false);
+        ws.lease(true);
+        fake.answer(Ok(ROOT.into()));
+        ws.intent(Intent::Step(1));
+        ws.intent(Intent::Enter);
+        old(Err("lost".into()));
+        ws.intent(Intent::Enter);
+        assert_eq!(
+            fake.methods().len(),
+            3,
+            "the directory is still pending, no second ask"
+        );
     }
 
     #[test]
