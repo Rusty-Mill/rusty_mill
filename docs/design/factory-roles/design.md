@@ -57,8 +57,9 @@ capability until something deploys through the board.
   author's provider. Sending back is never refused.
 - **R4 Gate.** A gate needs `approve`. Leaving Architecting also needs a passing
   `card_review` in Architecting newer than its last author claim. Leaving V&Ving needs a
-  passing verdict on the Building work or in V&Ving (the Building→V&Ving review move counts)
-  newer than the last author claim, and none asking for changes. `nano` is exempt from the author check (he may approve his own
+  passing verdict on the last authored work (the Building→V&Ving review move, when a maker
+  claimed Building) or in V&Ving, newer than the last author claim, and none asking for
+  changes. `nano` is exempt from the author check (he may approve his own
   cards); `nano-proxy` is never an author.
 - **R5 Unblock.** A card moved to Blocked records the column it left; the proxy may unblock
   it only back there. Any other target is Nano's.
@@ -208,17 +209,21 @@ What the build does with them:
     approval.
   - When the owner taps on text that was edited after the filings for that gate, those
     filings expire and the card stays: no gate is crossed on text the owner did not read.
-    The owner approves again on a fresh readback, which records their own approval, so a
-    stale filing cannot lock them out.
+    `card_approve` answers `outcome: expired`, the event log says `approval_expired`, and the
+    board shows a toast. The owner approves again on a fresh readback, which records their own
+    approval, so a stale filing cannot lock them out. With two filings on the same text, the
+    tap confirms the newest.
   - The merge gate counts the V&Ving verdicts and the Building review. It needs one passing
     verdict and none asking for changes. Each reviewer keeps only their newest verdict, so a
-    fail stands until that reviewer passes or a new authoring claim resets R4.
+    fail stands until that same actor passes or a new authoring claim resets R4.
   - The ledger is keyed by credential: the instances of one credential (`cli/a1`, `cli/a2`)
     and the agents registered under a connector (`claude-cloud#…`) are one hand, for R3 and
-    for the entries below. Only an admin makes credentials, so that bounds the ledger.
+    for authors and filings below. Only an admin makes credentials, so that bounds the ledger.
+    Verdicts are kept per actor, so one instance cannot clear another's fail; a credential's
+    instances keep at most four verdicts on one column's work.
   - Repeated facts move to the end of the ledger instead of adding entries: a hand's
-    re-claim of a column, its verdict on a column, and its new filing for a gate it already
-    filed (pending or expired). The older entry's text is replaced; the board's event log
+    re-claim of a column, an actor's verdict on a column, and a hand's new filing for a gate
+    it already filed (pending or expired). The older entry's text is replaced; the board's event log
     keeps every review and approval.
   - When the ledger is full, other actors are refused. The owner's approvals and admin gate
     moves can still be written, up to twice the cap; the owner's claims and reviews cannot.

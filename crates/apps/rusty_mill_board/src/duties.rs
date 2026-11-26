@@ -96,6 +96,22 @@ pub enum Duty {
     },
 }
 
+/// What an [`approve`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The card should now move through the gate.
+    Moves,
+    /// Recorded (filed, confirmed, or the owner's own for a merge); the card stays.
+    Stays,
+    /// The owner read text edited since the gate's filings: they expired, nothing was approved
+    /// and the card stays. The owner approves again on a fresh readback.
+    Expired,
+}
+
+/// The most verdicts the instances of one credential keep on one column's work: each
+/// instance's own verdict stands (a sibling cannot clear another's fail), and this bounds them.
+pub const MAX_HAND_VERDICTS: usize = 4;
+
 /// What an approver read back and the owner said, for [`approve`].
 #[derive(Debug, Clone, Copy)]
 pub struct Approval<'a> {
@@ -163,7 +179,26 @@ fn upsert(card: &Card, duty: Duty, same: impl Fn(&Duty) -> bool) -> Result<Card,
 
 /// A review by `actor` of the work in `column`.
 fn review_of<'a>(actor: &'a str, column: &'a Column) -> impl Fn(&Duty) -> bool + 'a {
-    move |d| matches!(d, Duty::Review { actor: a, column: c, .. } if hand(a) == hand(actor) && c == column)
+    move |d| matches!(d, Duty::Review { actor: a, column: c, .. } if a == actor && c == column)
+}
+
+/// `entry`, a verdict by `by` on `column`, in place of `by`'s own earlier one. Each instance
+/// keeps its own verdict, so another instance of the credential cannot clear its fail; a
+/// credential's instances keep at most [`MAX_HAND_VERDICTS`] on one column.
+fn verdict(card: &Card, by: &Actor, column: &Column, entry: Duty) -> Result<Card, BoardError> {
+    let mine = review_of(&by.name, column);
+    let siblings = card
+        .duties
+        .iter()
+        .filter(|d| matches!(d, Duty::Review { actor, column: c, .. } if hand(actor) == hand(&by.name) && c == column))
+        .count();
+    if !card.duties.iter().any(&mine) && siblings >= MAX_HAND_VERDICTS {
+        return Err(BoardError::Refused(format!(
+            "{MAX_HAND_VERDICTS} instances of {} already gave a verdict on this work",
+            hand(&by.name)
+        )));
+    }
+    upsert(card, entry, mine)
 }
 
 /// The credential behind an actor name: its instances (`claude-cli/a1`) and registered agents
@@ -275,7 +310,7 @@ pub fn on_move(
             note: String::new(),
             at_ms: now_ms,
         };
-        return upsert(moved, entry, review_of(&by.name, from));
+        return verdict(moved, by, from, entry);
     }
     if !through_gate(flow, from, &moved.column, by) {
         return Ok(moved.clone());
@@ -376,7 +411,7 @@ pub fn review(
     };
     // A reviewer's newer verdict on the same work replaces their older one, so reviews cannot
     // fill the ledger.
-    let next = upsert(card, entry, review_of(&by.name, &card.column))?;
+    let next = verdict(card, by, &card.column, entry)?;
     Ok(bumped(next, now_ms))
 }
 
@@ -427,9 +462,9 @@ fn needs_confirmation(flow: &Workflow, from: &Column, to: &Column) -> bool {
 }
 
 /// `by` approves the gate from the card's column to `a.to`, on what was read back to the owner.
-/// Returns the card and whether it should now move to `a.to` (the caller makes the move, so
-/// the claim and Done time follow the board's usual arrival, and its revision then; a card
-/// that stays is returned as a new revision already).
+/// Returns the card and the [`Outcome`]: whether it should now move to `a.to` (the caller
+/// makes the move, so the claim and Done time follow the board's usual arrival, and its
+/// revision then; a card that stays is returned as a new revision already).
 ///
 /// - With `Admin` (the owner): confirms a pending approval for this gate, or records a new one.
 ///   The card moves, except through the merge gate, whose approval is recorded for the PR head
@@ -448,9 +483,22 @@ pub fn approve(
     by: &Actor,
     a: &Approval<'_>,
     now_ms: i64,
-) -> Result<(Card, bool), BoardError> {
-    let (next, moves) = approve_in(card, flow, by, a, now_ms)?;
-    Ok((if moves { next } else { bumped(next, now_ms) }, moves))
+) -> Result<(Card, Outcome), BoardError> {
+    let (next, outcome) = approve_in(card, flow, by, a, now_ms)?;
+    let next = match outcome {
+        Outcome::Moves => next,
+        Outcome::Stays | Outcome::Expired => bumped(next, now_ms),
+    };
+    Ok((next, outcome))
+}
+
+/// [`Outcome::Moves`] when `moves`, else [`Outcome::Stays`].
+fn moves_if(moves: bool) -> Outcome {
+    if moves {
+        Outcome::Moves
+    } else {
+        Outcome::Stays
+    }
 }
 
 fn approve_in(
@@ -459,7 +507,7 @@ fn approve_in(
     by: &Actor,
     a: &Approval<'_>,
     now_ms: i64,
-) -> Result<(Card, bool), BoardError> {
+) -> Result<(Card, Outcome), BoardError> {
     let is_owner = owner(by);
     if !is_owner && !by.caps.contains(&Capability::Approve) {
         return Err(BoardError::Forbidden(Capability::Approve));
@@ -512,7 +560,7 @@ fn approve_in(
         matches!(d, Duty::Approval { actor, from: f, to, pending, expired, .. }
             if (*pending || *expired) && hand(actor) == hand(&by.name) && *f == from && to == a.to)
     })?;
-    Ok((next, !pending))
+    Ok((next, moves_if(!pending)))
 }
 
 fn approval(
@@ -553,7 +601,7 @@ fn confirm_or_record(
     pr_head: Option<&str>,
     merge: bool,
     now_ms: i64,
-) -> Result<(Card, bool), BoardError> {
+) -> Result<(Card, Outcome), BoardError> {
     let filed = |d: &Duty| matches!(d, Duty::Approval { from: f, to, pending: true, .. } if f == from && to == a.to);
     let read = card.duties.iter().rposition(|d| {
         filed(d) && matches!(d, Duty::Approval { digest, .. } if *digest == a.digest)
@@ -570,12 +618,12 @@ fn confirm_or_record(
             // A different PR head is a new approval.
             if merge && filed_head.as_deref() != pr_head {
                 let mine = approval(by, from, a, pr_head, false, None, now_ms);
-                return push_owner(card, mine).map(|c| (c, false));
+                return push_owner(card, mine).map(|c| (c, Outcome::Stays));
             }
             *pending = false;
             *confirmed_by = Some(by.name.clone());
         }
-        return Ok((next, !merge));
+        return Ok((next, moves_if(!merge)));
     }
     if card.duties.iter().any(filed) {
         let mut next = card.clone();
@@ -588,10 +636,10 @@ fn confirm_or_record(
                 *expired = true;
             }
         }
-        return Ok((next, false));
+        return Ok((next, Outcome::Expired));
     }
     let mine = approval(by, from, a, pr_head, false, None, now_ms);
-    push_owner(card, mine).map(|c| (c, !merge))
+    push_owner(card, mine).map(|c| (c, moves_if(!merge)))
 }
 
 #[cfg(test)]
@@ -771,7 +819,7 @@ mod tests {
         let dots = actor("dots", Some("openai"), &[Capability::Review]);
         let c = review(&c, &flow(), &dots, true, "ok", 3).expect("review");
         let (c, moves) = approve(&c, &flow(), &proxy(), &approval_of(&c, &to), 4).expect("ok");
-        assert!(moves);
+        assert_eq!(moves, Outcome::Moves);
         assert!(matches!(
             c.duties.last(),
             Some(Duty::Approval { pending: false, .. })
@@ -820,14 +868,17 @@ mod tests {
         assert!(approve(&c, &flow(), &proxy(), &a, 3).is_err(), "no PR head");
         a.pr_head = Some("abc123");
         let (c, moves) = approve(&c, &flow(), &proxy(), &a, 3).expect("filed");
-        assert!(!moves);
+        assert!(moves != Outcome::Moves);
         assert!(matches!(
             c.duties.last(),
             Some(Duty::Approval { pending: true, .. })
         ));
         let nano = actor("nano", Some("human"), &[Capability::Admin]);
         let (c, moves) = approve(&c, &flow(), &nano, &a, 4).expect("confirmed");
-        assert!(!moves, "a merge approval never moves the card");
+        assert!(
+            moves != Outcome::Moves,
+            "a merge approval never moves the card"
+        );
         assert!(matches!(c.duties.last(),
             Some(Duty::Approval { pending: false, confirmed_by: Some(n), .. }) if n == "nano"));
     }
@@ -837,10 +888,10 @@ mod tests {
         let c = at("blocked");
         let to = Column::new("building").expect("col");
         let (c, moves) = approve(&c, &flow(), &proxy(), &approval_of(&c, &to), 1).expect("filed");
-        assert!(!moves);
+        assert!(moves != Outcome::Moves);
         let nano = actor("nano", Some("human"), &[Capability::Admin]);
         let (_, moves) = approve(&c, &flow(), &nano, &approval_of(&c, &to), 2).expect("tap");
-        assert!(moves);
+        assert_eq!(moves, Outcome::Moves);
     }
 
     #[test]
@@ -874,7 +925,7 @@ mod tests {
         assert!(matches!(filed, Err(BoardError::Refused(m)) if m.contains("full")));
         let nano = actor("nano", None, &[Capability::Admin]);
         let (c, moves) = approve(&c, &flow(), &nano, &approval_of(&c, &to), 1).expect("owner");
-        assert!(moves);
+        assert_eq!(moves, Outcome::Moves);
         assert_eq!(c.duties.len(), MAX_DUTIES + 1);
     }
 }

@@ -1151,7 +1151,8 @@ function syncDialog(){
     const r=el("div",null,"pending"),b=el("button","Confirm");b.type="button";
     r.append(el("span","Approval waiting: "+colLabel(d.from)+" → "+colLabel(d.to)+(d.pr_head?" at "+d.pr_head:"")+", filed by "+d.actor+". "),el("q",d.verbatim)," ",b);
     b.onclick=async()=>{b.disabled=true;try{const g=await api("card_get",{id:k.id});
-      await act("card_approve",{id:k.id,to:d.to,digest:g.text_digest,verbatim:"Confirmed in the board by tap.",source:"board-ui",...(d.pr_head&&{pr_head:d.pr_head})})}
+      const res=await act("card_approve",{id:k.id,to:d.to,digest:g.text_digest,verbatim:"Confirmed in the board by tap.",source:"board-ui",...(d.pr_head&&{pr_head:d.pr_head})});
+      if(res?.outcome==="expired")toast("The text changed since it was filed: nothing was approved. Read it back and approve again.")}
       catch(e){toast(e.message)}finally{b.disabled=false}};
     return r}));
   const theirs=snap(k);
