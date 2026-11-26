@@ -49,7 +49,7 @@ use rusty_mux_proto::{Entry, Features, Launch, Message, Program, ShowTo, Takeove
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
     Act, BlockInfo, Bound, Detached, Dir, Feed, Float as Pane, ForwardDone, Link, ListDone, Listed,
-    Notice, PaneIo, Remote, Session, Show, Source, Take, Tree, UploadDone,
+    Notice, PaneIo, Remote, Session, Show, Source, Take, Tree, UploadDone, UploadProgress,
 };
 
 use crate::floats;
@@ -547,9 +547,15 @@ impl Source for MuxSource {
         self.pane(key).is_some_and(|b| b.uploads)
     }
 
-    fn upload(&self, key: u64, path: std::path::PathBuf, done: UploadDone) {
+    fn upload(
+        &self,
+        key: u64,
+        path: std::path::PathBuf,
+        progress: UploadProgress,
+        done: UploadDone,
+    ) {
         match self.pane(key) {
-            Some(block) => block.upload(path, done),
+            Some(block) => block.upload(path, progress, done),
             None => done(Err("the block is not open".into())),
         }
     }
@@ -1496,6 +1502,28 @@ const FORWARD_WANTS: usize = 16;
 /// long.
 const UPLOAD_CHUNK: usize = 64 << 10;
 
+/// Bounds a write to the server by [`WRITE_WAIT`], so one that stalls ends
+/// the connection instead of holding the writer's lock, and typing with it,
+/// for ever.
+fn bound_writes(stream: &UnixStream) -> Result<(), String> {
+    stream
+        .set_write_timeout(Some(WRITE_WAIT))
+        .map_err(|e| format!("cannot bound writes to the server: {e}"))
+}
+
+/// The bytes of file data in one chunk's `terminal.upload` arguments.
+fn chunk_len(args: &[(String, Value)]) -> u64 {
+    args.iter()
+        .find_map(|(k, v)| match v {
+            Value::Bytes(b) if k == "data" => Some(b.len() as u64),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+/// How long a write to the server may take before the connection is let go.
+const WRITE_WAIT: Duration = Duration::from_secs(30);
+
 /// How long the server may take to answer one chunk of an upload.
 const UPLOAD_WAIT: Duration = Duration::from_secs(30);
 
@@ -1561,6 +1589,7 @@ impl Block {
             Missed::Retry(why) | Missed::Broken(why, _) => why,
             Missed::Dropped => "the server let the client go".into(),
         })?;
+        bound_writes(&opened.stream)?;
         let (revive, revived) = std::sync::mpsc::channel();
         let shared = Arc::new(Block {
             block,
@@ -1614,6 +1643,12 @@ impl Block {
     /// screen again (an attached client's takeover), and the lease is
     /// asked for again if wanted, as silence may have lost it.
     fn revive(&self, opened: Opened) {
+        if bound_writes(&opened.stream).is_err() {
+            // Unbounded writes could hang the pane: let the connection go
+            // and the pane reconnects.
+            let _ = opened.stream.shutdown(Shutdown::Both);
+            return;
+        }
         *lock(&self.takeover) = opened.takeover;
         {
             // The runs of the old connection end before the new one is
@@ -1637,8 +1672,11 @@ impl Block {
     fn send(&self, make: impl FnOnce(u64) -> Message) -> u64 {
         let req = self.next.fetch_add(1, Ordering::Relaxed);
         let conn = &mut self.conn.lock().unwrap_or_else(PoisonError::into_inner);
-        // A failed send ends the reader too, which ends the pane.
-        let _ = conn.send(&make(req));
+        // A failed send, a timed-out one too, may leave half a frame on the
+        // wire: the connection is let go, which ends the reader and the pane.
+        if conn.send(&make(req)).is_err() {
+            let _ = lock(&self.stream).shutdown(Shutdown::Both);
+        }
         req
     }
 
@@ -1668,7 +1706,12 @@ impl Block {
     /// server does. A chunk the server leaves unanswered for [`UPLOAD_WAIT`],
     /// or a lost connection, ends it; see `rusty_mux_client::upload::send`
     /// for what an error after the last chunk means.
-    fn upload(self: &Arc<Self>, path: std::path::PathBuf, done: UploadDone) {
+    fn upload(
+        self: &Arc<Self>,
+        path: std::path::PathBuf,
+        progress: UploadProgress,
+        done: UploadDone,
+    ) {
         if !self.lease().held {
             return done(Err(
                 "Another client holds this block's input; take it over to send files.".into(),
@@ -1678,10 +1721,15 @@ impl Block {
             return done(Err("that is not a file".into()));
         };
         let block = Arc::clone(self);
-        std::thread::spawn(move || done(block.upload_file(&path, &name)));
+        std::thread::spawn(move || done(block.upload_file(&path, &name, &progress)));
     }
 
-    fn upload_file(&self, path: &std::path::Path, name: &str) -> Result<String, String> {
+    fn upload_file(
+        &self,
+        path: &std::path::Path,
+        name: &str,
+        progress: &UploadProgress,
+    ) -> Result<String, String> {
         // Looked at before it is opened: opening a FIFO would wait for a
         // writer for ever and the upload would never answer.
         let not_file = || format!("{} is not a file", path.display());
@@ -1694,7 +1742,11 @@ impl Block {
             return Err(not_file());
         }
         let id = self.block;
+        let total = looked.len();
+        let mut sent = 0u64;
+        let mut shown = None;
         rusty_mux_client::upload::send_with(name, &mut file, UPLOAD_CHUNK, |args| {
+            let len = chunk_len(&args);
             let (tx, rx) = channel();
             let mut args = Some(args);
             let req = self.send(|req| {
@@ -1709,9 +1761,17 @@ impl Block {
             // Answered by the reader; a lost connection drops the sender.
             let answer = rx.recv_timeout(UPLOAD_WAIT);
             lock(&self.uploading).remove(&req);
-            answer
+            let text = answer
                 .map_err(|_| std::io::Error::other("the server did not answer"))?
-                .map_err(std::io::Error::other)
+                .map_err(std::io::Error::other)?;
+            sent += len;
+            // Told when the percent moves, not once per chunk.
+            let percent = (sent.min(total) * 100).checked_div(total).unwrap_or(100);
+            if shown != Some(percent) {
+                shown = Some(percent);
+                progress(sent, total);
+            }
+            Ok(text)
         })
         .map_err(|e| e.to_string())
     }
@@ -2200,6 +2260,21 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_to_the_server_are_bounded_and_chunk_sizes_counted() {
+        let (a, _b) = std::os::unix::net::UnixStream::pair().expect("pair");
+        assert_eq!(a.write_timeout().expect("get"), None);
+        super::bound_writes(&a).expect("bound");
+        assert_eq!(a.write_timeout().expect("get"), Some(super::WRITE_WAIT));
+        let data = vec![(
+            "data".to_owned(),
+            rusty_mux_proto::schema::Value::Bytes(vec![0; 7]),
+        )];
+        assert_eq!(super::chunk_len(&data), 7);
+        assert_eq!(super::chunk_len(&[]), 0);
     }
 
     #[test]

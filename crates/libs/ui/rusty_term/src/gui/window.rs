@@ -233,6 +233,8 @@ pub(crate) enum UserEvent {
     /// A file dropped or pasted on a pane was sent to its host (C82): the
     /// pane and the file's path there, or why not.
     Uploaded(u64, Uploaded),
+    /// An upload for a pane went on: the banner text saying how far.
+    UploadProgress(u64, super::source::Notice),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -6636,9 +6638,15 @@ impl WindowState<'_> {
             .collect();
         while let Some((key, path)) = self.uploads.next(|k| open.contains(&k)) {
             let proxy = self.proxy.clone();
+            let name = file_label(&path);
+            let tell = self.proxy.clone();
             self.source.upload(
                 key,
                 path,
+                Box::new(move |sent, total| {
+                    let notice = progress_notice(&name, sent, total);
+                    let _ = tell.send_event(UserEvent::UploadProgress(key, notice));
+                }),
                 Box::new(move |uploaded| {
                     let _ = proxy.send_event(UserEvent::Uploaded(key, uploaded));
                 }),
@@ -6650,14 +6658,26 @@ impl WindowState<'_> {
     /// pane as a drop of a local file would be, or the notice says why not.
     fn uploaded(&mut self, key: u64, uploaded: Uploaded) {
         self.uploads.finish(key);
+        let shown = std::mem::take(&mut self.uploads.shown);
         match uploaded {
-            Ok(path) => self.type_remote_path(key, &path),
+            Ok(path) => {
+                if shown {
+                    self.show_notice(None);
+                }
+                self.type_remote_path(key, &path);
+            }
             Err(why) => self.show_notice(Some(super::source::Notice {
                 title: "File not sent".to_owned(),
                 detail: why,
             })),
         }
         self.next_upload();
+    }
+
+    /// An upload for pane `key` went on: its notice shows how far.
+    fn upload_progress(&mut self, notice: super::source::Notice) {
+        self.uploads.shown = true;
+        self.show_notice(Some(notice));
     }
 
     /// Types `path`, a file's place on pane `key`'s host, quoted for that
@@ -7623,6 +7643,12 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                     w.uploaded(key, uploaded);
                 }
             }
+            UserEvent::UploadProgress(key, notice) => {
+                // Only the window whose upload it is shows it.
+                if let Some(w) = self.windows.iter_mut().find(|w| w.uploads.busy_with(key)) {
+                    w.upload_progress(notice);
+                }
+            }
             UserEvent::Listed(ask, listed) => {
                 if let Some(w) = self.windows.first_mut() {
                     w.palette_listed(ask, listed);
@@ -8128,6 +8154,8 @@ struct UploadQueue {
     waiting: std::collections::VecDeque<(u64, std::path::PathBuf)>,
     /// The pane whose file is on its way.
     active: Option<u64>,
+    /// Whether the banner shows an upload's progress, to be cleared after.
+    shown: bool,
 }
 
 impl UploadQueue {
@@ -8160,6 +8188,23 @@ impl UploadQueue {
         if self.busy_with(key) {
             self.active = None;
         }
+    }
+}
+
+/// A file's name for the banner, or its whole path when it has none.
+fn file_label(path: &std::path::Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The banner text of an upload `sent` bytes into `total`.
+fn progress_notice(name: &str, sent: u64, total: u64) -> super::source::Notice {
+    let percent = (sent.min(total) * 100).checked_div(total).unwrap_or(100);
+    super::source::Notice {
+        title: "Sending file".to_owned(),
+        detail: format!("{name}: {percent}%"),
     }
 }
 
@@ -9369,6 +9414,20 @@ mod tests {
         assert!(q.busy_with(2), "an answer for another pane frees nothing");
         q.finish(2);
         assert_eq!(q.next(|_| true), None);
+    }
+
+    #[test]
+    fn an_upload_notice_names_the_file_and_how_far_it_is() {
+        let notice = super::progress_notice("a.png", 1, 4);
+        assert_eq!(notice.detail, "a.png: 25%");
+        assert_eq!(
+            super::progress_notice("a", 9, 4).detail,
+            "a: 100%",
+            "capped"
+        );
+        assert_eq!(super::progress_notice("e", 0, 0).detail, "e: 100%", "empty");
+        let path = std::path::Path::new("/tmp/dir/b.txt");
+        assert_eq!(super::file_label(path), "b.txt");
     }
 
     #[test]

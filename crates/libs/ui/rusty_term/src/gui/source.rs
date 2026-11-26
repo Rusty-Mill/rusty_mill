@@ -381,9 +381,17 @@ pub trait Source {
         false
     }
     /// Sends the file at `path` to pane `key`'s host and calls `done` once,
-    /// from any thread, with its path there or why not. Not called when
-    /// [`Source::uploads`] is `false`.
-    fn upload(&self, _key: u64, _path: std::path::PathBuf, done: UploadDone) {
+    /// from any thread, with its path there or why not. `progress` is called
+    /// with the bytes sent and the file's size as chunks are answered, from
+    /// any thread, before `done`. Not called when [`Source::uploads`] is
+    /// `false`.
+    fn upload(
+        &self,
+        _key: u64,
+        _path: std::path::PathBuf,
+        _progress: UploadProgress,
+        done: UploadDone,
+    ) {
         done(Err("this source uploads no files".into()));
     }
 }
@@ -431,6 +439,9 @@ pub type Uploaded = Result<String, String>;
 
 /// What a source calls once with an upload's outcome.
 pub type UploadDone = Box<dyn FnOnce(Uploaded) + Send>;
+
+/// What a source calls with an upload's bytes sent and the file's size.
+pub type UploadProgress = Box<dyn Fn(u64, u64) + Send>;
 
 /// A folder listing's text, or why the host refused it.
 pub type Listed = Result<String, String>;
