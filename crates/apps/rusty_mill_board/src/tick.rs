@@ -39,8 +39,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::domain::{
-    BoardError, Card, CloseReason, Closure, Column, Comment, DEFAULT_PROJECT, Event, EventKind,
-    ExecutionLink, Span, next_event_id, reserved_tag,
+    BoardError, Card, CloseReason, Closure, Column, Comment, CommentKind, DEFAULT_PROJECT, Event,
+    EventKind, ExecutionLink, Span, next_event_id, reserved_tag,
 };
 use crate::external::{ExternalRef, Provider, RefState};
 use crate::http::Http;
@@ -1279,6 +1279,18 @@ impl<T: TickApi> Store for TickStore<T> {
         // board document are as the board read them; each request below is fenced on it.
         if current.rev + 1 != read {
             return Err(BoardError::Conflict);
+        }
+        // Tick keeps a comment as text, author and time only; refuse what it would lose
+        // rather than read a blocker back as a note (#1436).
+        if event.kind == EventKind::Commented
+            && card
+                .comments
+                .last()
+                .is_some_and(|c| c.kind != CommentKind::Note || c.resolves.is_some())
+        {
+            return Err(BoardError::Refused(
+                "the rusty_tick store keeps plain notes only: comment kinds and `resolves` need the SQLite store".into(),
+            ));
         }
         let doc = match BoardDoc::of(card) != BoardDoc::of(&current) {
             true => Some(BoardDoc::kept(card, stored.as_ref()).checked()?),

@@ -741,6 +741,35 @@ fn a_state_write_on_a_stale_revision_is_refused_and_keeps_the_newer_line() {
     assert_eq!(board.get(card.id).expect("get").state, "newer line");
 }
 
+/// Tick keeps plain notes only: a typed or resolving comment is refused, never saved as a
+/// note that would read back as something else, and ordinary notes still work.
+#[test]
+fn tick_refuses_comment_kinds_and_resolution_and_keeps_plain_notes() {
+    use rusty_mill_board::domain::{CommentKind, NewComment};
+    let (board, _tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let blocker = NewComment {
+        text: "stuck",
+        kind: CommentKind::Blocker,
+        ..NewComment::default()
+    };
+    let refused = board.comment_with(card.id, &human, &blocker);
+    assert!(
+        matches!(&refused, Err(BoardError::Refused(m)) if m.contains("plain notes only")),
+        "{refused:?}"
+    );
+    let resolving = NewComment {
+        text: "done",
+        resolves: Some(uuid::Uuid::now_v7()),
+        ..NewComment::default()
+    };
+    assert!(board.comment_with(card.id, &human, &resolving).is_err());
+    assert!(board.get(card.id).expect("get").comments.is_empty());
+    board.comment(card.id, &human, "plain").expect("note");
+    assert_eq!(board.get(card.id).expect("get").comments.len(), 1);
+}
+
 #[test]
 fn overlapping_board_comments_both_land_one_after_the_other() {
     let (a, b, _tick, read) = two_readers();
