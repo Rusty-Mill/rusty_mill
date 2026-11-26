@@ -439,16 +439,35 @@ fn update(seen: &mut String, now: &str) -> bool {
 pub(crate) fn reported_dir(grid: &Grid) -> Option<PathBuf> {
     let rest = grid.cwd.strip_prefix("file://")?;
     let host = &rest[..rest.find('/')?];
-    if !(host.is_empty() || host == "localhost" || host == local_host()?.trim()) {
+    if !(host.is_empty() || host == "localhost" || is_local_host(host)) {
         return None;
     }
-    let dir = PathBuf::from(reported_path(&grid.cwd)?);
+    let path = reported_path(&grid.cwd)?;
+    // `file:///C:/work` carries `/C:/work`; Windows wants `C:/work`.
+    let path = if cfg!(windows) {
+        drive_path(&path).unwrap_or(&path)
+    } else {
+        &path
+    };
+    let dir = PathBuf::from(path);
     dir.is_dir().then_some(dir)
 }
 
-/// This machine's name, where the kernel says (Linux).
-fn local_host() -> Option<String> {
-    std::fs::read_to_string("/proc/sys/kernel/hostname").ok()
+/// `/C:/work` as `C:/work`: a URI path that starts with a drive letter.
+fn drive_path(path: &str) -> Option<&str> {
+    let b = path.as_bytes();
+    (b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':').then(|| &path[1..])
+}
+
+/// Whether `host` names this machine: the kernel's hostname on Linux, the
+/// computer name on Windows (compared without case).
+fn is_local_host(host: &str) -> bool {
+    let own = if cfg!(windows) {
+        std::env::var("COMPUTERNAME").ok()
+    } else {
+        std::fs::read_to_string("/proc/sys/kernel/hostname").ok()
+    };
+    own.is_some_and(|own| own.trim().eq_ignore_ascii_case(host))
 }
 
 /// The path of an OSC 7 `file://HOST/PATH` URI, percent-decoded.
@@ -689,6 +708,15 @@ mod tests {
         assert!(grid.bracketed_paste);
         assert_eq!(grid.title, "kept");
         assert!(parser.take_responses().is_empty());
+    }
+
+    #[test]
+    fn a_drive_letter_path_loses_its_leading_slash() {
+        assert_eq!(drive_path("/C:/work/sub"), Some("C:/work/sub"));
+        assert_eq!(drive_path("/c:"), Some("c:"));
+        assert_eq!(drive_path("/tmp/x"), None);
+        assert_eq!(drive_path("/1:/x"), None);
+        assert_eq!(drive_path("C:/x"), None);
     }
 
     #[test]
