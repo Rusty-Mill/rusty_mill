@@ -1,9 +1,12 @@
 """Checks for summarize.py: ranks with ties, Spearman, step pairing, the sign rule and the
 pre-registered verdicts."""
 import math
+import pathlib
 import unittest
 
 import summarize as s
+
+DOCS = pathlib.Path(__file__).resolve().parents[4] / "docs/projects/let-em-loose"
 
 
 def row(problem: str, cp: int, conc: float, erosion: float, dup: float = 0.0, clone: float = 0.0) -> str:
@@ -60,6 +63,15 @@ class Scb(unittest.TestCase):
     def test_parse_rejects_short_rows(self):
         with self.assertRaises(ValueError):
             s.parse("a\t1\t2")
+
+
+class Published(unittest.TestCase):
+    def test_committed_rows_reproduce_the_phase_a_table(self):
+        with open(DOCS / "705-slopcodebench-rows-2026-11-26.tsv", encoding="utf-8") as fh:
+            next(fh)
+            table = s.report([s.parse(line) for line in fh if line.strip()])
+        published = (DOCS / "705-slopcodebench-phase-a.md").read_text(encoding="utf-8")
+        self.assertIn(table, published)
 
 
 if __name__ == "__main__":
