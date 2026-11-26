@@ -37,7 +37,7 @@ const LOCK_WAIT: Duration = Duration::from_secs(30);
 
 pub const USAGE: &str = "usage: rusty_orch builder run <config.json> --bbp <bbp binary> --dir <bbp dir> --task <task>\n           --claim <id> --state <orch state dir> --repo <git repo> --base <commit>\n           --cgroup-parent <dir> --slots <dir> --mux-ctl <rusty-mux-ctl> [--mux-socket <path>]\n           [--jail <lel-jail>] [--read <dir>]...\n\nRun one builder session on one claim (#1318): admit it, make its worktree from --base,\nopen its cgroup below --cgroup-parent, take an agent slot from --slots, launch\n`lel-jail` running `claude-code-acp` in a mux block, run one ACP turn, end it and post\nits candidate only when it wrote .lel/submit with a non-empty diff (D188). Prints the\nsession row as one JSON line. --cgroup-parent is the board's `lel-store-<scope>`\ncgroup (`bbp cgroup-scope`), delegated to this user. Each --read adds a read root to the jail. Linux only.\nCalls the Claude CLI under its own subscription login.\n\n`rusty_orch builder sessions --help` prints the read-only command that lists saved sessions.";
 
-pub const SESSIONS_USAGE: &str = "usage: rusty_orch builder sessions <config.json> --dir <bbp dir> --task <task>\n           --state <orch state dir> [--claim <id>]\n\nPrint the builder sessions the orch store holds for the board (--dir, --task), one\nJSON line each in `builder run`'s row shape without notes, ordered by claim and n;\n--claim keeps one claim's. Read-only (D199): it waits for the store lock like\n`builder run`, changes no session, and fails when --state is not a directory or the\nstore cannot be read.";
+pub const SESSIONS_USAGE: &str = "usage: rusty_orch builder sessions <config.json> --dir <bbp dir> --task <task>\n           --state <orch state dir> [--claim <id>]\n\nPrint the builder sessions the orch store holds for the board (--dir, --task), one\nJSON line each in `builder run`'s row shape without notes, ordered by claim and n;\n--claim keeps one claim's. Read-only (D199): it makes and writes no file. An empty\n--state directory (no store yet) prints nothing. It fails when --state is not a\ndirectory, or holds a store that is partial, corrupt or stays locked.";
 
 /// What `builder sessions` reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,32 +212,47 @@ fn message_id(v: String) -> Result<MsgId, ArgsError> {
         .map_err(|_| ArgsError::Usage(format!("--claim {v:?} is not a message id")))
 }
 
-/// Print the board's persisted builder sessions (D199), read-only.
+/// Print the board's persisted builder sessions (D199), read-only: the
+/// store's own portable read under its existing lock, never `Store::open`,
+/// so no lock file or table is made and nothing is written back.
 ///
 /// # Errors
 ///
 /// When the config can't be read or parsed, `--state` is not a directory,
-/// the BBP directory can't be resolved, or the store stays locked or can't
-/// be read.
+/// the BBP directory can't be resolved, or the store in `--state` is
+/// partial (no lock, or no builder table or its records companion),
+/// corrupt, or stays locked.
 pub fn sessions(o: &SessionsOptions) -> Result<String, String> {
     let text = std::fs::read_to_string(&o.config)
         .map_err(|e| format!("cannot read {}: {e}", o.config.display()))?;
     orch_lens::LensConfig::parse(&text).map_err(|e| format!("{}: {e}", o.config.display()))?;
-    if !o.state.is_dir() {
-        return Err(format!("{} is not a directory", o.state.display()));
-    }
+    let mut entries = std::fs::read_dir(&o.state)
+        .map_err(|e| format!("{} is not a readable directory: {e}", o.state.display()))?;
     let board = crate::lens::run::board(&o.dir, &o.task)?;
-    let rows = with_store(&o.state, |store| {
-        store
-            .load_builder_sessions(&board)
-            .map_err(|e| e.to_string())
-    })?;
+    if entries.next().is_none() {
+        return Ok(String::new()); // no store yet: known empty
+    }
+    let rows = read_waiting(&o.state, &board, LOCK_WAIT)?;
     Ok(session_lines(rows, o.claim))
+}
+
+/// [`Store::read_builder_sessions`], waiting up to `wait` while another
+/// process holds the store.
+fn read_waiting(state: &Path, board: &str, wait: Duration) -> Result<Vec<Session>, String> {
+    let start = std::time::Instant::now();
+    loop {
+        match Store::read_builder_sessions(state, board) {
+            Err(StoreError::Locked(_)) if start.elapsed() < wait => {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            r => return r.map_err(|e| format!("{}: {e}", state.display())),
+        }
+    }
 }
 
 /// `rows` as JSON lines without notes, ordered by claim and n, kept to
 /// `claim` when given.
-pub fn session_lines(mut rows: Vec<Session>, claim: Option<MsgId>) -> String {
+fn session_lines(mut rows: Vec<Session>, claim: Option<MsgId>) -> String {
     rows.retain(|s| claim.is_none_or(|c| s.claim == c));
     rows.sort_by_key(|s| (s.claim.0, s.n));
     rows.iter()
