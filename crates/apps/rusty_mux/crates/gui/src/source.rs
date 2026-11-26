@@ -84,7 +84,7 @@ pub const GUI: Features = CONTROL
 /// over (handoff D153), and folder listings, for the palette's directory
 /// browse (D78), and file uploads (C82). [`PANE`] asks for clipboard reads
 /// (C54), which the window answers by its policy, and for `BLOCK_CALL` and
-/// `WORKSPACE` (D349), which the GUI does not use yet: they only let the
+/// `WORKSPACE` and `WORKSPACE_STATUS` (D349, D373), which the GUI does not use yet: they only let the
 /// pane's own connection carry a workspace listing once the panel exists.
 pub const BLOCK: Features = PANE
     .union(Features::INPUT_GATE)
