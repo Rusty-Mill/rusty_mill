@@ -14,8 +14,9 @@ Newest first.
 ### Added
 - `GenericMmapStore::read_checked_records`: `read_portable_records` after a
   read-only check of the mmap file's header (`slot_file::check_header`), so a
-  read-only reader refuses a table `open` would refuse, without mapping the
-  file or opening it for writing. `read_portable_records` is unchanged.
+  read-only reader refuses any header `SlotFile::open`'s header validation
+  refuses, without mapping the file or opening it for writing. This is header
+  parity only, not full equivalence with `open`. `read_portable_records` is unchanged.
 
 ## 0.2.0 (2026-10-04)
 

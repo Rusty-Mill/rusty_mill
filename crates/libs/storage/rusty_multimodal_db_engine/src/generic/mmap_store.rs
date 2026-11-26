@@ -1049,8 +1049,12 @@ where
     /// [`Self::read_portable_records`], after checking the mmap file's
     /// header without mapping it or opening it for writing
     /// ([`super::slot_file::check_header`]). For a read-only reader that
-    /// must fail where [`Self::open`] would refuse the table, while still
-    /// writing nothing: the slots themselves are not read.
+    /// must refuse any header [`Self::open`]'s header validation refuses,
+    /// while writing nothing. This is header parity only, not equivalence
+    /// with [`Self::open`]: the slots are not read or mapped, no write
+    /// access is needed, and `open`'s mapping and reconciliation are not
+    /// attempted, so a table `open` refuses for those reasons can still
+    /// read here.
     ///
     /// # Errors
     ///
