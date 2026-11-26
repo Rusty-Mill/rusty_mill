@@ -55,15 +55,17 @@ Out of scope: changing the #704 gate (card).
   - **Tie** if \|d\| is under that margin.
   - **Worse** if d is at or above the positive margin.
   - Ties are reported as ties, never as reductions.
-- **Verdict (pre-registered, proposed):**
-  - **"Slows decay"** needs all of the following:
-    - at least 2 of the 3 problems are evaluable;
-    - erosion shows a reduction on at least 2 evaluable problems;
-    - verbosity is worse on none;
-    - the factory's total core-passing checkpoints are at least the control's minus 1.
-  - **"No worse"** if the gates hold with ties instead of reductions.
-  - **"Worse"** if erosion or verbosity is worse on 2 or more evaluable problems.
-  - **"Inconclusive"** if fewer than 2 problems are evaluable.
+- **Functional gate (pre-registered, proposed).**
+  - A checkpoint is **core-passing** when its snapshot passes at least 50% of that checkpoint's core tests. This is the same cutoff as the evidence rule.
+  - The denominator is fixed: all 11 subset checkpoints for each arm, with carry-forward and missing snapshots counted as not passing.
+  - The gate holds when the factory has (a) at least as many core-passing checkpoints as the control minus 1, **and** (b) at least as many strict-solved checkpoints as the control minus 1.
+  - Keeping the strict floor next to the core floor is intentional: the core floor guards the evidence rule's cutoff, and the strict floor keeps the paper's headline measure. Strict, ISO and core results are reported for every checkpoint whatever the verdict.
+- **Verdict (pre-registered, proposed).** The first rule that matches wins, so every outcome gets exactly one verdict:
+  1. **"Inconclusive"**: fewer than 2 of the 3 problems are evaluable.
+  2. **"Worse"**: erosion or verbosity is worse on 2 or more evaluable problems.
+  3. **"Slows decay"**: erosion shows a reduction on at least 2 evaluable problems, verbosity is worse on none, and the functional gate holds.
+  4. **"No worse"**: neither erosion nor verbosity is worse on any evaluable problem, and the functional gate holds.
+  5. **"Mixed"**: everything else. Examples: one reduction and one worse with the third problem inconclusive, or erosion reductions with a failed functional gate. The report names which gate or rule failed.
   - With n = 3 this is a signal, not a significance claim.
   - A factory-only run (O2 b) can't reach any comparative verdict. It is reported descriptively against the paper's aggregates and the reference-solution curves.
 - **Mapping to the builder runtime:** the "fresh container plus previous workspace" model maps to a builder session on the D189 read-only mirror. The base commit is the previous accepted workspace in a local-only scratch repo, the same pattern as `dedup-manager` (600 design §4.3). The machine run goes to Nano as a paste-ready prompt in `/mnt/project-files/let-em-loose/`, with PowerShell for anything he types.
