@@ -12,6 +12,7 @@ const CONDITIONAL: Features = Features::DATAGRAM
     .union(Features::TAILSCALE_STATUS)
     .union(Features::PORTS)
     .union(Features::WORKSPACE)
+    .union(Features::WORKSPACE_STATUS)
     .union(Features::DOWNLOAD);
 
 /// A server older than this client: what to tell the user, once per

@@ -82,6 +82,24 @@ fn archiving_a_block_is_marked_destructive() {
 }
 
 #[test]
+fn workspace_status_calls_are_made_under_the_lease() {
+    let call = args(r#"{"block": "2", "path": "src/a.rs"}"#);
+    assert_eq!(
+        argv(known("terminal.workspace-stat"), Some(&call)).map(|a| a.join(" ")),
+        Ok("attach --block=2 + acquire-lease --block=2 + \
+            terminal.workspace-stat --block=2 --path=src/a.rs"
+            .into())
+    );
+    let call = args(r#"{"block": "2"}"#);
+    assert_eq!(
+        argv(known("terminal.workspace-touched"), Some(&call)).map(|a| a.join(" ")),
+        Ok("attach --block=2 + acquire-lease --block=2 + \
+            terminal.workspace-touched --block=2"
+            .into())
+    );
+}
+
+#[test]
 fn a_workspace_listing_is_made_under_the_lease() {
     // The server refuses it without the lease, so a fresh connection must
     // attach and take it first, as for typing.

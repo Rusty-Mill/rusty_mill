@@ -42,3 +42,4 @@ Port, adapters, crate layout, phases: `../design.md`.
 - [ ] Phase 0: `/dev/fuse` hello-world through `rusty_libc` on a Linux host; go or no-go recorded; CI feasibility known.
 - [ ] Phase 0 (ProjFS): confirm cache-state names and non-forcing delete behaviour; test clean hydration versus local changes: eviction removes a clean hydrated file and leaves an edited file, a locally created file, a changed-metadata file and a locally deleted entry untouched.
 - [ ] Phase 1 starts only after the first real backend is named (OPEN_QUESTIONS Q1).
+- [ ] Pre-Q1 slice (D22): port read core, memfs plus conformance, and read-only passthrough on a plain folder (D23); no mount, no ProjFS. It narrows the item above for this slice only; Q1 stays open.

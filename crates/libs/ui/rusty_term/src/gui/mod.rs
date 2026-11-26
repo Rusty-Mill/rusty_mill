@@ -35,8 +35,10 @@ mod font;
 mod gpu;
 pub(crate) mod input;
 mod layout;
-#[expect(dead_code)] // wired by the tab in slice 2 (#1416)
+#[expect(dead_code)] // wired by the tab in a later slice (#1416)
 mod lel;
+#[expect(dead_code)] // wired by the tab in a later slice (#1416)
+mod lel_map;
 mod link_policy;
 mod link_trust;
 mod motion;

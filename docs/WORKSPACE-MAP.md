@@ -111,6 +111,9 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | rusty_fedora | rusty_fedora | Async client for rusty_fedora_agent's local HTTP API: system status, systemd services, journal reads, dnf updates/install/remove, and allowlisted config file read/write. |
 | libs | rusty_flatbuffers | rusty_flatbuffers | Dependency-free FlatBuffers runtime: a bounds-checked table/vector reader that returns errors instead of panicking, and a back-to-front builder. No code generation; schemas are hand-written on top. |
 | libs | rusty_font | rusty_font | A #![no_std] + alloc sovereign TrueType/OpenType font table parser and SIMD-accelerated glyph rasterizer |
+| libs | rusty_fuse | rusty_fuse | rusty_fuse port: the backend-agnostic Filesystem trait and its types. No I/O, no unsafe, no OS calls. |
+| libs | rusty_fuse | rusty_fuse_conformance | Test support for rusty_fuse: an in-memory memfs backend, a shared fixture tree and assertions every backend must pass. |
+| libs | rusty_fuse | rusty_fuse_passthrough | Read-only rusty_fuse reference backend that mirrors a plain host directory (NTFS, ext4, APFS) through the Filesystem port. |
 | libs | rusty_git | rusty_git | Pure Rust implementation of Git object model, index, refs, and CLI binary |
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate |
