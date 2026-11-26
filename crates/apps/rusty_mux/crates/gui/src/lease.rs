@@ -41,6 +41,9 @@ pub struct Lease {
     pub wanted: bool,
     /// The server gave this client the lease and hasn't taken it back.
     pub held: bool,
+    /// How many times a held lease was lost, counted where it is lost so
+    /// a loss and a regain between two looks is still seen.
+    pub lost: u64,
     /// The pending `AcquireLease`.
     asking: Option<u64>,
     /// The pending `RequestLease`.
@@ -60,6 +63,11 @@ pub struct Lease {
 }
 
 impl Lease {
+    fn drop_hold(&mut self) {
+        self.lost += u64::from(self.held);
+        self.held = false;
+    }
+
     /// A lease for a block placed at `place`.
     pub fn at(place: (u16, u16)) -> Self {
         Self {
@@ -107,7 +115,7 @@ impl Lease {
             self.asking = Some(send(Ask::Acquire));
         } else if !self.wanted && self.held {
             send(Ask::Release);
-            self.held = false;
+            self.drop_hold();
         }
     }
 
@@ -124,7 +132,7 @@ impl Lease {
             return self.requested(refused, send);
         }
         if refused.is_some() {
-            self.held = false;
+            self.drop_hold();
         }
     }
 
@@ -183,7 +191,7 @@ impl Lease {
     /// The lease moved to someone else (`false`) or was freed (`true`):
     /// lost, and asked for again once free while wanted (D115).
     pub fn moved(&mut self, freed: bool, send: &mut dyn FnMut(Ask) -> u64) {
-        self.held = false;
+        self.drop_hold();
         if freed {
             self.settle(send);
         }
@@ -202,7 +210,7 @@ impl Lease {
             return;
         }
         // The server took the lease back with the grant.
-        self.held = false;
+        self.drop_hold();
         if matches!(self.consent, Consent::Taking | Consent::Asking) {
             self.ended = self.consent == Consent::Taking;
             self.consent = Consent::None;
@@ -244,7 +252,7 @@ impl Lease {
         self.consent = Consent::GivenBack;
         if self.held {
             send(Ask::Release);
-            self.held = false;
+            self.drop_hold();
         }
     }
 
@@ -254,7 +262,7 @@ impl Lease {
     /// may have been lost in the gap: the lease is tried as if granted,
     /// and the owner asked again only if that is refused (D153 4).
     pub fn revived(&mut self, send: &mut dyn FnMut(Ask) -> u64) {
-        self.held = false;
+        self.drop_hold();
         self.asking = None;
         self.requesting = None;
         self.sizing = None;
@@ -311,6 +319,21 @@ mod tests {
         l.want(false, &mut sent.send());
         assert_eq!(sent.0, [Ask::Acquire, Ask::Release]);
         assert!(!l.held);
+    }
+
+    #[test]
+    fn every_lost_hold_is_counted_even_when_it_is_regained_at_once() {
+        let mut sent = Sent::default();
+        let mut l = Lease::at((80, 24));
+        l.want(true, &mut sent.send());
+        l.answered(1, None, &mut sent.send());
+        assert_eq!(l.lost, 0);
+        l.revived(&mut sent.send());
+        assert_eq!(l.lost, 1, "revival drops the hold");
+        l.revived(&mut sent.send());
+        assert_eq!(l.lost, 1, "nothing was held to lose");
+        l.want(false, &mut sent.send());
+        assert_eq!(l.lost, 1);
     }
 
     #[test]

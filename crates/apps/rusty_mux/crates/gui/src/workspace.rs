@@ -41,6 +41,9 @@ struct Inner {
     /// earlier count was cut off with it and is ignored: the status is read
     /// again once the lease is back, under the new count.
     epoch: u64,
+    /// The lease's loss count last seen: more than this means it was lost
+    /// and regained between two looks.
+    lost: u64,
 }
 
 /// Which call a reply answers.
@@ -58,13 +61,14 @@ impl Workspace {
     /// Opens the tree: asks for the workspace root. `status`: the server
     /// answers the marks and stat calls. `held`: this client holds the
     /// block's input lease, which every call needs.
-    pub fn open(port: Arc<dyn Port>, status: bool, held: bool) -> Arc<Self> {
+    pub fn open(port: Arc<dyn Port>, status: bool, held: bool, lost: u64) -> Arc<Self> {
         let this = Arc::new(Self {
             port,
             inner: Mutex::new(Inner {
                 explorer: Explorer::opened(status),
                 held,
                 epoch: 0,
+                lost,
             }),
             live: AtomicBool::new(true),
         });
@@ -90,23 +94,28 @@ impl Workspace {
     /// The block's lease changed (also after a reconnect). Gaining it
     /// reads the root when none is loaded and none is on its way; losing
     /// it keeps the rows, and the next read says why it is refused (D99).
-    pub fn lease(self: &Arc<Self>, held: bool) {
+    pub fn lease(self: &Arc<Self>, held: bool, lost: u64) {
         if !self.live() {
             return;
         }
         let root = {
             let mut inner = self.lock();
             let was = std::mem::replace(&mut inner.held, held);
-            match (was, held) {
-                (true, false) => inner.epoch += 1,
-                (false, true) => inner.explorer.retry_status(),
-                _ => {}
+            let cut = lost != std::mem::replace(&mut inner.lost, lost);
+            // Lost, even if regained before this look: what was in flight
+            // under the old lease is retired.
+            if cut || (was && !held) {
+                inner.epoch += 1;
             }
-            // A root asked before the lease was lost is retired (its reply
-            // is dropped in `reply`), so regaining asks again even while
-            // the old one still looks pending.
+            let regained = held && (cut || !was);
+            if regained {
+                inner.explorer.retry_status();
+            }
+            // A root asked before the loss is retired (its reply is
+            // dropped in `reply`), so regaining asks again even while the
+            // old one still looks pending.
             held && inner.explorer.tree().is_none()
-                && (!was || (inner.explorer.note().is_some() && !inner.explorer.waiting()))
+                && (regained || (inner.explorer.note().is_some() && !inner.explorer.waiting()))
         };
         if root {
             self.lock().explorer.set_waiting(true);
@@ -351,7 +360,7 @@ mod tests {
 
     fn open(held: bool, status: bool) -> (Arc<Fake>, Arc<Workspace>) {
         let fake = Arc::new(Fake::default());
-        let ws = Workspace::open(fake.clone(), status, held);
+        let ws = Workspace::open(fake.clone(), status, held, 0);
         (fake, ws)
     }
 
@@ -457,8 +466,8 @@ mod tests {
     fn gaining_the_lease_reads_the_root_once() {
         let (fake, ws) = open(false, false);
         assert!(fake.methods().is_empty());
-        ws.lease(true);
-        ws.lease(true);
+        ws.lease(true, 0);
+        ws.lease(true, 0);
         assert_eq!(fake.methods(), ["terminal.workspace-list"]);
         fake.answer(Ok(ROOT.into()));
         assert_eq!(fake.last().state, State::Tree);
@@ -468,7 +477,7 @@ mod tests {
     fn losing_the_lease_keeps_the_rows_and_refuses_the_next_read() {
         let (fake, ws) = open(true, false);
         fake.answer(Ok(ROOT.into()));
-        ws.lease(false);
+        ws.lease(false, 1);
         assert_eq!(fake.last().rows.len(), 3, "rows stay");
         ws.intent(Intent::Step(1));
         ws.intent(Intent::Enter);
@@ -485,8 +494,8 @@ mod tests {
         let (fake, ws) = open(true, false);
         fake.answer(Err("the connection to the server was lost".into()));
         assert!(matches!(fake.last().state, State::Refused(_)));
-        ws.lease(false);
-        ws.lease(true);
+        ws.lease(false, 1);
+        ws.lease(true, 1);
         assert_eq!(fake.methods().len(), 2);
         fake.answer(Ok(ROOT.into()));
         assert_eq!(fake.last().state, State::Tree);
@@ -495,8 +504,8 @@ mod tests {
     #[test]
     fn an_old_root_reply_after_the_lease_returned_is_retired_and_the_root_asked_again() {
         let (fake, ws) = open(true, false);
-        ws.lease(false);
-        ws.lease(true);
+        ws.lease(false, 1);
+        ws.lease(true, 1);
         assert_eq!(fake.methods().len(), 2, "the root is asked again");
         // The first request fails late, after the lease came back.
         fake.answer(Err("the connection to the server was lost".into()));
@@ -509,10 +518,52 @@ mod tests {
     }
 
     #[test]
+    fn a_loss_and_regain_seen_as_held_twice_still_retires_the_old_calls() {
+        let (fake, ws) = open(true, false);
+        // The lease was lost and regained before the workspace looked:
+        // held both times, but the loss count moved.
+        ws.lease(true, 1);
+        assert_eq!(fake.methods().len(), 2, "the root is asked again");
+        fake.answer(Err("the connection to the server was lost".into()));
+        assert!(
+            matches!(fake.last().state, State::Loading(_)),
+            "the old root's refusal is retired"
+        );
+        fake.answer(Ok(ROOT.into()));
+        assert_eq!(fake.last().state, State::Tree);
+    }
+
+    #[test]
+    fn a_status_reply_from_before_a_collapsed_loss_is_ignored() {
+        let (fake, ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        assert!(
+            fake.methods()
+                .iter()
+                .any(|m| m == "terminal.workspace-touched")
+        );
+        ws.lease(true, 1);
+        // The marks call from the old lease answers late.
+        fake.answer(Ok("M\tREADME.md\n".into()));
+        assert_eq!(
+            fake.methods()
+                .iter()
+                .filter(|m| *m == "terminal.workspace-touched")
+                .count(),
+            2,
+            "the marks are asked again under the new lease"
+        );
+        assert!(
+            fake.last().rows.iter().all(|r| r.mark.is_none()),
+            "the old marks are not taken"
+        );
+    }
+
+    #[test]
     fn a_late_old_root_reply_does_not_touch_the_fresh_tree() {
         let (fake, ws) = open(true, false);
-        ws.lease(false);
-        ws.lease(true);
+        ws.lease(false, 1);
+        ws.lease(true, 1);
         // The replacement root answers first, then the old one fails late.
         let old = fake.waiting.lock().unwrap().remove(0);
         fake.answer(Ok(ROOT.into()));
@@ -526,8 +577,8 @@ mod tests {
     fn a_late_old_root_reply_does_not_clear_a_pending_directory() {
         let (fake, ws) = open(true, false);
         let old = fake.waiting.lock().unwrap().remove(0);
-        ws.lease(false);
-        ws.lease(true);
+        ws.lease(false, 1);
+        ws.lease(true, 1);
         fake.answer(Ok(ROOT.into()));
         ws.intent(Intent::Step(1));
         ws.intent(Intent::Enter);
@@ -546,8 +597,8 @@ mod tests {
         fake.answer(Ok(ROOT.into()));
         ws.intent(Intent::Step(1));
         ws.intent(Intent::Enter);
-        ws.lease(false);
-        ws.lease(true);
+        ws.lease(false, 1);
+        ws.lease(true, 1);
         fake.answer(Ok("src\nf\tmain.rs\n".into()));
         assert!(fake.last().rows.iter().any(|r| r.name == "main.rs"));
     }
@@ -560,7 +611,7 @@ mod tests {
         fake.answer(Ok(ROOT.into()));
         fake.answer(Ok("".into())); // touched
         fake.answer(Ok(STAT.into())); // stat of the root
-        ws.lease(false);
+        ws.lease(false, 1);
         ws.intent(Intent::Step(1));
         let sent = fake.methods();
         assert_eq!(sent.len(), 3, "no stat while the lease is absent: {sent:?}");
@@ -569,7 +620,7 @@ mod tests {
             None,
             "an uncached row has no footer yet"
         );
-        ws.lease(true);
+        ws.lease(true, 1);
         assert_eq!(
             fake.methods().last().map(String::as_str),
             Some("terminal.workspace-stat")
@@ -586,8 +637,8 @@ mod tests {
         fake.answer(Ok("".into()));
         fake.answer(Err("the connection to the server was lost".into()));
         assert_eq!(fake.last().footer, None);
-        ws.lease(false);
-        ws.lease(true);
+        ws.lease(false, 1);
+        ws.lease(true, 1);
         let methods = fake.methods();
         assert_eq!(
             &methods[3..],
@@ -603,8 +654,8 @@ mod tests {
         let (fake, ws) = open(true, true);
         fake.answer(Ok(ROOT.into()));
         fake.answer(Ok("".into())); // touched; the stat is left outstanding
-        ws.lease(false);
-        ws.lease(true);
+        ws.lease(false, 1);
+        ws.lease(true, 1);
         // Waiting now: the old stat, then the marks and stat asked again.
         fake.answer(Err("the connection to the server was lost".into()));
         fake.answer(Ok("".into()));
@@ -617,9 +668,9 @@ mod tests {
         let (fake, ws) = open(true, true);
         fake.answer(Ok(ROOT.into()));
         fake.answer(Ok("".into())); // touched; the root's stat is outstanding
-        ws.lease(false);
+        ws.lease(false, 1);
         ws.intent(Intent::Step(1));
-        ws.lease(true);
+        ws.lease(true, 1);
         // The old stat arrives first, for the root, and is dropped.
         fake.answer(Ok("f\t1\t0".into()));
         fake.answer(Ok("".into()));

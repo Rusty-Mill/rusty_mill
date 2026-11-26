@@ -441,18 +441,21 @@ impl MuxSource {
         };
         self.close_workspace();
         let ws = block.holding.attach(
-            || block.lease().held,
-            |held| {
+            || {
+                let lease = block.lease();
+                (lease.held, lease.lost)
+            },
+            |held, lost| {
                 let port = Arc::new(BlockPort {
                     block: Arc::clone(&block),
                     remote,
                     key,
                 });
-                let ws = Workspace::open(port, block.status, held);
+                let ws = Workspace::open(port, block.status, held, lost);
                 let follow = Arc::downgrade(&ws);
-                let hook: Holding = Box::new(move |held| {
+                let hook: Holding = Box::new(move |held, lost| {
                     if let Some(ws) = follow.upgrade() {
-                        ws.lease(held);
+                        ws.lease(held, lost);
                     }
                 });
                 (ws, hook)
@@ -1507,7 +1510,7 @@ impl Events {
 /// A lost connection is handed back by [`Block::revive`], the client the
 /// same.
 /// What an open explorer tree is told when the lease changes.
-type Holding = Box<dyn Fn(bool) + Send>;
+type Holding = Box<dyn Fn(bool, u64) + Send>;
 
 /// Carries lease changes to the open explorer. The lease is read under
 /// this lock, both when a hook is installed and when a change is
@@ -1520,18 +1523,24 @@ struct Follow(Mutex<Option<Holding>>);
 impl Follow {
     /// Starts following: `start` gets the lease as `now` reads it and
     /// returns what it built with the hook that gets later changes.
-    fn attach<T>(&self, now: impl FnOnce() -> bool, start: impl FnOnce(bool) -> (T, Holding)) -> T {
+    fn attach<T>(
+        &self,
+        now: impl FnOnce() -> (bool, u64),
+        start: impl FnOnce(bool, u64) -> (T, Holding),
+    ) -> T {
         let mut slot = lock(&self.0);
-        let (built, hook) = start(now());
+        let (held, lost) = now();
+        let (built, hook) = start(held, lost);
         *slot = Some(hook);
         built
     }
 
     /// Delivers the lease as `now` reads it, if anything follows.
-    fn notify(&self, now: impl FnOnce() -> bool) {
+    fn notify(&self, now: impl FnOnce() -> (bool, u64)) {
         let slot = lock(&self.0);
         if let Some(hook) = &*slot {
-            hook(now());
+            let (held, lost) = now();
+            hook(held, lost);
         }
     }
 
@@ -2027,7 +2036,10 @@ impl Block {
         // Not under the lease: the feed may block while it is full.
         drop(lease);
         self.tell(take);
-        self.holding.notify(|| self.lease().held);
+        self.holding.notify(|| {
+            let lease = self.lease();
+            (lease.held, lease.lost)
+        });
     }
 
     /// Tells the window `take`, when it changed and the server takes
@@ -2354,19 +2366,19 @@ mod tests {
         let follow = Arc::new(Follow::default());
         let mut grant = None;
         let started = follow.attach(
-            || lease.load(Ordering::SeqCst),
-            |held| {
+            || (lease.load(Ordering::SeqCst), 0),
+            |held, _| {
                 // The grant lands after the start read the lease and
                 // before its hook is installed.
                 lease.store(true, Ordering::SeqCst);
                 let (f, l) = (Arc::clone(&follow), Arc::clone(&lease));
                 grant = Some(std::thread::spawn(move || {
-                    f.notify(|| l.load(Ordering::SeqCst));
+                    f.notify(|| (l.load(Ordering::SeqCst), 0));
                 }));
                 let seen = Arc::clone(&seen);
                 (
                     held,
-                    Box::new(move |held| seen.lock().unwrap().push(held)) as super::Holding,
+                    Box::new(move |held, _| seen.lock().unwrap().push(held)) as super::Holding,
                 )
             },
         );
@@ -2381,10 +2393,10 @@ mod tests {
         let lease = AtomicBool::new(false);
         let follow = Follow::default();
         lease.store(true, Ordering::SeqCst);
-        follow.notify(|| lease.load(Ordering::SeqCst));
+        follow.notify(|| (lease.load(Ordering::SeqCst), 0));
         let held = follow.attach(
-            || lease.load(Ordering::SeqCst),
-            |held| (held, Box::new(|_| ()) as super::Holding),
+            || (lease.load(Ordering::SeqCst), 0),
+            |held, _| (held, Box::new(|_, _| ()) as super::Holding),
         );
         assert!(held);
     }
