@@ -2770,6 +2770,12 @@ mod client {
             let Some(open) = self.exploring.as_mut().filter(|o| o.block == block) else {
                 return;
             };
+            // A reply may replace the notice that asked for a `cd`'s yes, so
+            // the question is dropped with it: a `y` must never type what the
+            // screen no longer asks.
+            if [open.req, open.touched_req, open.stat_req].contains(&Some(req)) {
+                open.cd = None;
+            }
             if open.req == Some(req) {
                 open.req = None;
                 match answer {
@@ -4747,6 +4753,42 @@ mod client {
             app.take(Input::Keys(b"y".to_vec()));
             assert_eq!(typed_in(&sent(&far[1])), [b"cd -- 'my dir'\r".to_vec()]);
             assert!(app.exploring.is_none(), "closed");
+        }
+
+        /// A reply that replaces the question drops the pending `cd`: the `y`
+        /// that follows types nothing.
+        #[cfg(unix)]
+        #[test]
+        fn a_reply_cancels_a_pending_cd() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.act(Action::Explorer);
+            let list = workspace_calls(&sent(&far[1]))[0].0;
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: list,
+                    text: ".\nd\tsrc".into(),
+                },
+            );
+            // Open `src`: its listing is in flight when `c` asks.
+            app.take(Input::Keys(b"j\r".to_vec()));
+            let src = workspace_calls(&sent(&far[1])).remove(0);
+            assert_eq!(src.1.as_deref(), Some("src"));
+            app.take(Input::Keys(b"c".to_vec()));
+            assert!(app.exploring.as_ref().is_some_and(|o| o.cd.is_some()));
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: src.0,
+                    text: "src\nf\tx".into(),
+                },
+            );
+            assert!(app.exploring.as_ref().is_some_and(|o| o.cd.is_none()));
+            app.take(Input::Keys(b"y".to_vec()));
+            assert!(typed_in(&sent(&far[1])).is_empty(), "nothing typed");
         }
 
         /// The server refuses the change marks on an agent's block (D372): the
