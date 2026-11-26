@@ -3682,3 +3682,120 @@ fn a_download_replaces_an_existing_out_and_leaves_no_staging_file() {
     assert_eq!(names, ["out.txt", "remote.txt"]);
     let _gone = std::fs::remove_dir_all(dir);
 }
+
+/// Two servers saved as hosts `a` and `b`, a block on each, and the state
+/// directory of `b` for its uploads.
+#[cfg(target_os = "linux")]
+fn two_hosts(tag: &str) -> (PathBuf, PathBuf, String, String, PathBuf) {
+    let state = std::env::temp_dir().join(format!("ctl-copy-{tag}-{}", std::process::id()));
+    let _gone = std::fs::remove_dir_all(&state);
+    let (a, b) = (
+        start_server(),
+        start_server_with(Config {
+            state_dir: Some(state.clone()),
+            ..shell()
+        }),
+    );
+    let home = config_home(tag);
+    hosts_ok(&home, &["hosts", "add", "a", "--socket", path_text(&a)]);
+    hosts_ok(&home, &["hosts", "add", "b", "--socket", path_text(&b)]);
+    let (block_a, block_b) = (block(&a), block(&b));
+    (home, state, block_a, block_b, b)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn copy_moves_a_file_from_one_host_to_another() {
+    let (home, state, block_a, block_b, _b) = two_hosts("ok");
+    let remote = std::env::temp_dir().join(format!("ctl-copy-src-{}.bin", std::process::id()));
+    // Several chunks, so the stream is exercised past one.
+    let bytes: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&remote, &bytes).expect("write");
+    let path = hosts_ok(
+        &home,
+        &[
+            "copy",
+            "--block",
+            &block_a,
+            "--to-block",
+            &block_b,
+            &format!("a:{}", path_text(&remote)),
+            "b",
+        ],
+    );
+    assert_eq!(std::fs::read(&path).expect("copied file"), bytes);
+    assert!(path.starts_with(path_text(&state)), "{path}");
+    let _gone = std::fs::remove_file(remote);
+    let _gone = std::fs::remove_dir_all(state);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_copy_commits_nothing_and_names_the_failing_host() {
+    let (home, state, block_a, block_b, _b) = two_hosts("fail");
+    let output = hosts_ctl(
+        &home,
+        &[
+            "copy",
+            "--block",
+            &block_a,
+            "--to-block",
+            &block_b,
+            "a:/nonexistent/x",
+            "b",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("a:"), "{err}");
+    let files = |dir: &Path| {
+        walk(dir)
+            .into_iter()
+            .filter(|p| p.file_name().is_some_and(|n| n == "x"))
+            .count()
+    };
+    assert_eq!(files(&state), 0);
+    let unknown = hosts_ctl(
+        &home,
+        &[
+            "copy",
+            "--block",
+            &block_a,
+            "--to-block",
+            &block_b,
+            "a:/etc/hostname",
+            "nope",
+        ],
+    );
+    assert_ne!(unknown.status.code(), Some(0));
+    let global = hosts_ctl(
+        &home,
+        &[
+            "--host",
+            "a",
+            "copy",
+            "--block",
+            &block_a,
+            "--to-block",
+            &block_b,
+            "a:p",
+            "b",
+        ],
+    );
+    assert_eq!(global.status.code(), Some(2), "{global:?}");
+    let _gone = std::fs::remove_dir_all(state);
+}
+
+#[cfg(target_os = "linux")]
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .flat_map(|e| match e.path() {
+            p if p.is_dir() => walk(&p),
+            p => vec![p],
+        })
+        .collect()
+}

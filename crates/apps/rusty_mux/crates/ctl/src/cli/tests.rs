@@ -779,3 +779,48 @@ fn download_names_a_path_and_where_it_goes() {
         assert!(parse(&args(bad)).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn copy_names_two_hosts_and_a_block_on_each() {
+    let copy = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Copy(copy)) => Ok(copy),
+        Ok(other) => panic!("expected copy, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    let parsed = copy(&format!(
+        "copy --block {ID} --to-block {ID} a:/srv/x/pic.png b"
+    ))
+    .unwrap();
+    assert_eq!(
+        (parsed.from_host.as_str(), parsed.to_host.as_str()),
+        ("a", "b")
+    );
+    assert_eq!(
+        (parsed.path.as_str(), parsed.name.as_str()),
+        ("/srv/x/pic.png", "pic.png")
+    );
+    let names: Vec<&str> = parsed.to_prepare.iter().map(|c| c.method.name).collect();
+    assert_eq!(names, ["attach", "acquire-lease"]);
+    // A Windows path keeps its drive colon and yields its file name.
+    let win = copy(&format!(
+        "copy --block {ID} --to-block {ID} a:C:\\d\\n.txt b"
+    ))
+    .unwrap();
+    assert_eq!(
+        (win.path.as_str(), win.name.as_str()),
+        ("C:\\d\\n.txt", "n.txt")
+    );
+    let named = copy(&format!("copy --block {ID} --to-block {ID} --name n a:p b")).unwrap();
+    assert_eq!(named.name, "n");
+    for bad in [
+        "copy a:p b".to_owned(),
+        format!("copy --block {ID} a:p b"),
+        format!("copy --block {ID} --to-block {ID} p b"),
+        format!("copy --block {ID} --to-block {ID} :p b"),
+        format!("copy --block {ID} --to-block {ID} a:p"),
+        format!("copy --block {ID} --to-block {ID} a:dir/ b"),
+        format!("copy --block {ID} --to-block {ID} --out f a:p b"),
+    ] {
+        assert!(parse(&args(&bad)).is_err(), "{bad}");
+    }
+}

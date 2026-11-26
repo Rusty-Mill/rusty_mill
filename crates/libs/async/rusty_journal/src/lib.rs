@@ -15,22 +15,35 @@
 //! multi-broker replication, Kafka wire-protocol compatibility, WASM
 //! transforms, consumer-group rebalancing.
 
+// Linux-only (io_uring): client, consumer, manifest, retention, segment, server.
+// clock, offset, protocol and record are sans-IO and build everywhere.
+#[cfg(target_os = "linux")]
 pub mod client;
 pub mod clock;
+#[cfg(target_os = "linux")]
 pub mod consumer;
+#[cfg(target_os = "linux")]
 pub mod manifest;
 pub mod offset;
 pub mod protocol;
 pub mod record;
+#[cfg(target_os = "linux")]
 pub mod retention;
+#[cfg(target_os = "linux")]
 pub mod segment;
+#[cfg(target_os = "linux")]
 pub mod server;
 
+#[cfg(target_os = "linux")]
 pub use client::{Client, ClientError};
 pub use clock::{Clock, SimClock, SystemClock};
+#[cfg(target_os = "linux")]
 pub use consumer::ConsumerOffsets;
 pub use offset::{CommittedOffset, DurableOffset, Epoch, Offset};
 pub use protocol::{ProtocolError, Request, Response};
+#[cfg(target_os = "linux")]
 pub use retention::{Log, RetentionPolicy};
+#[cfg(target_os = "linux")]
 pub use segment::Segment;
+#[cfg(target_os = "linux")]
 pub use server::serve;
