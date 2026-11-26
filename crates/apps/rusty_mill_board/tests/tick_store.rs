@@ -674,6 +674,73 @@ fn a_comment_that_sets_the_state_line_saves_it() {
     assert_eq!(again.comments.len(), 1);
 }
 
+/// A move that sets a state line is one board mutation. On the Tick adapter it is still a
+/// task write then a document write; if the second fails the move stands and is reported
+/// as partly saved, never as a refused move.
+#[test]
+fn a_move_with_state_interrupted_before_the_document_is_reported_as_partly_saved() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    tick.fail_next("PUT", "/docs/board/");
+    let failed = board.move_card_with_state(card.id, &Column::READY, &human, Some("go"));
+    assert!(
+        matches!(failed, Err(BoardError::PartlySaved { .. })),
+        "{failed:?}"
+    );
+    let half = board.get(card.id).expect("get");
+    assert_eq!(
+        (half.column.clone(), half.state.as_str()),
+        (Column::READY, "")
+    );
+    let done = board
+        .edit_at(
+            card.id,
+            &human,
+            Some(half.rev),
+            &rusty_mill_board::domain::Edit {
+                state: Some("go"),
+                ..Default::default()
+            },
+        )
+        .expect("finish");
+    assert_eq!(done.state, "go");
+}
+
+/// The move and its state line are one board write: one revision step, one event.
+#[test]
+fn a_move_with_state_is_one_event() {
+    let (board, _tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let cursor = board.cursor().expect("cursor");
+    let moved = board
+        .move_card_with_state(card.id, &Column::READY, &human, Some("go"))
+        .expect("move");
+    assert_eq!((moved.column, moved.state.as_str()), (Column::READY, "go"));
+    let events = board.events(cursor, 10).expect("events");
+    assert_eq!(events.len(), 1, "{events:?}");
+}
+
+/// A state write on a stale revision is refused whole: another writer's newer line stays.
+#[test]
+fn a_state_write_on_a_stale_revision_is_refused_and_keeps_the_newer_line() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let store = TickStore::new(tick.clone());
+    let stale = store.get(card.id).expect("get").expect("card");
+    board
+        .comment_with_state(card.id, &human, "newer", Some("newer line"))
+        .expect("newer");
+    let mut mine = stale.clone();
+    mine.state = "older line".into();
+    mine.rev = stale.rev + 1;
+    let refused = store.replace(&mine, Event::of(&mine, EventKind::Edited, "nano"));
+    assert!(matches!(refused, Err(BoardError::Conflict)), "{refused:?}");
+    assert_eq!(board.get(card.id).expect("get").state, "newer line");
+}
+
 #[test]
 fn overlapping_board_comments_both_land_one_after_the_other() {
     let (a, b, _tick, read) = two_readers();
