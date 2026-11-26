@@ -5458,13 +5458,21 @@ impl WindowState<'_> {
         }
     }
 
+    /// Close the explorer and retire its workspace, if open: what opening
+    /// the palette, a popover or the overview does first (D99).
+    fn close_explorer(&mut self) {
+        if let Some(key) = self.explorer.block() {
+            self.explorer.close();
+            self.source.explore(key, Explored::Close);
+        }
+    }
+
     /// Open the workspace explorer on the focused block, or close it
     /// (gui-design D99). Opening closes the other popovers.
     fn toggle_explorer(&mut self) {
         self.set_armed(false);
-        if let Some(key) = self.explorer.block() {
-            self.explorer.close();
-            self.source.explore(key, Explored::Close);
+        if self.explorer.is_open() {
+            self.close_explorer();
         } else if let Some(key) = self
             .focused()
             .filter(|&k| self.source.explores(k) != Explore::No && !self.offline())
@@ -5597,6 +5605,7 @@ impl WindowState<'_> {
             self.popover.close();
             self.confirm = None;
             self.palette.close();
+            self.close_explorer();
             let online = !self.offline();
             self.overview.open(cards, online);
         }
@@ -6001,6 +6010,7 @@ impl WindowState<'_> {
         let open = self.popover_kind();
         self.popover.close();
         if open != Some(kind) {
+            self.close_explorer();
             self.open_popover(kind);
         }
         if let Some(window) = &self.window {
@@ -6458,6 +6468,7 @@ impl WindowState<'_> {
                 self.popover.close();
                 self.confirm = None;
                 self.overview.close();
+                self.close_explorer();
                 let entries = self.palette_entries();
                 self.palette_origin = self.focused();
                 self.palette.open(entries);
@@ -6691,7 +6702,8 @@ impl WindowState<'_> {
     /// A file dropped on the window: typed as a path, or, on a pane whose
     /// host is elsewhere, sent there first (C82).
     fn drop_file(&mut self, path: std::path::PathBuf) {
-        if self.overview.is_open() {
+        // The explorer is read-only: a drop on it is discarded (D99).
+        if self.overview.is_open() || self.explorer.is_open() {
             return;
         }
         if self.start_upload(path.clone()) {
@@ -6917,7 +6929,7 @@ impl WindowState<'_> {
                 }
                 // The explorer owns the keys while open, but the prefix and
                 // its command (which toggle it) still reach their handler.
-                if self.explorer.is_open()
+                if self.explorer.owns_keys()
                     && !self.popover_open()
                     && !self.armed
                     && !prefix::is_prefix(&event.logical_key, event.physical_key, self.mods)
@@ -7115,7 +7127,7 @@ impl WindowState<'_> {
                         self.palette_out(out);
                         return;
                     }
-                    if self.popover_open() {
+                    if self.popover_open() || self.explorer.owns_keys() {
                         return;
                     }
                     // The find bar owns composed text while it's open — mirror

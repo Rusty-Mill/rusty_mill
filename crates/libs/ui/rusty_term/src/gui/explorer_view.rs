@@ -26,8 +26,9 @@ const CLOSE_W: f32 = 26.0;
 const CLOSE_H: f32 = 24.0;
 const KEYS: [(&[&str], &str); 2] = [(&["y"], "Copy path"), (&["Esc"], "Close")];
 
-/// What a painting was made for: chrome, scale and the panel's height in px.
-type Look = (Chrome, f32, usize);
+/// What a painting was made for: chrome, scale, the panel's height and its
+/// left edge in px (a width-only resize moves the edge).
+type Look = (Chrome, f32, usize, usize);
 
 /// A painted panel: its pixels and the boxes a click can hit.
 struct Painted {
@@ -43,6 +44,9 @@ pub(crate) struct ExplorerUi {
     panel: Panel,
     hover: Option<usize>,
     painted: Option<(Look, Painted, (usize, usize))>,
+    /// The keyboard is the panel's: since it opened or was last clicked.
+    /// A click on a block hands it back, with the panel left showing (D99).
+    keys: bool,
 }
 
 impl ExplorerUi {
@@ -53,11 +57,18 @@ impl ExplorerUi {
             panel: Panel::default(),
             hover: None,
             painted: None,
+            keys: false,
         })
     }
 
     pub(crate) fn is_open(&self) -> bool {
         self.panel.is_open()
+    }
+
+    /// Whether the panel has the keyboard: open, and not handed back by a
+    /// click on a block.
+    pub(crate) fn owns_keys(&self) -> bool {
+        self.panel.is_open() && self.keys
     }
 
     /// The block the open panel belongs to.
@@ -67,6 +78,7 @@ impl ExplorerUi {
 
     pub(crate) fn open(&mut self, key: u64) {
         self.panel.open(key);
+        self.keys = true;
         self.hover = None;
         self.painted = None;
     }
@@ -99,6 +111,7 @@ impl ExplorerUi {
     /// A click at window px: what it asks, and whether it was on the panel.
     pub(crate) fn click(&mut self, x: f64, y: f64) -> (Option<Out>, bool) {
         let Some((_, painted, at)) = &self.painted else {
+            self.keys = false;
             return (None, false);
         };
         let (px, py) = ((x - at.0 as f64) as f32, (y - at.1 as f64) as f32);
@@ -106,6 +119,7 @@ impl ExplorerUi {
             && py >= 0.0
             && px < painted.pixmap.width as f32
             && py < painted.pixmap.height as f32;
+        self.keys = on;
         if painted.close.contains(px, py) {
             return (Some(Out::Close), true);
         }
@@ -146,11 +160,15 @@ impl ExplorerUi {
         }
         let inset = (8.0 * scale).round();
         let h = (band.1 - band.0 - inset).max(0.0).round();
-        let look = (chrome, scale, h as usize);
+        let w = (WIDTH * scale).round();
+        let at = (
+            (view.0 - w - inset).max(0.0).round() as usize,
+            band.0.round() as usize,
+        );
+        let look = (chrome, scale, h as usize, at.0);
         if matches!(&self.painted, Some((l, ..)) if *l == look) {
             return;
         }
-        let w = (WIDTH * scale).round();
         let list = (h / scale - HEAD_H - FOOT_H - 2.0 * BORDER).max(0.0);
         self.panel.fit((list / ROW_H) as usize);
         let painted = paint(
@@ -159,10 +177,6 @@ impl ExplorerUi {
             (&chrome, scale),
             (w, h),
             &mut self.text,
-        );
-        let at = (
-            (view.0 - w - inset).max(0.0).round() as usize,
-            band.0.round() as usize,
         );
         self.painted = Some((look, painted, at));
     }
@@ -208,9 +222,16 @@ fn paint(
         }
     };
     paint_footer(&mut out, frame, foot_y, (c, s), font, &KEYS);
-    if let Some(line) = &snap.footer {
+    // A refusal that leaves the rows standing (a read after the lease was
+    // lost) says why in the footer, over the size and age.
+    let refusal = match (&snap.state, snap.rows.is_empty()) {
+        (State::Refused(why), false) => Some(why),
+        _ => None,
+    };
+    if let Some(line) = refusal.or(snap.footer.as_ref()) {
         let px = SMALL_PX * s;
-        let text = font.fit(line, Weight::Regular, px, w / 3.0);
+        let room = if refusal.is_some() { w / 2.0 } else { w / 3.0 };
+        let text = font.fit(line, Weight::Regular, px, room);
         let width = font.width(&text, Weight::Regular, px);
         let base = foot_y + (FOOT_H * s) / 2.0 + font.centre_drop(px);
         out.text(
@@ -526,6 +547,54 @@ mod tests {
         assert!(ui.painted().is_none(), "dropped until the next repaint");
         ui.repaint(Chrome::from_theme(&Theme::default()), 1.0, VIEW, BAND);
         assert_ne!(first.as_ref(), ui.painted().map(|(p, _)| p));
+    }
+
+    #[test]
+    fn a_click_off_the_panel_hands_the_keys_back_and_one_on_it_takes_them() {
+        let mut ui = open(tree(), 1.0, &Theme::default());
+        assert!(ui.owns_keys(), "open takes the keyboard");
+        let at = ui.painted().map(|(_, a)| a).expect("painted");
+        ui.click(100.0, 300.0);
+        assert!(!ui.owns_keys(), "a block was clicked");
+        assert!(ui.is_open(), "the panel stays");
+        ui.click(at.0 as f64 + 100.0, at.1 as f64 + 100.0);
+        assert!(ui.owns_keys(), "the panel was clicked");
+        ui.close();
+        assert!(!ui.owns_keys());
+    }
+
+    #[test]
+    fn a_width_only_resize_moves_the_panel() {
+        let mut ui = open(tree(), 1.0, &Theme::default());
+        let before = ui.painted().map(|(_, a)| a).expect("painted");
+        ui.repaint(
+            Chrome::from_theme(&Theme::default()),
+            1.0,
+            (900.0, VIEW.1),
+            BAND,
+        );
+        let after = ui.painted().map(|(_, a)| a).expect("painted");
+        assert_eq!((before.0 - after.0, before.1), (300, after.1));
+    }
+
+    #[test]
+    fn a_refusal_over_standing_rows_shows_in_the_footer() {
+        let plain = open(tree(), 1.0, &Theme::default());
+        let mut snap = tree();
+        snap.state = State::Refused("Take over this block first.".into());
+        let refused = open(snap, 1.0, &Theme::default());
+        let (a, b) = (
+            plain.painted().expect("painted").0,
+            refused.painted().expect("painted").0,
+        );
+        let foot = (a.height - 34) * a.width..a.height * a.width;
+        assert_ne!(
+            a.pixels()[foot.clone()],
+            b.pixels()[foot],
+            "the footer differs"
+        );
+        let body = 39 * a.width..(a.height - 34) * a.width;
+        assert_eq!(a.pixels()[body.clone()], b.pixels()[body], "the rows stand");
     }
 
     #[test]
