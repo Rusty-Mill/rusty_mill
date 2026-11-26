@@ -370,7 +370,8 @@ pub(crate) fn stat(root: &Workspace, rel: &str) -> Result<String, String> {
 /// Output of `git status` read at most; more is a refusal, not a cut list.
 #[cfg(target_os = "linux")]
 const TOUCHED_MAX: usize = 256 * 1024;
-/// How long `git` may run before it is killed.
+/// How long all of `touched`'s `git` runs may take together, under the
+/// listing deadline so a slot is never held after the client gave up.
 #[cfg(target_os = "linux")]
 const TOUCHED_DEADLINE: Duration = Duration::from_secs(4);
 
@@ -380,7 +381,8 @@ const TOUCHED_DEADLINE: Duration = Duration::from_secs(4);
 /// for it is turned off: no fsmonitor hook, no hooks directory, no pager,
 /// no prompt, no optional lock. Killed after [`TOUCHED_DEADLINE`].
 #[cfg(target_os = "linux")]
-fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+fn git(dir: &Path, args: &[&str], deadline: std::time::Instant) -> Result<Vec<u8>, String> {
+    use rusty_libc::wait::{P_PID, WEXITED, WNOHANG, WNOWAIT, waitid};
     use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -399,6 +401,12 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_CEILING_DIRECTORIES")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        // No user or system configuration: what git does is what this call says.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
@@ -412,28 +420,27 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         let _ = out.take(TOUCHED_MAX as u64 + 1).read_to_end(&mut buf);
         buf
     });
-    let deadline = std::time::Instant::now() + TOUCHED_DEADLINE;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if std::time::Instant::now() < deadline => {
+    // Exit is seen without reaping (`WNOWAIT`), so the group is killed while
+    // git's pid is still its own, then reaped: a reaped pid could be reused
+    // by a process that would take the signal.
+    let group = i32::try_from(child.id()).unwrap_or(0);
+    let exited = loop {
+        let seen = waitid(P_PID, group, WEXITED | WNOHANG | WNOWAIT);
+        match seen {
+            Ok(info) if info.si_pid != 0 => break true,
+            Ok(_) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
             // Past the deadline, or the wait itself failed.
-            _ => break None,
+            _ => break false,
         }
-        // A reader that stops at its limit drops the pipe, and git ends on
-        // SIGPIPE, so a flood needs no check here.
     };
-    let ok = status.is_some_and(|s| s.success());
     // The group is ended either way: a finished git may leave a filter behind.
-    let group = i32::try_from(child.id()).unwrap_or(0);
     if group > 0 {
         let _ = rusty_libc::process::killpg(group, rusty_libc::signal::SIGKILL);
     }
-    if status.is_none() {
-        let _ = child.wait();
-    }
+    let status = child.wait().ok();
+    let ok = exited && status.is_some_and(|s| s.success());
     let buf = reader
         .join()
         .map_err(|_| "git's output was lost".to_owned())?;
@@ -447,8 +454,38 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn git(_: &Path, _: &[&str]) -> Result<Vec<u8>, String> {
+fn git(_: &Path, _: &[&str], _: std::time::Instant) -> Result<Vec<u8>, String> {
     Err(UNSUPPORTED.into())
+}
+
+/// Whether `top`'s `.git` is this work tree's own: a real directory, or the
+/// gitfile of a linked work tree whose git directory points back at it. A
+/// `.git` that is a link, or a gitfile for another repository, would make
+/// git read an index from outside the workspace (D337).
+fn owns_git_dir(top: &Path) -> bool {
+    let dot_git = top.join(".git");
+    let Ok(meta) = fs::symlink_metadata(&dot_git) else {
+        return false;
+    };
+    if meta.is_dir() {
+        return true;
+    }
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(text) = fs::read_to_string(&dot_git) else {
+        return false;
+    };
+    let Some(target) = text.trim().strip_prefix("gitdir:") else {
+        return false;
+    };
+    let target = top.join(target.trim());
+    let Ok(target) = fs::canonicalize(target) else {
+        return false;
+    };
+    // A linked work tree's git directory names the `.git` file that owns it.
+    let back = fs::read_to_string(target.join("gitdir")).unwrap_or_default();
+    fs::canonicalize(back.trim()).ok() == fs::canonicalize(&dot_git).ok()
 }
 
 /// Git's two status bytes as text, a space as `.`.
@@ -462,8 +499,11 @@ fn code_of(code: &[u8]) -> String {
 /// workspace, for the explorer's overlay. The first line is `.`; each other
 /// is `XY<TAB>PATH`, `XY` being git's two status letters with a space as `.`
 /// (`M.` staged, `.M` worktree, `??` untracked) and `PATH` relative to the
-/// workspace, [`escape`]d. Renames are not followed: a rename is a delete and
-/// an add. Linux only, as the rest of the workspace calls.
+/// workspace, [`escape`]d; an untracked directory is one line ending in `/`.
+/// A path that is not UTF-8 is counted in a last `!<TAB>N` line, as in
+/// [`list`]. Renames are not followed: a rename is a delete and an add. The
+/// work tree's `.git` must be its own ([`owns_git_dir`]). Linux only, as the
+/// rest of the workspace calls.
 pub(crate) fn touched(root: &Workspace) -> Result<String, String> {
     let (dir, _anchor) = root.anchor(&[]).map_err(|e| match e.kind() {
         std::io::ErrorKind::Unsupported => UNSUPPORTED.to_owned(),
@@ -472,7 +512,12 @@ pub(crate) fn touched(root: &Workspace) -> Result<String, String> {
     // Git's own account of where it is: the work tree it uses must hold this
     // directory, at the prefix it reports. A `core.worktree` that points
     // elsewhere fails that, and nothing of the other tree is listed.
-    let top = git(&dir, &["rev-parse", "--show-toplevel", "--show-prefix"])?;
+    let deadline = std::time::Instant::now() + TOUCHED_DEADLINE;
+    let top = git(
+        &dir,
+        &["rev-parse", "--show-toplevel", "--show-prefix"],
+        deadline,
+    )?;
     let top = String::from_utf8_lossy(&top);
     let mut lines = top.lines();
     let (top, prefix) = (lines.next().unwrap_or(""), lines.next().unwrap_or(""));
@@ -481,7 +526,9 @@ pub(crate) fn touched(root: &Workspace) -> Result<String, String> {
         .strip_prefix(top)
         .ok()
         .map(|r| r.to_string_lossy().into_owned());
-    if inside.as_deref().map(|r| r.trim_end_matches('/')) != Some(prefix.trim_end_matches('/')) {
+    if inside.as_deref().map(|r| r.trim_end_matches('/')) != Some(prefix.trim_end_matches('/'))
+        || !owns_git_dir(Path::new(top))
+    {
         return Err(NOT_A_WORK_TREE.into());
     }
     let prefix = prefix.to_owned();
@@ -496,11 +543,14 @@ pub(crate) fn touched(root: &Workspace) -> Result<String, String> {
             "--",
             ".",
         ],
+        deadline,
     )?;
     let mut out = String::from(".");
+    let mut unread = 0_usize;
     for rec in raw.split(|b| *b == 0).filter(|r| r.len() > 3) {
         let (code, path) = (&rec[..2], &rec[3..]);
         let Ok(path) = std::str::from_utf8(path) else {
+            unread += 1;
             continue;
         };
         let Some(path) = path.strip_prefix(prefix.as_str()) else {
@@ -509,6 +559,9 @@ pub(crate) fn touched(root: &Workspace) -> Result<String, String> {
         // An untracked workspace is one record naming itself, `sub/`.
         let path = if path.is_empty() { "." } else { path };
         out.push_str(&format!("\n{}\t{}", code_of(code), escape(path)));
+    }
+    if unread > 0 {
+        out.push_str(&format!("\n!\t{unread}"));
     }
     Ok(out)
 }
@@ -841,6 +894,28 @@ mod tests {
         );
         git(&["config", "--unset", "core.worktree"]);
         fs::remove_dir_all(elsewhere).unwrap();
+        // A `.git` file for another repository is refused, a linked work
+        // tree's own is not.
+        let hijack = dir.join("hijack");
+        fs::create_dir(&hijack).unwrap();
+        fs::write(
+            hijack.join(".git"),
+            format!("gitdir: {}\n", dir.join(".git").display()),
+        )
+        .unwrap();
+        assert_eq!(
+            touched(&Workspace::open(&hijack)),
+            Err(NOT_A_WORK_TREE.into())
+        );
+        git(&["worktree", "add", "-q", "linked"]);
+        fs::write(dir.join("linked").join("fresh"), "").unwrap();
+        assert_eq!(
+            touched(&Workspace::open(&dir.join("linked")))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [".", "??\tfresh"]
+        );
         // A directory that is no work tree is refused, naming nothing.
         let plain = scratch("touched-plain");
         let reason = touched(&Workspace::open(&plain)).unwrap_err();

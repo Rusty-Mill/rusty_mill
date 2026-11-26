@@ -1625,7 +1625,9 @@ pub static CATALOG: &[Method] = &[
               workspace explorer's overlay of who is changing what. The first line is `.`; \
               each other is `XY<TAB>PATH`: git's two status letters with a space as `.` \
               (`M.` staged, `.M` in the work tree, `??` untracked) and the path relative \
-              to the workspace. Renames show as a delete and an add. `git` runs with its \
+              to the workspace; an untracked directory is one line ending in `/`, and paths that \
+              are not UTF-8 are counted in a last `!<TAB>N` line. Renames show as a delete \
+              and an add. Refused on agent blocks, and when `.git` is not the work tree's own. `git` runs with its \
               hooks, fsmonitor, pager and prompts off and is killed after a few seconds. \
               Refused when the workspace is not in a git work tree, when git is missing or \
               when there are too many changes to list. Needs the lease; Linux only.",

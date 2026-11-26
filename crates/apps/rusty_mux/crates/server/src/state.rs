@@ -2222,6 +2222,12 @@ impl State {
                 });
             }
             "terminal.workspace-stat" | "terminal.workspace-touched" => {
+                // `git status` runs the repository's own filters as the
+                // server's account, and an agent's jail does not hold the
+                // server: refused on agent blocks, as upload and download.
+                if found.name == "terminal.workspace-touched" {
+                    rt.refuse_agent("terminal.workspace-touched")?;
+                }
                 // As `terminal.workspace-list`: the lease, and the held
                 // launch directory as the root (D337).
                 self.mux
