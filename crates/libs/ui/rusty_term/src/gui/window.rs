@@ -207,6 +207,8 @@ pub(crate) enum UserEvent {
     /// What the source says of the shown blocks, for their headers
     /// ([`Remote::blocks`]).
     Blocks(Vec<(u64, super::source::BlockInfo)>),
+    /// What the explorer panel shows for a block ([`Remote::explorer`]).
+    Explorer(u64, super::explorer::Snapshot),
     /// How the source reaches its server ([`Remote::link`]).
     Link(super::source::Link),
     /// The shown session ended while the source was away
@@ -789,6 +791,8 @@ struct WindowState<'a> {
     palette: PaletteUi,
     /// The block that had the focus when the palette opened.
     palette_origin: Option<u64>,
+    /// The workspace explorer panel's view state (gui-design D99).
+    explorer: super::explorer::Panel,
     /// The session overview (gui-design D97).
     overview: OverviewUi,
     /// The trusted link origins (C63, D69-D72).
@@ -5433,6 +5437,16 @@ impl WindowState<'_> {
         }
     }
 
+    /// The explorer panel's newest snapshot arrived.
+    fn show_explorer(&mut self, key: u64, snapshot: super::explorer::Snapshot) {
+        if !self.explorer.set(key, snapshot) {
+            return;
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// Show what the source says of its blocks in their headers.
     fn show_blocks(&mut self, blocks: Vec<(u64, super::source::BlockInfo)>) {
         let body = &mut self.body;
@@ -7427,6 +7441,7 @@ impl<'a> App<'a> {
             shown_wait: None,
             palette: PaletteUi::new().ok_or("the interface font failed to parse")?,
             palette_origin: None,
+            explorer: super::explorer::Panel::default(),
             overview: OverviewUi::new().ok_or("the interface font failed to parse")?,
             links: load_trust(),
             forward_trust: std::collections::HashSet::new(),
@@ -7573,6 +7588,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::Blocks(blocks) => {
                 if let Some(w) = self.windows.first_mut() {
                     w.show_blocks(blocks);
+                }
+            }
+            UserEvent::Explorer(key, snapshot) => {
+                if let Some(w) = self.windows.first_mut() {
+                    w.show_explorer(key, snapshot);
                 }
             }
             UserEvent::Link(link) => {
