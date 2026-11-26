@@ -663,17 +663,32 @@ fn nested_repo(root: &Path) -> Result<Option<PathBuf>, String> {
 }
 
 /// The first gitlink (mode 160000) in an `ls-tree -r -z` listing refuses
-/// the base: git follows whatever sits at a submodule path, a symlink to
-/// another repository included, and runs `submodule status` there, whose
-/// config (fsmonitor, filters) would run as orch.
+/// the base. At a submodule path git reads whatever repository it finds
+/// (a nested one runs its filters as orch), and a symlink there can point
+/// anywhere, so builders take no base with submodules.
 fn refuse_gitlinks(listing: &str) -> Result<(), String> {
-    let Some(entry) = listing.split('\0').find(|e| e.starts_with("160000 ")) else {
-        return Ok(());
-    };
-    let path = entry.split_once('\t').map_or(entry, |(_, path)| path);
-    Err(format!(
-        "the base has a submodule at {path}: builders take no base with submodules"
-    ))
+    match first_gitlink(listing) {
+        Some(path) => Err(format!(
+            "the base has a submodule at {path}: builders take no base with submodules"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The path of the first mode-160000 entry in an `ls-tree -r -z` or
+/// `diff --raw -z` listing.
+fn first_gitlink(listing: &str) -> Option<&str> {
+    let mut fields = listing.split('\0');
+    while let Some(field) = fields.next() {
+        // ls-tree: "160000 commit <oid>\t<path>"; diff --raw: ":<old> 160000 …", path next.
+        if field.starts_with("160000 ") {
+            return Some(field.split_once('\t').map_or(field, |(_, path)| path));
+        }
+        if field.starts_with(':') && field.split(' ').take(2).any(|m| m.ends_with("160000")) {
+            return Some(fields.next().unwrap_or(""));
+        }
+    }
+    None
 }
 
 /// git on `work_tree` through orch's own record of its git dir, with
@@ -700,7 +715,10 @@ fn sealed_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Result<String,
         ])
         .args(["-c", "core.untrackedCache=false", "-c", "diff.external="])
         .current_dir(work_tree)
-        .env("GIT_CONFIG_NOSYSTEM", "1");
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        // Nor the operator's global config: a `filter.lfs` there would let
+        // the agent's `.gitattributes` start `git-lfs` as orch.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null");
     cmd.args(args);
     git_out(cmd, args)
 }
@@ -731,6 +749,15 @@ fn staged_diff(git_dir: &Path, work_tree: &Path, base: &str) -> Result<String, S
         work_tree,
         &["add", "-A", "--", ".", ":(exclude).lel"],
     )?;
+    // Backstop: nothing staged may be a gitlink either.
+    let staged = sealed_git(
+        git_dir,
+        work_tree,
+        &["diff", "--cached", "--raw", "-z", "--no-renames", base],
+    )?;
+    if let Some(path) = first_gitlink(&staged) {
+        return Err(format!("a submodule was staged at {path}: no diff taken"));
+    }
     sealed_git(
         git_dir,
         work_tree,
@@ -870,8 +897,10 @@ mod tests {
     fn a_symlink_at_a_submodule_path_is_refused_before_git_runs() {
         let root = std::env::temp_dir().join(format!("orch-gitlink-{}", std::process::id()));
         let (wt, base, admin) = with_submodule(&root);
-        // The agent points its own `.git` at a repo whose fsmonitor runs
-        // its script and makes `sub` a symlink back to the worktree.
+        // The review's case: the agent points its own `.git` at a repo
+        // whose fsmonitor runs its script and makes `sub` a symlink back to
+        // the worktree. It is refused on the base's gitlink before git
+        // touches the worktree, whether or not this git would run the hook.
         let marker = root.join("ran");
         sh(
             &root,
@@ -887,6 +916,17 @@ mod tests {
         assert!(err.contains("submodule at sub"), "{err}");
         assert!(!marker.exists(), "the planted fsmonitor ran");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_staged_gitlink_shows_in_the_raw_diff() {
+        let raw = ":000000 160000 0000 1111 A\x00sub\x00:100644 100644 2222 3333 M\x00a\x00";
+        assert_eq!(first_gitlink(raw), Some("sub"));
+        assert_eq!(first_gitlink(":100644 100644 2 3 M\x00a\x00"), None);
+        assert_eq!(
+            first_gitlink(":160000 000000 1 0 D\x00gone\x00"),
+            Some("gone")
+        );
     }
 
     #[test]

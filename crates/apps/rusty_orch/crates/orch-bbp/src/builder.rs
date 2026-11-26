@@ -143,20 +143,13 @@ pub fn run<P: Ports>(ports: &mut P, session: Session, wall: Duration) -> Result<
         }
     };
     save(ports, &session, &mut notes);
-    let ran = match (ports.turn(deadline), stop(ports, &mut notes)) {
-        (
-            Ran::Turn(_),
-            Stopped {
-                lost: Some(lost), ..
-            },
-        ) => Ran::Lost(lost),
-        // Submit reads the worktree as orch: not while the agent may run.
-        (Ran::Turn(_), Stopped { empty: false, .. }) => {
-            Ran::Failed("the cgroup was not confirmed empty: nothing submitted".into())
-        }
+    let ran = ports.turn(deadline);
+    let stopped = stop(ports, &mut notes);
+    let ran = match (ran, stopped.lost) {
+        (Ran::Turn(_), Some(lost)) => Ran::Lost(lost),
         (ran, _) => ran,
     };
-    let (session, end) = settle(ports, session, ran, &mut notes);
+    let (session, end) = settle(ports, session, ran, stopped.empty, &mut notes);
     finish(ports, session, end, notes)
 }
 
@@ -197,11 +190,14 @@ fn stop<P: Ports>(ports: &mut P, notes: &mut Vec<String>) -> Stopped {
     Stopped { lost, empty }
 }
 
-/// How the turn ends the session, with its usage recorded (D188).
+/// How the turn ends the session, with its usage recorded (D188). Submit
+/// reads the worktree as orch, so it runs only when `empty` says no agent
+/// process is left.
 fn settle<P: Ports>(
     ports: &mut P,
     session: Session,
     ran: Ran,
+    empty: bool,
     notes: &mut Vec<String>,
 ) -> (Session, End) {
     let turn = match ran {
@@ -227,6 +223,10 @@ fn settle<P: Ports>(
     };
     if !turn.stop.is_end_turn() {
         notes.push(format!("stopped: {}", turn.stop.0));
+        return (session, End::Failed);
+    }
+    if !empty {
+        notes.push("the cgroup was not confirmed empty: nothing submitted".into());
         return (session, End::Failed);
     }
     match ports.submit() {

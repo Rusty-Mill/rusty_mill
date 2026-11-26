@@ -314,6 +314,7 @@ fn a_failed_kill_after_end_turn_submits_nothing() {
     };
     let out = run(&mut fake);
     assert_eq!(out.session.phase, ended(End::Failed));
+    assert_eq!((out.session.tokens_in, out.session.tokens_out), (120, 30));
     assert!(
         !fake.calls.contains(&"submit".to_owned()),
         "{:?}",
