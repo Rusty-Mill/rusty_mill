@@ -67,8 +67,17 @@ Stored with the comment (`#[serde(default)]`); old comments never change.
 `kind=handoff` only: at most 3 non-empty lines and 400 bytes; anything else is refused with the
 format. Other kinds keep only the 2 KiB cap.
 
+**Resolving a blocker or question.** Today a `Comment` is only `by`, `at_ms`, `text`, so "open"
+needs a mechanism. A comment gains an optional `id` (UUIDv7, assigned on write; old comments have
+none and are all `note`), returned by `card_comment`. A new optional `resolves: <comment id>`
+argument on `card_comment` marks that `blocker` or `question` resolved; it is refused if the id is
+not a blocker or question on the same card, and a resolved one is never reopened. A blocker or
+question is **open** until a comment names it in `resolves`; nothing is inferred from prose.
+Tests: open ones survive the 5-comment window, a resolved one drops out of the default read, a
+bad `resolves` is refused, and `history=all` still shows both.
+
 **`card_get` returns less by default**: the card, its `state`, and the last 5 comments plus the
-latest `handoff` and any open `blocker` or `question` (so a newer chatty comment never hides
+latest `handoff` and every open `blocker` or `question` (so a newer chatty comment never hides
 them), with `comments_omitted: n`. `history=all` returns every comment, as today. Older comments
 are left out of the default read, never rewritten.
 
@@ -88,11 +97,16 @@ this is a code change, not a config-only one). The profile is orthogonal to role
 scope: it changes defaults only, never what a credential may see or do.
 
 Under `agent`:
-- `board_list` defaults to `view=summary` (still paged; `limit` default 50);
-- `card_get` defaults to the recent-comments read from B;
+- `board_list` is already `view=summary` by default for everyone (S7, #1635, see
+  `changes/2026-11-12-board-list-summary-default.md`), so the profile does not change the view.
+  What it adds is paging: today a call with neither `limit` nor `cursor` returns every match, and a
+  paged call defaults to 100. Under `agent` an unpaged call is paged with `limit` 50; `full` keeps
+  today's behaviour exactly. This makes an agent's list partial by default, so the response
+  carries the cursor and the tool description says so;
+- `card_get` defaults to the recent-comments read from B (and to nothing else new);
 - `card_take` and `card_claim` still return the whole card: the full body and prompt load when
   the agent takes the work.
-- Explicit arguments always win: `view=full` and `history=all` are honoured, never refused.
+- Explicit arguments always win: `view=full`, `history=all` and an explicit `limit` are honoured, never refused.
 
 Human and UI credentials stay `full`, so nothing changes for them. `board_list` is **not**
 auto-filtered to "ready cards in the agent's lane": hiding cards from a list is surprising, and
@@ -109,8 +123,9 @@ Three small PRs, each tested and independently shippable; nothing deploys withou
    editable, `state` kept when a write omits it, summary view carries it).
 2. Comment `kind` + `card_get` history (+ tests: default read bounds, `history=all`, latest
    handoff and open blocker always present, old comments read as `note`).
-3. Credential view profile (+ tests: agent default is summary, explicit `view=full` wins,
-   human default unchanged, orthogonal to role and scope).
+3. Credential view profile (+ tests: an agent's unpaged `board_list` is paged at 50 with a cursor,
+   `full` still returns every match, explicit `limit` wins, human default unchanged, orthogonal to
+   role and scope).
 
 MCP tool descriptions and `docs/connecting-models.md` change in the same PRs. Tool names and
 existing arguments are unchanged.
