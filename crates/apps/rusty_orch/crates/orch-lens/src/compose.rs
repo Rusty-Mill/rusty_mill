@@ -40,7 +40,7 @@ pub struct Selection {
 /// Size limits on composed sections, in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// A file larger than this is left out.
+    /// A file larger than this, `DOMAIN.md` included, is left out.
     pub file_bytes: usize,
     /// Everything composed beyond the lens prompt must fit in this.
     pub total_bytes: usize,
@@ -155,7 +155,8 @@ pub fn select(map: &DomainMap, domains: &[String]) -> (Selection, BTreeSet<Strin
 }
 
 /// Compose `lens` with the domain pack and the selected files from `texts`
-/// (path to contents). Oversized files are dropped first; then, until the
+/// (path to contents). Oversized files, the domain pack included, are
+/// dropped first; then, until the
 /// rest fits `total_bytes`, knowledge files go (last first), then the
 /// domain pack, then standards (last first).
 pub fn compose(
@@ -166,49 +167,103 @@ pub fn compose(
     limits: Limits,
 ) -> Result<Composed, ComposeError> {
     let mut dropped = Vec::new();
-    let mut knowledge = load(&sel.knowledge, texts, limits, &mut dropped)?;
-    let mut standards = load(&sel.standards, texts, limits, &mut dropped)?;
     let mut pack = domain_pack.filter(|p| !p.trim().is_empty());
-    while size(lens, pack, &knowledge, &standards) > limits.total_bytes {
-        if let Some((path, _)) = knowledge.pop() {
+    if pack.is_some_and(|p| p.len() > limits.file_bytes) {
+        pack = None;
+        dropped.push(DOMAIN_PACK.to_owned());
+    }
+    let mut knowledge = Part::load("Knowledge", &sel.knowledge, texts, limits, &mut dropped)?;
+    let mut standards = Part::load("Standards", &sel.standards, texts, limits, &mut dropped)?;
+    let lead = usize::from(!lens.is_empty() && !lens.ends_with('\n'));
+    let size = |pack: Option<&str>, k: &Part<'_>, s: &Part<'_>| {
+        let body = pack.map_or(0, |p| header("Project") + body(p)) + k.bytes() + s.bytes();
+        if body == 0 {
+            0
+        } else {
+            lead + body
+        }
+    };
+    while size(pack, &knowledge, &standards) > limits.total_bytes {
+        if let Some(path) = knowledge.pop() {
             dropped.push(path.to_owned());
         } else if pack.take().is_some() {
             dropped.push(DOMAIN_PACK.to_owned());
-        } else if let Some((path, _)) = standards.pop() {
+        } else if let Some(path) = standards.pop() {
             dropped.push(path.to_owned());
         }
     }
     Ok(Composed {
-        prompt: render(lens, pack, &knowledge, &standards),
+        prompt: render(lens, pack, &knowledge.files, &standards.files),
         dropped,
     })
 }
 
 type File<'a> = (&'a str, &'a str);
 
-fn load<'a>(
-    paths: &'a BTreeSet<String>,
-    texts: &'a BTreeMap<String, String>,
-    limits: Limits,
-    dropped: &mut Vec<String>,
-) -> Result<Vec<File<'a>>, ComposeError> {
-    let mut out = Vec::new();
-    for path in paths {
-        let text = texts
-            .get(path)
-            .ok_or_else(|| ComposeError::Missing(path.clone()))?;
-        if text.len() > limits.file_bytes {
-            dropped.push(path.clone());
-            continue;
-        }
-        out.push((path.as_str(), text.as_str()));
-    }
-    Ok(out)
+/// One section's files and their rendered size, kept as files are
+/// dropped, so the budget is counted without rendering.
+struct Part<'a> {
+    title: &'static str,
+    files: Vec<File<'a>>,
+    file_bytes: usize,
 }
 
-/// Bytes composed beyond the lens prompt.
-fn size(lens: &str, pack: Option<&str>, knowledge: &[File<'_>], standards: &[File<'_>]) -> usize {
-    render(lens, pack, knowledge, standards).len() - lens.len()
+impl<'a> Part<'a> {
+    fn load(
+        title: &'static str,
+        paths: &'a BTreeSet<String>,
+        texts: &'a BTreeMap<String, String>,
+        limits: Limits,
+        dropped: &mut Vec<String>,
+    ) -> Result<Self, ComposeError> {
+        let mut files = Vec::new();
+        for path in paths {
+            let text = texts
+                .get(path)
+                .ok_or_else(|| ComposeError::Missing(path.clone()))?;
+            if text.len() > limits.file_bytes {
+                dropped.push(path.clone());
+                continue;
+            }
+            files.push((path.as_str(), text.as_str()));
+        }
+        let file_bytes = files.iter().map(|f| file(*f)).sum();
+        Ok(Self {
+            title,
+            files,
+            file_bytes,
+        })
+    }
+
+    /// Rendered bytes: the heading and every file, or nothing.
+    fn bytes(&self) -> usize {
+        if self.files.is_empty() {
+            0
+        } else {
+            header(self.title) + self.file_bytes
+        }
+    }
+
+    fn pop(&mut self) -> Option<&'a str> {
+        let f = self.files.pop()?;
+        self.file_bytes -= file(f);
+        Some(f.0)
+    }
+}
+
+/// Bytes of `\n# {title}\n`, as [`section`] writes it after the lead.
+fn header(title: &str) -> usize {
+    title.len() + 4
+}
+
+/// Bytes of a body, as [`push_body`] writes it.
+fn body(text: &str) -> usize {
+    text.trim_end().len() + 1
+}
+
+/// Bytes of one file: `## {path}\n` and its body.
+fn file((path, text): File<'_>) -> usize {
+    path.len() + 4 + body(text)
 }
 
 fn render(
@@ -401,6 +456,47 @@ mod tests {
         let c = build(&["rust"], None, limits);
         assert_eq!(c.dropped, vec!["standards/rust.md".to_owned()]);
         assert!(c.prompt.contains("Ownership") && !c.prompt.contains("MUST"));
+    }
+
+    #[test]
+    fn an_oversized_domain_pack_is_dropped_even_when_it_fits_the_total() {
+        let limits = Limits {
+            file_bytes: 12,
+            total_bytes: 1024,
+        };
+        let c = build(&[], Some("Dedup 20 TB, 3 hosts."), limits);
+        assert_eq!(c.dropped, vec![DOMAIN_PACK.to_owned()]);
+        assert_eq!(c.prompt, "find faults");
+        let kept = build(&[], Some("Dedup 20 TB."), limits);
+        assert_eq!(kept.prompt, "find faults\n\n# Project\nDedup 20 TB.\n");
+    }
+
+    #[test]
+    fn exact_budget_boundaries_count_heading_bytes() {
+        let tail = |c: &Composed| c.prompt.len() - "find faults".len();
+        let at = |total_bytes| {
+            build(
+                &["rust"],
+                None,
+                Limits {
+                    file_bytes: 1024,
+                    total_bytes,
+                },
+            )
+        };
+        let full = "\n\n# Knowledge\n## knowledge/rust.md\nOwnership first.\n\
+                    \n# Standards\n## standards/rust.md\nMUST: no unwrap in library code.\n";
+        assert_eq!(at(full.len()).prompt, format!("find faults{full}"));
+        assert!(at(full.len()).dropped.is_empty());
+        let only_std = "\n\n# Standards\n## standards/rust.md\nMUST: no unwrap in library code.\n";
+        let one_short = at(full.len() - 1);
+        assert_eq!(one_short.dropped, vec!["knowledge/rust.md"]);
+        assert_eq!(one_short.prompt, format!("find faults{only_std}"));
+        assert_eq!(at(only_std.len()).prompt, format!("find faults{only_std}"));
+        assert_eq!(at(only_std.len() - 1).prompt, "find faults");
+        for total in 0..=full.len() + 2 {
+            assert!(tail(&at(total)) <= total, "{total}");
+        }
     }
 
     #[test]
