@@ -63,6 +63,9 @@ def dispatch(cmd):
 
 def plain():
     pass
+
+def fstring(x, ys):
+    return f"{1 if x else 0} {[y for y in ys if y and x]}"
 "#;
 
 #[test]
@@ -79,9 +82,11 @@ fn cyclomatic_complexity_per_function() {
     // three cases, two extra.
     assert_eq!(cc_of(&r, "app/shape.py::dispatch"), 3);
     assert_eq!(cc_of(&r, "app/shape.py::plain"), 1);
+    // Inside f-string interpolations: conditional, comprehension for and if, and.
+    assert_eq!(cc_of(&r, "app/shape.py::fstring"), 5);
     // Module-level `if` adds no CC.
-    assert_eq!(r.total_cc, 22);
-    assert_eq!(r.functions.len(), 6);
+    assert_eq!(r.total_cc, 27);
+    assert_eq!(r.functions.len(), 7);
 }
 
 fn ladder(name: &str, rungs: usize) -> String {
