@@ -192,6 +192,7 @@ Precise contracts used by this guide:
 | D196 | #724: the redrawn `factory-map.svg` is accepted as the Factory map for now | [stated] 2026-11-25 (724) |
 | D197 | #1318 D167 toy-run runbook: BaileyAi as baileyrd from merged main, own BBP dir in ~, fresh toy repo, two concurrent `builder run`s, fail-closed checks, run record by PR | [default] 2026-11-25 (1318) |
 | D198 | #1416 slice 2: claim field bindings, stage strip derivation rule, brief text as a plain input | [default] 2026-11-25 (#1416) |
+| D199 | #1318: read-only `rusty_orch builder sessions` command for the toy-run verdict is approved | [stated] 2026-11-26 (1318) |
 
 ## D1. Lenses, not stages
 
@@ -1868,3 +1869,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_0d5e5a974ebd43479d6d75fcf6faeed8
 **Key.** lel:1416:lel-tab-slice2-bindings-stage-rule-brief-input
 **Source.** Caller question on #1416 slice 2 (Q9 of `1416-lel-tab-slice-plan.md`), 2026-11-25; `rusty_bbp` `src/claims.rs` `ClaimView`, `IntentView`, `EvidenceView`; `rusty_mill_board` `src/inbox.rs` (`brief` is an artifact id, claim JSON sample); D116, D173, D174; README Phases 2 to 5. Note: "D57" in the plan is gui-design D57, not this log's D57.
+
+## D199. #1318: read-only `rusty_orch builder sessions` command for the toy-run verdict is approved
+
+**Decision.** A small PR adds `rusty_orch builder sessions <config> --dir <bbp> --task <t> --state <dir> [--claim <id>]`. It is read-only: it takes the orch store dir lock and prints the saved builder session rows as JSON, one row per session in the `builder::row` shape without notes. It exits nonzero if the store can't be opened or read. #1894 (the D167 toy-run runbook, D197) stacks on it, and its verdict checks those rows. The approval covers this one command only. Any other new `rusty_orch` command or flag is still a public API change to ask Nano about first.
+**Why.** The toy-run verdict has to check the stored builder_session rows (D177, D188). A read-only printer is the smallest surface that lets the runbook script check them without opening the store itself. Because it adds a public command, it is on the ask-first list and needed Nano's approval.
+**Rejected.** Having the #1894 script read `builder-sessions.mmap` directly. A wider query or admin command.
+**Tag.** [stated] · remind-me: mem_bf939a8321774a30a361cab316004035
+**Key.** lel:1318:builder-sessions-reader
+**Source.** Nano tapped option a "Approve it as proposed" on the decision card in the #600 project thread, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4Gttb7wZhFF2cKQc3F6PYHg`, 2026-11-26T12:38:59Z. The card asked "Approve a read-only `rusty_orch builder sessions` command for the toy-run check?" Option a read: "A small PR adds a command that prints the saved builder session rows as JSON. #1894 stacks on it and its verdict checks those rows." The command shape comes from the let-em-loose-expert escalation in the #1318 thread. Related: D167, D177, D188, D197.
