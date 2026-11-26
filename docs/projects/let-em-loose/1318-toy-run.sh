@@ -28,6 +28,7 @@ BIN=/opt/lel/$SHA/bin
 D=$T/bbp; STATE=$T/state; SLOTS=$T/slots; SOCK=$T/mux.sock; OUT=$T/out; CFG=$T/lens.json
 
 die() { echo "STOP: $*" >&2; exit 1; }
+. "$HERE/1318-toy-verdict.sh"   # toy_verdict: the step 7 session check, fixture-tested in 1318-toy-verdict.test.sh
 
 # ---- 0. Pre-flight: read-only checks, in the order that costs least
 echo "=== 0. pre-flight $(date -u +%FT%TZ), commit $SHA"
@@ -193,6 +194,10 @@ echo "claim $CLAIM"
 SCOPE=$("$BIN/bbp" cgroup-scope --dir "$D")
 mkdir "$CG/$SCOPE"
 "$BIN/bbp" verify --dir "$D" --task "$TASK" | tee "$OUT/verify-before.txt"
+sessions() { "$BIN/rusty_orch" builder sessions "$CFG" --dir "$D" --task "$TASK" --state "$STATE" --claim "$CLAIM"; }
+# Step 7 trusts only the persisted sessions, so the reader must work before anything is spent.
+before=$(sessions) || die "rusty_orch builder sessions failed on the empty store: no way to check the run"
+[ -z "$before" ] || die "the store already holds sessions for claim $CLAIM: $before"
 
 # ---- 6. The paid part: two concurrent builders (D197 item 4), detached so a closed terminal can't stop them
 echo "=== 6. two builders, ${WALL}s wall each, from $(date -u +%FT%TZ)"
@@ -218,10 +223,12 @@ echo "=== 7. read back $(date -u +%FT%TZ)"
 "$BIN/bbp" verify --dir "$D" --task "$TASK"                  | tee "$OUT/verify-after.txt"
 cp -r "$STATE/builders" "$OUT/" 2>/dev/null || true
 fail=0
+# The stdout rows alone prove nothing: a row is printed even when its final save failed.
+sessions >"$OUT/sessions.jsonl" 2>"$OUT/sessions.err" || { echo "FAIL: rusty_orch builder sessions failed: see $OUT/sessions.err"; fail=1; }
+echo "persisted:"; cat "$OUT/sessions.jsonl"
+toy_verdict "$CLAIM" "$OUT/row-1.json" "$OUT/row-2.json" "$OUT/sessions.jsonl" || fail=1
 for n in 1 2; do
   row=$(cat "$OUT/row-$n.json"); echo "row $n: $row"
-  state=$(jq -r .state <<<"$row" 2>/dev/null || echo none)
-  case "$state" in stored|failed) ;; *) echo "FAIL: builder $n ended '$state', not stored or failed"; fail=1;; esac
   m=$(jq -r .n <<<"$row" 2>/dev/null || echo "")
   [ -s "$STATE/builders/$CLAIM/$m/acp.log" ] || { echo "FAIL: builder $n has no acp.log"; fail=1; }
 done
@@ -233,10 +240,14 @@ for l in "$SLOTS"/agent-*.lock; do
 done
 systemctl --user stop "$UNIT" || true
 echo "acp.logs: $OUT/builders/$CLAIM/*/acp.log; candidate (if any): jq .current $OUT/card-after.json"
-[ "$fail" = 0 ] && echo "LAUNCH PASS: both builders ended by D188's rule; cgroups empty; slots free." \
-                || echo "LAUNCH FAIL: see the lines above. Nothing was retried."
 cat <<EOF
 
-=== Done. Send Claude $OUT (rows, builder-*.err, builders/*/acp.log, card/why/verify, handshake.txt,
-acp-version.txt, $LOG). Do not rerun: D167 approved one run.
+=== Done. Send Claude $OUT (rows, sessions.jsonl, builder-*.err, builders/*/acp.log, card/why/verify,
+handshake.txt, acp-version.txt, $LOG). Do not rerun: D167 approved one run.
 EOF
+if [ "$fail" = 0 ]; then
+  echo "LAUNCH PASS: both sessions persisted as ended by D188's rule, matching stdout; cgroups empty; slots free."
+else
+  echo "LAUNCH FAIL: see the lines above. Nothing was retried."
+  exit 1
+fi
