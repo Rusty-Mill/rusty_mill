@@ -662,6 +662,19 @@ fn a_comment_the_owner_adds_meanwhile_is_kept() {
 }
 
 #[test]
+fn a_comment_that_sets_the_state_line_saves_it() {
+    let (board, _tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    board
+        .comment_with_state(card.id, &human, "note", Some("waiting on review"))
+        .expect("comment");
+    let again = board.get(card.id).expect("get");
+    assert_eq!(again.state, "waiting on review");
+    assert_eq!(again.comments.len(), 1);
+}
+
+#[test]
 fn overlapping_board_comments_both_land_one_after_the_other() {
     let (a, b, _tick, read) = two_readers();
     let human = Roles::default().actor("nano", "human").expect("role");

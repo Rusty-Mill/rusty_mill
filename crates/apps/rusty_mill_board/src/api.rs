@@ -1195,17 +1195,7 @@ pub fn ops() -> Vec<Op> {
                 let id = card_ref(b, &a.id)?;
                 // Checked before the move, so a bad state never leaves a half-done call.
                 a.state.as_deref().map(check_state).transpose()?;
-                let moved = b.move_card(id, &a.to, &who)?;
-                match a.state.as_deref() {
-                    None => card(moved),
-                    Some(state) => {
-                        let edit = Edit {
-                            state: Some(state),
-                            ..Edit::default()
-                        };
-                        card(b.edit_at(id, &who, None, &edit)?)
-                    }
-                }
+                card(b.move_card_with_state(id, &a.to, &who, a.state.as_deref())?)
             },
         ),
         op(

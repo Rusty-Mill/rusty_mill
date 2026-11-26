@@ -1900,6 +1900,29 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::move_to`], or [`Card::move_freely`] when the rules are off.
     pub fn move_card(&self, id: Uuid, to: &Column, by: &Actor) -> Result<Card, BoardError> {
+        self.move_card_with_state(id, to, by, None)
+    }
+
+    /// [`Board::move_card`], also setting the card's `state` line in the same write, so no
+    /// other writer's newer state can be overwritten between the move and the line.
+    ///
+    /// # Errors
+    /// As [`Board::move_card`], or a `state` that fails [`crate::domain::check_state`].
+    pub fn move_card_with_state(
+        &self,
+        id: Uuid,
+        to: &Column,
+        by: &Actor,
+        state: Option<&str>,
+    ) -> Result<Card, BoardError> {
+        let with_state = |moved: Card| -> Result<Card, BoardError> {
+            let Some(state) = state else { return Ok(moved) };
+            crate::domain::check_state(state)?;
+            Ok(Card {
+                state: state.to_owned(),
+                ..moved
+            })
+        };
         // A move into a work column starts the card: serialize it with `unclose`'s scan.
         let _links = self.links();
         let flow = self.flow();
@@ -1910,7 +1933,9 @@ impl<S: Store> Board<S> {
                 let moved = c.move_to(&flow, to, by, now)?;
                 // The ledger records the move as made: a recorder's close holds `close`.
                 let (made_as, _) = c.recorder(&flow, by, to);
-                crate::duties::on_move(&moved, &flow, &c.column, &made_as, now)
+                with_state(crate::duties::on_move(
+                    &moved, &flow, &c.column, &made_as, now,
+                )?)
             }),
             MoveRules::Open => {
                 let card = self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
@@ -1919,7 +1944,9 @@ impl<S: Store> Board<S> {
                     let moved = c.move_freely(&flow, to, by, now)?;
                     // The ledger records the move as made: a recorder's close holds `close`.
                     let (made_as, _) = c.recorder(&flow, by, to);
-                    crate::duties::on_move(&moved, &flow, &c.column, &made_as, now)
+                    with_state(crate::duties::on_move(
+                        &moved, &flow, &c.column, &made_as, now,
+                    )?)
                 })?;
                 rusty_log::info!(card = %id, actor = %by.name, to = %to, "card moved with movement rules off");
                 Ok(card)
