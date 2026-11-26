@@ -73,7 +73,7 @@ impl Workspace {
             live: AtomicBool::new(true),
         });
         if held {
-            this.ask(Which::Root, "terminal.workspace-list", Vec::new());
+            this.ask(Which::Root, "terminal.workspace-list", Vec::new(), 0);
         } else {
             // Nothing is on its way until the lease comes.
             this.lock().explorer.set_waiting(false);
@@ -98,7 +98,7 @@ impl Workspace {
         if !self.live() {
             return;
         }
-        let root = {
+        let (root, epoch) = {
             let mut inner = self.lock();
             let was = std::mem::replace(&mut inner.held, held);
             let cut = lost != std::mem::replace(&mut inner.lost, lost);
@@ -114,12 +114,14 @@ impl Workspace {
             // A root asked before the loss is retired (its reply is
             // dropped in `reply`), so regaining asks again even while the
             // old one still looks pending.
-            held && inner.explorer.tree().is_none()
-                && (regained || (inner.explorer.note().is_some() && !inner.explorer.waiting()))
+            let root = held
+                && inner.explorer.tree().is_none()
+                && (regained || (inner.explorer.note().is_some() && !inner.explorer.waiting()));
+            (root, inner.epoch)
         };
         if root {
             self.lock().explorer.set_waiting(true);
-            self.ask(Which::Root, "terminal.workspace-list", Vec::new());
+            self.ask(Which::Root, "terminal.workspace-list", Vec::new(), epoch);
         }
         self.pump();
     }
@@ -158,14 +160,22 @@ impl Workspace {
 
     fn list(self: &Arc<Self>, path: &str) {
         let args = vec![("path".to_owned(), Value::Text(path.to_owned()))];
-        self.ask(Which::Dir, "terminal.workspace-list", args);
+        // A directory reply is never retired, so its epoch is not enforced.
+        let epoch = self.lock().epoch;
+        self.ask(Which::Dir, "terminal.workspace-list", args, epoch);
     }
 
     /// Sends one call; its reply comes back through [`Self::reply`].
-    fn ask(self: &Arc<Self>, which: Which, method: &str, args: Vec<(String, Value)>) {
-        let (held, epoch) = {
+    /// `epoch` is the lease count the caller decided to ask under, read in
+    /// the same step as the decision: a call a lease loss has overtaken
+    /// since is not sent (its asked flag was cleared with it).
+    fn ask(self: &Arc<Self>, which: Which, method: &str, args: Vec<(String, Value)>, epoch: u64) {
+        let held = {
             let inner = self.lock();
-            (inner.held, inner.epoch)
+            if epoch != inner.epoch && !matches!(which, Which::Dir) {
+                return;
+            }
+            inner.held
         };
         if !held {
             return self.reply(which, epoch, Err("Take over this block first.".into()));
@@ -210,20 +220,29 @@ impl Workspace {
     fn pump(self: &Arc<Self>) {
         loop {
             // Marks and stats wait for the lease: asking without it would
-            // spend the one ask each gets on a refusal.
-            let call = {
+            // spend the one ask each gets on a refusal. The epoch is taken
+            // with the reservation, so a loss in between retires it.
+            let (call, epoch) = {
                 let mut inner = self.lock();
+                let epoch = inner.epoch;
                 match inner.held {
-                    true => inner.explorer.wants(),
-                    false => None,
+                    true => (inner.explorer.wants(), epoch),
+                    false => (None, epoch),
                 }
             };
             let Some(call) = call else { break };
             match call {
-                Call::Touched => self.ask(Which::Touched, "terminal.workspace-touched", Vec::new()),
+                Call::Touched => {
+                    self.ask(
+                        Which::Touched,
+                        "terminal.workspace-touched",
+                        Vec::new(),
+                        epoch,
+                    );
+                }
                 Call::Stat(path) => {
                     let args = vec![("path".to_owned(), Value::Text(path))];
-                    self.ask(Which::Stat, "terminal.workspace-stat", args);
+                    self.ask(Which::Stat, "terminal.workspace-stat", args, epoch);
                 }
             }
         }
@@ -557,6 +576,19 @@ mod tests {
             fake.last().rows.iter().all(|r| r.mark.is_none()),
             "the old marks are not taken"
         );
+    }
+
+    #[test]
+    fn a_status_call_reserved_before_a_lease_loss_is_not_sent_after_it() {
+        let (fake, ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        ws.lease(false, 1);
+        ws.lease(true, 1);
+        let sent = fake.methods().len();
+        // The old reservation reaches `ask` after the new lease count.
+        ws.ask(Which::Stat, "terminal.workspace-stat", Vec::new(), 0);
+        ws.ask(Which::Touched, "terminal.workspace-touched", Vec::new(), 0);
+        assert_eq!(fake.methods().len(), sent, "neither old call is sent");
     }
 
     #[test]
