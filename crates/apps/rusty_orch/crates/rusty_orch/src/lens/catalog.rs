@@ -2,9 +2,15 @@
 //! domain map, every file it names, and the target repo's `DOMAIN.md`,
 //! once at open, so a bad catalog fails before any call. Composing is then
 //! the pure [`orch_lens::compose`] over what was read.
+//!
+//! Every read is confined: the path must resolve inside its root (the
+//! Factory directory, or the target repo for `DOMAIN.md`), must be a
+//! regular file and not a symlink, and is read only up to its byte cap; a
+//! larger file is refused, not truncated.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 
 use orch_lens::compose::{self, Composed, DomainMap, Limits, Selection};
 
@@ -12,6 +18,8 @@ use orch_lens::compose::{self, Composed, DomainMap, Limits, Selection};
 pub const MAP: &str = "domains.json";
 /// The domain pack's file name, at the target repo root.
 pub const DOMAIN_PACK: &str = "DOMAIN.md";
+/// The most bytes read from the domain map.
+pub const MAP_BYTES: usize = 64 * 1024;
 
 /// A loaded catalog: the map, the files it names, and the domain pack.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,13 +45,15 @@ impl Catalog {
     /// `repo/DOMAIN.md`. Either file may be absent: no map selects
     /// nothing, and no pack composes no project section.
     pub fn open(factory: &Path, repo: &Path, limits: Limits) -> Result<Self, String> {
-        let map = match optional(&factory.join(MAP))? {
+        let factory = root(factory)?;
+        let repo = root(repo)?;
+        let map = match read(&factory, MAP, MAP_BYTES, Need::Optional)? {
             Some(text) => compose::parse_map(&text)
                 .map_err(|e| format!("{}: {e}", factory.join(MAP).display()))?,
             None => DomainMap::new(),
         };
-        let texts = read_all(factory, &map)?;
-        let domain_pack = optional(&repo.join(DOMAIN_PACK))?;
+        let texts = read_all(&factory, &map, limits.file_bytes)?;
+        let domain_pack = read(&repo, DOMAIN_PACK, limits.file_bytes, Need::Optional)?;
         Ok(Self {
             map,
             texts,
@@ -71,28 +81,69 @@ impl Catalog {
     }
 }
 
-fn read_all(factory: &Path, map: &DomainMap) -> Result<BTreeMap<String, String>, String> {
+fn read_all(
+    factory: &Path,
+    map: &DomainMap,
+    cap: usize,
+) -> Result<BTreeMap<String, String>, String> {
     let paths: BTreeSet<&String> = map
         .values()
         .flat_map(|p| p.knowledge.iter().chain(&p.standards))
         .collect();
-    paths
-        .into_iter()
-        .map(|rel| {
-            let path = factory.join(rel);
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            Ok((rel.clone(), text))
-        })
-        .collect()
+    let mut texts = BTreeMap::new();
+    for rel in paths {
+        if let Some(text) = read(factory, rel, cap, Need::Required)? {
+            texts.insert(rel.clone(), text);
+        }
+    }
+    Ok(texts)
 }
 
-fn optional(path: &Path) -> Result<Option<String>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+/// Whether a missing file is an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Need {
+    Optional,
+    Required,
+}
+
+/// A root directory, resolved, so containment is checked on real paths.
+fn root(dir: &Path) -> Result<PathBuf, String> {
+    dir.canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", dir.display()))
+}
+
+/// Read `root/rel` if it is a regular file (not a symlink) that resolves
+/// inside `root`, holding at most `cap` bytes of UTF-8.
+fn read(root: &Path, rel: &str, cap: usize, need: Need) -> Result<Option<String>, String> {
+    let path = root.join(rel);
+    let shown = path.display();
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && need == Need::Optional => {
+            return Ok(None)
+        }
+        Err(e) => return Err(format!("cannot read {shown}: {e}")),
+    };
+    if !meta.file_type().is_file() {
+        return Err(format!("{shown}: not a regular file"));
     }
+    let real = path
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {shown}: {e}"))?;
+    if !real.starts_with(root) {
+        return Err(format!("{shown}: resolves outside {}", root.display()));
+    }
+    let file = std::fs::File::open(&real).map_err(|e| format!("cannot read {shown}: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(cap as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read {shown}: {e}"))?;
+    if bytes.len() > cap {
+        return Err(format!("{shown}: over the {cap}-byte cap"));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| format!("{shown}: not UTF-8"))
 }
 
 #[cfg(test)]
@@ -162,6 +213,71 @@ mod tests {
         std::fs::remove_file(f.join("standards/rust.md")).expect("rm");
         let err = Catalog::open(&f, &scratch("missing-repo"), Limits::default()).unwrap_err();
         assert!(err.contains("standards/rust.md"), "{err}");
+    }
+
+    #[test]
+    fn an_oversized_input_is_refused_before_loading() {
+        let f = factory("big");
+        let limits = Limits {
+            file_bytes: 10,
+            ..Limits::default()
+        };
+        let err = Catalog::open(&f, &scratch("big-repo"), limits).unwrap_err();
+        assert!(err.contains("over the 10-byte cap"), "{err}");
+        let repo = scratch("big-pack");
+        write(&repo, DOMAIN_PACK, "A domain digest well over ten bytes.");
+        let err = Catalog::open(&scratch("big-empty"), &repo, limits).unwrap_err();
+        assert!(err.contains(DOMAIN_PACK) && err.contains("cap"), "{err}");
+    }
+
+    #[test]
+    fn a_directory_is_not_a_regular_file() {
+        let f = factory("dir");
+        std::fs::remove_file(f.join("standards/rust.md")).expect("rm");
+        std::fs::create_dir_all(f.join("standards/rust.md")).expect("dir");
+        let err = Catalog::open(&f, &scratch("dir-repo"), Limits::default()).unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
+        let repo = scratch("dir-pack");
+        std::fs::create_dir_all(repo.join(DOMAIN_PACK)).expect("dir");
+        let err = Catalog::open(&scratch("dir-empty"), &repo, Limits::default()).unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_refused_for_every_input() {
+        use std::os::unix::fs::symlink;
+        let outside = scratch("link-outside");
+        write(&outside, "secret.md", "not for lenses");
+        write(&outside, MAP, "{}");
+        // A named file that is a symlink out of the catalog.
+        let f = factory("link-file");
+        std::fs::remove_file(f.join("standards/rust.md")).expect("rm");
+        symlink(outside.join("secret.md"), f.join("standards/rust.md")).expect("link");
+        let err = Catalog::open(&f, &scratch("link-repo"), Limits::default()).unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
+        // A directory symlink: the file is regular but resolves outside.
+        let f = factory("link-dir");
+        std::fs::remove_dir_all(f.join("standards")).expect("rm");
+        write(&outside, "rust.md", "outside");
+        symlink(&outside, f.join("standards")).expect("link");
+        let err = Catalog::open(&f, &scratch("link-dir-repo"), Limits::default()).unwrap_err();
+        assert!(err.contains("resolves outside"), "{err}");
+        // The map and the domain pack.
+        let f = scratch("link-map");
+        symlink(outside.join(MAP), f.join(MAP)).expect("link");
+        let err = Catalog::open(&f, &scratch("link-map-repo"), Limits::default()).unwrap_err();
+        assert!(
+            err.contains(MAP) && err.contains("not a regular file"),
+            "{err}"
+        );
+        let repo = scratch("link-pack");
+        symlink(outside.join("secret.md"), repo.join(DOMAIN_PACK)).expect("link");
+        let err = Catalog::open(&scratch("link-pack-f"), &repo, Limits::default()).unwrap_err();
+        assert!(
+            err.contains(DOMAIN_PACK) && err.contains("not a regular file"),
+            "{err}"
+        );
     }
 
     #[test]
