@@ -363,6 +363,19 @@ pub trait Source {
     fn forwarded_port(&self, _key: u64, _port: u16) -> Option<Bound> {
         None
     }
+    /// Whether the source can send a file to pane `key`'s host (mux C82),
+    /// so a file dropped or pasted on that pane is uploaded and its path
+    /// there typed. A source that can't leaves the file's own path to be
+    /// typed, as a local pane's host is this machine.
+    fn uploads(&self, _key: u64) -> bool {
+        false
+    }
+    /// Sends the file at `path` to pane `key`'s host and calls `done` once,
+    /// from any thread, with its path there or why not. Not called when
+    /// [`Source::uploads`] is `false`.
+    fn upload(&self, _key: u64, _path: std::path::PathBuf, done: UploadDone) {
+        done(Err("this source uploads no files".into()));
+    }
 }
 
 /// A forward that listens: the local port, and which run of the pane's
@@ -379,6 +392,12 @@ pub type Forwarded = Result<Bound, String>;
 
 /// What a source calls once with a forward's local port.
 pub type ForwardDone = Box<dyn FnOnce(Forwarded) + Send>;
+
+/// A file's path on the pane's host, or why it was not sent.
+pub type Uploaded = Result<String, String>;
+
+/// What a source calls once with an upload's outcome.
+pub type UploadDone = Box<dyn FnOnce(Uploaded) + Send>;
 
 /// A folder listing's text, or why the host refused it.
 pub type Listed = Result<String, String>;

@@ -49,7 +49,7 @@ use rusty_mux_proto::{Entry, Features, Launch, Message, Program, ShowTo, Takeove
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
     Act, BlockInfo, Bound, Detached, Dir, Feed, Float as Pane, ForwardDone, Link, ListDone, Listed,
-    Notice, PaneIo, Remote, Session, Show, Source, Take, Tree,
+    Notice, PaneIo, Remote, Session, Show, Source, Take, Tree, UploadDone,
 };
 
 use crate::floats;
@@ -82,7 +82,7 @@ pub const GUI: Features = CONTROL
 /// What a block's connection asks for: the panes' features, and the input
 /// gate's grants and lease requests, so an owner-only block can be taken
 /// over (handoff D153), and folder listings, for the palette's directory
-/// browse (D78). [`PANE`] asks for clipboard reads (C54), which the
+/// browse (D78), and file uploads (C82). [`PANE`] asks for clipboard reads (C54), which the
 /// window answers by its policy.
 pub const BLOCK: Features = PANE
     .union(Features::INPUT_GATE)
@@ -90,7 +90,8 @@ pub const BLOCK: Features = PANE
     .union(Features::BACKGROUND_HISTORY)
     .union(Features::BLOCK_CALL)
     .union(Features::DIR_LISTING)
-    .union(Features::PORT_FORWARD);
+    .union(Features::PORT_FORWARD)
+    .union(Features::UPLOAD);
 
 /// Never set: the handshakes here are not cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -538,6 +539,17 @@ impl Source for MuxSource {
 
     fn forwards(&self, key: u64) -> bool {
         self.pane(key).is_some_and(|b| b.forwards)
+    }
+
+    fn uploads(&self, key: u64) -> bool {
+        self.pane(key).is_some_and(|b| b.uploads)
+    }
+
+    fn upload(&self, key: u64, path: std::path::PathBuf, done: UploadDone) {
+        match self.pane(key) {
+            Some(block) => block.upload(path, done),
+            None => done(Err("the block is not open".into())),
+        }
     }
 
     fn forwarded_port(&self, key: u64, port: u16) -> Option<Bound> {
@@ -1453,6 +1465,10 @@ struct Block {
     clipboard: bool,
     /// Who waits for a listing, by request number.
     listings: Mutex<HashMap<u64, ListDone>>,
+    /// The server takes files on this connection (C82).
+    uploads: bool,
+    /// Who waits for an upload chunk's answer, by request number.
+    uploading: Mutex<HashMap<u64, Sender<Result<String, String>>>>,
     /// The server tunnels ports on this connection (C81).
     forwards: bool,
     /// The run that tunnels this pane's ports, once one was asked for.
@@ -1472,6 +1488,14 @@ const FORWARD_REQ: u64 = 1 << 40;
 /// Frames queued for a pane's forward run, and asks queued for it.
 const FORWARD_FRAMES: usize = 1024;
 const FORWARD_WANTS: usize = 16;
+
+/// Bytes in one chunk of an upload. Each is written under the lock typing
+/// shares, so a small one keeps a slow link from holding up keystrokes for
+/// long.
+const UPLOAD_CHUNK: usize = 64 << 10;
+
+/// How long the server may take to answer one chunk of an upload.
+const UPLOAD_WAIT: Duration = Duration::from_secs(30);
 
 /// How long a port may take to be listened on.
 const LISTEN_WAIT: Duration = Duration::from_secs(10);
@@ -1553,6 +1577,10 @@ impl Block {
                 .contains(Features::BLOCK_CALL.union(Features::DIR_LISTING)),
             listings: Mutex::new(HashMap::new()),
             clipboard: opened.features.contains(Features::CLIPBOARD),
+            uploads: opened
+                .features
+                .contains(Features::BLOCK_CALL.union(Features::UPLOAD)),
+            uploading: Mutex::new(HashMap::new()),
             forwards: opened.features.contains(Features::PORT_FORWARD),
             forwarder: Mutex::new(None),
             conn_gen: AtomicU64::new(0),
@@ -1633,12 +1661,74 @@ impl Block {
         });
     }
 
+    /// Sends the file at `path` in chunks, from a thread of its own, and
+    /// calls `done` with its path on the server. Needs the lease, as the
+    /// server does. A chunk the server leaves unanswered for [`UPLOAD_WAIT`],
+    /// or a lost connection, ends it; see `rusty_mux_client::upload::send`
+    /// for what an error after the last chunk means.
+    fn upload(self: &Arc<Self>, path: std::path::PathBuf, done: UploadDone) {
+        if !self.lease().held {
+            return done(Err(
+                "Another client holds this block's input; take it over to send files.".into(),
+            ));
+        }
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            return done(Err("that is not a file".into()));
+        };
+        let block = Arc::clone(self);
+        std::thread::spawn(move || done(block.upload_file(&path, &name)));
+    }
+
+    fn upload_file(&self, path: &std::path::Path, name: &str) -> Result<String, String> {
+        // Looked at before it is opened: opening a FIFO would wait for a
+        // writer for ever and the upload would never answer.
+        let not_file = || format!("{} is not a file", path.display());
+        let looked = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !looked.is_file() {
+            return Err(not_file());
+        }
+        let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !file.metadata().is_ok_and(|m| m.is_file()) {
+            return Err(not_file());
+        }
+        let id = self.block;
+        rusty_mux_client::upload::send_with(name, &mut file, UPLOAD_CHUNK, |args| {
+            let (tx, rx) = channel();
+            let mut args = Some(args);
+            let req = self.send(|req| {
+                lock(&self.uploading).insert(req, tx);
+                Message::BlockCall {
+                    req,
+                    block: id,
+                    method: "terminal.upload".into(),
+                    args: args.take().unwrap_or_default(),
+                }
+            });
+            // Answered by the reader; a lost connection drops the sender.
+            let answer = rx.recv_timeout(UPLOAD_WAIT);
+            lock(&self.uploading).remove(&req);
+            answer
+                .map_err(|_| std::io::Error::other("the server did not answer"))?
+                .map_err(std::io::Error::other)
+        })
+        .map_err(|e| e.to_string())
+    }
+
     /// Answers every waiting listing with `why`: its connection is gone.
     fn fail_listings(&self, why: &str) {
+        // Dropped senders end the uploads waiting on them.
+        lock(&self.uploading).clear();
         let waiting: Vec<_> = lock(&self.listings).drain().collect();
         for (_, done) in waiting {
             done(Err(why.into()));
         }
+    }
+
+    /// Hands an upload chunk's answer to whoever waits for `req`; whether
+    /// someone did.
+    fn uploaded(&self, req: u64, answer: Result<String, String>) -> bool {
+        let tx = lock(&self.uploading).remove(&req);
+        tx.map(|tx| tx.send(answer)).is_some()
     }
 
     /// Hands a listing's answer to whoever waits for `req`; whether
@@ -1989,10 +2079,15 @@ impl Block {
                     continue;
                 }
                 Message::Text { req, text } => {
-                    self.listed(req, Ok(text));
+                    if !self.uploaded(req, Ok(text.clone())) {
+                        self.listed(req, Ok(text));
+                    }
                     continue;
                 }
-                Message::Failed { req, reason, .. } if self.listed(req, Err(reason.clone())) => {
+                Message::Failed { req, reason, .. }
+                    if self.uploaded(req, Err(reason.clone()))
+                        || self.listed(req, Err(reason.clone())) =>
+                {
                     continue;
                 }
                 Message::Done { req, .. } => {
