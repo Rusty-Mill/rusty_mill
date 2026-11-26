@@ -452,8 +452,57 @@ pub fn text_hash(title: &str, body: &str) -> u64 {
     hash
 }
 
+/// What a comment is for (#1436). Old comments, and any written without a kind, are notes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentKind {
+    /// A plain status note.
+    #[default]
+    Note,
+    /// Who holds the work.
+    Claim,
+    /// Done, next, and where the details are: three short lines.
+    Handoff,
+    /// Something stops the work; open until a comment `resolves` it.
+    Blocker,
+    /// A question for someone; open until a comment `resolves` it.
+    Question,
+    /// A choice made, and why.
+    Decision,
+}
+
+impl CommentKind {
+    /// Parse the `kind` argument of `card_comment`.
+    ///
+    /// # Errors
+    /// An unknown kind, naming the valid ones.
+    pub fn parse(s: &str) -> Result<Self, BoardError> {
+        match s {
+            "note" => Ok(Self::Note),
+            "claim" => Ok(Self::Claim),
+            "handoff" => Ok(Self::Handoff),
+            "blocker" => Ok(Self::Blocker),
+            "question" => Ok(Self::Question),
+            "decision" => Ok(Self::Decision),
+            _ => Err(BoardError::Invalid(
+                "kind is one of note, claim, handoff, blocker, question, decision",
+            )),
+        }
+    }
+
+    /// A blocker or a question: the kinds that stay open until resolved.
+    #[must_use]
+    pub fn is_open_kind(self) -> bool {
+        matches!(self, Self::Blocker | Self::Question)
+    }
+
+    fn is_note(&self) -> bool {
+        *self == Self::Note
+    }
+}
+
 /// A note on a card.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
     /// Author.
     pub by: String,
@@ -461,6 +510,49 @@ pub struct Comment {
     pub at_ms: i64,
     /// Text.
     pub text: String,
+    /// What the comment is for; absent (a note) on every comment written before #1436.
+    #[serde(default, skip_serializing_if = "CommentKind::is_note")]
+    pub kind: CommentKind,
+    /// Assigned on write, so a later comment can `resolves` it; absent on older comments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
+    /// The blocker or question this comment resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolves: Option<Uuid>,
+}
+
+/// A comment to add: [`Card::comment_with`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NewComment<'a> {
+    /// Text, at most [`MAX_COMMENT_BYTES`].
+    pub text: &'a str,
+    /// New `state` line, as on [`Edit`].
+    pub state: Option<&'a str>,
+    /// What the comment is for.
+    pub kind: CommentKind,
+    /// An open blocker or question on this card that this comment resolves.
+    pub resolves: Option<Uuid>,
+}
+
+/// Most lines, and bytes, of a handoff comment.
+pub const MAX_HANDOFF_LINES: usize = 3;
+/// See [`MAX_HANDOFF_LINES`].
+pub const MAX_HANDOFF_BYTES: usize = 400;
+/// Newest comments the recent read keeps (#1436).
+pub const RECENT_COMMENTS: usize = 5;
+
+/// A handoff is three short lines: done, next, where the details are.
+fn check_handoff(text: &str) -> Result<(), BoardError> {
+    let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+    if lines > MAX_HANDOFF_LINES || text.len() > MAX_HANDOFF_BYTES {
+        return Err(BoardError::Refused(format!(
+            "a handoff is at most {MAX_HANDOFF_LINES} non-empty lines and {MAX_HANDOFF_BYTES} bytes \
+             (got {lines} lines, {} bytes): line 1 what is done, line 2 what is next, \
+             line 3 where the details are",
+            text.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Most evidence links a card keeps.
@@ -1401,6 +1493,7 @@ impl Card {
                 "{MERGED_PREFIX} {pr} merged (was in {}).",
                 self.column.as_str()
             ),
+            ..Comment::default()
         });
         Ok(Self {
             column: Column::DONE,
@@ -1463,6 +1556,7 @@ impl Card {
                 "{UNCLOSED_PREFIX} the merge watch's close{pr} is undone, back to {}.",
                 was.as_str()
             ),
+            ..Comment::default()
         });
         Ok(Self {
             column: was,
@@ -1872,6 +1966,72 @@ impl Card {
         state: Option<&str>,
         now_ms: i64,
     ) -> Result<Self, BoardError> {
+        let new = NewComment {
+            text,
+            state,
+            ..NewComment::default()
+        };
+        self.comment_with(by, &new, now_ms)
+    }
+
+    /// The card with only its recent comments: the last [`RECENT_COMMENTS`], the latest
+    /// handoff and every open blocker or question, so a newer chatty comment never hides
+    /// them; and how many comments were left out. Nothing is rewritten.
+    #[must_use]
+    pub fn recent(&self) -> (Self, usize) {
+        let total = self.comments.len();
+        let latest_handoff = self
+            .comments
+            .iter()
+            .rposition(|c| c.kind == CommentKind::Handoff);
+        let kept: Vec<Comment> = self
+            .comments
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                *i + RECENT_COMMENTS >= total
+                    || Some(*i) == latest_handoff
+                    || c.id.is_some_and(|id| self.is_open(id))
+            })
+            .map(|(_, c)| c.clone())
+            .collect();
+        let omitted = total - kept.len();
+        (
+            Self {
+                comments: kept,
+                ..self.clone()
+            },
+            omitted,
+        )
+    }
+
+    /// Whether `id` is a blocker or question on this card that no comment resolves.
+    #[must_use]
+    pub fn is_open(&self, id: Uuid) -> bool {
+        self.comments
+            .iter()
+            .any(|c| c.id == Some(id) && c.kind.is_open_kind())
+            && !self.comments.iter().any(|c| c.resolves == Some(id))
+    }
+
+    /// Append a comment of a `kind`, optionally resolving a blocker or question and setting
+    /// the `state` line. A comment gets an id, so a later one can resolve it.
+    ///
+    /// # Errors
+    /// Text blank or over [`MAX_COMMENT_BYTES`], a handoff that is not three short lines, a
+    /// `resolves` that is not an open blocker or question on this card, or a bad state.
+    pub fn comment_with(
+        &self,
+        by: &Actor,
+        new: &NewComment<'_>,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
+        let NewComment {
+            text,
+            state,
+            kind,
+            resolves,
+        } = *new;
         if text.trim().is_empty() {
             return Err(BoardError::Invalid("comment is empty"));
         }
@@ -1883,6 +2043,17 @@ impl Card {
                 "bytes",
             ));
         }
+        if kind == CommentKind::Handoff {
+            check_handoff(text)?;
+        }
+        if let Some(target) = resolves
+            && !self.is_open(target)
+        {
+            return Err(BoardError::Refused(
+                "resolves must name an open blocker or question on this card (a resolved one is never reopened)"
+                    .into(),
+            ));
+        }
         let mut next = self.next(now_ms);
         if let Some(state) = state {
             check_state(state)?;
@@ -1892,6 +2063,9 @@ impl Card {
             by: by.name.clone(),
             at_ms: now_ms,
             text: text.to_owned(),
+            kind,
+            id: Some(Uuid::now_v7()),
+            resolves,
         });
         Ok(next)
     }
@@ -1940,6 +2114,7 @@ mod tests {
             by: "nano".into(),
             at_ms: 4,
             text: format!("Unclosed: the merge watch's close of {seven} is undone, back to ready."),
+            ..Comment::default()
         });
         assert!(!noted.unclosed_from(seven));
     }

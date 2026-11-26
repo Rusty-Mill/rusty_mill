@@ -20,6 +20,30 @@ use crate::store::Store;
 /// The board every surface shares.
 pub type Shared = Board<Box<dyn Store>>;
 
+/// Defaults a credential gets for reads (#1437). It changes defaults only, never what the
+/// credential may see or do, and an explicit argument always wins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewProfile {
+    /// Today's behaviour exactly.
+    #[default]
+    Full,
+    /// For agents: an unpaged `board_list` is paged at [`AGENT_PAGE`], and `card_get` returns
+    /// the recent comments.
+    Agent,
+}
+
+impl ViewProfile {
+    /// Whether this is the default, `full`.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        *self == Self::Full
+    }
+}
+
+/// Page size of an unpaged `board_list` under [`ViewProfile::Agent`].
+pub const AGENT_PAGE: u32 = 50;
+
 /// Who a credential belongs to. Set by the transport after it checks a bearer
 /// token; when present it fixes the caller's actor and role.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +62,9 @@ pub struct Identity {
     /// The model provider behind this credential, compared by separation of duties (#447).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Read defaults, set in the credentials file; `full` unless it says `agent`.
+    #[serde(default, skip_serializing_if = "ViewProfile::is_full")]
+    pub view: ViewProfile,
 }
 
 /// Why a call failed.
@@ -495,6 +522,15 @@ struct GetArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct GetCardArgs {
+    /// Card id, or its number (`#42` or `42`).
+    id: String,
+    /// `all` (default) returns every comment; `recent` returns the last 5 comments, the latest
+    /// handoff and every open blocker or question, with `comments_omitted`.
+    history: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct AddArgs {
     #[serde(flatten)]
     who: Who,
@@ -659,6 +695,11 @@ struct CommentArgs {
     text: String,
     /// Where the work stands now, one line, at most 200 bytes; kept as is when left out.
     state: Option<String>,
+    /// `note` (default), `claim`, `handoff`, `blocker`, `question` or `decision`. A handoff is
+    /// at most 3 non-empty lines and 400 bytes: done, next, where the details are.
+    kind: Option<String>,
+    /// The id of an open `blocker` or `question` on this card that this comment resolves.
+    resolves: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -766,6 +807,11 @@ fn card_ref(b: &Shared, raw: &str) -> Result<Uuid, BoardError> {
 /// The projects a credential is limited to; `None` when unrestricted or unauthenticated.
 fn scope(identity: Option<&Identity>) -> Option<&[String]> {
     identity.and_then(|i| i.projects.as_deref())
+}
+
+/// The read defaults of a credential; `full` when unauthenticated.
+fn profile(identity: Option<&Identity>) -> ViewProfile {
+    identity.map_or(ViewProfile::Full, |i| i.view)
 }
 
 fn in_scope(scope: Option<&[String]>, project: &str) -> bool {
@@ -876,8 +922,12 @@ pub fn ops() -> Vec<Op> {
     vec![
         op(
             "board_list",
-            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those. Done cards that are archived, or done more than `done_days` (default 14) ago, are left out unless `archived` is `include` or `only`. `created_*`, `updated_*` and `moved_*` (Unix ms, `from` inclusive, `to` exclusive) keep cards created, last changed or moved column in a range. By default it returns small summaries without body, prompt, links or comments; pass `view: full` for whole cards, or `card_get` one card. `limit` pages the result in creation order: pass the page's `next_cursor` as `cursor` with the same arguments until it is null.",
-            |b, i, a: ListArgs| {
+            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those. Done cards that are archived, or done more than `done_days` (default 14) ago, are left out unless `archived` is `include` or `only`. `created_*`, `updated_*` and `moved_*` (Unix ms, `from` inclusive, `to` exclusive) keep cards created, last changed or moved column in a range. By default it returns small summaries without body, prompt, links or comments; pass `view: full` for whole cards, or `card_get` one card. `limit` pages the result in creation order: pass the page's `next_cursor` as `cursor` with the same arguments until it is null. A credential with the `agent` view profile gets pages of 50 when it passes neither `limit` nor `cursor`, so check `next_cursor`.",
+            |b, i, mut a: ListArgs| {
+                // The agent profile pages an unpaged call; an explicit `limit` or `cursor` wins.
+                if profile(i) == ViewProfile::Agent && a.limit.is_none() && a.cursor.is_none() {
+                    a.limit = Some(AGENT_PAGE);
+                }
                 checked_project(b, scope(i), a.project.as_deref())?;
                 let days = a.done_days.unwrap_or(DONE_WINDOW_DAYS);
                 let mut cards = b.list_view(a.column.as_ref(), a.archived, days, a.view)?;
@@ -1118,14 +1168,27 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_get",
-            "Fetch one card with its comments, and its `text_digest` (of the title and body), which `card_approve` needs.",
-            |b, i, a: GetArgs| {
+            "Fetch one card with its comments, and its `text_digest` (of the title and body), which `card_approve` needs. `history: \"recent\"` returns only the last 5 comments, the latest handoff and every open blocker or question, with `comments_omitted`; it is the default for a credential with the `agent` view profile, and `history: \"all\"` returns every comment.",
+            |b, i, a: GetCardArgs| {
                 let c = b.get(card_ref(b, &a.id)?)?;
                 if !in_scope(scope(i), &c.project) {
                     return Err(BoardError::OutOfScope(c.project));
                 }
                 let digest = format!("{:016x}", crate::domain::text_hash(&c.title, &c.body));
-                to_json(json!({ "card": c, "text_digest": digest }))
+                let history = a.history.as_deref().unwrap_or(match profile(i) {
+                    ViewProfile::Agent => "recent",
+                    ViewProfile::Full => "all",
+                });
+                match history {
+                    "all" => to_json(json!({ "card": c, "text_digest": digest })),
+                    "recent" => {
+                        let (c, omitted) = c.recent();
+                        to_json(
+                            json!({ "card": c, "text_digest": digest, "comments_omitted": omitted }),
+                        )
+                    }
+                    _ => Err(BoardError::Invalid("history is `all` or `recent`")),
+                }
             },
         ),
         op(
@@ -1433,15 +1496,30 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_comment",
-            "Add a comment to a card: a status note of at most 2 KiB, with detail in a linked doc. An optional `state` line (one line, at most 200 bytes) updates where the work stands.",
+            "Add a comment to a card: a status note of at most 2 KiB, with detail in a linked doc. An optional `state` line (one line, at most 200 bytes) updates where the work stands. `kind` is note (default), claim, handoff (3 lines: done, next, where the details are), blocker, question or decision; a blocker or question stays open until a later comment names its id in `resolves`. The comment gets an `id` in the returned card.",
             |b, i, a: CommentArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.comment_with_state(
-                    card_ref(b, &a.id)?,
-                    &who,
-                    &a.text,
-                    a.state.as_deref(),
-                )?)
+                let kind = a
+                    .kind
+                    .as_deref()
+                    .map(crate::domain::CommentKind::parse)
+                    .transpose()?
+                    .unwrap_or_default();
+                let resolves = a
+                    .resolves
+                    .as_deref()
+                    .map(|r| {
+                        Uuid::parse_str(r.trim())
+                            .map_err(|_| BoardError::Invalid("resolves is a comment id"))
+                    })
+                    .transpose()?;
+                let new = crate::domain::NewComment {
+                    text: &a.text,
+                    state: a.state.as_deref(),
+                    kind,
+                    resolves,
+                };
+                card(b.comment_with(card_ref(b, &a.id)?, &who, &new)?)
             },
         ),
     ]
@@ -2370,6 +2448,7 @@ mod tests {
             role: role.into(),
             connector: false,
             provider: None,
+            view: ViewProfile::default(),
         }
     }
 
@@ -3715,6 +3794,229 @@ mod tests {
 
         fn add(board: &Shared) -> Value {
             run(board, "card_add", json!({"title": "a"})).expect("add")["card"]["id"].clone()
+        }
+
+        /// Add a comment of `kind` and return the id the board gave it.
+        fn say(board: &Shared, id: &Value, kind: &str, text: &str) -> Value {
+            let out = run(
+                board,
+                "card_comment",
+                json!({"id": id, "text": text, "kind": kind}),
+            )
+            .expect("comment");
+            out["card"]["comments"]
+                .as_array()
+                .and_then(|c| c.last())
+                .map(|c| c["id"].clone())
+                .expect("a comment")
+        }
+
+        fn agent() -> Identity {
+            Identity {
+                actor: "bot".into(),
+                role: "human".into(),
+                projects: None,
+                connector: false,
+                provider: None,
+                view: ViewProfile::Agent,
+            }
+        }
+
+        fn as_agent(board: &Shared, name: &str, extra: Value) -> Value {
+            call_as(board, Some(&agent()), name, extra).expect("call")
+        }
+
+        #[test]
+        fn the_agent_profile_pages_an_unpaged_list_and_an_explicit_limit_or_full_profile_does_not()
+        {
+            let board = paged_board();
+            add_cards(&board, 55);
+            let out = as_agent(&board, "board_list", json!({}));
+            assert_eq!(out["cards"].as_array().expect("cards").len(), 50);
+            assert!(
+                out["next_cursor"].is_string(),
+                "the page says there is more"
+            );
+            let out = as_agent(&board, "board_list", json!({"limit": 7}));
+            assert_eq!(out["cards"].as_array().expect("cards").len(), 7);
+            let full = call_as(&board, None, "board_list", json!({})).expect("full");
+            assert_eq!(full["cards"].as_array().expect("cards").len(), 55);
+            assert!(
+                full.get("next_cursor").is_none(),
+                "full keeps today's reply"
+            );
+        }
+
+        #[test]
+        fn the_agent_profile_reads_recent_comments_unless_history_all_is_asked() {
+            let board = paged_board();
+            let id = add(&board);
+            for n in 0..9 {
+                run(
+                    &board,
+                    "card_comment",
+                    json!({"id": id, "text": format!("c{n}")}),
+                )
+                .expect("comment");
+            }
+            let n = |v: &Value| v["card"]["comments"].as_array().expect("c").len();
+            let recent = as_agent(&board, "card_get", json!({"id": id}));
+            assert_eq!(
+                (n(&recent), recent["comments_omitted"].clone()),
+                (5, json!(4))
+            );
+            let all = as_agent(&board, "card_get", json!({"id": id, "history": "all"}));
+            assert_eq!(n(&all), 9);
+            let full = call_as(&board, None, "card_get", json!({"id": id})).expect("full");
+            assert_eq!(n(&full), 9, "the full profile is unchanged");
+        }
+
+        #[test]
+        fn comments_have_a_kind_and_an_id_and_a_plain_one_reads_as_a_note() {
+            let board = paged_board();
+            let id = add(&board);
+            run(&board, "card_comment", json!({"id": id, "text": "plain"})).expect("note");
+            let q = say(&board, &id, "question", "which db?");
+            assert!(q.is_string(), "every new comment has an id");
+            let c = run(&board, "card_get", json!({"id": id})).expect("get")["card"]["comments"]
+                .clone();
+            assert!(c[0].get("kind").is_none(), "a note is left out: {c}");
+            assert_eq!(c[1]["kind"], "question");
+            let bad = run(
+                &board,
+                "card_comment",
+                json!({"id": id, "text": "x", "kind": "rant"}),
+            );
+            assert!(matches!(bad, Err(CallError::Board(BoardError::Invalid(_)))));
+        }
+
+        #[test]
+        fn an_old_comment_without_kind_or_id_still_reads() {
+            let c: crate::domain::Comment =
+                serde_json::from_value(json!({"by": "a", "at_ms": 1, "text": "t"})).expect("old");
+            assert_eq!((c.kind, c.id, c.resolves), (Default::default(), None, None));
+            let back = serde_json::to_value(&c).expect("json");
+            assert_eq!(back, json!({"by": "a", "at_ms": 1, "text": "t"}));
+        }
+
+        #[test]
+        fn a_handoff_is_three_short_lines() {
+            let board = paged_board();
+            let id = add(&board);
+            let ok = "done: x\nnext: y\nwhere: PR #1";
+            assert!(
+                run(
+                    &board,
+                    "card_comment",
+                    json!({"id": id, "text": ok, "kind": "handoff"})
+                )
+                .is_ok()
+            );
+            let four = "a\nb\nc\nd";
+            let m = refusal(run(
+                &board,
+                "card_comment",
+                json!({"id": id, "text": four, "kind": "handoff"}),
+            ));
+            assert!(
+                m.contains("3 non-empty lines") && m.contains("4 lines"),
+                "{m}"
+            );
+            let long = "x".repeat(401);
+            let m = refusal(run(
+                &board,
+                "card_comment",
+                json!({"id": id, "text": long, "kind": "handoff"}),
+            ));
+            assert!(m.contains("400 bytes"), "{m}");
+            // Other kinds keep only the 2 KiB cap.
+            assert!(
+                run(
+                    &board,
+                    "card_comment",
+                    json!({"id": id, "text": "a\nb\nc\nd\ne", "kind": "note"})
+                )
+                .is_ok()
+            );
+        }
+
+        #[test]
+        fn a_blocker_stays_open_until_a_comment_resolves_it_and_never_reopens() {
+            let board = paged_board();
+            let id = add(&board);
+            let blocker = say(&board, &id, "blocker", "waiting on creds");
+            let note = say(&board, &id, "note", "just a note");
+            // Only an open blocker or question can be resolved.
+            for target in [json!(note), json!("not-a-uuid")] {
+                let r = run(
+                    &board,
+                    "card_comment",
+                    json!({"id": id, "text": "done", "resolves": target}),
+                );
+                assert!(r.is_err(), "{target}");
+            }
+            let unknown = uuid::Uuid::now_v7().to_string();
+            assert!(
+                refusal(run(
+                    &board,
+                    "card_comment",
+                    json!({"id": id, "text": "x", "resolves": unknown})
+                ))
+                .contains("open blocker or question")
+            );
+            run(
+                &board,
+                "card_comment",
+                json!({"id": id, "text": "creds arrived", "resolves": blocker}),
+            )
+            .expect("resolve");
+            let again = run(
+                &board,
+                "card_comment",
+                json!({"id": id, "text": "again", "resolves": blocker}),
+            );
+            assert!(again.is_err(), "a resolved blocker is never reopened");
+        }
+
+        #[test]
+        fn the_recent_read_keeps_open_blockers_and_the_latest_handoff_and_history_all_shows_everything()
+         {
+            let board = paged_board();
+            let id = add(&board);
+            let open = say(&board, &id, "blocker", "stuck");
+            let closed = say(&board, &id, "question", "q?");
+            run(
+                &board,
+                "card_comment",
+                json!({"id": id, "text": "answered", "resolves": closed}),
+            )
+            .expect("resolve");
+            say(&board, &id, "handoff", "d\nn\nw");
+            for n in 0..9 {
+                say(&board, &id, "note", &format!("chatter {n}"));
+            }
+            let all = run(&board, "card_get", json!({"id": id})).expect("all");
+            assert_eq!(all["card"]["comments"].as_array().expect("c").len(), 13);
+            assert!(all.get("comments_omitted").is_none());
+            let recent =
+                run(&board, "card_get", json!({"id": id, "history": "recent"})).expect("recent");
+            let kept = recent["card"]["comments"].as_array().expect("comments");
+            let texts: Vec<&str> = kept
+                .iter()
+                .map(|c| c["text"].as_str().expect("t"))
+                .collect();
+            assert!(texts.contains(&"stuck"), "open blocker kept: {texts:?}");
+            assert!(texts.contains(&"d\nn\nw"), "latest handoff kept: {texts:?}");
+            assert!(
+                !texts.contains(&"q?"),
+                "a resolved question drops out: {texts:?}"
+            );
+            assert!(texts.contains(&"chatter 8") && texts.contains(&"chatter 4"));
+            assert!(!texts.contains(&"chatter 3"));
+            assert_eq!(recent["comments_omitted"], 13 - kept.len());
+            assert_eq!(kept[0]["id"], open, "order is kept");
+            let bad = run(&board, "card_get", json!({"id": id, "history": "some"}));
+            assert!(bad.is_err());
         }
 
         #[test]
