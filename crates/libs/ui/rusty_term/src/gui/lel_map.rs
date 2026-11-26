@@ -4,7 +4,7 @@
 //! `rusty_bbp::claims::ClaimView` JSON), no UI and no I/O. Unknown fields are
 //! ignored; `accept_at`, `human_touched`, `holdout_due` and `intent` default
 //! when absent. The stage strip is derived from claim facts only (D55, LEL
-//! D189): BBP records no stage.
+//! D198): BBP records no stage.
 
 use super::lel::Error;
 use rusty_json::Value;
@@ -56,6 +56,8 @@ pub(crate) struct MapClaim {
     pub deps: Vec<u64>,
     /// Candidate claims answering this one (a stuck question's options).
     pub candidates: Vec<u64>,
+    /// The builder's stored candidate (an artifact id), if any: the skeleton.
+    pub current: Option<u64>,
     pub human_touched: bool,
     pub holdout_due: bool,
     /// The intent version this claim was last accepted under, if ever.
@@ -109,7 +111,10 @@ pub(crate) struct Map {
 /// Group name for a claim with neither a domain nor a known dependency.
 const UNGROUPED: &str = "other";
 
-/// Parses a `claim_card`/`claims_delta` reply and builds the map.
+/// Parses a full set of claim cards and builds the map. The text is one
+/// snapshot: a `claims_delta` reply holds only changed claims, so the caller
+/// merges it into the last snapshot first (a later slice); an empty reply is
+/// read as no claims.
 ///
 /// `brief` is the task brief text when known. An empty reply is a new task
 /// that is still gathering, not an error.
@@ -196,6 +201,10 @@ fn claim(index: usize, v: &Value) -> Result<(MapClaim, u32), Error> {
         budget: num("budget")?,
         deps: ids("deps")?,
         candidates: ids("candidates")?,
+        current: match v.get("current").filter(|x| !x.is_null()) {
+            None => None,
+            Some(x) => Some(x.as_u64().ok_or(miss("current"))?),
+        },
         human_touched: flag("human_touched")?,
         holdout_due: flag("holdout_due")?,
         proven_at,
@@ -209,7 +218,7 @@ fn build(claims: Vec<MapClaim>, brief: Option<&str>, version: u32) -> Map {
         .filter(|b| !b.is_empty())
         .map(str::to_owned);
     Map {
-        stages: stages(&claims, brief.is_some()),
+        stages: stages(&claims),
         gathering: claims.is_empty(),
         groups: group(claims),
         intent: Intent { brief, version },
@@ -217,7 +226,7 @@ fn build(claims: Vec<MapClaim>, brief: Option<&str>, version: u32) -> Map {
 }
 
 /// Groups by first domain; a claim with none follows its first known
-/// dependency's group, else `other`. First-seen order, claims in id order.
+/// dependency's group, else `other`. First-seen order, claims in input order.
 fn group(claims: Vec<MapClaim>) -> Vec<Group> {
     let mut of: Vec<(u64, String)> = Vec::with_capacity(claims.len());
     let mut groups: Vec<Group> = Vec::new();
@@ -244,36 +253,35 @@ fn group(claims: Vec<MapClaim>) -> Vec<Group> {
     groups
 }
 
-/// The stage rule of LEL D189, over one snapshot.
-fn stages(claims: &[MapClaim], has_brief: bool) -> [(Stage, StageState); 5] {
-    use StageState::{Current, Done, Pending};
+/// The stage rule of LEL D198, over one snapshot. Later stages done mark the
+/// earlier ones done, and the first stage not done is the one current.
+fn stages(claims: &[MapClaim]) -> [(Stage, StageState); 5] {
     let live = || claims.iter().filter(|c| c.status.live());
-    let candidates = live().any(|c| !c.candidates.is_empty());
-    let settled = live().any(|c| c.status == Status::Accepted)
-        && !live().any(|c| matches!(c.status, Status::Open | Status::Escalated));
-    let intent = match (claims.is_empty(), has_brief) {
-        (true, _) => Current,
-        (false, true) => Done,
-        (false, false) => Pending,
+    let open = live().any(|c| matches!(c.status, Status::Open | Status::Escalated));
+    let settled = !open && live().any(|c| c.status == Status::Accepted);
+    // Nothing records a shadow run, and Living app is not built (Q65, Q41).
+    let mut done = [
+        !claims.is_empty(),
+        settled || live().any(|c| c.current.is_some()),
+        settled,
+        false,
+        false,
+    ];
+    for i in (0..4).rev() {
+        done[i] |= done[i + 1];
+    }
+    let current = done.iter().take(4).position(|d| !d);
+    let state = |i: usize| match (done[i], current == Some(i)) {
+        (true, _) => StageState::Done,
+        (false, true) => StageState::Current,
+        _ => StageState::Pending,
     };
-    let skeletons = match (candidates, live().next().is_some()) {
-        (true, _) => Done,
-        (false, true) => Current,
-        (false, false) => Pending,
-    };
-    let attack = match (settled, candidates) {
-        (true, _) => Done,
-        (false, true) => Current,
-        (false, false) => Pending,
-    };
-    // Nothing records a shadow run, so it is never done (LEL D189, Q65).
-    let shadow = if settled { Current } else { Pending };
     [
-        (Stage::Intent, intent),
-        (Stage::Skeletons, skeletons),
-        (Stage::UnderAttack, attack),
-        (Stage::ShadowRun, shadow),
-        (Stage::LivingApp, Pending),
+        (Stage::Intent, state(0)),
+        (Stage::Skeletons, state(1)),
+        (Stage::UnderAttack, state(2)),
+        (Stage::ShadowRun, state(3)),
+        (Stage::LivingApp, state(4)),
     ]
 }
 
@@ -307,6 +315,7 @@ mod tests {
         );
         assert!(all[1].human_touched && all[1].holdout_due);
         assert_eq!(all[2].candidates, [4, 5]);
+        assert_eq!((all[1].current, all[0].current), (Some(7), None));
         assert_eq!(all[2].proven_at, Some(2));
         assert_eq!(m.intent.version, 3);
         assert_eq!(m.intent.brief.as_deref(), Some("Build a client"));
@@ -349,6 +358,11 @@ mod tests {
         assert_eq!(parse("[]", Some("  \n")).unwrap().intent.brief, None);
     }
 
+    /// A claim that has a builder candidate stored (`current`).
+    fn built(status: &str) -> String {
+        one(status, "[]").replace("\"deps\"", "\"current\":7,\"deps\"")
+    }
+
     #[test]
     fn stage_skeleton_only() {
         let m = parse(&one("Open", "[]"), Some("b")).unwrap();
@@ -356,17 +370,21 @@ mod tests {
     }
 
     #[test]
-    fn stage_mid_attack() {
-        let m = parse(&one("Open", "[2]"), Some("b")).unwrap();
+    fn a_builder_candidate_is_the_skeleton_but_a_question_is_not() {
+        // `current` set, no `candidates`: the real shape of a built claim.
+        let m = parse(&built("Open"), Some("b")).unwrap();
         assert_eq!(states(&m), [Done, Done, Current, Pending, Pending]);
+        // `candidates` lists a question's answers, not skeletons.
+        let m = parse(&one("Open", "[2]"), Some("b")).unwrap();
+        assert_eq!(states(&m), [Done, Current, Pending, Pending, Pending]);
     }
 
     #[test]
     fn an_escalated_claim_blocks_the_attack() {
         let two = format!(
             "[{},{}]",
-            one("Accepted", "[]").trim_matches(['[', ']']),
-            one("Escalated", "[2]")
+            built("Accepted").trim_matches(['[', ']']),
+            built("Escalated")
                 .trim_matches(['[', ']'])
                 .replace("\"id\":1", "\"id\":2")
         );
@@ -375,21 +393,49 @@ mod tests {
     }
 
     #[test]
-    fn all_settled_leaves_shadow_run_current_and_never_done() {
-        let m = parse(&one("Accepted", "[]"), Some("b")).unwrap();
-        assert_eq!(states(&m), [Done, Current, Done, Current, Pending]);
+    fn all_settled_leaves_exactly_shadow_run_current() {
+        // Even with no candidate on file, settled implies the earlier stages.
+        for json in [one("Accepted", "[]"), built("Accepted")] {
+            let m = parse(&json, Some("b")).unwrap();
+            assert_eq!(states(&m), [Done, Done, Done, Current, Pending]);
+        }
+    }
+
+    #[test]
+    fn exactly_one_stage_is_current_and_none_is_done_after_a_pending_one() {
+        for json in [
+            "[]".to_owned(),
+            one("Open", "[]"),
+            built("Open"),
+            one("Dropped", "[]"),
+            built("Accepted"),
+        ] {
+            let s = states(&parse(&json, None).unwrap());
+            assert_eq!(s.iter().filter(|x| **x == Current).count(), 1, "{json}");
+            let first_open = s.iter().position(|x| *x != Done).unwrap();
+            assert!(s[first_open..].iter().all(|x| *x != Done), "{json}");
+        }
     }
 
     #[test]
     fn dropped_claims_do_not_count() {
         let m = parse(&one("Dropped", "[2]"), Some("b")).unwrap();
-        assert_eq!(states(&m), [Done, Pending, Pending, Pending, Pending]);
+        assert_eq!(states(&m), [Done, Current, Pending, Pending, Pending]);
     }
 
     #[test]
-    fn claims_without_a_brief_leave_intent_pending() {
+    fn the_brief_does_not_gate_the_strip() {
         let m = parse(&one("Open", "[]"), None).unwrap();
-        assert_eq!(m.stages[0].1, Pending);
+        assert_eq!(m.stages[0].1, Done);
+    }
+
+    #[test]
+    fn a_delta_reply_is_read_as_given() {
+        // Merging a delta into the last snapshot is the caller's job.
+        let m = parse(&built("Open"), None).unwrap();
+        assert_eq!(m.groups[0].claims.len(), 1);
+        assert_eq!(m.groups[0].claims[0].current, Some(7));
+        assert!(!m.gathering);
     }
 
     #[test]
@@ -400,6 +446,10 @@ mod tests {
             (one("Weird", "[]"), "status"),
             (one("Open", "3"), "candidates"),
             (one("Open", r#"["x"]"#), "candidates"),
+            (
+                one("Open", "[]").replace("\"deps\"", "\"current\":\"x\",\"deps\""),
+                "current",
+            ),
             (r#"[{"id":1}]"#.to_owned(), "domains"),
         ] {
             assert_eq!(
