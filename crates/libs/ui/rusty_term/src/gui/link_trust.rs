@@ -407,11 +407,11 @@ mod tests {
         add_forward(&d, &entry).unwrap();
         add_forward(&d, &entry).unwrap();
         assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
-        assert_eq!(read_forwards(&d).unwrap(), [entry.clone()]);
+        assert_eq!(read_forwards(&d).unwrap(), std::slice::from_ref(&entry));
         // Neither kind reads the other's files, even in one directory.
         assert_eq!(read(&d).unwrap(), Policy::default());
         add(&d, "https://a.com").unwrap();
-        assert_eq!(read_forwards(&d).unwrap(), [entry.clone()]);
+        assert_eq!(read_forwards(&d).unwrap(), std::slice::from_ref(&entry));
         // Unbound, damaged and hand-made files trust nothing.
         std::fs::write(d.join("x.forward"), &entry).unwrap();
         std::fs::write(d.join(format!("{}.forward", name_hash("box:80"))), "box:81").unwrap();
