@@ -34,6 +34,21 @@ fn fake(d: &Path, body: &str) -> Ctl {
     }
 }
 
+/// `Own::spawn`, retried while the fake script is "text file busy": a
+/// fork in a parallel test can hold its just-written descriptor until that
+/// child execs (ETXTBSY), which is a test-harness race, not the adapter's.
+fn spawn_own(ctl: &Ctl, passed: &[std::os::fd::BorrowedFd<'_>]) -> Own {
+    for _ in 0..100 {
+        match Own::spawn(ctl, passed) {
+            Err(MuxError::Ctl(e)) if e.contains("busy") => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            other => return other.expect("spawn"),
+        }
+    }
+    panic!("the fake ctl stayed busy");
+}
+
 fn calls(d: &Path) -> Vec<String> {
     std::fs::read_to_string(d.join("calls"))
         .unwrap_or_default()
@@ -185,9 +200,8 @@ fn own_launches_signals_and_reports_events() {
     let ctl = fake(&d, OWN);
     let slot = std::fs::File::create(d.join("slot.lock")).expect("slot");
     let acp = std::fs::File::create(d.join("acp-end")).expect("acp");
-    let mut own = Own::spawn(&ctl, &[slot.as_fd(), acp.as_fd()])
-        .expect("spawn")
-        .answer_wait(Duration::from_secs(10));
+    let mut own =
+        spawn_own(&ctl, &[slot.as_fd(), acp.as_fd()]).answer_wait(Duration::from_secs(10));
     assert_eq!(own.launch(&builder_launch()), Ok("B1".into()));
     assert_eq!(
         own.launch(&mux::viewer("W2", "/x/acp.log")),
@@ -247,9 +261,7 @@ fn own_launches_signals_and_reports_events() {
 fn a_lost_connection_mid_launch_is_lost_not_failed() {
     let d = dir("lost");
     let ctl = fake(&d, r#"read -r line; echo '{"event":"lost"}'; exit 4"#);
-    let mut own = Own::spawn(&ctl, &[])
-        .expect("spawn")
-        .answer_wait(Duration::from_secs(10));
+    let mut own = spawn_own(&ctl, &[]).answer_wait(Duration::from_secs(10));
     assert!(matches!(
         own.launch(&builder_launch()),
         Err(MuxError::Lost(_))
@@ -258,9 +270,7 @@ fn a_lost_connection_mid_launch_is_lost_not_failed() {
 
     // `own` ending without a word is lost too.
     let ctl = fake(&d, "read -r line; exit 4");
-    let mut own = Own::spawn(&ctl, &[])
-        .expect("spawn")
-        .answer_wait(Duration::from_secs(10));
+    let mut own = spawn_own(&ctl, &[]).answer_wait(Duration::from_secs(10));
     assert!(matches!(
         own.launch(&builder_launch()),
         Err(MuxError::Lost(_))
@@ -273,9 +283,7 @@ fn a_lost_connection_mid_launch_is_lost_not_failed() {
 
     // An `own` that never answers is lost after the wait.
     let ctl = fake(&d, "read -r line; sleep 30");
-    let mut own = Own::spawn(&ctl, &[])
-        .expect("spawn")
-        .answer_wait(Duration::from_millis(300));
+    let mut own = spawn_own(&ctl, &[]).answer_wait(Duration::from_millis(300));
     assert!(
         matches!(own.launch(&builder_launch()), Err(MuxError::Lost(e)) if e.contains("no answer"))
     );

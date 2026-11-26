@@ -26,6 +26,9 @@ use platform::process::{Child, Command, EnvSpec, Signal, Stdio};
 use platform_linux::{LinuxChild, LinuxFile, LinuxSpawner};
 use rusty_json::{Map, Value};
 
+/// How long one `rusty-mux-ctl` call may take before it is killed.
+const CALL_WAIT: Duration = Duration::from_secs(30);
+
 /// How long orch waits for `own` to answer one request before treating
 /// the mux as lost.
 pub const ANSWER_WAIT: Duration = Duration::from_secs(30);
@@ -77,10 +80,9 @@ impl Ctl {
 
     /// One one-shot call; its stdout lines.
     fn call(&self, rest: &[&str]) -> Result<Vec<String>, MuxError> {
-        let out = std::process::Command::new(&self.bin)
-            .args(self.args(rest))
-            .stdin(std::process::Stdio::null())
-            .output()
+        let mut cmd = std::process::Command::new(&self.bin);
+        cmd.args(self.args(rest));
+        let out = crate::bounded::output_within(cmd, CALL_WAIT)
             .map_err(|e| MuxError::Ctl(format!("{}: {e}", self.bin.display())))?;
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         if !out.status.success() {
