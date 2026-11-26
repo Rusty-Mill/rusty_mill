@@ -34,12 +34,13 @@ pub fn classify(path: &str) -> FileClass {
 /// Classifies a path, measuring the languages in `langs`. Code in any other
 /// language is unmeasured. Paths under a `tests` or `target` directory are
 /// ignored, as are Rust `tests.rs` files (the usual out-of-line
-/// `#[cfg(test)] mod tests;`) and Python `test_*.py`, `*_test.py` and
-/// `conftest.py` files.
+/// `#[cfg(test)] mod tests;`). Python `test_*.py`, `*_test.py` and
+/// `conftest.py` files are ignored only when Python is measured, so the
+/// gate's Rust-only report still lists them as unmeasured.
 pub fn classify_in(path: &str, langs: &[Lang]) -> FileClass {
     let mut parts = path.split('/');
     let name = parts.next_back().unwrap_or_default();
-    if parts.any(|d| d == "tests" || d == "target") || is_test_file(name) {
+    if parts.any(|d| d == "tests" || d == "target") || is_test_file(name, langs) {
         return FileClass::Ignored;
     }
     let lang = match name.rsplit_once('.') {
@@ -54,11 +55,11 @@ pub fn classify_in(path: &str, langs: &[Lang]) -> FileClass {
     }
 }
 
-fn is_test_file(name: &str) -> bool {
-    name == "tests.rs"
-        || name == "conftest.py"
+fn is_test_file(name: &str, langs: &[Lang]) -> bool {
+    let python_test = name == "conftest.py"
         || (name.starts_with("test_") && name.ends_with(".py"))
-        || name.ends_with("_test.py")
+        || name.ends_with("_test.py");
+    name == "tests.rs" || (python_test && langs.contains(&Lang::Python))
 }
 
 /// Why a file set could not be measured.
@@ -144,6 +145,10 @@ mod tests {
         let both = [Lang::Rust, Lang::Python];
         let py = FileClass::Measured(Lang::Python);
         assert_eq!(classify("app/main.py"), FileClass::Unmeasured);
+        // The gate's Rust-only classification is unchanged for Python test files.
+        assert_eq!(classify("app/test_main.py"), FileClass::Unmeasured);
+        assert_eq!(classify("app/main_test.py"), FileClass::Unmeasured);
+        assert_eq!(classify("conftest.py"), FileClass::Unmeasured);
         assert_eq!(classify_in("app/main.py", &both), py);
         assert_eq!(classify_in("app/contest.py", &both), py);
         assert_eq!(classify_in("app/test_main.py", &both), FileClass::Ignored);
