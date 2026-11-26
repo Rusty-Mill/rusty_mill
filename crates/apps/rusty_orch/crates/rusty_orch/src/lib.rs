@@ -28,6 +28,7 @@
 
 pub mod agents;
 pub mod args;
+pub mod builder;
 pub mod cli;
 pub mod consolidate;
 pub mod dry_run;

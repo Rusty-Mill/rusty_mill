@@ -4,6 +4,17 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## One builder, end to end
+**2026-11-25**
+
+- `rusty_orch builder run` runs one Claude builder on one design claim:
+  it makes the worktree, opens the cgroup, takes a slot, launches the
+  jailed agent in a mux block, runs one turn, and stops it cleanly.
+- The builder's work is posted as a candidate only when it says it is
+  done (it writes `.lel/submit`) and the diff isn't empty. Otherwise
+  nothing is posted and nothing is charged.
+- If the mux goes away the session is recorded as aborted, not failed.
+
 ## Builder text in acp.log can't pose as orch's
 **2026-11-25**
 

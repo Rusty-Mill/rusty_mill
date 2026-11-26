@@ -155,7 +155,8 @@ lands; `jail.json`'s `token` slot still carries only an orch-minted token (D107)
 Risk accepted: v0 is not a security boundary and egress is open (the D107 gap), so
 a jailed builder could read and send the login. One paid run is approved (D167):
 the #1318 toy-claim run (2 builders, 45 min, one claim), once Nano adds the Claude
-`no_overage` assertion on BaileyAi (open action, not done). #1320 is not approved.
+`no_overage` assertion on BaileyAi (done 2026-11-25; it lapses 2026-12-25, so the run happens
+before then or Nano re-dates it). #1320 is not approved.
 
 Tests (design §11): inside the jail `RUSTY_MUX_SOCKET` is unset, its path doesn't
 exist (needs the mount namespace; Landlock covers v0, D107), `socket(AF_UNIX)`
@@ -198,7 +199,7 @@ rescan under 1 h after adding 50 GB; crash loss at most a few minutes.
                          └─► #1319 synthetic tree
 #1402 this plan ─► #1404 Builder job kind ─┐
               └──► #1405 untested check    ├─► #1318 builder launch via mux ─► #1320 the run
-                                           │       (waits on #749, #750, #752 and Nano's no_overage assertion, D167; #1320 also waits on M1 and the #1318 result)
+                                           │       (waits on #749, #750, #752; no_overage assertion in place 2026-11-25, lapses 2026-12-25, D167; #1320 also waits on M1 and the #1318 result)
 #1236, #1238, #1319 ───────────────────────┘
 ```
 
@@ -213,7 +214,7 @@ dottiusmaximus; agents never queue or merge.
 Settled 2026-11-25 by the recovered design: the builder counts, the
 `builder_session` fields and the budget refusal (D177), and how Windows-only lines
 are recognised (D178). Still **[filled]**: the mirror's contents (section 6),
-which design §4.3 fixes in the task's frozen inputs. Open and unchanged: Nano's Claude `no_overage`
-assertion on BaileyAi (D167), Q4 (golden-set sign-off), and the model for the
-holdout lens. Settled 2026-11-19: Q15 delivery (D166, v0 only) and the #1318 paid
+which design §4.3 fixes in the task's frozen inputs. Open and unchanged: Q4 (golden-set sign-off) and the model for the
+holdout lens. Done 2026-11-25: Nano's Claude `no_overage` assertion on BaileyAi
+(D167; lapses 2026-12-25). Settled 2026-11-19: Q15 delivery (D166, v0 only) and the #1318 paid
 run (D167).

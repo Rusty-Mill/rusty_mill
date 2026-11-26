@@ -13,6 +13,8 @@ layer = "apps"
 orch-core = { workspace = true }
 orch-dispatch = { workspace = true }
 orch-cli = { workspace = true }
+# #1318 S5: the builder sequence moves `orch_lens::builder::Session` rows.
+orch-lens = { workspace = true }
 rusty_bbp = { workspace = true }
 rusty_serde = { workspace = true }
 rusty_atomic_file = { workspace = true }
