@@ -13,8 +13,6 @@ One entry per merged PR against `main`, newest first. No version tags yet.
   the worktree), that a restarted mux aborts the session without charging
   anything, and that a builder whose orch dies is still stopped on time.
 
----
-
 ## One builder, end to end
 **2026-11-25**
 
