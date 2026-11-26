@@ -153,6 +153,24 @@ fn comments_test_files_and_python_in_the_gate_are_skipped() {
 }
 
 #[test]
+fn python_test_files_stay_unmeasured_in_the_gate_and_ignored_in_python_mode() {
+    let files = [
+        ("app/test_main.py", ORIGINAL),
+        ("app/main_test.py", ORIGINAL),
+        ("conftest.py", ORIGINAL),
+    ];
+    let gate = match measure(files) {
+        Ok(r) => r,
+        Err(e) => panic!("measure failed: {e}"),
+    };
+    let listed = ["app/main_test.py", "app/test_main.py", "conftest.py"].map(str::to_owned);
+    assert_eq!(gate.unmeasured, listed);
+    let python = report(&files);
+    assert!(python.unmeasured.is_empty());
+    assert!(python.functions.is_empty());
+}
+
+#[test]
 fn loc_counts_code_lines_only() {
     let r = report(&[("app/a.py", "# c\n\ndef a():\n    x()\n\n    y()\n")]);
     assert_eq!(r.loc, 3);
