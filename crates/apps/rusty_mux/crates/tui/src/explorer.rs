@@ -649,6 +649,9 @@ pub enum Step {
     /// Still open; list this path (see [`Want::Fetch`]) and pass the reply to
     /// [`Explorer::load`], or the refusal to [`Explorer::refuse`].
     Fetch(String),
+    /// Still open; put this path (relative to the workspace, real names,
+    /// `.` for the workspace itself) on the clipboard.
+    Copy(String),
 }
 
 /// What the overlay wants asked besides listings, once per ask.
@@ -769,6 +772,12 @@ impl Explorer {
             .map(|s| s.line(now))
     }
 
+    /// Shows `text` on the status line until the next reply or key that
+    /// asks for something. Callers pass fixed text, never a name.
+    pub fn say(&mut self, text: &str) {
+        self.note = Some(text.to_owned());
+    }
+
     /// Takes a refusal in place of a reply; one line, since the server's
     /// text may carry anything.
     pub fn refuse(&mut self, why: &str) {
@@ -787,8 +796,9 @@ impl Explorer {
     }
 
     /// Acts on the keys in `bytes`: `j`/`k` or the arrows move, Enter, `l`
-    /// or right opens, `h` or left goes up, `q` or a lone Esc leaves. Stops
-    /// at the first key that asks for a listing.
+    /// or right opens, `h` or left goes up, `y` copies the row's path, `q` or a
+    /// lone Esc leaves. Stops at the first key that asks for a listing or a
+    /// copy.
     pub fn keys(&mut self, bytes: &[u8]) -> Step {
         if bytes == b"\x1b" {
             return Step::Leave;
@@ -809,6 +819,15 @@ impl Explorer {
                 b'j' | b'B' => self.tree.iter_mut().for_each(|t| t.step(1)),
                 b'k' | b'A' => self.tree.iter_mut().for_each(|t| t.step(-1)),
                 b'h' | b'D' => self.tree.iter_mut().for_each(Tree::leave),
+                b'y' => {
+                    if let Some(tree) = &self.tree {
+                        self.note = None;
+                        return Step::Copy(match tree.selected_path() {
+                            p if p.is_empty() => ".".to_owned(),
+                            p => p,
+                        });
+                    }
+                }
                 b'l' | b'C' | b'\r' | b'\n' if !self.waiting => {
                     if let Some(Want::Fetch(path)) = self.tree.as_mut().map(Tree::enter) {
                         self.waiting = true;
@@ -826,7 +845,7 @@ impl Explorer {
     #[must_use]
     pub fn render(&self, width: usize, height: usize) -> Vec<String> {
         let mut lines = vec![clip(
-            "workspace: j/k move, Enter open, h up, q leave",
+            "workspace: j/k move, Enter open, h up, y copy path, q leave",
             width,
         )];
         let status = match (&self.note, self.waiting) {
@@ -1237,5 +1256,19 @@ mod tests {
             "{screen:?}"
         );
         assert!(!screen.iter().any(|l| l.contains("  M")));
+    }
+
+    #[test]
+    fn y_asks_to_copy_the_row_path_with_real_names() {
+        let mut e = Explorer::opened(false);
+        assert_eq!(e.keys(b"y"), Step::Open, "nothing to copy before the tree");
+        e.load(".\nd\ta\\tb");
+        assert_eq!(e.keys(b"y"), Step::Copy(".".into()), "the workspace itself");
+        e.keys(b"j");
+        assert_eq!(e.keys(b"y"), Step::Copy("a\tb".into()));
+        e.say("path copied");
+        assert!(e.render(40, 4).iter().any(|l| l == "path copied"));
+        e.keys(b"y");
+        assert!(!e.render(40, 4).iter().any(|l| l == "path copied"));
     }
 }
