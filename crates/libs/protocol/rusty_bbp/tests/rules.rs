@@ -577,6 +577,7 @@ fn assignment_grants_nothing_until_the_first_tick() {
     let task = TaskId("T2".into());
     let mut d = Driver::new(store, task.clone());
     let open = Command::Open(OpenTask {
+        gates: None,
         claims: None,
         mode: rusty_bbp::Mode::Stages,
         task,

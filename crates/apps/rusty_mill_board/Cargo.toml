@@ -2,7 +2,7 @@
 name = "rusty_mill_board"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.98.1"
 description = "Mill Board: a capability-gated kanban board for humans and agents, served over MCP and a live web UI."
 license = "MIT OR Apache-2.0"
 publish = false
@@ -34,6 +34,8 @@ rusty_oauth = { workspace = true }
 # OAuth 2.1 sign-in for /mcp (claude.ai connectors), beside the bearer tokens.
 rusty_oauth_server = { workspace = true, features = ["serve"] }
 rusty_crypto_key = { workspace = true }
+# Ed25519 signing of approval receipts for BBP human gates (#447).
+rusty_pk = { workspace = true }
 rusty_rand = { workspace = true }
 rusty_atomic_file = { workspace = true }
 # The board's own SQLite store (ADR-0007): the workspace wrapper, so pragmas and migrations are shared.

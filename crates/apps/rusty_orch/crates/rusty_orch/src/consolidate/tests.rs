@@ -240,6 +240,7 @@ fn the_cleanup_profile_gets_the_measured_base_and_other_modes_are_refused() {
 fn persist(dir: &Path, name: &str, repo: &str, accepted: u64) {
     let task = TaskId(name.into());
     let mut events = vec![Event::TaskOpened {
+        gates: None,
         claims: None,
         mode: Mode::Claims,
         schema: LOG_SCHEMA_CLAIMS,

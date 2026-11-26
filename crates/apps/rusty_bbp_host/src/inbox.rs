@@ -8,6 +8,7 @@
 //! escalation of the same claim has a different id. Every action the inbox
 //! takes is fenced on `rev`.
 
+use crate::diffstat::{self, Diffstat};
 use crate::erosion_detail::{self, ErosionDetail};
 use crate::open_driver;
 use rusty_bbp::claims::{card, ClaimView, EvidenceView, Sight};
@@ -105,6 +106,9 @@ pub struct Acted {
     pub claim: MsgId,
     /// The references of its marks that were not aborted (a PR, a deploy id).
     pub marks: Vec<String>,
+    /// What the claim's current candidate changes (#1400). `None` when it has
+    /// no stored candidate, or its diffs cannot be read.
+    pub diffstat: Option<Diffstat>,
 }
 
 /// One exhausted task budget field.
@@ -132,6 +136,9 @@ pub fn read(dir: &Path, tasks: &[TaskId]) -> Result<Vec<Escalation>, String> {
                 .claim
                 .as_ref()
                 .and_then(|c| erosion_detail::for_claim(&d.state, c, blob));
+            for a in &mut e.acted {
+                a.diffstat = candidate_stat(&d.state, a.claim, blob);
+            }
             (n, e)
         }));
     }
@@ -274,8 +281,27 @@ fn acted(st: &TaskState, ids: impl Iterator<Item = MsgId>) -> Vec<Acted> {
                 .filter(|m| m.outcome != Some(MarkOutcome::Aborted))
                 .map(|m| m.reference.clone())
                 .collect(),
+            diffstat: None,
         })
         .collect()
+}
+
+/// The diffstat of `claim`'s current candidate: its diff artifacts, in apply order.
+fn candidate_stat(
+    st: &TaskState,
+    claim: MsgId,
+    blob: impl Fn(&BlobRef) -> Option<Vec<u8>>,
+) -> Option<Diffstat> {
+    let cand = st.artifacts.get(&st.claims.get(claim)?.current?)?;
+    let ArtifactPayload::Candidate(m) = &cand.payload else {
+        return None;
+    };
+    let patches: Vec<Vec<u8>> = m
+        .diffs
+        .iter()
+        .map(|id| blob(&st.artifacts.get(id)?.blob))
+        .collect::<Option<_>>()?;
+    diffstat::of(&patches.iter().map(Vec::as_slice).collect::<Vec<_>>())
 }
 
 fn of_claim(st: &TaskState, c: MsgId, seq: usize, reason: Reason) -> Escalation {

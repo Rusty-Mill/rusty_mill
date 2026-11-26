@@ -343,6 +343,16 @@ pub trait Source {
     fn list_dir(&self, _key: u64, _path: Option<String>, done: ListDone) {
         done(Err("this source lists no folders".into()));
     }
+    /// What the source can show of pane `key`'s workspace tree in the
+    /// explorer panel (gui-design D99, card #1573). A source that can't
+    /// hides the panel's entry points.
+    fn explores(&self, _key: u64) -> Explore {
+        Explore::No
+    }
+    /// The user opened, used or closed the explorer on pane `key`. The
+    /// source owns the tree and answers with [`Remote::explorer`]. Not
+    /// called when [`Source::explores`] is [`Explore::No`].
+    fn explore(&self, _key: u64, _ask: Explored) {}
     /// Whether the source can tunnel a loopback port of pane `key`'s host
     /// to this machine (mux C81), so a `localhost` link in that pane opens
     /// here. A source that can't leaves such links to the ordinary link
@@ -363,6 +373,42 @@ pub trait Source {
     fn forwarded_port(&self, _key: u64, _port: u16) -> Option<Bound> {
         None
     }
+    /// Whether the source can send a file to pane `key`'s host (mux C82),
+    /// so a file dropped or pasted on that pane is uploaded and its path
+    /// there typed. A source that can't leaves the file's own path to be
+    /// typed, as a local pane's host is this machine.
+    fn uploads(&self, _key: u64) -> bool {
+        false
+    }
+    /// Sends the file at `path` to pane `key`'s host and calls `done` once,
+    /// from any thread, with its path there or why not. Not called when
+    /// [`Source::uploads`] is `false`.
+    fn upload(&self, _key: u64, _path: std::path::PathBuf, done: UploadDone) {
+        done(Err("this source uploads no files".into()));
+    }
+}
+
+/// How much of a block's workspace the source can show (gui-design D99).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Explore {
+    /// Nothing: the server has no workspace call, or the block is not open.
+    #[default]
+    No,
+    /// The tree and copy path.
+    Tree,
+    /// The tree, and the change marks and size/age footer too.
+    Marked,
+}
+
+/// What the panel asks of the source's tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Explored {
+    /// The panel opened: read the workspace root.
+    Open,
+    /// The panel closed: drop the tree.
+    Close,
+    /// A key or click in the panel.
+    Do(super::explorer::Intent),
 }
 
 /// A forward that listens: the local port, and which run of the pane's
@@ -379,6 +425,12 @@ pub type Forwarded = Result<Bound, String>;
 
 /// What a source calls once with a forward's local port.
 pub type ForwardDone = Box<dyn FnOnce(Forwarded) + Send>;
+
+/// A file's path on the pane's host, or why it was not sent.
+pub type Uploaded = Result<String, String>;
+
+/// What a source calls once with an upload's outcome.
+pub type UploadDone = Box<dyn FnOnce(Uploaded) + Send>;
 
 /// A folder listing's text, or why the host refused it.
 pub type Listed = Result<String, String>;
@@ -523,5 +575,13 @@ impl Remote {
     /// header.
     pub fn blocks(&self, blocks: Vec<(u64, BlockInfo)>) -> bool {
         self.0.send_event(UserEvent::Blocks(blocks)).is_ok()
+    }
+
+    /// What the explorer panel shows now for pane `key`'s tree (gui-design
+    /// D99); one for a pane the panel is not open on is dropped.
+    pub fn explorer(&self, key: u64, snapshot: super::explorer::Snapshot) -> bool {
+        self.0
+            .send_event(UserEvent::Explorer(key, snapshot))
+            .is_ok()
     }
 }

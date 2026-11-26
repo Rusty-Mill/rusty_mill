@@ -60,7 +60,7 @@ use super::render::{CpuRenderer, FloatLayer, PaneFrame, Renderer, Scene, SearchC
 use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use super::source::{
-    Act, Feed, Float, FloatAt, Forwarded, Listed, PaneIo, Remote, Show, Source, Tree,
+    Act, Feed, Float, FloatAt, Forwarded, Listed, PaneIo, Remote, Show, Source, Tree, Uploaded,
 };
 use super::strip::{self, Spot, StripState};
 use super::{link_policy, link_trust};
@@ -207,6 +207,8 @@ pub(crate) enum UserEvent {
     /// What the source says of the shown blocks, for their headers
     /// ([`Remote::blocks`]).
     Blocks(Vec<(u64, super::source::BlockInfo)>),
+    /// What the explorer panel shows for a block ([`Remote::explorer`]).
+    Explorer(u64, super::explorer::Snapshot),
     /// How the source reaches its server ([`Remote::link`]).
     Link(super::source::Link),
     /// The shown session ended while the source was away
@@ -228,6 +230,9 @@ pub(crate) enum UserEvent {
     /// A port forward the source was asked for ([`Source::forward`]).
     /// A forward's answer: the pane and ask it is for, the link and the result.
     Forwarded(u64, u64, super::link_policy::Loopback, Forwarded),
+    /// A file dropped or pasted on a pane was sent to its host (C82): the
+    /// pane and the file's path there, or why not.
+    Uploaded(u64, Uploaded),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -786,6 +791,8 @@ struct WindowState<'a> {
     palette: PaletteUi,
     /// The block that had the focus when the palette opened.
     palette_origin: Option<u64>,
+    /// The workspace explorer panel's view state (gui-design D99).
+    explorer: super::explorer::Panel,
     /// The session overview (gui-design D97).
     overview: OverviewUi,
     /// The trusted link origins (C63, D69-D72).
@@ -795,6 +802,9 @@ struct WindowState<'a> {
     forward_trust: std::collections::HashSet<(u64, u16)>,
     /// The forwards asked for and not yet answered.
     forward_asks: ForwardAsks,
+    /// Files waiting to be sent to a pane's host, one at a time so their
+    /// paths are typed in the order they were dropped (C82).
+    uploads: UploadQueue,
     /// The effective config; refreshed on live reload so new tabs follow it.
     config: Config,
     /// The config file in effect, for the open shortcut + reload re-reads.
@@ -3006,6 +3016,21 @@ impl WindowState<'_> {
     /// Paste the system clipboard into the active tab's child (Ctrl+Shift+V, and
     /// Ctrl+V on Windows).
     fn paste(&mut self) {
+        let uploads = self.focused().is_some_and(|k| self.source.uploads(k));
+        let Some(cb) = self.clipboard.as_mut() else {
+            return;
+        };
+        // Files copied in a file manager go as drops do, to a pane whose
+        // host is elsewhere (C82); a local pane keeps pasting text.
+        if uploads
+            && let Ok(files) = cb.get().file_list()
+            && !files.is_empty()
+        {
+            for file in files {
+                self.start_upload(file);
+            }
+            return;
+        }
         let Some(cb) = self.clipboard.as_mut() else {
             return;
         };
@@ -5412,6 +5437,16 @@ impl WindowState<'_> {
         }
     }
 
+    /// The explorer panel's newest snapshot arrived.
+    fn show_explorer(&mut self, key: u64, snapshot: super::explorer::Snapshot) {
+        if !self.explorer.set(key, snapshot) {
+            return;
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// Show what the source says of its blocks in their headers.
     fn show_blocks(&mut self, blocks: Vec<(u64, super::source::BlockInfo)>) {
         let body = &mut self.body;
@@ -6559,6 +6594,95 @@ impl WindowState<'_> {
         }
     }
 
+    /// A file dropped on the window: typed as a path, or, on a pane whose
+    /// host is elsewhere, sent there first (C82).
+    fn drop_file(&mut self, path: std::path::PathBuf) {
+        if self.overview.is_open() {
+            return;
+        }
+        if self.start_upload(path.clone()) {
+            return;
+        }
+        let Some(p) = self.pane_mut() else {
+            return;
+        };
+        let bracketed = p.grid.lock().bracketed_paste;
+        let Some(bytes) = dropped_file_paste(&path.to_string_lossy(), bracketed, false) else {
+            return;
+        };
+        let _ = p.writer.write(&bytes);
+        self.snap_to_bottom();
+    }
+
+    /// Queues `path` to be sent to the focused pane's host, if that is
+    /// another machine: `false` when it is this one, so `path` is as good
+    /// there as here.
+    fn start_upload(&mut self, path: std::path::PathBuf) -> bool {
+        let Some(key) = self.focused().filter(|&k| self.source.uploads(k)) else {
+            return false;
+        };
+        self.uploads.push(key, path);
+        self.next_upload();
+        true
+    }
+
+    /// Sends the next queued file unless one is on its way; the answer comes
+    /// back as [`UserEvent::Uploaded`].
+    fn next_upload(&mut self) {
+        let open: std::collections::HashSet<u64> = self
+            .tabs
+            .iter()
+            .flat_map(|t| t.panes.iter().map(|p| p.id))
+            .collect();
+        while let Some((key, path)) = self.uploads.next(|k| open.contains(&k)) {
+            let proxy = self.proxy.clone();
+            self.source.upload(
+                key,
+                path,
+                Box::new(move |uploaded| {
+                    let _ = proxy.send_event(UserEvent::Uploaded(key, uploaded));
+                }),
+            );
+        }
+    }
+
+    /// A file sent for pane `key` arrived: its path there is typed into the
+    /// pane as a drop of a local file would be, or the notice says why not.
+    fn uploaded(&mut self, key: u64, uploaded: Uploaded) {
+        self.uploads.finish(key);
+        match uploaded {
+            Ok(path) => self.type_remote_path(key, &path),
+            Err(why) => self.show_notice(Some(super::source::Notice {
+                title: "File not sent".to_owned(),
+                detail: why,
+            })),
+        }
+        self.next_upload();
+    }
+
+    /// Types `path`, a file's place on pane `key`'s host, quoted for that
+    /// host's shell.
+    fn type_remote_path(&mut self, key: u64, path: &str) {
+        let Some(quoted) = quote_remote(path) else {
+            return self.show_notice(Some(super::source::Notice {
+                title: "File sent, path not typed".to_owned(),
+                detail: format!("{path} has characters a Windows shell would act on."),
+            }));
+        };
+        let Some(p) = self.pane_by_id_mut(key) else {
+            return;
+        };
+        let bracketed = p.grid.lock().bracketed_paste;
+        let _ = p
+            .writer
+            .write(&encode_paste(&format!("{quoted} "), bracketed));
+        if p.grid.lock().reset_view()
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
+    }
+
     /// Type `text` into the focused block as a paste, without Enter
     /// (gui-design D78).
     fn type_text(&mut self, text: &str) {
@@ -6641,19 +6765,7 @@ impl WindowState<'_> {
                     window.request_redraw();
                 }
             }
-            WindowEvent::DroppedFile(path) => {
-                let overview = self.overview.is_open();
-                let Some(p) = self.pane_mut() else {
-                    return;
-                };
-                let bracketed = p.grid.lock().bracketed_paste;
-                let Some(bytes) = dropped_file_paste(&path.to_string_lossy(), bracketed, overview)
-                else {
-                    return;
-                };
-                let _ = p.writer.write(&bytes);
-                self.snap_to_bottom();
-            }
+            WindowEvent::DroppedFile(path) => self.drop_file(path),
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::Resized(size) => {
                 self.apply_size(size.width, size.height);
@@ -7329,10 +7441,12 @@ impl<'a> App<'a> {
             shown_wait: None,
             palette: PaletteUi::new().ok_or("the interface font failed to parse")?,
             palette_origin: None,
+            explorer: super::explorer::Panel::default(),
             overview: OverviewUi::new().ok_or("the interface font failed to parse")?,
             links: load_trust(),
             forward_trust: std::collections::HashSet::new(),
             forward_asks: ForwardAsks::default(),
+            uploads: UploadQueue::default(),
             config: self.config.clone(),
             config_path: self.config_path.clone(),
             profile_override: self.profile_override.clone(),
@@ -7476,6 +7590,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                     w.show_blocks(blocks);
                 }
             }
+            UserEvent::Explorer(key, snapshot) => {
+                if let Some(w) = self.windows.first_mut() {
+                    w.show_explorer(key, snapshot);
+                }
+            }
             UserEvent::Link(link) => {
                 if let Some(w) = self.windows.first_mut() {
                     w.show_link(link);
@@ -7495,6 +7614,13 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                 // Only the window that still holds the pane takes the answer.
                 if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(key)) {
                     w.forwarded(key, op, &target, forwarded);
+                }
+            }
+            UserEvent::Uploaded(key, uploaded) => {
+                // The window that asked, even if its pane has gone since: the
+                // answer still frees its queue.
+                if let Some(w) = self.windows.iter_mut().find(|w| w.uploads.busy_with(key)) {
+                    w.uploaded(key, uploaded);
                 }
             }
             UserEvent::Listed(ask, listed) => {
@@ -7994,6 +8120,60 @@ fn shell_quote(path: &str) -> String {
     {
         format!("'{}'", path.replace('\'', "'\\''"))
     }
+}
+
+/// Files to send to panes' hosts, one at a time.
+#[derive(Default)]
+struct UploadQueue {
+    waiting: std::collections::VecDeque<(u64, std::path::PathBuf)>,
+    /// The pane whose file is on its way.
+    active: Option<u64>,
+}
+
+impl UploadQueue {
+    fn push(&mut self, key: u64, path: std::path::PathBuf) {
+        self.waiting.push_back((key, path));
+    }
+
+    /// The next file to send, if none is on its way; files of a pane that
+    /// is no longer `open` are dropped.
+    fn next(&mut self, open: impl Fn(u64) -> bool) -> Option<(u64, std::path::PathBuf)> {
+        if self.active.is_some() {
+            return None;
+        }
+        while let Some((key, path)) = self.waiting.pop_front() {
+            if open(key) {
+                self.active = Some(key);
+                return Some((key, path));
+            }
+        }
+        None
+    }
+
+    /// Whether the file on its way is `key`'s.
+    fn busy_with(&self, key: u64) -> bool {
+        self.active == Some(key)
+    }
+
+    /// The file on its way is answered, whether or not its pane remains.
+    fn finish(&mut self, key: u64) {
+        if self.busy_with(key) {
+            self.active = None;
+        }
+    }
+}
+
+/// Quotes `path`, a file's place on a mux server's host, for that host's
+/// shell, which is not necessarily this machine's: a path from `/` is the
+/// server's POSIX one, single-quoted whatever it holds. Anything else is a
+/// Windows path, double-quoted only if cmd and PowerShell leave it alone
+/// inside quotes; with a `$`, backtick, `%`, `^`, `&` or the like, `None`.
+fn quote_remote(path: &str) -> Option<String> {
+    if path.starts_with('/') {
+        return Some(format!("'{}'", path.replace('\'', "'\\''")));
+    }
+    let plain = |c: char| c.is_alphanumeric() || " _.-:\\/()[]".contains(c);
+    (!path.is_empty() && path.chars().all(plain)).then(|| format!("\"{path}\""))
 }
 
 /// Hand `link` to the OS default handler. Only a parsed [`link_policy::Link`]
@@ -9170,6 +9350,60 @@ mod tests {
         assert_eq!(shell_quote("/tmp/plain"), "'/tmp/plain'");
         assert_eq!(shell_quote("/tmp/with space"), "'/tmp/with space'");
         assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
+    }
+
+    #[test]
+    fn an_upload_answered_after_its_pane_closed_frees_the_queue() {
+        let mut q = super::UploadQueue::default();
+        q.push(1, "a".into());
+        q.push(1, "b".into());
+        q.push(2, "c".into());
+        assert_eq!(q.next(|_| true), Some((1, "a".into())));
+        assert_eq!(q.next(|_| true), None, "one at a time");
+        assert!(q.busy_with(1) && !q.busy_with(2));
+        // Pane 1 is closed before its answer arrives: the answer still
+        // finishes the file, and what waits for pane 1 is dropped.
+        q.finish(1);
+        assert_eq!(q.next(|k| k != 1), Some((2, "c".into())));
+        q.finish(9);
+        assert!(q.busy_with(2), "an answer for another pane frees nothing");
+        q.finish(2);
+        assert_eq!(q.next(|_| true), None);
+    }
+
+    #[test]
+    fn a_remote_path_is_quoted_for_the_servers_shell_not_ours() {
+        // POSIX server: every byte stays inside the quotes.
+        assert_eq!(super::quote_remote("/up/a b").as_deref(), Some("'/up/a b'"));
+        assert_eq!(
+            super::quote_remote("/up/x;reboot").as_deref(),
+            Some("'/up/x;reboot'")
+        );
+        assert_eq!(
+            super::quote_remote("/up/$(rm -rf ~) a.txt").as_deref(),
+            Some("'/up/$(rm -rf ~) a.txt'")
+        );
+        assert_eq!(
+            super::quote_remote("/up/it's").as_deref(),
+            Some("'/up/it'\\''s'")
+        );
+        // Windows server: quoted, or not typed at all.
+        assert_eq!(
+            super::quote_remote("C:\\up\\a b.txt").as_deref(),
+            Some("\"C:\\up\\a b.txt\"")
+        );
+        for hostile in [
+            "C:\\up\\a&b",
+            "C:\\up\\$(x)",
+            "C:\\up\\%PATH%",
+            "C:\\up\\a`b",
+            "C:\\up\\a^b",
+            "C:\\up\\a;b",
+            "C:\\up\\a'b",
+            "",
+        ] {
+            assert_eq!(super::quote_remote(hostile), None, "{hostile}");
+        }
     }
 
     #[test]

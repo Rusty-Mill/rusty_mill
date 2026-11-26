@@ -1,0 +1,2 @@
+{"candidate":42,"claim":7,"ended":99,"n":1,"started":10,"state":"stored","tokens_in":5,"tokens_out":2}
+{"candidate":null,"claim":7,"ended":99,"n":2,"started":10,"state":"failed","tokens_in":5,"tokens_out":2}

@@ -336,6 +336,12 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
     if w.st.opened {
         return Err(rej(Code::AlreadyOpen, "task already opened"));
     }
+    if o.mode == Mode::Claims && o.gates.is_some() {
+        return Err(rej(
+            Code::BadClaimsConfig,
+            "gates: scratch gates have no claims-mode rule yet (D190)",
+        ));
+    }
     if o.mode == Mode::Claims {
         crate::claims_engine::check_open(o)?;
     } else if o.holdout_digest.is_some() {
@@ -391,6 +397,7 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
         claims: claims.then(|| o.claims.unwrap_or_default()),
         holdout_digest: o.holdout_digest,
         baseline_digest: o.baseline_digest,
+        gates: o.gates,
     });
     let id = w.st.next_art_id();
     w.emit(Event::ArtifactStored(ArtifactRecord {

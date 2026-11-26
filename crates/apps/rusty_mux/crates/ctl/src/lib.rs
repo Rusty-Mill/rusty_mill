@@ -37,6 +37,16 @@
 //! machine's, printing `LOCAL<TAB>REMOTE` for each, until the block closes
 //! or it is stopped. It is not for chaining with `+`.
 //!
+//! `upload [--block B] [--name N] FILE` (C82) and `download [--block B]
+//! [--out FILE] PATH` (C83) attach to the block, take its input lease and
+//! move one file over that connection: upload prints the path the file got
+//! on the server, download writes to stdout or `--out`. Neither is for
+//! chaining with `+`.
+//!
+//! `copy --block B --to-block B [--name N] HOST:PATH HOST` (C83) moves a
+//! file from one saved host's server to another's upload folder, streaming
+//! through this machine, and prints its path there.
+//!
 //! Output is text, or one JSON object per line with `--json`. The exit code
 //! is an [`Exit`]; an interrupt ends the process with the signal, which a
 //! shell reports as 130. An embedder bounds a command with [`run_until`].
@@ -507,6 +517,12 @@ fn run_with(
             return terminfo::run(&command, &ssh, out)
                 .unwrap_or_else(|(exit, reason)| report(err, exit, &reason));
         }
+        Command::Copy(copy) => {
+            if invocation.host.is_some() || invocation.socket.is_some() {
+                return report(err, Exit::Usage, COPY_HOSTS);
+            }
+            return run_copy(&copy, env, stop, out, err);
+        }
         Command::Agent(AgentCommand::Report(hook)) => {
             return send_hook_report(hook_socket.as_deref(), env, &hook, stop);
         }
@@ -532,6 +548,8 @@ fn run_with(
         | Command::Wait(_)
         | Command::Run(_)
         | Command::Forward(_)
+        | Command::Upload(_)
+        | Command::Download(_)
         | Command::Overview
         | Command::ServerStop => {}
     }
@@ -826,8 +844,11 @@ fn execute(
                 &mut *session.out,
             )
         }
+        Command::Upload(upload) => run_upload(&mut session, upload),
+        Command::Download(download) => run_download(&mut session, download),
         Command::Help(_)
         | Command::Api(_)
+        | Command::Copy(_)
         | Command::Do { .. }
         | Command::Config(_)
         | Command::Hosts(_)
@@ -841,6 +862,380 @@ fn execute(
         | Command::Own
         | Command::Completion(_) => Ok(Exit::Ok),
     }
+}
+
+/// First request number of a transfer: past the few the preparing calls use.
+const TRANSFER_REQ: u64 = 1_000;
+
+/// Prepares a transfer: attaches to the block, takes its lease and checks
+/// the server offers `feature`. Returns a client connection on the same
+/// stream, and the block.
+#[cfg(any(unix, windows))]
+fn transfer(
+    session: &mut Session<'_, conn::Stream>,
+    prepare: &[cli::Call],
+    feature: Features,
+    verb: &str,
+) -> Result<(rusty_mux_client::Conn<conn::Stream>, BlockId), Failure> {
+    let (features, block) = session.calls_with(prepare, feature)?;
+    if !features.contains(feature) {
+        return Err(Failure::Failed(format!(
+            "{verb}: this server does not offer it"
+        )));
+    }
+    let block = block.ok_or_else(|| Failure::Failed(format!("{verb}: no block")))?;
+    let (reader, _writer, pending) = session.conn.split()?;
+    let conn = rusty_mux_client::Conn::with_pending(reader, pending);
+    Ok((conn, BlockId::from_uuid(block)))
+}
+
+/// A refusal of the server is a failure of the command, not a lost server.
+fn refused(verb: &str, e: io::Error) -> Failure {
+    match e.kind() {
+        io::ErrorKind::Other => Failure::Failed(format!("{verb}: {e}")),
+        _ => e.into(),
+    }
+}
+
+/// `upload`: sends the file and prints the path it got on the server.
+#[cfg(any(unix, windows))]
+fn run_upload(
+    session: &mut Session<'_, conn::Stream>,
+    upload: &cli::Upload,
+) -> Result<Exit, Failure> {
+    // Opened first, so a missing file fails before the lease is taken.
+    let local = |e: io::Error| Failure::Failed(format!("upload: {}: {e}", upload.file.display()));
+    let mut file = std::fs::File::open(&upload.file).map_err(local)?;
+    if !file.metadata().map_err(local)?.is_file() {
+        return Err(local(io::Error::other("not a regular file")));
+    }
+    let (mut conn, block) = transfer(session, &upload.prepare, Features::UPLOAD, "upload")?;
+    let path =
+        rusty_mux_client::upload::send(&mut conn, block, &upload.name, &mut file, TRANSFER_REQ)
+            .map_err(|e| refused("upload", e))?;
+    let line = match session.json {
+        true => rusty_json::Value::Object(
+            [("path".to_owned(), rusty_json::Value::from(path))]
+                .into_iter()
+                .collect(),
+        )
+        .to_json_string(),
+        false => path,
+    };
+    writeln!(session.out, "{line}")?;
+    Ok(Exit::Ok)
+}
+
+/// Creates, exclusively, a file beside `out` to stage a download in: a name
+/// already taken is never opened, so nothing existing is truncated.
+#[cfg(any(unix, windows))]
+fn stage(out: &Path) -> io::Result<(PathBuf, std::fs::File)> {
+    for attempt in 0..100 {
+        let mut name = out.as_os_str().to_owned();
+        name.push(format!(".part-{}-{attempt}", std::process::id()));
+        let path = PathBuf::from(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free staging name beside the output",
+    ))
+}
+
+/// `download`: copies the file to `--out`, or to stdout. `--out` is written
+/// beside itself and renamed over it only once the whole file is in, so a
+/// failure or an interrupt never touches what was there.
+#[cfg(any(unix, windows))]
+fn run_download(
+    session: &mut Session<'_, conn::Stream>,
+    download: &cli::Download,
+) -> Result<Exit, Failure> {
+    // The preparing calls report on stdout in `--json`, ahead of the bytes.
+    if session.json && download.out.is_none() {
+        return Err(Failure::Failed(
+            "download: --json cannot share stdout with the file; give --out".into(),
+        ));
+    }
+    let (mut conn, block) = transfer(session, &download.prepare, Features::DOWNLOAD, "download")?;
+    let Some(out) = &download.out else {
+        rusty_mux_client::download::fetch(
+            &mut conn,
+            block,
+            &download.path,
+            &mut session.out,
+            TRANSFER_REQ,
+        )
+        .map_err(|e| refused("download", e))?;
+        return Ok(Exit::Ok);
+    };
+    let local = |e: io::Error| Failure::Failed(format!("download: {}: {e}", out.display()));
+    let (part, mut file) = stage(out).map_err(local)?;
+    let fetched = rusty_mux_client::download::fetch(
+        &mut conn,
+        block,
+        &download.path,
+        &mut file,
+        TRANSFER_REQ,
+    );
+    let done = fetched
+        .map_err(|e| refused("download", e))
+        .and_then(|_| file.sync_all().map_err(local))
+        .and_then(|()| std::fs::rename(&part, out).map_err(local));
+    if done.is_err() {
+        // Best effort: the failure being reported is the first one.
+        let _gone = std::fs::remove_file(&part);
+    }
+    done?;
+    Ok(Exit::Ok)
+}
+
+const COPY_HOSTS: &str = "copy names its hosts itself: --host and --socket do not apply";
+
+/// Prepares one side of a `copy`: reaches `host`, attaches and takes the
+/// lease. The `Reached` keeps an ssh forward alive and goes with the
+/// connection.
+#[cfg(any(unix, windows))]
+fn copy_side(
+    host: &str,
+    prepare: &[cli::Call],
+    feature: Features,
+    verb: &str,
+    env: &Env,
+    stop: &Stop,
+) -> Result<
+    (
+        hosts::Reached,
+        rusty_mux_client::Conn<conn::Stream>,
+        BlockId,
+    ),
+    (Exit, String),
+> {
+    let lost = |failure: Failure| match failure {
+        Failure::Failed(reason) => (Exit::Failed, format!("{host}: {reason}")),
+        Failure::TimedOut => (Exit::TimedOut, format!("{host}: timed out")),
+        Failure::Missing(reason) => (Exit::Target, format!("{host}: {reason}")),
+        Failure::Unreachable(e) => (Exit::Unreachable, format!("{host}: {e}")),
+    };
+    let reached = hosts::resolve(host, env, stop)?;
+    let mut conn = Conn::new(
+        conn::connect(&reached.socket, stop).map_err(|e| lost(e.into()))?,
+        stop.clone(),
+    );
+    // The preparing calls' reports are not the copy's output.
+    let mut sink = io::sink();
+    let mut session = Session {
+        conn: &mut conn,
+        out: &mut sink,
+        json: false,
+        here: None,
+    };
+    let (conn, block) = transfer(&mut session, prepare, feature, verb).map_err(lost)?;
+    Ok((reached, conn, block))
+}
+
+/// What the download hands the upload.
+#[cfg(any(unix, windows))]
+enum Item {
+    Data(Vec<u8>),
+    /// The download finished: only this makes the upload's input complete.
+    End,
+    Failed(io::ErrorKind, String),
+}
+
+/// The upload's input. The end of the file is the download's `End`; a
+/// closed channel without one (a panicked download, say) and a `Failed` are
+/// errors, and stay errors on every later read.
+#[cfg(any(unix, windows))]
+struct Pipe {
+    chunks: std::sync::mpsc::Receiver<Item>,
+    pending: std::io::Cursor<Vec<u8>>,
+    ended: Option<Result<(), (io::ErrorKind, String)>>,
+}
+
+#[cfg(any(unix, windows))]
+impl io::Read for Pipe {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let n = self.pending.read(buf)?;
+            if n > 0 || buf.is_empty() {
+                return Ok(n);
+            }
+            match &self.ended {
+                Some(Ok(())) => return Ok(0),
+                Some(Err((kind, why))) => return Err(io::Error::new(*kind, why.clone())),
+                None => {}
+            }
+            match self.chunks.recv() {
+                Ok(Item::Data(chunk)) => self.pending = std::io::Cursor::new(chunk),
+                Ok(Item::End) => self.ended = Some(Ok(())),
+                // Never `Interrupted`: a reader would retry it.
+                Ok(Item::Failed(kind, why)) => {
+                    let kind = match kind {
+                        io::ErrorKind::Interrupted => io::ErrorKind::Other,
+                        kind => kind,
+                    };
+                    self.ended = Some(Err((kind, why)));
+                }
+                Err(_) => {
+                    let why = "the download ended before the whole file arrived".to_owned();
+                    self.ended = Some(Err((io::ErrorKind::UnexpectedEof, why)));
+                }
+            }
+        }
+    }
+}
+
+/// The error a [`Feed`] write fails with once the upload has stopped
+/// reading: the upload's own error is the cause, not the download's.
+#[cfg(any(unix, windows))]
+#[derive(Debug)]
+struct UploadStopped;
+
+#[cfg(any(unix, windows))]
+impl std::fmt::Display for UploadStopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the upload stopped")
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl std::error::Error for UploadStopped {}
+
+/// The writing end of [`Pipe`]: a few chunks ahead, then it waits.
+#[cfg(any(unix, windows))]
+struct Feed(std::sync::mpsc::SyncSender<Item>);
+
+#[cfg(any(unix, windows))]
+impl Write for Feed {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0
+            .send(Item::Data(buf.to_vec()))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, UploadStopped))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Which end of a copy failed.
+#[cfg(any(unix, windows))]
+#[derive(Debug)]
+enum Side {
+    Download(io::Error),
+    Upload(io::Error),
+}
+
+/// Runs `download` and `upload` at once, the first feeding the second. The
+/// upload sees the end of the file only if the download finished.
+#[cfg(any(unix, windows))]
+fn stream<D, U>(download: D, upload: U) -> Result<String, Side>
+where
+    D: FnOnce(&mut Feed) -> io::Result<()> + Send,
+    U: FnOnce(&mut Pipe) -> io::Result<String>,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel(4);
+    let mut pipe = Pipe {
+        chunks: rx,
+        pending: std::io::Cursor::new(Vec::new()),
+        ended: None,
+    };
+    std::thread::scope(|scope| {
+        let reading = scope.spawn(move || {
+            let mut feed = Feed(tx);
+            let done = download(&mut feed);
+            let _ = feed.0.send(match &done {
+                Ok(()) => Item::End,
+                Err(e) => Item::Failed(e.kind(), e.to_string()),
+            });
+            done
+        });
+        let sent = upload(&mut pipe);
+        // Unblocks a download still waiting to hand a chunk over.
+        drop(pipe);
+        let fetched = reading
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("the download panicked")));
+        match (fetched, sent) {
+            (Err(e), Err(up)) if e.get_ref().is_some_and(|r| r.is::<UploadStopped>()) => {
+                Err(Side::Upload(up))
+            }
+            (Err(e), _) => Err(Side::Download(e)),
+            (Ok(()), Err(e)) => Err(Side::Upload(e)),
+            (Ok(()), Ok(path)) => Ok(path),
+        }
+    })
+}
+
+/// `copy`: streams a file of one host's server into another's upload folder
+/// and prints its path there. Nothing is kept on this machine.
+#[cfg(any(unix, windows))]
+fn run_copy(
+    copy: &cli::Copy,
+    env: &Env,
+    stop: &Stop,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit {
+    let copied = || -> Result<String, (Exit, String)> {
+        let (_from, mut source, from_block) = copy_side(
+            &copy.from_host,
+            &copy.from_prepare,
+            Features::DOWNLOAD,
+            "download",
+            env,
+            stop,
+        )?;
+        let (_to, mut sink, to_block) = copy_side(
+            &copy.to_host,
+            &copy.to_prepare,
+            Features::UPLOAD,
+            "upload",
+            env,
+            stop,
+        )?;
+        let failed = |verb: &str, host: &str, e: io::Error| match refused(verb, e) {
+            Failure::Failed(reason) => (Exit::Failed, format!("{host}: {reason}")),
+            _ => (Exit::Unreachable, format!("{host}: connection lost")),
+        };
+        stream(
+            |feed| {
+                rusty_mux_client::download::fetch(
+                    &mut source,
+                    from_block,
+                    &copy.path,
+                    feed,
+                    TRANSFER_REQ,
+                )
+                .map(drop)
+            },
+            |pipe| {
+                rusty_mux_client::upload::send(&mut sink, to_block, &copy.name, pipe, TRANSFER_REQ)
+            },
+        )
+        .map_err(|side| match side {
+            Side::Download(e) => failed("download", &copy.from_host, e),
+            Side::Upload(e) => failed("upload", &copy.to_host, e),
+        })
+    };
+    match copied() {
+        Ok(path) => write_line(out, &path),
+        Err((exit, reason)) => report(err, exit, &reason),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn run_copy(_: &cli::Copy, _: &Env, _: &Stop, _: &mut dyn Write, err: &mut dyn Write) -> Exit {
+    report(err, Exit::Unreachable, "rusty-mux-ctl needs Unix sockets")
 }
 
 /// `forward`: listens on each port and tunnels it until the block closes or
@@ -1448,6 +1843,30 @@ fn require_sync(features: Features) -> Result<(), Failure> {
 mod tests {
     use super::*;
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn staging_never_opens_a_name_that_exists() {
+        let dir = std::env::temp_dir().join(format!("ctl-stage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let out = dir.join("out.bin");
+        std::fs::write(&out, b"output").expect("out");
+        // The first names this process would pick are taken.
+        let taken: Vec<PathBuf> = (0..3)
+            .map(|n| dir.join(format!("out.bin.part-{}-{n}", std::process::id())))
+            .collect();
+        for path in &taken {
+            std::fs::write(path, b"someone else's").expect("taken");
+        }
+        let (part, mut file) = stage(&out).expect("a free name");
+        write!(file, "staged").expect("write");
+        assert!(!taken.contains(&part), "{}", part.display());
+        for path in &taken {
+            assert_eq!(std::fs::read(path).expect("kept"), b"someone else's");
+        }
+        assert_eq!(std::fs::read(&out).expect("kept"), b"output");
+        let _gone = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn ssh_home_is_the_profile_on_windows_and_home_elsewhere() {
         let both = |name: &str| match name {
@@ -1621,5 +2040,65 @@ mod tests {
             Err(Failure::Failed(why)) if why == "the server does not support create-session without --name"
         ));
         assert!(require(Features::SESSION_NAMES, &unnamed).is_ok());
+    }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod copy_tests {
+    use std::io::Read as _;
+
+    use super::*;
+
+    fn slurp(pipe: &mut Pipe) -> io::Result<String> {
+        let mut text = String::new();
+        pipe.read_to_string(&mut text)?;
+        Ok(text)
+    }
+
+    #[test]
+    fn a_finished_download_ends_the_upload_cleanly() {
+        let sent = stream(|feed| feed.write_all(b"whole"), slurp);
+        assert_eq!(sent.expect("copied"), "whole");
+    }
+
+    #[test]
+    fn a_download_that_panics_mid_stream_is_not_an_end_of_file() {
+        let sent = stream(
+            |feed| {
+                feed.write_all(b"half").expect("fed");
+                panic!("stops mid-stream");
+            },
+            slurp,
+        );
+        assert!(matches!(sent, Err(Side::Download(_))), "{sent:?}");
+    }
+
+    #[test]
+    fn an_interrupted_download_error_stays_an_error() {
+        let sent = stream(
+            |feed| {
+                feed.write_all(b"half")?;
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            },
+            slurp,
+        );
+        assert!(matches!(sent, Err(Side::Download(_))), "{sent:?}");
+    }
+
+    #[test]
+    fn a_dead_source_is_not_blamed_on_the_upload() {
+        let sent = stream(|_| Err(io::Error::from(io::ErrorKind::BrokenPipe)), slurp);
+        assert!(matches!(sent, Err(Side::Download(_))), "{sent:?}");
+    }
+
+    #[test]
+    fn a_stopped_upload_names_the_upload() {
+        let sent = stream(
+            |feed| loop {
+                feed.write_all(&[0; 1024])?;
+            },
+            |_| Err(io::Error::other("refused")),
+        );
+        assert!(matches!(sent, Err(Side::Upload(_))), "{sent:?}");
     }
 }

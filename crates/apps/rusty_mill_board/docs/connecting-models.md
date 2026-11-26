@@ -24,6 +24,11 @@ To keep a model inside one application of a monorepo, add `"projects": ["rocket_
 from the board's `--projects FILE`, which the server checks at start): that token cannot see, take or change
 cards of any other project, and `card_take` only ever returns its own.
 
+Add `"view": "agent"` to an entry to give that model lean reads: an unpaged `board_list` returns pages of 50 (follow
+`next_cursor`), and `card_get` returns the recent comments (`history: "all"` gets every one). It changes defaults only,
+never what the token may see or do, an explicit `limit`, `cursor` or `history` always wins, and a minted worker keeps its
+lead's profile. Leave it out for `full`, which is today's behaviour. `card_take` and `card_claim` still return the whole card.
+
 The simplest start is `rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.0.0.1:8787 --settings-dir ~/.mill`
 (with `RUSTY_TICK_TOKEN` set):
 the first start creates `~/.mill/identities.json` with an `admin` agent and prints its token once (open
@@ -63,7 +68,15 @@ You work from the Mill Board (MCP server "mill"). Humans decide what is ready an
    is waiting for your role. If null, say so and stop; do not invent work.
 3. Read the card and its comments (earlier notes may say why a previous attempt failed). Do the work in
    your own environment.
-4. Call card_comment with what you did, what you verified, and anything the next person needs.
+4. Call card_comment with what you did, what you verified, and anything the next person needs. Keep it
+   a status note (at most 2 KiB) and link the detail: rationale in remind-me, specs and logs in the
+   repo, review on GitHub. Pass `state` (one line, at most 200 bytes) to say where the work stands
+   now, such as "review requested, PR #1888"; card_move and card_update take it too. Title is at
+   most 200 characters, body and prompt 8 KiB; a longer write is refused, and a card already over a
+   limit is never rewritten. Pass `kind` to type a comment: `handoff` (3 lines: done, next, where the
+   details are), `blocker` or `question` (open until a later comment names its `id` in `resolves`),
+   `claim`, `decision` or the default `note`. `card_get` with `history: "recent"` returns only the last 5
+   comments, the latest handoff and every open blocker or question.
 5. Call card_move to the next column: builder -> qa when the work is done; qa -> review if it passes, or
    back to building with the failure in a comment; reviewer -> done only when you would merge it.
    If the card's work already merged on the forge (its PR is merged), record the PR link with

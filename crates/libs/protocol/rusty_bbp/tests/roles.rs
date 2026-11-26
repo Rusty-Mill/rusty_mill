@@ -190,6 +190,7 @@ fn opening_a_task_with_an_invalid_roster_is_refused_and_no_task_exists() {
     let task = TaskId("T9".into());
     let mut d = Driver::new(store, task.clone());
     let cmd = Command::Open(OpenTask {
+        gates: None,
         claims: None,
         mode: rusty_bbp::Mode::Stages,
         task,
@@ -564,6 +565,7 @@ fn the_roster_is_recorded_and_cannot_change() {
     }));
     assert_eq!(r.code, Code::UnknownRole);
     let again = Command::Open(OpenTask {
+        gates: None,
         claims: None,
         mode: rusty_bbp::Mode::Stages,
         task: task.clone(),
@@ -589,6 +591,7 @@ fn a_log_under_another_schema_does_not_replay() {
     let mut store = MemStore::new();
     let task = TaskId("T7".into());
     let opened = Event::TaskOpened {
+        gates: None,
         claims: None,
         mode: rusty_bbp::Mode::Stages,
         schema: 1,
@@ -640,6 +643,7 @@ fn the_file_store_refuses_a_v0_4_log_and_a_future_schema() {
     let task = TaskId("T3".into());
     let mut store = FsStore::open(&dir).expect("fresh dir");
     let opened = Event::TaskOpened {
+        gates: None,
         claims: None,
         mode: rusty_bbp::Mode::Stages,
         schema: LOG_SCHEMA_CLAIMS + 1,

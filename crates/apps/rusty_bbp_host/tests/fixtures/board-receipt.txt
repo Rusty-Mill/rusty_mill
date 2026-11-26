@@ -1,0 +1,2 @@
+{"task":"orch-abc","gate":"merge","subject":4,"run":1,"fence":17,"approver":"nano","verbatim":"Merge #12 at abc123? Yes.","source":"cmsg_fixture","issued_ms":1764000000000}
+1eb73651b7aefe503abfc19d28cb421efc294ace8e11b43be41a96f5e79c3f4469a71769ba914dd25d74624c88633d68f48a096e9119f4f3d743ab4f039abf09

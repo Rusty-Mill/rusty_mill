@@ -1,0 +1,70 @@
+== environment
+6.18.58.1-microsoft-standard-WSL2
+PRETTY_NAME="Ubuntu 24.04.5 LTS"
+crw-rw-rw- 1 root root 10, 229 Nov 25 09:21 /dev/fuse
+/usr/bin/fusermount3
+/usr/lib/x86_64-linux-gnu/libfuse3.so.3
+/usr/lib/x86_64-linux-gnu/libfuse3.so.3.14.0
+Seccomp:	2
+Seccomp_filters:	1
+kernel.unprivileged_userns_clone = sysctl: cannot stat /proc/sys/kernel/unprivileged_userns_clone: No such file or directory
+kernel.apparmor_restrict_unprivileged_userns = sysctl: cannot stat /proc/sys/kernel/apparmor_restrict_unprivileged_userns: No such file or directory
+user.max_user_namespaces = 31740
+LSMs: cat: /sys/kernel/security/lsm: No such file or directory
+
+== A: root, mount + self-test + umount2
+[root] open /dev/fuse: ok fd=3
+[root] mount(2): ok at /root/mnt as uid=0
+[root] ls /: ok ["dir", "hello.txt"]
+[root] cat hello.txt: ok Ok("Hello from rusty_fuse on Linux\n")
+[root] cat dir/a.txt: ok Ok("a\n")
+[root] stat missing -> ENOENT: ok 
+[root] statfs f_type == FUSE_SUPER_MAGIC: ok Ok(65735546)
+[root] umount2: ok Ok(())
+[root] kernel FUSE protocol: Some((7, 45)), negotiated 7.Some(31)
+[root] opcodes seen: {"GETATTR": 1, "INIT": 1, "LOOKUP": 4, "OPEN": 2, "OPENDIR": 1, "READ": 2, "READDIR": 2, "RELEASE": 2, "RELEASEDIR": 1, "STATFS": 1, "op25(ENOSYS)": 1, "op52(ENOSYS)": 1}
+[root] serve loop ended: read: ENODEV (unmounted)
+[root] GO: yes
+exit=0
+
+== B: root, external ls/cat from another process
+[serve] mounted /root/mnt; waiting for umount
+total 5
+dr-xr-xr-x 2 root root    0 Dec 31  1969 .
+drwx------ 5 root root 4096 Nov 25 09:21 ..
+dr-xr-xr-x 2 root root    0 Dec 31  1969 dir
+-r--r--r-- 1 root root   31 Dec 31  1969 hello.txt
+Hello from rusty_fuse on Linux
+a
+type=fuseblk
+rusty_fuse_spike /root/mnt fuse.rusty_fuse_spike rw,nosuid,nodev,relatime,user_id=0,group_id=0 0 0
+[serve] kernel FUSE protocol: Some((7, 45)), negotiated 7.Some(31)
+[serve] opcodes seen: {"GETATTR": 1, "INIT": 1, "LOOKUP": 3, "OPEN": 2, "OPENDIR": 1, "READ": 2, "READDIR": 2, "RELEASE": 2, "RELEASEDIR": 1, "STATFS": 1, "op22(ENOSYS)": 1, "op23(ENOSYS)": 1, "op25(ENOSYS)": 1}
+[serve] serve loop ended: read: ENODEV (unmounted)
+umount exit=0
+serve exit=0
+0
+
+== C (Q5): non-root, plain mount(2) without a user namespace
+[root] open /dev/fuse: ok fd=3
+[root] mount(2): FAIL Errno(1) (EPERM = no CAP_SYS_ADMIN in this ns or seccomp/LSM denial)
+exit=1
+
+== D (Q5): non-root, unshare(CLONE_NEWUSER|CLONE_NEWNS) then mount(2)
+[userns] outer uid=1000 gid=1000
+[userns] unshare(CLONE_NEWUSER|CLONE_NEWNS): ok
+[userns] uid/gid map: ok, inner uid=0
+[userns] open /dev/fuse: ok fd=3
+[userns] mount(2): ok at /tmp/spike-mnt as uid=0
+[userns] ls /: ok ["dir", "hello.txt"]
+[userns] cat hello.txt: ok Ok("Hello from rusty_fuse on Linux\n")
+[userns] cat dir/a.txt: ok Ok("a\n")
+[userns] stat missing -> ENOENT: ok 
+[userns] statfs f_type == FUSE_SUPER_MAGIC: ok Ok(65735546)
+[userns] umount2: ok Ok(())
+[userns] kernel FUSE protocol: Some((7, 45)), negotiated 7.Some(31)
+[userns] opcodes seen: {"GETATTR": 1, "INIT": 1, "LOOKUP": 4, "OPEN": 2, "OPENDIR": 1, "READ": 2, "READDIR": 2, "RELEASE": 2, "RELEASEDIR": 1, "STATFS": 1, "op25(ENOSYS)": 1, "op52(ENOSYS)": 1}
+[userns] serve loop ended: read: ENODEV (unmounted)
+[userns] GO: yes
+exit=0
+leftover mounts: 0

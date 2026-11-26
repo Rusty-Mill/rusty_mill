@@ -48,8 +48,8 @@ use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Entry, Features, Launch, Message, Program, ShowTo, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
-    Act, BlockInfo, Bound, Detached, Dir, Feed, Float as Pane, ForwardDone, Link, ListDone, Listed,
-    Notice, PaneIo, Remote, Session, Show, Source, Take, Tree,
+    Act, BlockInfo, Bound, Detached, Dir, Explore, Explored, Feed, Float as Pane, ForwardDone,
+    Link, ListDone, Listed, Notice, PaneIo, Remote, Session, Show, Source, Take, Tree, UploadDone,
 };
 
 use crate::floats;
@@ -58,6 +58,7 @@ use crate::keys::Keys;
 use crate::lease::{Ask as LeaseAsk, Lease};
 use crate::session::{Change, Model, StripKeys, local_host};
 use crate::tree::tree;
+use crate::workspace::{Port as WorkspacePort, Workspace};
 
 /// What the GUI's control connection asks for: the TUI's set, plus names
 /// for the strip and who each client is, to count them, and block calls
@@ -82,15 +83,18 @@ pub const GUI: Features = CONTROL
 /// What a block's connection asks for: the panes' features, and the input
 /// gate's grants and lease requests, so an owner-only block can be taken
 /// over (handoff D153), and folder listings, for the palette's directory
-/// browse (D78). [`PANE`] asks for clipboard reads (C54), which the
-/// window answers by its policy.
+/// browse (D78), and file uploads (C82). [`PANE`] asks for clipboard reads
+/// (C54), which the window answers by its policy, and for `BLOCK_CALL` and
+/// `WORKSPACE` and `WORKSPACE_STATUS` (D349, D373), which the explorer panel's
+/// tree uses on the pane's own connection (D99).
 pub const BLOCK: Features = PANE
     .union(Features::INPUT_GATE)
     .union(Features::LEASE_REQUESTS)
     .union(Features::BACKGROUND_HISTORY)
     .union(Features::BLOCK_CALL)
     .union(Features::DIR_LISTING)
-    .union(Features::PORT_FORWARD);
+    .union(Features::PORT_FORWARD)
+    .union(Features::UPLOAD);
 
 /// Never set: the handshakes here are not cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -191,6 +195,8 @@ pub fn attach_with(
         cwd: start_cwd,
         folders: Mutex::new(HashMap::new()),
         shell: start.shell,
+        remote: Mutex::new(None),
+        workspace: Mutex::new(None),
     });
     let (first, focus) = {
         let mut shown = state.shown();
@@ -285,6 +291,10 @@ struct State {
     folders: Mutex<HashMap<BlockId, String>>,
     /// What a split or a new window runs.
     shell: Option<Program>,
+    /// Where the explorer panel's snapshots go, once the window follows.
+    remote: Mutex<Option<Remote>>,
+    /// The open explorer tree and its block's key (gui-design D99).
+    workspace: Mutex<Option<(u64, Arc<Workspace>)>>,
 }
 
 /// The blocks shown and which has the focus.
@@ -424,6 +434,46 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct MuxSource(Arc<State>);
 
 impl MuxSource {
+    /// Opens the explorer tree on pane `key`'s block, replacing any other.
+    fn open_workspace(&self, key: u64) {
+        let (Some(block), Some(remote)) = (self.pane(key), lock(&self.0.remote).clone()) else {
+            return;
+        };
+        self.close_workspace();
+        let ws = block.holding.attach(
+            || {
+                let lease = block.lease();
+                (lease.held, lease.lost)
+            },
+            |held, lost| {
+                let port = Arc::new(BlockPort {
+                    block: Arc::clone(&block),
+                    remote,
+                    key,
+                });
+                let ws = Workspace::open(port, block.status, held, lost);
+                let follow = Arc::downgrade(&ws);
+                let hook: Holding = Box::new(move |held, lost| {
+                    if let Some(ws) = follow.upgrade() {
+                        ws.lease(held, lost);
+                    }
+                });
+                (ws, hook)
+            },
+        );
+        *lock(&self.0.workspace) = Some((key, ws));
+    }
+
+    /// Ends the open explorer tree, if any: its replies show nothing more.
+    fn close_workspace(&self) {
+        if let Some((key, ws)) = lock(&self.0.workspace).take() {
+            ws.close();
+            if let Some(block) = self.pane(key) {
+                block.holding.detach();
+            }
+        }
+    }
+
     /// Pane `key`'s block connection, while the window has it open.
     fn pane(&self, key: u64) -> Option<Arc<Block>> {
         self.0
@@ -536,8 +586,40 @@ impl Source for MuxSource {
         }
     }
 
+    fn explores(&self, key: u64) -> Explore {
+        match self.pane(key) {
+            Some(b) if b.workspace && b.status => Explore::Marked,
+            Some(b) if b.workspace => Explore::Tree,
+            _ => Explore::No,
+        }
+    }
+
+    fn explore(&self, key: u64, ask: Explored) {
+        match ask {
+            Explored::Open => self.open_workspace(key),
+            Explored::Close => self.close_workspace(),
+            Explored::Do(intent) => {
+                let open = lock(&self.0.workspace).clone();
+                if let Some((_, ws)) = open.filter(|(k, _)| *k == key) {
+                    ws.intent(intent);
+                }
+            }
+        }
+    }
+
     fn forwards(&self, key: u64) -> bool {
         self.pane(key).is_some_and(|b| b.forwards)
+    }
+
+    fn uploads(&self, key: u64) -> bool {
+        self.pane(key).is_some_and(|b| b.uploads)
+    }
+
+    fn upload(&self, key: u64, path: std::path::PathBuf, done: UploadDone) {
+        match self.pane(key) {
+            Some(block) => block.upload(path, done),
+            None => done(Err("the block is not open".into())),
+        }
     }
 
     fn forwarded_port(&self, key: u64, port: u16) -> Option<Bound> {
@@ -909,6 +991,7 @@ impl Events {
     /// Follows the session on a thread of its own, telling `remote`; the
     /// session's end, or the connection's, closes the window.
     pub fn follow(self, remote: Remote) {
+        *lock(&self.state.remote) = Some(remote.clone());
         std::thread::spawn(move || {
             self.run(|out| match out {
                 Out::Layout(t, floats) => remote.layout(t, floats),
@@ -1426,6 +1509,46 @@ impl Events {
 /// One block's connection, shared by the pane's writer and its reader.
 /// A lost connection is handed back by [`Block::revive`], the client the
 /// same.
+/// What an open explorer tree is told when the lease changes.
+type Holding = Box<dyn Fn(bool, u64) + Send>;
+
+/// Carries lease changes to the open explorer. The lease is read under
+/// this lock, both when a hook is installed and when a change is
+/// delivered, so a change made while the explorer starts is neither
+/// missed nor overwritten by the start's older value, and deliveries
+/// reach the hook in order, each with the value current at the time.
+#[derive(Default)]
+struct Follow(Mutex<Option<Holding>>);
+
+impl Follow {
+    /// Starts following: `start` gets the lease as `now` reads it and
+    /// returns what it built with the hook that gets later changes.
+    fn attach<T>(
+        &self,
+        now: impl FnOnce() -> (bool, u64),
+        start: impl FnOnce(bool, u64) -> (T, Holding),
+    ) -> T {
+        let mut slot = lock(&self.0);
+        let (held, lost) = now();
+        let (built, hook) = start(held, lost);
+        *slot = Some(hook);
+        built
+    }
+
+    /// Delivers the lease as `now` reads it, if anything follows.
+    fn notify(&self, now: impl FnOnce() -> (bool, u64)) {
+        let slot = lock(&self.0);
+        if let Some(hook) = &*slot {
+            let (held, lost) = now();
+            hook(held, lost);
+        }
+    }
+
+    fn detach(&self) {
+        *lock(&self.0) = None;
+    }
+}
+
 struct Block {
     block: BlockId,
     /// The client the server made of this connection.
@@ -1448,11 +1571,22 @@ struct Block {
     told: Mutex<Option<Take>>,
     /// The server lists folders on this connection (`terminal.list-dir`).
     lists: bool,
+    /// The server answers the workspace tree's calls on this connection
+    /// (`WORKSPACE`), and, beyond them, the marks and stat (`WORKSPACE_STATUS`).
+    workspace: bool,
+    status: bool,
+    /// Told whether this client holds the lease, after each change to it,
+    /// while an explorer tree is open on the block.
+    holding: Follow,
     /// The server asks this connection's client for clipboard reads
     /// (C54), so the window answers them, not the pane's own grid.
     clipboard: bool,
     /// Who waits for a listing, by request number.
     listings: Mutex<HashMap<u64, ListDone>>,
+    /// The server takes files on this connection (C82).
+    uploads: bool,
+    /// Who waits for an upload chunk's answer, by request number.
+    uploading: Mutex<HashMap<u64, Sender<Result<String, String>>>>,
     /// The server tunnels ports on this connection (C81).
     forwards: bool,
     /// The run that tunnels this pane's ports, once one was asked for.
@@ -1472,6 +1606,14 @@ const FORWARD_REQ: u64 = 1 << 40;
 /// Frames queued for a pane's forward run, and asks queued for it.
 const FORWARD_FRAMES: usize = 1024;
 const FORWARD_WANTS: usize = 16;
+
+/// Bytes in one chunk of an upload. Each is written under the lock typing
+/// shares, so a small one keeps a slow link from holding up keystrokes for
+/// long.
+const UPLOAD_CHUNK: usize = 64 << 10;
+
+/// How long the server may take to answer one chunk of an upload.
+const UPLOAD_WAIT: Duration = Duration::from_secs(30);
 
 /// How long a port may take to be listened on.
 const LISTEN_WAIT: Duration = Duration::from_secs(10);
@@ -1551,8 +1693,17 @@ impl Block {
             lists: opened
                 .features
                 .contains(Features::BLOCK_CALL.union(Features::DIR_LISTING)),
+            workspace: opened
+                .features
+                .contains(Features::BLOCK_CALL.union(Features::WORKSPACE)),
+            status: opened.features.contains(Features::WORKSPACE_STATUS),
+            holding: Follow::default(),
             listings: Mutex::new(HashMap::new()),
             clipboard: opened.features.contains(Features::CLIPBOARD),
+            uploads: opened
+                .features
+                .contains(Features::BLOCK_CALL.union(Features::UPLOAD)),
+            uploading: Mutex::new(HashMap::new()),
             forwards: opened.features.contains(Features::PORT_FORWARD),
             forwarder: Mutex::new(None),
             conn_gen: AtomicU64::new(0),
@@ -1615,6 +1766,16 @@ impl Block {
     /// Asks the server to list `path` (the block's folder when `None`) and
     /// calls `done` with the answer, or with why there is none.
     fn list_dir(&self, path: Option<String>, done: ListDone) {
+        let args = path
+            .map(|p| ("path".into(), Value::Text(p)))
+            .into_iter()
+            .collect();
+        self.call("terminal.list-dir", args, done);
+    }
+
+    /// Calls `method` on the block and gives `done` the answer text, or
+    /// why there is none.
+    fn call(&self, method: &str, args: Vec<(String, Value)>, done: ListDone) {
         let block = self.block;
         let mut done = Some(done);
         self.send(|req| {
@@ -1624,21 +1785,80 @@ impl Block {
             Message::BlockCall {
                 req,
                 block,
-                method: "terminal.list-dir".into(),
-                args: path
-                    .map(|p| ("path".into(), Value::Text(p)))
-                    .into_iter()
-                    .collect(),
+                method: method.into(),
+                args,
             }
         });
     }
 
+    /// Sends the file at `path` in chunks, from a thread of its own, and
+    /// calls `done` with its path on the server. Needs the lease, as the
+    /// server does. A chunk the server leaves unanswered for [`UPLOAD_WAIT`],
+    /// or a lost connection, ends it; see `rusty_mux_client::upload::send`
+    /// for what an error after the last chunk means.
+    fn upload(self: &Arc<Self>, path: std::path::PathBuf, done: UploadDone) {
+        if !self.lease().held {
+            return done(Err(
+                "Another client holds this block's input; take it over to send files.".into(),
+            ));
+        }
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            return done(Err("that is not a file".into()));
+        };
+        let block = Arc::clone(self);
+        std::thread::spawn(move || done(block.upload_file(&path, &name)));
+    }
+
+    fn upload_file(&self, path: &std::path::Path, name: &str) -> Result<String, String> {
+        // Looked at before it is opened: opening a FIFO would wait for a
+        // writer for ever and the upload would never answer.
+        let not_file = || format!("{} is not a file", path.display());
+        let looked = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !looked.is_file() {
+            return Err(not_file());
+        }
+        let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !file.metadata().is_ok_and(|m| m.is_file()) {
+            return Err(not_file());
+        }
+        let id = self.block;
+        rusty_mux_client::upload::send_with(name, &mut file, UPLOAD_CHUNK, |args| {
+            let (tx, rx) = channel();
+            let mut args = Some(args);
+            let req = self.send(|req| {
+                lock(&self.uploading).insert(req, tx);
+                Message::BlockCall {
+                    req,
+                    block: id,
+                    method: "terminal.upload".into(),
+                    args: args.take().unwrap_or_default(),
+                }
+            });
+            // Answered by the reader; a lost connection drops the sender.
+            let answer = rx.recv_timeout(UPLOAD_WAIT);
+            lock(&self.uploading).remove(&req);
+            answer
+                .map_err(|_| std::io::Error::other("the server did not answer"))?
+                .map_err(std::io::Error::other)
+        })
+        .map_err(|e| e.to_string())
+    }
+
     /// Answers every waiting listing with `why`: its connection is gone.
     fn fail_listings(&self, why: &str) {
+        // Dropped senders end the uploads waiting on them.
+        lock(&self.uploading).clear();
         let waiting: Vec<_> = lock(&self.listings).drain().collect();
         for (_, done) in waiting {
             done(Err(why.into()));
         }
+    }
+
+    /// Hands an upload chunk's answer to whoever waits for `req`; whether
+    /// someone did.
+    fn uploaded(&self, req: u64, answer: Result<String, String>) -> bool {
+        let tx = lock(&self.uploading).remove(&req);
+        tx.map(|tx| tx.send(answer)).is_some()
     }
 
     /// Hands a listing's answer to whoever waits for `req`; whether
@@ -1816,6 +2036,10 @@ impl Block {
         // Not under the lease: the feed may block while it is full.
         drop(lease);
         self.tell(take);
+        self.holding.notify(|| {
+            let lease = self.lease();
+            (lease.held, lease.lost)
+        });
     }
 
     /// Tells the window `take`, when it changed and the server takes
@@ -1989,10 +2213,15 @@ impl Block {
                     continue;
                 }
                 Message::Text { req, text } => {
-                    self.listed(req, Ok(text));
+                    if !self.uploaded(req, Ok(text.clone())) {
+                        self.listed(req, Ok(text));
+                    }
                     continue;
                 }
-                Message::Failed { req, reason, .. } if self.listed(req, Err(reason.clone())) => {
+                Message::Failed { req, reason, .. }
+                    if self.uploaded(req, Err(reason.clone()))
+                        || self.listed(req, Err(reason.clone())) =>
+                {
                     continue;
                 }
                 Message::Done { req, .. } => {
@@ -2016,6 +2245,33 @@ impl Block {
 /// The window's end of a block: typing and sizing go to the server while
 /// the lease is held. Dropping it detaches the block's connection.
 struct PaneWriter(Arc<Block>);
+
+/// The explorer tree's way to its block and to the window.
+struct BlockPort {
+    block: Arc<Block>,
+    remote: Remote,
+    key: u64,
+}
+
+impl WorkspacePort for BlockPort {
+    fn call(&self, method: &str, args: Vec<(String, Value)>, done: ListDone) -> bool {
+        if !self.block.lease().held {
+            return false;
+        }
+        self.block.call(method, args, done);
+        true
+    }
+
+    fn show(&self, snapshot: rusty_term::gui::explorer::Snapshot) {
+        self.remote.explorer(self.key, snapshot);
+    }
+
+    fn now(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    }
+}
 
 impl BackendHandle for PaneWriter {
     fn read_into(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
@@ -2099,7 +2355,51 @@ mod tests {
     use rusty_mux_proto::{Entry, Message};
     use rusty_uuid::Uuid;
 
-    use super::{anchor, first_block, forwarded};
+    use super::{Follow, anchor, first_block, forwarded};
+
+    #[test]
+    fn a_lease_change_while_the_explorer_starts_is_delivered_after_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        let lease = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let follow = Arc::new(Follow::default());
+        let mut grant = None;
+        let started = follow.attach(
+            || (lease.load(Ordering::SeqCst), 0),
+            |held, _| {
+                // The grant lands after the start read the lease and
+                // before its hook is installed.
+                lease.store(true, Ordering::SeqCst);
+                let (f, l) = (Arc::clone(&follow), Arc::clone(&lease));
+                grant = Some(std::thread::spawn(move || {
+                    f.notify(|| (l.load(Ordering::SeqCst), 0));
+                }));
+                let seen = Arc::clone(&seen);
+                (
+                    held,
+                    Box::new(move |held, _| seen.lock().unwrap().push(held)) as super::Holding,
+                )
+            },
+        );
+        grant.expect("spawned").join().expect("joined");
+        assert!(!started, "the start saw the lease before the grant");
+        assert_eq!(*seen.lock().unwrap(), [true], "the grant reaches the hook");
+    }
+
+    #[test]
+    fn a_lease_change_before_the_start_is_read_by_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let lease = AtomicBool::new(false);
+        let follow = Follow::default();
+        lease.store(true, Ordering::SeqCst);
+        follow.notify(|| (lease.load(Ordering::SeqCst), 0));
+        let held = follow.attach(
+            || (lease.load(Ordering::SeqCst), 0),
+            |held, _| (held, Box::new(|_, _| ()) as super::Holding),
+        );
+        assert!(held);
+    }
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()

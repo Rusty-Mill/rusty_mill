@@ -157,16 +157,24 @@ impl Drop for Mcp {
 }
 
 fn setup(dir: &Path) -> TaskId {
+    setup_gated(dir, Some(Gates::Scratch))
+}
+
+/// [`setup`], opening the task with `gates`: `None` is owned (#447).
+fn setup_gated(dir: &Path, gates: Option<Gates>) -> TaskId {
     let task = TaskId("T1".into());
-    admin::open_task(
-        dir,
-        &task,
+    let (repo, brief, human) = (
         "github.com/example/repo",
         b"Add retry with backoff.",
-        &PrincipalId("human".into()),
-        &rusty_bbp_host::profiles::ProfileSet::shell("test", "true"),
-        common::roster(),
-    )
+        PrincipalId("human".into()),
+    );
+    let set = rusty_bbp_host::profiles::ProfileSet::shell("test", "true");
+    match gates {
+        Some(Gates::Scratch) => {
+            open_scratch(dir, &task, repo, brief, &human, &set, common::roster())
+        }
+        None => admin::open_task(dir, &task, repo, brief, &human, &set, common::roster()),
+    }
     .expect("open");
     for (role, vendor) in [
         (Who::Planner, "anthropic"),
@@ -342,6 +350,191 @@ fn human_cli_drives_a_gate() {
     assert_eq!(
         card.turns.first().map(|t| t.0.clone()),
         Some(Who::Coder.id())
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An owned task at its plan gate, and the spec artifact the gate asks about.
+fn owned_at_plan_gate(tag: &str) -> (PathBuf, TaskId, u64) {
+    let dir = tempdir(tag);
+    let task = setup_gated(&dir, None);
+    let turn = turn_of(&dir, &task);
+    let mut mcp = Mcp::spawn(&dir, "T1", "planner", turn);
+    let (spec, _) = mcp.call(
+        "put_artifact",
+        r##"{"op":"s","kind":"spec","brief":1,"body":"# Spec"}"##,
+    );
+    let spec_id = spec["Stored"].as_u64().expect("spec id");
+    let (_, err) = mcp.call("post", &format!(r#"{{"op":"g","kind":"request_decision","to":["human"],"refs":["art:{spec_id}"],"body":"Approve the plan?","gate":true}}"#));
+    assert!(!err);
+    assert_eq!(
+        admin::card(&dir, &task).expect("card").state,
+        State::PlanGate
+    );
+    (dir, task, spec_id)
+}
+
+/// A receipt the test board key signs, as the board's `approval_issue` would.
+fn signed(r: &rusty_bbp_host::approval::Receipt) -> (rusty_pk::ed25519::SigningKey, Vec<u8>) {
+    let k = rusty_pk::ed25519::SigningKey::from_seed(&[3; 32]).expect("key");
+    let body = rusty_serde::json::to_string(r).expect("json");
+    let sig: String = k
+        .sign(body.as_bytes())
+        .expect("sign")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    (k, format!("{body}\n{sig}\n").into_bytes())
+}
+
+#[test]
+fn an_owned_plan_gate_takes_only_a_receipt_bound_to_it() {
+    use rusty_bbp_host::approval::{self, Receipt};
+    let (dir, task, spec) = owned_at_plan_gate("owned");
+    let refused = |r: Result<Response, String>| match r.expect("host") {
+        Response::Rejected(rej) => rej.detail,
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+    let unsigned = human::perform_as(
+        &dir,
+        &task,
+        "approve-plan",
+        &[&spec.to_string()],
+        None,
+        "nano",
+    );
+    assert!(
+        refused(unsigned).contains("--approval"),
+        "a label alone is not enough"
+    );
+
+    let rev = admin::card(&dir, &task).expect("card").rev;
+    let receipt = |fence: u64, task: &str| Receipt {
+        task: task.into(),
+        gate: "plan".into(),
+        subject: spec,
+        run: None,
+        fence,
+        approver: "nano".into(),
+        verbatim: "Approve the plan? Yes.".into(),
+        source: "cmsg_test".into(),
+        issued_ms: 1,
+    };
+    let answer = |file: &[u8], k: &rusty_pk::ed25519::SigningKey| {
+        let v = approval::verify(k.public_key(), file).expect("verifies");
+        human::perform_fenced(
+            &dir,
+            &task,
+            "approve-plan",
+            &[&spec.to_string()],
+            None,
+            "agent",
+            Some(rev),
+            None,
+            Some(&v),
+        )
+    };
+    let (k, stale) = signed(&receipt(rev.0 - 1, "T1"));
+    assert!(refused(answer(&stale, &k)).contains("fence"));
+    let (k, other) = signed(&receipt(rev.0, "T2"));
+    assert!(refused(answer(&other, &k)).contains("task"));
+
+    let (k, good) = signed(&receipt(rev.0, "T1"));
+    // A receipt that can't be stored refuses the answer and leaves the gate.
+    let blob = dir.join("blobs").join(Sha256::of(&good).hex());
+    std::fs::create_dir_all(&blob).expect("block the blob path");
+    assert!(answer(&good, &k)
+        .expect_err("unstored")
+        .contains("not stored"));
+    assert_eq!(
+        admin::card(&dir, &task).expect("card").state,
+        State::PlanGate
+    );
+    std::fs::remove_dir(&blob).expect("unblock");
+    assert_eq!(answer(&good, &k).expect("host"), Response::Ok);
+    assert_eq!(admin::card(&dir, &task).expect("card").state, State::Build);
+    let d = open_driver(&dir, &task).expect("driver");
+    let events = d.store.events(&task, 0).expect("events");
+    let op = events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Event::OpAccepted { op, .. } => Some(op.clone()),
+            _ => None,
+        })
+        .expect("an accepted op");
+    assert_eq!(
+        human::answered_by(&op),
+        "nano",
+        "labelled by the receipt, not --as"
+    );
+    let sha = approval::receipt_of(&op).expect("a receipted op");
+    assert_eq!(d.store.blob_get(&sha).expect("receipt stored"), good);
+    let vouched =
+        |key| rusty_bbp_host::report::of_with_key(&dir, &task, Some("nano"), key).expect("report");
+    let r = vouched(Some(k.public_key()));
+    assert!(!r.scratch && !r.gates[0].self_approved, "{:?}", r.gates);
+    assert!(
+        vouched(None).gates[0].self_approved,
+        "no key: the receipt cannot vouch"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_cli_refuses_a_by_label_in_op_and_a_receipt_without_the_board_key() {
+    let (dir, _task, spec) = owned_at_plan_gate("cli_owned");
+    let run = |extra: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_bbp"))
+            .args([
+                "human",
+                "--dir",
+                dir.to_str().expect("utf8"),
+                "--task",
+                "T1",
+            ])
+            .args(extra)
+            .args(["approve-plan", &spec.to_string()])
+            .output()
+            .expect("run bbp human");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    assert!(run(&["--op", "by:nano/forged"]).contains("by: label"));
+    assert!(
+        run(&[]).contains("--approval"),
+        "an owned gate needs a receipt"
+    );
+    let file = dir.join("receipt");
+    std::fs::write(&file, b"{}\n00\n").expect("write");
+    let f = file.to_str().expect("utf8");
+    assert!(run(&["--approval", f, "--op", "x"]).contains("drop --op"));
+    assert!(run(&["--approval", f]).contains("no board approval key"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_scratch_open_on_an_unlisted_repo_writes_nothing() {
+    let dir = tempdir("unlisted");
+    let task = TaskId("T1".into());
+    let refused = admin::open_task_gated(
+        &dir,
+        &task,
+        "github.com/example/real",
+        b"brief",
+        &PrincipalId("human".into()),
+        &rusty_bbp_host::profiles::ProfileSet::shell("test", "true"),
+        common::roster(),
+        (1, admin::default_policy(1)),
+        Some(Gates::Scratch),
+    );
+    assert!(refused.expect_err("refused").contains("not a scratch repo"));
+    assert!(
+        open_driver(&dir, &task).is_err(),
+        "not even the master secret is written"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -910,7 +1103,7 @@ fn two_planners(dir: &Path) -> TaskId {
     second.id = RoleId("planner2".into());
     second.turn_order = 10;
     roster.push(second);
-    admin::open_task_live(
+    open_scratch_live(
         dir,
         &task,
         "github.com/example/repo",
@@ -1010,4 +1203,53 @@ fn two_sessions_edit_one_spec_and_the_slower_edit_is_refused_stale_base() {
     assert_eq!(got["content"].as_str(), Some("# A\nfirst"));
     assert_eq!(got["head"].as_u64(), Some(v3));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #447: the fixture's tasks answer their gates with `--as`, so they open scratch, their repo
+/// listed first as the operator would (D195).
+#[allow(clippy::too_many_arguments, dead_code)]
+fn open_scratch_live(
+    dir: &std::path::Path,
+    task: &rusty_bbp::TaskId,
+    repo: &str,
+    brief: &[u8],
+    human: &rusty_bbp::PrincipalId,
+    set: &rusty_bbp_host::profiles::ProfileSet,
+    roster: Vec<rusty_bbp::Role>,
+    live: u32,
+    policy: rusty_bbp::SchedulingPolicy,
+) -> Result<rusty_bbp::Response, String> {
+    use rusty_bbp_host::scratch_repos;
+    if scratch_repos::check(dir, repo).is_err() {
+        scratch_repos::add(
+            dir,
+            scratch_repos::Record::new(repo, "test", "test fixture", rusty_bbp::Time(0)),
+        )?;
+    }
+    rusty_bbp_host::admin::open_task_gated(
+        dir,
+        task,
+        repo,
+        brief,
+        human,
+        set,
+        roster,
+        (live, policy),
+        Some(rusty_bbp::Gates::Scratch),
+    )
+}
+
+/// [`open_scratch_live`] with one live turn, as `admin::open_task` opens.
+#[allow(dead_code)]
+fn open_scratch(
+    dir: &std::path::Path,
+    task: &rusty_bbp::TaskId,
+    repo: &str,
+    brief: &[u8],
+    human: &rusty_bbp::PrincipalId,
+    set: &rusty_bbp_host::profiles::ProfileSet,
+    roster: Vec<rusty_bbp::Role>,
+) -> Result<rusty_bbp::Response, String> {
+    let policy = rusty_bbp_host::admin::default_policy(1);
+    open_scratch_live(dir, task, repo, brief, human, set, roster, 1, policy)
 }

@@ -20,20 +20,31 @@
 //! based on its own disk budget, this is a starting point, not a
 //! recommendation.
 
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
 use rusty_tokio::io::{uring_global_driver, TcpListener};
+#[cfg(target_os = "linux")]
 use rusty_tokio::sync::{watch, Mutex};
 
+#[cfg(target_os = "linux")]
 use rusty_journal::clock::SystemClock;
+#[cfg(target_os = "linux")]
 use rusty_journal::consumer::ConsumerOffsets;
+#[cfg(target_os = "linux")]
 use rusty_journal::retention::{Log, RetentionPolicy};
+#[cfg(target_os = "linux")]
 use rusty_journal::server::{self, AppState};
 
+#[cfg(target_os = "linux")]
 const DEFAULT_ADDR: &str = "127.0.0.1:7420";
+#[cfg(target_os = "linux")]
 const DEFAULT_DATA_DIR: &str = "./data";
 
+#[cfg(target_os = "linux")]
 fn default_policy() -> RetentionPolicy {
     RetentionPolicy {
         max_segment_bytes: 128 * 1024 * 1024,
@@ -42,6 +53,7 @@ fn default_policy() -> RetentionPolicy {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[rusty_tokio::main(flavor = "thread_per_core")]
 async fn main() -> std::io::Result<()> {
     let addr = std::env::var("RUSTY_STREAM_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_string());
@@ -113,4 +125,11 @@ async fn main() -> std::io::Result<()> {
         // directly -- stringify it first, which is.
         Err(e) => Err(std::io::Error::other(e.to_string())),
     }
+}
+
+/// The journal is io_uring-backed, so the server binary exists only on Linux.
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("rusty_journal requires Linux (io_uring)");
+    std::process::exit(1);
 }

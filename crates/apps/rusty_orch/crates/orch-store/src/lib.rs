@@ -20,6 +20,7 @@
 )]
 
 mod assignments;
+mod builder_sessions;
 mod hunts;
 mod lens_records;
 mod lens_states;
@@ -50,11 +51,13 @@ use rusty_multimodal_db_engine::generic::traits::{
 use rusty_multimodal_db_engine::generic::GenericMmapStore;
 
 use assignments::{AssignmentRecord, LegacyAssignmentRecord};
+use builder_sessions::BuilderSessionRecord;
 use hunts::HuntRecord;
 use lens_records::LensRecordRecord;
 use lens_states::LensStateRecord;
 use meters::MeterRecord;
 use orch_lens::alien::{HuntRow, ProbeRow};
+use orch_lens::builder::Session;
 use orch_lens::record::Review;
 use probes::ProbeRecord;
 use record::{ById, GoalRecord, Revision};
@@ -82,6 +85,8 @@ const LENS_STATES_FILE: &str = "lens-states.mmap";
 const WATCH_FILE: &str = "watch.mmap";
 /// Blind review jobs for lens track records (#599, `lens_record`).
 const LENS_RECORDS_FILE: &str = "lens-records.mmap";
+/// Builder sessions, one record per BBP board (#600, `builder_session`).
+const BUILDER_SESSIONS_FILE: &str = "builder-sessions.mmap";
 
 /// Everything a later process needs to continue a goal. The goal contract
 /// itself is not stored: `fingerprint` ties the snapshot to the goal file
@@ -171,6 +176,7 @@ pub struct Store {
     probes: GenericMmapStore<ProbeRecord, ById, Revision>,
     hunts: GenericMmapStore<HuntRecord, ById, Revision>,
     lens_states: GenericMmapStore<LensStateRecord, ById, Revision>,
+    builder_sessions: GenericMmapStore<BuilderSessionRecord, ById, Revision>,
     watch: GenericMmapStore<WatchRecord, ById, Revision>,
     lens_records: GenericMmapStore<LensRecordRecord, ById, Revision>,
     _lock: DirLock,
@@ -229,6 +235,12 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(BUILDER_SESSIONS_FILE);
+        let builder_sessions = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
         let path = dir.join(WATCH_FILE);
         let watch = if path.exists() {
             GenericMmapStore::open_portable(&path)?
@@ -256,6 +268,7 @@ impl Store {
             probes,
             hunts,
             lens_states,
+            builder_sessions,
             watch,
             lens_records,
             _lock: lock,
@@ -596,6 +609,77 @@ impl Store {
 }
 
 impl Store {
+    /// Every builder session of BBP board `board` (named as for
+    /// [`Store::load_lens_state`]); empty when none was saved. Run
+    /// `orch_lens::builder::recover` on them after a restart.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the record names another board or a
+    /// row does not check out.
+    pub fn load_builder_sessions(&self, board: &str) -> Result<Vec<Session>, StoreError> {
+        self.builder_sessions
+            .get(builder_sessions::key(board))
+            .map_or(Ok(Vec::new()), |r| r.into_sessions(board))
+    }
+
+    /// [`Store::load_builder_sessions`] for the store in `dir`, read without
+    /// changing anything, as [`Store::read_lens_reviews`]: the directory's
+    /// existing lock, no file made, nothing written back.
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::read_lens_reviews`]: [`StoreError::Missing`] when `dir`
+    /// has no lock or builder session file; [`StoreError::Locked`],
+    /// [`StoreError::Lock`]; [`StoreError::Engine`] when the table or its
+    /// records companion cannot be read; [`StoreError::Corrupt`] when the
+    /// board's record does not check out.
+    pub fn read_builder_sessions(dir: &Path, board: &str) -> Result<Vec<Session>, StoreError> {
+        let records = read_table::<BuilderSessionRecord>(dir, BUILDER_SESSIONS_FILE)?
+            .ok_or_else(|| StoreError::Missing(dir.join(BUILDER_SESSIONS_FILE)))?;
+        let id = builder_sessions::key(board);
+        records
+            .into_iter()
+            .find(|r| r.id() == id)
+            .map_or(Ok(Vec::new()), |r| r.into_sessions(board))
+    }
+
+    /// Save `sessions` as every builder session of `board`, replacing the
+    /// board's record without checking its revision: load, admit and save
+    /// under the one `&mut Store` the directory lock gives a process.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the sessions do not check out or the key
+    /// already holds another board's; [`StoreError::Engine`] when the write
+    /// fails.
+    pub fn save_builder_sessions(
+        &mut self,
+        board: &str,
+        sessions: &[Session],
+    ) -> Result<(), StoreError> {
+        orch_lens::builder::check(sessions).map_err(StoreError::Corrupt)?;
+        let existing = self.builder_sessions.get(builder_sessions::key(board));
+        if let Some(r) = &existing {
+            if r.board != board {
+                return Err(StoreError::Corrupt(format!(
+                    "builder session key for {board:?} holds {:?}",
+                    r.board
+                )));
+            }
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = BuilderSessionRecord::new(board, sessions, revision);
+        let written = if existing.is_none() {
+            self.builder_sessions.insert(record).map_err(engine_error)
+        } else {
+            self.builder_sessions.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+}
+
+impl Store {
     /// Save one blind review job of `board` for its lens's track record. A
     /// job saved again (re-asked after a refusal, or rerun after a crash)
     /// keeps the union of its items, so a restart never drops or doubles one.
@@ -755,7 +839,8 @@ fn merge(mut old: Review, row: &Review) -> Review {
 
 /// Every saved record of the table `file` in the store at `dir`, read under
 /// the directory's existing lock and recovered as [`Store::open`] would,
-/// writing nothing; `None` when the table file doesn't exist.
+/// writing nothing; `None` when the table file doesn't exist. A table file
+/// whose header [`Store::open`] would refuse fails here too.
 fn read_table<R>(dir: &Path, file: &str) -> Result<Option<Vec<R>>, StoreError>
 where
     R: IndexedField<ById, Id = i64>
@@ -776,7 +861,7 @@ where
         return Ok(None);
     }
     Ok(Some(
-        GenericMmapStore::<R, ById, Revision>::read_portable_records(&path)?,
+        GenericMmapStore::<R, ById, Revision>::read_checked_records(&path)?,
     ))
 }
 

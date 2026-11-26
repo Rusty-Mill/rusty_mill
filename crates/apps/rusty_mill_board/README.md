@@ -220,6 +220,7 @@ unsaved edit raises a conflict (keep mine / take theirs), and `card_update` take
 stale one. `tests/ui/drafts.mjs` checks this in a real browser (Playwright; see the file's header).
 Cards show their priority (High 5, Medium 3, Low 1; none shows nothing), sort highest first in each column, and
 the dialog sets it through `card_plan` (`tests/ui/priority.mjs`).
+A date filter under the toolbar (created, updated or moved, from/to days) narrows the board through `board_list`'s date arguments and keeps itself in the address (`?date=updated&from=2026-11-01&to=2026-11-25`); the chip clears it (`tests/ui/date_filter.mjs`).
 The dialog's **Close card** runs `card_close` (reason, one confirmation) for a role with `triage` on an unstarted card; a started card says why it cannot be closed. **Dismiss** only hides the dialog (`tests/ui/close_card.mjs`).
 The board reads like a press room's job board ([PRODUCT.md](PRODUCT.md); direction in `.impeccable/surfaces/board.md`):
 a colour strip across the top shows each column's open cards and jumps to it; empty columns fold to a spine; process

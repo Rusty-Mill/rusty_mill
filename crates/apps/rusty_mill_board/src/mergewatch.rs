@@ -359,6 +359,7 @@ fn watcher(project: &str) -> Actor {
         name: ACTOR.to_owned(),
         caps: BTreeSet::from([Capability::Record]),
         projects: Some(BTreeSet::from([project.to_owned()])),
+        provider: None,
     }
 }
 
