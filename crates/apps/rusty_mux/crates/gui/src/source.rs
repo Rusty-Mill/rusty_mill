@@ -440,19 +440,24 @@ impl MuxSource {
             return;
         };
         self.close_workspace();
-        let (status, held) = (block.status, block.lease().held);
-        let port = Arc::new(BlockPort {
-            block: Arc::clone(&block),
-            remote,
-            key,
-        });
-        let ws = Workspace::open(port, status, held);
-        let follow = Arc::downgrade(&ws);
-        *lock(&block.holding) = Some(Box::new(move |held| {
-            if let Some(ws) = follow.upgrade() {
-                ws.lease(held);
-            }
-        }));
+        let ws = block.holding.attach(
+            || block.lease().held,
+            |held| {
+                let port = Arc::new(BlockPort {
+                    block: Arc::clone(&block),
+                    remote,
+                    key,
+                });
+                let ws = Workspace::open(port, block.status, held);
+                let follow = Arc::downgrade(&ws);
+                let hook: Holding = Box::new(move |held| {
+                    if let Some(ws) = follow.upgrade() {
+                        ws.lease(held);
+                    }
+                });
+                (ws, hook)
+            },
+        );
         *lock(&self.0.workspace) = Some((key, ws));
     }
 
@@ -461,7 +466,7 @@ impl MuxSource {
         if let Some((key, ws)) = lock(&self.0.workspace).take() {
             ws.close();
             if let Some(block) = self.pane(key) {
-                *lock(&block.holding) = None;
+                block.holding.detach();
             }
         }
     }
@@ -1504,6 +1509,37 @@ impl Events {
 /// What an open explorer tree is told when the lease changes.
 type Holding = Box<dyn Fn(bool) + Send>;
 
+/// Carries lease changes to the open explorer. The lease is read under
+/// this lock, both when a hook is installed and when a change is
+/// delivered, so a change made while the explorer starts is neither
+/// missed nor overwritten by the start's older value, and deliveries
+/// reach the hook in order, each with the value current at the time.
+#[derive(Default)]
+struct Follow(Mutex<Option<Holding>>);
+
+impl Follow {
+    /// Starts following: `start` gets the lease as `now` reads it and
+    /// returns what it built with the hook that gets later changes.
+    fn attach<T>(&self, now: impl FnOnce() -> bool, start: impl FnOnce(bool) -> (T, Holding)) -> T {
+        let mut slot = lock(&self.0);
+        let (built, hook) = start(now());
+        *slot = Some(hook);
+        built
+    }
+
+    /// Delivers the lease as `now` reads it, if anything follows.
+    fn notify(&self, now: impl FnOnce() -> bool) {
+        let slot = lock(&self.0);
+        if let Some(hook) = &*slot {
+            hook(now());
+        }
+    }
+
+    fn detach(&self) {
+        *lock(&self.0) = None;
+    }
+}
+
 struct Block {
     block: BlockId,
     /// The client the server made of this connection.
@@ -1532,7 +1568,7 @@ struct Block {
     status: bool,
     /// Told whether this client holds the lease, after each change to it,
     /// while an explorer tree is open on the block.
-    holding: Mutex<Option<Holding>>,
+    holding: Follow,
     /// The server asks this connection's client for clipboard reads
     /// (C54), so the window answers them, not the pane's own grid.
     clipboard: bool,
@@ -1652,7 +1688,7 @@ impl Block {
                 .features
                 .contains(Features::BLOCK_CALL.union(Features::WORKSPACE)),
             status: opened.features.contains(Features::WORKSPACE_STATUS),
-            holding: Mutex::new(None),
+            holding: Follow::default(),
             listings: Mutex::new(HashMap::new()),
             clipboard: opened.features.contains(Features::CLIPBOARD),
             uploads: opened
@@ -1988,13 +2024,10 @@ impl Block {
         f(&mut lease, &mut send);
         self.fit(&mut lease);
         let take = lease.take();
-        let held = lease.held;
         // Not under the lease: the feed may block while it is full.
         drop(lease);
         self.tell(take);
-        if let Some(hold) = &*lock(&self.holding) {
-            hold(held);
-        }
+        self.holding.notify(|| self.lease().held);
     }
 
     /// Tells the window `take`, when it changed and the server takes
@@ -2310,7 +2343,51 @@ mod tests {
     use rusty_mux_proto::{Entry, Message};
     use rusty_uuid::Uuid;
 
-    use super::{anchor, first_block, forwarded};
+    use super::{Follow, anchor, first_block, forwarded};
+
+    #[test]
+    fn a_lease_change_while_the_explorer_starts_is_delivered_after_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        let lease = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let follow = Arc::new(Follow::default());
+        let mut grant = None;
+        let started = follow.attach(
+            || lease.load(Ordering::SeqCst),
+            |held| {
+                // The grant lands after the start read the lease and
+                // before its hook is installed.
+                lease.store(true, Ordering::SeqCst);
+                let (f, l) = (Arc::clone(&follow), Arc::clone(&lease));
+                grant = Some(std::thread::spawn(move || {
+                    f.notify(|| l.load(Ordering::SeqCst));
+                }));
+                let seen = Arc::clone(&seen);
+                (
+                    held,
+                    Box::new(move |held| seen.lock().unwrap().push(held)) as super::Holding,
+                )
+            },
+        );
+        grant.expect("spawned").join().expect("joined");
+        assert!(!started, "the start saw the lease before the grant");
+        assert_eq!(*seen.lock().unwrap(), [true], "the grant reaches the hook");
+    }
+
+    #[test]
+    fn a_lease_change_before_the_start_is_read_by_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let lease = AtomicBool::new(false);
+        let follow = Follow::default();
+        lease.store(true, Ordering::SeqCst);
+        follow.notify(|| lease.load(Ordering::SeqCst));
+        let held = follow.attach(
+            || lease.load(Ordering::SeqCst),
+            |held| (held, Box::new(|_| ()) as super::Holding),
+        );
+        assert!(held);
+    }
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
