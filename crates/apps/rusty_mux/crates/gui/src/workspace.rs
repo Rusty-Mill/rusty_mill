@@ -37,9 +37,10 @@ struct Inner {
     explorer: Explorer,
     /// This client holds the block's input lease, which every call needs.
     held: bool,
-    /// A marks or stat call failed: read them again when the lease is
-    /// gained, as it may have been cut off with the connection or lease.
-    retry: bool,
+    /// Counts the times the lease was lost. A marks or stat reply from an
+    /// earlier count was cut off with it and is ignored: the status is read
+    /// again once the lease is back, under the new count.
+    epoch: u64,
 }
 
 /// Which call a reply answers.
@@ -60,7 +61,7 @@ impl Workspace {
             inner: Mutex::new(Inner {
                 explorer: Explorer::opened(status),
                 held,
-                retry: false,
+                epoch: 0,
             }),
             live: AtomicBool::new(true),
         });
@@ -93,8 +94,10 @@ impl Workspace {
         let root = {
             let mut inner = self.lock();
             let was = std::mem::replace(&mut inner.held, held);
-            if held && !was && std::mem::take(&mut inner.retry) {
-                inner.explorer.retry_status();
+            match (was, held) {
+                (true, false) => inner.epoch += 1,
+                (false, true) => inner.explorer.retry_status(),
+                _ => {}
             }
             held && (!was || inner.explorer.note().is_some())
                 && inner.explorer.tree().is_none()
@@ -146,35 +149,41 @@ impl Workspace {
 
     /// Sends one call; its reply comes back through [`Self::reply`].
     fn ask(self: &Arc<Self>, which: Which, method: &str, args: Vec<(String, Value)>) {
-        if !self.lock().held {
-            return self.reply(which, Err("Take over this block first.".into()));
+        let (held, epoch) = {
+            let inner = self.lock();
+            (inner.held, inner.epoch)
+        };
+        if !held {
+            return self.reply(which, epoch, Err("Take over this block first.".into()));
         }
         let me = Arc::clone(self);
-        let sent = self
-            .port
-            .call(method, args, Box::new(move |reply| me.reply(which, reply)));
+        let sent = self.port.call(
+            method,
+            args,
+            Box::new(move |reply| me.reply(which, epoch, reply)),
+        );
         if !sent {
-            self.reply(which, Err("the block is not open".into()));
+            self.reply(which, epoch, Err("the block is not open".into()));
         }
     }
 
-    fn reply(self: &Arc<Self>, which: Which, reply: Result<String, String>) {
+    fn reply(self: &Arc<Self>, which: Which, epoch: u64, reply: Result<String, String>) {
         if !self.live() {
             return;
         }
         {
             let mut inner = self.lock();
+            if epoch != inner.epoch && !matches!(which, Which::List) {
+                return;
+            }
             let ex = &mut inner.explorer;
             match (which, reply) {
                 (Which::List, Ok(text)) => ex.load(&text),
                 (Which::List, Err(why)) => ex.refuse(&why),
                 (Which::Touched, Ok(text)) => ex.load_touched(&text),
-                (Which::Touched, Err(_)) => inner.retry = true,
+                (Which::Touched, Err(_)) => {}
                 (Which::Stat, Ok(text)) => ex.load_stat(Some(&text)),
-                (Which::Stat, Err(_)) => {
-                    ex.load_stat(None);
-                    inner.retry = true;
-                }
+                (Which::Stat, Err(_)) => ex.load_stat(None),
             }
         }
         self.pump();
@@ -497,6 +506,7 @@ mod tests {
             fake.methods().last().map(String::as_str),
             Some("terminal.workspace-stat")
         );
+        fake.answer(Ok("".into())); // the marks, read again with it
         fake.answer(Ok(STAT.into()));
         assert_eq!(fake.last().footer.as_deref(), Some("4.2 KiB"));
     }
@@ -518,5 +528,38 @@ mod tests {
         fake.answer(Ok("".into()));
         fake.answer(Ok(STAT.into()));
         assert_eq!(fake.last().footer.as_deref(), Some("4.2 KiB"));
+    }
+
+    #[test]
+    fn a_status_failure_that_arrives_after_the_lease_returned_is_ignored() {
+        let (fake, ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        fake.answer(Ok("".into())); // touched; the stat is left outstanding
+        ws.lease(false);
+        ws.lease(true);
+        // Waiting now: the old stat, then the marks and stat asked again.
+        fake.answer(Err("the connection to the server was lost".into()));
+        fake.answer(Ok("".into()));
+        fake.answer(Ok(STAT.into()));
+        assert_eq!(fake.last().footer.as_deref(), Some("4.2 KiB"));
+    }
+
+    #[test]
+    fn a_stat_reply_from_before_the_lease_loss_is_not_taken_for_the_row_now_under_the_cursor() {
+        let (fake, ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        fake.answer(Ok("".into())); // touched; the root's stat is outstanding
+        ws.lease(false);
+        ws.intent(Intent::Step(1));
+        ws.lease(true);
+        // The old stat arrives first, for the root, and is dropped.
+        fake.answer(Ok("f\t1\t0".into()));
+        fake.answer(Ok("".into()));
+        fake.answer(Ok(STAT.into()));
+        let last = fake.last();
+        assert_eq!(
+            (last.path.as_str(), last.footer.as_deref()),
+            ("src", Some("4.2 KiB"))
+        );
     }
 }
