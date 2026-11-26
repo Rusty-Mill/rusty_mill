@@ -186,6 +186,12 @@ Precise contracts used by this guide:
 | D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
 | D177 | #1404 build defaults from the recovered #600 design: builders_per_claim 1, max_live_builders 3; budget admission as approved; `builder_session` fields | [default] 2026-11-25 (1404) |
 | D178 | #1405: Windows-only intent lines are recognised by a frozen-input mapping file keyed by line; the check is orch's, no BBP change | [default] 2026-11-25 (1405) |
+| D190 | #447 step 6: no claims-mode `bbp human` verb needs a signed receipt for now; claims-mode verbs unchanged | [stated] 2026-11-25 (447) |
+| D191 | #447 step 6: BBP human-gate schema/API items approved as a set (`task_opened.gates`, `bbp open --gates scratch`, `bbp human --approval`, `--op by:` refusal) | [stated] 2026-11-25 (447) |
+| D192 | #447 step 6: a receipted answer's op is `by:<approver>/rcpt:<sha>`; `--approval` excludes `--op` and `--decision` | [default] 2026-11-25 (447) |
+| D193 | #447 step 6: only `approve-plan`/`approve-merge` need a receipt on an owned task; other verbs keep today's labels | [default] 2026-11-25 (447) |
+| D194 | #447 step 6: board approval public key committed at `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub`, compiled in | [default] 2026-11-25 (447) |
+| D195 | #447 step 6: the scratch-repo list is a host file in the BBP directory, changed by a bbp operator command that records each approval | [stated] 2026-11-25 (447) |
 | D187 | #1318 v0 builder launch defaults: ACP permission allow_once + logged; usage 0 when unreported; `tail -F acp.log` viewer; mirror from frozen inputs; no jail token before #1382 | [default] 2026-11-25 (1318) |
 | D188 | #1318 slice design approved; a builder's candidate reaches BBP only on `end_turn` with the `.lel/submit` marker and a non-empty diff, else the session ends Failed | [stated] 2026-11-25 (1318, 600) |
 | D189 | #1318 S5 `builder run` defaults: explicit launcher flags, holder deadline past orch's grace, `sh` fd-4 wrapper, no recover in `builder run`, built-in prompt, `claude-builder` seat and op ids, store opened per step | [default] 2026-11-25 (1318) |
@@ -1796,6 +1802,59 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1405:windows-line-recognition
 **Source.** Caller question from the #600 thread, 2026-11-25; `600-builder-session-design.md` §2, §8 (approved, D66); D56, D63.
 
+## D190. #447 step 6: no claims-mode `bbp human` verb needs a signed receipt for now
+
+**Decision.** For card #447 step 6 (BBP human gates, folded in from #22), no claims-mode `bbp human` verb needs a board-signed approval receipt for now. Claims-mode human verbs (`claim accept`, `choose`, `holdout-updated`, `extend`, `extend-claim`, `close`, `rerun`, `receipt`) are unchanged. Nano: "D3. None for now". This answers the expert's 2026-11-04 escalation. Build consequence recorded in the design (§12, the author's reading, not Nano's words): `bbp open --gates scratch` is refused together with claims mode until a receipt rule exists for claims mode.
+**Why.** Claims mode has no plan or merge gates (addendum lines 10, 250); Nano deferred receipts for its accept verbs.
+**Rejected.** (b) Receipts on the accepting verbs (`claim accept`, `choose`, `holdout-updated`, `extend`, `extend-claim`), the design's recommendation; (c) b plus `close`, `rerun`, `receipt`. Either can be reopened later as a new ask-first change.
+**Tag.** [stated] · remind-me: mem_9c788b1153304af490cde8cc982f2277
+**Key.** lel:447:claims-verbs-no-receipt
+**Source.** Nano, project thread message `cmsg_014AqbZs58L565hMV2pFkCX5CZatgThTCScc6TZfje7dmZ`, 2026-11-25T19:23:05Z, answering §10 of `docs/design/factory-roles/design.md` (PR #1881). Relayed verbatim by the caller; the message was not read. Design §10 D3.
+
+## D191. #447 step 6: BBP human-gate schema/API items approved as a set
+
+**Decision.** Nano approved as a set the ask-first items of `docs/design/factory-roles/design.md` §7 and §10 D4. The BBP and host parts recorded here: (1) optional `task_opened.gates` field, value `scratch`; absent means owned and is not serialized, so there is no `LOG_SCHEMA` bump and N=1 goldens stay byte-identical; (2) `bbp open --gates scratch`, refused at open (before any turn or cost) unless the repo is on orch's scratch-repo list; (3) `bbp human --approval FILE`: on an owned task `approve-plan` and `approve-merge` need an Ed25519 receipt signed by the board (`rusty_pk`), bound to the human-view fence, artifact and (merge) run, verified against the board public key committed in the repo, stored as a task blob, op labelled `by:<approver>/rcpt:<sha>`, and re-verified by `bbp metrics`; (4) the host refuses a caller `--op` with a `by:` prefix; labels come only from `--as` (scratch) or a receipt (owned). Nano: "D4. I Approve them as a set." The board items in the same set (`card_review`, `card_approve`, `approval_issue`, `provider` on board credentials) are Mill Board's, outside this pack, and are not recorded here. This clears the ask-first gate only; CI, review by `dottiusmaximus` and the merge rules still apply.
+**Why.** A new event field and new public CLI flags are ask-first (D59, D62 precedent); Nano approved them so the build can proceed.
+**Rejected.** None offered; the alternative was not approving.
+**Tag.** [stated] · remind-me: mem_8381b8074e314ea9a2eab66800286a48
+**Key.** lel:447:bbp-human-gates-api-approved
+**Source.** Nano, project thread message `cmsg_014AqbZs58L565hMV2pFkCX5CZatgThTCScc6TZfje7dmZ`, 2026-11-25T19:23:05Z, answering §10 of `docs/design/factory-roles/design.md` (PR #1881). Relayed verbatim by the caller; the message was not read. Design §7, §10 D4. Compatible with D168: `bbp human --decision` builds its `by:<as>/dec:ID` label from `--as`, not from a caller `--op`, but on owned tasks a label without a receipt now counts as self-approved in metrics; the build should check the #703 Remediate path against that.
+
+## D192. #447 step 6: a receipted answer's op is `by:<approver>/rcpt:<sha>`; `--approval` excludes `--op` and `--decision`
+
+**Decision.** A `bbp human --approval FILE` answer runs under op `by:<approver>/rcpt:<sha>`, where `<sha>` is the full 64-hex SHA-256 of the stored receipt blob, so `bbp metrics` fetches the receipt straight from the op. `--approval` together with `--op` or `--decision` is refused. A resend of the same receipt yields the same op and replays by R15, so retry stays idempotent; Orch drops its `orch-<sha>` `--op` when it passes a receipt. `bbp decision` does not look up receipted ops; no caller needs it, because the inbox sends only claims verbs (D190).
+**Why.** Keeps D191's label and D168's `by:<as>/dec:ID` format both unchanged; a receipt-derived op already gives the idempotent retry that `--decision` and Orch's stable `--op` exist for. Refusing the combination is the most reversible choice.
+**Rejected.** `by:<approver>/rcpt:<sha12>.dec:<id>` or `.../rcpt:<sha>/dec:<id>` (changes `decision_of` parsing and D168's documented op for no current caller); `by:<approver>/dec:<id>` with the receipt keyed by op (needs a blob index; drops D191's `rcpt:` label).
+**Tag.** [default] · remind-me: mem_10f69853db034ec8b4863f717c08d641
+**Key.** lel:447:receipt-op-shape
+**Source.** Let Em Loose expert, 2026-11-25, answering the #447 step 6 builder's implementation questions. `docs/design/factory-roles/design.md` §7 (PR #1881), D191, D168; `rusty_bbp_host/src/human.rs` `op_for`/`decision_of`; `orch-bbp/src/lib.rs` stable answer op.
+
+## D193. #447 step 6: only `approve-plan`/`approve-merge` need a receipt on an owned task; other verbs keep today's labels
+
+**Decision.** On an owned task only `approve-plan` and `approve-merge` need a receipt (D191). Every other `bbp human` verb keeps today's `--as`/`--decision` labelling: `reject`, `cancel`, `resume`, `rerun`, `receipt`, `decision`, `ask`, `answer`, `takeover`, `takeover-release`, `intent`, `holdout-updated` and the claims verbs, including the #703 Remediate/inbox sends (D190, D168). On a receipted answer the label is the receipt's approver and `--as` is ignored. `bbp metrics` re-verifies only plan and merge approval rows; rejection rows keep today's label logic. Enforcement sits in `rusty_bbp_host`'s library (`human::perform_as` and `perform_fenced`), not only in the binary; the `rusty_bbp` engine is unchanged.
+**Why.** Only `human_approval` and `human_rejection` feed `metrics::gate_answers`, so `self_approved` reads just those three verbs; a rejection is a refusal and needs no receipt (design §7); the board inbox passes `--as` on every claims verb (D190 keeps them unchanged); enforcing in the library stops library callers going around the CLI.
+**Rejected.** Refusing `--as` on owned tasks (breaks the inbox's claims verbs, against D190); receipts on `reject` (design §7 says refusals need none).
+**Tag.** [default] · remind-me: mem_e0c314c0ac2e4d35bf0a38a6a66eb8b9
+**Key.** lel:447:owned-task-labels
+**Source.** Let Em Loose expert, 2026-11-25, answering the #447 step 6 builder's implementation questions. Design §7, D190, D191; `rusty_bbp/src/metrics.rs` `gate_answers`; `rusty_mill_board/src/inbox.rs` step verbs; `rusty_bbp_host/src/report.rs`.
+
+## D194. #447 step 6: board approval public key committed at `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub`, compiled in
+
+**Decision.** The board's approval public key lives at `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub` (one line, 64 hex characters), is compiled into `bbp` with `include_str!` and is checked with `rusty_pk::ed25519::verify`. No env var or flag overrides it in the binary; tests sign with their own key through a library verify function that takes the key as a parameter. Until the board's key exists (build step 2) the file is empty and owned plan and merge answers are refused (fail closed; no owned tasks are live, design §7). The private key stays with the board and is never committed.
+**Why.** D191 requires the key committed in the repo and changed only by a reviewed PR; compiling it in leaves no runtime override. The host already compiles in assets this way (`launchers/author.txt`).
+**Rejected.** A runtime keyring file like nexus-plugins' `~/.nexus/keys/` (editable outside review); an env override (an agent could set it).
+**Tag.** [default] · remind-me: mem_c0b772bd5156447ba9f97c60696eb0e3
+**Key.** lel:447:board-key-path
+**Source.** Let Em Loose expert, 2026-11-25, answering the #447 step 6 builder's implementation questions. Design §7, D191; `rusty_pk/src/ed25519.rs` `verify`; `rusty_bbp_host/src/launchers.rs`.
+
+## D195. #447 step 6: the scratch-repo list is a host file in the BBP directory, changed by a bbp operator command that records each approval
+
+**Decision.** The list that `bbp open --gates scratch` checks lives in the BBP directory on the host, not in Orch's config. Only a `bbp` operator command changes it, and that command records where Nano approved each repo, like the erosion limits (`<dir>/erosion/limits.log`, D115). The host refuses `--gates scratch` at open unless the repo is on the list. Orch's per-goal config only asks for scratch. Tests use their own temp list. Nano chose option a, "Host file, operator command"; the card's option text: "A list in the BBP directory, changed by a bbp operator command that records where you approved each repo, like the erosion limits. Tests use their own temp list." This refines D191's wording "orch's scratch-repo list"; the rest of D191 stands.
+**Why.** Orch has no machine-wide hosting config: `orch-bbp` `Config` is per goal, so a list there could be written by the goal's own author, and the host could not enforce a list it never sees.
+**Rejected.** (b) a list committed in the repo and compiled into `bbp` (doesn't fit tests' temp repos without a test hook); (c) a `scratch_repos` field in orch-bbp `Config` that Orch checks, with the host trusting the flag.
+**Tag.** [stated] · remind-me: mem_432e3566a5d04536a8db87ffed67790f
+**Key.** lel:447:scratch-repo-list
+**Source.** Nano, decision card in the #447 project thread, message `cmsg_014AqbZs58L565hMV2pFkCX5718KhbE8PUKcJ6AkWm8GFb`, 2026-11-25T19:50:24Z, answering the expert's escalation on where the list lives (relayed by the coordinator; the card was not read). Refines D191.
 ## D187. #1318 v0 builder launch defaults
 
 **Decision.** Implementation choices for `1318-builder-launch-slices.md` (draft, awaiting Nano's approval), inside the approved designs (D66, D104, D107, D108):
