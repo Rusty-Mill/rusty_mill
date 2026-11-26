@@ -234,6 +234,12 @@ fn an_unblock_filed_on_old_text_expires_and_the_card_stays() {
         Outcome::Expired,
         "the caller is told nothing was approved"
     );
+    let events = b.events(None, 1000).expect("events");
+    assert_eq!(
+        events.last().map(|e| e.kind),
+        Some(rusty_mill_board::domain::EventKind::ApprovalExpired),
+        "logged as expired, not as an approval"
+    );
     assert_eq!(
         tapped.column,
         col("blocked"),
@@ -496,4 +502,37 @@ fn one_credentials_instances_keep_a_bounded_number_of_verdicts() {
     let again = who(&b, "rev/0", "reviewer", "openai");
     b.review(card.id, &again, false, "changed my mind")
         .expect("an instance replaces its own verdict");
+}
+
+#[test]
+fn verdicts_from_before_rework_do_not_count_toward_the_cap() {
+    let b = board();
+    let nano = who(&b, "nano", "human", "human");
+    let maker = who(&b, "cloud#1", "maker", "anthropic");
+    let dots = who(&b, "dots", "reviewer", "openai");
+    let card = at_v_and_ving(&b, &nano, &maker, &dots);
+    for i in 0..MAX_HAND_VERDICTS {
+        let r = who(&b, &format!("rev/{i}"), "reviewer", "openai");
+        b.review(card.id, &r, false, "rework").expect("verdict");
+    }
+    let card = b.move_card(card.id, &col("building"), &nano).expect("back");
+    b.claim(card.id, &maker).expect("rework claim");
+    b.release(card.id, &maker).expect("release");
+    let fresh = who(&b, "rev/new", "reviewer", "openai");
+    b.claim(card.id, &fresh).expect("claim");
+    b.move_card(card.id, &col("v_and_ving"), &fresh)
+        .expect("a fresh instance reviews the rework");
+    let card = b
+        .review(card.id, &fresh, true, "rework is good")
+        .expect("a fifth instance's verdict on the reworked V&V");
+    let stale = card
+        .duties
+        .iter()
+        .filter(|d| matches!(d, Duty::Review { actor, .. } if actor.starts_with("rev/") && actor != "rev/new"))
+        .count();
+    assert_eq!(
+        stale, 0,
+        "verdicts on the old work were dropped: {:?}",
+        card.duties
+    );
 }

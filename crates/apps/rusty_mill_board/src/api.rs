@@ -2335,6 +2335,7 @@ mod tests {
         assert!(approve("0000000000000000").is_err(), "a stale readback");
         let out = approve(&digest).expect("approve");
         assert_eq!(out["card"]["column"], "ready");
+        assert_eq!(out["outcome"], "moved");
         assert_eq!(out["card"]["duties"][0]["provider"], "human");
         assert_eq!(out["card"]["duties"][0]["source"], "cmsg_x");
     }

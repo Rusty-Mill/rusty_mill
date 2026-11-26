@@ -183,22 +183,31 @@ fn review_of<'a>(actor: &'a str, column: &'a Column) -> impl Fn(&Duty) -> bool +
 }
 
 /// `entry`, a verdict by `by` on `column`, in place of `by`'s own earlier one. Each instance
-/// keeps its own verdict, so another instance of the credential cannot clear its fail; a
-/// credential's instances keep at most [`MAX_HAND_VERDICTS`] on one column.
+/// keeps its own verdict, so another instance of the credential cannot clear its fail. The
+/// credential's verdicts on `column` from before the last authoring claim no longer count (R4)
+/// and are dropped; since then its instances keep at most [`MAX_HAND_VERDICTS`].
+///
+/// # Errors
+/// A new instance past the cap, or a full ledger.
 fn verdict(card: &Card, by: &Actor, column: &Column, entry: Duty) -> Result<Card, BoardError> {
+    let sibling = |d: &Duty| matches!(d, Duty::Review { actor, column: c, .. } if hand(actor) == hand(&by.name) && c == column);
+    let since = last_author(card).map_or(0, |i| i + 1);
+    let mut live = card.clone();
+    let mut i = 0;
+    live.duties.retain(|d| {
+        let keep = i >= since || !sibling(d);
+        i += 1;
+        keep
+    });
     let mine = review_of(&by.name, column);
-    let siblings = card
-        .duties
-        .iter()
-        .filter(|d| matches!(d, Duty::Review { actor, column: c, .. } if hand(actor) == hand(&by.name) && c == column))
-        .count();
-    if !card.duties.iter().any(&mine) && siblings >= MAX_HAND_VERDICTS {
+    let siblings = live.duties.iter().filter(|d| sibling(d)).count();
+    if !live.duties.iter().any(&mine) && siblings >= MAX_HAND_VERDICTS {
         return Err(BoardError::Refused(format!(
             "{MAX_HAND_VERDICTS} instances of {} already gave a verdict on this work",
             hand(&by.name)
         )));
     }
-    upsert(card, entry, mine)
+    upsert(&live, entry, mine)
 }
 
 /// The credential behind an actor name: its instances (`claude-cli/a1`) and registered agents
@@ -293,7 +302,8 @@ pub fn check_move(card: &Card, flow: &Workflow, to: &Column, by: &Actor) -> Resu
 /// approval).
 ///
 /// # Errors
-/// If the ledger is full.
+/// If the ledger is full, or a review move by a further instance of a credential whose
+/// instances already gave [`MAX_HAND_VERDICTS`] verdicts on this work.
 pub fn on_move(
     moved: &Card,
     flow: &Workflow,
@@ -868,7 +878,7 @@ mod tests {
         assert!(approve(&c, &flow(), &proxy(), &a, 3).is_err(), "no PR head");
         a.pr_head = Some("abc123");
         let (c, moves) = approve(&c, &flow(), &proxy(), &a, 3).expect("filed");
-        assert!(moves != Outcome::Moves);
+        assert_eq!(moves, Outcome::Stays);
         assert!(matches!(
             c.duties.last(),
             Some(Duty::Approval { pending: true, .. })
@@ -888,7 +898,7 @@ mod tests {
         let c = at("blocked");
         let to = Column::new("building").expect("col");
         let (c, moves) = approve(&c, &flow(), &proxy(), &approval_of(&c, &to), 1).expect("filed");
-        assert!(moves != Outcome::Moves);
+        assert_eq!(moves, Outcome::Stays);
         let nano = actor("nano", Some("human"), &[Capability::Admin]);
         let (_, moves) = approve(&c, &flow(), &nano, &approval_of(&c, &to), 2).expect("tap");
         assert_eq!(moves, Outcome::Moves);
