@@ -1,7 +1,7 @@
 # #432 Codex session resume: design
 
-Status: draft for Nano's approval on card #432 (bbp_factory). No code until approved.
-Defaults D199; open timing and env-var question Q66.
+Status: approved by Nano 2026-11-26 (D200); build after the #600 builder work lands.
+Defaults D199; Q66 resolved by D200 (design and `BBP_PROVIDER_SESSION` approved).
 
 ## Problem
 

@@ -192,6 +192,7 @@ Precise contracts used by this guide:
 | D196 | #724: the redrawn `factory-map.svg` is accepted as the Factory map for now | [stated] 2026-11-25 (724) |
 | D198 | #1416 slice 2: claim field bindings, stage strip derivation rule, brief text as a plain input | [default] 2026-11-25 (#1416) |
 | D199 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
+| D200 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
 
 ## D1. Lenses, not stages
 
@@ -1860,3 +1861,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_30f145c0fb2e4e10b0e89e7a86f79031
 **Key.** lel:432:codex-session-capture-defaults
 **Source.** Caller question from the #432 design thread, 2026-11-26; `432-codex-session-resume-design.md` §2; `rusty_bbp_host` `src/moderator.rs` `spawn`, `src/launchers.rs` `run`; Nano's deferral, remind-me `mem_489a8411814648ab95c7e9661c7f70ad`. D199 is the next number free after open PRs #1871 to #1894 (D179 to D197).
+
+## D200. #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands
+
+**Decision.** Nano approves the #432 Codex session resume design (`432-codex-session-resume-design.md`, PR #1904). The approval includes the new launcher env var `BBP_PROVIDER_SESSION`, the additive public launcher contract that Q66 flagged as ask-first. Code waits until the #600 builder work lands, following D164's order. This satisfies D25 for #432. The capture defaults stay in D199. Review, merge and the other ask-first gates still apply to the build PR.
+**Why.** No Let Em Loose v0 path uses a Codex session (D8, D64), and D164 released builder sessions (#1402, #600) first.
+**Rejected.** Approve and build now. Park the card. Change the design.
+**Tag.** [stated] · remind-me: mem_489a43a7e3194f5198c1fbc59032e132
+**Key.** lel:432:design-approved-build-after-600
+**Source.** Nano tapped "Approve, build after #600" ("Design and BBP_PROVIDER_SESSION approved; code waits until the #600 builder work lands (D164 order).") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE45mV9XoArWETD2NMavEjbEy` in the Let Em Loose project thread "Build BBP Codex session resume" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4KGZwc1M3KXuPWKygNkYSfd`), 2026-11-26 13:56Z. The coordinator relayed the tap; the card and its options were read. Resolves OPEN_QUESTIONS Q66. D200 is the next number free after open PRs #1871 to #1904.
