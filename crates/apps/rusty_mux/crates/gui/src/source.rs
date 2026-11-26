@@ -543,11 +543,18 @@ impl Source for MuxSource {
         self.pane(key).is_some_and(|b| b.forwards)
     }
 
-    /// The server's socket: the same on every connection to it, and what a
-    /// saved forward trust belongs to.
+    /// The server's socket as an absolute path: the same on every connection
+    /// to it, and what a saved forward trust belongs to.
     fn host_id(&self, key: u64) -> Option<String> {
         self.pane(key)?;
-        Some(self.0.socket.to_string_lossy().into_owned())
+        // Absolute, so the same relative name in another folder is another
+        // host; a path that is not UTF-8 gets no name rather than a lossy one.
+        let path = self
+            .0
+            .socket
+            .canonicalize()
+            .or_else(|_| std::path::absolute(&self.0.socket));
+        path.ok()?.to_str().map(str::to_owned)
     }
 
     fn uploads(&self, key: u64) -> bool {
