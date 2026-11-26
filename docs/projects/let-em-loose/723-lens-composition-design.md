@@ -30,7 +30,7 @@ mapped domains, the prefix is byte-for-byte today's.
 | Lens prompt | Factory `lens.json` → `lenses/<id>.md` (D135) | yes |
 | Domain pack | target repo `DOMAIN.md` (D186), a short digest | no |
 | Manifest | target repo manifest written by Ai Env Manager (D186): extra knowledge topics and tools | no |
-| Domain map | Factory `domains.toml` (new): domain token → knowledge and standards files | no |
+| Domain map | Factory `domains.json` (new, JSON like `lens.json`): domain token → knowledge and standards files | no |
 | Knowledge / standards | Factory `knowledge/*.md`, `standards/*.md` | only what the map selects |
 | Question domains | the claim's existing `domains` field (1–8 tokens); a question takes the union over the claims it references | yes |
 
@@ -40,15 +40,13 @@ No BBP change: `domains` already exists on every claim and orch already reads it
 The project-expert pack is not composed into prompts; it stays asked on demand (D186).
 `.factory/overlay.md` is not an input.
 
-## Domain map (`domains.toml`, in Factory)
+## Domain map (`domains.json`, in Factory)
 
-```toml
-[domain.rust]
-knowledge = ["knowledge/rust-expert.md"]
-standards = ["standards/rust.md"]
-
-[domain.terminal]
-knowledge = ["knowledge/terminal-emulator-expert.md"]
+```json
+{
+  "rust":     {"knowledge": ["knowledge/rust-expert.md"], "standards": ["standards/rust.md"]},
+  "terminal": {"knowledge": ["knowledge/terminal-emulator-expert.md"]}
+}
 ```
 
 File names above are illustrative; this session could not read Factory, so slice 4 picks
@@ -95,7 +93,7 @@ severity field in BBP, which is a schema change and ask-first. Not proposed for 
 
 - `orch-lens/src/compose.rs`: the pure composer. Takes already-read texts, returns `Composed`.
 - `rusty_orch/src/lens/catalog.rs`: the Factory catalog adapter. Reads `lens.json`,
-  `domains.toml`, the selected files, and the target repo's `DOMAIN.md` and manifest.
+  `domains.json`, the selected files, and the target repo's `DOMAIN.md` and manifest.
 - `lens run` switches to it behind config: `"compose": true` in the lens config, off by default.
 
 Roles stay in orch. BBP sees nothing new: lens id = principal, as today.
@@ -110,14 +108,13 @@ Approving this design approves that scope, not the Retro build.
 
 1. `compose.rs` + fixture tests: same lens, two domain sets → different bytes; same set in any
    order → same bytes; no inputs → today's prefix; budget drops in order.
-2. Catalog adapter + `domains.toml` reader, tested on a fixture catalog directory.
+2. Catalog adapter + `domains.json` reader, tested on a fixture catalog directory.
 3. `lens run` behind `compose`, with the prefix cache keyed by `ComposeKey`. Test: two claims
    in different domains get different contexts from one catalog.
-4. Factory PR (separate repo): `domains.toml` for the first domains. Needs Factory access in a
+4. Factory PR (separate repo): `domains.json` for the first domains. Needs Factory access in a
    session that has it.
 
-No dependency bumps: `toml = "0.8"` is already a workspace dependency; orch-lens would add it
-as a `workspace = true` crate dependency (new to orch, not a new crate or version).
+No dependency bumps: the map is JSON, parsed with `rusty_json` as `lens.json` is.
 
 ## Questions for Nano
 
