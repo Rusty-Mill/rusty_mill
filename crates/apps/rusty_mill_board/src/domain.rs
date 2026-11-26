@@ -326,6 +326,8 @@ pub struct Edit<'a> {
     pub why: Option<&'a str>,
     /// New one-paragraph summary; `""` clears it. At most [`MAX_SUMMARY_BYTES`].
     pub summary: Option<&'a str>,
+    /// New one-line state; `""` clears it. See [`check_state`].
+    pub state: Option<&'a str>,
 }
 
 /// The longest `acceptance`, `scope`, `why` and `summary`, in bytes (#1568).
@@ -337,9 +339,40 @@ pub const MAX_WHY_BYTES: usize = 600;
 /// See [`MAX_ACCEPTANCE_BYTES`].
 pub const MAX_SUMMARY_BYTES: usize = 320;
 
-/// The longest prompt, in bytes. It is stored in the card's rusty_tick board document,
-/// which rusty_tick caps at 64 KiB, beside the links.
-pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
+/// The longest prompt, in bytes (8 KiB; it was 32 KiB, lean cards #1435). A write that
+/// leaves a longer existing prompt as it is is never refused ([`Card::with_prompt`]).
+pub const MAX_PROMPT_BYTES: usize = 8 * 1024;
+/// The longest title, in characters (#1435).
+pub const MAX_TITLE_CHARS: usize = 200;
+/// The longest body, in bytes (#1435).
+pub const MAX_BODY_BYTES: usize = 8 * 1024;
+/// The longest comment, in bytes (#1435).
+pub const MAX_COMMENT_BYTES: usize = 2 * 1024;
+/// The longest `state` line, in bytes (#1435).
+pub const MAX_STATE_BYTES: usize = 200;
+
+/// A write refused for being over a content budget: names the field, the limit and the size
+/// sent, and says where the detail belongs.
+fn over_budget(field: &str, limit: usize, sent: usize, unit: &str) -> BoardError {
+    BoardError::Refused(format!(
+        "{field} is {sent} {unit}, over the {limit} {unit} limit; move the detail to remind-me, \
+         the repo or GitHub and link it"
+    ))
+}
+
+/// Check a `state` line: at most [`MAX_STATE_BYTES`], one line.
+///
+/// # Errors
+/// [`BoardError::Refused`] over the limit, [`BoardError::Invalid`] with a line break.
+pub fn check_state(state: &str) -> Result<(), BoardError> {
+    if state.contains(['\n', '\r']) {
+        return Err(BoardError::Invalid("state is one line: no line break"));
+    }
+    if state.len() > MAX_STATE_BYTES {
+        return Err(over_budget("state", MAX_STATE_BYTES, state.len(), "bytes"));
+    }
+    Ok(())
+}
 
 /// A planning change (`card_plan`): each `None` field is left as it is, and a list replaces
 /// the card's current one (an empty list clears it).
@@ -631,6 +664,10 @@ pub struct Card {
     /// One short paragraph for a card face. Empty when unset.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub summary: String,
+    /// Where the work stands now, in the last writer's words: one line, at most
+    /// [`MAX_STATE_BYTES`]. Changes as work moves; `summary` rarely does. Empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
     /// Current column.
     pub column: Column,
     /// Who holds the work, if anyone.
@@ -764,6 +801,9 @@ pub struct CardSummary {
     pub claim: Option<String>,
     /// Labels.
     pub tags: Vec<String>,
+    /// Where the work stands; left out when empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub state: String,
     /// Creation time, Unix ms.
     pub created_ms: i64,
     /// Last change, Unix ms.
@@ -789,6 +829,7 @@ impl From<&Card> for CardSummary {
             priority: c.priority,
             claim: c.claim.clone(),
             tags: c.tags.clone(),
+            state: c.state.clone(),
             created_ms: c.created_ms,
             updated_ms: c.updated_ms,
             done_ms: c.done_ms,
@@ -1039,6 +1080,21 @@ fn check_transition(t: &Transition, by: &Actor) -> Result<(), BoardError> {
     Ok(())
 }
 
+fn check_title(title: &str) -> Result<(), BoardError> {
+    let chars = title.chars().count();
+    if chars > MAX_TITLE_CHARS {
+        return Err(over_budget("title", MAX_TITLE_CHARS, chars, "characters"));
+    }
+    Ok(())
+}
+
+fn check_body(body: &str) -> Result<(), BoardError> {
+    if body.len() > MAX_BODY_BYTES {
+        return Err(over_budget("body", MAX_BODY_BYTES, body.len(), "bytes"));
+    }
+    Ok(())
+}
+
 impl Card {
     /// A new Backlog card.
     ///
@@ -1055,6 +1111,8 @@ impl Card {
             return Err(BoardError::Invalid("title is empty"));
         }
         check_tags(&tags)?;
+        check_title(title)?;
+        check_body(body)?;
         Ok(Self {
             id: Uuid::new_v4(),
             number: None,
@@ -1066,6 +1124,7 @@ impl Card {
             scope: String::new(),
             why: String::new(),
             summary: String::new(),
+            state: String::new(),
             column: Column::BACKLOG,
             claim: None,
             tags,
@@ -1576,9 +1635,17 @@ impl Card {
             if t.trim().is_empty() {
                 return Err(BoardError::Invalid("title is empty"));
             }
+            // A limit applies only to a write that changes the field: an oversized card from
+            // before the limits can still be edited elsewhere (#1435).
+            if t.trim() != self.title {
+                check_title(t.trim())?;
+            }
             next.title = t.trim().to_owned();
         }
         if let Some(b) = body {
+            if b != self.body {
+                check_body(b)?;
+            }
             next.body = b.to_owned();
         }
         if let Some(t) = tags {
@@ -1593,8 +1660,13 @@ impl Card {
     /// # Errors
     /// A prompt over [`MAX_PROMPT_BYTES`].
     pub fn with_prompt(mut self, prompt: &str) -> Result<Self, BoardError> {
-        if prompt.len() > MAX_PROMPT_BYTES {
-            return Err(BoardError::Invalid("prompt is longer than 32 KiB"));
+        if prompt != self.prompt && prompt.len() > MAX_PROMPT_BYTES {
+            return Err(over_budget(
+                "prompt",
+                MAX_PROMPT_BYTES,
+                prompt.len(),
+                "bytes",
+            ));
         }
         self.prompt = prompt.to_owned();
         Ok(self)
@@ -1637,6 +1709,10 @@ impl Card {
                 return Err(BoardError::Invalid(refusal));
             }
             *slot = (*text).to_owned();
+        }
+        if let Some(state) = edit.state {
+            check_state(state)?;
+            self.state = state.to_owned();
         }
         Ok(self)
     }
@@ -1782,10 +1858,36 @@ impl Card {
     /// # Errors
     /// If `text` is blank.
     pub fn comment(&self, by: &Actor, text: &str, now_ms: i64) -> Result<Self, BoardError> {
+        self.comment_with_state(by, text, None, now_ms)
+    }
+
+    /// [`Card::comment`], also setting the card's `state` line when one is given.
+    ///
+    /// # Errors
+    /// If `text` is blank or over [`MAX_COMMENT_BYTES`], or the state fails [`check_state`].
+    pub fn comment_with_state(
+        &self,
+        by: &Actor,
+        text: &str,
+        state: Option<&str>,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
         if text.trim().is_empty() {
             return Err(BoardError::Invalid("comment is empty"));
         }
+        if text.len() > MAX_COMMENT_BYTES {
+            return Err(over_budget(
+                "comment",
+                MAX_COMMENT_BYTES,
+                text.len(),
+                "bytes",
+            ));
+        }
         let mut next = self.next(now_ms);
+        if let Some(state) = state {
+            check_state(state)?;
+            next.state = state.to_owned();
+        }
         next.comments.push(Comment {
             by: by.name.clone(),
             at_ms: now_ms,

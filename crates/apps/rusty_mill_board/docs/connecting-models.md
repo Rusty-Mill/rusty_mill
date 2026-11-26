@@ -63,7 +63,12 @@ You work from the Mill Board (MCP server "mill"). Humans decide what is ready an
    is waiting for your role. If null, say so and stop; do not invent work.
 3. Read the card and its comments (earlier notes may say why a previous attempt failed). Do the work in
    your own environment.
-4. Call card_comment with what you did, what you verified, and anything the next person needs.
+4. Call card_comment with what you did, what you verified, and anything the next person needs. Keep it
+   a status note (at most 2 KiB) and link the detail: rationale in remind-me, specs and logs in the
+   repo, review on GitHub. Pass `state` (one line, at most 200 bytes) to say where the work stands
+   now, such as "review requested, PR #1888"; card_move and card_update take it too. Title is at
+   most 200 characters, body and prompt 8 KiB; a longer write is refused, and a card already over a
+   limit is never rewritten.
 5. Call card_move to the next column: builder -> qa when the work is done; qa -> review if it passes, or
    back to building with the failure in a comment; reviewer -> done only when you would merge it.
    If the card's work already merged on the forge (its PR is merged), record the PR link with

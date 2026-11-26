@@ -285,6 +285,8 @@ struct BoardDoc {
     why: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     summary: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -316,6 +318,7 @@ impl BoardDoc {
             scope: card.scope.clone(),
             why: card.why.clone(),
             summary: card.summary.clone(),
+            state: card.state.clone(),
             target_ms: card.target_ms,
             external_refs: card
                 .external_refs
@@ -564,6 +567,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         scope: doc.scope,
         why: doc.why,
         summary: doc.summary,
+        state: doc.state,
         column,
         claim,
         tags,
@@ -1197,6 +1201,8 @@ impl<T: TickApi> Store for TickStore<T> {
 
     /// The tasks alone: one read of the project lists and the tag's pages, never the board
     /// documents or comments, so prompts, links and comments are left empty.
+    ///
+    /// The `state` line lives in the board document, so it is empty here; `card_get` has it.
     fn summaries(&self) -> Result<Vec<Card>, BoardError> {
         self.board(false)
     }
@@ -1283,7 +1289,19 @@ impl<T: TickApi> Store for TickStore<T> {
                 let comment = card.comments.last().ok_or_else(|| {
                     BoardError::Storage("a comment event carries no comment".into())
                 })?;
-                self.put_comment(card, comment, read)
+                let version = self.put_comment(card, comment, read)?;
+                // A comment that also sets the `state` line changes the board document: a
+                // second fenced write, reported as partly saved if it fails.
+                match doc {
+                    Some(doc) => {
+                        self.put_doc(card, doc, version)
+                            .map_err(|e| BoardError::PartlySaved {
+                                rev: version - 1,
+                                why: e.to_string(),
+                            })
+                    }
+                    None => Ok(version),
+                }
             } else {
                 let patch = self.task_patch(&current, card)?;
                 let task_changed = patch.as_object().is_some_and(|p| !p.is_empty());
