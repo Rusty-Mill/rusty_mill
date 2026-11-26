@@ -1004,7 +1004,7 @@ fn a_forward_to_a_port_nothing_listens_on_tells_the_window_why() {
     assert!(attached.source.forwards(key), "the server tunnels ports");
     assert_eq!(
         attached.source.host_id(key).as_deref(),
-        socket.to_str(),
+        socket.canonicalize().expect("canonical").to_str(),
         "the server's socket names its host"
     );
     assert_eq!(attached.source.host_id(key + 99), None, "no such pane");

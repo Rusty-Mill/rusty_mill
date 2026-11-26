@@ -145,6 +145,9 @@ pub fn attach_with(
     start: Start,
 ) -> Result<Attached, String> {
     let start_cwd = start.first.cwd.clone();
+    let host = host_id(socket);
+    // Pinned: this and every later connection of the client go to one place.
+    let socket = host.as_deref().map_or(socket, Path::new);
     let (stream, mut conn) = hello(socket)?;
     let mut req = Requests {
         conn: &mut conn,
@@ -177,7 +180,7 @@ pub fn attach_with(
     let (asks, inbox) = std::sync::mpsc::channel();
     let state = Arc::new(State {
         socket: socket.to_owned(),
-        host: host_id(socket),
+        host,
         control: Mutex::new(Conn::new(clone(&stream)?)),
         next: AtomicU64::new(next),
         tells_focus: welcomed.features.contains(Features::FOCUS),
@@ -227,15 +230,17 @@ pub fn attach_with(
     })
 }
 
-/// A name for the server at `socket` that holds across folders and links:
-/// its resolved absolute path. A path that is not UTF-8 gets none rather than
-/// a lossy name.
+/// The server's pinned destination: `socket` with every link resolved, as an
+/// absolute UTF-8 path. Every connection of the client goes to this path and
+/// persisted consent is named by it, so the name is the destination reached,
+/// not a path that can be pointed elsewhere later. `None` where it cannot be
+/// pinned (no such path, not UTF-8, not Unix): consent then stays with the
+/// window.
 fn host_id(socket: &Path) -> Option<String> {
-    let path = socket
-        .canonicalize()
-        .or_else(|_| std::path::absolute(socket))
-        .ok()?;
-    path.to_str().map(str::to_owned)
+    if !cfg!(unix) {
+        return None;
+    }
+    socket.canonicalize().ok()?.to_str().map(str::to_owned)
 }
 
 /// Connects to `socket` and says the GUI's Hello, asking for no takeover.
@@ -264,7 +269,7 @@ enum Ask {
 /// What the client and the window share.
 struct State {
     socket: PathBuf,
-    /// [`host_id`] of `socket`, taken at attach.
+    /// [`host_id`] of the socket, pinned at attach: `socket` is that same path.
     host: Option<String>,
     control: Mutex<Conn<UnixStream>>,
     next: AtomicU64,
@@ -557,9 +562,10 @@ impl Source for MuxSource {
         self.pane(key).is_some_and(|b| b.forwards)
     }
 
-    /// The server's socket as an absolute path, resolved once when this
-    /// client attached, so a socket later retargeted never renames the host
-    /// an open pane reaches: what a saved forward trust belongs to.
+    /// The server's socket as an absolute path, pinned when this
+    /// client attached (every connection goes to it), so a socket later
+    /// retargeted never renames the host an open pane reaches: what a saved
+    /// forward trust belongs to.
     fn host_id(&self, key: u64) -> Option<String> {
         self.pane(key)?;
         self.0.host.clone()
@@ -2226,21 +2232,26 @@ impl Drop for PaneWriter {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     #[test]
-    fn a_host_is_named_by_its_absolute_utf8_path() {
+    fn a_host_is_the_resolved_destination_and_none_where_it_cannot_be_pinned() {
         use super::host_id;
-        use std::path::Path;
-        let rel = host_id(Path::new("s.sock")).expect("a name");
-        assert!(Path::new(&rel).is_absolute(), "{rel}");
-        assert!(rel.ends_with("s.sock"));
-        #[cfg(unix)]
-        {
-            let other = host_id(Path::new("/a/s.sock"));
-            assert_eq!(other.as_deref(), Some("/a/s.sock"));
-            use std::os::unix::ffi::OsStrExt;
-            let raw = Path::new(std::ffi::OsStr::from_bytes(b"/a/\xff.sock"));
-            assert_eq!(host_id(raw), None, "no lossy name");
-        }
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!("rusty-mux-gui-host-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = dir.canonicalize().expect("canonical dir");
+        let (real, alias) = (dir.join("real.sock"), dir.join("alias.sock"));
+        std::fs::write(&real, b"").expect("file");
+        std::os::unix::fs::symlink(&real, &alias).expect("link");
+        let named = host_id(&alias).expect("a name");
+        assert_eq!(Some(named.as_str()), real.to_str(), "links are resolved");
+        assert_eq!(host_id(&real), Some(named));
+        assert_eq!(host_id(&dir.join("missing.sock")), None);
+        let raw = dir.join(std::ffi::OsStr::from_bytes(b"\xff.sock"));
+        std::fs::write(&raw, b"").expect("file");
+        assert_eq!(host_id(&raw), None, "no lossy name");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     use std::ffi::OsString;
