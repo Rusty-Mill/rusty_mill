@@ -11,7 +11,8 @@
 //!
 //! Tokens drop comments, map identifiers to `ID` and literals to `STR` (one per
 //! string, f-string interpolations included), `NUM`, `BOOL` or `NONE`, and keep
-//! keywords and punctuation.
+//! keywords and punctuation. Decisions inside f-string interpolations still
+//! count toward CC, as they do in radon.
 
 use std::collections::HashMap;
 
@@ -97,6 +98,9 @@ impl<'s> Walk<'s> {
 
     fn visit(&mut self, node: Node, mut cc: Option<&mut u32>) {
         if let Some(class) = literal_class(node.kind()) {
+            if let Some(c) = cc.as_deref_mut() {
+                *c += nested_decisions(node);
+            }
             return self.token(node, class);
         }
         match node.kind() {
@@ -166,6 +170,15 @@ impl<'s> Walk<'s> {
             n => format!("{base}#{n}"),
         }
     }
+}
+
+/// CC inside `node`'s descendants, for a literal kept as one token: an
+/// f-string's interpolations still branch.
+fn nested_decisions(node: Node) -> u32 {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .map(|c| decisions(c) + nested_decisions(c))
+        .sum()
 }
 
 /// CC added by `node` itself, not counting its descendants.
