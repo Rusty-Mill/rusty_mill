@@ -28,3 +28,7 @@ Pre-answered from the design chat and `../design.md`. Each cites its source. The
 ## Testing
 - **Q:** How is it tested without a mount? **A:** Codec fixtures and fuzzing; `memfs` port tests on every OS; conformance mounts `memfs` through the real adapter on Linux and Windows CI; divergences numbered in `divergences.md` (rustils `platform-parity` pattern). macOS mount tests are manual. [default] design.md § Testing
 - **Q:** Unit tests for spikes? **A:** Exempt (Nano's standing rule: tests for non-trivial logic, spikes exempt). [stated] preferences
+
+## Pre-Q1 slice (added 2026-11-25)
+- **Q:** May I build Phase 1 code before the first backend is named? **A:** Only the D22 slice: port read core (`Filesystem`), memfs plus conformance, and read-only passthrough tested on a plain folder, with no mount and no ProjFS. Everything else in Phase 1 still waits on Q1. This narrows "do not start Phase 1" under § Scope above; that entry is left as written. [stated] D22
+- **Q:** What does passthrough build on? **A:** `std::fs`, lstat-style metadata, symlinks as `Symlink` nodes and never followed during `lookup`. [default] D23
