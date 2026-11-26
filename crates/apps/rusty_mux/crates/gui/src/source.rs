@@ -543,6 +543,13 @@ impl Source for MuxSource {
         self.pane(key).is_some_and(|b| b.forwards)
     }
 
+    /// The server's socket: the same on every connection to it, and what a
+    /// saved forward trust belongs to.
+    fn host_id(&self, key: u64) -> Option<String> {
+        self.pane(key)?;
+        Some(self.0.socket.to_string_lossy().into_owned())
+    }
+
     fn uploads(&self, key: u64) -> bool {
         self.pane(key).is_some_and(|b| b.uploads)
     }
@@ -1808,6 +1815,7 @@ impl Block {
         let (wants_tx, wants) = sync_channel(FORWARD_WANTS);
         let stop = Arc::new(AtomicBool::new(false));
         let (block, flag) = (Arc::clone(self), Arc::clone(&stop));
+        let told = Arc::clone(self);
         let id = RUNS.fetch_add(1, Ordering::Relaxed);
         let conn = self.conn_gen.load(Ordering::SeqCst);
         let spawned = std::thread::Builder::new()
@@ -1822,6 +1830,7 @@ impl Block {
                     &wants,
                     ConnWriter(Arc::clone(&block), Arc::clone(&flag), conn),
                     &|| flag.load(Ordering::SeqCst),
+                    Box::new(move |refused| told.refused(refused)),
                 );
                 if let forward::Ended::Lost(e) = ended {
                     eprintln!("rusty-mux-gui: block {}: forwards ended: {e}", block.block);
@@ -1848,6 +1857,18 @@ impl Block {
             wants: wants_tx,
             stop,
             ports: HashMap::new(),
+        }
+    }
+
+    /// Tells the window a forward ended with a reason, such as a dial
+    /// nothing answered.
+    fn refused(&self, refused: forward::Refused) {
+        if let Some(tell) = &*lock(&self.to_window) {
+            // A full feed drops the notice rather than stall the forwards.
+            let _ = tell.try_send(Feed::ForwardRefused {
+                port: refused.remote,
+                reason: refused.reason,
+            });
         }
     }
 

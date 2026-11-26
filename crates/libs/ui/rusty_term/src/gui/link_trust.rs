@@ -11,13 +11,33 @@
 //! http(s) origin *and* match their file name's hash, so a truncated or
 //! hand-made file can never trust another origin. Removing a site is
 //! deleting its file.
+//!
+//! Forwarded ports (C81, D341) are kept the same way in a second directory,
+//! one `<host>:<port>` entry per file, checked by their own validator, so a
+//! forward entry can never trust a web origin nor the other way round.
 
 use super::link_policy::{Policy, valid_origin};
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The file name's extension, and how many same-hash origins one hash may
+/// What one directory holds: the file name's extension and the check an
+/// entry must pass, on load and before it is added.
+struct Kind {
+    ext: &'static str,
+    valid: fn(&str) -> Option<&str>,
+}
+
+const ORIGINS: Kind = Kind {
+    ext: EXT,
+    valid: valid_origin,
+};
+const FORWARDS: Kind = Kind {
+    ext: "forward",
+    valid: valid_forward,
+};
+
+/// The origin files' extension, and how many same-hash entries one hash may
 /// hold (a 64-bit collision, in practice never).
 const EXT: &str = "origin";
 const SLOTS: u32 = 8;
@@ -34,20 +54,58 @@ pub(crate) fn default_dir() -> Option<PathBuf> {
     )
 }
 
+/// The directory of trusted forwarded ports, beside the origins'.
+pub(crate) fn forwards_dir() -> Option<PathBuf> {
+    Some(
+        rusty_dirs::config_root()?
+            .join("rusty_term")
+            .join("trusted_forwards"),
+    )
+}
+
+/// `host` and `port` as one forward entry: `host` is the source's opaque
+/// name for the pane's host, so it must be a single line.
+pub(crate) fn forward_entry(host: &str, port: u16) -> Option<String> {
+    let entry = format!("{host}:{port}");
+    valid_forward(&entry).is_some().then_some(entry)
+}
+
+/// `s` if it is `<host>:<port>` as [`forward_entry`] writes it.
+fn valid_forward(s: &str) -> Option<&str> {
+    let (host, port) = s.rsplit_once(':')?;
+    let port: u16 = port.parse().ok().filter(|p| *p != 0)?;
+    let plain = !host.is_empty() && host.len() <= 1024 && !host.chars().any(char::is_control);
+    (plain && s.ends_with(&format!(":{port}"))).then_some(s)
+}
+
+/// The saved forwards, as entries; see [`read`].
+pub(crate) fn read_forwards(dir: &Path) -> Result<Vec<String>> {
+    read_kind(dir, &FORWARDS)
+}
+
+/// Trust forward `entry` (from [`forward_entry`]); see [`add`].
+pub(crate) fn add_forward(dir: &Path, entry: &str) -> Result<()> {
+    add_by(dir, &FORWARDS, entry, name_hash)
+}
+
 /// The saved origins. A missing directory is an empty list; anything else
 /// that cannot be read is an error. Entries that are not a valid origin
 /// (damaged, hand-made, half-written) are skipped, so the directory can only
 /// ever trust fewer things than it holds.
 pub(crate) fn read(dir: &Path) -> Result<Policy> {
+    read_kind(dir, &ORIGINS).map(Policy::new)
+}
+
+fn read_kind(dir: &Path, kind: &Kind) -> Result<Vec<String>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Policy::default()),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
     let mut origins = Vec::new();
     for entry in entries {
         let path = entry?.path();
-        if path.extension().is_none_or(|e| e != EXT) {
+        if path.extension().is_none_or(|e| e != kind.ext) {
             continue;
         }
         let Ok(meta) = std::fs::metadata(&path) else {
@@ -61,32 +119,32 @@ pub(crate) fn read(dir: &Path) -> Result<Policy> {
         if let Some(o) = std::fs::read_to_string(&path)
             .ok()
             .as_deref()
-            .and_then(valid_origin)
+            .and_then(kind.valid)
             .filter(|o| name_hash(o) == named)
         {
             origins.push(o.to_owned());
         }
     }
-    Ok(Policy::new(origins))
+    Ok(origins)
 }
 
 /// Trust `origin` (already checked with [`valid_origin`]). Idempotent and
 /// safe to run at once from any number of windows and processes.
 pub(crate) fn add(dir: &Path, origin: &str) -> Result<()> {
-    add_by(dir, origin, name_hash)
+    add_by(dir, &ORIGINS, origin, name_hash)
 }
 
 /// [`add`] with the naming hash injectable, so tests can force collisions.
-fn add_by(dir: &Path, origin: &str, hash: fn(&str) -> String) -> Result<()> {
-    if valid_origin(origin).is_none() {
-        return Err(Error::new(ErrorKind::InvalidInput, "not a web origin"));
+fn add_by(dir: &Path, kind: &Kind, origin: &str, hash: fn(&str) -> String) -> Result<()> {
+    if (kind.valid)(origin).is_none() {
+        return Err(Error::new(ErrorKind::InvalidInput, "not a valid entry"));
     }
     std::fs::create_dir_all(dir)?;
     let hash = hash(origin);
     for slot in 0..SLOTS {
         let name = match slot {
-            0 => format!("{hash}.{EXT}"),
-            n => format!("{hash}-{n}.{EXT}"),
+            0 => format!("{hash}.{}", kind.ext),
+            n => format!("{hash}-{n}.{}", kind.ext),
         };
         let path = dir.join(name);
         match std::fs::read_to_string(&path) {
@@ -272,7 +330,7 @@ mod tests {
                 let (d, gate) = (&d, &gate);
                 s.spawn(move || {
                     gate.wait();
-                    add_by(d, o, |_| "0".repeat(16)).unwrap();
+                    add_by(d, &ORIGINS, o, |_| "0".repeat(16)).unwrap();
                 });
             }
         });
@@ -340,5 +398,44 @@ mod tests {
         assert!(read(&d).is_err());
         assert!(add(&d, "https://a.com").is_err());
         drop(std::fs::remove_file(&d));
+    }
+
+    #[test]
+    fn forwards_are_kept_apart_from_origins_and_checked_on_load() {
+        let d = dir("forwards");
+        let entry = forward_entry("/run/user/1000/mux.sock", 5173).unwrap();
+        add_forward(&d, &entry).unwrap();
+        add_forward(&d, &entry).unwrap();
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
+        assert_eq!(read_forwards(&d).unwrap(), [entry.clone()]);
+        // Neither kind reads the other's files, even in one directory.
+        assert_eq!(read(&d).unwrap(), Policy::default());
+        add(&d, "https://a.com").unwrap();
+        assert_eq!(read_forwards(&d).unwrap(), [entry.clone()]);
+        // Unbound, damaged and hand-made files trust nothing.
+        std::fs::write(d.join("x.forward"), &entry).unwrap();
+        std::fs::write(d.join(format!("{}.forward", name_hash("box:80"))), "box:81").unwrap();
+        assert_eq!(read_forwards(&d).unwrap(), [entry]);
+    }
+
+    #[test]
+    fn a_forward_entry_is_one_line_host_and_a_real_port() {
+        assert_eq!(forward_entry("box", 80).as_deref(), Some("box:80"));
+        assert_eq!(forward_entry("a:b", 80).as_deref(), Some("a:b:80"));
+        assert_eq!(forward_entry("", 80), None);
+        assert_eq!(forward_entry("box", 0), None);
+        assert_eq!(forward_entry("bo\nx", 80), None);
+        for bad in [
+            "box",
+            "box:",
+            "box:0",
+            "box:070",
+            "box:65536",
+            "box:+80",
+            ":80",
+        ] {
+            assert_eq!(valid_forward(bad), None, "{bad}");
+        }
+        assert!(add_forward(&dir("badfwd"), "box:0").is_err());
     }
 }

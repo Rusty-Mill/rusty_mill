@@ -991,6 +991,55 @@ fn a_folder_is_listed_over_the_blocks_connection_once_it_holds_the_lease() {
     std::fs::remove_dir_all(&tmp).expect("cleanup");
 }
 
+#[test]
+fn a_forward_to_a_port_nothing_listens_on_tells_the_window_why() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (mut writer, feed) = feed_of(attached.source.open(key, 80, 24).expect("opened"));
+    assert!(attached.source.forwards(key), "the server tunnels ports");
+    assert_eq!(
+        attached.source.host_id(key).as_deref(),
+        socket.to_str(),
+        "the server's socket names its host"
+    );
+    assert_eq!(attached.source.host_id(key + 99), None, "no such pane");
+    type_until_echoed(writer.as_mut(), &feed, 1);
+    // The client listens on the remote port's number when it is free, and the
+    // server dials this machine too: hold the number while the forward
+    // listens elsewhere, then let it go so nothing answers the dial.
+    let held = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let dead = held.local_addr().expect("addr").port();
+    let (tx, rx) = channel();
+    attached
+        .source
+        .forward(key, dead, Box::new(move |r| drop(tx.send(r))));
+    let bound = rx
+        .recv_timeout(PATIENCE)
+        .expect("an answer")
+        .expect("listening");
+    assert_ne!(bound.local, dead);
+    drop(held);
+    let mut local = TcpStream::connect(("127.0.0.1", bound.local)).expect("the local port");
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if let Ok(Feed::ForwardRefused { port, reason }) =
+            feed.recv_timeout(Duration::from_millis(50))
+        {
+            assert_eq!(port, dead);
+            assert!(!reason.is_empty());
+            // The browser's connection is closed too.
+            assert_eq!(local.read(&mut [0u8; 1]).unwrap_or(0), 0);
+            return;
+        }
+    }
+    panic!("no refusal reached the window");
+}
+
 /// Reads `feed` until a clipboard read arrives, its selection (C54).
 fn next_clipboard_read(feed: &Receiver<Feed>) -> bool {
     let deadline = Instant::now() + PATIENCE;
