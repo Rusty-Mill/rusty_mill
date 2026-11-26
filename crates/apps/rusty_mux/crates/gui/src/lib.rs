@@ -16,3 +16,4 @@ pub mod session;
 #[cfg(any(target_os = "linux", windows))]
 pub mod source;
 pub mod tree;
+pub mod workspace;
