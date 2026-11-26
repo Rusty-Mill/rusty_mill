@@ -199,6 +199,8 @@ Precise contracts used by this guide:
 | D197 | #1318 D167 toy-run runbook: BaileyAi as baileyrd from merged main, own BBP dir in ~, fresh toy repo, two concurrent `builder run`s, fail-closed checks, run record by PR | [default] 2026-11-25 (1318) |
 | D198 | #1416 slice 2: claim field bindings, stage strip derivation rule, brief text as a plain input | [default] 2026-11-25 (#1416) |
 | D199 | #1318: read-only `rusty_orch builder sessions` command for the toy-run verdict is approved | [stated] 2026-11-26 (1318) |
+| D203 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
+| D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
 
 ## D1. Lenses, not stages
 
@@ -1937,3 +1939,21 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_bf939a8321774a30a361cab316004035
 **Key.** lel:1318:builder-sessions-reader
 **Source.** Nano tapped option a "Approve it as proposed" on the decision card in the #600 project thread, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4Gttb7wZhFF2cKQc3F6PYHg`, 2026-11-26T12:38:59Z. The card asked "Approve a read-only `rusty_orch builder sessions` command for the toy-run check?" Option a read: "A small PR adds a command that prints the saved builder session rows as JSON. #1894 stacks on it and its verdict checks those rows." The command shape comes from the let-em-loose-expert escalation in the #1318 thread. Related: D167, D177, D188, D197.
+
+## D203. #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured
+
+**Decision.** These defaults hold until Nano approves the #432 design. (1) The provider-blind moderator captures Codex's session id by scanning each session launcher's `turn-N.log`. No `Launcher` field names the provider. The parser accepts the first JSON line whose top-level `type` is `thread.started` (UUID `thread_id`), and only if it comes before any `item.*` or `turn.*` event. It does not require line 1, because `turn-N.log` also takes the harness's stderr and the broker log (`moderator.rs` `spawn`). (2) If the first turn exits before an id is captured, the `.started` marker stays and the next (resume) turn is refused.
+**Why.** There is no launcher config schema change, and Claude's stream never emits `thread.started`. A literal line-1 rule would miss the id behind a stderr or broker line. Refusing never silently forgets a conversation that may exist. Each choice can be reversed in one PR.
+**Rejected.** A `Launcher` provider field (a config schema change). A strict line-1 rule. Deleting the marker so the turn starts fresh.
+**Tag.** [default] · remind-me: mem_30f145c0fb2e4e10b0e89e7a86f79031
+**Key.** lel:432:codex-session-capture-defaults
+**Source.** Caller question from the #432 design thread, 2026-11-26; `432-codex-session-resume-design.md` §2; `rusty_bbp_host` `src/moderator.rs` `spawn`, `src/launchers.rs` `run`; Nano's deferral, remind-me `mem_489a8411814648ab95c7e9661c7f70ad`. Numbered D203 (was D199): main took D199 for #1318, and open PR #1905 holds D201 and D202. Renumbered at Nano's request (baileyrd GitHub comment 7195028868 on PR #1904, 2026-11-26).
+
+## D204. #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands
+
+**Decision.** Nano approves the #432 Codex session resume design (`432-codex-session-resume-design.md`, PR #1904). The approval includes the new launcher env var `BBP_PROVIDER_SESSION`, the additive public launcher contract that Q66 flagged as ask-first. Code waits until the #600 builder work lands, following D164's order. This satisfies D25 for #432. The capture defaults stay in D203. Review, merge and the other ask-first gates still apply to the build PR.
+**Why.** No Let Em Loose v0 path uses a Codex session (D8, D64), and D164 released builder sessions (#1402, #600) first.
+**Rejected.** Approve and build now. Park the card. Change the design.
+**Tag.** [stated] · remind-me: mem_489a43a7e3194f5198c1fbc59032e132
+**Key.** lel:432:design-approved-build-after-600
+**Source.** Nano tapped "Approve, build after #600" ("Design and BBP_PROVIDER_SESSION approved; code waits until the #600 builder work lands (D164 order).") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE45mV9XoArWETD2NMavEjbEy` in the Let Em Loose project thread "Build BBP Codex session resume" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4KGZwc1M3KXuPWKygNkYSfd`), 2026-11-26 13:56Z. The coordinator relayed the tap; the card and its options were read. Resolves OPEN_QUESTIONS Q66. Numbered D204 (was D200) for the same reason. D203 and D204 were checked free on main and in every open PR on 2026-11-26.
