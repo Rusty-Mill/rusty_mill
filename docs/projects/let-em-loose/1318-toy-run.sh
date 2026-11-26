@@ -104,6 +104,9 @@ echo "$ACP_VERSION; node $(node --version); extra read roots: ${ROOTS[*]:-none}"
 
 # ---- 3. The run's own mux server in a delegated user unit, so a builder's cgroup can be made below it
 echo "=== 3. mux server ($UNIT)"
+# The unit gets the user manager's environment, not this script's: no API key may be there either.
+! systemctl --user show-environment | grep -q '^ANTHROPIC_' \
+  || die "the systemd user manager has an ANTHROPIC_ variable: systemctl --user unset-environment it first"
 systemctl --user is-active -q "$UNIT" && die "$UNIT is already running: stop it first (systemctl --user stop $UNIT)"
 # Until the builders start, any STOP also stops the unit; after that the builders need it.
 trap 'systemctl --user stop "$UNIT" 2>/dev/null || true' EXIT
@@ -126,7 +129,7 @@ grep -q '^handshake ok$' "$OUT/handshake.txt" || die "the jailed handshake faile
 rm -rf "$T/acp-check"
 
 # Everything free has passed. Nothing is made for the task until the paid run is confirmed.
-read -r -p "Type RUN to make the task and start the two paid builders (anything else stops here): " GO
+read -r -p "Type RUN to make the task and start the two paid builders (anything else stops here): " GO || GO=
 [ "$GO" = RUN ] || die "not confirmed: nothing was made and nothing paid ran"
 
 # ---- 5. Toy repo, task and claim (D197 item 3)
