@@ -1,12 +1,13 @@
 # Lean cards: design for #1435, #1436 and #1437 (parent #1434)
 
-Status: **proposed.** Nano chose "go with recommendations" on the five decisions below as first
-written (thread message `cmsg_017MoLbtrGAAcyE1PVPZXuN6Sw9f4nJeWJ39LMadDRD5Go`, 2026-11-26 00:48Z).
-Two things changed after that and are **pending his word**: the explicit `resolves` mechanism for
-blockers and questions (B), and the agent profile now only adds `board_list` paging (C). Nothing
-here is built. No change touches the SQLite schema (cards are JSON docs, ADR-0007). The MCP changes
-add arguments and fields, but write budgets tighten what writers may send (prompt 32 KiB to 8 KiB,
-new caps on title, body and comment) and the `view` setting needs a loader change.
+Status: **approved by Nano, 2026-11-26.** He chose "go with recommendations" on the five
+decisions as first written (thread message `cmsg_017MoLbtrGAAcyE1PVPZXuN6Sw9f4nJeWJ39LMadDRD5Go`,
+00:48Z), then "Go" on the two later changes, the `resolves` mechanism for blockers and questions
+(B) and the agent profile adding only `board_list` paging (C), and on starting the build (thread
+message `cmsg_017MoLbtrGAAcyE1PVPZXuN6TRr8HLHcJXEf9gJ3HixexP`, 09:58Z). Nothing here is built. No
+change touches the SQLite schema (cards are JSON docs, ADR-0007). The MCP changes add arguments and
+fields, but write budgets tighten what writers may send (prompt 32 KiB to 8 KiB, new caps on title,
+body and comment) and the `view` setting needs a loader change.
 
 ## Problem
 
