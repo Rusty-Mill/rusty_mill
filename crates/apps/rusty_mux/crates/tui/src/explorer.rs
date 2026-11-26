@@ -160,40 +160,52 @@ pub fn unescape(text: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stat {
     pub size: u64,
-    /// Seconds since it was modified, when the reply was read.
-    pub age: u64,
+    /// Seconds since the epoch; 0 when the server does not know.
+    pub mtime: u64,
 }
 
 impl Stat {
-    /// "4.2 KiB, 3 h ago".
-    fn line(self) -> String {
-        let age = match self.age {
-            0..=59 => "now".to_owned(),
-            60..=3599 => format!("{} min ago", self.age / 60),
-            3600..=86399 => format!("{} h ago", self.age / 3600),
-            _ => format!("{} d ago", self.age / 86400),
-        };
-        let mut size = self.size as f64;
-        let mut unit = 0;
-        while size >= 1024.0 && unit < 4 {
-            size /= 1024.0;
-            unit += 1;
+    /// "4.2 KiB, 3 h ago" at time `now` (seconds since the epoch). A
+    /// modification time of 0 is unknown and shows no age; one in the
+    /// future shows as now.
+    fn line(self, now: u64) -> String {
+        let size = size_text(self.size);
+        if self.mtime == 0 {
+            return size;
         }
-        let size = match unit {
-            0 => format!("{} B", self.size),
-            _ => format!("{size:.1} {}", ["", "KiB", "MiB", "GiB", "TiB"][unit]),
+        let age = now.saturating_sub(self.mtime);
+        let age = match age {
+            0..=59 => "now".to_owned(),
+            60..=3599 => format!("{} min ago", age / 60),
+            3600..=86399 => format!("{} h ago", age / 3600),
+            _ => format!("{} d ago", age / 86400),
         };
         format!("{size}, {age}")
     }
 }
 
-/// Reads a `terminal.workspace-stat` reply (`KIND<TAB>SIZE<TAB>MTIME`) at
-/// time `now`, in seconds since the epoch.
+/// `bytes` in the largest unit that keeps it under 1024 once rounded.
+fn size_text(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    // Rounded to one place first: 1_048_575 B is 1.0 MiB, not 1024.0 KiB.
+    while unit < 4 && (size * 10.0).round() / 10.0 >= 1024.0 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    match unit {
+        0 => format!("{bytes} B"),
+        _ => format!("{size:.1} {}", UNITS[unit]),
+    }
+}
+
+/// Reads a `terminal.workspace-stat` reply (`KIND<TAB>SIZE<TAB>MTIME`).
 ///
 /// # Errors
 /// [`Malformed`] when it is not three tab-separated fields with numbers
 /// for the last two.
-pub fn parse_stat(reply: &str, now: u64) -> Result<Stat, Malformed> {
+pub fn parse_stat(reply: &str) -> Result<Stat, Malformed> {
     let mut f = reply.trim_end().split('\t');
     let num = |f: Option<&str>| {
         f.and_then(|t| t.parse::<u64>().ok())
@@ -202,10 +214,7 @@ pub fn parse_stat(reply: &str, now: u64) -> Result<Stat, Malformed> {
     let _kind = f.next();
     let size = num(f.next())?;
     let mtime = num(f.next())?;
-    Ok(Stat {
-        size,
-        age: now.saturating_sub(mtime),
-    })
+    Ok(Stat { size, mtime })
 }
 
 /// What changed under the workspace, from `terminal.workspace-touched`:
@@ -253,7 +262,7 @@ pub fn parse_touched(reply: &str) -> Result<Touched, Malformed> {
                 .map_err(|_| Malformed(format!("bad count `{path}`")))?;
             continue;
         }
-        if code.chars().count() != 2 {
+        if code.chars().count() != 2 || !code.chars().all(|c| c.is_ascii_graphic()) {
             return Err(Malformed(format!("bad status `{}`", code.escape_debug())));
         }
         let path = path.trim_end_matches('/');
@@ -737,23 +746,27 @@ impl Explorer {
         }
     }
 
-    /// Takes the stat of the path asked for, read at `now`; `None` for a
+    /// Takes the stat of the path asked for; `None` for a
     /// refusal or a reply it cannot read, which are not asked for again.
-    pub fn load_stat(&mut self, reply: Option<&str>, now: u64) {
+    pub fn load_stat(&mut self, reply: Option<&str>) {
         let Some(path) = self.stat_wait.take() else {
             return;
         };
-        let stat = reply.and_then(|r| parse_stat(r, now).ok());
+        let stat = reply.and_then(|r| parse_stat(r).ok());
         self.stats.insert(path, stat);
     }
 
     /// The size and age of the row under the cursor, once read.
-    fn stat_line(&self) -> Option<String> {
+    fn stat_line(&self, now: u64) -> Option<String> {
         let path = match self.tree.as_ref()?.selected_path() {
             p if p.is_empty() => ".".to_owned(),
             p => p,
         };
-        self.stats.get(&path).copied().flatten().map(Stat::line)
+        self.stats
+            .get(&path)
+            .copied()
+            .flatten()
+            .map(|s| s.line(now))
     }
 
     /// Takes a refusal in place of a reply; one line, since the server's
@@ -821,7 +834,10 @@ impl Explorer {
             (None, true) => Some("reading..."),
             (None, false) => None,
         };
-        let stat = self.stat_line();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let stat = self.stat_line(now);
         let foot = usize::from(status.is_some()) + usize::from(stat.is_some());
         let room = height.saturating_sub(1 + foot);
         if let Some(tree) = &self.tree {
@@ -1141,11 +1157,17 @@ mod tests {
 
     #[test]
     fn reads_a_stat_and_words_it() {
-        let s = parse_stat("f\t4300\t1000", 1000 + 3 * 3600).unwrap();
-        assert_eq!(s.line(), "4.2 KiB, 3 h ago");
-        assert_eq!(parse_stat("d\t12\t5", 5).unwrap().line(), "12 B, now");
-        assert!(parse_stat("f\tbig\t1", 1).is_err());
-        assert!(parse_stat("f", 1).is_err());
+        let s = parse_stat("f\t4300\t1000").unwrap();
+        assert_eq!(s.line(1000 + 3 * 3600), "4.2 KiB, 3 h ago");
+        assert_eq!(s.line(1000 + 7200 * 24), "4.2 KiB, 2 d ago");
+        let now = parse_stat("d\t12\t5").unwrap();
+        assert_eq!(now.line(5), "12 B, now");
+        assert_eq!(now.line(1), "12 B, now", "the future is now");
+        assert_eq!(parse_stat("f\t5\t0").unwrap().line(9999), "5 B", "unknown");
+        assert_eq!(size_text(1_048_575), "1.0 MiB", "never 1024.0 KiB");
+        assert_eq!(size_text(1023), "1023 B");
+        assert!(parse_stat("f\tbig\t1").is_err());
+        assert!(parse_stat("f").is_err());
     }
 
     #[test]
@@ -1175,6 +1197,11 @@ mod tests {
         assert!(parse_touched(".\nM\ta").is_err());
         assert!(parse_touched(".\n.M\t../a").is_err());
         assert!(parse_touched(".\n.M\ta\u{1b}b").is_err());
+        assert!(
+            parse_touched(".\n.\u{1b}\ta").is_err(),
+            "an escape in the code"
+        );
+        assert!(parse_touched(".\n\u{e9}M\ta").is_err(), "a code is ASCII");
         let t = parse_touched(".\n??\t.\n!\t2").unwrap();
         assert_eq!(t.unreadable, 2);
         assert_eq!(t.mark("", true), Some('?'), "the workspace itself");
@@ -1188,14 +1215,27 @@ mod tests {
         assert_eq!(e.wants(), Some(Call::Touched));
         assert_eq!(e.wants(), Some(Call::Stat(".".into())));
         assert_eq!(e.wants(), None, "one stat in flight");
-        e.load_stat(Some("d\t0\t0"), 120);
+        e.load_stat(Some("d\t0\t60"));
         assert_eq!(e.wants(), None, "the root's is read");
-        assert_eq!(e.stat_line().as_deref(), Some("0 B, 2 min ago"));
+        assert_eq!(e.stat_line(180).as_deref(), Some("0 B, 2 min ago"));
         e.keys(b"j");
-        assert_eq!(e.stat_line(), None);
+        assert_eq!(e.stat_line(180), None);
         assert_eq!(e.wants(), Some(Call::Stat("src".into())));
-        e.load_stat(None, 0);
+        e.load_stat(None);
         assert_eq!(e.wants(), None, "a refusal is not asked again");
         assert!(!Explorer::opened(false).wants().is_some());
+    }
+
+    #[test]
+    fn a_touched_reply_that_cannot_be_read_shows_a_note_and_no_marks() {
+        let mut e = Explorer::opened(true);
+        e.load(".\nf\ta");
+        e.load_touched("not a reply");
+        let screen = e.render(60, 5);
+        assert!(
+            screen.iter().any(|l| l.contains("touched reply")),
+            "{screen:?}"
+        );
+        assert!(!screen.iter().any(|l| l.contains("  M")));
     }
 }

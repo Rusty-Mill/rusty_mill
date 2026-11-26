@@ -2691,7 +2691,7 @@ mod client {
                         open.stat_req = req;
                         // Unsent at the bound: a plain miss, not asked again.
                         if req.is_none() {
-                            open.explorer.load_stat(None, 0);
+                            open.explorer.load_stat(None);
                         }
                     }
                 }
@@ -2738,10 +2738,7 @@ mod client {
                 }
             } else if open.stat_req == Some(req) {
                 open.stat_req = None;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs());
-                open.explorer.load_stat(answer.ok(), now);
+                open.explorer.load_stat(answer.ok());
             } else {
                 return;
             }
@@ -4674,6 +4671,62 @@ mod client {
                         if method == "terminal.workspace-stat"))
                     .count(),
                 1
+            );
+        }
+
+        /// The server refuses the change marks on an agent's block (D372): the
+        /// tree stays unmarked and silent, the lease stands, and nothing asks
+        /// again.
+        #[cfg(unix)]
+        #[test]
+        fn a_refused_touched_call_leaves_the_tree_silent_and_is_not_repeated() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.panes.get_mut(&a).expect("A").status = true;
+            app.act(Action::Explorer);
+            let list = workspace_calls(&sent(&far[1]))[0].0;
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: list,
+                    text: ".\nf\ta".into(),
+                },
+            );
+            let asked = sent(&far[1]);
+            let call = |m: &Message, name: &str| matches!(m, Message::BlockCall { method, .. } if method == name);
+            let touched = asked
+                .iter()
+                .find_map(|m| match m {
+                    Message::BlockCall { req, method, .. }
+                        if method == "terminal.workspace-touched" =>
+                    {
+                        Some(*req)
+                    }
+                    _ => None,
+                })
+                .expect("touched is asked for");
+            pane_says(
+                &mut app,
+                a,
+                Message::Failed {
+                    req: touched,
+                    reason: "refused on agent blocks".into(),
+                    code: None,
+                },
+            );
+            assert!(app.panes[&a].leased, "the lease stands");
+            assert!(app.exploring.is_some(), "the tree stays open");
+            assert!(
+                !sent(&far[1])
+                    .iter()
+                    .any(|m| call(m, "terminal.workspace-touched")),
+                "not asked again"
+            );
+            let screen = app.exploring.as_ref().expect("open").explorer.render(60, 8);
+            assert!(
+                !screen.iter().any(|l| l.contains("refused")),
+                "no note: {screen:?}"
             );
         }
 
