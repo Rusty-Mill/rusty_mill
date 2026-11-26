@@ -9,6 +9,14 @@ constant changed in the releases below.
 
 Newest first.
 
+## Unreleased
+
+### Added
+- `GenericMmapStore::read_checked_records`: `read_portable_records` after a
+  read-only check of the mmap file's header (`slot_file::check_header`), so a
+  read-only reader refuses a table `open` would refuse, without mapping the
+  file or opening it for writing. `read_portable_records` is unchanged.
+
 ## 0.2.0 (2026-10-04)
 
 The first release since the engine was extracted from `rusty_multimodal_db`
