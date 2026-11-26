@@ -37,6 +37,9 @@ struct Inner {
     explorer: Explorer,
     /// This client holds the block's input lease, which every call needs.
     held: bool,
+    /// A marks or stat call failed: read them again when the lease is
+    /// gained, as it may have been cut off with the connection or lease.
+    retry: bool,
 }
 
 /// Which call a reply answers.
@@ -57,6 +60,7 @@ impl Workspace {
             inner: Mutex::new(Inner {
                 explorer: Explorer::opened(status),
                 held,
+                retry: false,
             }),
             live: AtomicBool::new(true),
         });
@@ -89,6 +93,9 @@ impl Workspace {
         let root = {
             let mut inner = self.lock();
             let was = std::mem::replace(&mut inner.held, held);
+            if held && !was && std::mem::take(&mut inner.retry) {
+                inner.explorer.retry_status();
+            }
             held && (!was || inner.explorer.note().is_some())
                 && inner.explorer.tree().is_none()
                 && !inner.explorer.waiting()
@@ -97,7 +104,7 @@ impl Workspace {
             self.lock().explorer.set_waiting(true);
             self.ask(Which::List, "terminal.workspace-list", Vec::new());
         }
-        self.show();
+        self.pump();
     }
 
     /// Carries out what the user asked of the tree.
@@ -162,9 +169,12 @@ impl Workspace {
                 (Which::List, Ok(text)) => ex.load(&text),
                 (Which::List, Err(why)) => ex.refuse(&why),
                 (Which::Touched, Ok(text)) => ex.load_touched(&text),
-                (Which::Touched, Err(_)) => {}
+                (Which::Touched, Err(_)) => inner.retry = true,
                 (Which::Stat, Ok(text)) => ex.load_stat(Some(&text)),
-                (Which::Stat, Err(_)) => ex.load_stat(None),
+                (Which::Stat, Err(_)) => {
+                    ex.load_stat(None);
+                    inner.retry = true;
+                }
             }
         }
         self.pump();
@@ -173,7 +183,15 @@ impl Workspace {
     /// Makes the calls the tree wants besides listings, then shows it.
     fn pump(self: &Arc<Self>) {
         loop {
-            let call = self.lock().explorer.wants();
+            // Marks and stats wait for the lease: asking without it would
+            // spend the one ask each gets on a refusal.
+            let call = {
+                let mut inner = self.lock();
+                match inner.held {
+                    true => inner.explorer.wants(),
+                    false => None,
+                }
+            };
             let Some(call) = call else { break };
             match call {
                 Call::Touched => self.ask(Which::Touched, "terminal.workspace-touched", Vec::new()),
@@ -455,5 +473,50 @@ mod tests {
         assert_eq!(fake.methods().len(), 2);
         fake.answer(Ok(ROOT.into()));
         assert_eq!(fake.last().state, State::Tree);
+    }
+
+    const STAT: &str = "f\t4300\t0";
+
+    #[test]
+    fn status_waits_for_the_lease_and_a_cut_off_stat_is_asked_again() {
+        let (fake, ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        fake.answer(Ok("".into())); // touched
+        fake.answer(Ok(STAT.into())); // stat of the root
+        ws.lease(false);
+        ws.intent(Intent::Step(1));
+        let sent = fake.methods();
+        assert_eq!(sent.len(), 3, "no stat while the lease is absent: {sent:?}");
+        assert_eq!(
+            fake.last().footer,
+            None,
+            "an uncached row has no footer yet"
+        );
+        ws.lease(true);
+        assert_eq!(
+            fake.methods().last().map(String::as_str),
+            Some("terminal.workspace-stat")
+        );
+        fake.answer(Ok(STAT.into()));
+        assert_eq!(fake.last().footer.as_deref(), Some("4.2 KiB"));
+    }
+
+    #[test]
+    fn a_stat_that_failed_is_asked_again_after_the_lease_returns() {
+        let (fake, ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        fake.answer(Ok("".into()));
+        fake.answer(Err("the connection to the server was lost".into()));
+        assert_eq!(fake.last().footer, None);
+        ws.lease(false);
+        ws.lease(true);
+        let methods = fake.methods();
+        assert_eq!(
+            &methods[3..],
+            ["terminal.workspace-touched", "terminal.workspace-stat"]
+        );
+        fake.answer(Ok("".into()));
+        fake.answer(Ok(STAT.into()));
+        assert_eq!(fake.last().footer.as_deref(), Some("4.2 KiB"));
     }
 }
