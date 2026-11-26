@@ -1366,6 +1366,9 @@ mod client {
         /// The change marks and the stat of the cursor's row, asked for.
         touched_req: Option<u64>,
         stat_req: Option<u64>,
+        /// A `cd` waiting for the user's `y`: the directory and the line to
+        /// type, shown first so the user sees what goes into the shell.
+        cd: Option<(String, Vec<u8>)>,
     }
 
     impl Pane {
@@ -2630,6 +2633,7 @@ mod client {
                 req: None,
                 touched_req: None,
                 stat_req: None,
+                cd: None,
             });
             self.list_workspace(None);
             self.browsing = true;
@@ -2704,8 +2708,32 @@ mod client {
             let Some(open) = self.exploring.as_mut() else {
                 return;
             };
+            // A `cd` asked for waits on one key: `y` types it, any other
+            // cancels and is not acted on.
+            if let Some((_, line)) = open.cd.take() {
+                if bytes == b"y" {
+                    let block = open.block;
+                    if let Some(pane) = self.panes.get_mut(&block) {
+                        pane.typed(line);
+                    }
+                    return self.live();
+                }
+                open.explorer.say("cd cancelled");
+                return self.draw();
+            }
             match explorer::press(&mut open.explorer, bytes) {
                 Explored::Leave => self.live(),
+                Explored::Cd(dir) => {
+                    match explorer::cd_command(&dir) {
+                        Some(line) => {
+                            open.explorer
+                                .say(&format!("type `cd -- '{dir}'` in the shell? y = yes"));
+                            open.cd = Some((dir, line));
+                        }
+                        None => open.explorer.say("cd refused: unsafe name"),
+                    }
+                    self.draw();
+                }
                 Explored::Open => {
                     self.ask_workspace();
                     self.draw();
@@ -4691,6 +4719,34 @@ mod client {
                     .count(),
                 1
             );
+        }
+
+        /// `c` on a directory asks first: only `y` types the quoted `cd` into
+        /// the block and closes the tree; any other key cancels.
+        #[cfg(unix)]
+        #[test]
+        fn cd_types_into_the_block_only_after_a_yes() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.act(Action::Explorer);
+            let list = workspace_calls(&sent(&far[1]))[0].0;
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: list,
+                    text: ".\nd\tmy dir\nf\ta".into(),
+                },
+            );
+            app.take(Input::Keys(b"jc".to_vec()));
+            assert!(typed_in(&sent(&far[1])).is_empty(), "asked, not typed");
+            // Anything but `y` cancels, and is not read as a command.
+            app.take(Input::Keys(b"n".to_vec()));
+            assert!(app.exploring.is_some() && typed_in(&sent(&far[1])).is_empty());
+            app.take(Input::Keys(b"c".to_vec()));
+            app.take(Input::Keys(b"y".to_vec()));
+            assert_eq!(typed_in(&sent(&far[1])), [b"cd -- 'my dir'\r".to_vec()]);
+            assert!(app.exploring.is_none(), "closed");
         }
 
         /// The server refuses the change marks on an agent's block (D372): the

@@ -73,6 +73,25 @@ pub enum Step {
     /// Still open; put this path (relative to the workspace, real names,
     /// `.` for the workspace itself) on the clipboard.
     Copy(String),
+    /// Still open; the user asked to `cd` a block's shell to this directory
+    /// (relative to the workspace, real names). The caller asks to confirm
+    /// before it types [`cd_command`] into the block.
+    Cd(String),
+}
+
+/// Longest path [`cd_command`] types.
+const CD_MAX: usize = 4096;
+
+/// The line that changes a shell into `path` (relative to where the block
+/// started): `cd -- 'path'` and Enter. `None` for an empty or overlong
+/// path or one with a control byte, which could end the quote or run
+/// another command.
+#[must_use]
+pub fn cd_command(path: &str) -> Option<Vec<u8>> {
+    if path.is_empty() || path.len() > CD_MAX || path.chars().any(char::is_control) {
+        return None;
+    }
+    Some(format!("cd -- '{}'\r", path.replace('\'', "'\\''")).into_bytes())
 }
 
 /// Acts on the keys in `bytes`: `j`/`k` or the arrows move, Enter, `l` or
@@ -108,6 +127,27 @@ pub fn press(explorer: &mut Explorer, bytes: &[u8]) -> Step {
                     return Step::Copy(path);
                 }
             }
+            b'c' => {
+                let dir = explorer.tree().is_some_and(|t| {
+                    t.rows()
+                        .iter()
+                        .filter(|r| !r.summary)
+                        .nth(t.cursor())
+                        .is_some_and(|r| r.kind == Kind::Dir)
+                });
+                if !dir {
+                    explorer.say("cd needs a directory");
+                    continue;
+                }
+                let path = explorer.tree().map(|t| match t.selected_path() {
+                    p if p.is_empty() => ".".to_owned(),
+                    p => p,
+                });
+                if let Some(path) = path {
+                    explorer.clear_note();
+                    return Step::Cd(path);
+                }
+            }
             b'l' | b'C' | b'\r' | b'\n' if !explorer.waiting() => {
                 if let Some(Want::Fetch(path)) = explorer.tree_mut().map(Tree::enter) {
                     explorer.set_waiting(true);
@@ -125,7 +165,7 @@ pub fn press(explorer: &mut Explorer, bytes: &[u8]) -> Step {
 #[must_use]
 pub fn render(explorer: &Explorer, width: usize, height: usize) -> Vec<String> {
     let mut lines = vec![clip(
-        "workspace: j/k move, Enter open, h up, y copy path, q leave",
+        "workspace: j/k move, Enter open, h up, y copy path, c cd, q leave",
         width,
     )];
     let status = match (explorer.note(), explorer.waiting()) {
@@ -437,6 +477,35 @@ mod tests {
             "{screen:?}"
         );
         assert!(!screen.iter().any(|l| l.contains("  M")));
+    }
+
+    #[test]
+    fn cd_quotes_the_path_and_refuses_what_could_escape_the_quote() {
+        let line = |p: &str| cd_command(p).map(|b| String::from_utf8(b).unwrap());
+        assert_eq!(line("src").as_deref(), Some("cd -- 'src'\r"));
+        assert_eq!(line("a b").as_deref(), Some("cd -- 'a b'\r"));
+        assert_eq!(line("it's").as_deref(), Some("cd -- 'it'\\''s'\r"));
+        assert_eq!(line("-rf").as_deref(), Some("cd -- '-rf'\r"));
+        assert_eq!(line("a\nrm x"), None);
+        assert_eq!(line("a\u{1b}[2J"), None);
+        assert_eq!(line(""), None);
+        assert_eq!(line(&"a".repeat(CD_MAX + 1)), None);
+    }
+
+    #[test]
+    fn c_asks_to_cd_only_on_a_directory() {
+        let mut e = Explorer::opened(false);
+        e.load(".\nd\tsrc\nf\ta");
+        assert_eq!(press(&mut e, b"c"), Step::Cd(".".into()), "the root is one");
+        press(&mut e, b"j");
+        assert_eq!(press(&mut e, b"c"), Step::Cd("src".into()));
+        press(&mut e, b"j");
+        assert_eq!(press(&mut e, b"c"), Step::Open, "a file is not");
+        assert!(
+            render(&e, 40, 4)
+                .iter()
+                .any(|l| l == "cd needs a directory")
+        );
     }
 
     #[test]
