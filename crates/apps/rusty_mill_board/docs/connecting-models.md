@@ -68,7 +68,10 @@ You work from the Mill Board (MCP server "mill"). Humans decide what is ready an
    repo, review on GitHub. Pass `state` (one line, at most 200 bytes) to say where the work stands
    now, such as "review requested, PR #1888"; card_move and card_update take it too. Title is at
    most 200 characters, body and prompt 8 KiB; a longer write is refused, and a card already over a
-   limit is never rewritten.
+   limit is never rewritten. Pass `kind` to type a comment: `handoff` (3 lines: done, next, where the
+   details are), `blocker` or `question` (open until a later comment names its `id` in `resolves`),
+   `claim`, `decision` or the default `note`. `card_get` with `history: "recent"` returns only the last 5
+   comments, the latest handoff and every open blocker or question.
 5. Call card_move to the next column: builder -> qa when the work is done; qa -> review if it passes, or
    back to building with the failure in a comment; reviewer -> done only when you would merge it.
    If the card's work already merged on the forge (its PR is merged), record the PR link with

@@ -103,6 +103,12 @@ pub trait Store: Send + Sync {
             .iter()
             .any(|e| e.id == id))
     }
+    /// Whether a comment keeps the `id` it was given. A store that saves comments as text,
+    /// author and time only (the retired rusty_tick adapter) says no, so the board does not
+    /// return an id that a later read would not show.
+    fn keeps_comment_ids(&self) -> bool {
+        true
+    }
     /// Reserve a card number for `card`: one above `floor` that no reservation holds. A
     /// reservation is durable and never released, so no two cards get the same number,
     /// whichever boards share the store and whatever leaves the board meanwhile. Callers pass
@@ -302,6 +308,9 @@ impl<T: Store + ?Sized> Store for Box<T> {
     }
     fn holds_event(&self, id: Uuid) -> Result<bool, BoardError> {
         (**self).holds_event(id)
+    }
+    fn keeps_comment_ids(&self) -> bool {
+        (**self).keeps_comment_ids()
     }
     fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
         (**self).reserve_number(card, floor)
