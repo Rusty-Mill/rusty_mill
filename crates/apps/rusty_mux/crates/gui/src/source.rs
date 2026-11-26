@@ -439,10 +439,31 @@ impl MuxSource {
         let (Some(block), Some(remote)) = (self.pane(key), lock(&self.0.remote).clone()) else {
             return;
         };
+        self.close_workspace();
         let (status, held) = (block.status, block.lease().held);
-        let port = Arc::new(BlockPort { block, remote, key });
+        let port = Arc::new(BlockPort {
+            block: Arc::clone(&block),
+            remote,
+            key,
+        });
         let ws = Workspace::open(port, status, held);
+        let follow = Arc::downgrade(&ws);
+        *lock(&block.holding) = Some(Box::new(move |held| {
+            if let Some(ws) = follow.upgrade() {
+                ws.lease(held);
+            }
+        }));
         *lock(&self.0.workspace) = Some((key, ws));
+    }
+
+    /// Ends the open explorer tree, if any: its replies show nothing more.
+    fn close_workspace(&self) {
+        if let Some((key, ws)) = lock(&self.0.workspace).take() {
+            ws.close();
+            if let Some(block) = self.pane(key) {
+                *lock(&block.holding) = None;
+            }
+        }
     }
 
     /// Pane `key`'s block connection, while the window has it open.
@@ -568,7 +589,7 @@ impl Source for MuxSource {
     fn explore(&self, key: u64, ask: Explored) {
         match ask {
             Explored::Open => self.open_workspace(key),
-            Explored::Close => *lock(&self.0.workspace) = None,
+            Explored::Close => self.close_workspace(),
             Explored::Do(intent) => {
                 let open = lock(&self.0.workspace).clone();
                 if let Some((_, ws)) = open.filter(|(k, _)| *k == key) {
@@ -1480,6 +1501,9 @@ impl Events {
 /// One block's connection, shared by the pane's writer and its reader.
 /// A lost connection is handed back by [`Block::revive`], the client the
 /// same.
+/// What an open explorer tree is told when the lease changes.
+type Holding = Box<dyn Fn(bool) + Send>;
+
 struct Block {
     block: BlockId,
     /// The client the server made of this connection.
@@ -1506,6 +1530,9 @@ struct Block {
     /// (`WORKSPACE`), and, beyond them, the marks and stat (`WORKSPACE_STATUS`).
     workspace: bool,
     status: bool,
+    /// Told whether this client holds the lease, after each change to it,
+    /// while an explorer tree is open on the block.
+    holding: Mutex<Option<Holding>>,
     /// The server asks this connection's client for clipboard reads
     /// (C54), so the window answers them, not the pane's own grid.
     clipboard: bool,
@@ -1625,6 +1652,7 @@ impl Block {
                 .features
                 .contains(Features::BLOCK_CALL.union(Features::WORKSPACE)),
             status: opened.features.contains(Features::WORKSPACE_STATUS),
+            holding: Mutex::new(None),
             listings: Mutex::new(HashMap::new()),
             clipboard: opened.features.contains(Features::CLIPBOARD),
             uploads: opened
@@ -1960,9 +1988,13 @@ impl Block {
         f(&mut lease, &mut send);
         self.fit(&mut lease);
         let take = lease.take();
+        let held = lease.held;
         // Not under the lease: the feed may block while it is full.
         drop(lease);
         self.tell(take);
+        if let Some(hold) = &*lock(&self.holding) {
+            hold(held);
+        }
     }
 
     /// Tells the window `take`, when it changed and the server takes
@@ -2178,6 +2210,9 @@ struct BlockPort {
 
 impl WorkspacePort for BlockPort {
     fn call(&self, method: &str, args: Vec<(String, Value)>, done: ListDone) -> bool {
+        if !self.block.lease().held {
+            return false;
+        }
         self.block.call(method, args, done);
         true
     }

@@ -5,6 +5,7 @@
 //! `rusty_term` cannot link this crate's client, so it holds view state
 //! only; every key it takes arrives here as an [`Intent`].
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rusty_mux_client::workspace::{self, Call, Explorer, Kind, Tree, Want};
@@ -27,12 +28,15 @@ pub trait Port: Send + Sync {
 pub struct Workspace {
     port: Arc<dyn Port>,
     inner: Mutex<Inner>,
+    /// Cleared by [`Self::close`]: a reply or key for a closed or replaced
+    /// tree does nothing, so it cannot show over its replacement.
+    live: AtomicBool,
 }
 
 struct Inner {
     explorer: Explorer,
-    /// An owner-only block this client does not hold.
-    take_over: bool,
+    /// This client holds the block's input lease, which every call needs.
+    held: bool,
 }
 
 /// Which call a reply answers.
@@ -52,23 +56,57 @@ impl Workspace {
             port,
             inner: Mutex::new(Inner {
                 explorer: Explorer::opened(status),
-                take_over: !held,
+                held,
             }),
+            live: AtomicBool::new(true),
         });
         if held {
             this.ask(Which::List, "terminal.workspace-list", Vec::new());
+        } else {
+            // Nothing is on its way until the lease comes.
+            this.lock().explorer.set_waiting(false);
         }
         this.show();
         this
     }
 
+    /// Ends this tree: nothing it has in flight shows, and it asks no more.
+    pub fn close(&self) {
+        self.live.store(false, Ordering::SeqCst);
+    }
+
+    fn live(&self) -> bool {
+        self.live.load(Ordering::SeqCst)
+    }
+
+    /// The block's lease changed (also after a reconnect). Gaining it
+    /// reads the root when none is loaded and none is on its way; losing
+    /// it keeps the rows, and the next read says why it is refused (D99).
+    pub fn lease(self: &Arc<Self>, held: bool) {
+        if !self.live() {
+            return;
+        }
+        let root = {
+            let mut inner = self.lock();
+            let was = std::mem::replace(&mut inner.held, held);
+            held && (!was || inner.explorer.note().is_some())
+                && inner.explorer.tree().is_none()
+                && !inner.explorer.waiting()
+        };
+        if root {
+            self.lock().explorer.set_waiting(true);
+            self.ask(Which::List, "terminal.workspace-list", Vec::new());
+        }
+        self.show();
+    }
+
     /// Carries out what the user asked of the tree.
     pub fn intent(self: &Arc<Self>, intent: Intent) {
+        if !self.live() {
+            return;
+        }
         let fetch = {
             let mut inner = self.lock();
-            if inner.take_over {
-                return;
-            }
             let ex = &mut inner.explorer;
             let mut fetch = None;
             match intent {
@@ -101,6 +139,9 @@ impl Workspace {
 
     /// Sends one call; its reply comes back through [`Self::reply`].
     fn ask(self: &Arc<Self>, which: Which, method: &str, args: Vec<(String, Value)>) {
+        if !self.lock().held {
+            return self.reply(which, Err("Take over this block first.".into()));
+        }
         let me = Arc::clone(self);
         let sent = self
             .port
@@ -111,6 +152,9 @@ impl Workspace {
     }
 
     fn reply(self: &Arc<Self>, which: Which, reply: Result<String, String>) {
+        if !self.live() {
+            return;
+        }
         {
             let mut inner = self.lock();
             let ex = &mut inner.explorer;
@@ -143,6 +187,9 @@ impl Workspace {
     }
 
     fn show(&self) {
+        if !self.live() {
+            return;
+        }
         let snapshot = snapshot(&self.lock(), self.port.now());
         self.port.show(snapshot);
     }
@@ -170,16 +217,11 @@ fn select(tree: &mut Tree, at: usize) {
 /// What the panel draws for `inner` at time `now`.
 fn snapshot(inner: &Inner, now: u64) -> Snapshot {
     let ex = &inner.explorer;
-    if inner.take_over {
-        return Snapshot {
-            state: State::TakeOver,
-            ..Snapshot::default()
-        };
-    }
     let Some(tree) = ex.tree() else {
-        let state = match ex.note() {
-            Some(why) => State::Refused(why.to_owned()),
-            None => State::Loading(".".into()),
+        let state = match (inner.held, ex.note()) {
+            (false, _) => State::TakeOver,
+            (_, Some(why)) => State::Refused(why.to_owned()),
+            _ => State::Loading(".".into()),
         };
         return Snapshot {
             state,
@@ -364,5 +406,54 @@ mod tests {
         ws.intent(Intent::Enter);
         ws.intent(Intent::Enter);
         assert_eq!(fake.methods().len(), 2);
+    }
+
+    #[test]
+    fn a_closed_tree_shows_nothing_more() {
+        let (fake, ws) = open(true, false);
+        let shown = fake.shown.lock().unwrap().len();
+        ws.close();
+        fake.answer(Ok(ROOT.into()));
+        ws.intent(Intent::Step(1));
+        assert_eq!(fake.shown.lock().unwrap().len(), shown, "no late snapshot");
+    }
+
+    #[test]
+    fn gaining_the_lease_reads_the_root_once() {
+        let (fake, ws) = open(false, false);
+        assert!(fake.methods().is_empty());
+        ws.lease(true);
+        ws.lease(true);
+        assert_eq!(fake.methods(), ["terminal.workspace-list"]);
+        fake.answer(Ok(ROOT.into()));
+        assert_eq!(fake.last().state, State::Tree);
+    }
+
+    #[test]
+    fn losing_the_lease_keeps_the_rows_and_refuses_the_next_read() {
+        let (fake, ws) = open(true, false);
+        fake.answer(Ok(ROOT.into()));
+        ws.lease(false);
+        assert_eq!(fake.last().rows.len(), 3, "rows stay");
+        ws.intent(Intent::Step(1));
+        ws.intent(Intent::Enter);
+        assert_eq!(fake.methods().len(), 1, "no call without the lease");
+        assert_eq!(
+            fake.last().state,
+            State::Refused("Take over this block first.".into())
+        );
+        assert_eq!(fake.last().path, "src", "copy path still works");
+    }
+
+    #[test]
+    fn a_root_lost_with_the_connection_is_read_again_when_the_lease_returns() {
+        let (fake, ws) = open(true, false);
+        fake.answer(Err("the connection to the server was lost".into()));
+        assert!(matches!(fake.last().state, State::Refused(_)));
+        ws.lease(false);
+        ws.lease(true);
+        assert_eq!(fake.methods().len(), 2);
+        fake.answer(Ok(ROOT.into()));
+        assert_eq!(fake.last().state, State::Tree);
     }
 }
