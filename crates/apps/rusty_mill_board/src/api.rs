@@ -1284,6 +1284,11 @@ pub fn ops() -> Vec<Op> {
                         "a receipt names its approver: it needs a token credential of your own, not a named actor and role or a connector",
                     ));
                 }
+                if a.who.actor.as_deref().is_some_and(|n| n.contains('/')) {
+                    return Err(BoardError::Invalid(
+                        "a receipt names the credential itself: omit actor, without a /label",
+                    ));
+                }
                 let who = acting(b, i, &a.who)?;
                 let r = crate::receipts::Receipt {
                     task: a.task,
@@ -2376,6 +2381,10 @@ mod tests {
         named["role"] = json!("admin");
         let err = call_as(&board, None, "approval_issue", named).expect_err("named");
         assert!(format!("{err:?}").contains("token credential"), "{err:?}");
+        let mut labelled = args.clone();
+        labelled["actor"] = json!("nano-proxy/x");
+        let err = call_as(&board, Some(&proxy), "approval_issue", labelled).expect_err("label");
+        assert!(format!("{err:?}").contains("/label"), "{err:?}");
         let mut connector = ident("claude-cloud", "approver");
         connector.connector = true;
         assert!(call_as(&board, Some(&connector), "approval_issue", args.clone()).is_err());
