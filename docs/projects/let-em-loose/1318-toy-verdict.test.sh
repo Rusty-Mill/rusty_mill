@@ -17,6 +17,7 @@ case_() { # NAME WANT(0 pass, 1 fail) ROW1 ROW2 SESSIONS
 }
 case_ "durable terminal rows match stdout: pass"        0 "$r1" "$r2" "$p1"$'\n'"$p2"$'\n'
 case_ "a persisted failed session is a pass (D197)"     0 "$(row 7 1 failed 9 null ',"notes":[]')" "$r2" "$(row 7 1 failed 9 null '')"$'\n'"$p2"$'\n'
+case_ "sessions 1 and 11 compare in one order"          0 "$r1" "$(row 7 11 failed 9 null ',"notes":[]')" "$p1"$'\n'"$(row 7 11 failed 9 null '')"$'\n'
 case_ "other claims' sessions are ignored"              0 "$r1" "$r2" "$p1"$'\n'"$p2"$'\n'"$(row 8 1 running null null '')"$'\n'
 case_ "stdout terminal, persisted running: fail"        1 "$r1" "$r2" "$p1"$'\n'"$(row 7 2 running null null '')"$'\n'
 case_ "stdout terminal, persisted missing: fail"        1 "$r1" "$r2" "$p1"$'\n'

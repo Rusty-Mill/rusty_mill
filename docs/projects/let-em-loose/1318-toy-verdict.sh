@@ -33,7 +33,7 @@ toy_verdict() {
   n=$(grep -c . <<<"$ns" || true)
   [ "$n" = 2 ] || { echo "FAIL: the store holds $n sessions for claim $claim, not 2: ${ns//$'\n'/; }"; fail=1; }
   if [ "${#want[@]}" = 2 ]; then
-    local expect; expect=$(printf '%s\n' "${want[@]}" | sort)
+    local expect; expect=$(printf '%s\n' "${want[@]}" | LC_ALL=C sort)
     [ "$expect" = "$ns" ] || { echo "FAIL: persisted sessions (${ns//$'\n'/; }) differ from stdout (${expect//$'\n'/; })"; fail=1; }
   fi
   return "$fail"
