@@ -25,6 +25,14 @@ fn main() -> ExitCode {
         Some("watch") => return watch(argv),
         Some("builder") => {
             use rusty_orch::builder;
+            let argv: Vec<String> = argv.collect();
+            if argv.first().map(String::as_str) == Some("sessions") {
+                return lens_command(
+                    builder::SESSIONS_USAGE,
+                    builder::sessions_options(argv),
+                    builder::sessions,
+                );
+            }
             return lens_command(builder::USAGE, builder::options(argv), builder::run);
         }
         Some("dry-run") => {
