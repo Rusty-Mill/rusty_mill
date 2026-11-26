@@ -1,6 +1,6 @@
 # #1318 Paste-ready prompt for Nano: the D167 toy-claim run on BaileyAi
 
-Status: 2026-11-26, ready to run from `main` once this runbook and the read-only `rusty_orch builder sessions` command it uses (awaiting your approval) are merged. All of #1318's PRs are merged: #1880, #1882, #1885, #1886, #1887, #1889 (S5) and #1890 (S6). The script checks for S6. This is the one paid run D167 approved: two builders, a 45-minute wall each, one claim. Claude calls go through your subscription login (D165). The defaults are in D197. The no-overage assertion you added on 2026-11-25 lapses on 2026-12-25, so the run has to happen before then, or you re-date the assertion first.
+Status: 2026-11-26, ready to run from `main` once this runbook and the read-only `rusty_orch builder sessions` command it uses (#1901, D199) are merged. All of #1318's PRs are merged: #1880, #1882, #1885, #1886, #1887, #1889 (S5) and #1890 (S6). The script checks for S6. This is the one paid run D167 approved: two builders, a 45-minute wall each, one claim. Claude calls go through your subscription login (D165). The defaults are in D197. The no-overage assertion you added on 2026-11-25 lapses on 2026-12-25, so the run has to happen before then, or you re-date the assertion first.
 
 The work is a committed script, `1318-toy-run.sh`, plus a small helper, `1318-acp-handshake.py`. Nothing gets pasted into a terminal.
 
