@@ -139,10 +139,14 @@ pub(crate) fn read_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<us
     let mut done = 0;
     while done < buf.len() {
         let at = offset.saturating_add(done as u64);
-        if at > MAX_OFFSET {
+        // Clamp the read so `at + len` stays within `i64::MAX`; a larger end
+        // makes `pread` fail with EINVAL instead of reporting end of file.
+        let room = MAX_OFFSET.saturating_sub(at);
+        if room == 0 {
             break;
         }
-        let n = match read_once(file, at, &mut buf[done..]) {
+        let end = done + (buf.len() - done).min(usize::try_from(room).unwrap_or(usize::MAX));
+        let n = match read_once(file, at, &mut buf[done..end]) {
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,

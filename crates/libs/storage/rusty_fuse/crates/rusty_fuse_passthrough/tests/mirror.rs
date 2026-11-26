@@ -253,3 +253,14 @@ fn windows_lookups_follow_ntfs_case_rules() {
         .expect("NTFS is case-insensitive");
     assert_eq!(upper.attr.kind, NodeKind::File);
 }
+
+#[test]
+fn a_read_reaching_the_signed_offset_limit_is_end_of_file() {
+    let (_tmp, root) = fixture_dir();
+    let fs = PassthroughFs::new(&root).expect("mirror the fixture");
+    let hello = fs.lookup(NodeId::ROOT, name("hello.txt")).expect("lookup");
+    let mut buf = [0u8; 5];
+    for at in [i64::MAX as u64 - 2, i64::MAX as u64, i64::MAX as u64 + 1] {
+        assert_eq!(fs.read(hello.id, Handle::NONE, at, &mut buf), Ok(0), "{at}");
+    }
+}
