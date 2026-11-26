@@ -34,7 +34,10 @@ pub enum Command {
     Calls(Vec<Call>),
     /// The events after `after` (or from now), then the cursor to resume
     /// from; with `follow`, every later event until the server goes away.
-    Events { after: Option<Cursor>, follow: bool },
+    Events {
+        after: Option<Cursor>,
+        follow: bool,
+    },
     /// Runs a configured action with its arguments.
     Do {
         action: String,
@@ -55,7 +58,9 @@ pub enum Command {
     Terminfo(Terminfo),
     /// Follows events from `after` (or from now) and runs the config's
     /// rules for each, until the server goes away.
-    Watch { after: Option<Cursor> },
+    Watch {
+        after: Option<Cursor>,
+    },
     /// Waits for a block's program to end, or for an event.
     Wait(Wait),
     /// Starts a program in a new block, and with `wait` waits for it.
@@ -74,6 +79,7 @@ pub enum Command {
     Upload(Upload),
     /// Fetches a file of the server's host (C83).
     Download(Download),
+    Copy(Copy),
     /// Prints a completion script for a shell.
     Completion(Shell),
     /// Stops the server cleanly and waits until it has (C36b).
@@ -426,6 +432,7 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "forward" => forward(rest, defaults).map(Command::Forward),
         "upload" => upload(rest, defaults).map(Command::Upload),
         "download" => download(rest, defaults).map(Command::Download),
+        "copy" => copy(rest).map(Command::Copy),
         "bridge" if rest.is_empty() => Ok(Command::Bridge),
         "bridge" => Err("bridge takes no arguments".into()),
         "own" if rest.is_empty() => Ok(Command::Own),
@@ -510,6 +517,17 @@ pub struct Download {
     pub out: Option<PathBuf>,
 }
 
+/// `copy`: a file of one saved host's server, sent to another's.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Copy {
+    pub from_host: String,
+    pub path: String,
+    pub from_prepare: Vec<Call>,
+    pub to_host: String,
+    pub to_prepare: Vec<Call>,
+    pub name: String,
+}
+
 /// What `upload` and `download` take: one operand, `--block`, and the flag
 /// each names its other value with.
 struct Operands {
@@ -585,6 +603,52 @@ fn download(args: &[String], defaults: &Defaults) -> Result<Download, String> {
         prepare: lease_calls(&block, defaults)?,
         path: operand,
         out: other.map(PathBuf::from),
+    })
+}
+
+/// `copy [--block B] [--to-block B] [--name N] HOST:PATH HOST`. A block of
+/// this machine means nothing on another host, so neither side has a default.
+fn copy(args: &[String]) -> Result<Copy, String> {
+    const USAGE: &str = "usage: copy --block BLOCK --to-block BLOCK [--name NAME] HOST:PATH HOST";
+    let (mut from, mut to, mut name, mut operands) = (None, None, None, Vec::new());
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let slot = match arg.as_str() {
+            "--block" => &mut from,
+            "--to-block" => &mut to,
+            "--name" => &mut name,
+            flag if flag.starts_with('-') => return Err(format!("copy: unknown flag {flag}")),
+            operand => {
+                operands.push(operand.to_owned());
+                continue;
+            }
+        };
+        *slot = Some(
+            rest.next()
+                .ok_or(format!("copy: {arg} needs a value"))?
+                .clone(),
+        );
+    }
+    let [source, to_host] = operands.as_slice() else {
+        return Err(USAGE.into());
+    };
+    let (from_host, path) = source
+        .split_once(':')
+        .filter(|(host, path)| !host.is_empty() && !path.is_empty())
+        .ok_or_else(|| format!("copy: {source:?} is not HOST:PATH"))?;
+    let name = name
+        .or_else(|| path.rsplit(['/', '\\']).next().map(str::to_owned))
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| format!("copy: {path:?} has no file name; give --name"))?;
+    let (from, to) = from.zip(to).ok_or(USAGE)?;
+    let no_defaults = Defaults::default();
+    Ok(Copy {
+        from_host: from_host.to_owned(),
+        path: path.to_owned(),
+        from_prepare: lease_calls(&["--block".into(), from], &no_defaults)?,
+        to_host: to_host.clone(),
+        to_prepare: lease_calls(&["--block".into(), to], &no_defaults)?,
+        name,
     })
 }
 
@@ -1420,6 +1484,14 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
          \x20                  block's directory) to stdout or --out FILE: download\n\
          \x20                  [--block BLOCK] [--out FILE] PATH; takes the block's input\n\
          \x20                  lease; refused on an agent's block; not for use with +",
+    ),
+    (
+        "copy",
+        "Copy a file from one saved host's server to another's and print its\n\
+         \x20                  path there, through this machine: copy --block BLOCK\n\
+         \x20                  --to-block BLOCK [--name NAME] HOST:PATH HOST; takes the input\n\
+         \x20                  lease of both blocks; refused on an agent's block; not for use\n\
+         \x20                  with + or --host",
     ),
     (
         "watch",

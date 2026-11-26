@@ -4,6 +4,38 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Builder text in acp.log can't pose as orch's
+**2026-11-25**
+
+- In `acp.log`, everything the builder writes is now indented, and orch's
+  own lines (tools, permissions, usage, stop) start at the left edge, so
+  text the builder writes can't start a line that looks like orch's.
+  Fields orch copies from the builder, such as a tool's title, are not
+  quoted yet, so they can still hold misleading text within orch's line.
+- Characters that reorder, hide or break text on screen are shown as
+  escapes.
+
+## Builder blocks in the mux
+**2026-11-25**
+
+- orch can now find (or make) a project's mux session and window, and
+  launch a builder there through its own `rusty-mux-ctl own` connection,
+  handing it the slot and the ACP socket, plus a read-only block that
+  shows `acp.log`.
+- If the mux goes away mid-launch, orch reports it as lost, so the builder
+  session is aborted rather than counted as failed.
+
+## Builder ACP client
+**2026-11-25**
+
+- orch can now hold one Agent Client Protocol conversation with a #600
+  builder: it starts the session in the builder's worktree, sends the
+  prompt, answers permission requests with "allow once", and reports why
+  the builder stopped and the tokens it used, if it said.
+- Everything the builder does is rendered into `acp.log`, a readable view
+  for the mux, never evidence. A dead or garbled builder ends the turn as
+  failed rather than hanging.
+
 ## Cost breaker and taint in lens runs
 **2026-11-17**
 
