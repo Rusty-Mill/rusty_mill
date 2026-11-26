@@ -136,6 +136,16 @@ fn inside(p: &str) -> bool {
             .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
+/// A composed prefix's key: the lens id and a claim's domains, sorted and
+/// deduped, so domain order never picks a different prefix.
+pub type PrefixKey = (String, Vec<String>);
+
+/// The [`PrefixKey`] for `lens` on a claim in `domains`.
+pub fn prefix_key(lens: &str, domains: &[String]) -> PrefixKey {
+    let set: BTreeSet<&String> = domains.iter().collect();
+    (lens.to_owned(), set.into_iter().cloned().collect())
+}
+
 /// The name reported when the domain pack is dropped.
 pub const DOMAIN_PACK: &str = "DOMAIN.md";
 

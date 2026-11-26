@@ -24,6 +24,7 @@ use rusty_bbp::{Direction, MsgId};
 use crate::call::{call, Ctx, End, Models};
 use crate::card::Card;
 use crate::class::DataClass;
+use crate::compose::{prefix_key, PrefixKey};
 use crate::config::{LensConfig, Provider};
 use crate::context::{Line, Parts, Phase};
 use crate::meter::Stop;
@@ -73,6 +74,10 @@ pub struct View<'a> {
     pub lines: &'a [Line],
     /// Each lens's prefix ([`crate::context::prefix`]), by lens id.
     pub prefixes: &'a BTreeMap<String, String>,
+    /// #723 composed prefixes, by lens and claim domains; a job whose key
+    /// is here uses it instead of its lens's flat prefix. Empty when
+    /// composition is off.
+    pub composed: &'a BTreeMap<PrefixKey, String>,
     /// Each lens's track-record line, by lens id; a lens without one gets
     /// none.
     pub records: &'a BTreeMap<String, String>,
@@ -142,7 +147,7 @@ pub fn round(
         let Some(card) = by_id.get(&job.key.claim) else {
             continue;
         };
-        let Some(prefix) = view.prefixes.get(&job.key.lens) else {
+        let Some(prefix) = prefix_for(view, &job.key.lens, card) else {
             out.halt = Some(Halt::NoPrefix(job.key.lens.clone()));
             return out;
         };
@@ -176,6 +181,13 @@ pub fn round(
         }
     }
     out
+}
+
+/// The prefix a job on `card` uses: composed for its domains, else flat.
+fn prefix_for<'v>(view: &View<'v>, lens: &str, card: &Card) -> Option<&'v String> {
+    view.composed
+        .get(&prefix_key(lens, &card.domains))
+        .or_else(|| view.prefixes.get(lens))
 }
 
 /// The highest class the answering provider could have been shown: the
@@ -462,7 +474,15 @@ mod tests {
     }
 
     fn go(cards: &[Card], state: State, task_calls: u32, echo: Echo, board: Posted) -> Out {
-        go_with(cards, state, task_calls, echo, board, &prefixes())
+        go_with(
+            cards,
+            state,
+            task_calls,
+            echo,
+            board,
+            &prefixes(),
+            &BTreeMap::new(),
+        )
     }
 
     fn go_with(
@@ -472,6 +492,7 @@ mod tests {
         mut echo: Echo,
         mut board: Posted,
         prefixes: &BTreeMap<String, String>,
+        composed: &BTreeMap<PrefixKey, String>,
     ) -> Out {
         let cfg = config();
         let ceilings = Ceilings {
@@ -485,6 +506,7 @@ mod tests {
             cards,
             lines: &[],
             prefixes,
+            composed,
             records: &records,
         };
         let ctx = Ctx {
@@ -539,6 +561,7 @@ mod tests {
             cards: &[plain(7)],
             lines: &lines,
             prefixes: &prefixes,
+            composed: &BTreeMap::new(),
             records: &records,
         };
         let ctx = Ctx {
@@ -844,6 +867,52 @@ mod tests {
     }
 
     #[test]
+    fn a_composed_prefix_replaces_the_flat_one_for_its_domains() {
+        let mut rust = plain(7);
+        rust.domains = vec!["rust".to_owned(), "cli".to_owned()];
+        let mut term = plain(8);
+        term.domains = vec!["terminal".to_owned()];
+        let composed: BTreeMap<PrefixKey, String> = LENSES
+            .iter()
+            .map(|l| {
+                let domains = ["rust".to_owned(), "cli".to_owned(), "rust".to_owned()];
+                (
+                    prefix_key(l, &domains),
+                    format!("# Your lens\n{l}\nRUST PACK\n"),
+                )
+            })
+            .collect();
+        let out = go_with(
+            &[rust, term],
+            State::default(),
+            400,
+            Echo::new(Ok(vec![])),
+            Posted::default(),
+            &prefixes(),
+            &composed,
+        );
+        let asked = |claim: &str| {
+            out.echo
+                .asked
+                .iter()
+                .filter(|(_, _, q)| q.body.contains(claim))
+                .map(|(_, _, q)| q.prefix.contains("RUST PACK"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(out.echo.asked.len(), 6);
+        assert_eq!(asked("domains: rust").len(), 3);
+        assert_eq!(asked("domains: terminal").len(), 3);
+        assert!(
+            asked("domains: rust").iter().all(|r| *r),
+            "rust claim gets the pack"
+        );
+        assert!(
+            asked("domains: terminal").iter().all(|r| !*r),
+            "terminal claim stays flat"
+        );
+    }
+
+    #[test]
     fn a_lens_without_a_prefix_ends_the_round() {
         let out = go_with(
             &[plain(7)],
@@ -851,6 +920,7 @@ mod tests {
             400,
             Echo::new(Ok(vec![])),
             Posted::default(),
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
         assert!(matches!(out.report.halt, Some(Halt::NoPrefix(_))));

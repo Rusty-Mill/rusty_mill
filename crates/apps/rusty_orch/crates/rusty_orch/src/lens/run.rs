@@ -36,6 +36,7 @@ use orch_core::AgentId;
 use orch_lens::breaker::{judge, Breaker, Mark, Outcome};
 use orch_lens::call::{Ctx, Models};
 use orch_lens::card::Card;
+use orch_lens::compose::{prefix_key, Limits, PrefixKey};
 use orch_lens::config::Tools;
 use orch_lens::context::{prefix, Line};
 use orch_lens::meter::{Meter, Stop};
@@ -49,6 +50,7 @@ use rusty_bbp::ArtId;
 
 use super::assertions::{self, Grants};
 use super::bbp::{run_id, Child, Diffs, Rpc, Session};
+use super::catalog::Catalog;
 use super::check::DEFAULT_ASSERTIONS;
 use super::hunts::{Kit, Ordinary};
 use super::registry::Registry;
@@ -305,6 +307,8 @@ pub struct Prompts {
     pub rules: String,
     /// Each lens's own prompt, by lens id.
     pub lens: BTreeMap<String, String>,
+    /// #723: the Factory catalog when the config turns composition on.
+    pub catalog: Option<Catalog>,
 }
 
 /// Each lens's prefix, rebuilt whenever its seat sees a new brief (#598):
@@ -313,6 +317,8 @@ pub struct Prompts {
 struct Prefixes {
     text: BTreeMap<String, String>,
     built_on: BTreeMap<String, Option<ArtId>>,
+    /// The brief each lens's prefix was built on, for composed prefixes.
+    intent: BTreeMap<String, String>,
 }
 
 impl Prefixes {
@@ -328,7 +334,40 @@ impl Prefixes {
         self.text
             .insert(lens.to_owned(), prefix(&intent, &prompts.rules, prompt));
         self.built_on.insert(lens.to_owned(), id);
+        self.intent.insert(lens.to_owned(), intent);
         Ok(())
+    }
+
+    /// #723: one composed prefix per distinct domain set among `cards`,
+    /// built on the same brief as the lens's flat prefix. Empty when
+    /// composition is off. Each file dropped to fit is logged.
+    fn composed(
+        &self,
+        lens: &str,
+        cards: &[Card],
+        prompts: &Prompts,
+        log: &mut String,
+    ) -> Result<BTreeMap<PrefixKey, String>, String> {
+        let (Some(catalog), Some(prompt), Some(intent)) = (
+            prompts.catalog.as_ref(),
+            prompts.lens.get(lens),
+            self.intent.get(lens),
+        ) else {
+            return Ok(BTreeMap::new());
+        };
+        let mut out = BTreeMap::new();
+        for card in cards {
+            let key = prefix_key(lens, &card.domains);
+            if out.contains_key(&key) {
+                continue;
+            }
+            let built = catalog.build(prompt, &key.1)?;
+            for d in &built.composed.dropped {
+                let _ = writeln!(log, "{lens} [{}]: {d} left out to fit", key.1.join(", "));
+            }
+            out.insert(key, prefix(intent, &prompts.rules, &built.composed.prompt));
+        }
+        Ok(out)
     }
 }
 
@@ -407,6 +446,9 @@ pub fn passes(
                 .update(&lens.id, seat.as_mut(), prompts)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
             let cards = seat.cards(config);
+            let composed = prefixes
+                .composed(&lens.id, &cards, prompts, log)
+                .map_err(|e| format!("{}: {e}", lens.id))?;
             let calls = metering.meter.calls(metering.task);
             let seen = task_cards(seats, config);
             let now = Mark::of(calls, metering.meter.task_spent(metering.task), &seen);
@@ -438,6 +480,7 @@ pub fn passes(
                 cards: &cards,
                 lines: &lines,
                 prefixes: &prefixes.text,
+                composed: &composed,
                 records: &tracks,
             };
             let ctx = Ctx {
@@ -572,9 +615,15 @@ pub fn run(o: &Options) -> Result<String, String> {
         None => Meter::new(config.ceilings, 0),
     };
     let mut seats: BTreeMap<String, Box<dyn Seat>> = BTreeMap::new();
+    let catalog = if config.compose {
+        Some(Catalog::open(&base, &o.repo, Limits::default())?)
+    } else {
+        None
+    };
     let mut prompts = Prompts {
         rules,
         lens: BTreeMap::new(),
+        catalog,
     };
     let run = run_id()?;
     let _ = writeln!(log, "run {run}");
@@ -1002,6 +1051,7 @@ mod tests {
                 .iter()
                 .map(|l| (l.id.clone(), l.id.clone()))
                 .collect(),
+            catalog: None,
         };
         let mut ceilings = cfg.ceilings;
         ceilings.task_calls = task_calls;
@@ -2119,5 +2169,59 @@ mod tests {
             options(argv("check c.json"), PathBuf::new()),
             Err(ArgsError::Usage(_))
         ));
+    }
+
+    #[test]
+    fn composed_prefixes_differ_by_claim_domain_from_one_catalog() {
+        let root = std::env::temp_dir().join(format!("orch-run-compose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (factory, repo) = (root.join("factory"), root.join("repo"));
+        for (dir, rel, text) in [
+            (
+                &factory,
+                "domains.json",
+                r#"{"rust": {"knowledge": ["k/rust.md"]}, "tty": {"knowledge": ["k/tty.md"]}}"#,
+            ),
+            (&factory, "k/rust.md", "Ownership first."),
+            (&factory, "k/tty.md", "VT is a state machine."),
+            (&repo, "DOMAIN.md", "Dedup 20 TB."),
+        ] {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+            std::fs::write(path, text).expect("write");
+        }
+        let prompts = Prompts {
+            rules: "rules".to_owned(),
+            lens: BTreeMap::from([("adversary".to_owned(), "find faults".to_owned())]),
+            catalog: Some(Catalog::open(&factory, &repo, Limits::default()).expect("opens")),
+        };
+        let mut prefixes = Prefixes::default();
+        prefixes
+            .intent
+            .insert("adversary".to_owned(), "the brief".to_owned());
+        let on = |id: u64, domains: &[&str]| Card {
+            domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+            ..card(id)
+        };
+        let cards = [on(1, &["rust"]), on(2, &["tty"]), on(3, &["rust"])];
+        let mut log = String::new();
+        let got = prefixes
+            .composed("adversary", &cards, &prompts, &mut log)
+            .expect("composes");
+        assert_eq!(got.len(), 2, "one prefix per domain set");
+        let rust = &got[&prefix_key("adversary", &["rust".to_owned()])];
+        let tty = &got[&prefix_key("adversary", &["tty".to_owned()])];
+        assert_ne!(rust, tty);
+        assert!(rust.contains("Ownership first.") && rust.contains("# Project\nDedup 20 TB."));
+        assert!(rust.starts_with("# Intent\nthe brief\n"));
+        assert!(tty.contains("VT is a state machine.") && !tty.contains("Ownership"));
+        let off = Prompts {
+            catalog: None,
+            ..prompts
+        };
+        assert!(prefixes
+            .composed("adversary", &cards, &off, &mut log)
+            .expect("ok")
+            .is_empty());
     }
 }
