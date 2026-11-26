@@ -192,6 +192,8 @@ Precise contracts used by this guide:
 | D196 | #724: the redrawn `factory-map.svg` is accepted as the Factory map for now | [stated] 2026-11-25 (724) |
 | D198 | #1416 slice 2: claim field bindings, stage strip derivation rule, brief text as a plain input | [default] 2026-11-25 (#1416) |
 | D199 | #1318: read-only `rusty_orch builder sessions` command for the toy-run verdict is approved | [stated] 2026-11-26 (1318) |
+| D201 | #705: SlopCodeBench spike design approved; Phase A starts now, options O1–O3 a, pre-registered rules; Phase B spend not approved | [stated] 2026-11-26 (705) |
+| D202 | #705: `tree-sitter-python` 0.25 added to `rusty_erosion` (new `Cargo.lock` entry) | [stated] 2026-11-26 (705) |
 
 ## D1. Lenses, not stages
 
@@ -1860,3 +1862,28 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_bf939a8321774a30a361cab316004035
 **Key.** lel:1318:builder-sessions-reader
 **Source.** Nano tapped option a "Approve it as proposed" on the decision card in the #600 project thread, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4Gttb7wZhFF2cKQc3F6PYHg`, 2026-11-26T12:38:59Z. The card asked "Approve a read-only `rusty_orch builder sessions` command for the toy-run check?" Option a read: "A small PR adds a command that prints the saved builder session rows as JSON. #1894 stacks on it and its verdict checks those rows." The command shape comes from the let-em-loose-expert escalation in the #1318 thread. Related: D167, D177, D188, D197.
+
+## D201. #705: SlopCodeBench spike design approved; Phase A starts now, options O1–O3 a, pre-registered rules; Phase B spend not approved
+
+**Decision.** Nano approved `705-slopcodebench-spike-design.md` as written at PR #1905 head `eee52856`. Approval covers:
+- **Phase A starts now, ahead of #1320.** That means the `rusty_erosion` Python adapter, then scoring and Spearman cross-validation on SCB's 196 reference-solution checkpoints. It costs $0 and makes no model calls. This lifts D164's "other bbp_factory Backlog cards later" for #705 only; D164 stands for every other card.
+- **O1 a:** the Phase A sample is SCB reference solutions only. The ~30 public Python repo histories are not in scope.
+- **O2 a:** Phase B, when it runs, has a factory arm and a bare-Claude control arm.
+- **O3 a:** D44 scheduled cleanups are off in the factory arm, matching the paper.
+- **The pre-registered rules in design §3.** In A.4 these are: ρ ≥ 0.6 on levels and ≥ 75% delta sign agreement for concentration against erosion, and ρ ≥ 0.5 for duplication against clone share. In Phase B they are the evidence rule, the tie margins (−0.005 erosion, −0.003 verbosity), the functional gate, and the first-match verdict order.
+
+**Not approved:** the Phase B paid run and its ceiling. D134 stands, and design §5.7 brings Phase B back as its own ask after #1320 has run and Phase A has reported. That ask may revisit O2, O3 and the Phase B subset.
+**Why.** Phase A is free and checks the erosion metric (D43, D45) against an outside benchmark before the factory relies on it. Nano's "Approve" answered a message whose asks 1, 3 and 4 were: approve the plan (which starts Phase A now); three choices, each with a stated recommendation of a; and the §3 rules. The design he approved recommends a for all three.
+**Rejected.** O1 b (also public repo histories), O2 b (factory only, against the paper's aggregates), O3 b/c (cleanups on, or as a third arm).
+**Tag.** [stated] · remind-me: mem_675eac0e01a44aa3a03acd900077d6ca
+**Key.** lel:705:spike-design-approved
+**Source.** Nano, Let Em Loose project thread "Spike SlopCodeBench against the factory", message `cmsg_01WgyiM31RsSnZTgNuPX2VE4UTNJasKiZJj1PzCwBg4Jqp`, 2026-11-26T14:08:07Z: "Approve and ok", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE4Vx1ji78992yPg2feUNXe9c`. Design revised after Nano's PR #1905 review comments 7193376881 and 7193529801 (exhaustive verdict, evidence rule, functional gate). The O1–O3 choices are read from his approval of a design and a message that both recommend a; nothing he wrote names the options one by one. Relates to D37, D44, D45, D52, D64, D134, D164, D188. Numbered D201 because D200 is taken on branch `claude/project-thread-o7o32u` (#432).
+
+## D202. #705: `tree-sitter-python` 0.25 added to `rusty_erosion` (new `Cargo.lock` entry)
+
+**Decision.** `rusty_erosion` may depend on `tree-sitter-python` 0.25, the version already pinned in the workspace `Cargo.toml`, for the #705 Phase A Python adapter (`adapter/python.rs`). This adds a new entry to the root `Cargo.lock`. The approval covers this one crate in this one crate's manifest. Any other dependency, or any version bump, is still ask-first.
+**Why.** Dependency additions are on Nano's ask-first list. D45 and D52 anticipated a Python adapter "when a real task needs it", and #705 is that task.
+**Rejected.** Porting SCB problems to Rust, which would lose comparability with the paper (card default, remind-me `mem_fe2e758185bb4ce69509d5b2a258da11`).
+**Tag.** [stated] · remind-me: mem_44ae546553c64bafb824e3255b9c8d5b
+**Key.** lel:705:tree-sitter-python-dep
+**Source.** Nano, Let Em Loose project thread "Spike SlopCodeBench against the factory", message `cmsg_01WgyiM31RsSnZTgNuPX2VE4UTNJasKiZJj1PzCwBg4Jqp`, 2026-11-26T14:08:07Z: "Approve and ok", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE4Vx1ji78992yPg2feUNXe9c`; "ok" answers ask 2. Relates to D45, D52, D201. Numbered D202 after D201.
