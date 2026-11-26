@@ -32,4 +32,14 @@ case_ "both builders report one n: fail"                1 "$r1" "$r1" "$p1"$'\n'
 case_ "a third session for the claim: fail"             1 "$r1" "$r2" "$p1"$'\n'"$p2"$'\n'"$(row 7 3 failed 9 null '')"$'\n'
 case_ "stdout row empty (builder crashed): fail"        1 "" "$r2" "$p1"$'\n'"$p2"$'\n'
 case_ "stdout row for another claim: fail"              1 "$(row 8 1 stored 9 42 ',"notes":[]')" "$r2" "$p1"$'\n'"$p2"$'\n'
+# The reader's real output for two persisted terminal rows (#1903's real-store test asserts it byte for byte).
+GOLD=$(dirname "$0")/../../../crates/apps/rusty_orch/crates/rusty_orch/tests/fixtures/builder-sessions.jsonl
+if [ -f "$GOLD" ]; then
+  case_ "the reader's real output for matching rows: pass" 0 \
+    '{"claim":7,"n":1,"state":"stored","candidate":42,"notes":[]}' \
+    '{"claim":7,"n":2,"state":"failed","candidate":null,"notes":["no submit marker or an empty diff: nothing posted"]}' \
+    "$(cat "$GOLD")"$'\n'
+else
+  echo "FAIL the reader's fixture is missing: $GOLD"; bad=1
+fi
 exit "$bad"
