@@ -1,16 +1,21 @@
 # Lean cards: design for #1435, #1436 and #1437 (parent #1434)
 
-Status: **approved by Nano, 2026-11-26** (all five decisions as recommended: state line, budgets, comment kinds with the three-line handoff, `card_get` default under the agent profile only (option b), per-credential view profile). Nothing here is built. All three changes are
-additive to the MCP contract; none changes the SQLite schema (cards are JSON docs, ADR-0007).
+Status: **proposed.** Nano chose "go with recommendations" on the five decisions below as first
+written (thread message `cmsg_017MoLbtrGAAcyE1PVPZXuN6Sw9f4nJeWJ39LMadDRD5Go`, 2026-11-26 00:48Z).
+Two things changed after that and are **pending his word**: the explicit `resolves` mechanism for
+blockers and questions (B), and the agent profile now only adds `board_list` paging (C). Nothing
+here is built. No change touches the SQLite schema (cards are JSON docs, ADR-0007). The MCP changes
+add arguments and fields, but write budgets tighten what writers may send (prompt 32 KiB to 8 KiB,
+new caps on title, body and comment) and the `view` setting needs a loader change.
 
 ## Problem
 
 Card size and what the board sends overwhelm agent context. Bounded reads (#1426: summaries,
 paging, incremental polling) fixed list volume. What remains is card content shape and what an
-agent sees by default. Principle (Nano, 2026-11-10): a card says what, who, status and where the
+agent sees by default. Principle (Nano, 2026-11-10, card #1434): a card says what, who, status and where the
 detail lives. Rationale goes in remind-me, specs and logs in the repo, review on GitHub.
 
-Measured on the live board (2026-11-10, `retrieval-scalability-plan.md` §3a; 1,425 cards,
+Measured on the live board (2026-11-10, `retrieval-scalability-plan.md` §3a, kept in the project files, not in this repo; 1,425 cards,
 3.87 MB full JSON):
 
 | | Median | p95 | Max |
@@ -53,9 +58,9 @@ GitHub and link it"):
 that changes that field: editing the title of a card with a 28 KB body is not refused, and
 nothing is truncated on read. The refusal names the field, the limit and the size sent.
 
-*Open measurement:* the per-comment size distribution was not captured (only per-card totals).
-Before the number for comments is final, a read-only pass over the live board reports the
-per-comment p95 and max; if p95 exceeds 2 KiB the limit is raised to cover it.
+*Measured:* `tests/fixtures/board-profile-2026-11-10.json` stores each comment's length: 1,387
+comments, median 404 B, p95 1,598 B, max 10,875 B, 40 over 2 KiB. p95 is under 2 KiB, so the
+limit stands; the 40 larger comments are grandfathered.
 
 ## B. Typed comments and history on request (#1436)
 
@@ -69,7 +74,8 @@ format. Other kinds keep only the 2 KiB cap.
 
 **Resolving a blocker or question.** Today a `Comment` is only `by`, `at_ms`, `text`, so "open"
 needs a mechanism. A comment gains an optional `id` (UUIDv7, assigned on write; old comments have
-none and are all `note`), returned by `card_comment`. A new optional `resolves: <comment id>`
+none and are all `note`; ids that the Tick migration kept under `migrated_from_tick`, sqlite.rs,
+are not relied on), returned by `card_comment`. A new optional `resolves: <comment id>`
 argument on `card_comment` marks that `blocker` or `question` resolved; it is refused if the id is
 not a blocker or question on the same card, and a resolved one is never reopened. A blocker or
 question is **open** until a comment names it in `resolves`; nothing is inferred from prose.
@@ -86,10 +92,10 @@ are left out of the default read, never rewritten.
 - b) the new default applies only under the agent view profile (C below); everyone else keeps
   today's full read until Nano decides otherwise.
 
-(b) follows the S7 precedent: Nano deferred changing a global default to keep clients
-compatible. The UI renders `kind` (a small label) and keeps the full thread.
+(b) avoids repeating S7, which changed `board_list`'s global default and needed matching UI and
+mill-runner changes (#1635); here only credentials that opt in see the shorter read. The UI renders `kind` (a small label) and keeps the full thread.
 
-## C. Summary view by default for agent credentials (#1437)
+## C. Per-credential view profile (#1437)
 
 A per-credential **view profile**, not a global default. `credentials.json` gains an optional
 `"view": "agent" | "full"` per entry (default `full`; the loader is `deny_unknown_fields`, so
