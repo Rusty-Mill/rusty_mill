@@ -99,9 +99,11 @@ impl Workspace {
                 (false, true) => inner.explorer.retry_status(),
                 _ => {}
             }
-            held && (!was || inner.explorer.note().is_some())
-                && inner.explorer.tree().is_none()
-                && !inner.explorer.waiting()
+            // A root asked before the lease was lost is retired (its reply
+            // is dropped in `reply`), so regaining asks again even while
+            // the old one still looks pending.
+            held && inner.explorer.tree().is_none()
+                && (!was || (inner.explorer.note().is_some() && !inner.explorer.waiting()))
         };
         if root {
             self.lock().explorer.set_waiting(true);
@@ -173,7 +175,11 @@ impl Workspace {
         }
         {
             let mut inner = self.lock();
-            if epoch != inner.epoch && !matches!(which, Which::List) {
+            let stale = epoch != inner.epoch;
+            // Old status replies never apply. An old root reply is retired
+            // too: the lease change asked for a new one. An old directory
+            // reply still fills the tree it was asked for.
+            if stale && (!matches!(which, Which::List) || inner.explorer.tree().is_none()) {
                 return;
             }
             let ex = &mut inner.explorer;
@@ -482,6 +488,34 @@ mod tests {
         assert_eq!(fake.methods().len(), 2);
         fake.answer(Ok(ROOT.into()));
         assert_eq!(fake.last().state, State::Tree);
+    }
+
+    #[test]
+    fn an_old_root_reply_after_the_lease_returned_is_retired_and_the_root_asked_again() {
+        let (fake, ws) = open(true, false);
+        ws.lease(false);
+        ws.lease(true);
+        assert_eq!(fake.methods().len(), 2, "the root is asked again");
+        // The first request fails late, after the lease came back.
+        fake.answer(Err("the connection to the server was lost".into()));
+        assert!(
+            matches!(fake.last().state, State::Loading(_)),
+            "the old refusal is dropped, the new root is still on its way"
+        );
+        fake.answer(Ok(ROOT.into()));
+        assert_eq!(fake.last().state, State::Tree);
+    }
+
+    #[test]
+    fn an_old_directory_reply_still_fills_a_populated_tree() {
+        let (fake, ws) = open(true, false);
+        fake.answer(Ok(ROOT.into()));
+        ws.intent(Intent::Step(1));
+        ws.intent(Intent::Enter);
+        ws.lease(false);
+        ws.lease(true);
+        fake.answer(Ok("src\nf\tmain.rs\n".into()));
+        assert!(fake.last().rows.iter().any(|r| r.name == "main.rs"));
     }
 
     const STAT: &str = "f\t4300\t0";
