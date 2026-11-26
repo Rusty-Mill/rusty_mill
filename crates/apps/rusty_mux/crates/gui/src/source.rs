@@ -1511,6 +1511,20 @@ fn bound_writes(stream: &UnixStream) -> Result<(), String> {
         .map_err(|e| format!("cannot bound writes to the server: {e}"))
 }
 
+/// `wrote`, a write to the server's connection `stream`; a failed one, a
+/// timed-out one too, may have left half a frame on the wire, so the
+/// connection is let go and the error is one nobody retries (a timeout
+/// would be resent whole behind its own prefix).
+fn drop_on_failure<T>(stream: &UnixStream, wrote: std::io::Result<T>) -> std::io::Result<T> {
+    use std::io::ErrorKind::{Interrupted, TimedOut, WouldBlock};
+    let Err(e) = wrote else { return wrote };
+    let _ = stream.shutdown(Shutdown::Both);
+    Err(match e.kind() {
+        WouldBlock | TimedOut | Interrupted => std::io::ErrorKind::BrokenPipe.into(),
+        _ => e,
+    })
+}
+
 /// The bytes of file data in one chunk's `terminal.upload` arguments.
 fn chunk_len(args: &[(String, Value)]) -> u64 {
     args.iter()
@@ -1559,7 +1573,8 @@ impl std::io::Write for ConnWriter {
         if self.1.load(Ordering::SeqCst) || self.0.conn_gen.load(Ordering::SeqCst) != self.2 {
             return Err(std::io::ErrorKind::BrokenPipe.into());
         }
-        conn.write_raw(buf)?;
+        let wrote = conn.write_raw(buf);
+        drop_on_failure(&lock(&self.0.stream), wrote)?;
         Ok(buf.len())
     }
 
@@ -1672,11 +1687,8 @@ impl Block {
     fn send(&self, make: impl FnOnce(u64) -> Message) -> u64 {
         let req = self.next.fetch_add(1, Ordering::Relaxed);
         let conn = &mut self.conn.lock().unwrap_or_else(PoisonError::into_inner);
-        // A failed send, a timed-out one too, may leave half a frame on the
-        // wire: the connection is let go, which ends the reader and the pane.
-        if conn.send(&make(req)).is_err() {
-            let _ = lock(&self.stream).shutdown(Shutdown::Both);
-        }
+        // A failed send ends the reader too, which ends the pane.
+        let _ = drop_on_failure(&lock(&self.stream), conn.send(&make(req)));
         req
     }
 
@@ -2260,6 +2272,30 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_that_stalls_lets_the_connection_go_and_is_not_retried() {
+        use std::io::{ErrorKind, Read, Write};
+        let (mut a, mut b) = std::os::unix::net::UnixStream::pair().expect("pair");
+        a.set_write_timeout(Some(std::time::Duration::from_millis(50)))
+            .expect("timeout");
+        // Nobody reads `b`: the buffer fills and the write stalls part-way.
+        let stalled = a.write_all(&vec![7u8; 64 << 20]);
+        assert_eq!(
+            stalled.as_ref().err().map(|e| e.kind()),
+            Some(ErrorKind::WouldBlock)
+        );
+        let kind = super::drop_on_failure(&a, stalled)
+            .expect_err("failed")
+            .kind();
+        assert_eq!(kind, ErrorKind::BrokenPipe, "not a kind to retry");
+        // The peer reads what was written, then the end of the connection.
+        let mut rest = Vec::new();
+        b.read_to_end(&mut rest).expect("ends");
+        assert!(!rest.is_empty() && rest.len() < 64 << 20, "a partial frame");
+        assert_eq!(super::drop_on_failure(&a, Ok(3)).expect("kept"), 3);
     }
 
     #[cfg(unix)]
