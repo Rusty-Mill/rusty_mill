@@ -1185,6 +1185,11 @@ fn check_claim(card: &Card) -> Result<(), BoardError> {
 }
 
 impl<T: TickApi> Store for TickStore<T> {
+    /// Tick keeps a comment as text, author and time: no id survives a read.
+    fn keeps_comment_ids(&self) -> bool {
+        false
+    }
+
     /// rusty_tick has no field for it (retired, ADR-0007), so a merge close there cannot be undone.
     fn keeps_merge_record(&self) -> bool {
         false

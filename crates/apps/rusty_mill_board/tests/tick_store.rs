@@ -766,8 +766,12 @@ fn tick_refuses_comment_kinds_and_resolution_and_keeps_plain_notes() {
     };
     assert!(board.comment_with(card.id, &human, &resolving).is_err());
     assert!(board.get(card.id).expect("get").comments.is_empty());
-    board.comment(card.id, &human, "plain").expect("note");
-    assert_eq!(board.get(card.id).expect("get").comments.len(), 1);
+    let added = board.comment(card.id, &human, "plain").expect("note");
+    assert_eq!(added.comments.len(), 1);
+    assert_eq!(added.comments[0].id, None, "no transient id is returned");
+    let read = board.get(card.id).expect("get");
+    assert_eq!(read.comments.len(), 1);
+    assert_eq!(read.comments[0].id, None, "a legacy note has no stable id");
 }
 
 #[test]

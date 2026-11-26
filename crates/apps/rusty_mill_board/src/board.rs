@@ -2480,8 +2480,13 @@ impl<S: Store> Board<S> {
         by: &Actor,
         new: &crate::domain::NewComment<'_>,
     ) -> Result<Card, BoardError> {
+        let keeps_ids = self.store.keeps_comment_ids();
         self.apply(id, by, EventKind::Commented, |c, now| {
-            c.comment_with(by, new, now)
+            let mut next = c.comment_with(by, new, now)?;
+            if !keeps_ids && let Some(added) = next.comments.last_mut() {
+                added.id = None;
+            }
+            Ok(next)
         })
     }
 
@@ -2496,9 +2501,12 @@ impl<S: Store> Board<S> {
         text: &str,
         state: Option<&str>,
     ) -> Result<Card, BoardError> {
-        self.apply(id, by, EventKind::Commented, |c, now| {
-            c.comment_with_state(by, text, state, now)
-        })
+        let new = crate::domain::NewComment {
+            text,
+            state,
+            ..crate::domain::NewComment::default()
+        };
+        self.comment_with(id, by, &new)
     }
 }
 
