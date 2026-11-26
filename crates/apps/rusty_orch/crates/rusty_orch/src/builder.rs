@@ -1,7 +1,9 @@
 //! `rusty_orch builder run` (#1318 S5): one builder session on one claim,
 //! the D167 toy run's entry point. Admits under the store lock, then runs
 //! `orch_bbp::builder`'s sequence over [`live`]'s ports and prints the
-//! session row as one JSON line.
+//! session row as one JSON line. `rusty_orch builder sessions` prints the
+//! sessions the store holds, read-only (D199), so a caller can check what was
+//! persisted rather than what was printed.
 //!
 //! The implementation defaults are D189: the extra flags, the holder's
 //! deadline past orch's own end, the fd-4 shell redirect, no `recover` here
@@ -33,7 +35,19 @@ pub const SUBMIT: &str = ".lel/submit";
 /// How long a save waits for another process's store lock.
 const LOCK_WAIT: Duration = Duration::from_secs(30);
 
-pub const USAGE: &str = "usage: rusty_orch builder run <config.json> --bbp <bbp binary> --dir <bbp dir> --task <task>\n           --claim <id> --state <orch state dir> --repo <git repo> --base <commit>\n           --cgroup-parent <dir> --slots <dir> --mux-ctl <rusty-mux-ctl> [--mux-socket <path>]\n           [--jail <lel-jail>] [--read <dir>]...\n\nRun one builder session on one claim (#1318): admit it, make its worktree from --base,\nopen its cgroup below --cgroup-parent, take an agent slot from --slots, launch\n`lel-jail` running `claude-code-acp` in a mux block, run one ACP turn, end it and post\nits candidate only when it wrote .lel/submit with a non-empty diff (D188). Prints the\nsession row as one JSON line. --cgroup-parent is the board's `lel-store-<scope>`\ncgroup (`bbp cgroup-scope`), delegated to this user. Each --read adds a read root to the jail. Linux only.\nCalls the Claude CLI under its own subscription login.";
+pub const USAGE: &str = "usage: rusty_orch builder run <config.json> --bbp <bbp binary> --dir <bbp dir> --task <task>\n           --claim <id> --state <orch state dir> --repo <git repo> --base <commit>\n           --cgroup-parent <dir> --slots <dir> --mux-ctl <rusty-mux-ctl> [--mux-socket <path>]\n           [--jail <lel-jail>] [--read <dir>]...\n\nRun one builder session on one claim (#1318): admit it, make its worktree from --base,\nopen its cgroup below --cgroup-parent, take an agent slot from --slots, launch\n`lel-jail` running `claude-code-acp` in a mux block, run one ACP turn, end it and post\nits candidate only when it wrote .lel/submit with a non-empty diff (D188). Prints the\nsession row as one JSON line. --cgroup-parent is the board's `lel-store-<scope>`\ncgroup (`bbp cgroup-scope`), delegated to this user. Each --read adds a read root to the jail. Linux only.\nCalls the Claude CLI under its own subscription login.\n\n`rusty_orch builder sessions --help` prints the read-only command that lists saved sessions.";
+
+pub const SESSIONS_USAGE: &str = "usage: rusty_orch builder sessions <config.json> --dir <bbp dir> --task <task>\n           --state <orch state dir> [--claim <id>]\n\nPrint the builder sessions the orch store holds for the board (--dir, --task), one\nJSON line each in `builder run`'s row shape without notes, ordered by claim and n;\n--claim keeps one claim's. Read-only (D199): it waits for the store lock like\n`builder run`, changes no session, and fails when --state is not a directory or the\nstore cannot be read.";
+
+/// What `builder sessions` reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionsOptions {
+    pub config: PathBuf,
+    pub dir: PathBuf,
+    pub task: String,
+    pub state: PathBuf,
+    pub claim: Option<MsgId>,
+}
 
 /// What to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,40 +101,15 @@ pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsEr
             )))
         }
     }
-    let mut config = None;
-    let mut flags: BTreeMap<&'static str, String> = BTreeMap::new();
-    let mut read = Vec::new();
-    while let Some(arg) = args.next() {
-        if arg == "-h" || arg == "--help" {
-            return Err(ArgsError::Help);
-        }
-        let Some(flag) = FLAGS.iter().find(|f| **f == arg) else {
-            if arg.starts_with('-') || config.is_some() {
-                return Err(ArgsError::Usage(format!("unexpected argument {arg:?}")));
-            }
-            config = Some(PathBuf::from(arg));
-            continue;
-        };
-        let value = args
-            .next()
-            .filter(|v| !v.is_empty() && !v.starts_with('-'))
-            .ok_or_else(|| ArgsError::Usage(format!("{arg} needs a value")))?;
-        if *flag == "--read" {
-            read.push(PathBuf::from(value));
-        } else if flags.insert(flag, value).is_some() {
-            return Err(ArgsError::Usage(format!("duplicate {arg}")));
-        }
-    }
+    let Parsed {
+        config,
+        mut flags,
+        read,
+    } = parse(args, &FLAGS)?;
     let mut take = |f: &str| flags.remove(f);
-    let required =
-        |v: Option<String>, f: &str| v.ok_or_else(|| ArgsError::Usage(format!("{f} is required")));
-    let claim = required(take("--claim"), "--claim")?;
-    let claim = claim
-        .parse()
-        .map(MsgId)
-        .map_err(|_| ArgsError::Usage(format!("--claim {claim:?} is not a message id")))?;
+    let claim = message_id(required(take("--claim"), "--claim")?)?;
     Ok(Options {
-        config: config.ok_or_else(|| ArgsError::Usage("a lens config is required".into()))?,
+        config,
         bbp: required(take("--bbp"), "--bbp")?.into(),
         dir: required(take("--dir"), "--dir")?.into(),
         task: required(take("--task"), "--task")?,
@@ -135,6 +124,131 @@ pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsEr
         jail: take("--jail").map_or_else(|| PathBuf::from("lel-jail"), PathBuf::from),
         read,
     })
+}
+
+/// Parse `sessions <config> --dir … --task … --state … [--claim …]`.
+///
+/// # Errors
+///
+/// [`ArgsError::Help`] for `-h`, else a usage error naming the problem.
+pub fn sessions_options(
+    argv: impl IntoIterator<Item = String>,
+) -> Result<SessionsOptions, ArgsError> {
+    const SESSIONS_FLAGS: [&str; 4] = ["--dir", "--task", "--state", "--claim"];
+    let mut args = argv.into_iter();
+    match args.next().as_deref() {
+        Some("sessions") => {}
+        Some("-h" | "--help") | None => return Err(ArgsError::Help),
+        Some(other) => {
+            return Err(ArgsError::Usage(format!(
+                "unknown builder command {other:?}"
+            )))
+        }
+    }
+    let Parsed {
+        config, mut flags, ..
+    } = parse(args, &SESSIONS_FLAGS)?;
+    let mut take = |f: &str| flags.remove(f);
+    Ok(SessionsOptions {
+        config,
+        dir: required(take("--dir"), "--dir")?.into(),
+        task: required(take("--task"), "--task")?,
+        state: required(take("--state"), "--state")?.into(),
+        claim: take("--claim").map(message_id).transpose()?,
+    })
+}
+
+/// A command line after the subcommand: the config path and each flag.
+struct Parsed {
+    config: PathBuf,
+    flags: BTreeMap<&'static str, String>,
+    /// Every `--read`, in order (the one repeatable flag).
+    read: Vec<PathBuf>,
+}
+
+fn parse(
+    mut args: impl Iterator<Item = String>,
+    known: &[&'static str],
+) -> Result<Parsed, ArgsError> {
+    let mut config = None;
+    let mut flags = BTreeMap::new();
+    let mut read = Vec::new();
+    while let Some(arg) = args.next() {
+        if arg == "-h" || arg == "--help" {
+            return Err(ArgsError::Help);
+        }
+        let Some(flag) = known.iter().find(|f| **f == arg) else {
+            if arg.starts_with('-') || config.is_some() {
+                return Err(ArgsError::Usage(format!("unexpected argument {arg:?}")));
+            }
+            config = Some(PathBuf::from(arg));
+            continue;
+        };
+        let value = args
+            .next()
+            .filter(|v| !v.is_empty() && !v.starts_with('-'))
+            .ok_or_else(|| ArgsError::Usage(format!("{arg} needs a value")))?;
+        if *flag == "--read" {
+            read.push(PathBuf::from(value));
+        } else if flags.insert(*flag, value).is_some() {
+            return Err(ArgsError::Usage(format!("duplicate {arg}")));
+        }
+    }
+    let config = config.ok_or_else(|| ArgsError::Usage("a lens config is required".into()))?;
+    Ok(Parsed {
+        config,
+        flags,
+        read,
+    })
+}
+
+fn required(v: Option<String>, flag: &str) -> Result<String, ArgsError> {
+    v.ok_or_else(|| ArgsError::Usage(format!("{flag} is required")))
+}
+
+fn message_id(v: String) -> Result<MsgId, ArgsError> {
+    v.parse()
+        .map(MsgId)
+        .map_err(|_| ArgsError::Usage(format!("--claim {v:?} is not a message id")))
+}
+
+/// Print the board's persisted builder sessions (D199), read-only.
+///
+/// # Errors
+///
+/// When the config can't be read or parsed, `--state` is not a directory,
+/// the BBP directory can't be resolved, or the store stays locked or can't
+/// be read.
+pub fn sessions(o: &SessionsOptions) -> Result<String, String> {
+    let text = std::fs::read_to_string(&o.config)
+        .map_err(|e| format!("cannot read {}: {e}", o.config.display()))?;
+    orch_lens::LensConfig::parse(&text).map_err(|e| format!("{}: {e}", o.config.display()))?;
+    if !o.state.is_dir() {
+        return Err(format!("{} is not a directory", o.state.display()));
+    }
+    let board = crate::lens::run::board(&o.dir, &o.task)?;
+    let rows = with_store(&o.state, |store| {
+        store
+            .load_builder_sessions(&board)
+            .map_err(|e| e.to_string())
+    })?;
+    Ok(session_lines(rows, o.claim))
+}
+
+/// `rows` as JSON lines without notes, ordered by claim and n, kept to
+/// `claim` when given.
+pub fn session_lines(mut rows: Vec<Session>, claim: Option<MsgId>) -> String {
+    rows.retain(|s| claim.is_none_or(|c| s.claim == c));
+    rows.sort_by_key(|s| (s.claim.0, s.n));
+    rows.iter()
+        .map(|s| {
+            let mut v = row(s, &[]);
+            if let Value::Object(m) = &mut v {
+                m.remove("notes");
+            }
+            format!("{}\n", v.to_json_string())
+        })
+        .collect()
 }
 
 /// The builder's one prompt (D189 item 5).
