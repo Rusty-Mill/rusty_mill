@@ -8,6 +8,7 @@
 //! grapheme clusters are not joined, which the server's escaping makes rare.
 
 use rusty_term_core::char_width;
+use std::collections::{HashMap, HashSet};
 
 /// What a name is, as the server's `KIND` column says. A link is never
 /// followed, so only a directory can be opened.
@@ -155,6 +156,149 @@ pub fn unescape(text: &str) -> String {
     out
 }
 
+/// What `terminal.workspace-stat` says of one entry, as the tree shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stat {
+    pub size: u64,
+    /// Seconds since the epoch; 0 when the server does not know.
+    pub mtime: u64,
+}
+
+impl Stat {
+    /// "4.2 KiB, 3 h ago" at time `now` (seconds since the epoch). A
+    /// modification time of 0 is unknown and shows no age; one in the
+    /// future shows as now.
+    fn line(self, now: u64) -> String {
+        let size = size_text(self.size);
+        if self.mtime == 0 {
+            return size;
+        }
+        let age = now.saturating_sub(self.mtime);
+        let age = match age {
+            0..=59 => "now".to_owned(),
+            60..=3599 => format!("{} min ago", age / 60),
+            3600..=86399 => format!("{} h ago", age / 3600),
+            _ => format!("{} d ago", age / 86400),
+        };
+        format!("{size}, {age}")
+    }
+}
+
+/// `bytes` in the largest unit that keeps it under 1024 once rounded.
+fn size_text(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    // Rounded to one place first: 1_048_575 B is 1.0 MiB, not 1024.0 KiB.
+    while unit < 4 && (size * 10.0).round() / 10.0 >= 1024.0 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    match unit {
+        0 => format!("{bytes} B"),
+        _ => format!("{size:.1} {}", UNITS[unit]),
+    }
+}
+
+/// Reads a `terminal.workspace-stat` reply (`KIND<TAB>SIZE<TAB>MTIME`).
+///
+/// # Errors
+/// [`Malformed`] when it is not three tab-separated fields with numbers
+/// for the last two.
+pub fn parse_stat(reply: &str) -> Result<Stat, Malformed> {
+    let mut f = reply.trim_end().split('\t');
+    let num = |f: Option<&str>| {
+        f.and_then(|t| t.parse::<u64>().ok())
+            .ok_or_else(|| Malformed(format!("bad stat `{}`", reply.escape_debug())))
+    };
+    let _kind = f.next();
+    let size = num(f.next())?;
+    let mtime = num(f.next())?;
+    Ok(Stat { size, mtime })
+}
+
+/// What changed under the workspace, from `terminal.workspace-touched`:
+/// the real path of each entry git reports, and every directory above one.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Touched {
+    /// Path (empty for the workspace) to its one-letter status.
+    exact: HashMap<String, char>,
+    /// Directories holding a change.
+    within: HashSet<String>,
+    /// Paths git named that are not UTF-8.
+    pub unreadable: usize,
+}
+
+/// One letter for git's two status letters (a space shown as `.`): `?` for
+/// untracked, else the work tree's, else the index's.
+fn letter(code: &str) -> char {
+    let mut c = code.chars();
+    match (c.next(), c.next()) {
+        (Some('?'), _) => '?',
+        (_, Some(y)) if y != '.' => y,
+        (Some(x), _) => x,
+        _ => '?',
+    }
+}
+
+/// Reads a `terminal.workspace-touched` reply.
+///
+/// # Errors
+/// [`Malformed`] on a first line that is not `.`, a line without a two
+/// letter code and a tab, or a path that is unsafe to draw.
+pub fn parse_touched(reply: &str) -> Result<Touched, Malformed> {
+    let mut lines = reply.lines();
+    if lines.next() != Some(".") {
+        return Err(Malformed("touched reply does not start with `.`".into()));
+    }
+    let mut out = Touched::default();
+    for line in lines {
+        let (code, path) = line
+            .split_once('\t')
+            .ok_or_else(|| Malformed(format!("no tab in `{}`", line.escape_debug())))?;
+        if code == "!" {
+            out.unreadable = path
+                .parse()
+                .map_err(|_| Malformed(format!("bad count `{path}`")))?;
+            continue;
+        }
+        if code.chars().count() != 2 || !code.chars().all(|c| c.is_ascii_graphic()) {
+            return Err(Malformed(format!("bad status `{}`", code.escape_debug())));
+        }
+        let path = path.trim_end_matches('/');
+        if path != "." && path.split('/').any(bad_name) || path.chars().any(char::is_control) {
+            return Err(Malformed(format!("bad path `{}`", path.escape_debug())));
+        }
+        let real = if path == "." {
+            String::new()
+        } else {
+            unescape(path)
+        };
+        let mut above = String::new();
+        out.within.insert(above.clone());
+        for part in real.split('/').filter(|p| !p.is_empty()) {
+            if !above.is_empty() {
+                above.push('/');
+            }
+            above.push_str(part);
+            out.within.insert(above.clone());
+        }
+        out.exact.insert(real, letter(code));
+    }
+    Ok(out)
+}
+
+impl Touched {
+    /// The letter drawn beside `path` (real names, `/`-joined): its own
+    /// status, or `*` for a directory with a change below it.
+    fn mark(&self, path: &str, dir: bool) -> Option<char> {
+        self.exact
+            .get(path)
+            .copied()
+            .or_else(|| (dir && self.within.contains(path)).then_some('*'))
+    }
+}
+
 #[derive(Debug)]
 struct Node {
     kind: Kind,
@@ -192,6 +336,7 @@ pub enum Want {
 #[derive(Debug)]
 pub struct Tree {
     root: Node,
+    touched: Touched,
     /// Index into the selectable rows (everything but cut summaries).
     cursor: usize,
 }
@@ -229,6 +374,7 @@ impl Tree {
         fill(&mut node, root);
         Ok(Self {
             root: node,
+            touched: Touched::default(),
             cursor: 0,
         })
     }
@@ -328,6 +474,11 @@ impl Tree {
         }
     }
 
+    /// Marks what changed, as `terminal.workspace-touched` reported.
+    pub fn set_touched(&mut self, touched: Touched) {
+        self.touched = touched;
+    }
+
     /// The path of the row under the cursor, as [`Want::Fetch`] writes it.
     #[must_use]
     pub fn selected_path(&self) -> String {
@@ -378,7 +529,7 @@ impl Tree {
 
     fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
-        walk(&self.root, 0, &mut Vec::new(), &mut rows);
+        walk(&self.root, 0, &mut Vec::new(), "", &self.touched, &mut rows);
         rows
     }
 
@@ -424,7 +575,14 @@ fn fill(node: &mut Node, listing: &Listing) {
     node.cut = listing.cut;
 }
 
-fn walk(node: &Node, depth: usize, at: &mut Vec<usize>, rows: &mut Vec<Row>) {
+fn walk(
+    node: &Node,
+    depth: usize,
+    at: &mut Vec<usize>,
+    path: &str,
+    touched: &Touched,
+    rows: &mut Vec<Row>,
+) {
     let sign = match (node.kind, node.open) {
         (Kind::Dir, true) => "v ",
         (Kind::Dir, false) => "+ ",
@@ -433,10 +591,13 @@ fn walk(node: &Node, depth: usize, at: &mut Vec<usize>, rows: &mut Vec<Row>) {
         (Kind::File, _) => "  ",
     };
     let slash = if node.kind == Kind::Dir { "/" } else { "" };
+    let mark = touched
+        .mark(path, node.kind == Kind::Dir)
+        .map_or_else(String::new, |c| format!("  {c}"));
     rows.push(Row {
         depth,
         at: at.clone(),
-        text: format!("{sign}{}{slash}", node.name),
+        text: format!("{sign}{}{slash}{mark}", node.name),
         summary: false,
     });
     if !node.open {
@@ -444,7 +605,13 @@ fn walk(node: &Node, depth: usize, at: &mut Vec<usize>, rows: &mut Vec<Row>) {
     }
     for (i, child) in node.children.iter().flatten().enumerate() {
         at.push(i);
-        walk(child, depth + 1, at, rows);
+        let name = unescape(&child.name);
+        let below = if path.is_empty() {
+            name
+        } else {
+            format!("{path}/{name}")
+        };
+        walk(child, depth + 1, at, &below, touched, rows);
         at.pop();
     }
     if !node.cut.is_empty() {
@@ -470,6 +637,218 @@ fn cut_line(cut: Cut) -> String {
         parts.push(format!("{} unreadable", cut.unreadable));
     }
     format!("... {}", parts.join(", "))
+}
+
+/// What a key batch did to the open [`Explorer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// Still open; draw it again.
+    Open,
+    /// Closed.
+    Leave,
+    /// Still open; list this path (see [`Want::Fetch`]) and pass the reply to
+    /// [`Explorer::load`], or the refusal to [`Explorer::refuse`].
+    Fetch(String),
+}
+
+/// What the overlay wants asked besides listings, once per ask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Call {
+    /// `terminal.workspace-touched`, for the change marks.
+    Touched,
+    /// `terminal.workspace-stat` of this path (`.` for the workspace).
+    Stat(String),
+}
+
+/// The overlay's state: the tree once the root listing arrives, one listing
+/// in flight at most, the stats read, and the last refusal.
+#[derive(Debug, Default)]
+pub struct Explorer {
+    tree: Option<Tree>,
+    waiting: bool,
+    note: Option<String>,
+    /// Whether the server answers [`Call`]s.
+    status: bool,
+    touched_asked: bool,
+    /// The path whose stat is in flight.
+    stat_wait: Option<String>,
+    /// Each stat read, or `None` for one refused: asked once.
+    stats: HashMap<String, Option<Stat>>,
+}
+
+impl Explorer {
+    /// An explorer that has asked for the root and shows nothing yet.
+    /// `status`: the server answers stat and touched calls.
+    #[must_use]
+    pub fn opened(status: bool) -> Self {
+        Self {
+            waiting: true,
+            status,
+            ..Self::default()
+        }
+    }
+
+    /// Takes a listing reply: the first one is the root.
+    pub fn load(&mut self, reply: &str) {
+        self.waiting = false;
+        let listing = match parse(reply) {
+            Ok(listing) => listing,
+            Err(e) => return self.note = Some(e.to_string()),
+        };
+        self.note = None;
+        match self.tree.as_mut() {
+            Some(tree) => tree.load(&listing),
+            None => match Tree::new(&listing) {
+                Ok(tree) => self.tree = Some(tree),
+                Err(e) => self.note = Some(e.to_string()),
+            },
+        }
+    }
+
+    /// The next call to make, if any: the change marks once the tree
+    /// stands, then the stat of the row under the cursor while none is in
+    /// flight and it has not been asked for. Call it after each key batch
+    /// and reply; it marks what it returns as asked.
+    pub fn wants(&mut self) -> Option<Call> {
+        let tree = self.tree.as_ref().filter(|_| self.status)?;
+        if !self.touched_asked {
+            self.touched_asked = true;
+            return Some(Call::Touched);
+        }
+        if self.stat_wait.is_some() {
+            return None;
+        }
+        let path = match tree.selected_path() {
+            p if p.is_empty() => ".".to_owned(),
+            p => p,
+        };
+        if self.stats.contains_key(&path) {
+            return None;
+        }
+        self.stat_wait = Some(path.clone());
+        Some(Call::Stat(path))
+    }
+
+    /// Takes the change marks. A bad reply leaves the tree unmarked.
+    pub fn load_touched(&mut self, reply: &str) {
+        match (parse_touched(reply), self.tree.as_mut()) {
+            (Ok(touched), Some(tree)) => {
+                if touched.unreadable > 0 {
+                    self.note = Some(format!(
+                        "{} changed paths are not UTF-8",
+                        touched.unreadable
+                    ));
+                }
+                tree.set_touched(touched);
+            }
+            (Err(e), _) => self.note = Some(e.to_string()),
+            _ => {}
+        }
+    }
+
+    /// Takes the stat of the path asked for; `None` for a
+    /// refusal or a reply it cannot read, which are not asked for again.
+    pub fn load_stat(&mut self, reply: Option<&str>) {
+        let Some(path) = self.stat_wait.take() else {
+            return;
+        };
+        let stat = reply.and_then(|r| parse_stat(r).ok());
+        self.stats.insert(path, stat);
+    }
+
+    /// The size and age of the row under the cursor, once read.
+    fn stat_line(&self, now: u64) -> Option<String> {
+        let path = match self.tree.as_ref()?.selected_path() {
+            p if p.is_empty() => ".".to_owned(),
+            p => p,
+        };
+        self.stats
+            .get(&path)
+            .copied()
+            .flatten()
+            .map(|s| s.line(now))
+    }
+
+    /// Takes a refusal in place of a reply; one line, since the server's
+    /// text may carry anything.
+    pub fn refuse(&mut self, why: &str) {
+        self.waiting = false;
+        let line: String = why
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        self.note = Some(line);
+    }
+
+    /// Whether a request is in flight.
+    #[must_use]
+    pub fn waiting(&self) -> bool {
+        self.waiting
+    }
+
+    /// Acts on the keys in `bytes`: `j`/`k` or the arrows move, Enter, `l`
+    /// or right opens, `h` or left goes up, `q` or a lone Esc leaves. Stops
+    /// at the first key that asks for a listing.
+    pub fn keys(&mut self, bytes: &[u8]) -> Step {
+        if bytes == b"\x1b" {
+            return Step::Leave;
+        }
+        let mut i = 0;
+        while i < bytes.len() {
+            let key = match bytes[i..] {
+                [0x1b, b'[' | b'O', last, ..] => {
+                    i += 2;
+                    last
+                }
+                [b, ..] => b,
+                [] => break,
+            };
+            i += 1;
+            match key {
+                b'q' => return Step::Leave,
+                b'j' | b'B' => self.tree.iter_mut().for_each(|t| t.step(1)),
+                b'k' | b'A' => self.tree.iter_mut().for_each(|t| t.step(-1)),
+                b'h' | b'D' => self.tree.iter_mut().for_each(Tree::leave),
+                b'l' | b'C' | b'\r' | b'\n' if !self.waiting => {
+                    if let Some(Want::Fetch(path)) = self.tree.as_mut().map(Tree::enter) {
+                        self.waiting = true;
+                        return Step::Fetch(path);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Step::Open
+    }
+
+    /// `height` lines of `width` cells: a title, the tree and, last, the
+    /// refusal or a wait notice.
+    #[must_use]
+    pub fn render(&self, width: usize, height: usize) -> Vec<String> {
+        let mut lines = vec![clip(
+            "workspace: j/k move, Enter open, h up, q leave",
+            width,
+        )];
+        let status = match (&self.note, self.waiting) {
+            (Some(note), _) => Some(note.as_str()),
+            (None, true) => Some("reading..."),
+            (None, false) => None,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let stat = self.stat_line(now);
+        let foot = usize::from(status.is_some()) + usize::from(stat.is_some());
+        let room = height.saturating_sub(1 + foot);
+        if let Some(tree) = &self.tree {
+            lines.extend(tree.render(width, room));
+        }
+        lines.truncate(height.saturating_sub(foot));
+        lines.extend(stat.map(|s| clip(&s, width)));
+        lines.extend(status.map(|s| clip(s, width)));
+        lines.truncate(height);
+        lines
+    }
 }
 
 #[cfg(test)]
@@ -721,5 +1100,142 @@ mod tests {
         assert!(three[0].starts_with('>') && three[2].contains("1 not shown"));
         assert_eq!(t.render(40, 1).len(), 1);
         assert!(t.render(40, 1)[0].starts_with('>'));
+    }
+
+    #[test]
+    fn the_explorer_reads_the_root_then_asks_for_a_directory_once() {
+        let mut e = Explorer::opened(true);
+        assert!(e.waiting());
+        e.load(".\nd\tsrc\nf\ta");
+        assert!(!e.waiting());
+        assert_eq!(e.keys(b"j"), Step::Open);
+        assert_eq!(e.keys(b"\r"), Step::Fetch("src".into()));
+        // Waiting: a second Enter asks for nothing.
+        assert_eq!(e.keys(b"\r"), Step::Open);
+        e.load("src\nf\tlib.rs");
+        assert!(e.render(40, 10).iter().any(|r| r.ends_with("lib.rs")));
+    }
+
+    #[test]
+    fn keys_move_leave_and_read_arrows() {
+        let mut e = Explorer::opened(true);
+        e.load(".\nf\ta\nf\tb");
+        assert_eq!(e.keys(b"\x1b[B\x1b[B"), Step::Open);
+        assert!(e.render(40, 10).iter().any(|r| r.starts_with(">    b")));
+        assert_eq!(e.keys(b"k"), Step::Open);
+        assert_eq!(e.keys(b"\x1b"), Step::Leave);
+        assert_eq!(e.keys(b"q"), Step::Leave);
+    }
+
+    #[test]
+    fn a_refusal_is_one_clean_line_and_frees_the_next_request() {
+        let mut e = Explorer::opened(true);
+        e.refuse("not listed\u{1b}[2J\n");
+        assert!(!e.waiting());
+        let lines = e.render(40, 4);
+        assert_eq!(lines.last().unwrap().trim_end(), "not listed [2J");
+        assert!(lines.iter().all(|l| !l.chars().any(char::is_control)));
+    }
+
+    #[test]
+    fn a_bad_first_reply_leaves_no_tree_and_says_why() {
+        let mut e = Explorer::opened(true);
+        e.load("src\nf\ta");
+        assert!(e.render(100, 3)[1].contains("not the root"));
+        e.load("garbage");
+        assert!(e.render(60, 3).len() <= 3);
+    }
+
+    #[test]
+    fn render_fits_its_height() {
+        let mut e = Explorer::opened(true);
+        e.load(".\nf\ta\nf\tb\nf\tc");
+        for h in 0..6 {
+            assert!(e.render(30, h).len() <= h);
+        }
+    }
+
+    #[test]
+    fn reads_a_stat_and_words_it() {
+        let s = parse_stat("f\t4300\t1000").unwrap();
+        assert_eq!(s.line(1000 + 3 * 3600), "4.2 KiB, 3 h ago");
+        assert_eq!(s.line(1000 + 7200 * 24), "4.2 KiB, 2 d ago");
+        let now = parse_stat("d\t12\t5").unwrap();
+        assert_eq!(now.line(5), "12 B, now");
+        assert_eq!(now.line(1), "12 B, now", "the future is now");
+        assert_eq!(parse_stat("f\t5\t0").unwrap().line(9999), "5 B", "unknown");
+        assert_eq!(size_text(1_048_575), "1.0 MiB", "never 1024.0 KiB");
+        assert_eq!(size_text(1023), "1023 B");
+        assert!(parse_stat("f\tbig\t1").is_err());
+        assert!(parse_stat("f").is_err());
+    }
+
+    #[test]
+    fn marks_touched_files_and_the_directories_above_them() {
+        let mut t = tree(&parse(".\nd\tsrc\nd\tdocs\nf\tnew").unwrap());
+        t.step(1);
+        assert_eq!(t.enter(), Want::Fetch("src".into()));
+        t.load(&parse("src\nf\tlib.rs\nf\tok.rs").unwrap());
+        t.set_touched(parse_touched(".\n.M\tsrc/lib.rs\n??\tnew\nM.\tdocs/").unwrap());
+        assert_eq!(
+            t.render(40, 10),
+            [
+                " v ./  *",
+                ">  v src/  *",
+                "       lib.rs  M",
+                "       ok.rs",
+                "   + docs/  M",
+                "     new  ?"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_touched_reply_that_cannot_be_trusted_is_refused() {
+        assert!(parse_touched("").is_err());
+        assert!(parse_touched("x\n.M\ta").is_err());
+        assert!(parse_touched(".\nM\ta").is_err());
+        assert!(parse_touched(".\n.M\t../a").is_err());
+        assert!(parse_touched(".\n.M\ta\u{1b}b").is_err());
+        assert!(
+            parse_touched(".\n.\u{1b}\ta").is_err(),
+            "an escape in the code"
+        );
+        assert!(parse_touched(".\n\u{e9}M\ta").is_err(), "a code is ASCII");
+        let t = parse_touched(".\n??\t.\n!\t2").unwrap();
+        assert_eq!(t.unreadable, 2);
+        assert_eq!(t.mark("", true), Some('?'), "the workspace itself");
+    }
+
+    #[test]
+    fn wants_marks_once_then_each_cursor_rows_stat_once() {
+        let mut e = Explorer::opened(true);
+        assert_eq!(e.wants(), None, "no tree yet");
+        e.load(".\nd\tsrc\nf\ta");
+        assert_eq!(e.wants(), Some(Call::Touched));
+        assert_eq!(e.wants(), Some(Call::Stat(".".into())));
+        assert_eq!(e.wants(), None, "one stat in flight");
+        e.load_stat(Some("d\t0\t60"));
+        assert_eq!(e.wants(), None, "the root's is read");
+        assert_eq!(e.stat_line(180).as_deref(), Some("0 B, 2 min ago"));
+        e.keys(b"j");
+        assert_eq!(e.stat_line(180), None);
+        assert_eq!(e.wants(), Some(Call::Stat("src".into())));
+        e.load_stat(None);
+        assert_eq!(e.wants(), None, "a refusal is not asked again");
+        assert!(!Explorer::opened(false).wants().is_some());
+    }
+
+    #[test]
+    fn a_touched_reply_that_cannot_be_read_shows_a_note_and_no_marks() {
+        let mut e = Explorer::opened(true);
+        e.load(".\nf\ta");
+        e.load_touched("not a reply");
+        let screen = e.render(60, 5);
+        assert!(
+            screen.iter().any(|l| l.contains("touched reply")),
+            "{screen:?}"
+        );
+        assert!(!screen.iter().any(|l| l.contains("  M")));
     }
 }

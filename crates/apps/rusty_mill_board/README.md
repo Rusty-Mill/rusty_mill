@@ -73,7 +73,7 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
   `card_get`, `card_trace`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_close`,
-  `card_archive`, `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `board_milestones`, `milestone_add`,
+  `card_archive`, `card_restore`, `card_unclose`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `board_milestones`, `milestone_add`,
   `milestone_update`, `inbox_list`, `inbox_act`, `board_number_cards`. The web API
   exposes the same table, so the two cannot drift. `inbox_list`, `inbox_act` and `board_number_cards` need an
   authenticated admin credential (a token or OAuth grant); a caller-named actor and role are refused.
@@ -95,7 +95,7 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   14 days after it was done or last restored (`board_list`'s `done_days`; 0 keeps every unarchived Done card). It is
   still Done: `card_get`, the roadmap, metrics and dependencies see it as before. `card_restore` puts any such card
   back, starting its 14 days again without changing its ship time. `card_archive` and `card_restore` need `close`;
-  `card_archive_done` archives every Done card at once (optionally one project's, done or restored at least
+  `card_unclose` (needs `triage`) undoes a close by the merge watch (ADR-0008): the card returns to the column it was in and keeps its evidence; a close any other way is refused, as is one while a card that depends on it has started. `card_archive_done` archives every Done card at once (optionally one project's, done or restored at least
   `older_than_days` ago), checks each card again as it commits, and needs `triage`. `board_list` with
   `archived: "only"` lists the archive. The state is an `archived:<ms>` or `restored:<ms>` tag on the rusty_tick
   task, beside `number:<n>`, so there is no migration.
@@ -220,6 +220,7 @@ unsaved edit raises a conflict (keep mine / take theirs), and `card_update` take
 stale one. `tests/ui/drafts.mjs` checks this in a real browser (Playwright; see the file's header).
 Cards show their priority (High 5, Medium 3, Low 1; none shows nothing), sort highest first in each column, and
 the dialog sets it through `card_plan` (`tests/ui/priority.mjs`).
+A date filter under the toolbar (created, updated or moved, from/to days) narrows the board through `board_list`'s date arguments and keeps itself in the address (`?date=updated&from=2026-11-01&to=2026-11-25`); the chip clears it (`tests/ui/date_filter.mjs`).
 The dialog's **Close card** runs `card_close` (reason, one confirmation) for a role with `triage` on an unstarted card; a started card says why it cannot be closed. **Dismiss** only hides the dialog (`tests/ui/close_card.mjs`).
 The board reads like a press room's job board ([PRODUCT.md](PRODUCT.md); direction in `.impeccable/surfaces/board.md`):
 a colour strip across the top shows each column's open cards and jumps to it; empty columns fold to a spine; process

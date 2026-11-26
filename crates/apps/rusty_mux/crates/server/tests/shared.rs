@@ -13,7 +13,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common::{Client, PATIENCE};
+use common::{Client, PATIENCE, block_for};
+use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Features, Message};
 use rusty_mux_server::{Config, Reload, Sharing, serve_shared};
 use rusty_tokio::io::UnixListener;
@@ -56,6 +57,7 @@ fn config() -> Config {
         cwd: "/".into(),
         console_host: rusty_mux_server::ConsoleHost::default(),
         state_dir: None,
+        protected: Default::default(),
         grapheme_clustering: false,
         config_file: None,
     }
@@ -144,6 +146,40 @@ fn the_servers_own_user_is_served_with_an_empty_list() {
         None,
     );
     assert_served(&mut client);
+    drop(client);
+    shared.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_allowlist_is_not_downloadable_whatever_config_the_caller_built() {
+    let dir = scratch();
+    let list = write_list(&dir, "# nobody else\n");
+    // `config()` names no protected file: the shared server adds its own.
+    let shared = Shared::start(&dir, list.clone());
+    let mut client = Client::connect_with(
+        &shared.socket,
+        Features::CHECKPOINT_V6
+            .union(Features::INSPECT)
+            .union(Features::BLOCK_CALL)
+            .union(Features::DOWNLOAD),
+        None,
+    );
+    let block = block_for(&mut client);
+    let path = list.to_str().expect("utf-8").to_owned();
+    let answer = client.answer(move |req| Message::BlockCall {
+        req,
+        block,
+        method: "terminal.download".into(),
+        args: vec![
+            ("path".to_owned(), Value::Text(path)),
+            ("offset".to_owned(), Value::Lines(0)),
+        ],
+    });
+    assert!(
+        matches!(answer.as_slice(), [Message::Failed { reason, .. }] if reason.contains("keeps secret")),
+        "{answer:?}"
+    );
     drop(client);
     shared.stop();
     let _ = std::fs::remove_dir_all(&dir);

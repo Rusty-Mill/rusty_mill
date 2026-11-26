@@ -17,7 +17,9 @@ use crate::domain::{
     import_id, is_pull_link, text_hash,
 };
 use crate::external::Observation;
-use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome, plan};
+use crate::inbox::{
+    Acted, Action, Diffstat, DryRun, Escalation, Escalations, InboxError, Outcome, plan,
+};
 use crate::metrics::{Metrics, metrics};
 use crate::milestones::{MemMilestones, Milestone, MilestoneEdit, MilestoneStore};
 use crate::projects::{Projects, Statuses};
@@ -101,6 +103,7 @@ impl Roles {
             name: name.to_owned(),
             caps: caps.clone(),
             projects: None,
+            provider: None,
         })
     }
 }
@@ -137,8 +140,14 @@ pub struct Board<S> {
     milestones: Box<dyn MilestoneStore>,
     /// Agents registered on shared connectors.
     agents: Mutex<crate::agents::Registry>,
-    /// Held by every writer of a parent link and by the merge close, so a card cannot gain a
-    /// child between the close's childlessness check and its commit (#1620).
+    /// Held by every writer of a parent link or of dependencies (`add_card`, `plan`), by the
+    /// merge close and `unclose`, and by `take`, `claim` and `move_card`. So a card cannot gain
+    /// a child between the close's childlessness check and its commit, and a dependency edit,
+    /// a claim or a move that starts a card cannot go stale under an unclose (#1620). Every
+    /// claim and every move serializes on it, including moves into columns that are not work
+    /// columns: cheap in process, and simpler than reading the workflow first. **Lock order:
+    /// this gate first, then the workflow guard**; never the other way, or a waiting workflow
+    /// writer can deadlock the board.
     links: Mutex<()>,
     /// What the merge watch last found (#1620).
     merged_open: Mutex<(
@@ -154,6 +163,11 @@ impl<S> Board<S> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+/// Whether `card` has started: it is claimed, or sits in a work column.
+fn started(flow: &Workflow, card: &Card) -> bool {
+    card.claim.is_some() || flow.kind(&card.column) == Some(crate::workflow::Kind::Work)
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -317,6 +331,12 @@ impl<S: Store> Board<S> {
     pub fn with_move_rules(self, rules: MoveRules) -> Self {
         self.set_move_rules(rules);
         self
+    }
+
+    /// Whether the store keeps the record `card_unclose` needs: when it does not, the merge
+    /// watch closes nothing.
+    pub fn keeps_merge_record(&self) -> bool {
+        self.store.keeps_merge_record()
     }
 
     /// Use `workflow` instead of [`Workflow::default`].
@@ -998,10 +1018,14 @@ impl<S: Store> Board<S> {
         );
         for x in dropped {
             body.push_str(&format!(
-                "- msg:{} \"{}\": {}\n",
+                "- msg:{} \"{}\": {}\n  {}\n",
                 x.claim,
                 text(x.claim),
-                x.marks.join(", ")
+                x.marks.join(", "),
+                x.diffstat.as_ref().map_or_else(
+                    || "No diffstat: the claim has no readable candidate, or the host predates #1400.".to_owned(),
+                    Diffstat::line,
+                )
             ));
         }
         let events: Vec<&str> = dry
@@ -1365,6 +1389,7 @@ impl<S: Store> Board<S> {
             name: NUMBERER.into(),
             caps: BTreeSet::new(),
             projects: None,
+            provider: None,
         };
         let cards = self.store.list()?;
         let on_board = cards.iter().filter_map(|c| c.number).max().unwrap_or(0);
@@ -1688,6 +1713,10 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::OutOfScope(p.to_owned()));
             }
         }
+        // The link gate is taken before the workflow guard, as everywhere (see `Board::links`),
+        // and held across every dependency check and commit below: `unclose` reopens a
+        // prerequisite under the same gate, so a take's check cannot go stale before its write.
+        let _links = self.links();
         let flow = self.flow();
         let queues = flow.work_queues();
         let rank = |c: &Card| queues.iter().position(|q| *q == c.column);
@@ -1775,7 +1804,7 @@ impl<S: Store> Board<S> {
                     return Err(BoardError::Conflict);
                 }
                 self.check_takeable(c)?;
-                c.claim(by, now)
+                crate::duties::on_claim(&c.claim(by, now)?, flow, by, now)
             });
         };
         if !works(enter) {
@@ -1795,10 +1824,11 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::Claimed(holder.clone()));
             }
             let entered = c.move_to(flow, enter, by, now)?;
-            Ok(Card {
+            let claimed = Card {
                 claim: Some(by.name.clone()),
                 ..entered
-            })
+            };
+            crate::duties::on_claim(&claimed, flow, by, now)
         })
     }
 
@@ -1846,7 +1876,8 @@ impl<S: Store> Board<S> {
             if !by.may_work_in(&current.project) {
                 return Err(BoardError::OutOfScope(current.project));
             }
-            let next = op(&current, (self.clock)())?;
+            // A card that leaves a gate expires what was filed for it (#447).
+            let next = crate::duties::on_leave(&current, op(&current, (self.clock)())?);
             // Domain operations may deliberately return the unchanged aggregate
             // for an idempotent replay.  Such a replay is already durable and
             // must not be sent through the store's rev + 1 CAS.
@@ -1869,16 +1900,26 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::move_to`], or [`Card::move_freely`] when the rules are off.
     pub fn move_card(&self, id: Uuid, to: &Column, by: &Actor) -> Result<Card, BoardError> {
+        // A move into a work column starts the card: serialize it with `unclose`'s scan.
+        let _links = self.links();
         let flow = self.flow();
         match self.move_rules() {
             MoveRules::Enforced => self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
                 self.check_starts(&flow, c, to)?;
-                c.move_to(&flow, to, by, now)
+                crate::duties::check_move(c, &flow, to, by)?;
+                let moved = c.move_to(&flow, to, by, now)?;
+                // The ledger records the move as made: a recorder's close holds `close`.
+                let (made_as, _) = c.recorder(&flow, by, to);
+                crate::duties::on_move(&moved, &flow, &c.column, &made_as, now)
             }),
             MoveRules::Open => {
                 let card = self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
                     self.check_starts(&flow, c, to)?;
-                    c.move_freely(&flow, to, by, now)
+                    crate::duties::check_move(c, &flow, to, by)?;
+                    let moved = c.move_freely(&flow, to, by, now)?;
+                    // The ledger records the move as made: a recorder's close holds `close`.
+                    let (made_as, _) = c.recorder(&flow, by, to);
+                    crate::duties::on_move(&moved, &flow, &c.column, &made_as, now)
                 })?;
                 rusty_log::info!(card = %id, actor = %by.name, to = %to, "card moved with movement rules off");
                 Ok(card)
@@ -2009,6 +2050,11 @@ impl<S: Store> Board<S> {
         repo: &str,
         by: &Actor,
     ) -> Result<Card, BoardError> {
+        if !self.store.keeps_merge_record() {
+            return Err(BoardError::Refused(
+                "this store cannot keep the record that undoes a merge close".into(),
+            ));
+        }
         let _links = self.links();
         let flow = self.flow();
         let current = self.get_in(&flow, id)?;
@@ -2034,7 +2080,10 @@ impl<S: Store> Board<S> {
                 "a parent closes with its children".into(),
             ));
         }
-        let next = current.closed_by_merge(&flow, pr, by, (self.clock)())?;
+        let next = crate::duties::on_leave(
+            &current,
+            current.closed_by_merge(&flow, pr, by, (self.clock)())?,
+        );
         let event = Event::of(&next, EventKind::Moved, &by.name);
         let rev = self.store.replace(&next, event)?;
         Ok(Card { rev, ..next })
@@ -2052,6 +2101,43 @@ impl<S: Store> Board<S> {
         let window = window_ms(DONE_WINDOW_DAYS);
         self.apply(id, by, EventKind::Restored, |c, now| {
             Ok(c.restore(now, window))
+        })
+    }
+
+    /// Undo the merge watch's close of a card: see [`Card::unclosed`]. Logged as a move by
+    /// `by`. Needs `Triage`. Refused while an open card that depends on this one has started
+    /// (claimed, or in a work column): reopening the prerequisite would pull the ground from
+    /// under it, so a person decides; one still waiting simply waits again.
+    ///
+    /// # Errors
+    /// A missing capability or card, a started dependent, or see [`Card::unclosed`].
+    pub fn unclose(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
+        // Under the gate every start of a card holds (take, claim, move), so none can start a
+        // dependent between the look at the dependents and the reopening.
+        let _links = self.links();
+        let flow = self.flow();
+        // Authorize and validate the card itself first: only then look at other cards, and
+        // never say more about them than that one has started.
+        let current = self.get_in(&flow, id)?;
+        if !by.may_work_in(&current.project) {
+            return Err(BoardError::OutOfScope(current.project));
+        }
+        current.unclosed(&flow, by, (self.clock)())?;
+        // Back into a work column: a paused project takes no new work.
+        if let Some(m) = &current.merged {
+            self.check_starts(&flow, &current, &m.was)?;
+        }
+        if self
+            .cards_in(&flow)?
+            .iter()
+            .any(|c| c.deps.contains(&id) && c.column != Column::DONE && started(&flow, c))
+        {
+            return Err(BoardError::Refused(
+                "an open card that depends on this one has started; move or finish it first".into(),
+            ));
+        }
+        self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
+            c.unclosed(&flow, by, now)
         })
     }
 
@@ -2111,10 +2197,69 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::claim`].
     pub fn claim(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
-        self.apply(id, by, EventKind::Claimed, |c, now| {
+        // A claim starts the card: serialize it with `unclose`'s scan (gate before workflow).
+        let _links = self.links();
+        let flow = self.flow();
+        self.apply_in(&flow, id, by, EventKind::Claimed, |c, now| {
             self.check_accepts(&c.project)?;
-            c.claim(by, now)
+            crate::duties::on_claim(&c.claim(by, now)?, &flow, by, now)
         })
+    }
+
+    /// Review the work of a card's current column (#447): passed, or changes asked for.
+    ///
+    /// # Errors
+    /// See [`crate::duties::review`].
+    pub fn review(&self, id: Uuid, by: &Actor, pass: bool, note: &str) -> Result<Card, BoardError> {
+        let flow = self.flow();
+        self.apply_in(&flow, id, by, EventKind::Reviewed, |c, now| {
+            crate::duties::review(c, &flow, by, pass, note, now)
+        })
+    }
+
+    /// Approve a gate on the owner's stated approval (#447): move the card through it, or file
+    /// the approval (pending for the proxy's merges and unblocks, recorded for a merge the
+    /// owner confirms).
+    ///
+    /// # Errors
+    /// See [`crate::duties::approve`]; a move into a work column also needs the card's
+    /// dependencies done, as any start does.
+    pub fn approve(
+        &self,
+        id: Uuid,
+        by: &Actor,
+        approval: &crate::duties::Approval<'_>,
+    ) -> Result<(Card, crate::duties::Outcome), BoardError> {
+        use crate::duties::Outcome;
+        // A move into a work column starts the card: serialize it with `unclose`'s scan.
+        let _links = self.links();
+        let flow = self.flow();
+        let to = approval.to;
+        // The outcome decides the event, so ask first, and refuse a commit that would decide
+        // otherwise (the card changed in between).
+        let current = self.get_in(&flow, id)?;
+        // Scope first, so an out-of-scope caller learns nothing of the card from a refusal.
+        if !by.may_work_in(&current.project) {
+            return Err(BoardError::OutOfScope(current.project));
+        }
+        let (_, outcome) = crate::duties::approve(&current, &flow, by, approval, (self.clock)())?;
+        let kind = match outcome {
+            Outcome::Moves => EventKind::Moved,
+            Outcome::Stays => EventKind::Approved,
+            Outcome::Expired => EventKind::ApprovalExpired,
+        };
+        let card = self.apply_in(&flow, id, by, kind, |c, now| {
+            let (approved, now_outcome) = crate::duties::approve(c, &flow, by, approval, now)?;
+            if now_outcome != outcome {
+                return Err(BoardError::Conflict);
+            }
+            if outcome != Outcome::Moves {
+                return Ok(approved);
+            }
+            self.check_starts(&flow, c, to)?;
+            Ok(approved.arrive(to, now))
+        })?;
+        Ok((card, outcome))
     }
 
     /// Release a claim.
@@ -2192,7 +2337,8 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::NotFound(*linked));
             }
         }
-        let _links = plan.parent.map(|_| self.links());
+        // Parent and dependency edits are what the unclose scan reads: serialize them with it.
+        let _links = (plan.parent.is_some() || plan.deps.is_some()).then(|| self.links());
         if let Some(Some(parent)) = plan.parent {
             self.check_parent(id, parent)?;
         }

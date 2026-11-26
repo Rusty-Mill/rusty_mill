@@ -11,6 +11,13 @@ Stay up to date with the latest changes to rusty_libc.
 
 ---
 
+## `pidfd_getfd`, for taking a child's descriptor
+
+**Added**
+- `process::pidfd_getfd(pidfd, targetfd, flags)` (Linux 5.6+) — a copy of another process's descriptor, sharing its open file description and `flock` locks. First consumer: rusty_orch's builder launch (#1318) takes the cgroup holder's slot descriptor from it, through `platform-linux`'s `LinuxChild::dup_fd`.
+
+---
+
 ## `statfs`, for a free-space check
 
 **Added**

@@ -124,7 +124,9 @@ mod client {
         Axis, BlockId, Event, Float, FloatRect, Layout, Rect, SessionId, Share, Side, Size, Toward,
         WindowId,
     };
+    use rusty_mux_proto::schema::Value;
     use rusty_mux_proto::{Entry, Features, Launch, Message, Takeover};
+    use rusty_mux_tui::explorer::{Call, Explorer, Step as Explored};
     use rusty_mux_tui::find::{Find, Step};
     use rusty_mux_tui::floats;
     use rusty_mux_tui::follow::Follow;
@@ -1045,6 +1047,7 @@ mod client {
             shown: Shown::Nothing,
             browsing: false,
             finding: None,
+            exploring: None,
             split: None,
             arriving: None,
             opened: 0,
@@ -1337,6 +1340,31 @@ mod client {
         /// Guesses typed keys' echo, when the connection can check them.
         predict: Option<Predictor>,
         gate: Gate,
+        /// Whether the server lists this block's workspace, on this
+        /// connection: [`Features::WORKSPACE`] over [`Features::BLOCK_CALL`].
+        workspace: bool,
+        /// Whether it also tells what is in it: [`Features::WORKSPACE_STATUS`].
+        status: bool,
+        /// The workspace listings asked for and not yet answered: a tree
+        /// closed and opened again leaves its first one outstanding, and its
+        /// refusal is not the lease's. No more than [`LISTINGS`] are asked
+        /// for until one is answered.
+        listings: Vec<u64>,
+    }
+
+    /// How many workspace listings a block's connection remembers asking
+    /// for, until each is answered.
+    const LISTINGS: usize = 8;
+
+    /// The workspace tree open over `block`, and the listing request it
+    /// waits on.
+    struct Exploring {
+        block: BlockId,
+        explorer: Explorer,
+        req: Option<u64>,
+        /// The change marks and the stat of the cursor's row, asked for.
+        touched_req: Option<u64>,
+        stat_req: Option<u64>,
     }
 
     impl Pane {
@@ -1470,14 +1498,27 @@ mod client {
                 Message::Failed { req, reason, .. } if req == self.attach => {
                     return Ok(Change::Refused(reason));
                 }
+                // The listing is the tree's: a refusal of it says nothing
+                // of the lease.
+                Message::Text { req, text } if self.listings.contains(&req) => {
+                    self.listings.retain(|r| *r != req);
+                    return Ok(Change::Listed(req, Ok(text)));
+                }
+                Message::Failed { req, reason, .. } if self.listings.contains(&req) => {
+                    self.listings.retain(|r| *r != req);
+                    return Ok(Change::Listed(req, Err(reason)));
+                }
                 Message::Failed { req, .. } => {
                     // A refused lease, or input after losing it.
                     if self.asking == Some(req) {
                         self.asking = None;
                         self.waiting.clear();
                     }
-                    self.leased = false;
+                    let was = std::mem::take(&mut self.leased);
                     self.unpredict();
+                    if was {
+                        return Ok(Change::Unleased);
+                    }
                 }
                 _ => {}
             }
@@ -1510,6 +1551,10 @@ mod client {
         Closed,
         /// The server would not attach the block.
         Refused(String),
+        /// The workspace listing asked for was answered, or refused.
+        Listed(u64, Result<String, String>),
+        /// The lease was lost.
+        Unleased,
     }
 
     /// What the local terminal shows.
@@ -1594,6 +1639,8 @@ mod client {
         browsing: bool,
         /// Find is open on the focused block.
         finding: Option<Find>,
+        /// The workspace tree is open over the focused block.
+        exploring: Option<Exploring>,
         /// The pending split, whose new block takes the focus.
         split: Option<u64>,
         /// The split's new block, until the layout shows it.
@@ -1721,6 +1768,7 @@ mod client {
             match input {
                 Input::Keys(bytes) if bytes.is_empty() => self.end(Ended::Detached),
                 Input::Keys(bytes) if self.finding.is_some() => self.found(&bytes),
+                Input::Keys(bytes) if self.exploring.is_some() => self.explored(&bytes),
                 Input::Keys(bytes) => {
                     for action in self.keys.feed(&bytes) {
                         self.typed(action);
@@ -2155,6 +2203,9 @@ mod client {
             // there is asked again here, and focus requests are forgotten,
             // the server's focus being taken from the path's List.
             self.follow = Follow::default();
+            // The workspace tree's listing was asked there too, and its
+            // capability and lease are not known here yet: close it.
+            self.exploring = None;
             if let Some(listing) = self.listing.take() {
                 self.wanted.merge(listing.wants);
             }
@@ -2422,12 +2473,23 @@ mod client {
             if action.on_focused_block() && !self.shows(focus) {
                 return bell();
             }
-            if self.browsing && !matches!(action, Action::Prompt { .. } | Action::Find) {
+            // Keys read in the same batch as the command that opened the
+            // tree belong to it.
+            if let (Some(_), Action::Input(data)) = (&self.exploring, &action) {
+                return self.explored(data);
+            }
+            if self.browsing
+                && !matches!(
+                    action,
+                    Action::Prompt { .. } | Action::Find | Action::Explorer
+                )
+            {
                 self.live();
             }
             match action {
                 Action::Prompt { next } => self.prompt(next),
                 Action::Find => self.find(),
+                Action::Explorer => self.explore(),
                 Action::Input(data) => {
                     if let Some(pane) = self.panes.get_mut(&focus) {
                         pane.typed(data);
@@ -2546,10 +2608,149 @@ mod client {
             }
         }
 
+        /// Opens the workspace tree over the focused block: it asks for the
+        /// block's workspace, so it needs the server's call and the lease.
+        fn explore(&mut self) {
+            let block = self.focus;
+            let Some(status) = self
+                .panes
+                .get(&block)
+                .filter(|p| p.workspace && p.leased)
+                .map(|p| p.status)
+            else {
+                return bell();
+            };
+            if self.exploring.is_some() {
+                return bell();
+            }
+            self.exploring = Some(Exploring {
+                block,
+                explorer: Explorer::opened(status),
+                req: None,
+                touched_req: None,
+                stat_req: None,
+            });
+            self.list_workspace(None);
+            self.browsing = true;
+            self.sync();
+            self.draw();
+        }
+
+        /// Asks to list `path` of the tree's block's workspace, on the
+        /// block's own connection, which holds the lease; the reply reaches
+        /// [`App::on_pane`].
+        fn list_workspace(&mut self, path: Option<String>) {
+            let args = path.map(|p| ("path".into(), Value::Text(p)));
+            let req = self.workspace_call("terminal.workspace-list", args.into_iter().collect());
+            let Some(open) = self.exploring.as_mut() else {
+                return;
+            };
+            open.req = req;
+            if req.is_none() {
+                open.explorer
+                    .refuse("the server has not answered earlier listings");
+            }
+        }
+
+        /// Sends `method` for the open tree's block and remembers its
+        /// request, to know its refusal from the lease's. `None` at
+        /// [`LISTINGS`] unanswered: none is forgotten, so no more is asked.
+        fn workspace_call(&mut self, method: &str, args: Vec<(String, Value)>) -> Option<u64> {
+            let block = self.exploring.as_ref()?.block;
+            let pane = self.panes.get_mut(&block)?;
+            if pane.listings.len() >= LISTINGS {
+                return None;
+            }
+            let req = pane.send(|req| Message::BlockCall {
+                req,
+                block,
+                method: method.into(),
+                args,
+            });
+            pane.listings.push(req);
+            Some(req)
+        }
+
+        /// Makes the calls the open tree wants besides listings.
+        fn ask_workspace(&mut self) {
+            while let Some(ask) = self.exploring.as_mut().and_then(|o| o.explorer.wants()) {
+                let (method, args) = match &ask {
+                    Call::Touched => ("terminal.workspace-touched", Vec::new()),
+                    Call::Stat(p) => (
+                        "terminal.workspace-stat",
+                        vec![("path".to_owned(), Value::Text(p.clone()))],
+                    ),
+                };
+                let req = self.workspace_call(method, args);
+                let Some(open) = self.exploring.as_mut() else {
+                    return;
+                };
+                match ask {
+                    Call::Touched => open.touched_req = req,
+                    Call::Stat(_) => {
+                        open.stat_req = req;
+                        // Unsent at the bound: a plain miss, not asked again.
+                        if req.is_none() {
+                            open.explorer.load_stat(None);
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Takes keyboard `bytes` for the open workspace tree.
+        fn explored(&mut self, bytes: &[u8]) {
+            let Some(open) = self.exploring.as_mut() else {
+                return;
+            };
+            match open.explorer.keys(bytes) {
+                Explored::Leave => self.live(),
+                Explored::Open => {
+                    self.ask_workspace();
+                    self.draw();
+                }
+                Explored::Fetch(path) => {
+                    self.list_workspace(Some(path));
+                    self.ask_workspace();
+                    self.draw();
+                }
+            }
+        }
+
+        /// Gives the tree the answer to the request `req`, if it is one of
+        /// its own: the listing, the change marks or the cursor row's stat.
+        fn listed_workspace(&mut self, block: BlockId, req: u64, answer: Result<&str, &str>) {
+            let Some(open) = self.exploring.as_mut().filter(|o| o.block == block) else {
+                return;
+            };
+            if open.req == Some(req) {
+                open.req = None;
+                match answer {
+                    Ok(text) => open.explorer.load(text),
+                    Err(why) => open.explorer.refuse(why),
+                }
+            } else if open.touched_req == Some(req) {
+                open.touched_req = None;
+                // Refused where there is no git, or on an agent's block:
+                // the tree is simply unmarked.
+                if let Ok(text) = answer {
+                    open.explorer.load_touched(text);
+                }
+            } else if open.stat_req == Some(req) {
+                open.stat_req = None;
+                open.explorer.load_stat(answer.ok());
+            } else {
+                return;
+            }
+            self.ask_workspace();
+            self.draw();
+        }
+
         /// Back to the live screen after browsing history.
         fn live(&mut self) {
             self.browsing = false;
             self.finding = None;
+            self.exploring = None;
             for pane in self.panes.values_mut() {
                 if let Some((grid, _)) = pane.term.as_mut() {
                     grid.reset_view();
@@ -2827,6 +3028,16 @@ mod client {
                     self.end(Ended::Failed(reason))
                 }
                 Ok(Change::Refused(_)) => {}
+                Ok(Change::Listed(req, answer)) => {
+                    let answer = answer.as_ref().map(String::as_str).map_err(String::as_str);
+                    self.listed_workspace(block, req, answer);
+                }
+                // The tree reads the block's workspace by its lease.
+                Ok(Change::Unleased) => {
+                    if self.exploring.as_ref().is_some_and(|o| o.block == block) {
+                        self.live();
+                    }
+                }
                 Err(why) => self.end(Ended::Failed(why)),
             }
         }
@@ -2907,8 +3118,16 @@ mod client {
             self.fit();
             // Browsing ends when the focused block is back on its live screen
             // (it closed, or the server changed the focus).
-            self.browsing =
-                self.browsing && self.grid(self.focus).is_some_and(|g| g.view_offset > 0);
+            // The workspace tree belongs to the block it opened over.
+            if self
+                .exploring
+                .as_ref()
+                .is_some_and(|o| o.block != self.focus)
+            {
+                self.exploring = None;
+            }
+            self.browsing = self.exploring.is_some()
+                || (self.browsing && self.grid(self.focus).is_some_and(|g| g.view_offset > 0));
             let shown = match visible.as_slice() {
                 [(only, _)] if !self.browsing && self.float_of(*only).is_none() => {
                     Shown::Passing(*only)
@@ -3016,6 +3235,11 @@ mod client {
                 predict: (self.predicting && opened.features.contains(PREDICT))
                     .then(Predictor::default),
                 gate: Gate::default(),
+                workspace: opened
+                    .features
+                    .contains(Features::BLOCK_CALL.union(Features::WORKSPACE)),
+                status: opened.features.contains(Features::WORKSPACE_STATUS),
+                listings: Vec::new(),
             };
             if opened.resumed.is_none() {
                 pane.attach = pane.send(|req| Message::Attach { req, block });
@@ -3083,6 +3307,18 @@ mod client {
             let mut panes = self.panes.get(&block).into_iter().chain(lost);
             let pane = panes.find(|p| p.block == block)?;
             pane.term.as_ref().map(|(grid, _)| grid)
+        }
+
+        /// The open workspace tree, drawn over the focused block.
+        fn paint_explorer(&self, frame: &mut Frame, visible: &[(BlockId, Rect)]) {
+            let Some(Exploring { explorer, .. }) = &self.exploring else {
+                return;
+            };
+            let Some((_, rect)) = visible.iter().find(|(block, _)| *block == self.focus) else {
+                return;
+            };
+            let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
+            frame.panel(*rect, &explorer.render(cols, rows));
         }
 
         /// The open find bar's matches and prompt, drawn onto `frame`.
@@ -3172,6 +3408,7 @@ mod client {
                 .collect();
             let mut frame = screen::compose(self.area, &views, self.focus);
             self.paint_find(&mut frame, &visible);
+            self.paint_explorer(&mut frame, &visible);
             let mut bytes = screen::render(last.as_ref(), &frame);
             // With no frame before (the layout or focus changed), `render`
             // takes the cursor to have the terminal's own colour; one the
@@ -3632,6 +3869,7 @@ mod client {
                 shown: Shown::Nothing,
                 browsing: false,
                 finding: None,
+                exploring: None,
                 split: None,
                 arriving: None,
                 opened: 0,
@@ -4274,6 +4512,364 @@ mod client {
             app.window = Some(window_id(7));
             app.session = Some(session_id(8));
             (app, inbox, far)
+        }
+
+        /// The workspace calls among `messages`: the path asked, if any.
+        #[cfg(unix)]
+        fn workspace_calls(messages: &[Message]) -> Vec<(u64, Option<String>)> {
+            messages
+                .iter()
+                .filter_map(|m| match m {
+                    Message::BlockCall {
+                        req, method, args, ..
+                    } if method == "terminal.workspace-list" => {
+                        let path = args.iter().find_map(|(k, v)| match v {
+                            Value::Text(t) if k == "path" => Some(t.clone()),
+                            _ => None,
+                        });
+                        Some((*req, path))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Says `message` as `block`'s own connection.
+        #[cfg(unix)]
+        fn pane_says(app: &mut App, block: BlockId, message: Message) {
+            let generation = app.panes[&block].generation;
+            app.on_pane((block, generation), message);
+        }
+
+        /// The workspace tree needs the server's call and the lease: without
+        /// either it asks for nothing and does not open.
+        #[cfg(unix)]
+        #[test]
+        fn the_workspace_tree_needs_the_call_and_the_lease() {
+            let (mut app, _inbox, far) = app(None);
+            app.panes.get_mut(&block(1)).expect("A").workspace = false;
+            app.act(Action::Explorer);
+            assert!(app.exploring.is_none(), "the server lacks the call");
+            app.panes.get_mut(&block(1)).expect("A").workspace = true;
+            app.panes.get_mut(&block(1)).expect("A").leased = false;
+            app.act(Action::Explorer);
+            assert!(app.exploring.is_none(), "no lease");
+            assert!(workspace_calls(&sent(&far[1])).is_empty());
+        }
+
+        /// Keys read together with the command that opens the tree go to the
+        /// tree, not to the program under it.
+        #[cfg(unix)]
+        #[test]
+        fn keys_batched_after_the_tree_opens_stay_in_the_tree() {
+            let (mut app, _inbox, far) = app(None);
+            app.take(Input::Keys(b"\x1dej\r".to_vec()));
+            assert!(app.exploring.is_some(), "still open");
+            assert!(typed_in(&sent(&far[1])).is_empty(), "nothing typed in");
+        }
+
+        /// The tree asks for the root, then a directory's listing when Enter
+        /// opens it; a refusal shows and a key leaves it.
+        #[cfg(unix)]
+        #[test]
+        fn the_workspace_tree_lists_the_root_then_a_directory() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.act(Action::Explorer);
+            assert!(app.exploring.is_some(), "opened");
+            assert!(app.browsing, "composed, not passed through");
+            // On the block's own connection, which holds the lease.
+            assert!(workspace_calls(&sent(&far[0])).is_empty());
+            let asked = workspace_calls(&sent(&far[1]));
+            assert_eq!(asked.len(), 1);
+            assert_eq!(asked[0].1, None, "the root has no path");
+            // A reply to something else is not the tree's.
+            let text = |req, text: &str| Message::Text {
+                req,
+                text: text.into(),
+            };
+            pane_says(&mut app, a, text(asked[0].0 + 100, ".\nd\tsrc"));
+            assert!(app.exploring.as_ref().is_some_and(|o| o.explorer.waiting()));
+            pane_says(&mut app, a, text(asked[0].0, ".\nd\tsrc\nf\ta"));
+            app.take(Input::Keys(b"j\r".to_vec()));
+            let asked = workspace_calls(&sent(&far[1]));
+            assert_eq!(asked.len(), 1);
+            assert_eq!(asked[0].1.as_deref(), Some("src"));
+            // A refusal of the listing shows; it does not cost the lease.
+            pane_says(
+                &mut app,
+                a,
+                Message::Failed {
+                    req: asked[0].0,
+                    reason: "not listed".into(),
+                    code: None,
+                },
+            );
+            assert!(app.panes[&a].leased, "the lease stands");
+            let open = app.exploring.as_ref().expect("still open");
+            assert!(open.req.is_none() && !open.explorer.waiting());
+            app.take(Input::Keys(b"q".to_vec()));
+            assert!(app.exploring.is_none() && !app.browsing);
+        }
+
+        /// With the server's status calls the tree asks for the change marks
+        /// and the stat of the cursor's row, once each; a refusal of either
+        /// leaves the tree as it was.
+        #[cfg(unix)]
+        #[test]
+        fn the_workspace_tree_asks_for_marks_and_the_cursors_stat() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.panes.get_mut(&a).expect("A").status = true;
+            app.act(Action::Explorer);
+            let list = workspace_calls(&sent(&far[1]))[0].0;
+            let text = |req, text: &str| Message::Text {
+                req,
+                text: text.into(),
+            };
+            pane_says(&mut app, a, text(list, ".\nd\tsrc\nf\ta"));
+            let calls: Vec<(u64, String)> = sent(&far[1])
+                .into_iter()
+                .filter_map(|m| match m {
+                    Message::BlockCall {
+                        req, method, args, ..
+                    } if method.starts_with("terminal.workspace-")
+                        && method != "terminal.workspace-list" =>
+                    {
+                        let path = args.iter().find_map(|(_, v)| match v {
+                            Value::Text(t) => Some(t.as_str()),
+                            _ => None,
+                        });
+                        Some((req, format!("{method} {}", path.unwrap_or(""))))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(calls.len(), 2, "the marks, and the root's stat");
+            assert_eq!(calls[0].1, "terminal.workspace-touched ");
+            assert_eq!(calls[1].1, "terminal.workspace-stat .");
+            pane_says(&mut app, a, text(calls[0].0, ".\n.M\ta"));
+            let stat = calls[1].0;
+            // A refused stat is a miss: the cursor moving on asks again, for
+            // the new row only.
+            pane_says(
+                &mut app,
+                a,
+                Message::Failed {
+                    req: stat,
+                    reason: "not statted".into(),
+                    code: None,
+                },
+            );
+            assert!(app.panes[&a].leased, "the lease stands");
+            app.take(Input::Keys(b"j".to_vec()));
+            let again = sent(&far[1]);
+            assert_eq!(
+                again
+                    .iter()
+                    .filter(|m| matches!(m, Message::BlockCall { method, .. }
+                        if method == "terminal.workspace-stat"))
+                    .count(),
+                1
+            );
+        }
+
+        /// The server refuses the change marks on an agent's block (D372): the
+        /// tree stays unmarked and silent, the lease stands, and nothing asks
+        /// again.
+        #[cfg(unix)]
+        #[test]
+        fn a_refused_touched_call_leaves_the_tree_silent_and_is_not_repeated() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.panes.get_mut(&a).expect("A").status = true;
+            app.act(Action::Explorer);
+            let list = workspace_calls(&sent(&far[1]))[0].0;
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: list,
+                    text: ".\nf\ta".into(),
+                },
+            );
+            let asked = sent(&far[1]);
+            let call = |m: &Message, name: &str| matches!(m, Message::BlockCall { method, .. } if method == name);
+            let touched = asked
+                .iter()
+                .find_map(|m| match m {
+                    Message::BlockCall { req, method, .. }
+                        if method == "terminal.workspace-touched" =>
+                    {
+                        Some(*req)
+                    }
+                    _ => None,
+                })
+                .expect("touched is asked for");
+            pane_says(
+                &mut app,
+                a,
+                Message::Failed {
+                    req: touched,
+                    reason: "refused on agent blocks".into(),
+                    code: None,
+                },
+            );
+            assert!(app.panes[&a].leased, "the lease stands");
+            assert!(app.exploring.is_some(), "the tree stays open");
+            assert!(
+                !sent(&far[1])
+                    .iter()
+                    .any(|m| call(m, "terminal.workspace-touched")),
+                "not asked again"
+            );
+            let screen = app.exploring.as_ref().expect("open").explorer.render(60, 8);
+            assert!(
+                !screen.iter().any(|l| l.contains("refused")),
+                "no note: {screen:?}"
+            );
+        }
+
+        /// A refusal that is not the listing's, such as input after the lease
+        /// went, closes the tree: it reads by the lease.
+        #[cfg(unix)]
+        #[test]
+        fn losing_the_lease_closes_the_workspace_tree() {
+            let (mut app, _inbox, _far) = app(None);
+            let a = block(1);
+            app.act(Action::Explorer);
+            assert!(app.exploring.is_some());
+            pane_says(
+                &mut app,
+                a,
+                Message::Failed {
+                    req: 999,
+                    reason: "not the lease holder".into(),
+                    code: None,
+                },
+            );
+            assert!(!app.panes[&a].leased);
+            assert!(app.exploring.is_none() && !app.browsing, "closed");
+        }
+
+        /// A listing refused after the tree was closed and opened again is
+        /// the old one's: it costs neither the new tree nor the lease.
+        #[cfg(unix)]
+        #[test]
+        fn an_older_listings_refusal_leaves_the_new_tree_and_the_lease() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.act(Action::Explorer);
+            let first = workspace_calls(&sent(&far[1]))[0].0;
+            app.take(Input::Keys(b"q".to_vec()));
+            assert!(app.exploring.is_none());
+            app.act(Action::Explorer);
+            let second = workspace_calls(&sent(&far[1]))[0].0;
+            assert_ne!(first, second);
+            pane_says(
+                &mut app,
+                a,
+                Message::Failed {
+                    req: first,
+                    reason: "outside the workspace".into(),
+                    code: None,
+                },
+            );
+            assert!(app.panes[&a].leased, "the lease stands");
+            assert!(app.exploring.as_ref().is_some_and(|o| o.explorer.waiting()));
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: second,
+                    text: ".\nf\ta".into(),
+                },
+            );
+            assert!(
+                app.exploring
+                    .as_ref()
+                    .is_some_and(|o| !o.explorer.waiting())
+            );
+        }
+
+        /// At the bound on unanswered listings no more are asked, so none is
+        /// forgotten: the first one's late refusal still is not the lease's.
+        #[cfg(unix)]
+        #[test]
+        fn listings_unanswered_up_to_the_bound_are_not_asked_past_it() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            let mut asked = Vec::new();
+            for _ in 0..LISTINGS {
+                app.act(Action::Explorer);
+                asked.extend(workspace_calls(&sent(&far[1])));
+                app.take(Input::Keys(b"q".to_vec()));
+            }
+            assert_eq!(asked.len(), LISTINGS);
+            app.act(Action::Explorer);
+            assert!(workspace_calls(&sent(&far[1])).is_empty(), "not asked");
+            let open = app.exploring.as_ref().expect("open, with a note");
+            assert!(open.req.is_none() && !open.explorer.waiting());
+            pane_says(
+                &mut app,
+                a,
+                Message::Failed {
+                    req: asked[0].0,
+                    reason: "outside the workspace".into(),
+                    code: None,
+                },
+            );
+            assert!(app.panes[&a].leased, "the lease stands");
+            assert!(app.exploring.is_some(), "and so does the tree");
+        }
+
+        /// A listing asked on a path given up is never answered: the path
+        /// back closes the tree rather than leave it reading for ever, and a
+        /// reply from the old path is not taken for a new one's.
+        #[cfg(unix)]
+        #[test]
+        fn a_workspace_listing_lost_with_the_path_closes_the_tree() {
+            let (mut app, _inbox, far) = app(Some(Box::new(Never)));
+            let a = block(1);
+            app.act(Action::Explorer);
+            let old = workspace_calls(&sent(&far[1]));
+            assert_eq!(old.len(), 1);
+            assert!(app.exploring.as_ref().is_some_and(|o| o.explorer.waiting()));
+            app.lose(false);
+            let (mut back, _control, a_new, _b_new) = back(takeover(1));
+            back.layout = Some(Shape {
+                layout: app.layout.clone(),
+                focused: Some(a),
+                ..Shape::default()
+            });
+            app.take(Input::Rejoined(Ok(back)));
+            assert!(app.exploring.is_none() && !app.browsing, "closed");
+            // A reply from the old path finds nothing waiting.
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: old[0].0,
+                    text: ".\nf\ta".into(),
+                },
+            );
+            assert!(app.exploring.is_none());
+            // Usable again once the new path holds the lease.
+            app.panes.get_mut(&a).expect("A").leased = true;
+            app.act(Action::Explorer);
+            assert!(app.exploring.is_some());
+            let asked = workspace_calls(&sent(&a_new));
+            assert_eq!(asked.len(), 1, "asked on the new path");
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: asked[0].0,
+                    text: ".\nf\ta".into(),
+                },
+            );
+            let open = app.exploring.as_ref().expect("open");
+            assert!(!open.explorer.waiting() && open.req.is_none());
         }
 
         /// Requests asked on a path given up are never answered: following

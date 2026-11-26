@@ -1091,12 +1091,12 @@ fn check_request(st: &TaskState, role: &Role, d: &Draft) -> R<Option<ArtId>> {
     }
 }
 
-/// Refuse a logged version whose fold lacked a line or base, naming it.
+/// Refuse a logged version whose fold did not apply, saying why.
 fn unapplied(st: &TaskState, version: ArtId) -> R<()> {
     match st.unapplied.get(&version) {
         Some(m) => Err(rej(
             Code::RefUnresolved,
-            format!("{version} did not apply when the log was folded: {m} is missing"),
+            format!("{version} did not apply when the log was folded: {m}"),
         )),
         None => Ok(()),
     }

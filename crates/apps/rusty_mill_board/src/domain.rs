@@ -130,11 +130,15 @@ pub enum Capability {
     /// Mint credentials for itself (`agent_enrol`): at most [`crate::identities::MAX_CHILDREN`],
     /// never wider than the minter's own role and projects, and never `enrol` or `admin`.
     Enrol,
+    /// Cross a gate on the owner's stated approval (`card_approve`): the approver proxy's one
+    /// capability (#447). A merge or an unblock is filed pending until an `Admin` holder
+    /// confirms it.
+    Approve,
 }
 
 impl Capability {
     /// Every capability, in display order.
-    pub const ALL: [Capability; 12] = [
+    pub const ALL: [Capability; 13] = [
         Capability::Triage,
         Capability::Plan,
         Capability::Architect,
@@ -147,6 +151,7 @@ impl Capability {
         Capability::Project,
         Capability::Admin,
         Capability::Enrol,
+        Capability::Approve,
     ];
 
     /// What holding this lets a role do, for the settings view.
@@ -172,6 +177,9 @@ impl Capability {
             Capability::Enrol => {
                 "Mint credentials for its own workers: no wider than its own role and projects."
             }
+            Capability::Approve => {
+                "Cross a gate on the owner's stated approval (card_approve); merges and unblocks wait for the owner's confirmation."
+            }
         }
     }
 }
@@ -186,6 +194,10 @@ pub struct Actor {
     /// Projects this actor may work in; `None` means all of them.
     #[serde(default)]
     pub projects: Option<BTreeSet<String>>,
+    /// The model provider behind this actor (`anthropic`, `openai`, `local`, `human`, ...), from
+    /// its credential. Separation of duties compares it (see [`crate::duties`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 impl Actor {
@@ -576,6 +588,18 @@ pub struct Closure {
     pub at_ms: i64,
 }
 
+/// How the merge watch closed a Done card: the typed record `card_unclose` relies on. Only the
+/// board writes it ([`Card::closed_by_merge`]); it is cleared when the close is undone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeClose {
+    /// The column the card was in.
+    pub was: Column,
+    /// When, Unix ms.
+    pub at_ms: i64,
+    /// The pull request whose merge closed it.
+    pub pr: String,
+}
+
 /// One card. `rev` increases on every change and is the store's CAS token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Card {
@@ -674,6 +698,15 @@ pub struct Card {
     /// `done_ms`, and counts as dropped, never shipped. `None` for open and shipped cards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed: Option<Closure>,
+    /// Set when the merge watch closed the card ([`Card::closed_by_merge`]): which column it was
+    /// in. Set only by the board; `card_unclose` needs it. Kept by the SQLite store (the card's JSON); rusty_tick keeps none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged: Option<MergeClose>,
+    /// Pull requests whose merge close was undone ([`Card::unclosed`]), so the same marker does
+    /// not close the card again. Set only by the board from the typed [`MergeClose`], never
+    /// from comment text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unclosed_prs: Vec<String>,
     /// Links showing the work shipped: a merged PR, or any page that shows it ([`Card::add_evidence`]).
     /// A Done card counts as shipped only with one; without, it reports as a prototype.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -690,6 +723,9 @@ pub struct Card {
     /// When the card should be done, Unix ms, if planned: what the roadmap draws ahead of today.
     #[serde(default)]
     pub target_ms: Option<i64>,
+    /// Who authored, reviewed and approved it (#447, [`crate::duties`]). Set only by the board.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duties: Vec<crate::duties::Duty>,
 }
 
 /// How much of each card a listing returns.
@@ -875,6 +911,16 @@ impl fmt::Display for BoardError {
 
 impl std::error::Error for BoardError {}
 
+/// The board's own writer for a close on a merged pull request (the merge watch): no caller
+/// may act under this name.
+pub const MERGE_WATCH: &str = "merge-watch";
+
+/// How the comment of a close on merge begins.
+const MERGED_PREFIX: &str = "Closed by merge:";
+
+/// How the comment that undoes such a close begins.
+const UNCLOSED_PREFIX: &str = "Unclosed:";
+
 /// What happened to a card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -911,6 +957,13 @@ pub enum EventKind {
     Numbered,
     /// Closed without shipping ([`Card::close`]).
     Closed,
+    /// Reviewed with `card_review` (#447).
+    Reviewed,
+    /// A gate approval filed or confirmed with `card_approve`, without a move (#447).
+    Approved,
+    /// An owner's `card_approve` found the gate's filings made on text edited since: they
+    /// expired, nothing was approved and the card stayed (#447).
+    ApprovalExpired,
 }
 
 /// One entry in the append-only log. `id` is a UUIDv7 assigned by the store
@@ -1034,10 +1087,13 @@ impl Card {
             updated_ms: now_ms,
             done_ms: None,
             closed: None,
+            merged: None,
+            unclosed_prs: Vec::new(),
             evidence: Vec::new(),
             archived_ms: None,
             restored_ms: None,
             target_ms: None,
+            duties: Vec::new(),
         })
     }
 
@@ -1125,7 +1181,12 @@ impl Card {
     /// `by`, counted as holding `Close` for a move to Done when it holds `Record` (and not
     /// `Close`), this card carries a pull request link, and the card is in a work column:
     /// recording merged work, narrowed. The flag says that this happened.
-    fn recorder<'a>(&self, flow: &Workflow, by: &'a Actor, to: &Column) -> (Cow<'a, Actor>, bool) {
+    pub(crate) fn recorder<'a>(
+        &self,
+        flow: &Workflow,
+        by: &'a Actor,
+        to: &Column,
+    ) -> (Cow<'a, Actor>, bool) {
         let applies = *to == Column::DONE
             && by.caps.contains(&Capability::Record)
             && !by.caps.contains(&Capability::Close)
@@ -1220,7 +1281,7 @@ impl Card {
         Ok(self.arrive(to, now_ms))
     }
 
-    fn arrive(&self, to: &Column, now_ms: i64) -> Self {
+    pub(crate) fn arrive(&self, to: &Column, now_ms: i64) -> Self {
         Self {
             column: to.clone(),
             claim: None,
@@ -1278,7 +1339,7 @@ impl Card {
             by: by.name.clone(),
             at_ms: now_ms,
             text: format!(
-                "Closed by merge: {pr} merged (was in {}).",
+                "{MERGED_PREFIX} {pr} merged (was in {}).",
                 self.column.as_str()
             ),
         });
@@ -1286,7 +1347,72 @@ impl Card {
             column: Column::DONE,
             claim: None,
             done_ms: Some(now_ms),
+            merged: Some(MergeClose {
+                was: self.column.clone(),
+                at_ms: now_ms,
+                pr: pr.to_owned(),
+            }),
             ..base
+        })
+    }
+
+    /// Whether the merge watch's close on pull request `pr` was undone ([`Card::unclosed`]).
+    /// Read from the board's own record, never from comment text, so no note can withhold a
+    /// close and `#7` is not `#70`.
+    pub fn unclosed_from(&self, pr: &str) -> bool {
+        self.unclosed_prs.iter().any(|p| p == pr)
+    }
+
+    /// Undo the merge watch's close: back to the column it was in, ship time cleared, evidence
+    /// and comments kept, and a comment saying who undid it. Only for a Done card carrying the
+    /// typed [`MergeClose`] that [`Card::closed_by_merge`] wrote (nothing else sets it, and
+    /// callers cannot send the record). Needs `Triage`.
+    ///
+    /// # Errors
+    /// [`BoardError::Forbidden`] without `Triage`, and [`BoardError::Refused`] for a card that
+    /// is not Done, was not closed by the merge watch (including one closed before the record
+    /// existed), or whose earlier column is gone from the workflow.
+    pub fn unclosed(&self, flow: &Workflow, by: &Actor, now_ms: i64) -> Result<Self, BoardError> {
+        if !by.caps.contains(&Capability::Triage) {
+            return Err(BoardError::Forbidden(Capability::Triage));
+        }
+        let refuse = |why: &str| Err(BoardError::Refused(why.to_owned()));
+        if self.column != Column::DONE {
+            return refuse("only a Done card can be unclosed");
+        }
+        let Some(close) = self.merged.as_ref() else {
+            return refuse("this card was not closed by the merge watch");
+        };
+        let was = close.was.clone();
+        if was == Column::DONE || flow.kind(&was).is_none() {
+            return refuse("the column the card was in is gone");
+        }
+        let mut next = self.next(now_ms);
+        let pr = if close.pr.is_empty() {
+            String::new()
+        } else {
+            format!(" of {}", close.pr)
+        };
+        let mut unclosed_prs = self.unclosed_prs.clone();
+        if !close.pr.is_empty() && !unclosed_prs.contains(&close.pr) {
+            unclosed_prs.push(close.pr.clone());
+        }
+        next.comments.push(Comment {
+            by: by.name.clone(),
+            at_ms: now_ms,
+            text: format!(
+                "{UNCLOSED_PREFIX} the merge watch's close{pr} is undone, back to {}.",
+                was.as_str()
+            ),
+        });
+        Ok(Self {
+            column: was,
+            done_ms: None,
+            merged: None,
+            unclosed_prs,
+            archived_ms: None,
+            claim: None,
+            ..next
         })
     }
 
@@ -1678,6 +1804,7 @@ mod tests {
             name: name.into(),
             caps: caps.iter().copied().collect(),
             projects: None,
+            provider: None,
         }
     }
 
@@ -1687,6 +1814,68 @@ mod tests {
 
     fn card() -> Card {
         Card::new("t", "", vec![], 0).expect("valid")
+    }
+
+    #[test]
+    fn an_undo_names_exactly_one_pull_request() {
+        let watch = actor(MERGE_WATCH, &[Capability::Record]);
+        let human = actor("nano", &[Capability::Triage, Capability::Close]);
+        let seven = "https://github.com/o/r/pull/7";
+        let seventy = "https://github.com/o/r/pull/70";
+        let ready = card()
+            .move_to(&flow(), &Column::READY, &human, 1)
+            .expect("ready");
+        let undone = ready
+            .closed_by_merge(&flow(), seventy, &watch, 2)
+            .and_then(|c| c.unclosed(&flow(), &human, 3))
+            .expect("undone");
+        assert!(undone.unclosed_from(seventy));
+        assert!(!undone.unclosed_from(seven), "#7 is not #70");
+        assert!(!undone.unclosed_from("https://github.com/o/r/pull/700"));
+        // A person's note that copies the undo comment word for word withholds nothing.
+        let mut noted = ready;
+        noted.comments.push(Comment {
+            by: "nano".into(),
+            at_ms: 4,
+            text: format!("Unclosed: the merge watch's close of {seven} is undone, back to ready."),
+        });
+        assert!(!noted.unclosed_from(seven));
+    }
+
+    #[test]
+    fn unclose_binds_to_the_current_merge_close_not_to_an_equal_timestamp() {
+        let watch = actor(MERGE_WATCH, &[Capability::Record]);
+        let human = actor(
+            "nano",
+            &[Capability::Triage, Capability::Merge, Capability::Close],
+        );
+        let pr = "https://github.com/o/r/pull/7";
+        let ready = card()
+            .move_to(&flow(), &Column::READY, &human, 1)
+            .expect("ready");
+        // A fixed clock: the close, the undo and the later ordinary Done all read 5 ms.
+        let closed = ready
+            .closed_by_merge(&flow(), pr, &watch, 5)
+            .expect("closed");
+        let reopened = closed.unclosed(&flow(), &human, 5).expect("unclosed");
+        assert_eq!(
+            (reopened.column.clone(), reopened.done_ms),
+            (Column::READY, None)
+        );
+        let again = reopened
+            .move_freely(&flow(), &Column::DONE, &human, 5)
+            .expect("ordinary Done");
+        assert_eq!(
+            again.done_ms,
+            Some(5),
+            "the same millisecond as the old close"
+        );
+        assert!(matches!(
+            again.unclosed(&flow(), &human, 6),
+            Err(BoardError::Refused(_))
+        ));
+        // And the real, current close is still undone.
+        assert!(closed.unclosed(&flow(), &human, 6).is_ok());
     }
 
     #[test]

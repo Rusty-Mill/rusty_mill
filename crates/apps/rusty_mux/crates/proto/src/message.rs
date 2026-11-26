@@ -296,6 +296,25 @@ impl Features {
     /// capability's.
     pub const ARCHIVE: Self = Self(1 << 54);
 
+    /// The block method `terminal.upload` (C82): a file sent in chunks to a
+    /// folder of the server's state directory, answered with its absolute
+    /// path. It travels as [`Message::BlockCall`], so the bit only says the
+    /// server knows it.
+    pub const UPLOAD: Self = Self(1 << 55);
+
+    /// The block method `terminal.download` (C83): a file of the server's
+    /// host read a chunk at a time, as base64 text. It travels as
+    /// [`Message::BlockCall`], so the bit only says the server knows it.
+    pub const DOWNLOAD: Self = Self(1 << 56);
+
+    /// The block methods `terminal.workspace-stat` and
+    /// `terminal.workspace-touched` (card #1573, slice 2): what one entry
+    /// under the block's launch directory is, and what `git status` says
+    /// changed there. They travel as [`Message::BlockCall`], so the bit only
+    /// says the server knows them. A server that grants it grants
+    /// [`Features::WORKSPACE`] too.
+    pub const WORKSPACE_STATUS: Self = Self(1 << 57);
+
     /// The block methods `terminal.prompts` and `terminal.find` (C55): the
     /// rows where the shell's prompts started (OSC 133/633 `A`) and the rows
     /// holding a text, over the block's scrollback and screen. They travel as
@@ -404,6 +423,12 @@ const NAMES: &[(Features, &str)] = &[
     (Features::AGENT_META, "agent, role and card on blocks"),
     (Features::WORKSPACE, "workspace explorer"),
     (Features::ARCHIVE, "archive of dismissed blocks"),
+    (Features::UPLOAD, "file upload to a block"),
+    (Features::DOWNLOAD, "file download from a server"),
+    (
+        Features::WORKSPACE_STATUS,
+        "file status in the workspace explorer",
+    ),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the

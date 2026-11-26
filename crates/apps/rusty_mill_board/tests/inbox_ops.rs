@@ -207,6 +207,7 @@ fn owner() -> Identity {
         role: "human".into(),
         projects: None,
         connector: false,
+        provider: None,
     }
 }
 
@@ -237,6 +238,7 @@ fn a_model_token_is_forbidden() {
         role: "builder".into(),
         projects: None,
         connector: false,
+        provider: None,
     };
     assert!(refused(call(&b, &model, "inbox_list", json!({}))).contains("Admin"));
     let act = json!({"id": "T1/msg:1/3", "rev": 7, "action": "approve"});
@@ -392,6 +394,17 @@ fn shipped() -> Escalation {
     e.acted = Some(vec![rusty_mill_board::inbox::Acted {
         claim: 1,
         marks: vec!["pr-7".into()],
+        diffstat: Some(rusty_mill_board::inbox::Diffstat {
+            files: 2,
+            added: 5,
+            removed: 1,
+            top: vec![rusty_mill_board::inbox::FileStat {
+                path: "src/a.rs".into(),
+                added: 5,
+                removed: 1,
+            }],
+            more: 1,
+        }),
     }]);
     e
 }
@@ -453,6 +466,13 @@ fn rejecting_acted_on_work_files_one_remediate_card() {
     assert_eq!(made.len(), 1);
     assert!(
         made[0].body.contains("pr-7") && made[0].body.contains("claim msg:1 drop"),
+        "{}",
+        made[0].body
+    );
+    assert!(
+        made[0]
+            .body
+            .contains("2 files, +5 -1: `src/a.rs` +5 -1, and 1 more"),
         "{}",
         made[0].body
     );

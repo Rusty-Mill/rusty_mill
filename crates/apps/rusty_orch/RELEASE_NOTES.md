@@ -4,6 +4,58 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Builders tested end to end in CI
+**2026-11-25**
+
+- CI now runs a builder for real: a mux server, the jail and the BBP host,
+  with a scripted stand-in for the Claude agent, so no model is called.
+- It checks the jail holds (no way to the mux, nothing writable outside
+  the worktree), that a restarted mux aborts the session without charging
+  anything, and that a builder whose orch dies is still stopped on time.
+
+## One builder, end to end
+**2026-11-25**
+
+- `rusty_orch builder run` runs one Claude builder on one design claim:
+  it makes the worktree, opens the cgroup, takes a slot, launches the
+  jailed agent in a mux block, runs one turn, and stops it cleanly.
+- The builder's work is posted as a candidate only when it says it is
+  done (it writes `.lel/submit`) and the diff isn't empty. Otherwise
+  nothing is posted and nothing is charged.
+- If the mux goes away the session is recorded as aborted, not failed.
+
+## Builder text in acp.log can't pose as orch's
+**2026-11-25**
+
+- In `acp.log`, everything the builder writes is now indented, and orch's
+  own lines (tools, permissions, usage, stop) start at the left edge, so
+  text the builder writes can't start a line that looks like orch's.
+  Fields orch copies from the builder, such as a tool's title, are not
+  quoted yet, so they can still hold misleading text within orch's line.
+- Characters that reorder, hide or break text on screen are shown as
+  escapes.
+
+## Builder blocks in the mux
+**2026-11-25**
+
+- orch can now find (or make) a project's mux session and window, and
+  launch a builder there through its own `rusty-mux-ctl own` connection,
+  handing it the slot and the ACP socket, plus a read-only block that
+  shows `acp.log`.
+- If the mux goes away mid-launch, orch reports it as lost, so the builder
+  session is aborted rather than counted as failed.
+
+## Builder ACP client
+**2026-11-25**
+
+- orch can now hold one Agent Client Protocol conversation with a #600
+  builder: it starts the session in the builder's worktree, sends the
+  prompt, answers permission requests with "allow once", and reports why
+  the builder stopped and the tokens it used, if it said.
+- Everything the builder does is rendered into `acp.log`, a readable view
+  for the mux, never evidence. A dead or garbled builder ends the turn as
+  failed rather than hanging.
+
 ## Cost breaker and taint in lens runs
 **2026-11-17**
 

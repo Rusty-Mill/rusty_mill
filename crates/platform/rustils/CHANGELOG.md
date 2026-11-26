@@ -20,6 +20,21 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.30.0
+
+- **Passed descriptors for a plain spawn, and copying a child's
+  descriptor back (`platform-linux`, #1318 S1).** New public items:
+  `LinuxSpawner::spawn_passing(cmd, passed)`, which gives the child
+  `passed` in order at 3, 4, … and closes everything else above 2,
+  exactly as `LinuxPty::spawn_passing` does for a pty child (C75; the
+  staging and mapping helpers now live in `sys::spawn` and serve both);
+  `LinuxChild::dup_fd(fd)`, a close-on-exec copy of the child's
+  descriptor through `pidfd_getfd(2)`, refused once the child is
+  reaped; `sys::spawn::dup_from`; and `ffi::libc_surface::SYS_pidfd_getfd`.
+  `sys::spawn::spawn` takes a trailing `passed` slice (empty keeps the
+  old behaviour). `Spawner::spawn` is unchanged. Track P routes the copy
+  through `rusty_libc::process::pidfd_getfd`.
+
 ### 0.29.0
 
 - **Windows pieces for the `rusty-mux` attach client

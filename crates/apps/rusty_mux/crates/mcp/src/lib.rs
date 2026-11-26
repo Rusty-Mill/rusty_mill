@@ -45,7 +45,11 @@ enum Shape {
 
 fn shape(method: &Method) -> Shape {
     match method.name {
-        "attach" | "detach" | "acquire-lease" | "release-lease" | "sync" => Shape::Connection,
+        // The file transfers move a file's bytes, which no tool argument can
+        // carry or a tool reply should; `rusty_mux_client::{upload, download}`
+        // do it (no ctl command yet).
+        "attach" | "detach" | "acquire-lease" | "release-lease" | "sync" | "terminal.upload"
+        | "terminal.download" => Shape::Connection,
         "input"
         | "resize"
         | "terminal.send-keys"
@@ -53,7 +57,9 @@ fn shape(method: &Method) -> Shape {
         | "terminal.set-theme"
         | "terminal.clear"
         | "terminal.rerun"
-        | "terminal.workspace-list" => Shape::Leased,
+        | "terminal.workspace-list"
+        | "terminal.workspace-stat"
+        | "terminal.workspace-touched" => Shape::Leased,
         _ => Shape::Plain,
     }
 }
@@ -102,7 +108,9 @@ fn tool(method: &Method) -> Tool {
 /// program they are given, and `terminal.rerun` starts a block's old command; each can delete data and reach any system,
 /// so all are destructive and open-world. The rest stays on the local server.
 fn annotations(method: &Method) -> Value {
-    let read_only = matches!(method.returns, Returns::Text | Returns::Entries);
+    // `workspace-touched` runs `git`, and a repository's own filters with it.
+    let read_only = matches!(method.returns, Returns::Text | Returns::Entries)
+        && method.name != "terminal.workspace-touched";
     let runs = matches!(
         method.name,
         "input" | "create-block" | "split-block" | "terminal.rerun"

@@ -12,6 +12,7 @@ usage: rusty_orch run <goal.json> [options]
        rusty_orch maintain [--repo <dir>] [--bbp <config>] [--execute] (default dry-run)
        rusty_orch inspect [--repo <dir>] (read-only JSON findings)
        rusty_orch lens check <config.json> [--assertions <file>] [--repo <dir>] (no model calls)
+       rusty_orch builder run <config.json> --claim <id> ... (one builder session; Linux)
 
 Runs the goal file through the dispatcher and prints the board.
 

@@ -8,6 +8,7 @@ use orch_core::AgentId;
 use rusty_json::{Map, Value};
 
 use crate::breaker::{Breaker, Mode};
+use crate::builder::Builders;
 use crate::class::DataClass;
 use crate::meter::{Ceilings, Price};
 use crate::post::DirectionKey;
@@ -110,6 +111,8 @@ pub struct LensConfig {
     pub ceilings: Ceilings,
     /// The cost breaker; its defaults when the key is absent.
     pub breaker: Breaker,
+    /// Builder session limits (#600); their defaults when the key is absent.
+    pub builders: Builders,
     pub lenses: Vec<Lens>,
     /// The alien lens, when configured; `lens run --alien` needs it.
     pub alien: Option<Alien>,
@@ -127,6 +130,7 @@ impl LensConfig {
                 "domain_classes",
                 "ceilings",
                 "breaker",
+                "builders",
                 "lenses",
                 "alien",
             ],
@@ -136,6 +140,9 @@ impl LensConfig {
         let domain_classes = domain_classes(top.get("domain_classes"))?;
         let ceilings = ceilings(field(top, "ceilings")?)?;
         let breaker = top.get("breaker").map_or(Ok(Breaker::default()), breaker)?;
+        let builders = top
+            .get("builders")
+            .map_or(Ok(Builders::default()), builders)?;
         let lenses = arr(field(top, "lenses")?, "lenses")?
             .iter()
             .enumerate()
@@ -153,6 +160,7 @@ impl LensConfig {
             domain_classes,
             ceilings,
             breaker,
+            builders,
             lenses,
             alien,
         })
@@ -311,6 +319,37 @@ fn breaker(v: &Value) -> Result<Breaker, String> {
         window_spend,
         min_score_move: num("min_score_move", d.min_score_move)?,
         mode,
+    })
+}
+
+fn builders(v: &Value) -> Result<Builders, String> {
+    let m = obj(v, "builders")?;
+    only(
+        m,
+        &[
+            "builders_per_claim",
+            "max_live_builders",
+            "builder_wall_secs",
+        ],
+        "builders",
+    )?;
+    let d = Builders::default();
+    let num = |k: &str, default: u64| match m.get(k) {
+        None => Ok(default),
+        Some(_) => uint(m, k)
+            .and_then(|n| match n {
+                0 => Err(format!("{k}: must be above 0")),
+                n => Ok(n),
+            })
+            .map_err(|e| format!("builders.{e}")),
+    };
+    let count = |k: &str, default: u32| {
+        u32::try_from(num(k, u64::from(default))?).map_err(|_| format!("builders.{k}: too large"))
+    };
+    Ok(Builders {
+        per_claim: count("builders_per_claim", d.per_claim)?,
+        max_live: count("max_live_builders", d.max_live)?,
+        wall_secs: num("builder_wall_secs", d.wall_secs)?,
     })
 }
 
@@ -675,6 +714,42 @@ pub(crate) mod tests {
         bad(
             r#""breaker": {"windows": 3}"#,
             "breaker: unknown field \"windows\"",
+        );
+    }
+
+    #[test]
+    fn builders_default_and_read_their_fields() {
+        let c = LensConfig::parse(STARTER).expect("loads");
+        assert_eq!(c.builders, Builders::default());
+        let text = STARTER.replacen(
+            r#""lenses": ["#,
+            r#""builders": {"builders_per_claim": 2, "builder_wall_secs": 600},
+      "lenses": ["#,
+            1,
+        );
+        let b = LensConfig::parse(&text).expect("loads").builders;
+        assert_eq!((b.per_claim, b.max_live, b.wall_secs), (2, 3, 600));
+        let bad = |builders: &str, expected: &str| {
+            let text =
+                STARTER.replacen(r#""lenses": ["#, &format!("{builders},\n\"lenses\": ["), 1);
+            let e = LensConfig::parse(&text).expect_err(expected);
+            assert!(e.contains(expected), "{expected:?} not in {e:?}");
+        };
+        bad(
+            r#""builders": {"max_live_builders": 0}"#,
+            "builders.max_live_builders: must be above 0",
+        );
+        bad(
+            r#""builders": {"builders_per_claim": 4294967296}"#,
+            "builders.builders_per_claim: too large",
+        );
+        bad(
+            r#""builders": {"builders_per_claim": "two"}"#,
+            "builders.builders_per_claim: whole number required",
+        );
+        bad(
+            r#""builders": {"per_claim": 1}"#,
+            "builders: unknown field \"per_claim\"",
         );
     }
 

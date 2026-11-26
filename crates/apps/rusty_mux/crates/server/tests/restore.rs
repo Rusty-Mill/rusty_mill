@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::{Client, PATIENCE, block_for, run_and_wait, shell};
 use rusty_mux_core::EntityId;
+#[cfg(unix)]
+use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Entry, Features, Message};
 use rusty_mux_server::{Config, serve_until};
 use rusty_tokio::io::UnixListener;
@@ -525,4 +527,82 @@ fn a_held_exited_block_survives_a_restart() {
     drop(client);
     server.stop();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A restored command block keeps no launch facts, so an agent's cannot be
+/// told from another: it takes no upload or download, and nothing is written.
+#[cfg(unix)]
+fn restored_command_block_refuses(
+    name: &str,
+    feature: Features,
+    method: &str,
+    args: Vec<(String, Value)>,
+) {
+    let dir = state_dir(name);
+    let server = Server::start(&dir);
+    let mut client = Client::connect_with(
+        &server.socket,
+        Features::CHECKPOINT_V6.union(Features::LAUNCH),
+        None,
+    );
+    let block = command_block(&mut client, "exec sleep 600");
+    client.wait_ready(block);
+    drop(client);
+    server.stop();
+
+    let server = Server::start(&dir);
+    let mut client = Client::connect_with(
+        &server.socket,
+        Features::CHECKPOINT_V6
+            .union(Features::BLOCK_CALL)
+            .union(feature),
+        None,
+    );
+    client.request(|req| Message::Attach { req, block });
+    client.request(|req| Message::AcquireLease { req, block });
+    let answer = client.answer(|req| Message::BlockCall {
+        req,
+        block,
+        method: method.into(),
+        args,
+    });
+    assert!(
+        matches!(answer.as_slice(), [Message::Failed { reason, .. }] if reason.contains("unknown whether")),
+        "{answer:?}"
+    );
+    let stored: Vec<_> = std::fs::read_dir(&dir)
+        .expect("state dir")
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains("upload"))
+        .collect();
+    assert!(stored.is_empty(), "{stored:?}");
+    drop(client);
+    server.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_restored_command_block_takes_no_upload() {
+    let args = vec![
+        ("name".into(), Value::Text("f".into())),
+        ("offset".into(), Value::Lines(0)),
+        ("data".into(), Value::Bytes(b"x".to_vec())),
+    ];
+    restored_command_block_refuses("upload-refused", Features::UPLOAD, "terminal.upload", args);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_restored_command_block_takes_no_download() {
+    let args = vec![
+        ("path".into(), Value::Text("/etc/hostname".into())),
+        ("offset".into(), Value::Lines(0)),
+    ];
+    restored_command_block_refuses(
+        "download-refused",
+        Features::DOWNLOAD,
+        "terminal.download",
+        args,
+    );
 }

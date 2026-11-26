@@ -80,6 +80,7 @@ fn start(dir: &Path, allow: &str) -> Server {
                 cwd: "/".into(),
                 console_host: rusty_mux_server::ConsoleHost::default(),
                 state_dir: None,
+                protected: Default::default(),
                 grapheme_clustering: false,
                 config_file: None,
             };

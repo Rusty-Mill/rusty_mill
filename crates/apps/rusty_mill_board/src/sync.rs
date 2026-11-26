@@ -258,6 +258,7 @@ pub fn reconcile(board: &Shared, forge: &dyn Forge) -> Result<Report, SyncError>
         name: "github-sync".into(),
         caps: BTreeSet::new(),
         projects: None,
+        provider: None,
     };
     let issues = forge.list_issues()?;
     let by_number: HashMap<u64, &Issue> = issues.iter().map(|i| (i.number, i)).collect();

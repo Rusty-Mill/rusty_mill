@@ -1507,6 +1507,76 @@ pub static CATALOG: &[Method] = &[
         build: |req, a| block_call(req, a, "terminal.list-dir"),
     },
     Method {
+        name: "terminal.upload",
+        doc: "Refused on an agent's (jailed) block. Send a file to the server's host, a chunk at a time, into a folder kept for \
+              the block under the server's state directory. Each call appends `data` to \
+              the file `name` at `offset`, which must be the bytes received so far (0 \
+              starts the file again); the reply is then the bytes received, as a number. \
+              With `done` the file is committed and the reply is its absolute path. `name` \
+              is cleaned: a folder part, control and invisible format characters are \
+              dropped. A chunk is at most 1 MiB and a block keeps 2 GiB, the oldest files \
+              removed first, counted before each chunk is written, unfinished files too; a file \
+              over that is refused. At most 16 files are unfinished at once, and one untouched \
+              for 10 minutes is cleared by the next new file. The folder goes with the block. \
+              A lost reply to the last chunk is not safe to retry blindly: the file may \
+              already be in the folder (a resend from 0 is kept beside it as `name-1`), or \
+              its partial lost, and a nonzero offset then reports an unknown outcome; look \
+              at the folder first. Needs the lease and a server with a state directory.",
+        params: &[
+            BLOCK,
+            required(
+                "name",
+                Ty::Text,
+                "The file's name; its folder part is dropped.",
+            ),
+            required(
+                "offset",
+                Ty::Lines,
+                "The bytes already sent; 0 for the first chunk.",
+            ),
+            required("data", Ty::Bytes, "The next chunk, at most 1 MiB."),
+            Param {
+                name: "done",
+                ty: Ty::Flag,
+                doc: "Commit the file with this chunk and reply with its path.",
+                presence: Presence::Optional {
+                    needs: Features::NONE,
+                },
+            },
+        ],
+        needs: Features::BLOCK_CALL.union(Features::UPLOAD),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.upload"),
+    },
+    Method {
+        name: "terminal.download",
+        doc: "Refused on an agent's (jailed) block. Read a file of the server's host a chunk at a time, for a copy to the \
+              client. The reply is the file's size in bytes on the first line, then the \
+              base64 of at most 192 KiB of it from `offset` (empty past the end); ask \
+              again from `offset` plus the bytes got until the size is reached. `path` is \
+              absolute or relative to the program's working directory; a directory, \
+              another kind of file, a network path, a file over 2 GiB and a file in the \
+              server's state directory are refused. Read off the server's main thread and \
+              refused after 5 seconds. Needs the lease, as reading any file of the host \
+              is more than watching a block.",
+        params: &[
+            BLOCK,
+            required(
+                "path",
+                Ty::Text,
+                "The file, absolute or relative to the working directory.",
+            ),
+            required(
+                "offset",
+                Ty::Lines,
+                "The bytes already read; 0 for the first call.",
+            ),
+        ],
+        needs: Features::BLOCK_CALL.union(Features::DOWNLOAD),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.download"),
+    },
+    Method {
         name: "terminal.workspace-list",
         doc: "List a directory under the block's workspace (the directory its program \
               was launched in) for the workspace explorer, in the same text form as \
@@ -1531,6 +1601,43 @@ pub static CATALOG: &[Method] = &[
         needs: Features::BLOCK_CALL.union(Features::WORKSPACE),
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.workspace-list"),
+    },
+    Method {
+        name: "terminal.workspace-stat",
+        doc: "What one entry under the block's workspace is, for the workspace explorer, \
+              as `KIND<TAB>SIZE<TAB>MTIME`: the kind as `terminal.workspace-list` gives \
+              it (a link is `l` and is not followed), the size in bytes and the \
+              modification time in seconds since the epoch. The path is confined as there; \
+              a refusal names nothing outside the workspace. Needs the lease; Linux only.",
+        params: &[
+            BLOCK,
+            Param {
+                name: "path",
+                ty: Ty::Text,
+                doc: "The entry, relative to the workspace; `.` is the workspace.",
+                presence: Presence::Required,
+            },
+        ],
+        needs: Features::BLOCK_CALL.union(Features::WORKSPACE_STATUS),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.workspace-stat"),
+    },
+    Method {
+        name: "terminal.workspace-touched",
+        doc: "What `git status` says changed under the block's workspace, for the \
+              workspace explorer's overlay of who is changing what. The first line is `.`; \
+              each other is `XY<TAB>PATH`: git's two status letters with a space as `.` \
+              (`M.` staged, `.M` in the work tree, `??` untracked) and the path relative \
+              to the workspace; an untracked directory is one line ending in `/`, and paths that \
+              are not UTF-8 are counted in a last `!<TAB>N` line. Renames show as a delete \
+              and an add. Refused on agent blocks, and when `.git` is not the work tree's own. `git` runs with its \
+              hooks, fsmonitor, pager and prompts off and is killed after a few seconds. \
+              Refused when the workspace is not in a git work tree, when git is missing or \
+              when there are too many changes to list. Needs the lease; Linux only.",
+        params: &[BLOCK],
+        needs: Features::BLOCK_CALL.union(Features::WORKSPACE_STATUS),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.workspace-touched"),
     },
     Method {
         name: "terminal.reset",
