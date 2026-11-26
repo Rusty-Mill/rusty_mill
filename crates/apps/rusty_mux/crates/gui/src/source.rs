@@ -48,8 +48,8 @@ use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Entry, Features, Launch, Message, Program, ShowTo, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
-    Act, BlockInfo, Bound, Detached, Dir, Feed, Float as Pane, ForwardDone, Link, ListDone, Listed,
-    Notice, PaneIo, Remote, Session, Show, Source, Take, Tree, UploadDone,
+    Act, BlockInfo, Bound, Detached, Dir, Explore, Explored, Feed, Float as Pane, ForwardDone,
+    Link, ListDone, Listed, Notice, PaneIo, Remote, Session, Show, Source, Take, Tree, UploadDone,
 };
 
 use crate::floats;
@@ -58,6 +58,7 @@ use crate::keys::Keys;
 use crate::lease::{Ask as LeaseAsk, Lease};
 use crate::session::{Change, Model, StripKeys, local_host};
 use crate::tree::tree;
+use crate::workspace::{Port as WorkspacePort, Workspace};
 
 /// What the GUI's control connection asks for: the TUI's set, plus names
 /// for the strip and who each client is, to count them, and block calls
@@ -84,8 +85,8 @@ pub const GUI: Features = CONTROL
 /// over (handoff D153), and folder listings, for the palette's directory
 /// browse (D78), and file uploads (C82). [`PANE`] asks for clipboard reads
 /// (C54), which the window answers by its policy, and for `BLOCK_CALL` and
-/// `WORKSPACE` and `WORKSPACE_STATUS` (D349, D373), which the GUI does not use yet: they only let the
-/// pane's own connection carry a workspace listing once the panel exists.
+/// `WORKSPACE` and `WORKSPACE_STATUS` (D349, D373), which the explorer panel's
+/// tree uses on the pane's own connection (D99).
 pub const BLOCK: Features = PANE
     .union(Features::INPUT_GATE)
     .union(Features::LEASE_REQUESTS)
@@ -194,6 +195,8 @@ pub fn attach_with(
         cwd: start_cwd,
         folders: Mutex::new(HashMap::new()),
         shell: start.shell,
+        remote: Mutex::new(None),
+        workspace: Mutex::new(None),
     });
     let (first, focus) = {
         let mut shown = state.shown();
@@ -288,6 +291,10 @@ struct State {
     folders: Mutex<HashMap<BlockId, String>>,
     /// What a split or a new window runs.
     shell: Option<Program>,
+    /// Where the explorer panel's snapshots go, once the window follows.
+    remote: Mutex<Option<Remote>>,
+    /// The open explorer tree and its block's key (gui-design D99).
+    workspace: Mutex<Option<(u64, Arc<Workspace>)>>,
 }
 
 /// The blocks shown and which has the focus.
@@ -427,6 +434,17 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct MuxSource(Arc<State>);
 
 impl MuxSource {
+    /// Opens the explorer tree on pane `key`'s block, replacing any other.
+    fn open_workspace(&self, key: u64) {
+        let (Some(block), Some(remote)) = (self.pane(key), lock(&self.0.remote).clone()) else {
+            return;
+        };
+        let (status, held) = (block.status, block.lease().held);
+        let port = Arc::new(BlockPort { block, remote, key });
+        let ws = Workspace::open(port, status, held);
+        *lock(&self.0.workspace) = Some((key, ws));
+    }
+
     /// Pane `key`'s block connection, while the window has it open.
     fn pane(&self, key: u64) -> Option<Arc<Block>> {
         self.0
@@ -536,6 +554,27 @@ impl Source for MuxSource {
         match self.pane(key) {
             Some(block) => block.list_dir(path, done),
             None => done(Err("the block is not open".into())),
+        }
+    }
+
+    fn explores(&self, key: u64) -> Explore {
+        match self.pane(key) {
+            Some(b) if b.workspace && b.status => Explore::Marked,
+            Some(b) if b.workspace => Explore::Tree,
+            _ => Explore::No,
+        }
+    }
+
+    fn explore(&self, key: u64, ask: Explored) {
+        match ask {
+            Explored::Open => self.open_workspace(key),
+            Explored::Close => *lock(&self.0.workspace) = None,
+            Explored::Do(intent) => {
+                let open = lock(&self.0.workspace).clone();
+                if let Some((_, ws)) = open.filter(|(k, _)| *k == key) {
+                    ws.intent(intent);
+                }
+            }
         }
     }
 
@@ -923,6 +962,7 @@ impl Events {
     /// Follows the session on a thread of its own, telling `remote`; the
     /// session's end, or the connection's, closes the window.
     pub fn follow(self, remote: Remote) {
+        *lock(&self.state.remote) = Some(remote.clone());
         std::thread::spawn(move || {
             self.run(|out| match out {
                 Out::Layout(t, floats) => remote.layout(t, floats),
@@ -1462,6 +1502,10 @@ struct Block {
     told: Mutex<Option<Take>>,
     /// The server lists folders on this connection (`terminal.list-dir`).
     lists: bool,
+    /// The server answers the workspace tree's calls on this connection
+    /// (`WORKSPACE`), and, beyond them, the marks and stat (`WORKSPACE_STATUS`).
+    workspace: bool,
+    status: bool,
     /// The server asks this connection's client for clipboard reads
     /// (C54), so the window answers them, not the pane's own grid.
     clipboard: bool,
@@ -1577,6 +1621,10 @@ impl Block {
             lists: opened
                 .features
                 .contains(Features::BLOCK_CALL.union(Features::DIR_LISTING)),
+            workspace: opened
+                .features
+                .contains(Features::BLOCK_CALL.union(Features::WORKSPACE)),
+            status: opened.features.contains(Features::WORKSPACE_STATUS),
             listings: Mutex::new(HashMap::new()),
             clipboard: opened.features.contains(Features::CLIPBOARD),
             uploads: opened
@@ -1645,6 +1693,16 @@ impl Block {
     /// Asks the server to list `path` (the block's folder when `None`) and
     /// calls `done` with the answer, or with why there is none.
     fn list_dir(&self, path: Option<String>, done: ListDone) {
+        let args = path
+            .map(|p| ("path".into(), Value::Text(p)))
+            .into_iter()
+            .collect();
+        self.call("terminal.list-dir", args, done);
+    }
+
+    /// Calls `method` on the block and gives `done` the answer text, or
+    /// why there is none.
+    fn call(&self, method: &str, args: Vec<(String, Value)>, done: ListDone) {
         let block = self.block;
         let mut done = Some(done);
         self.send(|req| {
@@ -1654,11 +1712,8 @@ impl Block {
             Message::BlockCall {
                 req,
                 block,
-                method: "terminal.list-dir".into(),
-                args: path
-                    .map(|p| ("path".into(), Value::Text(p)))
-                    .into_iter()
-                    .collect(),
+                method: method.into(),
+                args,
             }
         });
     }
@@ -2113,6 +2168,30 @@ impl Block {
 /// The window's end of a block: typing and sizing go to the server while
 /// the lease is held. Dropping it detaches the block's connection.
 struct PaneWriter(Arc<Block>);
+
+/// The explorer tree's way to its block and to the window.
+struct BlockPort {
+    block: Arc<Block>,
+    remote: Remote,
+    key: u64,
+}
+
+impl WorkspacePort for BlockPort {
+    fn call(&self, method: &str, args: Vec<(String, Value)>, done: ListDone) -> bool {
+        self.block.call(method, args, done);
+        true
+    }
+
+    fn show(&self, snapshot: rusty_term::gui::explorer::Snapshot) {
+        self.remote.explorer(self.key, snapshot);
+    }
+
+    fn now(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    }
+}
 
 impl BackendHandle for PaneWriter {
     fn read_into(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
