@@ -191,6 +191,7 @@ Precise contracts used by this guide:
 | D189 | #1318 S5 `builder run` defaults: explicit launcher flags, holder deadline past orch's grace, `sh` fd-4 wrapper, no recover in `builder run`, built-in prompt, `claude-builder` seat and op ids, store opened per step | [default] 2026-11-25 (1318) |
 | D196 | #724: the redrawn `factory-map.svg` is accepted as the Factory map for now | [stated] 2026-11-25 (724) |
 | D198 | #1416 slice 2: claim field bindings, stage strip derivation rule, brief text as a plain input | [default] 2026-11-25 (#1416) |
+| D199 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
 
 ## D1. Lenses, not stages
 
@@ -1850,3 +1851,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_0d5e5a974ebd43479d6d75fcf6faeed8
 **Key.** lel:1416:lel-tab-slice2-bindings-stage-rule-brief-input
 **Source.** Caller question on #1416 slice 2 (Q9 of `1416-lel-tab-slice-plan.md`), 2026-11-25; `rusty_bbp` `src/claims.rs` `ClaimView`, `IntentView`, `EvidenceView`; `rusty_mill_board` `src/inbox.rs` (`brief` is an artifact id, claim JSON sample); D116, D173, D174; README Phases 2 to 5. Note: "D57" in the plan is gui-design D57, not this log's D57.
+
+## D199. #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured
+
+**Decision.** These defaults hold until Nano approves the #432 design. (1) The provider-blind moderator captures Codex's session id by scanning each session launcher's `turn-N.log`. No `Launcher` field names the provider. The parser accepts the first JSON line whose top-level `type` is `thread.started` (UUID `thread_id`), and only if it comes before any `item.*` or `turn.*` event. It does not require line 1, because `turn-N.log` also takes the harness's stderr and the broker log (`moderator.rs` `spawn`). (2) If the first turn exits before an id is captured, the `.started` marker stays and the next (resume) turn is refused.
+**Why.** There is no launcher config schema change, and Claude's stream never emits `thread.started`. A literal line-1 rule would miss the id behind a stderr or broker line. Refusing never silently forgets a conversation that may exist. Each choice can be reversed in one PR.
+**Rejected.** A `Launcher` provider field (a config schema change). A strict line-1 rule. Deleting the marker so the turn starts fresh.
+**Tag.** [default] · remind-me: mem_30f145c0fb2e4e10b0e89e7a86f79031
+**Key.** lel:432:codex-session-capture-defaults
+**Source.** Caller question from the #432 design thread, 2026-11-26; `432-codex-session-resume-design.md` §2; `rusty_bbp_host` `src/moderator.rs` `spawn`, `src/launchers.rs` `run`; Nano's deferral, remind-me `mem_489a8411814648ab95c7e9661c7f70ad`. D199 is the next number free after open PRs #1871 to #1894 (D179 to D197).
