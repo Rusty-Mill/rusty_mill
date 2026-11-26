@@ -234,13 +234,16 @@ pub fn attach_with(
 /// absolute UTF-8 path. Every connection of the client goes to this path and
 /// persisted consent is named by it, so the name is the destination reached,
 /// not a path that can be pointed elsewhere later. `None` where it cannot be
-/// pinned (no such path, not UTF-8, not Unix): consent then stays with the
-/// window.
+/// pinned (no such path, not UTF-8, too long to connect to, not Unix): consent
+/// then stays with the window and the path given is used as it was.
 fn host_id(socket: &Path) -> Option<String> {
     if !cfg!(unix) {
         return None;
     }
-    socket.canonicalize().ok()?.to_str().map(str::to_owned)
+    let path = socket.canonicalize().ok()?;
+    // A name the connection could not use is no pin: keep the path given.
+    rusty_mux_proto::endpoint::check_socket_path(&path).ok()?;
+    path.to_str().map(str::to_owned)
 }
 
 /// Connects to `socket` and says the GUI's Hello, asking for no takeover.
@@ -2251,6 +2254,14 @@ mod tests {
         let raw = dir.join(std::ffi::OsStr::from_bytes(b"\xff.sock"));
         std::fs::write(&raw, b"").expect("file");
         assert_eq!(host_id(&raw), None, "no lossy name");
+        let deep = (0..8).fold(dir.clone(), |p, _| p.join("d".repeat(20)));
+        std::fs::create_dir_all(&deep).expect("deep");
+        std::fs::write(deep.join("s.sock"), b"").expect("file");
+        assert_eq!(
+            host_id(&deep.join("s.sock")),
+            None,
+            "too long to connect to"
+        );
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
