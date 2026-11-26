@@ -1,6 +1,6 @@
 # #705 SlopCodeBench spike: design (draft 2026-11-26)
 
-Status: proposal for Nano. Nothing is built, no model has been called, and nothing here authorises a paid call (D134). Build nothing until Nano approves on card #705.
+Status: approved by Nano 2026-11-26 (§7, D201, D202). Phase A is in progress. Phase B and any paid call still need their own approval (D134).
 
 ## 1. Goal
 Two questions, report only (card #705):
@@ -99,4 +99,11 @@ Out of scope: changing the #704 gate (card).
 - The card says agreement shows `rusty_erosion` is "trustworthy on Rust". Phase A measures Python only (§3 A.5).
 
 ## 7. Owner answers
-_(empty)_
+Nano, 2026-11-26T14:08:07Z, LEL thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4UTNJasKiZJj1PzCwBg4Jqp`: "Approve and ok". He was answering the approval request `cmsg_01WgyiM31RsSnZTgNuPX2VE4Vx1ji78992yPg2feUNXe9c` on this design as of `eee52856`.
+1. Design approved; Phase A starts now, ahead of #1320 (D201; lifts D164's deferral for #705 only).
+2. `tree-sitter-python` 0.25 in `rusty_erosion` approved, with a new `Cargo.lock` entry (D202).
+3. O1 a: reference solutions only (D201).
+4. O2 a: factory plus control arm (D201).
+5. O3 a: D44 cleanups off (D201).
+6. The §3 pre-registered rules are approved as written (D201).
+7. Phase B paid run and ceiling: not approved. D134 stands. It comes back as its own ask after #1320 and the Phase A report; that ask restates O2 and O3 for confirmation.
