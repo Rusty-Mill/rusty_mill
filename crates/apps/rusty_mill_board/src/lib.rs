@@ -30,6 +30,7 @@ pub mod bbp_cli;
 pub mod board;
 pub mod domain;
 pub mod drain;
+pub mod duties;
 pub mod external;
 pub mod github;
 pub mod history;
