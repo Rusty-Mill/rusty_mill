@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 1040" width="1500" height="1040" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif">
+  <title>Let Em Loose: how the Factory pieces fit</title>
+  <defs>
+    <marker id="aB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4ea1ff"/></marker>
+    <marker id="aG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/></marker>
+    <marker id="aP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a371f7"/></marker>
+    <marker id="aT" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#39c5cf"/></marker>
+    <marker id="aA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#d29922"/></marker>
+    <marker id="aR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#f85149"/></marker>
+    <style>
+      .t{fill:#e6edf3}.m{fill:#8b98a5}.h{font-size:17px;font-weight:600}.s{font-size:13px}.xs{font-size:11.5px}
+      .mono{font-family:Consolas, "Cascadia Mono", Menlo, monospace}
+      .panel{fill:#161d26;stroke-width:1.5}
+      .chip{fill:#1d2632;stroke:#2a3644}
+      .keep{fill:#3fb950;font-size:11px;font-weight:600}
+      .gone{fill:#f85149;font-size:13px;text-decoration:line-through}
+    </style>
+  </defs>
+
+  <rect width="1500" height="1040" fill="#0f1419"/>
+
+  <!-- Title -->
+  <text x="40" y="44" class="t" font-size="24" font-weight="700">Let Em Loose: how the Factory pieces fit</text>
+  <text x="40" y="68" class="m s">Reworks the software-factory map. The catalog, overlay and Expert-Agents stay; role threads, column hand-offs and both gates go. Lenses resolve per question on an event-driven board.</text>
+
+  <!-- ============ ROW 1: WHAT STAYS ============ -->
+  <!-- Catalog -->
+  <rect x="40" y="96" width="440" height="210" rx="12" class="panel" stroke="#4ea1ff"/>
+  <text x="60" y="126" class="t h">Factory catalog</text>
+  <text x="460" y="126" class="keep" text-anchor="end">STAYS</text>
+  <text x="60" y="146" class="m xs">process and config only · knows no project</text>
+  <rect x="60" y="158" width="400" height="40" rx="8" class="chip"/>
+  <text x="76" y="183" class="t s"><tspan class="mono">lenses/</tspan><tspan class="m xs" dx="10">lens definitions · lens.json bindings</tspan></text>
+  <rect x="60" y="204" width="400" height="40" rx="8" class="chip"/>
+  <text x="76" y="229" class="t s"><tspan class="mono">knowledge/</tspan><tspan class="m xs" dx="10">domain experts, loaded only when listed</tspan></text>
+  <rect x="60" y="250" width="400" height="40" rx="8" class="chip"/>
+  <text x="76" y="275" class="t s"><tspan class="mono">standards/</tspan><tspan class="m xs" dx="10">musts → never-rules · shoulds flagged</tspan></text>
+
+  <!-- Overlay -->
+  <rect x="530" y="96" width="440" height="210" rx="12" class="panel" stroke="#d29922"/>
+  <text x="550" y="126" class="t h">Overlay (domain pack)</text>
+  <text x="950" y="126" class="keep" text-anchor="end">STAYS</text>
+  <text x="550" y="146" class="m xs mono">.factory/overlay.md in the target repo</text>
+  <rect x="550" y="158" width="400" height="40" rx="8" class="chip"/>
+  <text x="566" y="183" class="t s">Adds and tightens<tspan class="m xs" dx="10">never loosens the catalog</tspan></text>
+  <rect x="550" y="204" width="400" height="40" rx="8" class="chip"/>
+  <text x="566" y="229" class="t s">Lists what loads<tspan class="m xs" dx="10">knowledge and standards this project needs</tspan></text>
+  <rect x="550" y="250" width="400" height="40" rx="8" class="chip"/>
+  <text x="566" y="275" class="t s">Project facts<tspan class="m xs" dx="10">paths, protected tests, reversibility</tspan></text>
+
+  <!-- Expert-Agents -->
+  <rect x="1020" y="96" width="440" height="210" rx="12" class="panel" stroke="#3fb950"/>
+  <text x="1040" y="126" class="t h">Expert-Agents repo</text>
+  <text x="1440" y="126" class="keep" text-anchor="end">STAYS</text>
+  <text x="1040" y="146" class="m xs">project-bound, grounded in review fixes, benched</text>
+  <rect x="1040" y="158" width="400" height="40" rx="8" class="chip"/>
+  <text x="1056" y="183" class="t s"><tspan class="mono">experts/&lt;p&gt;</tspan><tspan class="m xs" dx="10">benched reviewers → lens prompts</tspan></text>
+  <rect x="1040" y="204" width="400" height="40" rx="8" class="chip"/>
+  <text x="1056" y="229" class="t s"><tspan class="mono">grounding</tspan><tspan class="m xs" dx="10">defect classes → adversary attacks</tspan></text>
+  <rect x="1040" y="250" width="400" height="40" rx="8" class="chip"/>
+  <text x="1056" y="275" class="t s"><tspan class="mono">bench/</tspan><tspan class="m xs" dx="10">seeds each lens's track record</tspan></text>
+
+  <!-- ============ ROW 2: RESOLVE PER QUESTION ============ -->
+  <rect x="430" y="356" width="640" height="96" rx="12" class="panel" stroke="#a371f7"/>
+  <text x="450" y="384" class="t h">Lens resolved per question <tspan class="m xs" font-weight="400" dx="6">rusty_orch</tspan></text>
+  <text x="450" y="410" class="s t">catalog lens + overlay + expert prompt → <tspan fill="#a371f7">one lens, one model, one fresh context</tspan></text>
+  <text x="450" y="434" class="xs m">No standing role threads. Context = intent + the claim + its evidence + settled claims · never asks a claim's author</text>
+
+  <path d="M420,306 C420,340 410,380 426,392" stroke="#4ea1ff" stroke-width="1.6" fill="none" marker-end="url(#aB)"/>
+  <path d="M750,306 L750,352" stroke="#d29922" stroke-width="1.6" fill="none" marker-end="url(#aA)"/>
+  <path d="M1240,306 C1240,340 1120,380 1074,392" stroke="#3fb950" stroke-width="1.6" fill="none" marker-end="url(#aG)"/>
+
+  <!-- Intent -->
+  <rect x="40" y="356" width="330" height="96" rx="12" class="panel" stroke="#d29922" stroke-width="2"/>
+  <text x="60" y="384" class="t h">Intent</text>
+  <text x="60" y="408" class="s t">Nano writes <tspan class="mono">INTENT.md</tspan></text>
+  <text x="60" y="432" class="xs m">goal · always · never · taste · reversibility</text>
+  <path d="M205,452 C205,480 300,500 426,530" stroke="#d29922" stroke-width="1.6" fill="none" marker-end="url(#aA)"/>
+  <text x="120" y="478" class="xs" fill="#d29922">opens a task</text>
+
+  <!-- ============ ROW 3: BOARD, LENSES, COORDINATOR, INBOX ============ -->
+  <!-- Lenses -->
+  <rect x="40" y="520" width="330" height="250" rx="12" class="panel" stroke="#a371f7"/>
+  <text x="60" y="550" class="t h">Critic lenses</text>
+  <text x="60" y="570" class="m xs">run concurrently, woken by board events</text>
+  <rect x="60" y="584" width="290" height="36" rx="8" class="chip"/><text x="76" y="607" class="t s">Architect<tspan class="m xs" dx="8">3 blind proposers</tspan></text>
+  <rect x="60" y="626" width="290" height="36" rx="8" class="chip"/><text x="76" y="649" class="t s">Research<tspan class="m xs" dx="8">prior art, sources</tspan></text>
+  <rect x="60" y="668" width="290" height="36" rx="8" class="chip"/><text x="76" y="691" class="t s">Adversary<tspan class="m xs" dx="8">attacks the claim</tspan></text>
+  <rect x="60" y="710" width="290" height="36" rx="8" class="chip"/><text x="76" y="733" class="t s">Operator<tspan class="m xs" dx="8">how it fails in production</tspan></text>
+
+  <path d="M370,620 L426,620" stroke="#a371f7" stroke-width="1.6" fill="none" marker-end="url(#aP)"/>
+  <text x="398" y="612" class="xs" fill="#a371f7" text-anchor="middle">post</text>
+  <path d="M426,680 L374,680" stroke="#39c5cf" stroke-width="1.6" fill="none" marker-end="url(#aT)"/>
+  <text x="398" y="698" class="xs" fill="#39c5cf" text-anchor="middle">event</text>
+
+  <!-- Board -->
+  <rect x="430" y="490" width="640" height="280" rx="12" class="panel" stroke="#39c5cf" stroke-width="2"/>
+  <text x="450" y="520" class="t h">BBP board <tspan class="m xs" font-weight="400" dx="6">event-driven · append-only claim log</tspan></text>
+  <text x="450" y="540" class="m xs">No columns, no hand-offs: a change to a claim is an event, and whoever it concerns wakes up</text>
+  <rect x="450" y="556" width="600" height="44" rx="8" class="chip"/>
+  <text x="466" y="583" class="t s">Claims<tspan class="m xs" dx="10">proposed · evidence attached · confidence moves · accepted or dropped</tspan></text>
+  <rect x="450" y="608" width="600" height="44" rx="8" class="chip"/>
+  <text x="466" y="635" class="t s">Evidence<tspan class="m xs" dx="10">test runs, holdout passes, sources · counter-evidence reopens</tspan></text>
+  <rect x="450" y="660" width="600" height="44" rx="8" class="chip"/>
+  <text x="466" y="687" class="t s">Thresholds and budgets<tspan class="m xs" dx="10">accept line · fail-block · spend caps</tspan></text>
+  <text x="450" y="730" class="xs m mono">claim_posted · evidence_added · threshold_crossed · budget_spent · escalated</text>
+  <text x="450" y="752" class="xs" fill="#39c5cf">Same log replays to the same outcome</text>
+
+  <!-- Project expert -->
+  <rect x="1130" y="490" width="330" height="128" rx="12" class="panel" stroke="#3fb950"/>
+  <text x="1150" y="520" class="t h">Project expert</text>
+  <text x="1150" y="540" class="m xs">acts as coordinator</text>
+  <text x="1150" y="564" class="s t">Answers design questions</text>
+  <text x="1150" y="582" class="xs m">from the project's decision record</text>
+  <text x="1150" y="604" class="xs m">escalates only intent, scope or taste</text>
+  <path d="M1070,560 L1126,560" stroke="#3fb950" stroke-width="1.6" fill="none" marker-start="url(#aG)" marker-end="url(#aG)"/>
+
+  <!-- Decision inbox -->
+  <rect x="1130" y="642" width="330" height="128" rx="12" class="panel" stroke="#f85149" stroke-width="2"/>
+  <text x="1150" y="672" class="t h">Decision inbox <tspan class="m xs" font-weight="400" dx="4">Mill Board</tspan></text>
+  <text x="1150" y="692" class="xs" fill="#f85149">replaces Gate 1 and Gate 2</text>
+  <text x="1150" y="716" class="s t">Nano: irreversible · deadlock · taste</text>
+  <text x="1150" y="738" class="xs m">approve +1 allowance · choose · reject</text>
+  <text x="1150" y="756" class="xs m">irreversible first, then oldest</text>
+  <path d="M1070,700 L1126,700" stroke="#f85149" stroke-width="1.6" fill="none" marker-end="url(#aR)"/>
+  <text x="1098" y="692" class="xs" fill="#f85149" text-anchor="middle">escalate</text>
+  <path d="M1295,618 L1295,638" stroke="#3fb950" stroke-width="1.6" fill="none" marker-end="url(#aG)"/>
+
+  <!-- ============ ROW 4: RETRO + REMOVED ============ -->
+  <rect x="40" y="810" width="690" height="120" rx="12" class="panel" stroke="#d29922"/>
+  <text x="60" y="840" class="t h">Retro / learning loop</text>
+  <text x="710" y="840" class="keep" text-anchor="end">STAYS</text>
+  <text x="60" y="866" class="s t">Settled outcomes, reopened claims and inbox answers → remind-me</text>
+  <text x="60" y="888" class="xs m">lessons feed back into the catalog, the overlay and each lens's track record</text>
+  <text x="60" y="910" class="xs m">decisions carry across sessions and projects</text>
+  <path d="M750,770 C750,800 600,800 560,808" stroke="#d29922" stroke-width="1.6" fill="none" marker-end="url(#aA)"/>
+  <path d="M40,870 C14,870 14,200 36,200" stroke="#d29922" stroke-width="1.6" fill="none" stroke-dasharray="5 4" marker-end="url(#aA)"/>
+
+  <rect x="770" y="810" width="690" height="120" rx="12" class="panel" stroke="#f85149" stroke-dasharray="6 4"/>
+  <text x="790" y="840" class="t h">Removed from the software-factory map</text>
+  <text x="790" y="868" class="gone">Role threads (planner → coder → tester → reviewer)</text>
+  <text x="790" y="892" class="gone">Column hand-offs between roles</text>
+  <text x="790" y="916" class="gone">Gate 1 (plan approval) · Gate 2 (merge approval)</text>
+
+  <!-- Footer -->
+  <text x="40" y="970" class="xs m">Redrawn from Mill Board card #724; the 2026-11-04 voice-chat original was not reachable (OPEN_QUESTIONS Q45). The original software-factory map is kept unchanged as history.</text>
+  <text x="40" y="990" class="xs m">Shows the 2026-11-04 design. Later direction (D133): the project expert becomes a domain knowledge pack; the expert stays the answerer until Nano confirms the swap (Q47).</text>
+</svg>
