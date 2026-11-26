@@ -2,6 +2,7 @@
 //! touches a process, the network or the disk. Decisions stay in the pure
 //! `orch-lens` core.
 //!
+//! - [`catalog`]: the Factory catalog read for #723 lens composition.
 //! - [`registry`]: one [`orch_lens::Model`] per configured provider, with
 //!   the operator's assertions passed to the CLI adapters.
 //! - [`assertions`]: the operator's assertions file, read fail-closed.
@@ -22,6 +23,7 @@ pub mod alien;
 pub mod assertions;
 pub mod bbp;
 pub mod breaker;
+pub mod catalog;
 pub mod check;
 pub mod container;
 pub mod hunts;

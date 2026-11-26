@@ -16,6 +16,9 @@
 //! Rules stay in code (ADR-0021); nothing composed here can loosen them.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path};
+
+use rusty_json::Value;
 
 /// The files one domain loads, as catalog-relative paths.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -76,6 +79,62 @@ impl std::fmt::Display for ComposeError {
 }
 
 impl std::error::Error for ComposeError {}
+
+/// Parse the domain map (Factory `domains.json`):
+/// `{"rust": {"knowledge": ["knowledge/rust.md"], "standards": [...]}}`.
+/// Paths must be relative and stay inside the catalog.
+pub fn parse_map(text: &str) -> Result<DomainMap, String> {
+    let v = Value::parse(text).map_err(|e| format!("domain map is not JSON: {e}"))?;
+    let top = v.as_object().ok_or("domain map: object required")?;
+    top.iter()
+        .map(|(domain, packs)| {
+            let packs = parse_packs(packs).map_err(|e| format!("{domain}.{e}"))?;
+            Ok((domain.clone(), packs))
+        })
+        .collect()
+}
+
+fn parse_packs(v: &Value) -> Result<Packs, String> {
+    let m = v.as_object().ok_or("object required")?;
+    if let Some(k) = m
+        .keys()
+        .find(|k| !["knowledge", "standards"].contains(&k.as_str()))
+    {
+        return Err(format!("unknown field {k:?}"));
+    }
+    Ok(Packs {
+        knowledge: paths(m.get("knowledge"), "knowledge")?,
+        standards: paths(m.get("standards"), "standards")?,
+    })
+}
+
+fn paths(v: Option<&Value>, what: &str) -> Result<Vec<String>, String> {
+    let Some(v) = v else {
+        return Ok(vec![]);
+    };
+    let items = v
+        .as_array()
+        .ok_or_else(|| format!("{what}: array required"))?;
+    items
+        .iter()
+        .map(|p| {
+            let p = p
+                .as_str()
+                .ok_or_else(|| format!("{what}: strings required"))?;
+            inside(p)
+                .then(|| p.to_owned())
+                .ok_or_else(|| format!("{what}: {p:?} must be a relative path inside the catalog"))
+        })
+        .collect()
+}
+
+/// Relative, non-empty, and no `..`, root or prefix component.
+fn inside(p: &str) -> bool {
+    !p.is_empty()
+        && Path::new(p)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
 
 /// The name reported when the domain pack is dropped.
 pub const DOMAIN_PACK: &str = "DOMAIN.md";
@@ -232,6 +291,45 @@ mod tests {
     fn build(domains: &[&str], pack: Option<&str>, limits: Limits) -> Composed {
         let (sel, _) = select(&map(), &doms(domains));
         compose("find faults", pack, &sel, &texts(), limits).expect("composes")
+    }
+
+    #[test]
+    fn the_map_parses() {
+        let m = parse_map(
+            r#"{"rust": {"knowledge": ["knowledge/rust.md"], "standards": ["standards/rust.md"]},
+                "terminal": {"knowledge": ["knowledge/terminal.md"]}}"#,
+        )
+        .expect("parses");
+        assert_eq!(m, map());
+    }
+
+    #[test]
+    fn a_bad_map_is_refused_with_the_field_named() {
+        for (text, err) in [
+            ("[]", "domain map: object required"),
+            (r#"{"rust": []}"#, "rust.object required"),
+            (
+                r#"{"rust": {"skills": []}}"#,
+                "rust.unknown field \"skills\"",
+            ),
+            (
+                r#"{"rust": {"knowledge": "k.md"}}"#,
+                "rust.knowledge: array required",
+            ),
+            (
+                r#"{"rust": {"knowledge": [1]}}"#,
+                "rust.knowledge: strings required",
+            ),
+        ] {
+            assert_eq!(parse_map(text).unwrap_err(), err, "{text}");
+        }
+        for bad in ["../secrets.md", "/etc/passwd", ""] {
+            let text = format!(r#"{{"rust": {{"standards": ["{bad}"]}}}}"#);
+            assert!(
+                parse_map(&text).unwrap_err().contains("inside the catalog"),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
