@@ -2233,11 +2233,14 @@ mod tests {
         let rel = host_id(Path::new("s.sock")).expect("a name");
         assert!(Path::new(&rel).is_absolute(), "{rel}");
         assert!(rel.ends_with("s.sock"));
-        let other = host_id(Path::new("/a/s.sock"));
-        assert_eq!(other.as_deref(), Some("/a/s.sock"));
-        use std::os::unix::ffi::OsStrExt;
-        let raw = Path::new(std::ffi::OsStr::from_bytes(b"/a/\xff.sock"));
-        assert_eq!(host_id(raw), None, "no lossy name");
+        #[cfg(unix)]
+        {
+            let other = host_id(Path::new("/a/s.sock"));
+            assert_eq!(other.as_deref(), Some("/a/s.sock"));
+            use std::os::unix::ffi::OsStrExt;
+            let raw = Path::new(std::ffi::OsStr::from_bytes(b"/a/\xff.sock"));
+            assert_eq!(host_id(raw), None, "no lossy name");
+        }
     }
 
     use std::ffi::OsString;
