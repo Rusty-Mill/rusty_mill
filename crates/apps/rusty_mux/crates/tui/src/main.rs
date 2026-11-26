@@ -2718,14 +2718,14 @@ mod client {
                 Explored::Copy(path) => {
                     // Asked for by a key; the terminal may ignore OSC 52, so
                     // the note says what was sent, not that it landed.
-                    let sent = osc52_set(&path).is_some_and(|seq| {
-                        let mut out = std::io::stdout();
-                        out.write_all(seq.as_bytes())
-                            .and_then(|()| out.flush())
-                            .is_ok()
-                    });
+                    let seq = osc52_set(&path);
+                    // A write that fails ends the client, as every other
+                    // terminal write does; only the size is the note's.
+                    if let Some(seq) = &seq {
+                        write(seq.as_bytes(), &mut self.ended);
+                    }
                     if let Some(open) = self.exploring.as_mut() {
-                        open.explorer.say(if sent {
+                        open.explorer.say(if seq.is_some() {
                             "path sent to the clipboard (needs OSC 52)"
                         } else {
                             "path not copied: too long"
