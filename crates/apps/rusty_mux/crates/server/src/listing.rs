@@ -372,7 +372,6 @@ pub(crate) fn stat(root: &Workspace, rel: &str) -> Result<String, String> {
 const TOUCHED_MAX: usize = 256 * 1024;
 /// How long all of `touched`'s `git` runs may take together, under the
 /// listing deadline so a slot is never held after the client gave up.
-#[cfg(target_os = "linux")]
 const TOUCHED_DEADLINE: Duration = Duration::from_secs(4);
 
 /// Runs `git` in the held workspace directory and returns its stdout.
