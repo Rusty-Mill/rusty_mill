@@ -903,30 +903,44 @@ fn a_prompt_is_kept_in_the_board_document_and_read_back() {
         tick.docs("board")[0].get("prompt").is_none(),
         "an empty prompt is left out of the document"
     );
-    let too_long = "x".repeat(32 * 1024 + 1);
+    let too_long = "x".repeat(8 * 1024 + 1);
     assert!(matches!(
         board.edit_at(card.id, &human, None, &prompt(&too_long)),
-        Err(BoardError::Invalid(_))
+        Err(BoardError::Refused(_))
     ));
+}
+
+/// A card as one written before the content limits is: stored directly, because the board
+/// refuses to write one (#1435).
+fn legacy(store: &TickStore<FakeTick>, title: &str, edit: impl FnOnce(&mut Card)) -> Card {
+    let mut card = Card::new(title, "", vec![], 1).expect("card");
+    edit(&mut card);
+    let rev = store
+        .insert(&card, Event::of(&card, EventKind::Created, "nano"))
+        .expect("insert");
+    Card { rev, ..card }
 }
 
 #[test]
 fn a_prompt_that_escapes_past_the_document_limit_is_refused_before_any_write() {
-    let (board, tick) = board();
-    let human = board.roles().actor("nano", "human").expect("role");
-    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let tick = FakeTick::default();
+    let store = TickStore::new(tick.clone());
+    let card = legacy(&store, "a", |_| {});
+    let card = store.get(card.id).expect("get").expect("card");
     // Within 32 KiB as typed, but every quote doubles once stored as JSON.
     let quotes = "\"".repeat(32 * 1024);
-    let edit = Edit {
-        title: Some("b"),
-        prompt: Some(&quotes),
-        ..Edit::default()
+    let edited = Card {
+        title: "b".into(),
+        prompt: quotes,
+        // As the board commits an edit: the revision it read, plus one.
+        rev: card.rev + 1,
+        ..card.clone()
     };
     assert!(matches!(
-        board.edit_at(card.id, &human, None, &edit),
+        store.replace(&edited, Event::of(&edited, EventKind::Edited, "nano")),
         Err(BoardError::Invalid(_))
     ));
-    let read = board.get(card.id).expect("get");
+    let read = store.get(card.id).expect("get").expect("card");
     assert_eq!(
         (read.title.as_str(), read.rev),
         ("a", card.rev),
@@ -982,16 +996,15 @@ fn title_and_prompt<'a>(t: &'a str, p: &'a str) -> Edit<'a> {
 
 #[test]
 fn links_that_take_a_document_near_the_limit_past_it_are_refused_before_any_write() {
-    let (board, tick) = board();
+    let tick = FakeTick::default();
+    let store = TickStore::new(tick.clone());
+    let board = Board::with_clock(TickStore::new(tick.clone()), Roles::default(), clock);
     let human = board.roles().actor("nano", "human").expect("role");
     let a = board.add(&human, "a", "", vec![]).expect("add");
     let b = board.add(&human, "b", "", vec![]).expect("add");
-    let card = board.add(&human, "card", "", vec![]).expect("add");
     // 32,700 quotes store as 65,400 bytes: the document fits, with no room for two links.
     let near = "\"".repeat(32_700);
-    let card = board
-        .edit_at(card.id, &human, None, &prompt(&near))
-        .expect("fits");
+    let card = legacy(&store, "card", |c| c.prompt = near.clone());
     assert!(matches!(
         board.plan(card.id, &human, &plan(Some(5), Some(vec![a.id, b.id]))),
         Err(BoardError::Invalid(_))
@@ -1403,14 +1416,23 @@ fn scan_all(
 /// The largest records the board holds come through a paged scan whole, from rusty_tick.
 #[test]
 fn a_paged_scan_over_rusty_tick_never_truncates_large_records() {
-    let board = tick_shared(FakeTick::default());
+    let tick = FakeTick::default();
+    let board = tick_shared(tick.clone());
     let body = "b".repeat(28 * 1024);
     let prompt = "p".repeat(rusty_mill_board::domain::MAX_PROMPT_BYTES);
-    let comment = "c".repeat(31 * 1024);
+    let comment = "c".repeat(2 * 1024);
     op(&board, "card_add", json!({"title": "before"}));
-    let big = op(&board, "card_add", json!({"title": "big", "body": body}))["card"]["id"].clone();
-    op(&board, "card_update", json!({"id": big, "prompt": prompt}));
-    op(&board, "card_comment", json!({"id": big, "text": comment}));
+    // Records from before the content limits, which the board no longer writes.
+    let big = legacy(&TickStore::new(tick), "big", |c| {
+        c.body.clone_from(&body);
+        c.prompt.clone_from(&prompt);
+    })
+    .id
+    .to_string();
+    let big = json!(big);
+    for _ in 0..15 {
+        op(&board, "card_comment", json!({"id": big, "text": comment}));
+    }
     op(&board, "card_add", json!({"title": "after"}));
 
     let all = op(&board, "board_list", json!({"view": "full"}))["cards"].clone();
@@ -1419,10 +1441,13 @@ fn a_paged_scan_over_rusty_tick_never_truncates_large_records() {
     let card = seen.iter().find(|c| c["id"] == big).expect("big card");
     assert_eq!(card["body"].as_str().map(str::len), Some(body.len()));
     assert_eq!(card["prompt"].as_str().map(str::len), Some(prompt.len()));
-    assert_eq!(
-        card["comments"][0]["text"].as_str().map(str::len),
-        Some(comment.len())
-    );
+    let total: usize = card["comments"]
+        .as_array()
+        .expect("comments")
+        .iter()
+        .map(|c| c["text"].as_str().map_or(0, str::len))
+        .sum();
+    assert_eq!(total, 15 * comment.len());
 }
 
 /// A scan over rusty_tick with fenced writes between pages: an unchanged card comes once, an

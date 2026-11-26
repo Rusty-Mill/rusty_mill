@@ -10,7 +10,7 @@ use crate::agents::Grant;
 use crate::board::{Board, NewCard};
 use crate::domain::{
     Actor, BoardError, Card, CardSummary, CloseReason, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS,
-    Dates, Edit, ExecutionLink, Plan, ProjectStatus, Shelf, Span, View,
+    Dates, Edit, ExecutionLink, Plan, ProjectStatus, Shelf, Span, View, check_state,
 };
 use crate::external::{Observation, Provider, RefState};
 use crate::milestones::MilestoneEdit;
@@ -575,6 +575,8 @@ struct MoveArgs {
     id: String,
     /// Destination column.
     to: Column,
+    /// Where the work stands now, one line, at most 200 bytes; kept as is when left out.
+    state: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -610,7 +612,7 @@ struct UpdateArgs {
     /// New labels (replaces all).
     tags: Option<Vec<String>>,
     /// New prompt: instructions for whoever takes the card, kept apart from the body
-    /// (`""` clears it; at most 32 KiB).
+    /// (`""` clears it; at most 8 KiB).
     prompt: Option<String>,
     /// What makes the card done (`""` clears it; at most 1200 bytes).
     acceptance: Option<String>,
@@ -620,6 +622,8 @@ struct UpdateArgs {
     why: Option<String>,
     /// One short paragraph for the card face (`""` clears it; at most 320 bytes).
     summary: Option<String>,
+    /// Where the work stands now (`""` clears it; one line, at most 200 bytes).
+    state: Option<String>,
     /// The card revision you last saw. If the card has moved on, the update is refused (409)
     /// so you can look at what changed instead of overwriting it.
     rev: Option<u64>,
@@ -631,8 +635,10 @@ struct CommentArgs {
     who: Who,
     /// Card id, or its number (`#42` or `42`).
     id: String,
-    /// Comment text.
+    /// Comment text (at most 2 KiB; put detail in a linked doc).
     text: String,
+    /// Where the work stands now, one line, at most 200 bytes; kept as is when left out.
+    state: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1115,7 +1121,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_add",
-            "Create a card in Backlog, or with `done: true` straight in Done to record work that already merged (needs `close`; pass the merged PR as `evidence`, or it counts as a prototype). When splitting work into pieces, pass `parent` (the card it is split from) on each piece. `acceptance` (1200 bytes), `scope` (800), `why` (600) and `summary` (320) are typed fields; use them instead of `##` headers in the body.",
+            "Create a card in Backlog, or with `done: true` straight in Done to record work that already merged (needs `close`; pass the merged PR as `evidence`, or it counts as a prototype). When splitting work into pieces, pass `parent` (the card it is split from) on each piece. `acceptance` (1200 bytes), `scope` (800), `why` (600) and `summary` (320) are typed fields; use them instead of `##` headers in the body. A card says what, who, status and where the detail lives: title at most 200 characters, body 8 KiB; longer is refused, so link the detail (remind-me, the repo, GitHub) instead.",
             |b, i, a: AddArgs| {
                 let who = acting(b, i, &a.who)?;
                 let new = NewCard {
@@ -1183,10 +1189,23 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_move",
-            "Move a card to a column (an id from `board_columns`). Needs the capability of that transition (`board_columns` lists them; a gate also needs admin); leaving a work column needs your claim. Any open card may be moved to blocked. While an admin has turned movement rules off, the transition list is not enforced; role, project scope, claims, gates and card state still apply, and Done stays final.",
+            "Move a card to a column (an id from `board_columns`); an optional `state` line (at most 200 bytes) updates where the work stands. Needs the capability of that transition (`board_columns` lists them; a gate also needs admin); leaving a work column needs your claim. Any open card may be moved to blocked. While an admin has turned movement rules off, the transition list is not enforced; role, project scope, claims, gates and card state still apply, and Done stays final.",
             |b, i, a: MoveArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.move_card(card_ref(b, &a.id)?, &a.to, &who)?)
+                let id = card_ref(b, &a.id)?;
+                // Checked before the move, so a bad state never leaves a half-done call.
+                a.state.as_deref().map(check_state).transpose()?;
+                let moved = b.move_card(id, &a.to, &who)?;
+                match a.state.as_deref() {
+                    None => card(moved),
+                    Some(state) => {
+                        let edit = Edit {
+                            state: Some(state),
+                            ..Edit::default()
+                        };
+                        card(b.edit_at(id, &who, None, &edit)?)
+                    }
+                }
             },
         ),
         op(
@@ -1297,7 +1316,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_update",
-            "Edit a card's title, body, tags, prompt (instructions for whoever takes it, shown apart from the body) or its typed fields `acceptance`, `scope`, `why` and `summary`. Put those in the fields, not under `## Acceptance`-style headers in the body: `card_take` and `card_get` return them, `board_list` summaries leave them out. Pass `rev` (the revision you last read) to refuse the edit if the card has changed since.",
+            "Edit a card's title, body, tags, prompt (instructions for whoever takes it, shown apart from the body) or its typed fields `acceptance`, `scope`, `why` and `summary`, or `state`: one line, at most 200 bytes, saying where the work stands now (it changes as work moves; `summary` rarely does). Title is at most 200 characters, body and prompt 8 KiB; a limit applies only to a field you change, so an older longer card can still be edited. Put those in the fields, not under `## Acceptance`-style headers in the body: `card_take` and `card_get` return them, `board_list` summaries leave them out. Pass `rev` (the revision you last read) to refuse the edit if the card has changed since.",
             |b, i, a: UpdateArgs| {
                 let who = acting(b, i, &a.who)?;
                 let edit = Edit {
@@ -1309,6 +1328,7 @@ pub fn ops() -> Vec<Op> {
                     scope: a.scope.as_deref(),
                     why: a.why.as_deref(),
                     summary: a.summary.as_deref(),
+                    state: a.state.as_deref(),
                 };
                 card(b.edit_at(card_ref(b, &a.id)?, &who, a.rev, &edit)?)
             },
@@ -1372,10 +1392,15 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_comment",
-            "Add a comment to a card.",
+            "Add a comment to a card: a status note of at most 2 KiB, with detail in a linked doc. An optional `state` line (one line, at most 200 bytes) updates where the work stands.",
             |b, i, a: CommentArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.comment(card_ref(b, &a.id)?, &who, &a.text)?)
+                card(b.comment_with_state(
+                    card_ref(b, &a.id)?,
+                    &who,
+                    &a.text,
+                    a.state.as_deref(),
+                )?)
             },
         ),
     ]
@@ -1639,15 +1664,19 @@ mod tests {
 
     #[test]
     fn a_page_stops_at_its_byte_budget_and_keeps_every_card_whole() {
-        let board = paged_board();
-        let human = json!({"actor": "nano", "role": "human"});
+        use crate::domain::{Event, EventKind};
+        use crate::store::Store;
+        // Cards from before the content limits, which the board no longer writes.
+        let store = MemStore::default();
         let body = "b".repeat(300 * 1024);
         for i in 0..3 {
-            let mut a = human.clone();
-            a["title"] = json!(format!("big {i}"));
-            a["body"] = json!(body);
-            call_as(&board, None, "card_add", a).expect("add");
+            let mut card = Card::new(&format!("big {i}"), "", vec![], i + 1).expect("card");
+            card.body.clone_from(&body);
+            store
+                .insert(&card, Event::of(&card, EventKind::Created, "nano"))
+                .expect("insert");
         }
+        let board: Shared = Board::with_clock(Box::new(store), Roles::default(), ticking);
         let full = json!({"limit": 500, "view": "full"});
         let first = call_as(&board, None, "board_list", full).expect("page");
         assert_eq!(first["cards"].as_array().expect("cards").len(), 1);
@@ -3559,5 +3588,189 @@ mod tests {
             ),
             Err(CallError::Board(BoardError::Forbidden(_)))
         ));
+    }
+
+    /// Lean cards (#1435): the `state` line and the write-time content budgets.
+    mod lean {
+        use super::*;
+
+        fn human(extra: Value) -> Value {
+            let mut a = json!({"actor": "nano", "role": "human"});
+            a.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            a
+        }
+
+        fn run(board: &Shared, name: &str, extra: Value) -> Result<Value, CallError> {
+            call_as(board, None, name, human(extra))
+        }
+
+        fn refusal(r: Result<Value, CallError>) -> String {
+            match r {
+                Err(CallError::Board(BoardError::Refused(m))) => m,
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+
+        fn add(board: &Shared) -> Value {
+            run(board, "card_add", json!({"title": "a"})).expect("add")["card"]["id"].clone()
+        }
+
+        #[test]
+        fn state_is_set_by_update_comment_and_move_and_kept_when_a_write_omits_it() {
+            let board = paged_board();
+            let id = add(&board);
+            let get = || run(&board, "card_get", json!({"id": id})).expect("get")["card"].clone();
+            assert!(get().get("state").is_none(), "empty state is left out");
+            run(
+                &board,
+                "card_update",
+                json!({"id": id, "state": "by update"}),
+            )
+            .expect("update");
+            assert_eq!(get()["state"], "by update");
+            run(&board, "card_update", json!({"id": id, "title": "b"})).expect("title");
+            assert_eq!(
+                get()["state"],
+                "by update",
+                "a write that omits it keeps it"
+            );
+            run(
+                &board,
+                "card_comment",
+                json!({"id": id, "text": "x", "state": "by comment"}),
+            )
+            .expect("comment");
+            assert_eq!(get()["state"], "by comment");
+            run(&board, "card_comment", json!({"id": id, "text": "y"})).expect("comment");
+            assert_eq!(get()["state"], "by comment");
+            run(
+                &board,
+                "card_move",
+                json!({"id": id, "to": "ready", "state": "ready for pickup"}),
+            )
+            .expect("move");
+            assert_eq!(get()["state"], "ready for pickup");
+            run(&board, "card_update", json!({"id": id, "state": ""})).expect("clear");
+            assert!(get().get("state").is_none());
+        }
+
+        #[test]
+        fn state_is_one_line_of_at_most_200_bytes_and_a_bad_one_changes_nothing() {
+            let board = paged_board();
+            let id = add(&board);
+            let set = |s: &str| run(&board, "card_update", json!({"id": id, "state": s}));
+            assert!(set(&"s".repeat(200)).is_ok());
+            let m = refusal(set(&"s".repeat(201)));
+            assert!(
+                m.contains("state") && m.contains("201") && m.contains("200"),
+                "{m}"
+            );
+            assert!(set("two\nlines").is_err());
+            // A bad state on a move refuses before the card moves.
+            let bad = run(
+                &board,
+                "card_move",
+                json!({"id": id, "to": "ready", "state": "a\nb"}),
+            );
+            assert!(bad.is_err());
+            let card = run(&board, "card_get", json!({"id": id})).expect("get")["card"].clone();
+            assert_eq!(card["column"], "backlog");
+        }
+
+        #[test]
+        fn the_summary_view_carries_state_only_when_set() {
+            let board = paged_board();
+            let with = add(&board);
+            let without = add(&board);
+            run(
+                &board,
+                "card_update",
+                json!({"id": with, "state": "in review"}),
+            )
+            .expect("set");
+            let out = run(&board, "board_list", json!({"view": "summary"})).expect("list");
+            let cards = out["cards"].as_array().expect("cards");
+            let of = |id: &Value| cards.iter().find(|c| c["id"] == *id).expect("card").clone();
+            assert_eq!(of(&with)["state"], "in review");
+            assert!(of(&without).get("state").is_none());
+        }
+
+        #[test]
+        fn each_budget_accepts_its_limit_and_refuses_one_over_with_a_hint() {
+            let board = paged_board();
+            let id = add(&board);
+            let kib8 = 8 * 1024;
+            for (field, ok, over, unit) in [
+                ("title", "t".repeat(200), "t".repeat(201), "characters"),
+                ("body", "b".repeat(kib8), "b".repeat(kib8 + 1), "bytes"),
+                ("prompt", "p".repeat(kib8), "p".repeat(kib8 + 1), "bytes"),
+            ] {
+                assert!(
+                    run(&board, "card_update", json!({"id": id, field: ok})).is_ok(),
+                    "{field}"
+                );
+                let m = refusal(run(&board, "card_update", json!({"id": id, field: over})));
+                assert!(m.contains(field) && m.contains(unit), "{m}");
+                assert!(
+                    m.contains("remind-me"),
+                    "the hint says where the detail goes: {m}"
+                );
+            }
+            let m = refusal(run(&board, "card_add", json!({"title": "t".repeat(201)})));
+            assert!(m.contains("title"), "{m}");
+            let m = refusal(run(
+                &board,
+                "card_add",
+                json!({"title": "x", "body": "b".repeat(kib8 + 1)}),
+            ));
+            assert!(m.contains("body"), "{m}");
+            assert!(
+                run(
+                    &board,
+                    "card_comment",
+                    json!({"id": id, "text": "c".repeat(2048)})
+                )
+                .is_ok()
+            );
+            let m = refusal(run(
+                &board,
+                "card_comment",
+                json!({"id": id, "text": "c".repeat(2049)}),
+            ));
+            assert!(
+                m.contains("comment") && m.contains("2049") && m.contains("2048"),
+                "{m}"
+            );
+        }
+
+        #[test]
+        fn a_card_over_the_limits_is_grandfathered_never_rewritten_and_still_editable() {
+            use crate::domain::{Event, EventKind};
+            use crate::store::Store;
+            let store = MemStore::default();
+            let mut card = Card::new("old", "", vec![], 1).expect("card");
+            card.body = "b".repeat(28 * 1024);
+            card.prompt = "p".repeat(32 * 1024);
+            store
+                .insert(&card, Event::of(&card, EventKind::Created, "nano"))
+                .expect("insert");
+            let board: Shared = Board::with_clock(Box::new(store), Roles::default(), ticking);
+            let id = json!(card.id);
+            // An edit of another field is not refused, and nothing is truncated.
+            run(&board, "card_update", json!({"id": id, "title": "renamed"})).expect("title");
+            let got = run(&board, "card_get", json!({"id": id})).expect("get")["card"].clone();
+            assert_eq!(got["body"].as_str().map(str::len), Some(28 * 1024));
+            assert_eq!(got["prompt"].as_str().map(str::len), Some(32 * 1024));
+            // Sending the same body or prompt back is not a change.
+            let same = json!({"id": id, "body": card.body, "prompt": card.prompt});
+            assert!(run(&board, "card_update", same).is_ok());
+            // A different oversized body is a change, and is refused.
+            let other = json!({"id": id, "body": "c".repeat(28 * 1024)});
+            assert!(run(&board, "card_update", other).is_err());
+            // Shortening it under the limit is allowed.
+            assert!(run(&board, "card_update", json!({"id": id, "body": "short"})).is_ok());
+        }
     }
 }

@@ -285,6 +285,8 @@ struct BoardDoc {
     why: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     summary: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -316,6 +318,7 @@ impl BoardDoc {
             scope: card.scope.clone(),
             why: card.why.clone(),
             summary: card.summary.clone(),
+            state: card.state.clone(),
             target_ms: card.target_ms,
             external_refs: card
                 .external_refs
@@ -564,6 +567,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         scope: doc.scope,
         why: doc.why,
         summary: doc.summary,
+        state: doc.state,
         column,
         claim,
         tags,

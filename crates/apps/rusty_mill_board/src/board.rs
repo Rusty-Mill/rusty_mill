@@ -2390,8 +2390,22 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::comment`].
     pub fn comment(&self, id: Uuid, by: &Actor, text: &str) -> Result<Card, BoardError> {
+        self.comment_with_state(id, by, text, None)
+    }
+
+    /// [`Board::comment`], also setting the card's `state` line when one is given.
+    ///
+    /// # Errors
+    /// See [`Card::comment_with_state`].
+    pub fn comment_with_state(
+        &self,
+        id: Uuid,
+        by: &Actor,
+        text: &str,
+        state: Option<&str>,
+    ) -> Result<Card, BoardError> {
         self.apply(id, by, EventKind::Commented, |c, now| {
-            c.comment(by, text, now)
+            c.comment_with_state(by, text, state, now)
         })
     }
 }
