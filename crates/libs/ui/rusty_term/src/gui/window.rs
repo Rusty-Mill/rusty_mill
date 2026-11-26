@@ -5308,6 +5308,7 @@ impl WindowState<'_> {
         });
         self.active = 0;
         self.layout_panes(0);
+        self.retire_explorer_if_gone();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -5357,6 +5358,7 @@ impl WindowState<'_> {
             tab.focus = first;
         }
         self.layout_panes(self.active);
+        self.retire_explorer_if_gone();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -5464,6 +5466,21 @@ impl WindowState<'_> {
         if let Some(key) = self.explorer.block() {
             self.explorer.close();
             self.source.explore(key, Explored::Close);
+        }
+    }
+
+    /// Close the explorer if the block it was opened on is gone from the
+    /// window: its connection ends with the pane. Changing focus leaves it.
+    fn retire_explorer_if_gone(&mut self) {
+        let Some(key) = self.explorer.block() else {
+            return;
+        };
+        if !self
+            .tabs
+            .iter()
+            .any(|t| t.panes.iter().any(|p| p.id == key))
+        {
+            self.close_explorer();
         }
     }
 
@@ -7419,6 +7436,20 @@ impl WindowState<'_> {
                 let (lines, remainder) = accumulate_scroll_lines(self.scroll_accum, raw_lines);
                 self.scroll_accum = remainder;
                 if lines == 0 {
+                    return;
+                }
+                // Over the explorer the wheel moves its cursor a row a
+                // line, and never reaches the panes under it (D99).
+                if self.explorer.over(self.mouse_pos.0, self.mouse_pos.1) {
+                    let step = if lines > 0 {
+                        super::explorer::Key::Up
+                    } else {
+                        super::explorer::Key::Down
+                    };
+                    for _ in 0..lines.unsigned_abs() {
+                        let out = self.explorer.key(step);
+                        self.explorer_out(out);
+                    }
                     return;
                 }
                 // The overview covers the body: the wheel moves its

@@ -108,6 +108,18 @@ impl ExplorerUi {
         Some(self.panel.key(key))
     }
 
+    /// Whether window px `(x, y)` is on the painted panel.
+    pub(crate) fn over(&self, x: f64, y: f64) -> bool {
+        let Some((_, painted, at)) = &self.painted else {
+            return false;
+        };
+        let (px, py) = (x - at.0 as f64, y - at.1 as f64);
+        px >= 0.0
+            && py >= 0.0
+            && px < painted.pixmap.width as f64
+            && py < painted.pixmap.height as f64
+    }
+
     /// A click at window px: what it asks, and whether it was on the panel.
     pub(crate) fn click(&mut self, x: f64, y: f64) -> (Option<Out>, bool) {
         let Some((_, painted, at)) = &self.painted else {
@@ -561,6 +573,18 @@ mod tests {
         assert!(ui.owns_keys(), "the panel was clicked");
         ui.close();
         assert!(!ui.owns_keys());
+    }
+
+    #[test]
+    fn over_is_the_painted_box() {
+        let ui = open(tree(), 1.0, &Theme::default());
+        let at = ui.painted().map(|(_, a)| a).expect("painted");
+        assert!(ui.over(at.0 as f64 + 1.0, at.1 as f64 + 1.0));
+        assert!(!ui.over(at.0 as f64 - 1.0, at.1 as f64 + 1.0), "left of it");
+        assert!(
+            !ExplorerUi::new().expect("font").over(900.0, 100.0),
+            "closed"
+        );
     }
 
     #[test]
