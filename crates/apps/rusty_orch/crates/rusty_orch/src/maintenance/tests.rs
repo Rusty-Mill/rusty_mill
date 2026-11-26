@@ -723,6 +723,7 @@ fn persist_task(dir: &Path, name: &str, repo: &Path, terminal: bool) {
     use rusty_bbp::{Budget, Event, PrincipalId, Rev, SchedulingPolicy, TaskId, LOG_SCHEMA};
     let task = TaskId(name.into());
     let mut events = vec![Event::TaskOpened {
+        gates: None,
         claims: None,
         mode: rusty_bbp::Mode::Stages,
         schema: LOG_SCHEMA,

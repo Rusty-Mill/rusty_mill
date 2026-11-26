@@ -154,6 +154,9 @@ pub struct Board<S> {
         Vec<crate::mergewatch::MergedOpen>,
         crate::mergewatch::WatchStatus,
     )>,
+    /// Signs approval receipts for BBP human gates (#447), and the file each issued receipt is
+    /// recorded in; `None` refuses `approval_issue`.
+    approval_key: Option<Arc<(rusty_pk::ed25519::SigningKey, std::path::PathBuf)>>,
 }
 
 /// The parent-link gate, even if a holder panicked: it guards no data.
@@ -246,7 +249,54 @@ impl<S: Store> Board<S> {
             agents: Mutex::default(),
             links: Mutex::new(()),
             merged_open: Mutex::default(),
+            approval_key: None,
         }
+    }
+
+    /// Sign BBP approval receipts with `key` (#447), recording each one issued in `issued` (one
+    /// receipt JSON per line, owner-only).
+    #[must_use]
+    pub fn with_approval_key(
+        mut self,
+        key: rusty_pk::ed25519::SigningKey,
+        issued: std::path::PathBuf,
+    ) -> Self {
+        self.approval_key = Some(Arc::new((key, issued)));
+        self
+    }
+
+    /// Sign a receipt that `by` approved one BBP gate in the words of `r.verbatim` (#447). The
+    /// approver is `by`, whatever `r` names, and the time is the board's. A plan needs `approve`
+    /// or `admin`; a merge needs `admin` (the owner), as a merge `card_approve` waits for the
+    /// owner's confirmation (D1). Every receipt issued is recorded before it is returned.
+    ///
+    /// # Errors
+    /// `Forbidden` without the capability; `Refused` when no key is configured, `bbp` would
+    /// refuse the receipt, or it cannot be recorded.
+    pub fn issue_approval(
+        &self,
+        by: &Actor,
+        r: crate::receipts::Receipt,
+    ) -> Result<String, BoardError> {
+        let admin = by.caps.contains(&Capability::Admin);
+        if r.gate == "merge" && !admin {
+            return Err(BoardError::Forbidden(Capability::Admin));
+        }
+        if !admin && !by.caps.contains(&Capability::Approve) {
+            return Err(BoardError::Forbidden(Capability::Approve));
+        }
+        let (key, issued) = self.approval_key.as_deref().ok_or_else(|| {
+            BoardError::Refused("this board has no approval key (--approval-key)".into())
+        })?;
+        let r = crate::receipts::Receipt {
+            approver: by.name.clone(),
+            issued_ms: (self.clock)(),
+            ..r
+        };
+        let file = crate::receipts::issue(key, &r).map_err(BoardError::Refused)?;
+        crate::receipts::record(issued, &file).map_err(BoardError::Refused)?;
+        rusty_log::info!(approver = %r.approver, task = %r.task, gate = %r.gate, fence = r.fence, source = %r.source, "approval receipt issued");
+        Ok(file)
     }
 
     /// Serve these projects instead of only `default`.

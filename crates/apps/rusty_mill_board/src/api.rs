@@ -568,6 +568,26 @@ struct ApproveArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct ApprovalIssueArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// The BBP task id, as its gate shows it.
+    task: String,
+    /// `plan` or `merge`.
+    gate: String,
+    /// The approved artifact (`art:N` as the number N).
+    subject: u64,
+    /// For the merge gate: the approved run (`run:N` as N).
+    run: Option<u64>,
+    /// The task revision the approver's view showed; the answer is fenced on it.
+    fence: u64,
+    /// The readback and the approver's answer, verbatim (at most 2000 bytes).
+    verbatim: String,
+    /// Where it was said: a message link or id.
+    source: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct MoveArgs {
     #[serde(flatten)]
     who: Who,
@@ -1251,6 +1271,37 @@ pub fn ops() -> Vec<Op> {
                     crate::duties::Outcome::Expired => "expired",
                 };
                 Ok(json!({ "card": c, "outcome": outcome }))
+            },
+        ),
+        op(
+            "approval_issue",
+            "Sign a receipt that you approved one BBP gate (a task's plan, or its merge at a run), for `bbp human --approval FILE` on an owned task. Read the gate back to the owner and ask \"Approve?\" first, as for `card_approve`; pass the revision the gate showed as `fence`, the readback and answer as `verbatim`, and the message link as `source`. The receipt names your credential as the approver, so only a token credential of your own can get one: never a named actor and role, and never a claude.ai connector. Returns the file's text in `receipt`. A plan needs `approve`; a merge needs `admin`, and any admin counts as the owner.",
+            |b, i, a: ApprovalIssueArgs| {
+                // A receipt carries the approver's name to BBP, so it is a token credential's
+                // own, never one the caller names (stdio, open auth) or a connector's agent.
+                if !i.is_some_and(|i| !i.connector) {
+                    return Err(BoardError::Invalid(
+                        "a receipt names its approver: it needs a token credential of your own, not a named actor and role or a connector",
+                    ));
+                }
+                if a.who.actor.as_deref().is_some_and(|n| n.contains('/')) {
+                    return Err(BoardError::Invalid(
+                        "a receipt names the credential itself: omit actor, without a /label",
+                    ));
+                }
+                let who = acting(b, i, &a.who)?;
+                let r = crate::receipts::Receipt {
+                    task: a.task,
+                    gate: a.gate,
+                    subject: a.subject,
+                    run: a.run,
+                    fence: a.fence,
+                    approver: String::new(),
+                    verbatim: a.verbatim,
+                    source: a.source,
+                    issued_ms: 0,
+                };
+                Ok(json!({ "receipt": b.issue_approval(&who, r)? }))
             },
         ),
         op(
@@ -2301,6 +2352,65 @@ mod tests {
             connector: false,
             provider: None,
         }
+    }
+
+    #[test]
+    fn approval_issue_signs_as_the_caller_for_an_approve_holder_only() {
+        let mut roles = Roles::default();
+        roles
+            .0
+            .insert("approver".into(), [Capability::Approve].into());
+        let key = rusty_pk::ed25519::SigningKey::from_seed(&[5; 32]).expect("key");
+        let args = json!({"task": "orch-abc", "gate": "plan", "subject": 2, "fence": 9,
+                          "verbatim": "Approve the plan? Yes.", "source": "cmsg_x"});
+        let keyless_store: Box<dyn crate::store::Store> = Box::new(MemStore::default());
+        let keyless: Shared = Board::new(keyless_store, roles.clone());
+        let proxy = ident("nano-proxy", "approver");
+        let err =
+            call_as(&keyless, Some(&proxy), "approval_issue", args.clone()).expect_err("refused");
+        assert!(format!("{err:?}").contains("approval key"), "{err:?}");
+
+        let store: Box<dyn crate::store::Store> = Box::new(MemStore::default());
+        let issued = std::env::temp_dir().join(format!("issued-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&issued);
+        let board: Shared = Board::new(store, roles).with_approval_key(key, issued.clone());
+        let builder = ident("cloud", "builder");
+        assert!(call_as(&board, Some(&builder), "approval_issue", args.clone()).is_err());
+        let mut named = args.clone();
+        named["actor"] = json!("nano");
+        named["role"] = json!("admin");
+        let err = call_as(&board, None, "approval_issue", named).expect_err("named");
+        assert!(format!("{err:?}").contains("token credential"), "{err:?}");
+        let mut labelled = args.clone();
+        labelled["actor"] = json!("nano-proxy/x");
+        let err = call_as(&board, Some(&proxy), "approval_issue", labelled).expect_err("label");
+        assert!(format!("{err:?}").contains("/label"), "{err:?}");
+        let mut connector = ident("claude-cloud", "approver");
+        connector.connector = true;
+        assert!(call_as(&board, Some(&connector), "approval_issue", args.clone()).is_err());
+        let mut merge = args.clone();
+        merge["gate"] = json!("merge");
+        merge["run"] = json!(1);
+        assert!(
+            call_as(&board, Some(&proxy), "approval_issue", merge).is_err(),
+            "a merge receipt is the owner's"
+        );
+        let out = call_as(&board, Some(&proxy), "approval_issue", args).expect("issue");
+        let recorded = std::fs::read_to_string(&issued).expect("recorded");
+        let _ = std::fs::remove_file(&issued);
+        assert_eq!(
+            recorded.lines().count(),
+            1,
+            "only the issued one is recorded"
+        );
+        let file = out["receipt"].as_str().expect("receipt");
+        let body: crate::receipts::Receipt =
+            serde_json::from_str(file.lines().next().expect("line")).expect("json");
+        assert_eq!(
+            body.approver, "nano-proxy",
+            "the caller, not a name it passes"
+        );
+        assert!(body.issued_ms > 0);
     }
 
     #[test]

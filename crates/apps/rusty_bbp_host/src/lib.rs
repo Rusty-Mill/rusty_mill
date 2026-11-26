@@ -27,6 +27,7 @@ pub const BUILD_SHA: &str = env!("BBP_BUILD_SHA");
 
 pub mod admin;
 pub mod admission;
+pub mod approval;
 pub mod args;
 pub mod baseline;
 pub mod broker;
@@ -58,6 +59,7 @@ pub mod protect;
 pub mod report;
 pub mod run_control;
 pub mod runner;
+pub mod scratch_repos;
 pub mod shadow;
 pub mod slots;
 pub mod tokens;

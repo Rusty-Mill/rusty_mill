@@ -33,6 +33,7 @@ fn blob(tag: &str) -> BlobRef {
 
 fn open_task(mode: Mode, claims: Option<ClaimsConfig>, roster: Vec<Role>) -> OpenTask {
     OpenTask {
+        gates: None,
         task: TaskId::from("t"),
         roster,
         repo: "repo".into(),

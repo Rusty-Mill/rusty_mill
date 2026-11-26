@@ -564,7 +564,16 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
                 dir.join("profiles.json").to_string_lossy().into_owned(),
                 "--live-turns".into(),
                 config.live_turns.to_string(),
-            ],
+            ]
+            .into_iter()
+            .chain(
+                config
+                    .gates
+                    .map(|_| ["--gates".into(), "scratch".into()])
+                    .into_iter()
+                    .flatten(),
+            )
+            .collect(),
         )?;
         match response {
             Response::Rejected(r) if r.code == Code::AlreadyOpen => Ok(()),

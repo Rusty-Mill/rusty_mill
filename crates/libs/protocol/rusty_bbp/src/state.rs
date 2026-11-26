@@ -212,6 +212,8 @@ pub struct TaskState {
     pub repo: String,
     pub profile_digest: Sha256,
     pub human: PrincipalId,
+    /// #447: `Some(Scratch)` when the task's human gates take an unsigned answer; `None` is owned.
+    pub gates: Option<crate::policy::Gates>,
     pub policy: SchedulingPolicy,
     pub budget: Budget,
     pub spent: Spent,
@@ -285,6 +287,7 @@ impl TaskState {
             repo: String::new(),
             profile_digest: Sha256([0; 32]),
             human: PrincipalId("human".into()),
+            gates: None,
             policy: SchedulingPolicy::default(),
             budget: Budget {
                 messages: 40,
@@ -715,8 +718,10 @@ impl TaskState {
                 claims,
                 holdout_digest,
                 baseline_digest,
+                gates,
             } => {
                 self.task = task.clone();
+                self.gates = *gates;
                 self.schema = *schema;
                 // Only schema 5 is claims mode; below it the field is ignored.
                 self.mode = if *schema == crate::event::LOG_SCHEMA_CLAIMS {
