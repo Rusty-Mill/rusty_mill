@@ -2791,18 +2791,28 @@ impl State {
             .ok_or(rusty_mux_core::Error::UnknownWindow(window))?
             .session();
         // What it was started as, even a default shell: a config reloaded
-        // since would otherwise start something else. It starts in the
-        // directory it was launched in, the one the workspace explorer
-        // shows (D337), not wherever its shell last went: the held
-        // descriptor when there is one, which survives a rename of the
-        // path, else the launch path, which must still be a directory.
-        let held = rt.started.workspace.spawn_cwd();
+        // since would otherwise start something else. It starts where its
+        // shell last reported being (OSC 7, D375) while that is still a
+        // local directory; else in the directory it was launched in, the
+        // one the workspace explorer shows (D337): the held descriptor when
+        // there is one, which survives a rename of the path, else the
+        // launch path, which must still be a directory.
+        let reported = terminal::reported_dir(&rt.grid);
+        let held = rt
+            .started
+            .workspace
+            .spawn_cwd()
+            .filter(|_| reported.is_none());
         let launch = Launch {
             program: Some(Program {
                 command: rt.started.program.clone(),
                 args: rt.started.args.clone(),
             }),
-            cwd: Some(rt.started.cwd.clone()).filter(|d| held.is_none() && !d.is_empty()),
+            cwd: reported
+                .map(|d| d.to_string_lossy().into_owned())
+                .or_else(|| {
+                    Some(rt.started.cwd.clone()).filter(|d| held.is_none() && !d.is_empty())
+                }),
             ..Launch::default()
         };
         let mut config = launched(&self.config, &launch)?;

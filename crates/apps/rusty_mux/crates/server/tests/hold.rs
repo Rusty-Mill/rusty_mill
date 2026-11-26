@@ -283,6 +283,49 @@ fn a_re_run_follows_the_held_directory_when_the_launch_path_is_gone() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A re-run starts where the shell last reported being (OSC 7, D375), not
+/// where it was launched; a report that names no directory falls back to
+/// the launch directory.
+#[test]
+fn a_re_run_starts_where_the_shell_last_reported_being() {
+    for (report, in_sub) in [("$PWD/sub", true), ("/no/such/dir", false)] {
+        let base = std::env::temp_dir().join(format!(
+            "rusty-mux-rerun-osc7-{}-{in_sub}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("sub")).unwrap();
+        let socket = start_server();
+        let mut client = Client::connect_with(&socket, HOLDING, None);
+        let script =
+            format!("printf '\\033]7;file://%s\\033\\\\' \"{report}\"; echo ran >> marker; exit 0");
+        let mut spec = launch(&script, true);
+        spec.cwd = Some(base.to_string_lossy().into_owned());
+        let block = created(&create(&mut client, spec));
+        wait_exited(&mut client, block);
+        client.request(|req| Message::Attach { req, block });
+        client.wait_ready(block);
+        client.request(|req| Message::AcquireLease { req, block });
+        let done = rerun(&mut client, block);
+        assert!(
+            matches!(done.as_slice(), [Message::Done { .. }]),
+            "{done:?}"
+        );
+        wait_screen(&mut client, block, "-- re-run at");
+        wait_exited(&mut client, block);
+        let lines = |d: &std::path::Path| {
+            std::fs::read_to_string(d.join("marker")).map_or(0, |m| m.lines().count())
+        };
+        let (launch_dir, sub) = (lines(&base), lines(&base.join("sub")));
+        assert_eq!(
+            (launch_dir, sub),
+            if in_sub { (1, 1) } else { (2, 0) },
+            "{report}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
 #[test]
 fn a_running_block_is_not_re_run() {
     let socket = start_server();

@@ -1856,7 +1856,7 @@ pub static CATALOG: &[Method] = &[
     Method {
         name: "terminal.rerun",
         doc: "Start again the command a held block's program was started \
-              with (its program, arguments and the directory it was launched in, the one the workspace explorer shows), in the block, \
+              with (its program and arguments, in the directory the shell last reported with OSC 7 while that is still a local directory, else the one it was launched in), in the block, \
               under the lease; the screen stays and a line says when. Only once the \
               program is gone, and never for an agent's block, which is re-run through \
               its orchestrator. Nothing runs again on its own after a restart.",
