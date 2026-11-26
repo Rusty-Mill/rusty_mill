@@ -79,6 +79,11 @@ pub struct Config {
     /// (`[a-z0-9_-]+`, absolute paths). Only [`dry_run_args`] uses them.
     #[rusty_serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub real_data: BTreeMap<String, String>,
+    /// #447: `bbp open --gates`. `scratch` asks for human gates that take an unsigned answer;
+    /// the host refuses it unless the operator listed `repo` (D195). Unset opens owned tasks,
+    /// whose plan and merge approvals need a board receipt.
+    #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+    pub gates: Option<rusty_bbp::Gates>,
 }
 /// BBP's bound on a claim's `priority_secs`: a day.
 const MAX_PRIORITY_SECS: u64 = 86_400;

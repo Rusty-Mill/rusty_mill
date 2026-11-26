@@ -101,6 +101,7 @@ pub(super) fn config(dir: &std::path::Path) -> Config {
         slots: None,
         sensitive_paths: vec![],
         real_data: BTreeMap::new(),
+        gates: Some(rusty_bbp::Gates::Scratch),
     }
 }
 pub(super) fn task() -> (Task, Board) {

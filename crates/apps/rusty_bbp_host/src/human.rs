@@ -3,6 +3,7 @@
 //! revision the human saw (`--rev`, R15), never the one the CLI happens to
 //! load, so a delayed command meets newer work with `stale_rev`.
 
+use crate::approval::Verified;
 use crate::{fresh_op, now, open_driver};
 use rusty_bbp::*;
 use std::path::Path;
@@ -320,6 +321,10 @@ pub fn op_for(
 ) -> Result<Option<OpId>, String> {
     match (op, decision) {
         (Some(_), Some(_)) => Err("--op and --decision are exclusive".into()),
+        // A label comes only from `--as` or a receipt (D191): a caller op may not claim one.
+        (Some(op), None) if op.starts_with("by:") => {
+            Err("--op may not carry a by: label; use --as, or --approval on an owned task".into())
+        }
         (Some(op), None) => Ok(Some(OpId(op.to_owned()))),
         (None, Some(_)) if !fenced => Err("--decision needs --fence".into()),
         (None, Some(id)) => decision_op(by, id).map(Some),
@@ -378,6 +383,10 @@ pub fn perform_as(
     let _admission = refuse_evidence_extension(dir, task, &act)?.map_err(|r| r.detail)?;
     let op = labelled_op(by)?;
     let mut d = open_driver(dir, task)?;
+    // No receipt reaches this path, so an owned task's plan or merge approval is refused here.
+    if let Err(rej) = owner_gate(&d.state, &act, None) {
+        return Ok(Response::Rejected(rej));
+    }
     d.dispatch(&Command::Human { op, action: act }, now())
         .map_err(|e| format!("{e:?}"))
 }
@@ -488,6 +497,53 @@ fn command(
     Ok(Ok(Command::Human { op, action }))
 }
 
+/// Who may answer this action on `state`'s task (#447, D193): on an owned task a plan or merge
+/// approval needs a board receipt bound to it, and answers under the receipt's op; anything
+/// else, and every answer on a scratch task, keeps its own op (`Ok(None)`).
+///
+/// # Errors
+/// A `BadHumanInput` rejection: an owned approval without a receipt, a receipt that does not
+/// bind to this fenced approval, or a receipt on any other action.
+pub fn owner_gate(
+    state: &TaskState,
+    action: &HumanAction,
+    approval: Option<&Verified>,
+) -> Result<Option<OpId>, Rejection> {
+    let refuse = |why: String| Rejection::new(Code::BadHumanInput, why);
+    let Some((approve, fence)) = crate::approval::approval_in(action) else {
+        return match approval {
+            Some(_) => Err(refuse(
+                "--approval: only approve-plan and approve-merge take a receipt".into(),
+            )),
+            None => Ok(None),
+        };
+    };
+    match (approval, state.gates) {
+        (None, Some(Gates::Scratch)) => Ok(None),
+        (None, None) => Err(refuse(format!(
+            "{}: an owned task's plan and merge approvals need --approval, a receipt the board signs for an approve holder",
+            state.task.0
+        ))),
+        (Some(v), _) => {
+            crate::approval::binds(v.receipt(), &state.task, fence, approve).map_err(refuse)?;
+            Ok(Some(crate::approval::op(v)))
+        }
+    }
+}
+
+/// `cmd` under [`owner_gate`]: its op replaced by the receipt's when one applies.
+fn receipted(
+    state: &TaskState,
+    cmd: Command,
+    approval: Option<&Verified>,
+) -> Result<Command, Rejection> {
+    let Command::Human { op, action } = cmd else {
+        return Ok(cmd);
+    };
+    let op = owner_gate(state, &action, approval)?.unwrap_or(op);
+    Ok(Command::Human { op, action })
+}
+
 /// [`perform_fenced`] without committing: the pure engine applied to the
 /// task's current state, so the preview is what the commit would do at that
 /// revision (#595 dry run).
@@ -501,6 +557,7 @@ pub fn preview_fenced(
     by: &str,
     fence: Option<Rev>,
     op: Option<OpId>,
+    approval: Option<&Verified>,
 ) -> Result<Preview, String> {
     let d = open_driver(dir, task)?;
     let rev_now = d.state.rev;
@@ -508,6 +565,16 @@ pub fn preview_fenced(
     let (args, _) = brief_ref(verb, args)?;
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let cmd = match command(verb, &args, rev, by, fence, op)? {
+        Ok(cmd) => cmd,
+        Err(rej) => {
+            return Ok(Preview {
+                rev: rev_now,
+                response: Response::Rejected(rej),
+                events: vec![],
+            })
+        }
+    };
+    let cmd = match receipted(&d.state, cmd, approval) {
         Ok(cmd) => cmd,
         Err(rej) => {
             return Ok(Preview {
@@ -550,6 +617,7 @@ pub fn perform_fenced(
     by: &str,
     fence: Option<Rev>,
     op: Option<OpId>,
+    approval: Option<&Verified>,
 ) -> Result<Response, String> {
     let (args, brief) = brief_ref(verb, args)?;
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -569,18 +637,36 @@ pub fn perform_fenced(
         Err(rej) => return Err(rej.detail),
     };
     let mut d = open_driver(dir, task)?;
-    if let Some(bytes) = &brief {
-        // Judge the command before its brief is published: a refusal (bad
+    let cmd = match receipted(&d.state, cmd, approval) {
+        Ok(cmd) => cmd,
+        Err(rej) => return Ok(Response::Rejected(rej)),
+    };
+    let blobs: Vec<&[u8]> = [
+        brief.as_deref(),
+        approval.map(crate::approval::Verified::bytes),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !blobs.is_empty() {
+        // Judge the command before its blobs (a brief, a receipt) are published: a refusal (bad
         // affects, a stale fence, the wrong state) and a replay of an op
         // already answered store nothing. Blobs before references: what
-        // passes stores the brief just before the command that names it.
+        // passes stores them just before the command that names them.
         // Only a write racing in between can still refuse it, and then the
         // stored blob is unreferenced, never a reference without its blob.
         let judged = handle(&d.state, &cmd, now());
         if matches!(judged.response, Response::Rejected(_)) || judged.events.is_empty() {
             return Ok(judged.response);
         }
-        d.store.blob_put(bytes);
+        for bytes in blobs {
+            // `blob_put` cannot report a failed write: read it back, so a
+            // command never lands without the brief or receipt it names.
+            let blob = d.store.blob_put(bytes);
+            d.store
+                .blob_get(&blob.sha)
+                .map_err(|e| format!("blob {} was not stored: {e:?}", blob.sha.hex()))?;
+        }
     }
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
@@ -674,8 +760,18 @@ mod tests {
         ] {
             let err = perform(&dir, &task, "extend", &[f, "1000"], None).unwrap_err();
             assert!(err.contains("evidence"), "{f}: {err}");
-            let cli = perform_fenced(&dir, &task, "extend", &[f, "1000"], None, "o", None, None)
-                .unwrap_err();
+            let cli = perform_fenced(
+                &dir,
+                &task,
+                "extend",
+                &[f, "1000"],
+                None,
+                "o",
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
             assert!(cli.contains("evidence"), "{f}: {cli}");
             let fenced = perform_fenced(
                 &dir,
@@ -685,6 +781,7 @@ mod tests {
                 None,
                 "o",
                 Some(Rev(1)),
+                None,
                 None,
             );
             assert!(
@@ -711,6 +808,7 @@ mod tests {
             &["messages", "1000"],
             None,
             "o",
+            None,
             None,
             None,
         )
@@ -802,6 +900,7 @@ mod tests {
                 "o",
                 Some(Rev(1)),
                 None,
+                None,
             )
         };
         let (dir, task) = task("fenced-marker-io", false);
@@ -821,6 +920,7 @@ mod tests {
             None,
             "o",
             Some(Rev(1)),
+            None,
             None,
         );
         assert!(p.is_err(), "{p:?}");
@@ -885,6 +985,7 @@ mod tests {
                 "owner",
                 Some(Rev(fence)),
                 Some(op),
+                None,
             )
             .unwrap()
         };
@@ -953,6 +1054,7 @@ mod tests {
             "owner",
             Some(Rev(rev)),
             Some(op),
+            None,
         )
         .unwrap();
         let rows = crate::decision::json(&dir, &task, "d1,nope,d1").unwrap();
