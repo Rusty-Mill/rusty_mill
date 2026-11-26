@@ -1413,11 +1413,16 @@ fn a_file_is_sent_to_the_blocks_host_once_the_pane_holds_the_lease() {
     assert!(!attached.source.uploads(key + 99), "no such pane");
     type_until_echoed(writer.as_mut(), &feed, 1);
 
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let ask = |path: &std::path::Path| {
         let (tx, rx) = channel();
-        attached
-            .source
-            .upload(key, path.to_owned(), Box::new(move |r| drop(tx.send(r))));
+        let log = std::sync::Arc::clone(&seen);
+        attached.source.upload(
+            key,
+            path.to_owned(),
+            Box::new(move |sent, total| log.lock().expect("log").push((sent, total))),
+            Box::new(move |r| drop(tx.send(r))),
+        );
         rx.recv_timeout(PATIENCE).expect("an answer")
     };
     let local = state.join("local.bin");
@@ -1426,6 +1431,18 @@ fn a_file_is_sent_to_the_blocks_host_once_the_pane_holds_the_lease() {
     let sent = ask(&local).expect("sent");
     assert!(sent.ends_with("local.bin"), "{sent}");
     assert_eq!(std::fs::read(&sent).expect("on the server"), body);
+    {
+        let seen = seen.lock().expect("log");
+        let total = body.len() as u64;
+        assert_eq!(seen.last(), Some(&(total, total)), "ends at the whole file");
+        assert!(
+            seen.len() > 2 && seen.len() <= 101,
+            "per percent: {}",
+            seen.len()
+        );
+        assert!(seen.iter().all(|&(_, t)| t == total));
+        assert!(seen.windows(2).all(|w| w[0].0 < w[1].0), "moves forward");
+    }
 
     let missing = ask(&state.join("nope")).expect_err("no such file");
     assert!(missing.contains("nope"), "{missing}");
