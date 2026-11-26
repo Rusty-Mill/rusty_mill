@@ -667,7 +667,7 @@ fn nested_repo(root: &Path) -> Result<Option<PathBuf>, String> {
 /// (a nested one runs its filters as orch), and a symlink there can point
 /// anywhere, so builders take no base with submodules.
 fn refuse_gitlinks(listing: &str) -> Result<(), String> {
-    match first_gitlink(listing) {
+    match tree_gitlink(listing) {
         Some(path) => Err(format!(
             "the base has a submodule at {path}: builders take no base with submodules"
         )),
@@ -675,17 +675,29 @@ fn refuse_gitlinks(listing: &str) -> Result<(), String> {
     }
 }
 
-/// The path of the first mode-160000 entry in an `ls-tree -r -z` or
-/// `diff --raw -z` listing.
-fn first_gitlink(listing: &str) -> Option<&str> {
-    let mut fields = listing.split('\0');
-    while let Some(field) = fields.next() {
-        // ls-tree: "160000 commit <oid>\t<path>"; diff --raw: ":<old> 160000 …", path next.
-        if field.starts_with("160000 ") {
-            return Some(field.split_once('\t').map_or(field, |(_, path)| path));
-        }
-        if field.starts_with(':') && field.split(' ').take(2).any(|m| m.ends_with("160000")) {
-            return Some(fields.next().unwrap_or(""));
+/// The path of the first mode-160000 entry in an `ls-tree -r -z` listing,
+/// where each entry is `<mode> <type> <oid>\t<path>`.
+fn tree_gitlink(listing: &str) -> Option<&str> {
+    listing
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\t'))
+        .find(|(head, _)| head.starts_with("160000 "))
+        .map(|(_, path)| path)
+}
+
+/// The path of the first entry with mode 160000 on either side in a
+/// `diff --raw -z --no-renames` listing, where each `:<old> <new> …`
+/// header is followed by its one path, so a path can't pass for a header.
+fn staged_gitlink(raw: &str) -> Option<&str> {
+    let mut fields = raw.split('\0');
+    while let (Some(head), Some(path)) = (fields.next(), fields.next()) {
+        // A field that isn't a header means the listing isn't what was
+        // asked for: refuse rather than guess.
+        let Some(modes) = head.strip_prefix(':') else {
+            return Some(head);
+        };
+        if modes.split(' ').take(2).any(|m| m == "160000") {
+            return Some(path);
         }
     }
     None
@@ -755,7 +767,7 @@ fn staged_diff(git_dir: &Path, work_tree: &Path, base: &str) -> Result<String, S
         work_tree,
         &["diff", "--cached", "--raw", "-z", "--no-renames", base],
     )?;
-    if let Some(path) = first_gitlink(&staged) {
+    if let Some(path) = staged_gitlink(&staged) {
         return Err(format!("a submodule was staged at {path}: no diff taken"));
     }
     sealed_git(
@@ -921,12 +933,16 @@ mod tests {
     #[test]
     fn a_staged_gitlink_shows_in_the_raw_diff() {
         let raw = ":000000 160000 0000 1111 A\x00sub\x00:100644 100644 2222 3333 M\x00a\x00";
-        assert_eq!(first_gitlink(raw), Some("sub"));
-        assert_eq!(first_gitlink(":100644 100644 2 3 M\x00a\x00"), None);
+        assert_eq!(staged_gitlink(raw), Some("sub"));
+        assert_eq!(staged_gitlink(":100644 100644 2 3 M\x00a\x00"), None);
         assert_eq!(
-            first_gitlink(":160000 000000 1 0 D\x00gone\x00"),
+            staged_gitlink(":160000 000000 1 0 D\x00gone\x00"),
             Some("gone")
         );
+        // A path that looks like a header or an ls-tree entry is only a path.
+        let odd = ":000000 100644 0 1 A\x00160000 notes.txt\x00:000000 100644 0 2 A\x00:000000 160000\x00";
+        assert_eq!(staged_gitlink(odd), None);
+        assert_eq!(tree_gitlink("100644 blob 0a\t160000 notes.txt\x00"), None);
     }
 
     #[test]
