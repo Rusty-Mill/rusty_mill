@@ -80,6 +80,7 @@ fn connector(role: &str) -> Identity {
         projects: None,
         connector: true,
         provider: None,
+        view: Default::default(),
     }
 }
 
@@ -90,6 +91,7 @@ fn person(role: &str) -> Identity {
         projects: None,
         connector: false,
         provider: None,
+        view: Default::default(),
     }
 }
 

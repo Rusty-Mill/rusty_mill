@@ -20,6 +20,30 @@ use crate::store::Store;
 /// The board every surface shares.
 pub type Shared = Board<Box<dyn Store>>;
 
+/// Defaults a credential gets for reads (#1437). It changes defaults only, never what the
+/// credential may see or do, and an explicit argument always wins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewProfile {
+    /// Today's behaviour exactly.
+    #[default]
+    Full,
+    /// For agents: an unpaged `board_list` is paged at [`AGENT_PAGE`], and `card_get` returns
+    /// the recent comments.
+    Agent,
+}
+
+impl ViewProfile {
+    /// Whether this is the default, `full`.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        *self == Self::Full
+    }
+}
+
+/// Page size of an unpaged `board_list` under [`ViewProfile::Agent`].
+pub const AGENT_PAGE: u32 = 50;
+
 /// Who a credential belongs to. Set by the transport after it checks a bearer
 /// token; when present it fixes the caller's actor and role.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +62,9 @@ pub struct Identity {
     /// The model provider behind this credential, compared by separation of duties (#447).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Read defaults, set in the credentials file; `full` unless it says `agent`.
+    #[serde(default, skip_serializing_if = "ViewProfile::is_full")]
+    pub view: ViewProfile,
 }
 
 /// Why a call failed.
@@ -782,6 +809,11 @@ fn scope(identity: Option<&Identity>) -> Option<&[String]> {
     identity.and_then(|i| i.projects.as_deref())
 }
 
+/// The read defaults of a credential; `full` when unauthenticated.
+fn profile(identity: Option<&Identity>) -> ViewProfile {
+    identity.map_or(ViewProfile::Full, |i| i.view)
+}
+
 fn in_scope(scope: Option<&[String]>, project: &str) -> bool {
     scope.is_none_or(|s| s.iter().any(|p| p == project))
 }
@@ -890,8 +922,12 @@ pub fn ops() -> Vec<Op> {
     vec![
         op(
             "board_list",
-            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those. Done cards that are archived, or done more than `done_days` (default 14) ago, are left out unless `archived` is `include` or `only`. `created_*`, `updated_*` and `moved_*` (Unix ms, `from` inclusive, `to` exclusive) keep cards created, last changed or moved column in a range. By default it returns small summaries without body, prompt, links or comments; pass `view: full` for whole cards, or `card_get` one card. `limit` pages the result in creation order: pass the page's `next_cursor` as `cursor` with the same arguments until it is null.",
-            |b, i, a: ListArgs| {
+            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those. Done cards that are archived, or done more than `done_days` (default 14) ago, are left out unless `archived` is `include` or `only`. `created_*`, `updated_*` and `moved_*` (Unix ms, `from` inclusive, `to` exclusive) keep cards created, last changed or moved column in a range. By default it returns small summaries without body, prompt, links or comments; pass `view: full` for whole cards, or `card_get` one card. `limit` pages the result in creation order: pass the page's `next_cursor` as `cursor` with the same arguments until it is null. A credential with the `agent` view profile gets pages of 50 when it passes neither `limit` nor `cursor`, so check `next_cursor`.",
+            |b, i, mut a: ListArgs| {
+                // The agent profile pages an unpaged call; an explicit `limit` or `cursor` wins.
+                if profile(i) == ViewProfile::Agent && a.limit.is_none() && a.cursor.is_none() {
+                    a.limit = Some(AGENT_PAGE);
+                }
                 checked_project(b, scope(i), a.project.as_deref())?;
                 let days = a.done_days.unwrap_or(DONE_WINDOW_DAYS);
                 let mut cards = b.list_view(a.column.as_ref(), a.archived, days, a.view)?;
@@ -1132,22 +1168,26 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_get",
-            "Fetch one card with its comments, and its `text_digest` (of the title and body), which `card_approve` needs. `history: \"recent\"` returns only the last 5 comments, the latest handoff and every open blocker or question, with `comments_omitted`.",
+            "Fetch one card with its comments, and its `text_digest` (of the title and body), which `card_approve` needs. `history: \"recent\"` returns only the last 5 comments, the latest handoff and every open blocker or question, with `comments_omitted`; it is the default for a credential with the `agent` view profile, and `history: \"all\"` returns every comment.",
             |b, i, a: GetCardArgs| {
                 let c = b.get(card_ref(b, &a.id)?)?;
                 if !in_scope(scope(i), &c.project) {
                     return Err(BoardError::OutOfScope(c.project));
                 }
                 let digest = format!("{:016x}", crate::domain::text_hash(&c.title, &c.body));
-                match a.history.as_deref() {
-                    None | Some("all") => to_json(json!({ "card": c, "text_digest": digest })),
-                    Some("recent") => {
+                let history = a.history.as_deref().unwrap_or(match profile(i) {
+                    ViewProfile::Agent => "recent",
+                    ViewProfile::Full => "all",
+                });
+                match history {
+                    "all" => to_json(json!({ "card": c, "text_digest": digest })),
+                    "recent" => {
                         let (c, omitted) = c.recent();
                         to_json(
                             json!({ "card": c, "text_digest": digest, "comments_omitted": omitted }),
                         )
                     }
-                    Some(_) => Err(BoardError::Invalid("history is `all` or `recent`")),
+                    _ => Err(BoardError::Invalid("history is `all` or `recent`")),
                 }
             },
         ),
@@ -2408,6 +2448,7 @@ mod tests {
             role: role.into(),
             connector: false,
             provider: None,
+            view: ViewProfile::default(),
         }
     }
 
@@ -3768,6 +3809,66 @@ mod tests {
                 .and_then(|c| c.last())
                 .map(|c| c["id"].clone())
                 .expect("a comment")
+        }
+
+        fn agent() -> Identity {
+            Identity {
+                actor: "bot".into(),
+                role: "human".into(),
+                projects: None,
+                connector: false,
+                provider: None,
+                view: ViewProfile::Agent,
+            }
+        }
+
+        fn as_agent(board: &Shared, name: &str, extra: Value) -> Value {
+            call_as(board, Some(&agent()), name, extra).expect("call")
+        }
+
+        #[test]
+        fn the_agent_profile_pages_an_unpaged_list_and_an_explicit_limit_or_full_profile_does_not()
+        {
+            let board = paged_board();
+            add_cards(&board, 55);
+            let out = as_agent(&board, "board_list", json!({}));
+            assert_eq!(out["cards"].as_array().expect("cards").len(), 50);
+            assert!(
+                out["next_cursor"].is_string(),
+                "the page says there is more"
+            );
+            let out = as_agent(&board, "board_list", json!({"limit": 7}));
+            assert_eq!(out["cards"].as_array().expect("cards").len(), 7);
+            let full = call_as(&board, None, "board_list", json!({})).expect("full");
+            assert_eq!(full["cards"].as_array().expect("cards").len(), 55);
+            assert!(
+                full.get("next_cursor").is_none(),
+                "full keeps today's reply"
+            );
+        }
+
+        #[test]
+        fn the_agent_profile_reads_recent_comments_unless_history_all_is_asked() {
+            let board = paged_board();
+            let id = add(&board);
+            for n in 0..9 {
+                run(
+                    &board,
+                    "card_comment",
+                    json!({"id": id, "text": format!("c{n}")}),
+                )
+                .expect("comment");
+            }
+            let n = |v: &Value| v["card"]["comments"].as_array().expect("c").len();
+            let recent = as_agent(&board, "card_get", json!({"id": id}));
+            assert_eq!(
+                (n(&recent), recent["comments_omitted"].clone()),
+                (5, json!(4))
+            );
+            let all = as_agent(&board, "card_get", json!({"id": id, "history": "all"}));
+            assert_eq!(n(&all), 9);
+            let full = call_as(&board, None, "card_get", json!({"id": id})).expect("full");
+            assert_eq!(n(&full), 9, "the full profile is unchanged");
         }
 
         #[test]
