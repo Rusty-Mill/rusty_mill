@@ -341,7 +341,11 @@ fn a_partial_or_corrupt_store_fails_closed() {
         r.state_file(&blob)
     };
     type Break = fn(&Reader, PathBuf);
-    let cases: [(&str, Break); 4] = [
+    let cases: [(&str, Break); 5] = [
+        ("corrupt table header", |r, _| {
+            std::fs::write(r.state_file("builder-sessions.mmap"), b"GARBAGE!\0\0\0\0")
+                .expect("write");
+        }),
         ("no lock", |r, _| {
             std::fs::remove_file(r.state_file("lock")).expect("rm")
         }),

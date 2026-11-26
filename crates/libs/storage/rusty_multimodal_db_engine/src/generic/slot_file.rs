@@ -36,7 +36,7 @@ use memmap2::MmapMut;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::hash::Hash;
-use std::io::{Seek, Write};
+use std::io::{Read, Seek, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
@@ -68,6 +68,39 @@ pub const COMMITTED: u8 = 1;
 /// One memory-mapped `GMMAPST\0` slot file: a column of
 /// `(Id, V, COMMITTED)` slots behind the fixed header. Owns the mapping
 /// and the path; knows nothing about records.
+/// Check the header of the slot file at `path` without mapping it or
+/// opening it for writing: the read-only twin of [`SlotFile::open`]'s
+/// header check, for readers that must change nothing on disk. Reads at
+/// most `HEADER_LEN` bytes; no slot data is read.
+///
+/// # Errors
+///
+/// [`DurabilityError::Io`] if `path` can't be opened for reading, else as
+/// [`SlotFile::open`]'s header check: [`DurabilityError::InvalidMagic`] or
+/// [`DurabilityError::SchemaVersionMismatch`].
+pub fn check_header(path: &Path) -> Result<(), DurabilityError> {
+    let mut header = Vec::with_capacity(HEADER_LEN);
+    File::open(path)?
+        .take(HEADER_LEN as u64)
+        .read_to_end(&mut header)?;
+    validate_header(&header)
+}
+
+/// The header rule shared by [`SlotFile::open`] and [`check_header`].
+fn validate_header(bytes: &[u8]) -> Result<(), DurabilityError> {
+    if bytes.len() < HEADER_LEN || bytes[0..MAGIC.len()] != MAGIC {
+        return Err(DurabilityError::InvalidMagic);
+    }
+    let found = u32::read_le(&bytes[MAGIC.len()..HEADER_LEN]);
+    if found != SCHEMA_VERSION {
+        return Err(DurabilityError::SchemaVersionMismatch {
+            found,
+            expected: SCHEMA_VERSION,
+        });
+    }
+    Ok(())
+}
+
 pub struct SlotFile<Id, V> {
     mmap: MmapMut,
     path: PathBuf,
@@ -274,17 +307,7 @@ where
     /// they mean different things: "not one of these files at all" versus
     /// "one of these files, from a build with a different slot layout."
     fn read_header(mmap: &MmapMut) -> Result<(), DurabilityError> {
-        if mmap.len() < HEADER_LEN || mmap[0..MAGIC.len()] != MAGIC {
-            return Err(DurabilityError::InvalidMagic);
-        }
-        let found = u32::read_le(&mmap[MAGIC.len()..HEADER_LEN]);
-        if found != SCHEMA_VERSION {
-            return Err(DurabilityError::SchemaVersionMismatch {
-                found,
-                expected: SCHEMA_VERSION,
-            });
-        }
-        Ok(())
+        validate_header(mmap)
     }
 
     /// Build fresh: create a new `HEADER_LEN + slot_width() * slots.len()`

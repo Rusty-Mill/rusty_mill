@@ -1046,6 +1046,27 @@ where
         Ok(Self::merge_log(persisted, logged))
     }
 
+    /// [`Self::read_portable_records`], after checking the mmap file's
+    /// header without mapping it or opening it for writing
+    /// ([`super::slot_file::check_header`]). For a read-only reader that
+    /// must refuse any header [`Self::open`]'s header validation refuses,
+    /// while writing nothing. This is header parity only, not equivalence
+    /// with [`Self::open`]: the slots are not read or mapped, no write
+    /// access is needed, and `open`'s mapping and reconciliation are not
+    /// attempted, so a table `open` refuses for those reasons can still
+    /// read here.
+    ///
+    /// # Errors
+    ///
+    /// [`DurabilityError::Io`] if the mmap file can't be read,
+    /// [`DurabilityError::InvalidMagic`] or
+    /// [`DurabilityError::SchemaVersionMismatch`] if its header doesn't
+    /// check out, else everything [`Self::read_portable_records`] returns.
+    pub fn read_checked_records(path: &Path) -> Result<Vec<R>, DurabilityError> {
+        super::slot_file::check_header(path)?;
+        Self::read_portable_records(path)
+    }
+
     /// Reopen a store from its two files alone — exactly
     /// `open(read_portable_records(path)?, path)`. Because the records
     /// come from the blob itself, `open`'s currency check always passes
@@ -1569,6 +1590,76 @@ mod tests {
             "expected InvalidMagic, got {:?}",
             result.err()
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `read_checked_records` refuses every header `open` refuses, reads
+    /// a good table like `read_portable_records`, and changes no byte of
+    /// either file on the way: the read-only reader's contract.
+    #[test]
+    fn checked_records_refuse_a_bad_header_and_write_nothing() {
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_checked_read").unwrap();
+        let path = dir.join("amount.mmap");
+        {
+            let store = GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
+            Flush::flush(&store).unwrap();
+        }
+        let blob = blob_path(&path);
+        let good = std::fs::read(&path).unwrap();
+        let read = |p: &Path| GenericMmapStore::<Order, Status, Amount>::read_checked_records(p);
+
+        let records = read(&path).unwrap();
+        assert_eq!(records.len(), sample().len());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            good,
+            "a good read changes nothing"
+        );
+
+        let blob_bytes = std::fs::read(&blob).unwrap();
+        let mut bad_magic = good.clone();
+        bad_magic[0..MAGIC.len()].copy_from_slice(&[0xFFu8; MAGIC.len()]);
+        let mut bad_version = good.clone();
+        SCHEMA_VERSION
+            .wrapping_add(1)
+            .write_le(&mut bad_version[MAGIC.len()..HEADER_LEN]);
+        let cases: [(&str, Vec<u8>); 4] = [
+            ("wrong magic", bad_magic),
+            ("other version", bad_version),
+            ("shorter than the header", good[..4].to_vec()),
+            ("empty", Vec::new()),
+        ];
+        for (name, bytes) in cases {
+            std::fs::write(&path, &bytes).unwrap();
+            let result = read(&path);
+            assert!(
+                matches!(
+                    result,
+                    Err(DurabilityError::InvalidMagic
+                        | DurabilityError::SchemaVersionMismatch { .. })
+                ),
+                "{name}: expected a header error, got {:?}",
+                result.map(|r| r.len())
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                bytes,
+                "{name}: file untouched"
+            );
+            assert_eq!(
+                std::fs::read(&blob).unwrap(),
+                blob_bytes,
+                "{name}: blob untouched"
+            );
+        }
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            matches!(read(&path), Err(DurabilityError::Io(_))),
+            "no mmap file"
+        );
+        assert!(!path.exists(), "a missing file is not created");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

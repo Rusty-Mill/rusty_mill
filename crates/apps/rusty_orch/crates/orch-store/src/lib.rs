@@ -839,7 +839,8 @@ fn merge(mut old: Review, row: &Review) -> Review {
 
 /// Every saved record of the table `file` in the store at `dir`, read under
 /// the directory's existing lock and recovered as [`Store::open`] would,
-/// writing nothing; `None` when the table file doesn't exist.
+/// writing nothing; `None` when the table file doesn't exist. A table file
+/// whose header [`Store::open`] would refuse fails here too.
 fn read_table<R>(dir: &Path, file: &str) -> Result<Option<Vec<R>>, StoreError>
 where
     R: IndexedField<ById, Id = i64>
@@ -860,7 +861,7 @@ where
         return Ok(None);
     }
     Ok(Some(
-        GenericMmapStore::<R, ById, Revision>::read_portable_records(&path)?,
+        GenericMmapStore::<R, ById, Revision>::read_checked_records(&path)?,
     ))
 }
 
