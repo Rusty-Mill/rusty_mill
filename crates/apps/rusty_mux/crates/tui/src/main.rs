@@ -127,7 +127,7 @@ mod client {
     };
     use rusty_mux_proto::schema::Value;
     use rusty_mux_proto::{Entry, Features, Launch, Message, Takeover};
-    use rusty_mux_tui::explorer::{Call, Explorer, Step as Explored};
+    use rusty_mux_tui::explorer::{self, Call, Explorer, Step as Explored};
     use rusty_mux_tui::find::{Find, Step};
     use rusty_mux_tui::floats;
     use rusty_mux_tui::follow::Follow;
@@ -2704,7 +2704,7 @@ mod client {
             let Some(open) = self.exploring.as_mut() else {
                 return;
             };
-            match open.explorer.keys(bytes) {
+            match explorer::press(&mut open.explorer, bytes) {
                 Explored::Leave => self.live(),
                 Explored::Open => {
                     self.ask_workspace();
@@ -3337,7 +3337,7 @@ mod client {
                 return;
             };
             let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
-            frame.panel(*rect, &explorer.render(cols, rows));
+            frame.panel(*rect, &explorer::render(explorer, cols, rows));
         }
 
         /// The open find bar's matches and prompt, drawn onto `frame`.
@@ -4742,7 +4742,7 @@ mod client {
                     .any(|m| call(m, "terminal.workspace-touched")),
                 "not asked again"
             );
-            let screen = app.exploring.as_ref().expect("open").explorer.render(60, 8);
+            let screen = explorer::render(&app.exploring.as_ref().expect("open").explorer, 60, 8);
             assert!(
                 !screen.iter().any(|l| l.contains("refused")),
                 "no note: {screen:?}"
