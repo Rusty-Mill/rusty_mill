@@ -4,6 +4,15 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Builders tested end to end in CI
+**2026-11-25**
+
+- CI now runs a builder for real: a mux server, the jail and the BBP host,
+  with a scripted stand-in for the Claude agent, so no model is called.
+- It checks the jail holds (no way to the mux, nothing writable outside
+  the worktree), that a restarted mux aborts the session without charging
+  anything, and that a builder whose orch dies is still stopped on time.
+
 ## One builder, end to end
 **2026-11-25**
 
