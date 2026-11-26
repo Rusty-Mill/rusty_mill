@@ -2223,35 +2223,37 @@ impl<S: Store> Board<S> {
         id: Uuid,
         by: &Actor,
         approval: &crate::duties::Approval<'_>,
-    ) -> Result<Card, BoardError> {
+    ) -> Result<(Card, crate::duties::Outcome), BoardError> {
+        use crate::duties::Outcome;
         // A move into a work column starts the card: serialize it with `unclose`'s scan.
         let _links = self.links();
         let flow = self.flow();
         let to = approval.to;
-        // Whether it moves decides the event, so ask first, and refuse a commit that would
-        // decide otherwise (the card changed in between).
+        // The outcome decides the event, so ask first, and refuse a commit that would decide
+        // otherwise (the card changed in between).
         let current = self.get_in(&flow, id)?;
         // Scope first, so an out-of-scope caller learns nothing of the card from a refusal.
         if !by.may_work_in(&current.project) {
             return Err(BoardError::OutOfScope(current.project));
         }
-        let (_, moves) = crate::duties::approve(&current, &flow, by, approval, (self.clock)())?;
-        let kind = if moves {
-            EventKind::Moved
-        } else {
-            EventKind::Approved
+        let (_, outcome) = crate::duties::approve(&current, &flow, by, approval, (self.clock)())?;
+        let kind = match outcome {
+            Outcome::Moves => EventKind::Moved,
+            Outcome::Stays => EventKind::Approved,
+            Outcome::Expired => EventKind::ApprovalExpired,
         };
-        self.apply_in(&flow, id, by, kind, |c, now| {
-            let (approved, move_it) = crate::duties::approve(c, &flow, by, approval, now)?;
-            if move_it != moves {
+        let card = self.apply_in(&flow, id, by, kind, |c, now| {
+            let (approved, now_outcome) = crate::duties::approve(c, &flow, by, approval, now)?;
+            if now_outcome != outcome {
                 return Err(BoardError::Conflict);
             }
-            if !move_it {
+            if outcome != Outcome::Moves {
                 return Ok(approved);
             }
             self.check_starts(&flow, c, to)?;
             Ok(approved.arrive(to, now))
-        })
+        })?;
+        Ok((card, outcome))
     }
 
     /// Release a claim.

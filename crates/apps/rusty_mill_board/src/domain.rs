@@ -961,6 +961,9 @@ pub enum EventKind {
     Reviewed,
     /// A gate approval filed or confirmed with `card_approve`, without a move (#447).
     Approved,
+    /// An owner's `card_approve` found the gate's filings made on text edited since: they
+    /// expired, nothing was approved and the card stayed (#447).
+    ApprovalExpired,
 }
 
 /// One entry in the append-only log. `id` is a UUIDv7 assigned by the store

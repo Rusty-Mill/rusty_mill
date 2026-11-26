@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{Actor, BoardError, Capability, Card, Column, text_hash};
-use rusty_mill_board::duties::{Approval, Duty};
+use rusty_mill_board::duties::{Approval, Duty, MAX_HAND_VERDICTS, Outcome};
 use rusty_mill_board::store::MemStore;
 use rusty_mill_board::workflow::Workflow;
 
@@ -44,6 +44,16 @@ fn approval<'a>(card: &Card, to: &'a Column, pr_head: Option<&'a str>) -> Approv
     }
 }
 
+/// `Board::approve`'s card.
+fn approve(
+    b: &Board<MemStore>,
+    id: uuid::Uuid,
+    by: &Actor,
+    a: &Approval<'_>,
+) -> Result<Card, BoardError> {
+    b.approve(id, by, a).map(|(c, _)| c)
+}
+
 fn refused(r: Result<Card, BoardError>) -> bool {
     matches!(r, Err(BoardError::Refused(_)))
 }
@@ -59,8 +69,7 @@ fn a_card_crosses_the_factory_with_duties_split() {
 
     let card = b.add(&nano, "feature", "do it", vec![]).expect("add");
     let ready = col("ready");
-    let card = b
-        .approve(card.id, &proxy, &approval(&card, &ready, None))
+    let card = approve(&b, card.id, &proxy, &approval(&card, &ready, None))
         .expect("the design gate into Ready moves at once");
     assert_eq!(card.column, ready);
 
@@ -86,7 +95,12 @@ fn a_card_crosses_the_factory_with_duties_split() {
     let building = col("building");
     let card = b.get(card.id).expect("get");
     assert!(
-        refused(b.approve(card.id, &proxy, &approval(&card, &building, None))),
+        refused(approve(
+            &b,
+            card.id,
+            &proxy,
+            &approval(&card, &building, None)
+        )),
         "no review of the design yet"
     );
     assert!(
@@ -95,9 +109,8 @@ fn a_card_crosses_the_factory_with_duties_split() {
     );
     b.review(card.id, &dots, true, "sound").expect("review");
     let card = b.get(card.id).expect("get");
-    let card = b
-        .approve(card.id, &proxy, &approval(&card, &building, None))
-        .expect("the design gate");
+    let card =
+        approve(&b, card.id, &proxy, &approval(&card, &building, None)).expect("the design gate");
     assert_eq!(card.column, building);
     assert_eq!(card.claim, None);
 
@@ -109,16 +122,14 @@ fn a_card_crosses_the_factory_with_duties_split() {
 
     let card = b.get(card.id).expect("get");
     let done = Column::DONE;
-    let filed = b
-        .approve(card.id, &proxy, &approval(&card, &done, Some("abc123")))
+    let filed = approve(&b, card.id, &proxy, &approval(&card, &done, Some("abc123")))
         .expect("a merge approval is filed");
     assert_eq!(filed.column, col("v_and_ving"), "never moves");
     assert!(matches!(
         filed.duties.last(),
         Some(Duty::Approval { pending: true, .. })
     ));
-    let confirmed = b
-        .approve(card.id, &nano, &approval(&filed, &done, Some("abc123")))
+    let confirmed = approve(&b, card.id, &nano, &approval(&filed, &done, Some("abc123")))
         .expect("the owner's tap");
     assert_eq!(confirmed.column, col("v_and_ving"));
     assert!(matches!(
@@ -211,14 +222,18 @@ fn an_unblock_filed_on_old_text_expires_and_the_card_stays() {
     let card = b.add(&nano, "x", "body A", vec![]).expect("add");
     let card = b.move_card(card.id, &col("blocked"), &nano).expect("block");
     let ready = col("ready");
-    b.approve(card.id, &proxy, &approval(&card, &ready, None))
-        .expect("filed");
+    approve(&b, card.id, &proxy, &approval(&card, &ready, None)).expect("filed");
     let edited = b
         .edit(card.id, &nano, None, Some("body B"), None)
         .expect("edit");
-    let tapped = b
+    let (tapped, outcome) = b
         .approve(card.id, &nano, &approval(&edited, &ready, None))
         .expect("the stale filing does not lock the owner out");
+    assert_eq!(
+        outcome,
+        Outcome::Expired,
+        "the caller is told nothing was approved"
+    );
     assert_eq!(
         tapped.column,
         col("blocked"),
@@ -237,8 +252,7 @@ fn an_unblock_filed_on_old_text_expires_and_the_card_stays() {
         "the filing expired and nothing was approved: {:?}",
         tapped.duties
     );
-    let moved = b
-        .approve(card.id, &nano, &approval(&tapped, &ready, None))
+    let moved = approve(&b, card.id, &nano, &approval(&tapped, &ready, None))
         .expect("the owner approves on a fresh readback");
     assert_eq!(moved.column, ready);
 }
@@ -251,12 +265,9 @@ fn refiling_a_gate_does_not_grow_the_ledger() {
     let card = b.add(&nano, "x", "", vec![]).expect("add");
     let card = b.move_card(card.id, &col("blocked"), &nano).expect("block");
     let ready = col("ready");
-    let first = b
-        .approve(card.id, &proxy, &approval(&card, &ready, None))
-        .expect("filed");
+    let first = approve(&b, card.id, &proxy, &approval(&card, &ready, None)).expect("filed");
     for _ in 0..20 {
-        b.approve(card.id, &proxy, &approval(&card, &ready, None))
-            .expect("refiled");
+        approve(&b, card.id, &proxy, &approval(&card, &ready, None)).expect("refiled");
     }
     let last = b.get(card.id).expect("get");
     assert_eq!(last.duties.len(), first.duties.len());
@@ -324,15 +335,14 @@ fn a_v_and_v_verdict_holds_the_merge_gate() {
     let card = at_v_and_ving(&b, &nano, &maker, &dots);
     let done = Column::DONE;
     let card = b.review(card.id, &dots, false, "tests fail").expect("fail");
-    assert!(refused(b.approve(
+    assert!(refused(approve(
+        &b,
         card.id,
         &proxy,
         &approval(&card, &done, Some("abc"))
     )));
     let card = b.review(card.id, &dots, true, "fixed").expect("pass");
-    let filed = b
-        .approve(card.id, &proxy, &approval(&card, &done, Some("abc")))
-        .expect("filed");
+    let filed = approve(&b, card.id, &proxy, &approval(&card, &done, Some("abc"))).expect("filed");
     assert!(
         approvals(&filed)
             .iter()
@@ -369,8 +379,7 @@ fn a_pending_approval_expires_when_the_card_leaves_its_gate() {
     let card = b.add(&nano, "x", "", vec![]).expect("add");
     let card = b.move_card(card.id, &col("blocked"), &nano).expect("block");
     let ready = col("ready");
-    b.approve(card.id, &proxy, &approval(&card, &ready, None))
-        .expect("filed");
+    approve(&b, card.id, &proxy, &approval(&card, &ready, None)).expect("filed");
     b.move_card(card.id, &ready, &nano)
         .expect("owner unblocks by hand");
     let back = b
@@ -384,9 +393,7 @@ fn a_pending_approval_expires_when_the_card_leaves_its_gate() {
             ..
         }
     )));
-    let mine = b
-        .approve(card.id, &nano, &approval(&back, &ready, None))
-        .expect("owner's own");
+    let mine = approve(&b, card.id, &nano, &approval(&back, &ready, None)).expect("owner's own");
     assert!(
         !mine.duties.iter().any(|d| matches!(
             d,
@@ -433,7 +440,60 @@ fn a_planning_review_does_not_carry_the_design_gate() {
         .move_card(card.id, &col("architecting"), &dots)
         .expect("review move");
     assert!(
-        refused(b.approve(card.id, &proxy, &approval(&card, &col("building"), None))),
+        refused(approve(
+            &b,
+            card.id,
+            &proxy,
+            &approval(&card, &col("building"), None)
+        )),
         "nobody reviewed Architecting"
     );
+}
+
+#[test]
+fn a_sibling_instance_cannot_clear_a_fail() {
+    let b = board();
+    let nano = who(&b, "nano", "human", "human");
+    let proxy = who(&b, "nano-proxy", "approver", "human");
+    let maker = who(&b, "cloud#1", "maker", "anthropic");
+    let dots = who(&b, "dots", "reviewer", "openai");
+    let (a, sibling) = (
+        who(&b, "rev/a", "reviewer", "openai"),
+        who(&b, "rev/b", "reviewer", "openai"),
+    );
+    let card = at_v_and_ving(&b, &nano, &maker, &dots);
+    let done = Column::DONE;
+    b.review(card.id, &a, false, "tests fail").expect("fail");
+    let card = b
+        .review(card.id, &sibling, true, "looks fine")
+        .expect("pass");
+    assert!(
+        refused(approve(
+            &b,
+            card.id,
+            &proxy,
+            &approval(&card, &done, Some("abc"))
+        )),
+        "rev/a's fail stands"
+    );
+    let card = b.review(card.id, &a, true, "fixed").expect("pass");
+    approve(&b, card.id, &proxy, &approval(&card, &done, Some("abc"))).expect("filed");
+}
+
+#[test]
+fn one_credentials_instances_keep_a_bounded_number_of_verdicts() {
+    let b = board();
+    let nano = who(&b, "nano", "human", "human");
+    let maker = who(&b, "cloud#1", "maker", "anthropic");
+    let dots = who(&b, "dots", "reviewer", "openai");
+    let card = at_v_and_ving(&b, &nano, &maker, &dots);
+    for i in 0..MAX_HAND_VERDICTS {
+        let r = who(&b, &format!("rev/{i}"), "reviewer", "openai");
+        b.review(card.id, &r, true, "ok").expect("verdict");
+    }
+    let one_more = who(&b, "rev/x", "reviewer", "openai");
+    assert!(refused(b.review(card.id, &one_more, true, "ok")));
+    let again = who(&b, "rev/0", "reviewer", "openai");
+    b.review(card.id, &again, false, "changed my mind")
+        .expect("an instance replaces its own verdict");
 }
