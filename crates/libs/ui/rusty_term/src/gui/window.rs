@@ -45,6 +45,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, 
 use super::blocks::{self, BodyState};
 use super::chrome::{Chrome, Marks};
 use super::confirm::{self, Answer, Confirm, ConfirmKey, Subject};
+use super::explorer_view::ExplorerUi;
 use super::floats::{self, Dir4, Grab};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
@@ -60,7 +61,8 @@ use super::render::{CpuRenderer, FloatLayer, PaneFrame, Renderer, Scene, SearchC
 use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use super::source::{
-    Act, Feed, Float, FloatAt, Forwarded, Listed, PaneIo, Remote, Show, Source, Tree, Uploaded,
+    Act, Explore, Explored, Feed, Float, FloatAt, Forwarded, Listed, PaneIo, Remote, Show, Source,
+    Tree, Uploaded,
 };
 use super::strip::{self, Spot, StripState};
 use super::{link_policy, link_trust};
@@ -244,6 +246,7 @@ fn attached_scene<'a>(
     confirm: Option<&'a Confirm>,
     palette: &'a PaletteUi,
     overview: &'a OverviewUi,
+    explorer: &'a ExplorerUi,
 ) -> Scene<'a> {
     let body = body.painted();
     Scene {
@@ -256,7 +259,8 @@ fn attached_scene<'a>(
             .painted()
             .or_else(|| confirm.and_then(Confirm::painted))
             .or_else(|| palette.painted())
-            .or_else(|| overview.painted()),
+            .or_else(|| overview.painted())
+            .or_else(|| explorer.painted()),
     }
 }
 
@@ -792,7 +796,7 @@ struct WindowState<'a> {
     /// The block that had the focus when the palette opened.
     palette_origin: Option<u64>,
     /// The workspace explorer panel's view state (gui-design D99).
-    explorer: super::explorer::Panel,
+    explorer: ExplorerUi,
     /// The session overview (gui-design D97).
     overview: OverviewUi,
     /// The trusted link origins (C63, D69-D72).
@@ -1411,6 +1415,11 @@ impl WindowState<'_> {
         }
         self.palette.repaint(tokens, scale, view);
         self.overview.repaint(tokens, scale, view);
+        let band = (
+            strip::height(scale) as f32,
+            view.1 - ribbon::height(scale) as f32,
+        );
+        self.explorer.repaint(tokens, scale, view, band);
         let oy = self.grid_oy();
         // The command dock renders as one more (synthetic, unfocused) pane
         // right of the pane area. Built before the renderer is borrowed and
@@ -1443,6 +1452,7 @@ impl WindowState<'_> {
                 self.confirm.as_ref(),
                 &self.palette,
                 &self.overview,
+                &self.explorer,
             );
             renderer.render(
                 &[],
@@ -1625,6 +1635,7 @@ impl WindowState<'_> {
             self.confirm.as_ref(),
             &self.palette,
             &self.overview,
+            &self.explorer,
         );
         // Each float's frame, pane and veil, back to front (gui-design D89).
         let mut float_frames: Vec<(u64, PaneFrame)> = float_snaps
@@ -5447,6 +5458,78 @@ impl WindowState<'_> {
         }
     }
 
+    /// Open the workspace explorer on the focused block, or close it
+    /// (gui-design D99). Opening closes the other popovers.
+    fn toggle_explorer(&mut self) {
+        self.set_armed(false);
+        if let Some(key) = self.explorer.block() {
+            self.explorer.close();
+            self.source.explore(key, Explored::Close);
+        } else if let Some(key) = self
+            .focused()
+            .filter(|&k| self.source.explores(k) != Explore::No && !self.offline())
+        {
+            self.popover.close();
+            self.confirm = None;
+            self.palette.close();
+            self.overview.close();
+            self.explorer.open(key);
+            self.source.explore(key, Explored::Open);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// A key while the explorer is open: it owns the keyboard (D99).
+    fn explorer_key(&mut self, key: &Key) {
+        use super::explorer::Key as E;
+        use winit::keyboard::NamedKey;
+        let mapped = match key {
+            Key::Named(NamedKey::ArrowUp) => E::Up,
+            Key::Named(NamedKey::ArrowDown) => E::Down,
+            Key::Named(NamedKey::ArrowLeft) => E::Left,
+            Key::Named(NamedKey::ArrowRight) => E::Right,
+            Key::Named(NamedKey::Enter) => E::Enter,
+            Key::Named(NamedKey::PageUp) => E::PageUp,
+            Key::Named(NamedKey::PageDown) => E::PageDown,
+            Key::Named(NamedKey::Escape) => E::Close,
+            Key::Character(c) if c.as_str() == "y" => E::Copy,
+            _ => return,
+        };
+        let out = self.explorer.key(mapped);
+        self.explorer_out(out);
+    }
+
+    /// A click on the explorer: whether it was on the panel (a click on a
+    /// block goes on to the block).
+    fn explorer_click(&mut self, x: f64, y: f64) -> bool {
+        let (out, on) = self.explorer.click(x, y);
+        self.explorer_out(out);
+        on
+    }
+
+    /// Carry out what the explorer panel asked for.
+    fn explorer_out(&mut self, out: Option<super::explorer::Out>) {
+        use super::explorer::Out;
+        let key = self.explorer.block();
+        match (out, key) {
+            (Some(Out::Ask(intent)), Some(key)) => self.source.explore(key, Explored::Do(intent)),
+            (Some(Out::Copy(path)), _) => {
+                if let Some(cb) = self.clipboard.as_mut()
+                    && let Err(e) = cb.set_text(path)
+                {
+                    eprintln!("rusty_term: copy path: {e}");
+                }
+            }
+            (Some(Out::Close), _) => self.toggle_explorer(),
+            _ => {}
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// Show what the source says of its blocks in their headers.
     fn show_blocks(&mut self, blocks: Vec<(u64, super::source::BlockInfo)>) {
         let body = &mut self.body;
@@ -5726,6 +5809,7 @@ impl WindowState<'_> {
             Command::Float => self.float_focused(),
             Command::Stack { top } => self.stack_focused(top),
             Command::Overview => self.toggle_overview(),
+            Command::Explorer => self.toggle_explorer(),
             Command::Next => self.focus_next_shown(),
             Command::MoveMode => {
                 // Only a source that floats has a float to move.
@@ -6322,6 +6406,7 @@ impl WindowState<'_> {
         let changed = self.popover.hover(x, y)
             || self.palette.hover(x, y)
             || self.overview.hover(x, y)
+            || self.explorer.hover(x, y)
             || self.confirm.as_mut().is_some_and(|c| c.hover(x, y));
         if let (true, Some(window)) = (changed, &self.window) {
             window.request_redraw();
@@ -6434,6 +6519,14 @@ impl WindowState<'_> {
                 .position(|e| e.id == Id::Cmd(Cmd::Switcher))
                 .map_or(out.len(), |i| i + 1);
             out.insert(at, act(Cmd::Overview, label, true));
+        }
+        if focus.is_some_and(|k| self.source.explores(k) != Explore::No) {
+            let at = out
+                .iter()
+                .position(|e| e.id == Id::Cmd(Cmd::Overview))
+                .or_else(|| out.iter().position(|e| e.id == Id::Cmd(Cmd::Switcher)))
+                .map_or(out.len(), |i| i + 1);
+            out.insert(at, act(Cmd::Explorer, "Workspace explorer", online));
         }
         match take {
             Some(super::source::Take::Held) => {
@@ -6549,6 +6642,7 @@ impl WindowState<'_> {
             Id::Cmd(Cmd::NewWindow) => self.source.new_window(),
             Id::Cmd(Cmd::Switcher) => self.toggle_popover(Kind::Switcher),
             Id::Cmd(Cmd::Overview) => self.toggle_overview(),
+            Id::Cmd(Cmd::Explorer) => self.toggle_explorer(),
             Id::Cmd(Cmd::Settings) => self.open_settings(),
             Id::Cmd(Cmd::ReloadConfig) => self.reload_config(),
             Id::Cmd(Cmd::TakeOver) => {
@@ -6818,6 +6912,17 @@ impl WindowState<'_> {
                 // The overview still hears the chord that toggles it and the
                 // palette's shortcut, which leaves it (gui-design D97, D98).
                 if self.overview.is_open() && self.overview_passes(&event) {
+                    self.consumed_keys.consume(event.physical_key);
+                    return;
+                }
+                // The explorer owns the keys while open, but the prefix and
+                // its command (which toggle it) still reach their handler.
+                if self.explorer.is_open()
+                    && !self.popover_open()
+                    && !self.armed
+                    && !prefix::is_prefix(&event.logical_key, event.physical_key, self.mods)
+                {
+                    self.explorer_key(&event.logical_key);
                     self.consumed_keys.consume(event.physical_key);
                     return;
                 }
@@ -7202,6 +7307,10 @@ impl WindowState<'_> {
                 match state {
                     // An open popover takes the click: a row picks, any
                     // other place closes it (gui-design D60).
+                    ElementState::Pressed
+                        if !self.popover_open()
+                            && self.explorer.is_open()
+                            && self.explorer_click(self.mouse_pos.0, self.mouse_pos.1) => {}
                     ElementState::Pressed if self.popover_open() => {
                         self.popover_click(self.mouse_pos.0, self.mouse_pos.1);
                     }
@@ -7441,7 +7550,7 @@ impl<'a> App<'a> {
             shown_wait: None,
             palette: PaletteUi::new().ok_or("the interface font failed to parse")?,
             palette_origin: None,
-            explorer: super::explorer::Panel::default(),
+            explorer: ExplorerUi::new().ok_or("the interface font failed to parse")?,
             overview: OverviewUi::new().ok_or("the interface font failed to parse")?,
             links: load_trust(),
             forward_trust: std::collections::HashSet::new(),
