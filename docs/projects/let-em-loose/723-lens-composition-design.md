@@ -1,6 +1,6 @@
 # #723 Lens composition: design
 
-Status: draft for Nano's approval on card #723. Nothing is built until he approves (D25).
+Status: approved by Nano 2026-11-26 (D205), with Q48 = a (D206) and Q46 = a (D207).
 Released by D185. Project layer per D186. Direction from D133.
 
 ## Goal
@@ -116,21 +116,15 @@ Approving this design approves that scope, not the Retro build.
 
 No dependency bumps: the map is JSON, parsed with `rusty_json` as `lens.json` is.
 
-## Questions for Nano
+## Decisions on the open questions
 
-**Q48. Are Factory's workflow roles and the board lenses one set of roles or two?**
-- a) One set for orch: the lens is the role (D133); Factory role files give only ground rules;
-  Factory's gated pipeline stays outside orch. **Recommended**: matches D133 and the card's
-  "drop the pipeline and gates", changes nothing in Factory's own pipeline.
-- b) Two sets: orch composes both.
-- c) Retire Factory workflow roles altogether.
+Drafted as questions for Nano; he took both recommendations on 2026-11-26.
 
-**Q46. Where do knowledge and standards packs live for the composer?**
-- a) Factory `knowledge/` and `standards/`, read through the catalog adapter; lenses stay in
-  Factory `lenses/` (D135); DOMAIN.md stays in the target repo (D186). **Recommended**: Factory
-  is the source of truth (D19), and a later move only needs a new adapter.
-- b) A pack catalog in `baileyrd/pack-validation`.
-- c) Copied into each repo under `.agents/packs/`.
+- **Q48, one set of roles or two: a (D206).** One set for orch: the lens is the role (D133);
+  Factory role files give only ground rules; Factory's gated pipeline stays outside orch.
+- **Q46, where packs live: a (D207).** Factory `knowledge/` and `standards/`, read through the
+  catalog adapter; lenses stay in Factory `lenses/` (D135); DOMAIN.md stays in the target repo
+  (D186). A later move only needs a new adapter.
 
 Q47 (when the expert retires) does not block this; `let-em-loose-expert` keeps answering.
 
@@ -138,4 +132,5 @@ Q47 (when the expert retires) does not block this; `let-em-loose-expert` keeps a
 
 The card's "drop the pipeline and gates" (step 3) and moving domain knowledge out of
 Expert-Agents prompts (step 2) are Factory/Expert-Agents repo work. This design only makes orch
-able to consume the result; those moves follow once Q46 and Q48 are answered.
+able to consume the result. With Q46 (D207) and Q48 (D206) settled, those moves can go ahead
+as Factory and Expert-Agents work.
