@@ -204,7 +204,7 @@ fn a_close_into_done_is_not_recorded_as_an_approval() {
 }
 
 #[test]
-fn an_unblock_filed_on_old_text_expires_and_the_owner_approves_their_own() {
+fn an_unblock_filed_on_old_text_expires_and_the_card_stays() {
     let b = board();
     let nano = who(&b, "nano", "human", "human");
     let proxy = who(&b, "nano-proxy", "approver", "human");
@@ -216,23 +216,72 @@ fn an_unblock_filed_on_old_text_expires_and_the_owner_approves_their_own() {
     let edited = b
         .edit(card.id, &nano, None, Some("body B"), None)
         .expect("edit");
-    let moved = b
+    let tapped = b
         .approve(card.id, &nano, &approval(&edited, &ready, None))
         .expect("the stale filing does not lock the owner out");
-    assert_eq!(moved.column, ready);
-    let filed = |d: &&Duty| matches!(d, Duty::Approval { actor, .. } if actor == "nano-proxy");
+    assert_eq!(
+        tapped.column,
+        col("blocked"),
+        "no gate crossed on unread text"
+    );
     assert!(
         matches!(
-            approvals(&moved).into_iter().find(filed),
-            Some(Duty::Approval {
+            approvals(&tapped).as_slice(),
+            [Duty::Approval {
                 expired: true,
                 pending: false,
                 confirmed_by: None,
                 ..
-            })
+            }]
         ),
-        "{:?}",
-        moved.duties
+        "the filing expired and nothing was approved: {:?}",
+        tapped.duties
+    );
+    let moved = b
+        .approve(card.id, &nano, &approval(&tapped, &ready, None))
+        .expect("the owner approves on a fresh readback");
+    assert_eq!(moved.column, ready);
+}
+
+#[test]
+fn refiling_a_gate_does_not_grow_the_ledger() {
+    let b = board();
+    let nano = who(&b, "nano", "human", "human");
+    let proxy = who(&b, "nano-proxy", "approver", "human");
+    let card = b.add(&nano, "x", "", vec![]).expect("add");
+    let card = b.move_card(card.id, &col("blocked"), &nano).expect("block");
+    let ready = col("ready");
+    let first = b
+        .approve(card.id, &proxy, &approval(&card, &ready, None))
+        .expect("filed");
+    for _ in 0..20 {
+        b.approve(card.id, &proxy, &approval(&card, &ready, None))
+            .expect("refiled");
+    }
+    let last = b.get(card.id).expect("get");
+    assert_eq!(last.duties.len(), first.duties.len());
+}
+
+#[test]
+fn labelled_instances_are_one_hand() {
+    let b = board();
+    let nano = who(&b, "nano", "human", "human");
+    let maker = who(&b, "cli/a0", "maker", "anthropic");
+    let dots = who(&b, "dots", "reviewer", "openai");
+    let card = at_v_and_ving(&b, &nano, &maker, &dots);
+    let card = b.move_card(card.id, &col("building"), &nano).expect("back");
+    let before = card.duties.len();
+    for i in 1..30 {
+        let instance = who(&b, &format!("cli/a{i}"), "maker", "anthropic");
+        b.claim(card.id, &instance).expect("claim");
+        b.release(card.id, &instance).expect("release");
+    }
+    assert_eq!(b.get(card.id).expect("get").duties.len(), before);
+    let sibling = who(&b, "cli/z", "maker", "local");
+    b.claim(card.id, &sibling).expect("claim");
+    assert!(
+        refused(b.move_card(card.id, &col("v_and_ving"), &sibling)),
+        "another instance of the author's credential cannot review"
     );
 }
 
