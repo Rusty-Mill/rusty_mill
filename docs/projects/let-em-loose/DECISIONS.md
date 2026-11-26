@@ -184,6 +184,15 @@ Precise contracts used by this guide:
 | D174 | #1416: the LEL tab view model and parsing live in rusty_term, fixtures from `bbp inbox --json` plus a drift test; no shared crate | [default] 2026-11-24 (1416) |
 | D175 | #1092: the inbox runs on a second Mill Board on BaileyAi with its own SQLite file; rusty_tick retired, live board untouched | [stated] 2026-11-25 (1092) |
 | D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
+| D177 | #1404 build defaults from the recovered #600 design: builders_per_claim 1, max_live_builders 3; budget admission as approved; `builder_session` fields | [default] 2026-11-25 (1404) |
+| D178 | #1405: Windows-only intent lines are recognised by a frozen-input mapping file keyed by line; the check is orch's, no BBP change | [default] 2026-11-25 (1405) |
+| D187 | #1318 v0 builder launch defaults: ACP permission allow_once + logged; usage 0 when unreported; `tail -F acp.log` viewer; mirror from frozen inputs; no jail token before #1382 | [default] 2026-11-25 (1318) |
+| D188 | #1318 slice design approved; a builder's candidate reaches BBP only on `end_turn` with the `.lel/submit` marker and a non-empty diff, else the session ends Failed | [stated] 2026-11-25 (1318, 600) |
+| D189 | #1318 S5 `builder run` defaults: explicit launcher flags, holder deadline past orch's grace, `sh` fd-4 wrapper, no recover in `builder run`, built-in prompt, `claude-builder` seat and op ids, store opened per step | [default] 2026-11-25 (1318) |
+| D196 | #724: the redrawn `factory-map.svg` is accepted as the Factory map for now | [stated] 2026-11-25 (724) |
+| D197 | #1318 D167 toy-run runbook: BaileyAi as baileyrd from merged main, own BBP dir in ~, fresh toy repo, two concurrent `builder run`s, fail-closed checks, run record by PR | [default] 2026-11-25 (1318) |
+| D198 | #1416 slice 2: claim field bindings, stage strip derivation rule, brief text as a plain input | [default] 2026-11-25 (#1416) |
+| D199 | #1318: read-only `rusty_orch builder sessions` command for the toy-run verdict is approved | [stated] 2026-11-26 (1318) |
 
 ## D1. Lenses, not stages
 
@@ -1674,7 +1683,7 @@ The first three were approved first. The last three were added to Q35 after that
 ## D167. One paid run approved: the #1318 toy-claim acceptance run (2 builders, 45 min, one claim) after the Claude `no_overage` assertion is added; #1320 not approved
 
 **Decision.** Nano approves ONE paid run: the toy-claim acceptance run for #1318, with `builders_per_claim` 2, `builder_wall_secs` 2700 (45 minutes each) and one claim. This supersedes D134 for that run only, as D140 did for its run. Before it, the Claude `no_overage` assertion must be added to `/etc/let-em-loose/assertions.json` so the run fails closed. The dedup run (#1320) is NOT approved; it waits on M1 and the toy-run result, and any further paid call stays ask-first. The subscription is flat-rate, so the cost is usage limit, not dollars.
-**Open action for Nano (not done).** Adding the `no_overage` assertion is a host write on BaileyAi. Nano hasn't done it and hasn't authorised an agent to. Entry shape (from `mem_fe5132a19f51456190c6017e94955e0a`): `{provider: claude, account: <email as `claude auth status` reports it for the running account>, checked: YYYY-MM-DD}`. The run does not start until it is in place.
+**Open action for Nano (done 2026-11-25).** Adding the `no_overage` assertion is a host write on BaileyAi; Nano did it himself. Nano: "Done", #732 project thread, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4XwVns9yHdxFK1rGRYvyaUf`, 2026-11-25T19:02:38Z (usage credits off, account matches; remind-me `mem_5e7dc428234b4b71be3504e17bc8f228`). The entry is dated 2026-11-25 and lapses 2026-12-25: the toy run happens before then or Nano re-dates it. Entry shape (from `mem_fe5132a19f51456190c6017e94955e0a`): `{provider: claude, account: <email as `claude auth status` reports it for the running account>, checked: YYYY-MM-DD}`. The run did not start until it was in place.
 **Why.** The smallest paid run that tests builder launch; the assertion makes it fail closed; the dedup run needs evidence from the first.
 **Rejected.** Approving #1320 as well.
 **Tag.** [stated] · remind-me: mem_77c0be9609544059ae911c7e2ccdb2f9
@@ -1765,3 +1774,107 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_8d894a129917493782f8b8f1e8123b26
 **Key.** lel:430:coedit-fold-on-rusty-crdt
 **Source.** Nano, project thread "Update Mill Board card statuses", message cmsg_014AqbZs58L565hMV2pFkCX5HGJTsB1QUY7avVobhzUMnP, 2026-11-25T01:15:31Z: "1", answering the three options in cmsg_014AqbZs58L565hMV2pFkCX5C5P4veGi9BERQNHB1fH2T3. Relayed by the caller; the message was not read.
+
+## D177. #1404 build defaults from the recovered #600 design
+
+**Decision.** The approved #600 design (`600-builder-session-design.md`, D66) survived in `/mnt/project-files/let-em-loose/` and is now in this folder (PR #1874), so OPEN_QUESTIONS Q44 was wrong that it was gone. It settles what `600-build-plan.md` marked **[filled]** for #1404:
+1. **Config defaults** are the approved ones (design §5): `builders_per_claim` = 1, `max_live_builders` = 3, `builder_wall_secs` = 2700. The plan's [filled] 2 and 2 are withdrawn. D167's two builders is run config for the #1318 toy run only, not a default.
+2. **Admission** (design §4.1): an open design claim with no live candidate, or whose latest candidate failed, and `spent(c) < budget(c)` read from the task. A spent budget gets the existing budget refusal; no new budget rule.
+3. **`builder_session` record**, a new orch-store record type with its own schema tag (D66 cleared the ask-first gate for this table, and no existing data is migrated): `claim`, `n`, `candidate` (set when stored), `state` (`admitted`, `running`, `stored`, `failed`, `aborted`), `started`, `ended`, `tokens_in`, `tokens_out`, plus optional per-profile run results and erosion delta, filled when the run report lands (design §6). Wall time is derived as `ended - started`, not stored, so it has one source. `human_touched` (D106) and the claim's later outcome (accepted, reversed, reopened) are derived from the claim fold, not stored. (Amended 2026-11-25: `wall_secs` dropped as a stored column to match the built row, coordinator report from the #600 thread.)
+**Why.** Everything here sits inside D66's approved design. The column layout of an approved orch-internal record is implementation detail, and the derived flags follow D106.
+**Rejected.** The build plan's [filled] 2/2 defaults (they contradict approved §5). Taking D167's run values as defaults. A stored `human_touched` column.
+**Tag.** [default] · remind-me: mem_0a48ad5089f14c64aebb63790a976736
+**Key.** lel:1404:builder-session-build-defaults
+**Source.** Caller question from the #600 thread, 2026-11-25; `600-builder-session-design.md` §4.1, §5, §6, §8 (approved, D66); D106; D167.
+
+## D178. #1405: how Windows-only intent lines are recognised
+
+**Decision.** The open-time `untested` check is an orch check (approved design §2, §8 item 1), and BBP needs no change (§8 item 4), so there is no new event field. A line is Windows-specific when it is listed in a mapping file in the task's frozen inputs, keyed by intent line; each entry names a `golden:<case>`, `shadow`, or nothing. At open, orch lists every listed line with neither a golden case nor a shadow run as `untested` for the Linux runs. There is no marker in `INTENT.md` (frozen; any change is a new version) and no text heuristic. Which lines go in the file is experiment data that goes to Nano with the golden-set sign-off (Q4); the check is tested with fixtures.
+**Why.** The approved design already requires each Windows line to map to a golden case or the shadow run; a frozen-input mapping file is the most reversible way to recognise those lines without touching the frozen intent or the BBP schema.
+**Rejected.** A marker in `INTENT.md`. Matching on the line's text. A BBP host check with a new event field (ask-first, and §8 says BBP: none).
+**Tag.** [default] · remind-me: mem_8515601b9f5d426e973dcad3c0524df4
+**Key.** lel:1405:windows-line-recognition
+**Source.** Caller question from the #600 thread, 2026-11-25; `600-builder-session-design.md` §2, §8 (approved, D66); D56, D63.
+
+## D187. #1318 v0 builder launch defaults
+
+**Decision.** Implementation choices for `1318-builder-launch-slices.md` (draft, awaiting Nano's approval), inside the approved designs (D66, D104, D107, D108):
+1. **Permission.** orch answers every ACP `session/request_permission` with the offered `allow_once` option (`allow_always` only when no `allow_once` is offered) and writes the request and the answer to `acp.log`.
+2. **Usage.** `tokens_in`/`tokens_out` come from the adapter's reported usage; when it reports none they are 0 and `acp.log` says "usage not reported". Before #596 compares token numbers, an unreported run must be told apart from 0 (a later change to the `builder_session` row, D177).
+3. **Viewer.** The display-only session block runs `tail -F <dir>/builders/<claim>/<n>/acp.log`, outside the jail, held after exit. No new viewer binary.
+4. **Mirror.** Its contents are fixed by the task's frozen inputs (600 design §4.3). The toy claim needs no external dependencies, so its mirror is an empty read-only root. For #1320: a read-only vendored directory made from the experiment repo's lock file at task open.
+5. **Token.** v0 `jail.json` has no `token` (optional, D107) until orch mints one in #1382; nothing inside the jail consumes one before the gateway.
+**Why.** A permission prompt is not a boundary; the jail confines and built-in tools stay on (D101, spike #727); `allow_once` keeps every request in the log. Zero usage is reversible. D104 item 4 says a viewer program is enough. The #726 design builds the minter last (726-sandbox-design.md §10, D180).
+**Rejected.** Denying or escalating permission requests; `allow_always` (the adapter stops asking and the log loses entries); an optional token column now (changes the #1404 row in the queue); a new viewer binary; a minted token with no consumer.
+**Tag.** [default] · remind-me: mem_98aa01df7ad849d2b9643cb5f5137207
+**Key.** lel:1318:builder-launch-v0-defaults
+**Source.** Caller question from the #600 thread on `1318-builder-launch-slices.md` §5, 2026-11-25; D66, D101, D104, D107, D177, D180; `600-builder-session-design.md` §4.3; `mux-hosted-agents-design.md` §6. Numbered D187 because D179 to D186 are taken on open PRs (#1871, #1872, #1873, #1877).
+
+## D188. #1318: slice design approved; a candidate reaches BBP on `end_turn` + `.lel/submit` + non-empty diff
+
+**Decision.** Nano approves `1318-builder-launch-slices.md` (S1 to S6, with D187's defaults) and picks option a for how a builder's candidate reaches BBP. After the turn, orch posts the diff and candidate under the builder's seat only when all three hold: the stop reason is `end_turn`, the builder wrote the submit marker `.lel/submit` in its worktree, and the diff is non-empty. Otherwise orch posts nothing, nothing is debited, and the session ends `failed`. This closes the §5 point that blocked S5.
+**Why.** The marker tells a deliberate submission apart from a builder that gave up, so half-done work never becomes a debited candidate (600 design §4 step 7). orch already decides what reaches the board (D104), and option a adds no tool surface before the #726 gateway.
+**Rejected.** b: post on any `end_turn` with a non-empty diff, even when the builder gave up. c: a BBP submit tool offered to the agent over ACP (an MCP server in `session/new`), which means more surface to build and test in v0. "Not yet, I have changes".
+**Tag.** [stated] · remind-me: mem_22f4ae32277a47aeb0ba09fa4deed541
+**Key.** lel:1318:design-approved-candidate-submit-marker
+**Source.** Nano, decision card in the #600 project thread, message `cmsg_01WgyiM31RsSnZTgNuPX2VE48sBVZYhJPE5kniVhcHSwk1`, tapped 2026-11-25T17:26:33Z: "Approve, marker + diff (a)". The question was "Approve the #1318 design, and how should a builder's candidate reach BBP?" This satisfies D25 for #1318. Review, merge and ask-first gates (the new public surface in §5) still apply per PR. Relates to D66, D104, D177, D187. Numbered D188 because D179 to D187 are taken on open PRs (#1871, #1872, #1873, #1877, #1880).
+
+## D189. #1318 S5 `rusty_orch builder run` implementation defaults
+
+**Decision.** Inside the approved S5 (D188, `1318-builder-launch-slices.md` §S5):
+1. **Flags.** Beyond `<config> --bbp --dir --task --claim --state`: `--repo`, `--base`, `--cgroup-parent` (a delegated cgroup dir holding the `lel-store-<scope>` name), `--slots`, `--mux-ctl`, optional `--mux-socket`. No orch config schema change. `--base` is the caller-passed task baseline (the protected set's `baseline`) until 600 §4 step 2's claim-base rule is coded, then it becomes optional. The flags ride the command's existing ask-first note in the PR.
+2. **Holder deadline.** `--deadline-ms` = now + `builder_wall_secs` + 60 s grace + 30 s margin, so orch's end path (term, grace, `cgroup.kill`, `release`) always runs first and the holder's kill stays the backstop for a dead orch (§S5 step 6).
+3. **fd 4 to stdio.** Jail program `/bin/sh` with `-c 'exec claude-code-acp <&4 >&4 4>&-'`; stderr stays on the pty; `/bin` and `/usr` in read roots. Closing fd 4 keeps the agent's tool subprocesses off the ACP channel. `lel-jail` is unchanged.
+4. **Recover.** `builder run` does not call `orch_lens::builder::recover`; #1320's loop owns it, since a sibling `builder run` (D167, `builders_per_claim` 2) would be aborted. A crashed run's row stays `running` and counts toward `max_live_builders` until then.
+5. **Prompt.** A short built-in prompt: claim id and text, the worktree, "build it; run the visible tests as often as you like; when it is ready write `.lel/submit` and end your turn; to give up, end your turn without it". `.lel/` is excluded from the posted diff. Failing-profile names (600 §4 Retries) are added when the card carries them.
+6. **Seat and posts.** Through `bbp mcp` with `BBP_PRINCIPAL=claude-builder` (the agent file's id; it must be the task's assigned builder seat, addendum C-R1) and `BBP_SESSION`, as lenses do. Diff then candidate, op ids `builder-<claim>-<n>-diff` and `builder-<claim>-<n>-candidate` (`n` is unique per claim from `admit`), so a lost answer replays. Diff: `git add -A` excluding `.lel`, then `git diff --cached --binary <base>`.
+7. **Store.** Each step opens the store briefly (load, replace this row, save), retrying briefly on `DirLock` `Held`; admission is one such step. Rows saved at admitted, running and ended.
+**Why.** Each is implementation detail inside the approved design and the most reversible choice: no config schema, BBP or merged-crate change, and the holder deadline keeps the design's stated order.
+**Rejected.** Deadline at exactly the wall (the holder kill would always beat orch's end path). Teaching `lel-jail` to dup fd 4 onto 0/1 (a change to merged `orch-jail` for what a wrapper does). Calling `recover` at startup (aborts a live sibling). New orch config fields for the launcher paths.
+**Tag.** [default] · remind-me: mem_f09b470e92384f13befd1e1adce9a0ed
+**Key.** lel:1318:s5-builder-run-defaults
+**Source.** Caller question from the #1318 S5 implementation, 2026-11-25; `1318-builder-launch-slices.md` §S5; D104, D167, D177, D187, D188; addendum C-R1. Numbered D189 because D179 to D188 are taken on open PRs (#1871, #1872, #1873, #1877, #1880).
+
+## D196. #724: the redrawn `factory-map.svg` is accepted as the Factory map for now
+
+**Decision.** `docs/projects/let-em-loose/factory-map.svg`, redrawn from card #724's description of what changed (Q45's interim choice) in PR #1876, is accepted as #724's Factory map for now. The original Factory map stays untouched. "For now": a later redraw, or the 2026-11-04 voice-chat source SVG if it is recovered, may replace it without a new decision on intent. This settles the drawing only; CI, review by `dottiusmaximus` and the merge rules still apply to PR #1876.
+**Why.** The source SVG from the 2026-11-04 voice chat was not reachable from a repo session; Nano reviewed the redraw on the PR and found it good enough.
+**Rejected.** Waiting for the source SVG before landing #724's map.
+**Tag.** [stated] · remind-me: mem_b5e76a2c6dde43489fec5e501929dd57
+**Key.** lel:724:factory-map-redraw-accepted
+**Source.** Nano, project thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YM1e34fpJeXfgbUJqq3Mf5`, 2026-11-25T20:13:53Z: "Goood enough for now", after reviewing the drawing on PR #1876. Relayed by the caller; the message was not read. Resolves OPEN_QUESTIONS Q45. Numbered D196 because D177 to D195 are taken on `main` and open branches.
+
+## D197. #1318: runbook defaults for the D167 toy-claim run
+
+**Decision.** Inside the approved design (`1318-builder-launch-slices.md` §4, D188) and D167's approved run:
+1. **Host and code.** BaileyAi (D53; LXC 107 was dropped there), as `baileyrd` (`same_user` v0, D161, D166). Only from merged `main` at a recorded sha: S1 to S6 merge first. `bbp`, `rusty_orch`, `lel-jail` and `rusty-mux-ctl` from that sha go to `/opt/lel/<sha>/bin` without flipping `/opt/lel/current`, so the inbox board's `bbp` and the 1092 drain rule are untouched; the script passes full paths.
+2. **Directories.** Its own BBP dir, orch state, slots dir and toy repo under `~baileyrd` (for example `~/toy-1318/`). `/srv/lel/bbp` is `orch-runner` 0700 and refused to `baileyrd` (`1092-deploy.sh`), so nothing under `/srv/lel` changes and the Mill Board inbox is not involved.
+3. **Repo, claim, task.** A fresh throwaway local git repo, not `dedup-manager` (#1234 serves #1320, which is not approved). Shell only, no external dependencies (empty mirror, D187 item 4), erosion off (D45 opt-out). Brief, roster (`architect`, `claude-builder` assigned as the builder seat, C-R1) and profiles are written inline as `1166-smoke-run.sh` does. The claim is a small fixture (D146), for example a `sweep --dry-run DIR DAYS` that lists and deletes nothing, posted by the script as `architect` through `bbp mcp` as `1166-seed-inbox.sh` does. No lens run.
+4. **Two builders.** Two concurrent `builder run` invocations on the one claim. `admit` refuses a new builder once the claim has a live candidate, so run one after the other only the first would build. Config `builders_per_claim` 2, `max_live_builders` at least 2, slot capacity 2.
+5. **Fail closed before any paid call.** The assertion entry (`provider` claude, `account` equal to what `claude auth status` reports, `checked` within the 30 days, D167); `claude` logged in; `claude-code-acp` resolvable from the jail's read roots (the script never installs it: Nano installs the pinned npm package for his user, and the script records the version); Nano's mux server running under his systemd user manager (`user@<uid>.service`), so `lel-store-<scope>` can be made there with `Delegate=yes` and no root write; `lel-jail` and Landlock present; `bbp verify` clean. Any `sudo` step is printed for Nano, never run by the script.
+6. **Result.** Both printed session rows, both `acp.log`s, `bbp card`, `bbp why --claim` and `bbp verify` kept under the run dir. The run record goes into a committed doc by PR, plus a remind-me fact and a comment on card #1318. Launch pass: both rows ended `stored` or `failed` by D188's rule (none left `running` or `aborted`), `acp.log` renders, cgroups empty, slots released, verify clean. A stored candidate is reported, not required. Whether #1320 then proceeds stays Nano's call (D167).
+7. **Docs.** No separate design note: script, prompt and run doc in one PR, as 1092 did. Committing them in the repo satisfies D94; a copy in `/mnt/project-files/` is optional.
+**Why.** Each is the most reversible choice inside an approved design and an approved run: no `current` flip, no `/srv/lel` change, no persistent root write, no repo for an unapproved card, and the one paid run spent on reviewed code.
+**Rejected.** Running from an unmerged branch (spends the one run on unreviewed code). Opening `/srv/lel/bbp` to `baileyrd` (undoes the 1092 separation). Using `dedup-manager`. Sequential builders. A `sudo` cgroup step baked into the script.
+**Drift.** `1318-builder-launch-slices.md` §4 says the `orch-runner` account isn't created in v0; `1092-deploy.sh` created it. Harmless here (the run is as `baileyrd`). `1092-deploy-layout.md`'s "mux runs as `orch-runner`" is superseded for v0 by D161.
+**Tag.** [default] · remind-me: mem_9fffb39370e843afbe00fb627cf7cd0c
+**Key.** lel:1318:toy-run-runbook-defaults
+**Source.** Caller question from the #1318 thread, 2026-11-25; D53, D161, D166, D167, D177, D187, D188, D189; `1318-builder-launch-slices.md` §4–§5; `1092-deploy.sh`; `1166-smoke-run.sh`; `orch-lens` `builder::admit`. Numbered D197 because D190 to D196 are taken on open PRs.
+
+## D198. #1416 slice 2: claim field bindings, stage strip derivation rule, brief text as a plain input
+
+**Decision.** (1) The LEL tab binds to the merged `rusty_bbp::claims::ClaimView` names (`id, text, domains, status, score, accept_at, confidence, epoch, spent, budget, deps, candidates, sole_candidate, human_touched, holdout_due, failing, intent{current,proven_at}`). Ids are plain integers on the wire, `status` is PascalCase, and `intent` is absent until the intent is first revised. Parsing ignores unknown fields (`evidence`, `tests_changed`, `endorsement`) and defaults `accept_at`, `human_touched`, `holdout_due` and `intent` when absent. `evidence` is parsed in the slice that shows it (D58 top-two items). (2) Stage strip, derived per snapshot with no stored state. A claim is live when its status is Open, Accepted or Escalated. Intent is done as soon as the task has any claim (the brief text is not needed: it has no source until D173). Skeletons is done when a live claim has a candidate (`current` set: the builder's stored candidate; `candidates` lists a question's answer claims, not skeletons, and only feeds the stuck-question display). Under attack is done when at least one claim is Accepted and none is Open or Escalated. The strip never contradicts itself: a later stage done marks the earlier ones done, and exactly one of the first four stages is current (the first not done). Shadow run is the current stage once Under attack is done and is never shown done: the human's real-drive reality check leaves no BBP fact. Living app is always pending, labelled "not built" (same as the Q41 undo log). With no claims, Intent is current (a task with only dropped or void claims has Skeletons current) and the tab shows "new, gathering". Each stage shows text plus glyph, no animation (gui D55). (3) Slice 2 takes the brief text as a plain input (`Option<String>`). The Mill Board read endpoint that serves brief text is part of the gated API PR (D173, Q64) and its shape waits.
+**Why.** The names come from the merged struct; the stage rule uses only claim facts D116 allows and cannot claim a shadow run happened. A plain-text input keeps slice 2 testable on fixtures.
+**Rejected.** A stage field in BBP or orch (D116). Marking Shadow run done from a claim domain name nobody defined. Reading `candidates` as skeletons and Intent pending without a brief (both corrected on review of PR #1896). Fetching the brief artifact from rusty_term (no read path exists on the desktop).
+**Tag.** [default] · remind-me: mem_0d5e5a974ebd43479d6d75fcf6faeed8
+**Key.** lel:1416:lel-tab-slice2-bindings-stage-rule-brief-input
+**Source.** Caller question on #1416 slice 2 (Q9 of `1416-lel-tab-slice-plan.md`), 2026-11-25; `rusty_bbp` `src/claims.rs` `ClaimView`, `IntentView`, `EvidenceView`; `rusty_mill_board` `src/inbox.rs` (`brief` is an artifact id, claim JSON sample); D116, D173, D174; README Phases 2 to 5. Note: "D57" in the plan is gui-design D57, not this log's D57.
+
+## D199. #1318: read-only `rusty_orch builder sessions` command for the toy-run verdict is approved
+
+**Decision.** A small PR adds `rusty_orch builder sessions <config> --dir <bbp> --task <t> --state <dir> [--claim <id>]`. It is read-only: it takes the orch store dir lock and prints the saved builder session rows as JSON, one row per session in the `builder::row` shape without notes. It exits nonzero if the store can't be opened or read. #1894 (the D167 toy-run runbook, D197) stacks on it, and its verdict checks those rows. The approval covers this one command only. Any other new `rusty_orch` command or flag is still a public API change to ask Nano about first.
+**Why.** The toy-run verdict has to check the stored builder_session rows (D177, D188). A read-only printer is the smallest surface that lets the runbook script check them without opening the store itself. Because it adds a public command, it is on the ask-first list and needed Nano's approval.
+**Rejected.** Having the #1894 script read `builder-sessions.mmap` directly. A wider query or admin command.
+**Tag.** [stated] · remind-me: mem_bf939a8321774a30a361cab316004035
+**Key.** lel:1318:builder-sessions-reader
+**Source.** Nano tapped option a "Approve it as proposed" on the decision card in the #600 project thread, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4Gttb7wZhFF2cKQc3F6PYHg`, 2026-11-26T12:38:59Z. The card asked "Approve a read-only `rusty_orch builder sessions` command for the toy-run check?" Option a read: "A small PR adds a command that prints the saved builder session rows as JSON. #1894 stacks on it and its verdict checks those rows." The command shape comes from the let-em-loose-expert escalation in the #1318 thread. Related: D167, D177, D188, D197.

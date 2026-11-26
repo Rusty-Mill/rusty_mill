@@ -181,6 +181,8 @@ jobs:
       # The #1092 inbox board deploy script's checks and fixture flow, against in-memory fakes:
       # no sudo, no bbp, no board (bash and jq only).
       - run: bash docs/projects/let-em-loose/1092-board-lib.test.sh
+      # The #1318 toy-run launch verdict against fixture rows (bash and jq only).
+      - run: bash docs/projects/let-em-loose/1318-toy-verdict.test.sh
 
   claude-hooks:
     # The remind-me cloud capture hook (.claude/hooks) is stdlib-only Python and its
@@ -531,10 +533,9 @@ jobs:
           native: ${{ matrix.scope.native }}
           cache-shared-key: clippy-${{ matrix.os }}
 
-      # rusty_journal is built on io_uring, a Linux-only kernel interface --
-      # excluded on windows-latest rather than making its internals
-      # cfg-gated portable shims like rusty_win32 does the other way.
-      # rusty_fedora_agent gets the same treatment: it shells out to
+      # rusty_journal is Linux-only (io_uring); its uring-backed modules are
+      # cfg-gated, so it builds on Windows with only the sans-IO modules.
+      # rusty_fedora_agent is excluded here: it shells out to
       # systemctl/journalctl/dnf, none of which exist on Windows either.
       # rusty_multimodal_db is a different case -- it was excluded because
       # --all-features built `external-db-bench`'s bundled DuckDB, which
@@ -546,7 +547,7 @@ jobs:
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ matrix.scope.packages }}
-          windows-exclude: rusty_journal rusty_fedora_agent rusty_multimodal_db
+          windows-exclude: rusty_fedora_agent rusty_multimodal_db
 
       - name: Clippy
         if: steps.scope.outputs.args != ''
@@ -603,7 +604,7 @@ jobs:
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ matrix.scope.packages }}
-          windows-exclude: rusty_journal rusty_fedora_agent rusty_multimodal_db
+          windows-exclude: rusty_fedora_agent rusty_multimodal_db
 
       # mill-term's own tests locate sibling binaries (rush/rgit/rsed/rawk)
       # by walking target/{debug,release} at runtime rather than through a
@@ -735,9 +736,9 @@ jobs:
       # from the plan job's raw list: only the former has the per-OS
       # exclusions applied. Re-deriving the scope here from
       # `needs.plan.outputs.packages` (or a bare `--doc --workspace`) is
-      # exactly how rusty_journal -- Linux-only, and correctly excluded on
-      # windows-latest by every other step in this job -- was still getting
-      # compiled by this one step and failing the whole job on Windows.
+      # exactly how a package excluded on windows-latest by every other step
+      # in this job (rusty_journal was one, before its gating) was still
+      # getting compiled by this one step and failing the whole job.
       # Runs once per OS, not once per shard -- doctests are cheap and
       # nextest doesn't run them at all, so there's nothing shard 2/3
       # would otherwise be covering.
@@ -1990,6 +1991,7 @@ jobs:
       - name: Build real host and Orch binaries and acceptance tests
         run: |
           cargo build --locked -p rusty_orch -p rusty_bbp_host -p rusty_mill_board -p rusty_erosion
+          cargo build --locked -p rusty_mux_server -p rusty_mux_ctl -p orch-jail
           cargo test --locked -p orch-bbp --lib --no-run
           cargo test --locked -p rusty_orch --lib --no-run
           cargo test --locked -p rusty_bbp_host --test moderator_e2e --test rust_lld_profile --test claims_host --no-run
@@ -2002,6 +2004,16 @@ jobs:
           export ORCH_TEST_BIN="$PWD/target/debug/rusty_orch"
           export MILLBOARD_TEST_BIN="$PWD/target/debug/rusty_mill_board"
           export EROSION_TEST_BIN="$PWD/target/debug/erosion"
+          export MUX_SERVER_TEST_BIN="$PWD/target/debug/rusty-mux-server"
+          export MUX_CTL_TEST_BIN="$PWD/target/debug/rusty-mux-ctl"
+          export JAIL_TEST_BIN="$PWD/target/debug/lel-jail"
+          # #1318 S6: a cgroup2 subtree this user owns, with this shell (and so
+          # every test) inside it, so a builder's lel-jail can move itself into
+          # its session cgroup (cgroup v2 needs the common ancestor writable).
+          sudo mkdir -p /sys/fs/cgroup/lel-ci/runner
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/lel-ci
+          echo $$ | sudo tee /sys/fs/cgroup/lel-ci/runner/cgroup.procs > /dev/null
+          export LEL_TEST_CGROUP=/sys/fs/cgroup/lel-ci
           python3 .github/scripts/orch_bbp_acceptance.py --output acceptance-results
       - name: Publish each mode's result
         if: always()

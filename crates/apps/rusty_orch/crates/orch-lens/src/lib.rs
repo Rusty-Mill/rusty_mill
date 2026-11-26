@@ -17,11 +17,13 @@
 //! - [`tier`]: routine or contested, and the cleared providers in order.
 //! - [`meter`]: integer micro-dollars, reserved before every call.
 //! - [`breaker`]: pause a task whose spend rises while its claims stay flat.
+//! - [`builder`]: #600 builder sessions: limits, admission, the session row.
 //! - [`schedule`]: which jobs run now; the blind-first, look-harder,
 //!   proposer, rebel and fairness rules as checks.
 //! - [`record`]: a lens's track record, one informational line.
 //! - [`taint`]: what a lens saw marks what it posts; never lowered.
 //! - [`saved`]: the scheduler's memory as plain data, for the store.
+//! - [`untested`]: #600's open-time check for Windows-only intent lines.
 
 #![cfg_attr(
     not(test),
@@ -30,6 +32,7 @@
 
 pub mod alien;
 pub mod breaker;
+pub mod builder;
 pub mod call;
 pub mod card;
 pub mod class;
@@ -45,6 +48,7 @@ pub mod saved;
 pub mod schedule;
 pub mod taint;
 pub mod tier;
+pub mod untested;
 
 pub use class::DataClass;
 pub use config::LensConfig;

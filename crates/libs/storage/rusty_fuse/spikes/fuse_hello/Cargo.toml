@@ -1,0 +1,12 @@
+[package]
+name = "rusty_fuse_spike_fuse_hello"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Phase 0 spike B: raw /dev/fuse hello filesystem. Throwaway, test-exempt."
+
+# Standalone: never part of the root workspace (phase0-plan.md ground rules).
+[workspace]
+
+[dependencies]
+rusty_libc = { path = "../../../../../foundation/rusty_libc", features = ["std"] }

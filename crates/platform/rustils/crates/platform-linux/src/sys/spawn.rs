@@ -8,7 +8,7 @@
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString, OsStr, OsString};
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
@@ -187,6 +187,10 @@ pub type ParentPipes = [Option<OwnedFd>; 3];
 /// `path`/`argv0`/`args` are the exec triple, `cwd`/`env`/`stdio` are
 /// spawn context, `group`/`detached` are placement), so a bundling
 /// struct would only relocate the count, not reduce it.
+///
+/// `passed` reach the child in order at 3, 4, … with everything else
+/// above 2 closed, exactly as for `sys::pty::spawn_attached` (C75); when
+/// empty, nothing above 2 is touched.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     path: &OsStr,
@@ -197,6 +201,7 @@ pub fn spawn(
     stdio: [&Stdio; 3],
     group: GroupSpec,
     detached: bool,
+    passed: &[BorrowedFd<'_>],
 ) -> Result<(c::pid_t, ParentPipes)> {
     // Every allocation happens here, before the spawn call (B-1/B-2 fix
     // standard): owned CStrings outlive the raw pointer arrays built from
@@ -320,6 +325,12 @@ pub fn spawn(
         }
     }
 
+    // After the stdio actions, so their sources are already on 0–2 when
+    // everything from 3+n up is closed. The staged copies close here when
+    // this returns, spawned or not.
+    let staged = stage(passed)?;
+    map_passed(&mut actions, &staged)?;
+
     let mut attr = SpawnAttr::new()?;
     // `NewGroup` leads a fresh group (pgroup 0 means "use my own pid");
     // `JoinGroup(pgid)` places the child straight into an existing one —
@@ -398,6 +409,73 @@ pub fn spawn(
     Ok((pid, parent_ends))
 }
 
+/// The first descriptor number a passed descriptor lands on: 0–2 are
+/// stdio.
+const FIRST_PASSED: i32 = 3;
+
+/// Copies of `passed`, close-on-exec, each numbered at or above the first
+/// number past the targets.
+pub(crate) fn stage(passed: &[BorrowedFd<'_>]) -> Result<Vec<OwnedFd>> {
+    let floor = target(passed.len())?;
+    passed
+        .iter()
+        .map(|fd| {
+            // SAFETY: `fd` is a valid open descriptor for the call;
+            // F_DUPFD_CLOEXEC takes an int and has no pointer argument.
+            let copy = unsafe { c::fcntl(fd.as_raw_fd(), c::F_DUPFD_CLOEXEC, floor) };
+            if copy < 0 {
+                return Err(last_err("fcntl F_DUPFD_CLOEXEC"));
+            }
+            // SAFETY: `copy` is a freshly returned, otherwise-unowned fd.
+            Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+        })
+        .collect()
+}
+
+/// The file actions that put `staged[i]` at 3+i and close everything from
+/// 3+n up; none without passed descriptors, so a plain spawn is unchanged.
+pub(crate) fn map_passed(actions: &mut FileActions, staged: &[OwnedFd]) -> Result<()> {
+    if staged.is_empty() {
+        return Ok(());
+    }
+    for (i, fd) in staged.iter().enumerate() {
+        let to = target(i)?;
+        // SAFETY: `actions.0` is initialized; `fd` stays open until the
+        // spawn returns. dup2 clears close-on-exec on the target only.
+        let r = unsafe { c::posix_spawn_file_actions_adddup2(&mut actions.0, fd.as_raw_fd(), to) };
+        if r != 0 {
+            return Err(errno_err("posix_spawn adddup2", r, OsStr::new("")));
+        }
+    }
+    let from = target(staged.len())?;
+    // SAFETY: `actions.0` is initialized; no pointer argument besides it.
+    let r = unsafe { c::posix_spawn_file_actions_addclosefrom_np(&mut actions.0, from) };
+    if r != 0 {
+        return Err(errno_err("posix_spawn addclosefrom", r, OsStr::new("")));
+    }
+    Ok(())
+}
+
+/// The descriptor number the `i`th passed descriptor lands on.
+fn target(i: usize) -> Result<i32> {
+    i32::try_from(i)
+        .ok()
+        .and_then(|i| FIRST_PASSED.checked_add(i))
+        .ok_or_else(|| {
+            PlatformError::new(
+                ErrorKind::InvalidInput,
+                OsCode::None,
+                "too many passed descriptors",
+            )
+        })
+}
+
+/// The calling thread's errno as a [`PlatformError`] for `op`.
+fn last_err(op: &'static str) -> PlatformError {
+    let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    errno_err(op, code, OsStr::new(""))
+}
+
 /// `pidfd_open(pid, 0)`, wrapped as an owned fd. `ENOSYS` (pre-5.3 kernel)
 /// surfaces as `Unsupported` — [`poll_pids`]'s caller falls back to the
 /// portable poll loop rather than treating it as a hard failure.
@@ -442,6 +520,45 @@ fn pidfd_open(pid: c::pid_t) -> Result<OwnedFd> {
             "pidfd_open",
         )),
         Err(e) => Err(errno_err("pidfd_open", e.code(), OsStr::new(""))),
+    }
+}
+
+/// A copy of descriptor `target` of process `pid`, through
+/// `pidfd_getfd(2)` (Linux 5.6+). The copy shares the target's open file
+/// description, locks included, and is close-on-exec.
+///
+/// `pid` must stay this process until the call returns: the caller passes
+/// an unreaped child of its own, which cannot be recycled. `EPERM` when the
+/// caller lacks ptrace access to `pid`, `EBADF` when `pid` has no `target`.
+pub fn dup_from(pid: c::pid_t, target: c::c_int) -> Result<OwnedFd> {
+    use std::os::fd::AsFd;
+    let pidfd = pidfd_open(pid)?;
+    pidfd_getfd(pidfd.as_fd(), target)
+}
+
+/// `pidfd_getfd(pidfd, target, 0)`, wrapped as an owned fd. No libc
+/// wrapper exists at this crate's MSRV baseline, as for `pidfd_open`.
+#[cfg(not(feature = "track-p"))]
+fn pidfd_getfd(pidfd: BorrowedFd<'_>, target: c::c_int) -> Result<OwnedFd> {
+    // SAFETY: (pidfd, targetfd, flags) are plain integers; no pointer
+    // arguments.
+    let fd = unsafe { c::syscall(c::SYS_pidfd_getfd, pidfd.as_raw_fd(), target, 0u32) };
+    if fd < 0 {
+        return Err(last_err("pidfd_getfd"));
+    }
+    // SAFETY: `fd` is a freshly returned, valid, otherwise-unowned
+    // descriptor; wrapped exactly once.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as c::c_int) })
+}
+
+/// `pidfd_getfd` — Track P: `rusty_libc::process::pidfd_getfd`.
+#[cfg(feature = "track-p")]
+fn pidfd_getfd(pidfd: BorrowedFd<'_>, target: c::c_int) -> Result<OwnedFd> {
+    match rusty_libc::process::pidfd_getfd(pidfd.as_raw_fd(), target, 0) {
+        // SAFETY: `fd` is a freshly returned, valid, otherwise-unowned
+        // descriptor; wrapped exactly once.
+        Ok(fd) => Ok(unsafe { OwnedFd::from_raw_fd(fd) }),
+        Err(e) => Err(errno_err("pidfd_getfd", e.code(), OsStr::new(""))),
     }
 }
 

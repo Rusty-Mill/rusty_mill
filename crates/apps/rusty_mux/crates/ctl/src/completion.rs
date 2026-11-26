@@ -61,6 +61,9 @@ const COMMAND_WORDS: &[(&str, &[&str])] = &[
     ),
     ("terminfo", &["check", "setup", "remove", "--dry-run"]),
     ("forward", &["--block"]),
+    ("upload", &["--block", "--name"]),
+    ("download", &["--block", "--out"]),
+    ("copy", &["--block", "--to-block", "--name"]),
     ("watch", &["--after"]),
     (
         "wait",

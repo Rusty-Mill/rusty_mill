@@ -17,7 +17,9 @@ use crate::domain::{
     import_id, is_pull_link, text_hash,
 };
 use crate::external::Observation;
-use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome, plan};
+use crate::inbox::{
+    Acted, Action, Diffstat, DryRun, Escalation, Escalations, InboxError, Outcome, plan,
+};
 use crate::metrics::{Metrics, metrics};
 use crate::milestones::{MemMilestones, Milestone, MilestoneEdit, MilestoneStore};
 use crate::projects::{Projects, Statuses};
@@ -1066,10 +1068,14 @@ impl<S: Store> Board<S> {
         );
         for x in dropped {
             body.push_str(&format!(
-                "- msg:{} \"{}\": {}\n",
+                "- msg:{} \"{}\": {}\n  {}\n",
                 x.claim,
                 text(x.claim),
-                x.marks.join(", ")
+                x.marks.join(", "),
+                x.diffstat.as_ref().map_or_else(
+                    || "No diffstat: the claim has no readable candidate, or the host predates #1400.".to_owned(),
+                    Diffstat::line,
+                )
             ));
         }
         let events: Vec<&str> = dry

@@ -26,6 +26,7 @@ use crate::api::{CallError, Identity, Shared, Who, acting};
 use crate::board::{ProjectsSink, Roles};
 use crate::domain::{Actor, BoardError, Capability, MoveRules, ProjectStatus};
 use crate::github::GithubConfig;
+use crate::history;
 use crate::identities::{Credentials, read_private};
 use crate::projects::{Projects, Statuses};
 use crate::syncer::{MIN_SECS, Syncer};
@@ -77,6 +78,8 @@ pub struct Files {
     pub project_status: Option<PathBuf>,
     /// The append-only record of settings calls (one JSON object a line, never a secret).
     pub audit: Option<PathBuf>,
+    /// The append-only record of what each settings change altered (`history`).
+    pub history: Option<PathBuf>,
 }
 
 impl Files {
@@ -91,6 +94,7 @@ impl Files {
             workflow: Some(dir.join("workflow.json")),
             project_status: Some(dir.join("project-status.json")),
             audit: Some(dir.join("settings-audit.jsonl")),
+            history: Some(dir.join("settings-history.jsonl")),
         }
     }
 }
@@ -493,6 +497,13 @@ pub fn tools() -> Vec<SettingsTool> {
             &[],
         ),
         tool(
+            "settings_history",
+            "What each settings change altered (needs admin), oldest first: when, who, operation, section, old and new value; never a secret. Keeps the newest 5000 entries within 2 MiB; a response holds at most 256 KiB (`truncated` says it was cut), and a change too large to keep whole is kept without its values (`omitted_bytes`).",
+            json!({"limit": {"type": "integer", "description": "How many of the newest entries (1-500, default 50)."},
+                   "section": {"type": "string", "description": "Only this section: agents, registry, roles, github, rules, workflow, project_status or registered_agents."}}),
+            &[],
+        ),
+        tool(
             "settings_registered_agent_set",
             "Set a registered agent's own role, projects and nickname (needs admin). Anything left out is cleared, so it acts as its connector again. You can only give a role, capabilities and projects you hold; admin and enrol are never granted through a connector.",
             json!({"id": text, "agent_role": text, "agent_projects": list(text.clone()), "nickname": text}),
@@ -577,6 +588,14 @@ pub fn tools() -> Vec<SettingsTool> {
 struct Caller {
     actor: Actor,
     via_connector: bool,
+}
+
+#[derive(Deserialize)]
+struct HistoryRead {
+    /// How many of the newest entries (1-500, default 50).
+    limit: Option<usize>,
+    /// Only this section.
+    section: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -673,6 +692,7 @@ impl Settings {
         let run: fn(&Self, &Caller, Value) -> Res = match name {
             "settings_get" => |s, _, _| s.get(),
             "settings_audit" => |s, _, a| s.audit_read(&parse(a)?),
+            "settings_history" => |s, _, a| s.history_read(&parse(a)?),
             "settings_agent_add" => {
                 |s, by, a| s.agent_add(by, &parse::<WithAgent<AgentAdd>>(a)?.agent)
             }
@@ -721,11 +741,17 @@ impl Settings {
             return Err(BoardError::Forbidden(Capability::Enrol).into());
         }
         let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
-        let out = if name == "agent_enrol" {
-            self.enrol(&actor, &lead.actor, &parse(args)?)
-        } else {
-            self.enrol_revoke(&lead.actor, &parse(args)?)
+        let caller = Caller {
+            actor: actor.clone(),
+            via_connector: lead.connector,
         };
+        let out = self.recorded(&caller, name, || {
+            if name == "agent_enrol" {
+                self.enrol(&actor, &lead.actor, &parse(args)?)
+            } else {
+                self.enrol_revoke(&lead.actor, &parse(args)?)
+            }
+        });
         out.map_err(CallError::Board)
     }
 
@@ -827,9 +853,53 @@ impl Settings {
             m.remove("agent_key");
         }
         let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
-        let out = run(self, &caller, args);
+        let out = self.recorded(&caller, &op, || run(self, &caller, args));
         self.audit(&caller, &op, out.as_ref().map(|_| ()));
         out.map_err(CallError::Board)
+    }
+
+    /// Run `run`, and when it succeeded, record each settings section it changed. Every settings
+    /// write passes here, so a new operation is covered without its own code. Callers hold the
+    /// `changing` lock, so the two snapshots see nothing but this change.
+    fn recorded(&self, by: &Caller, op: &str, run: impl FnOnce() -> Res) -> Res {
+        let Some(path) = self.files.history.as_deref() else {
+            return run();
+        };
+        let before = self.get().map(|v| history::snapshot(&v));
+        let out = run();
+        if out.is_ok() {
+            self.record_changes(path, by, op, before);
+        }
+        out
+    }
+
+    fn record_changes(
+        &self,
+        path: &Path,
+        by: &Caller,
+        op: &str,
+        before: Result<serde_json::Map<String, Value>, BoardError>,
+    ) {
+        let (Ok(before), Ok(after)) = (before, self.get().map(|v| history::snapshot(&v))) else {
+            rusty_log::warn!(op = %op, "could not read the settings to record their history");
+            return;
+        };
+        let at_ms = self.board.now_ms();
+        let entries: Vec<history::Entry> = history::changes(&before, &after)
+            .into_iter()
+            .map(|(section, old, new)| history::Entry {
+                at_ms,
+                actor: by.actor.name.clone(),
+                via_connector: by.via_connector,
+                op: op.to_owned(),
+                section,
+                old,
+                new,
+            })
+            .collect();
+        if let Err(e) = history::append(path, &entries) {
+            rusty_log::warn!(error = %e, "could not write the settings history");
+        }
     }
 
     /// Record one settings call: who, which operation, how it ended. Never its arguments, which
@@ -930,6 +1000,15 @@ impl Settings {
         if let Err(e) = append_line(path, &line.to_string()) {
             rusty_log::warn!(error = %e, "could not write the refusal record");
         }
+    }
+
+    /// The newest `limit` history entries (of one section, when given), oldest first.
+    fn history_read(&self, a: &HistoryRead) -> Res {
+        let path = self.file(&self.files.history)?;
+        let limit = a.limit.unwrap_or(50).clamp(1, 500);
+        let page = history::read(&path, limit, a.section.as_deref())
+            .map_err(|e| refused(format!("{}: {e}", path.display())))?;
+        Ok(json!({ "entries": page.entries, "truncated": page.truncated }))
     }
 
     /// The newest `limit` audit records, oldest first.

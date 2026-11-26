@@ -3492,3 +3492,310 @@ fn forward_fails_while_another_client_holds_the_lease() {
     let _ = first.kill();
     let _ = first.wait();
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn upload_sends_a_file_and_prints_its_path_on_the_server() {
+    let state = std::env::temp_dir().join(format!("ctl-upload-state-{}", std::process::id()));
+    let _gone = std::fs::remove_dir_all(&state);
+    let socket = start_server_with(Config {
+        state_dir: Some(state.clone()),
+        ..shell()
+    });
+    let block = block(&socket);
+    let local = std::env::temp_dir().join(format!("ctl-upload-{}.txt", std::process::id()));
+    std::fs::write(&local, b"hello from the client").expect("write");
+
+    let path = ok(
+        &socket,
+        &["upload", "--block", &block, local.to_str().expect("utf8")],
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("the file on the server"),
+        b"hello from the client"
+    );
+    assert!(path.ends_with(".txt"), "{path}");
+
+    let json = ok(
+        &socket,
+        &[
+            "--json",
+            "upload",
+            "--block",
+            &block,
+            "--name",
+            "n.txt",
+            local.to_str().expect("utf8"),
+        ],
+    );
+    // The preparing calls report too; the path is the last line.
+    let last = json.lines().last().expect("a line");
+    assert!(last.starts_with("{\"path\":\""), "{json}");
+
+    let missing = ctl(&socket, &["upload", "--block", &block, "/nonexistent/x"]);
+    assert_eq!(missing.status.code(), Some(1));
+    let _gone = std::fs::remove_file(local);
+    let _gone = std::fs::remove_dir_all(state);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn download_writes_a_file_to_stdout_or_out() {
+    let socket = start_server();
+    let block = block(&socket);
+    let remote = std::env::temp_dir().join(format!("ctl-download-{}.txt", std::process::id()));
+    std::fs::write(&remote, b"hello from the server").expect("write");
+    let remote_path = remote.to_str().expect("utf8");
+
+    let output = ctl(&socket, &["download", "--block", &block, remote_path]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"hello from the server");
+
+    let out = std::env::temp_dir().join(format!("ctl-download-out-{}.txt", std::process::id()));
+    ok(
+        &socket,
+        &[
+            "download",
+            "--block",
+            &block,
+            "--out",
+            out.to_str().expect("utf8"),
+            remote_path,
+        ],
+    );
+    assert_eq!(std::fs::read(&out).expect("out"), b"hello from the server");
+
+    // A refusal leaves no partial file.
+    let _gone = std::fs::remove_file(&out);
+    let refused = ctl(
+        &socket,
+        &[
+            "download",
+            "--block",
+            &block,
+            "--out",
+            out.to_str().expect("utf8"),
+            "/nonexistent/x",
+        ],
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(!out.exists());
+    let _gone = std::fs::remove_file(remote);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_download_leaves_an_existing_out_alone_and_json_keeps_stdout_clean() {
+    let socket = start_server();
+    let block = block(&socket);
+    let out = std::env::temp_dir().join(format!("ctl-keep-{}.txt", std::process::id()));
+    std::fs::write(&out, b"precious").expect("write");
+    let out_arg = out.to_str().expect("utf8");
+
+    let refused = ctl(
+        &socket,
+        &[
+            "download",
+            "--block",
+            &block,
+            "--out",
+            out_arg,
+            "/nonexistent/x",
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(std::fs::read(&out).expect("kept"), b"precious");
+
+    // The bytes and the preparing calls' JSON would share stdout.
+    let json = ctl(
+        &socket,
+        &["--json", "download", "--block", &block, "/etc/hostname"],
+    );
+    assert_eq!(json.status.code(), Some(1));
+    assert!(json.stdout.is_empty(), "{}", stdout(&json));
+    let _gone = std::fs::remove_file(out);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_file_over_one_chunk_goes_up_and_a_directory_is_refused() {
+    let state = std::env::temp_dir().join(format!("ctl-chunks-state-{}", std::process::id()));
+    let _gone = std::fs::remove_dir_all(&state);
+    let socket = start_server_with(Config {
+        state_dir: Some(state.clone()),
+        ..shell()
+    });
+    let block = block(&socket);
+    let local = std::env::temp_dir().join(format!("ctl-chunks-{}.bin", std::process::id()));
+    let bytes: Vec<u8> = (0..(5 << 19)).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&local, &bytes).expect("write");
+
+    let path = ok(
+        &socket,
+        &["upload", "--block", &block, local.to_str().expect("utf8")],
+    );
+    assert_eq!(std::fs::read(&path).expect("on the server"), bytes);
+
+    let dir = ctl(&socket, &["upload", "--block", &block, "/tmp"]);
+    assert_eq!(
+        dir.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&dir.stderr)
+    );
+    let _gone = std::fs::remove_file(local);
+    let _gone = std::fs::remove_dir_all(state);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_download_replaces_an_existing_out_and_leaves_no_staging_file() {
+    let socket = start_server();
+    let block = block(&socket);
+    let dir = std::env::temp_dir().join(format!("ctl-replace-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let (remote, out) = (dir.join("remote.txt"), dir.join("out.txt"));
+    std::fs::write(&remote, b"new").expect("remote");
+    std::fs::write(&out, b"old").expect("out");
+    ok(
+        &socket,
+        &[
+            "download",
+            "--block",
+            &block,
+            "--out",
+            out.to_str().expect("utf8"),
+            remote.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(std::fs::read(&out).expect("out"), b"new");
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .expect("read")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["out.txt", "remote.txt"]);
+    let _gone = std::fs::remove_dir_all(dir);
+}
+
+/// Two servers saved as hosts `a` and `b`, a block on each, and the state
+/// directory of `b` for its uploads.
+#[cfg(target_os = "linux")]
+fn two_hosts(tag: &str) -> (PathBuf, PathBuf, String, String, PathBuf) {
+    let state = std::env::temp_dir().join(format!("ctl-copy-{tag}-{}", std::process::id()));
+    let _gone = std::fs::remove_dir_all(&state);
+    let (a, b) = (
+        start_server(),
+        start_server_with(Config {
+            state_dir: Some(state.clone()),
+            ..shell()
+        }),
+    );
+    let home = config_home(tag);
+    hosts_ok(&home, &["hosts", "add", "a", "--socket", path_text(&a)]);
+    hosts_ok(&home, &["hosts", "add", "b", "--socket", path_text(&b)]);
+    let (block_a, block_b) = (block(&a), block(&b));
+    (home, state, block_a, block_b, b)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn copy_moves_a_file_from_one_host_to_another() {
+    let (home, state, block_a, block_b, _b) = two_hosts("ok");
+    let remote = std::env::temp_dir().join(format!("ctl-copy-src-{}.bin", std::process::id()));
+    // Several chunks, so the stream is exercised past one.
+    let bytes: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&remote, &bytes).expect("write");
+    let path = hosts_ok(
+        &home,
+        &[
+            "copy",
+            "--block",
+            &block_a,
+            "--to-block",
+            &block_b,
+            &format!("a:{}", path_text(&remote)),
+            "b",
+        ],
+    );
+    assert_eq!(std::fs::read(&path).expect("copied file"), bytes);
+    assert!(path.starts_with(path_text(&state)), "{path}");
+    let _gone = std::fs::remove_file(remote);
+    let _gone = std::fs::remove_dir_all(state);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_copy_commits_nothing_and_names_the_failing_host() {
+    let (home, state, block_a, block_b, _b) = two_hosts("fail");
+    let output = hosts_ctl(
+        &home,
+        &[
+            "copy",
+            "--block",
+            &block_a,
+            "--to-block",
+            &block_b,
+            "a:/nonexistent/x",
+            "b",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("a:"), "{err}");
+    let files = |dir: &Path| {
+        walk(dir)
+            .into_iter()
+            .filter(|p| p.file_name().is_some_and(|n| n == "x"))
+            .count()
+    };
+    assert_eq!(files(&state), 0);
+    let unknown = hosts_ctl(
+        &home,
+        &[
+            "copy",
+            "--block",
+            &block_a,
+            "--to-block",
+            &block_b,
+            "a:/etc/hostname",
+            "nope",
+        ],
+    );
+    assert_ne!(unknown.status.code(), Some(0));
+    let global = hosts_ctl(
+        &home,
+        &[
+            "--host",
+            "a",
+            "copy",
+            "--block",
+            &block_a,
+            "--to-block",
+            &block_b,
+            "a:p",
+            "b",
+        ],
+    );
+    assert_eq!(global.status.code(), Some(2), "{global:?}");
+    let _gone = std::fs::remove_dir_all(state);
+}
+
+#[cfg(target_os = "linux")]
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .flat_map(|e| match e.path() {
+            p if p.is_dir() => walk(&p),
+            p => vec![p],
+        })
+        .collect()
+}

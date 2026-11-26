@@ -56,7 +56,9 @@ fn shape(method: &Method) -> Shape {
         | "terminal.reset"
         | "terminal.set-theme"
         | "terminal.clear"
-        | "terminal.workspace-list" => Shape::Leased,
+        | "terminal.workspace-list"
+        | "terminal.workspace-stat"
+        | "terminal.workspace-touched" => Shape::Leased,
         _ => Shape::Plain,
     }
 }
@@ -105,7 +107,9 @@ fn tool(method: &Method) -> Tool {
 /// any program they are given; each can delete data and reach any system,
 /// so all are destructive and open-world. The rest stays on the local server.
 fn annotations(method: &Method) -> Value {
-    let read_only = matches!(method.returns, Returns::Text | Returns::Entries);
+    // `workspace-touched` runs `git`, and a repository's own filters with it.
+    let read_only = matches!(method.returns, Returns::Text | Returns::Entries)
+        && method.name != "terminal.workspace-touched";
     let runs = matches!(method.name, "input" | "create-block" | "split-block");
     let destructive = runs
         || method.name.starts_with("close-")

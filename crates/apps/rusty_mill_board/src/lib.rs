@@ -33,6 +33,7 @@ pub mod drain;
 pub mod duties;
 pub mod external;
 pub mod github;
+pub mod history;
 pub mod http;
 pub mod identities;
 pub mod inbox;

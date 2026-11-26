@@ -45,6 +45,7 @@
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
 //! bbp slot-hold                           holds the slot lock on stdout until stdin closes and no other process is in the group it leads; started by bbp mod
 //! bbp slot-hold --cgroup PATH [--deadline-ms N]   D104: holds the slot lock on stdout until stdin closes and the cgroup is empty; at the deadline writes cgroup.kill
+//! bbp slot-hold --cgroup PATH --slots DIR [--deadline-ms N]   D108: takes a free agent slot from DIR itself and prints the descriptor it holds it on as stdout's first line; exits non-zero, taking nothing, when every agent slot is held
 //! bbp cgroup-scope --dir D                 D104: the cgroup name this control directory's sessions must sit below
 //! bbp cgroup-open --dir D --task T --cgroup PATH   D104: records a mux-hosted session's cgroup for the task, then creates it (refused if it exists or isn't below the scope)
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
@@ -164,7 +165,11 @@ fn run() -> Result<String, String> {
             .transpose()?
             .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
         if let Some(cgroup) = a.flags.get("cgroup") {
-            return cgroup_hold(cgroup, deadline);
+            let slots = a.flags.get("slots").map(PathBuf::from);
+            return cgroup_hold(cgroup, slots.as_deref(), deadline);
+        }
+        if a.flags.contains_key("slots") {
+            return Err("--slots needs --cgroup".into());
         }
         slots::hold_while_alive(deadline);
         return Ok(String::new());
@@ -711,11 +716,20 @@ fn takeover_batch(input: impl std::io::Read) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// `bbp slot-hold --cgroup PATH`: holds until the cgroup is empty.
+/// `bbp slot-hold --cgroup PATH [--slots DIR]`: holds until the cgroup is
+/// empty; with `--slots` it takes the slot itself (D108 item 2).
 #[cfg(target_os = "linux")]
-fn cgroup_hold(cgroup: &str, deadline: Option<std::time::SystemTime>) -> Result<String, String> {
-    use rusty_bbp_host::cgroups::{checked, hold, Session};
+fn cgroup_hold(
+    cgroup: &str,
+    slots: Option<&std::path::Path>,
+    deadline: Option<std::time::SystemTime>,
+) -> Result<String, String> {
+    use rusty_bbp_host::cgroups::{checked, hold, hold_slot, Session};
     let cgroup = checked(std::path::Path::new(cgroup))?;
+    // Read before the cgroup wait, so a bad directory fails at once.
+    let slots = slots
+        .map(rusty_bbp_host::slots::Slots::recorded)
+        .transpose()?;
     // Opened once and held: a cgroup made again at the path is not this one.
     let session = loop {
         match Session::open(&cgroup) {
@@ -724,9 +738,18 @@ fn cgroup_hold(cgroup: &str, deadline: Option<std::time::SystemTime>) -> Result<
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     };
-    hold(&session, deadline, std::io::stdin(), &mut |e| {
-        eprintln!("bbp slot-hold: {e}; still holding")
-    });
+    let mut report = |e: &str| eprintln!("bbp slot-hold: {e}; still holding");
+    match slots {
+        Some(slots) => hold_slot(
+            &session,
+            &slots,
+            deadline,
+            std::io::stdin(),
+            &mut std::io::stdout(),
+            &mut report,
+        )?,
+        None => hold(&session, deadline, std::io::stdin(), &mut report),
+    }
     Ok(String::new())
 }
 
@@ -745,7 +768,11 @@ fn cgroup_open(
 }
 
 #[cfg(not(target_os = "linux"))]
-fn cgroup_hold(_: &str, _: Option<std::time::SystemTime>) -> Result<String, String> {
+fn cgroup_hold(
+    _: &str,
+    _: Option<&std::path::Path>,
+    _: Option<std::time::SystemTime>,
+) -> Result<String, String> {
     Err(CGROUPS_LINUX_ONLY.into())
 }
 
