@@ -119,6 +119,7 @@ mod tests {
         let lens = PrincipalId("l".into());
         let parts = Parts {
             prefix: "",
+            smaller: &[],
             card: &c,
             lens: &lens,
             phase: Phase::Informed,

@@ -38,7 +38,7 @@ use orch_lens::call::{Ctx, Models};
 use orch_lens::card::Card;
 use orch_lens::compose::{prefix_key, Limits, PrefixKey};
 use orch_lens::config::Tools;
-use orch_lens::context::{prefix, Line};
+use orch_lens::context::{prefix, Line, Rung};
 use orch_lens::meter::{Meter, Stop};
 use orch_lens::record::{Review, Tally};
 use orch_lens::round::{round, Board, Halt, View};
@@ -338,16 +338,19 @@ impl Prefixes {
         Ok(())
     }
 
-    /// #723: one composed prefix per distinct domain set among `cards`,
-    /// built on the same brief as the lens's flat prefix. Empty when
-    /// composition is off. Each file dropped to fit is logged.
+    /// #723: per distinct domain set among `cards`, the composed prefix
+    /// and every smaller one down to the base prefix, built on the same
+    /// brief as the flat prefix. Each job then uses the largest that fits
+    /// its provider. Empty when composition is off. Files left out by the
+    /// catalog's own limits are logged here; the round reports what a
+    /// provider's window left out.
     fn composed(
         &self,
         lens: &str,
         cards: &[Card],
         prompts: &Prompts,
         log: &mut String,
-    ) -> Result<BTreeMap<PrefixKey, String>, String> {
+    ) -> Result<BTreeMap<PrefixKey, Vec<Rung>>, String> {
         let (Some(catalog), Some(prompt), Some(intent)) = (
             prompts.catalog.as_ref(),
             prompts.lens.get(lens),
@@ -361,11 +364,23 @@ impl Prefixes {
             if out.contains_key(&key) {
                 continue;
             }
-            let built = catalog.build(prompt, &key.1)?;
-            for d in &built.composed.dropped {
+            let ladder = catalog.ladder(prompt, &key.1)?;
+            let first = ladder.first().map_or(0, |c| c.dropped.len());
+            for d in ladder
+                .first()
+                .map(|c| c.dropped.as_slice())
+                .unwrap_or_default()
+            {
                 let _ = writeln!(log, "{lens} [{}]: {d} left out to fit", key.1.join(", "));
             }
-            out.insert(key, prefix(intent, &prompts.rules, &built.composed.prompt));
+            let rungs = ladder
+                .into_iter()
+                .map(|c| Rung {
+                    prefix: prefix(intent, &prompts.rules, &c.prompt),
+                    dropped: c.dropped[first..].to_vec(),
+                })
+                .collect();
+            out.insert(key, rungs);
         }
         Ok(out)
     }
@@ -507,6 +522,16 @@ pub fn passes(
             guard.raise(&report.taints)?;
             keep(state).map_err(|e| format!("lens state not saved: {e}"))?;
             started += report.ran.len();
+            for (key, provider, dropped) in &report.trimmed {
+                let _ = writeln!(
+                    log,
+                    "pass {pass} {} {} {:?} {provider}: left out {} to fit its window",
+                    key.lens,
+                    key.claim,
+                    key.slot,
+                    dropped.join(", ")
+                );
+            }
             for (key, end) in &report.ran {
                 let _ = writeln!(
                     log,
@@ -2209,9 +2234,17 @@ mod tests {
             .composed("adversary", &cards, &prompts, &mut log)
             .expect("composes");
         assert_eq!(got.len(), 2, "one prefix per domain set");
-        let rust = &got[&prefix_key("adversary", &["rust".to_owned()])];
-        let tty = &got[&prefix_key("adversary", &["tty".to_owned()])];
+        let rust_rungs = &got[&prefix_key("adversary", &["rust".to_owned()])];
+        let tty_rungs = &got[&prefix_key("adversary", &["tty".to_owned()])];
+        let (rust, tty) = (&rust_rungs[0].prefix, &tty_rungs[0].prefix);
         assert_ne!(rust, tty);
+        let base = prefix("the brief", "rules", "find faults");
+        assert_eq!(rust_rungs.last().map(|r| &r.prefix), Some(&base));
+        assert_eq!(
+            rust_rungs.last().map(|r| r.dropped.clone()),
+            Some(vec!["k/rust.md".to_owned(), "DOMAIN.md".to_owned()])
+        );
+        assert!(rust_rungs[0].dropped.is_empty());
         assert!(rust.contains("Ownership first.") && rust.contains("# Project\nDedup 20 TB."));
         assert!(rust.starts_with("# Intent\nthe brief\n"));
         assert!(tty.contains("VT is a state machine.") && !tty.contains("Ownership"));

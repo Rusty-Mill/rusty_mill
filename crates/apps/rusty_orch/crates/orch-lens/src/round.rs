@@ -26,7 +26,7 @@ use crate::card::Card;
 use crate::class::DataClass;
 use crate::compose::{prefix_key, PrefixKey};
 use crate::config::{LensConfig, Provider};
-use crate::context::{Line, Parts, Phase};
+use crate::context::{Line, Parts, Phase, Rung};
 use crate::meter::Stop;
 use crate::post::Post;
 use crate::record::Review;
@@ -74,10 +74,11 @@ pub struct View<'a> {
     pub lines: &'a [Line],
     /// Each lens's prefix ([`crate::context::prefix`]), by lens id.
     pub prefixes: &'a BTreeMap<String, String>,
-    /// #723 composed prefixes, by lens and claim domains; a job whose key
-    /// is here uses it instead of its lens's flat prefix. Empty when
-    /// composition is off.
-    pub composed: &'a BTreeMap<PrefixKey, String>,
+    /// #723 composed prefixes, by lens and claim domains, largest first,
+    /// the last being the lens's base prefix; a job whose key is here uses
+    /// the largest that fits each provider instead of its flat prefix.
+    /// Empty when composition is off.
+    pub composed: &'a BTreeMap<PrefixKey, Vec<Rung>>,
     /// Each lens's track-record line, by lens id; a lens without one gets
     /// none.
     pub records: &'a BTreeMap<String, String>,
@@ -109,6 +110,8 @@ pub struct Report {
     /// Each post that landed, with the class of the context its lens was
     /// shown (#598 taint): the shell raises its taint table by these.
     pub taints: Vec<(MsgId, DataClass)>,
+    /// Composed sections left out to fit a provider's window (#723).
+    pub trimmed: Vec<(JobKey, AgentId, Vec<String>)>,
     pub halt: Option<Halt>,
 }
 
@@ -141,19 +144,21 @@ pub fn round(
         skipped,
         reviews: Vec::new(),
         taints: Vec::new(),
+        trimmed: Vec::new(),
         halt: None,
     };
     for job in &jobs {
         let Some(card) = by_id.get(&job.key.claim) else {
             continue;
         };
-        let Some(prefix) = prefix_for(view, &job.key.lens, card) else {
+        let Some((prefix, smaller)) = prefix_for(view, &job.key.lens, card) else {
             out.halt = Some(Halt::NoPrefix(job.key.lens.clone()));
             return out;
         };
         let lens = rusty_bbp::PrincipalId(job.key.lens.clone());
         let parts = Parts {
             prefix,
+            smaller,
             card,
             lens: &lens,
             phase: job.phase,
@@ -169,6 +174,12 @@ pub fn round(
             save: &mut *save,
         };
         let called = call(job, &parts, ctx, models);
+        out.trimmed.extend(
+            called
+                .trimmed
+                .iter()
+                .map(|(id, d)| (job.key.clone(), *id, d.clone())),
+        );
         let (row, halted, landed) = settle(job, card, &called.end, state, board, &mut *ahead);
         let class = seen(&parts, &called.end, providers);
         out.taints.extend(landed.into_iter().map(|id| (id, class)));
@@ -183,11 +194,15 @@ pub fn round(
     out
 }
 
-/// The prefix a job on `card` uses: composed for its domains, else flat.
-fn prefix_for<'v>(view: &View<'v>, lens: &str, card: &Card) -> Option<&'v String> {
-    view.composed
-        .get(&prefix_key(lens, &card.domains))
-        .or_else(|| view.prefixes.get(lens))
+/// The prefix a job on `card` uses and its smaller fallbacks: composed
+/// for its domains, else flat with none.
+fn prefix_for<'v>(view: &View<'v>, lens: &str, card: &Card) -> Option<(&'v str, &'v [Rung])> {
+    match view.composed.get(&prefix_key(lens, &card.domains)) {
+        Some(rungs) => rungs
+            .split_first()
+            .map(|(f, rest)| (f.prefix.as_str(), rest)),
+        None => view.prefixes.get(lens).map(|p| (p.as_str(), [].as_slice())),
+    }
 }
 
 /// The highest class the answering provider could have been shown: the
@@ -492,7 +507,7 @@ mod tests {
         mut echo: Echo,
         mut board: Posted,
         prefixes: &BTreeMap<String, String>,
-        composed: &BTreeMap<PrefixKey, String>,
+        composed: &BTreeMap<PrefixKey, Vec<Rung>>,
     ) -> Out {
         let cfg = config();
         let ceilings = Ceilings {
@@ -872,13 +887,20 @@ mod tests {
         rust.domains = vec!["rust".to_owned(), "cli".to_owned()];
         let mut term = plain(8);
         term.domains = vec!["terminal".to_owned()];
-        let composed: BTreeMap<PrefixKey, String> = LENSES
+        let composed: BTreeMap<PrefixKey, Vec<Rung>> = LENSES
             .iter()
             .map(|l| {
                 let domains = ["rust".to_owned(), "cli".to_owned(), "rust".to_owned()];
+                let rung = |prefix: String| Rung {
+                    prefix,
+                    dropped: vec![],
+                };
                 (
                     prefix_key(l, &domains),
-                    format!("# Your lens\n{l}\nRUST PACK\n"),
+                    vec![
+                        rung(format!("# Your lens\n{l}\nRUST PACK\n")),
+                        rung(format!("# Your lens\n{l}\n")),
+                    ],
                 )
             })
             .collect();
@@ -910,6 +932,7 @@ mod tests {
             asked("domains: terminal").iter().all(|r| !*r),
             "terminal claim stays flat"
         );
+        assert!(out.report.trimmed.is_empty(), "everything fit");
     }
 
     #[test]

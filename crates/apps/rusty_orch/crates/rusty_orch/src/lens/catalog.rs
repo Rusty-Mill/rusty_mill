@@ -79,6 +79,21 @@ impl Catalog {
             unknown,
         })
     }
+
+    /// The composed prompt for `domains`, then every smaller one down to
+    /// the bare lens prompt ([`compose::ladder`]), so a caller can fit a
+    /// provider's window without cutting the card.
+    pub fn ladder(&self, lens_prompt: &str, domains: &[String]) -> Result<Vec<Composed>, String> {
+        let (selection, _) = compose::select(&self.map, domains);
+        compose::ladder(
+            lens_prompt,
+            self.domain_pack.as_deref(),
+            &selection,
+            &self.texts,
+            self.limits,
+        )
+        .map_err(|e| e.to_string())
+    }
 }
 
 fn read_all(

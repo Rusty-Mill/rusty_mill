@@ -36,10 +36,22 @@ pub struct Line {
     pub class: DataClass,
 }
 
+/// A smaller prefix a job may fall back to (#723), and what it leaves out
+/// compared with the job's full prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rung {
+    pub prefix: String,
+    pub dropped: Vec<String>,
+}
+
 /// Everything one job's context is made from.
 #[derive(Debug, Clone, Copy)]
 pub struct Parts<'a> {
     pub prefix: &'a str,
+    /// Smaller prefixes, largest first, the last being the base prefix
+    /// with no composed sections. Tried in order when `prefix` and the
+    /// card do not fit a provider's window. Empty when nothing is composed.
+    pub smaller: &'a [Rung],
     pub card: &'a Card,
     pub lens: &'a PrincipalId,
     pub phase: Phase,
@@ -65,8 +77,21 @@ pub enum Refusal {
         card: DataClass,
         clearance: DataClass,
     },
-    /// Prefix and card alone exceed the window.
-    TooLarge { needed: u64, room: u64 },
+    /// Prefix and card alone exceed the window, even with every composed
+    /// section left out (`dropped`).
+    TooLarge {
+        needed: u64,
+        room: u64,
+        dropped: Vec<String>,
+    },
+}
+
+/// A context that fits, and the composed sections left out to make it fit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fitted {
+    pub prefix: String,
+    pub body: String,
+    pub dropped: Vec<String>,
 }
 
 /// The prefix: intent, rules, lens prompt and the reply protocol, in that
@@ -86,8 +111,16 @@ pub fn raw_prefix(intent: &str, rules: &str, lens_prompt: &str) -> String {
     format!("# Intent\n{intent}\n\n# Board rules\n{rules}\n\n# Your lens\n{lens_prompt}\n")
 }
 
-/// Build `(prefix, body)` for one provider.
+/// Build `(prefix, body)` for one provider; see [`fit`].
 pub fn assemble(p: &Parts<'_>, w: Window) -> Result<(String, String), Refusal> {
+    fit(p, w).map(|f| (f.prefix, f.body))
+}
+
+/// Build one provider's context. The card and the base prefix are never
+/// cut: the first of `prefix` then `smaller` that fits with the card and
+/// suffix is used, so composed sections drop in their order before the
+/// card is refused. Settled lines and the track record take what is left.
+pub fn fit(p: &Parts<'_>, w: Window) -> Result<Fitted, Refusal> {
     if !admit(p.card.class, w.clearance) {
         return Err(Refusal::AboveClearance {
             card: p.card.class,
@@ -101,14 +134,29 @@ pub fn assemble(p: &Parts<'_>, w: Window) -> Result<(String, String), Refusal> {
     };
     let card = render(p.card, show, w.clearance);
     let suffix = p.suffix.map(|s| format!("\n{s}\n")).unwrap_or_default();
-    let fixed = (p.prefix.len() + card.len() + suffix.len()) as u64;
-    if fixed > room {
-        return Err(Refusal::TooLarge {
-            needed: fixed,
-            room,
-        });
+    let full = (p.prefix, [].as_slice());
+    let rungs = std::iter::once(full).chain(
+        p.smaller
+            .iter()
+            .map(|r| (r.prefix.as_str(), r.dropped.as_slice())),
+    );
+    let mut last = full;
+    let mut chosen = None;
+    for rung in rungs {
+        last = rung;
+        if (rung.0.len() + card.len() + suffix.len()) as u64 <= room {
+            chosen = Some(rung);
+            break;
+        }
     }
-    let mut left = room - fixed;
+    let Some((prefix, dropped)) = chosen else {
+        return Err(Refusal::TooLarge {
+            needed: (last.0.len() + card.len() + suffix.len()) as u64,
+            room,
+            dropped: last.1.to_vec(),
+        });
+    };
+    let mut left = room - (prefix.len() + card.len() + suffix.len()) as u64;
     let record = p
         .record
         .map(|r| format!("\nYour track record: {r}\n"))
@@ -121,7 +169,11 @@ pub fn assemble(p: &Parts<'_>, w: Window) -> Result<(String, String), Refusal> {
     }
     body.push_str(&record.unwrap_or_default());
     body.push_str(&suffix);
-    Ok((p.prefix.to_owned(), body))
+    Ok(Fitted {
+        prefix: prefix.to_owned(),
+        body,
+        dropped: dropped.to_vec(),
+    })
 }
 
 /// The admitted lines, newest first, as many as fit after the record.
@@ -194,6 +246,7 @@ mod tests {
         let me = lens();
         let parts = |c| Parts {
             prefix: &pre,
+            smaller: &[],
             card: c,
             lens: &me,
             phase: Phase::Blind,
@@ -217,6 +270,7 @@ mod tests {
         let me = lens();
         let mut parts = Parts {
             prefix: "p",
+            smaller: &[],
             card: &c,
             lens: &me,
             phase: Phase::Blind,
@@ -238,6 +292,7 @@ mod tests {
         let ls = lines(MAX_LINES + 5);
         let parts = Parts {
             prefix: "p",
+            smaller: &[],
             card: &c,
             lens: &me,
             phase: Phase::Informed,
@@ -259,6 +314,7 @@ mod tests {
         let ls = lines(10);
         let parts = Parts {
             prefix: "p",
+            smaller: &[],
             card: &c,
             lens: &me,
             phase: Phase::Informed,
@@ -297,6 +353,7 @@ mod tests {
         let me = lens();
         let parts = Parts {
             prefix: "p",
+            smaller: &[],
             card: &c,
             lens: &me,
             phase: Phase::Informed,
@@ -338,6 +395,7 @@ mod tests {
         }];
         let parts = Parts {
             prefix: "p",
+            smaller: &[],
             card: &c,
             lens: &me,
             phase: Phase::Informed,
@@ -350,5 +408,106 @@ mod tests {
             !body.contains("secret path") && !body.contains("Settled"),
             "{body}"
         );
+    }
+
+    mod composed {
+        use super::*;
+
+        const BASE: &str = "# Your lens\nfind faults\n# Reply\n";
+
+        fn rungs() -> (String, Vec<Rung>) {
+            let full = format!("{BASE}{}", "K".repeat(400));
+            let rung = |extra: usize, dropped: &[&str]| Rung {
+                prefix: format!("{BASE}{}", "S".repeat(extra)),
+                dropped: dropped.iter().map(|d| (*d).to_owned()).collect(),
+            };
+            let smaller = vec![
+                rung(200, &["knowledge/rust.md"]),
+                rung(0, &["knowledge/rust.md", "standards/rust.md"]),
+            ];
+            (full, smaller)
+        }
+
+        /// A window whose room, after the output allowance, is `bytes`
+        /// rounded up (`up`) or down to whole tokens.
+        fn window(bytes: u64, up: bool) -> Window {
+            let tokens = if up {
+                bytes.div_ceil(BYTES_PER_TOKEN)
+            } else {
+                bytes / BYTES_PER_TOKEN
+            };
+            Window {
+                context_tokens: tokens as u32 + 10,
+                max_output_tokens: 10,
+                clearance: DataClass::Internal,
+            }
+        }
+
+        fn fitted(w: Window) -> Result<Fitted, Refusal> {
+            let (full, smaller) = rungs();
+            let c = card(vec![]);
+            let me = lens();
+            let parts = Parts {
+                prefix: &full,
+                smaller: &smaller,
+                card: &c,
+                lens: &me,
+                phase: Phase::Blind,
+                lines: &[],
+                record: None,
+                suffix: None,
+            };
+            fit(&parts, w)
+        }
+
+        fn card_text() -> String {
+            render(&card(vec![]), Show::OwnOnly(&lens()), DataClass::Internal)
+        }
+
+        fn base_need() -> u64 {
+            (BASE.len() + card_text().len()) as u64
+        }
+
+        #[test]
+        fn the_full_composition_is_used_when_it_fits() {
+            let f = fitted(window(base_need() + 400, true)).expect("fits");
+            assert!(f.prefix.ends_with(&"K".repeat(400)));
+            assert!(f.dropped.is_empty());
+            assert_eq!(f.body, card_text());
+        }
+
+        #[test]
+        fn sections_drop_in_order_until_the_card_fits() {
+            let f = fitted(window(base_need() + 399, false)).expect("fits trimmed");
+            assert_eq!(f.prefix, format!("{BASE}{}", "S".repeat(200)));
+            assert_eq!(f.dropped, vec!["knowledge/rust.md".to_owned()]);
+            let f = fitted(window(base_need(), true)).expect("base fits");
+            assert_eq!(f.prefix, BASE);
+            assert_eq!(
+                f.dropped,
+                vec![
+                    "knowledge/rust.md".to_owned(),
+                    "standards/rust.md".to_owned()
+                ]
+            );
+            assert_eq!(f.body, card_text(), "the card is whole");
+        }
+
+        #[test]
+        fn base_and_card_too_large_is_refused_with_the_drops() {
+            let w = window(base_need() - 1, false);
+            let room = u64::from(w.context_tokens - w.max_output_tokens) * BYTES_PER_TOKEN;
+            assert_eq!(
+                fitted(w),
+                Err(Refusal::TooLarge {
+                    needed: base_need(),
+                    room,
+                    dropped: vec![
+                        "knowledge/rust.md".to_owned(),
+                        "standards/rust.md".to_owned()
+                    ],
+                })
+            );
+        }
     }
 }

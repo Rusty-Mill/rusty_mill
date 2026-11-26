@@ -176,36 +176,110 @@ pub fn compose(
     texts: &BTreeMap<String, String>,
     limits: Limits,
 ) -> Result<Composed, ComposeError> {
-    let mut dropped = Vec::new();
-    let mut pack = domain_pack.filter(|p| !p.trim().is_empty());
-    if pack.is_some_and(|p| p.len() > limits.file_bytes) {
-        pack = None;
-        dropped.push(DOMAIN_PACK.to_owned());
+    let mut d = Draft::new(lens, domain_pack, sel, texts, limits)?;
+    d.fit(limits.total_bytes);
+    Ok(d.composed())
+}
+
+/// The composed prompt that fits `total_bytes`, then every smaller one in
+/// the same drop order, one more section or file left out each step, down
+/// to the bare lens prompt. Never empty; the last entry's prompt is `lens`.
+/// The caller picks the first that fits a provider's window.
+pub fn ladder(
+    lens: &str,
+    domain_pack: Option<&str>,
+    sel: &Selection,
+    texts: &BTreeMap<String, String>,
+    limits: Limits,
+) -> Result<Vec<Composed>, ComposeError> {
+    let mut d = Draft::new(lens, domain_pack, sel, texts, limits)?;
+    d.fit(limits.total_bytes);
+    let mut out = vec![d.composed()];
+    while d.drop_one() {
+        out.push(d.composed());
     }
-    let mut knowledge = Part::load("Knowledge", &sel.knowledge, texts, limits, &mut dropped)?;
-    let mut standards = Part::load("Standards", &sel.standards, texts, limits, &mut dropped)?;
-    let lead = usize::from(!lens.is_empty() && !lens.ends_with('\n'));
-    let size = |pack: Option<&str>, k: &Part<'_>, s: &Part<'_>| {
-        let body = pack.map_or(0, |p| header("Project") + body(p)) + k.bytes() + s.bytes();
+    Ok(out)
+}
+
+/// A composition in progress: what is still in, and what was left out.
+struct Draft<'a> {
+    lens: &'a str,
+    pack: Option<&'a str>,
+    knowledge: Part<'a>,
+    standards: Part<'a>,
+    dropped: Vec<String>,
+}
+
+impl<'a> Draft<'a> {
+    fn new(
+        lens: &'a str,
+        domain_pack: Option<&'a str>,
+        sel: &'a Selection,
+        texts: &'a BTreeMap<String, String>,
+        limits: Limits,
+    ) -> Result<Self, ComposeError> {
+        let mut dropped = Vec::new();
+        let mut pack = domain_pack.filter(|p| !p.trim().is_empty());
+        if pack.is_some_and(|p| p.len() > limits.file_bytes) {
+            pack = None;
+            dropped.push(DOMAIN_PACK.to_owned());
+        }
+        let knowledge = Part::load("Knowledge", &sel.knowledge, texts, limits, &mut dropped)?;
+        let standards = Part::load("Standards", &sel.standards, texts, limits, &mut dropped)?;
+        Ok(Self {
+            lens,
+            pack,
+            knowledge,
+            standards,
+            dropped,
+        })
+    }
+
+    /// Bytes composed beyond the lens prompt, counted without rendering.
+    fn size(&self) -> usize {
+        let body = self.pack.map_or(0, |p| header("Project") + body(p))
+            + self.knowledge.bytes()
+            + self.standards.bytes();
+        let lead = usize::from(!self.lens.is_empty() && !self.lens.ends_with('\n'));
         if body == 0 {
             0
         } else {
             lead + body
         }
-    };
-    while size(pack, &knowledge, &standards) > limits.total_bytes {
-        if let Some(path) = knowledge.pop() {
-            dropped.push(path.to_owned());
-        } else if pack.take().is_some() {
-            dropped.push(DOMAIN_PACK.to_owned());
-        } else if let Some(path) = standards.pop() {
-            dropped.push(path.to_owned());
+    }
+
+    fn fit(&mut self, total_bytes: usize) {
+        while self.size() > total_bytes && self.drop_one() {}
+    }
+
+    /// Leave out the next item in drop order: knowledge (last first), the
+    /// domain pack, standards (last first). False when nothing is left.
+    fn drop_one(&mut self) -> bool {
+        let gone = match self.knowledge.pop() {
+            Some(path) => path.to_owned(),
+            None => match self.pack.take() {
+                Some(_) => DOMAIN_PACK.to_owned(),
+                None => match self.standards.pop() {
+                    Some(path) => path.to_owned(),
+                    None => return false,
+                },
+            },
+        };
+        self.dropped.push(gone);
+        true
+    }
+
+    fn composed(&self) -> Composed {
+        Composed {
+            prompt: render(
+                self.lens,
+                self.pack,
+                &self.knowledge.files,
+                &self.standards.files,
+            ),
+            dropped: self.dropped.clone(),
         }
     }
-    Ok(Composed {
-        prompt: render(lens, pack, &knowledge.files, &standards.files),
-        dropped,
-    })
 }
 
 type File<'a> = (&'a str, &'a str);
@@ -507,6 +581,52 @@ mod tests {
         for total in 0..=full.len() + 2 {
             assert!(tail(&at(total)) <= total, "{total}");
         }
+    }
+
+    #[test]
+    fn the_ladder_steps_down_in_drop_order_to_the_bare_lens() {
+        let (sel, _) = select(&map(), &doms(&["rust", "terminal"]));
+        let rungs = ladder(
+            "find faults",
+            Some("brief"),
+            &sel,
+            &texts(),
+            Limits::default(),
+        )
+        .expect("composes");
+        let full = build(&["rust", "terminal"], Some("brief"), Limits::default());
+        assert_eq!(rungs[0], full);
+        let dropped: Vec<&str> = rungs
+            .last()
+            .expect("rung")
+            .dropped
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            dropped,
+            vec![
+                "knowledge/terminal.md",
+                "knowledge/rust.md",
+                DOMAIN_PACK,
+                "standards/rust.md"
+            ]
+        );
+        assert_eq!(rungs.len(), 5);
+        assert_eq!(rungs.last().expect("rung").prompt, "find faults");
+        assert!(rungs
+            .windows(2)
+            .all(|w| w[0].prompt.len() > w[1].prompt.len()));
+        let flat = ladder(
+            "find faults",
+            None,
+            &Selection::default(),
+            &texts(),
+            Limits::default(),
+        )
+        .expect("composes");
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].prompt, "find faults");
     }
 
     #[test]
