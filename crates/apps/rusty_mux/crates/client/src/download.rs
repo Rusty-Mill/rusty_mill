@@ -22,21 +22,38 @@ pub fn fetch<S: Read + Write>(
     out: &mut impl Write,
     first_req: u64,
 ) -> io::Result<u64> {
-    let (mut offset, mut req) = (0u64, first_req);
-    let mut first = None;
-    loop {
-        let at = u32::try_from(offset)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "a file is at most 2 GiB"))?;
+    let mut req = first_req;
+    fetch_with(path, out, |args| {
         conn.send(&Message::BlockCall {
             req,
             block,
             method: "terminal.download".into(),
-            args: vec![
-                ("path".to_owned(), Value::Text(path.to_owned())),
-                ("offset".to_owned(), Value::Lines(at)),
-            ],
+            args,
         })?;
-        let (size, data) = split(&reply(conn, req)?)?;
+        let text = reply(conn, req);
+        req += 1;
+        text
+    })
+}
+
+/// [`fetch`] for a caller that owns the connection's reads: `call` takes
+/// each chunk's `terminal.download` arguments, makes the call and returns its
+/// reply text.
+pub fn fetch_with(
+    path: &str,
+    out: &mut impl Write,
+    mut call: impl FnMut(Vec<(String, Value)>) -> io::Result<String>,
+) -> io::Result<u64> {
+    let mut offset = 0u64;
+    let mut first = None;
+    loop {
+        let at = u32::try_from(offset)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "a file is at most 2 GiB"))?;
+        let args = vec![
+            ("path".to_owned(), Value::Text(path.to_owned())),
+            ("offset".to_owned(), Value::Lines(at)),
+        ];
+        let (size, data) = split(&call(args)?)?;
         // The first size is the file's; a different one later means it
         // changed under the read, and what is in `out` is not that file.
         if *first.get_or_insert(size) != size {
@@ -63,7 +80,6 @@ pub fn fetch<S: Read + Write>(
                 "the file got shorter while it was read",
             ));
         }
-        req += 1;
     }
 }
 

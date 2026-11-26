@@ -49,6 +49,8 @@ pub(crate) enum Id {
     GoTo,
     /// "Insert path" (D78).
     Insert,
+    /// "Download file…" (D100): browse the host, then fetch the file.
+    Download,
 }
 
 /// A row's group, in the order the palette lists them (D77).
@@ -96,7 +98,7 @@ impl Entry {
             Id::Cmd(_) => Group::Actions,
             Id::Session(_) => Group::Sessions,
             Id::Window(_) => Group::Windows,
-            Id::GoTo | Id::Insert => Group::Folders,
+            Id::GoTo | Id::Insert | Id::Download => Group::Folders,
         }
     }
 }
@@ -349,6 +351,8 @@ pub(crate) enum Out {
     List { ask: u64, path: Option<String> },
     /// Type this text into the block, without Enter, and close.
     Type(String),
+    /// Fetch this file of the block's host and close (D100).
+    Download(String),
 }
 
 /// A key the palette reads, as the window maps it.
@@ -374,11 +378,21 @@ enum Load {
     Failed(String, String),
 }
 
+/// What a browse does with its pick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// "Go to directory": folders, typed as `cd`.
+    Go,
+    /// "Insert path": files too, typed as a path.
+    Insert,
+    /// "Download file…": files, fetched (D100).
+    Download,
+}
+
 /// A directory browse (D78).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Browse {
-    /// "Insert path": files too, and no `cd`.
-    insert: bool,
+    mode: Mode,
     ask: u64,
     /// The folder asked for, `None` for the server's own start.
     at: Option<String>,
@@ -562,10 +576,10 @@ impl Palette {
             }
             Load::Ready(list) => list,
         };
-        let head = if b.insert {
-            "Folders and files"
-        } else {
-            "Folders"
+        let head = match b.mode {
+            Mode::Go => "Folders",
+            Mode::Insert => "Folders and files",
+            Mode::Download => "Pick a file to download",
         };
         let item = |pick: Pick, label: &str, at: Vec<usize>, folder| {
             let path = match &pick {
@@ -574,7 +588,7 @@ impl Palette {
                 Pick::Entry(_, name) => Some(join(&list.path, name)),
                 Pick::Run(_) => None,
             };
-            let typable = path.is_none_or(|p| quote(&p).is_some());
+            let typable = b.mode == Mode::Download || path.is_none_or(|p| quote(&p).is_some());
             Line::Item(Item {
                 detail: if typable { "" } else { "Can't type this name" }.into(),
                 pick,
@@ -587,7 +601,10 @@ impl Palette {
         };
         let mut lines = vec![Line::Head(head.into())];
         if self.query.is_empty() {
-            lines.push(item(Pick::Here, "This folder", Vec::new(), false));
+            // A folder is never fetched, so a download has no "This folder".
+            if b.mode != Mode::Download {
+                lines.push(item(Pick::Here, "This folder", Vec::new(), false));
+            }
             if parent(&list.path).is_some() {
                 lines.push(item(Pick::Up, "..", Vec::new(), true));
             }
@@ -598,7 +615,7 @@ impl Palette {
             .iter()
             .enumerate()
             .filter(|(_, (kind, name))| {
-                (b.insert || *kind == Kind::Dir) && (dotted || !name.starts_with('.'))
+                (b.mode != Mode::Go || *kind == Kind::Dir) && (dotted || !name.starts_with('.'))
             })
             .filter_map(|(i, (_, name))| matches(&self.query, name).map(|m| (m.score, i, m.at)))
             .collect();
@@ -760,8 +777,9 @@ impl Palette {
     fn choose(&mut self, pick: Pick) -> Out {
         let Some(b) = &self.browse else {
             return match pick {
-                Pick::Run(Id::GoTo) => self.start_browse(false),
-                Pick::Run(Id::Insert) => self.start_browse(true),
+                Pick::Run(Id::GoTo) => self.start_browse(Mode::Go),
+                Pick::Run(Id::Insert) => self.start_browse(Mode::Insert),
+                Pick::Run(Id::Download) => self.start_browse(Mode::Download),
                 Pick::Run(id) => Out::Run(id),
                 _ => Out::Stay,
             };
@@ -772,18 +790,26 @@ impl Palette {
         let path = match pick {
             Pick::Here => Some(list.path.clone()),
             Pick::Up => parent(&list.path),
-            Pick::Entry(_, name) => Some(join(&list.path, &name)),
+            Pick::Entry(_, ref name) => Some(join(&list.path, name)),
             Pick::Run(_) => None,
         };
         let Some(path) = path else {
             return Out::Stay;
         };
+        if b.mode == Mode::Download {
+            // Only a file is fetched; a folder is opened with Tab or a click
+            // on its chevron.
+            return match pick {
+                Pick::Entry(Kind::File, _) => Out::Download(path),
+                _ => Out::Stay,
+            };
+        }
         let Some(quoted) = quote(&path) else {
             return Out::Stay;
         };
-        Out::Type(match b.insert {
-            true => quoted,
-            false => format!("cd {quoted}"),
+        Out::Type(match b.mode {
+            Mode::Insert => quoted,
+            _ => format!("cd {quoted}"),
         })
     }
 
@@ -819,9 +845,9 @@ impl Palette {
             .map_or(Out::Stay, |p| self.read(Some(p)))
     }
 
-    fn start_browse(&mut self, insert: bool) -> Out {
+    fn start_browse(&mut self, mode: Mode) -> Out {
         self.browse = Some(Browse {
-            insert,
+            mode,
             ask: 0,
             at: None,
             load: Load::Reading,
@@ -997,6 +1023,13 @@ mod tests {
                 enabled: true,
                 current: false,
             },
+            Entry {
+                id: Id::Download,
+                label: "Download file…".into(),
+                detail: String::new(),
+                enabled: true,
+                current: false,
+            },
         ]
     }
 
@@ -1030,8 +1063,11 @@ mod tests {
     }
 
     fn browsing(insert: bool) -> Palette {
+        browse_with(if insert { "Insert" } else { "Go" })
+    }
+
+    fn browse_with(id: &str) -> Palette {
         let mut p = Palette::open(entries(), 0);
-        let id = if insert { "Insert" } else { "Go" };
         type_in(&mut p, id);
         let Out::List { ask, path } = p.key(Key::Enter) else {
             panic!("no listing asked");
@@ -1128,7 +1164,7 @@ mod tests {
         assert_eq!(p.pick(), Some(Pick::Run(Id::Cmd(Cmd::Settings))));
         p.key(Key::Up);
         p.key(Key::Up);
-        assert_eq!(p.pick(), Some(Pick::Run(Id::Insert)));
+        assert_eq!(p.pick(), Some(Pick::Run(Id::Download)));
         p.key(Key::Down);
         assert_eq!(p.pick(), Some(Pick::Run(Id::Cmd(Cmd::SplitRight))));
     }
@@ -1199,6 +1235,34 @@ mod tests {
         p.listed(ask, Ok("/home/me/docs\nf\ta b.txt".into()));
         assert_eq!(p.folder(), Some("/home/me/docs"));
         assert_eq!(labels(&p), ["This folder", ".."], "no folders in it");
+    }
+
+    #[test]
+    fn download_lists_files_and_enter_on_a_file_fetches_it() {
+        let mut p = browse_with("Download");
+        assert!(matches!(&p.lines()[0], Line::Head(h) if h == "Pick a file to download"));
+        assert!(!labels(&p).contains(&"This folder".into()));
+        assert!(labels(&p).contains(&"README.md".into()));
+        select(&mut p, "README.md");
+        assert_eq!(
+            p.key(Key::Enter),
+            Out::Download("/home/me/README.md".into())
+        );
+    }
+
+    #[test]
+    fn download_never_fetches_a_folder_and_names_need_no_quoting() {
+        let mut p = browse_with("Download");
+        select(&mut p, "docs/");
+        assert_eq!(p.key(Key::Enter), Out::Stay);
+        assert!(matches!(p.key(Key::Tab), Out::List { .. }));
+        let mut p = browse_with("Download");
+        p.listed(p.asks, Ok("/home/me\nf\ta b'c.txt".into()));
+        select(&mut p, "a b'c.txt");
+        assert_eq!(
+            p.key(Key::Enter),
+            Out::Download("/home/me/a b'c.txt".into())
+        );
     }
 
     #[test]

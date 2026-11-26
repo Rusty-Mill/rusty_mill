@@ -48,8 +48,8 @@ use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Entry, Features, Launch, Message, Program, ShowTo, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
-    Act, BlockInfo, Bound, Detached, Dir, Feed, Float as Pane, ForwardDone, Link, ListDone, Listed,
-    Notice, PaneIo, Remote, Session, Show, Source, Take, Tree, UploadDone,
+    Act, BlockInfo, Bound, Detached, Dir, DownloadDone, Feed, Float as Pane, ForwardDone, Link,
+    ListDone, Listed, Notice, PaneIo, Remote, Session, Show, Source, Take, Tree, UploadDone,
 };
 
 use crate::floats;
@@ -93,7 +93,8 @@ pub const BLOCK: Features = PANE
     .union(Features::BLOCK_CALL)
     .union(Features::DIR_LISTING)
     .union(Features::PORT_FORWARD)
-    .union(Features::UPLOAD);
+    .union(Features::UPLOAD)
+    .union(Features::DOWNLOAD);
 
 /// Never set: the handshakes here are not cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -550,6 +551,17 @@ impl Source for MuxSource {
     fn upload(&self, key: u64, path: std::path::PathBuf, done: UploadDone) {
         match self.pane(key) {
             Some(block) => block.upload(path, done),
+            None => done(Err("the block is not open".into())),
+        }
+    }
+
+    fn downloads(&self, key: u64) -> bool {
+        self.pane(key).is_some_and(|b| b.downloads)
+    }
+
+    fn download(&self, key: u64, path: String, done: DownloadDone) {
+        match self.pane(key) {
+            Some(block) => block.download(path, done),
             None => done(Err("the block is not open".into())),
         }
     }
@@ -1469,7 +1481,9 @@ struct Block {
     listings: Mutex<HashMap<u64, ListDone>>,
     /// The server takes files on this connection (C82).
     uploads: bool,
-    /// Who waits for an upload chunk's answer, by request number.
+    /// The server gives files on this connection (C83).
+    downloads: bool,
+    /// Who waits for an upload or download chunk's answer, by request number.
     uploading: Mutex<HashMap<u64, Sender<Result<String, String>>>>,
     /// The server tunnels ports on this connection (C81).
     forwards: bool,
@@ -1490,6 +1504,44 @@ const FORWARD_REQ: u64 = 1 << 40;
 /// Frames queued for a pane's forward run, and asks queued for it.
 const FORWARD_FRAMES: usize = 1024;
 const FORWARD_WANTS: usize = 16;
+
+/// The file name a download is saved as: the last part of the server's
+/// `path`, whatever separator that host uses. `None` when there is none, or
+/// when it could climb out of the Downloads folder.
+fn saved_name(path: &str) -> Option<String> {
+    let name = path.rsplit(['/', '\\']).next()?;
+    let bad = name.is_empty() || name == "." || name == ".." || name.contains([':', '\0']);
+    (!bad).then(|| name.to_owned())
+}
+
+/// This machine's Downloads folder, if it has one.
+fn downloads_dir() -> Option<PathBuf> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+    let dir = PathBuf::from(home).join("Downloads");
+    dir.is_dir().then_some(dir)
+}
+
+/// Creates `name` in `dir`, or `name-1`, `name-2`... when it is taken, never
+/// replacing a file; the open file and its path.
+fn create_unique(dir: &Path, name: &str) -> Result<(std::fs::File, PathBuf), String> {
+    for n in 0..1000 {
+        let file = match n {
+            0 => name.to_owned(),
+            n => format!("{name}-{n}"),
+        };
+        let path = dir.join(file);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(f) => return Ok((f, path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+    }
+    Err(format!("too many files named {name} in {}", dir.display()))
+}
 
 /// Bytes in one chunk of an upload. Each is written under the lock typing
 /// shares, so a small one keeps a slow link from holding up keystrokes for
@@ -1582,6 +1634,9 @@ impl Block {
             uploads: opened
                 .features
                 .contains(Features::BLOCK_CALL.union(Features::UPLOAD)),
+            downloads: opened
+                .features
+                .contains(Features::BLOCK_CALL.union(Features::DOWNLOAD)),
             uploading: Mutex::new(HashMap::new()),
             forwards: opened.features.contains(Features::PORT_FORWARD),
             forwarder: Mutex::new(None),
@@ -1714,6 +1769,51 @@ impl Block {
                 .map_err(std::io::Error::other)
         })
         .map_err(|e| e.to_string())
+    }
+
+    /// Fetches the file at `path` in chunks, from a thread of its own, into
+    /// the Downloads folder and calls `done` with where it was saved. A chunk
+    /// left unanswered for [`UPLOAD_WAIT`], or a lost connection, ends it and
+    /// leaves no partial file.
+    fn download(self: &Arc<Self>, path: String, done: DownloadDone) {
+        let Some(name) = saved_name(&path) else {
+            return done(Err(format!("{path} is not a file")));
+        };
+        let block = Arc::clone(self);
+        std::thread::spawn(move || done(block.download_file(&path, &name)));
+    }
+
+    fn download_file(&self, path: &str, name: &str) -> Result<String, String> {
+        let dir = downloads_dir().ok_or("there is no Downloads folder")?;
+        let (mut file, saved) = create_unique(&dir, name)?;
+        let id = self.block;
+        let fetched = rusty_mux_client::download::fetch_with(path, &mut file, |args| {
+            let (tx, rx) = channel();
+            let mut args = Some(args);
+            let req = self.send(|req| {
+                lock(&self.uploading).insert(req, tx);
+                Message::BlockCall {
+                    req,
+                    block: id,
+                    method: "terminal.download".into(),
+                    args: args.take().unwrap_or_default(),
+                }
+            });
+            let answer = rx.recv_timeout(UPLOAD_WAIT);
+            lock(&self.uploading).remove(&req);
+            answer
+                .map_err(|_| std::io::Error::other("the server did not answer"))?
+                .map_err(std::io::Error::other)
+        });
+        drop(file);
+        match fetched {
+            Ok(_) => Ok(saved.display().to_string()),
+            Err(e) => {
+                // Not the file asked for: leave none behind.
+                let _ = std::fs::remove_file(&saved);
+                Err(e.to_string())
+            }
+        }
     }
 
     /// Answers every waiting listing with `why`: its connection is gone.
@@ -2196,7 +2296,31 @@ mod tests {
     use rusty_mux_proto::{Entry, Message};
     use rusty_uuid::Uuid;
 
-    use super::{anchor, first_block, forwarded};
+    use super::{anchor, create_unique, first_block, forwarded, saved_name};
+
+    #[test]
+    fn a_download_is_saved_under_the_last_part_of_the_servers_path() {
+        assert_eq!(saved_name("/home/me/a b.txt").as_deref(), Some("a b.txt"));
+        assert_eq!(saved_name("C:\\dev\\x.log").as_deref(), Some("x.log"));
+        assert_eq!(saved_name("C:x").as_deref(), None, "a drive-relative name");
+        assert_eq!(saved_name("dir\\x.log").as_deref(), Some("x.log"));
+        assert_eq!(saved_name("x").as_deref(), Some("x"));
+        for bad in ["", "/", "/a/", "..", "/a/..", "."] {
+            assert_eq!(saved_name(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_taken_name_gets_a_number_and_nothing_is_replaced() {
+        let dir = std::env::temp_dir().join(format!("rusty-mux-gui-uniq-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let (_, first) = create_unique(&dir, "f.txt").expect("first");
+        std::fs::write(&first, b"keep").expect("write");
+        let (_, second) = create_unique(&dir, "f.txt").expect("second");
+        assert_eq!(second.file_name().and_then(|n| n.to_str()), Some("f.txt-1"));
+        assert_eq!(std::fs::read(&first).expect("read"), b"keep");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
