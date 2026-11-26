@@ -148,12 +148,8 @@ const UNSUPPORTED: &str = "the workspace explorer is not available on this platf
 
 const NOT_LISTED: &str = "that directory cannot be listed in the workspace";
 
-/// `rel` under `root` (D337): its components must be plain names, each a real
-/// directory, never a link. On Linux every component is opened from its
-/// parent's descriptor with `O_NOFOLLOW` and the listing reads that
-/// descriptor, so nothing swapped into the tree after the check is followed.
-/// Elsewhere the call is refused: no atomic confinement exists there yet.
-fn confined(root: &Workspace, rel: &str) -> Result<Held, String> {
+/// The plain names of `rel`; `..`, a root or a drive prefix is outside.
+fn plain_names(rel: &str) -> Result<Vec<&std::ffi::OsStr>, String> {
     let mut names = Vec::new();
     for part in Path::new(rel).components() {
         match part {
@@ -162,6 +158,16 @@ fn confined(root: &Workspace, rel: &str) -> Result<Held, String> {
             _ => return Err("the path is outside the workspace".into()),
         }
     }
+    Ok(names)
+}
+
+/// `rel` under `root` (D337): its components must be plain names, each a real
+/// directory, never a link. On Linux every component is opened from its
+/// parent's descriptor with `O_NOFOLLOW` and the listing reads that
+/// descriptor, so nothing swapped into the tree after the check is followed.
+/// Elsewhere the call is refused: no atomic confinement exists there yet.
+fn confined(root: &Workspace, rel: &str) -> Result<Held, String> {
+    let names = plain_names(rel)?;
     let (read, anchor) = root.anchor(&names).map_err(|e| match e.kind() {
         std::io::ErrorKind::Unsupported => UNSUPPORTED.to_owned(),
         _ => {
@@ -319,6 +325,244 @@ impl Workspace {
     fn anchor(&self, _: &[&std::ffi::OsStr]) -> std::io::Result<(PathBuf, Anchor)> {
         Err(std::io::ErrorKind::Unsupported.into())
     }
+}
+
+const NOT_A_WORK_TREE: &str = "the workspace is not in a git work tree it belongs to";
+
+const NOT_STATTED: &str = "that entry cannot be read in the workspace";
+
+/// `terminal.workspace-stat`: what one entry under the workspace is, as
+/// `KIND<TAB>SIZE<TAB>MTIME`: the kind as in [`list`], the size in bytes
+/// and the modification time in seconds since the epoch. The entry is not
+/// followed if it is a link (`l`), and every directory above it is walked
+/// as [`confined`] does. The workspace itself is `.`.
+pub(crate) fn stat(root: &Workspace, rel: &str) -> Result<String, String> {
+    let names = plain_names(rel)?;
+    let (last, parents) = match names.split_last() {
+        Some((last, parents)) => (Some(last), parents),
+        None => (None, &names[..]),
+    };
+    let (dir, _anchor) = root.anchor(parents).map_err(|e| match e.kind() {
+        std::io::ErrorKind::Unsupported => UNSUPPORTED.to_owned(),
+        _ => NOT_STATTED.to_owned(),
+    })?;
+    // The anchor is a descriptor's link, which names the directory itself, so
+    // the workspace is read through it and an entry below it is not followed.
+    let meta = match last {
+        Some(l) => fs::symlink_metadata(dir.join(l)),
+        None => fs::metadata(&dir),
+    }
+    .map_err(|_| NOT_STATTED.to_owned())?;
+    let kind = match meta.file_type() {
+        t if t.is_symlink() => 'l',
+        t if t.is_dir() => 'd',
+        t if t.is_file() => 'f',
+        _ => 'o',
+    };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
+    Ok(format!("{kind}\t{}\t{mtime}", meta.len()))
+}
+
+/// Output of `git status` read at most; more is a refusal, not a cut list.
+#[cfg(target_os = "linux")]
+const TOUCHED_MAX: usize = 256 * 1024;
+/// How long all of `touched`'s `git` runs may take together, under the
+/// listing deadline so a slot is never held after the client gave up.
+const TOUCHED_DEADLINE: Duration = Duration::from_secs(4);
+
+/// Runs `git` in the held workspace directory and returns its stdout.
+///
+/// The repository belongs to whoever works in it, so what `git` would run
+/// for it is turned off: no fsmonitor hook, no hooks directory, no pager,
+/// no prompt, no optional lock. Killed after [`TOUCHED_DEADLINE`].
+#[cfg(target_os = "linux")]
+fn git(dir: &Path, args: &[&str], deadline: std::time::Instant) -> Result<Vec<u8>, String> {
+    use rusty_libc::wait::{P_PID, WEXITED, WNOHANG, WNOWAIT, waitid};
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("git")
+        .args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
+        .args(["-c", "core.hooksPath=/dev/null", "--no-pager"])
+        .args(args)
+        .current_dir(dir)
+        // Its own process group, so the deadline ends what git started (a
+        // clean filter) as well as git.
+        .process_group(0)
+        // The repository is the one the directory is in, never one the
+        // server's environment names.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_CEILING_DIRECTORIES")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        // No user or system configuration: what git does is what this call says.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "git is not available to the server".to_owned())?;
+    let out = child.stdout.take().ok_or("git gave no output")?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out.take(TOUCHED_MAX as u64 + 1).read_to_end(&mut buf);
+        buf
+    });
+    // Exit is seen without reaping (`WNOWAIT`), so the group is killed while
+    // git's pid is still its own, then reaped: a reaped pid could be reused
+    // by a process that would take the signal.
+    let group = i32::try_from(child.id()).unwrap_or(0);
+    let exited = loop {
+        let seen = waitid(P_PID, group, WEXITED | WNOHANG | WNOWAIT);
+        match seen {
+            Ok(info) if info.si_pid != 0 => break true,
+            Ok(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // Past the deadline, or the wait itself failed.
+            _ => break false,
+        }
+    };
+    // The group is ended either way: a finished git may leave a filter behind.
+    if group > 0 {
+        let _ = rusty_libc::process::killpg(group, rusty_libc::signal::SIGKILL);
+    }
+    let status = child.wait().ok();
+    let ok = exited && status.is_some_and(|s| s.success());
+    let buf = reader
+        .join()
+        .map_err(|_| "git's output was lost".to_owned())?;
+    if buf.len() > TOUCHED_MAX {
+        return Err("too many changes to list".into());
+    }
+    if !ok {
+        return Err("the workspace is not a git work tree, or git failed".into());
+    }
+    Ok(buf)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn git(_: &Path, _: &[&str], _: std::time::Instant) -> Result<Vec<u8>, String> {
+    Err(UNSUPPORTED.into())
+}
+
+/// Whether `top`'s `.git` is this work tree's own: a real directory, or the
+/// gitfile of a linked work tree whose git directory points back at it. A
+/// `.git` that is a link, or a gitfile for another repository, would make
+/// git read an index from outside the workspace (D337).
+fn owns_git_dir(top: &Path) -> bool {
+    let dot_git = top.join(".git");
+    let Ok(meta) = fs::symlink_metadata(&dot_git) else {
+        return false;
+    };
+    if meta.is_dir() {
+        return true;
+    }
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(text) = fs::read_to_string(&dot_git) else {
+        return false;
+    };
+    let Some(target) = text.trim().strip_prefix("gitdir:") else {
+        return false;
+    };
+    let target = top.join(target.trim());
+    let Ok(target) = fs::canonicalize(target) else {
+        return false;
+    };
+    // A linked work tree's git directory names the `.git` file that owns it.
+    let back = fs::read_to_string(target.join("gitdir")).unwrap_or_default();
+    fs::canonicalize(back.trim()).ok() == fs::canonicalize(&dot_git).ok()
+}
+
+/// Git's two status bytes as text, a space as `.`.
+fn code_of(code: &[u8]) -> String {
+    code.iter()
+        .map(|b| if *b == b' ' { '.' } else { *b as char })
+        .collect()
+}
+
+/// `terminal.workspace-touched`: what `git status` says changed under the
+/// workspace, for the explorer's overlay. The first line is `.`; each other
+/// is `XY<TAB>PATH`, `XY` being git's two status letters with a space as `.`
+/// (`M.` staged, `.M` worktree, `??` untracked) and `PATH` relative to the
+/// workspace, [`escape`]d; an untracked directory is one line ending in `/`.
+/// A path that is not UTF-8 is counted in a last `!<TAB>N` line, as in
+/// [`list`]. Renames are not followed: a rename is a delete and an add. The
+/// work tree's `.git` must be its own ([`owns_git_dir`]). Linux only, as the
+/// rest of the workspace calls.
+pub(crate) fn touched(root: &Workspace) -> Result<String, String> {
+    let (dir, _anchor) = root.anchor(&[]).map_err(|e| match e.kind() {
+        std::io::ErrorKind::Unsupported => UNSUPPORTED.to_owned(),
+        _ => NOT_LISTED.to_owned(),
+    })?;
+    // Git's own account of where it is: the work tree it uses must hold this
+    // directory, at the prefix it reports. A `core.worktree` that points
+    // elsewhere fails that, and nothing of the other tree is listed.
+    let deadline = std::time::Instant::now() + TOUCHED_DEADLINE;
+    let top = git(
+        &dir,
+        &["rev-parse", "--show-toplevel", "--show-prefix"],
+        deadline,
+    )?;
+    let top = String::from_utf8_lossy(&top);
+    let mut lines = top.lines();
+    let (top, prefix) = (lines.next().unwrap_or(""), lines.next().unwrap_or(""));
+    let here = fs::canonicalize(&dir).map_err(|_| NOT_LISTED.to_owned())?;
+    let inside = here
+        .strip_prefix(top)
+        .ok()
+        .map(|r| r.to_string_lossy().into_owned());
+    if inside.as_deref().map(|r| r.trim_end_matches('/')) != Some(prefix.trim_end_matches('/'))
+        || !owns_git_dir(Path::new(top))
+    {
+        return Err(NOT_A_WORK_TREE.into());
+    }
+    let prefix = prefix.to_owned();
+    let raw = git(
+        &dir,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            "--untracked-files=normal",
+            "--",
+            ".",
+        ],
+        deadline,
+    )?;
+    let mut out = String::from(".");
+    let mut unread = 0_usize;
+    for rec in raw.split(|b| *b == 0).filter(|r| r.len() > 3) {
+        let (code, path) = (&rec[..2], &rec[3..]);
+        let Ok(path) = std::str::from_utf8(path) else {
+            unread += 1;
+            continue;
+        };
+        let Some(path) = path.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        // An untracked workspace is one record naming itself, `sub/`.
+        let path = if path.is_empty() { "." } else { path };
+        out.push_str(&format!("\n{}\t{}", code_of(code), escape(path)));
+    }
+    if unread > 0 {
+        out.push_str(&format!("\n!\t{unread}"));
+    }
+    Ok(out)
 }
 
 /// The listing text of the directory at `read`, headed by `shown`.
@@ -570,6 +814,113 @@ mod tests {
         let top = list(None, None, Some(&ws)).unwrap();
         assert_eq!(top.lines().collect::<Vec<_>>(), [".", "f\tmine"]);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stat_tells_an_entry_and_stays_in_the_workspace() {
+        let dir = scratch("stat");
+        fs::create_dir_all(dir.join("ws").join("sub")).unwrap();
+        fs::write(dir.join("ws").join("sub").join("a.txt"), "four").unwrap();
+        fs::write(dir.join("outside"), "").unwrap();
+        std::os::unix::fs::symlink(dir.join("outside"), dir.join("ws").join("out")).unwrap();
+        let ws = Workspace::open(&dir.join("ws"));
+        let kind =
+            |rel| stat(&ws, rel).map(|t| t.split('\t').take(2).collect::<Vec<_>>().join(" "));
+        assert!(kind(".").unwrap().starts_with("d "));
+        assert_eq!(kind("sub/a.txt"), Ok("f 4".into()));
+        assert!(kind("sub").unwrap().starts_with("d "));
+        // A link is `l` and not followed; one in the path is refused.
+        assert!(kind("out").unwrap().starts_with("l "));
+        assert_eq!(kind("out/x"), Err(NOT_STATTED.into()));
+        assert_eq!(kind("missing"), Err(NOT_STATTED.into()));
+        for outside in ["..", "sub/../..", "/"] {
+            assert_eq!(
+                kind(outside),
+                Err("the path is outside the workspace".into())
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn touched_lists_changes_under_the_workspace_only() {
+        use std::process::Command;
+        let dir = scratch("touched");
+        let ws_dir = dir.join("sub");
+        fs::create_dir_all(&ws_dir).unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .map(|s| s.success());
+            assert_eq!(ok.ok(), Some(true), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        fs::write(ws_dir.join("tracked"), "1").unwrap();
+        fs::write(dir.join("elsewhere"), "1").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "one"]);
+        fs::write(ws_dir.join("tracked"), "2").unwrap();
+        fs::write(ws_dir.join("new file"), "").unwrap();
+        fs::write(dir.join("elsewhere"), "2").unwrap();
+        let text = touched(&Workspace::open(&ws_dir)).unwrap();
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            [".", ".M\ttracked", "??\tnew file"]
+        );
+        // An untracked workspace is one record for itself.
+        let fresh = dir.join("fresh");
+        fs::create_dir(&fresh).unwrap();
+        fs::write(fresh.join("x"), "").unwrap();
+        assert_eq!(
+            touched(&Workspace::open(&fresh))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [".", "??\t."]
+        );
+        // A `core.worktree` pointing elsewhere is refused, listing nothing of it.
+        let elsewhere = scratch("touched-elsewhere");
+        fs::write(elsewhere.join("secret"), "").unwrap();
+        git(&["config", "core.worktree", elsewhere.to_str().unwrap()]);
+        assert_eq!(
+            touched(&Workspace::open(&ws_dir)),
+            Err(NOT_A_WORK_TREE.into())
+        );
+        git(&["config", "--unset", "core.worktree"]);
+        fs::remove_dir_all(elsewhere).unwrap();
+        // A `.git` file for another repository is refused, a linked work
+        // tree's own is not.
+        let hijack = dir.join("hijack");
+        fs::create_dir(&hijack).unwrap();
+        fs::write(
+            hijack.join(".git"),
+            format!("gitdir: {}\n", dir.join(".git").display()),
+        )
+        .unwrap();
+        assert_eq!(
+            touched(&Workspace::open(&hijack)),
+            Err(NOT_A_WORK_TREE.into())
+        );
+        git(&["worktree", "add", "-q", "linked"]);
+        fs::write(dir.join("linked").join("fresh"), "").unwrap();
+        assert_eq!(
+            touched(&Workspace::open(&dir.join("linked")))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [".", "??\tfresh"]
+        );
+        // A directory that is no work tree is refused, naming nothing.
+        let plain = scratch("touched-plain");
+        let reason = touched(&Workspace::open(&plain)).unwrap_err();
+        assert!(!reason.contains(plain.to_str().unwrap()), "{reason}");
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(plain).unwrap();
     }
 
     #[cfg(target_os = "linux")]
