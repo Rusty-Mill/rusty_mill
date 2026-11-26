@@ -43,6 +43,9 @@ pub struct Snapshot {
     pub rows: Vec<Row>,
     /// Index into `rows` of the selected row.
     pub cursor: usize,
+    /// The selected row's path in the workspace (`.` for the root): what
+    /// copy puts on the clipboard.
+    pub path: String,
     /// Size and age of the selected row, when the server tells them.
     pub footer: Option<String>,
 }
@@ -56,8 +59,6 @@ pub enum Intent {
     Enter,
     /// Close it, or go to its parent.
     Leave,
-    /// Put the selected path on the clipboard.
-    Copy,
     /// Select row `n` of the snapshot (a click).
     Select(usize),
 }
@@ -77,9 +78,11 @@ pub enum Key {
 }
 
 /// What a key or click did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Out {
     Ask(Intent),
+    /// Put this path on the clipboard.
+    Copy(String),
     Close,
 }
 
@@ -166,13 +169,13 @@ impl Panel {
         let page = isize::try_from(self.page).unwrap_or(isize::MAX);
         Out::Ask(match key {
             Key::Close => return Out::Close,
+            Key::Copy => return Out::Copy(self.snap.path.clone()),
             Key::Up => Intent::Step(-1),
             Key::Down => Intent::Step(1),
             Key::PageUp => Intent::Step(-page),
             Key::PageDown => Intent::Step(page),
             Key::Left => Intent::Leave,
             Key::Right | Key::Enter => Intent::Enter,
-            Key::Copy => Intent::Copy,
         })
     }
 
@@ -249,13 +252,16 @@ mod tests {
 
     #[test]
     fn keys_become_intents() {
-        let p = open(5);
+        let mut p = open(5);
         assert_eq!(p.key(Key::Down), Out::Ask(Intent::Step(1)));
         assert_eq!(p.key(Key::PageUp), Out::Ask(Intent::Step(-5)));
         assert_eq!(p.key(Key::Left), Out::Ask(Intent::Leave));
         assert_eq!(p.key(Key::Right), Out::Ask(Intent::Enter));
         assert_eq!(p.key(Key::Enter), Out::Ask(Intent::Enter));
-        assert_eq!(p.key(Key::Copy), Out::Ask(Intent::Copy));
+        let mut s = snap(1, 0);
+        s.path = "src/lib.rs".into();
+        p.set(7, s);
+        assert_eq!(p.key(Key::Copy), Out::Copy("src/lib.rs".into()));
         assert_eq!(p.key(Key::Close), Out::Close);
     }
 
