@@ -2474,6 +2474,21 @@ impl<S: Store> Board<S> {
     ///
     /// # Errors
     /// See [`Card::comment_with_state`].
+    pub fn comment_with(
+        &self,
+        id: Uuid,
+        by: &Actor,
+        new: &crate::domain::NewComment<'_>,
+    ) -> Result<Card, BoardError> {
+        self.apply(id, by, EventKind::Commented, |c, now| {
+            c.comment_with(by, new, now)
+        })
+    }
+
+    /// [`Board::comment`], also setting the card's `state` line.
+    ///
+    /// # Errors
+    /// See [`Card::comment_with_state`].
     pub fn comment_with_state(
         &self,
         id: Uuid,

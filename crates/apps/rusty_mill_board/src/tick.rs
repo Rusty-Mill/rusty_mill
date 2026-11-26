@@ -831,6 +831,9 @@ impl<T: TickApi> TickStore<T> {
                 by: body.by.unwrap_or_else(|| OWNER.to_owned()),
                 at_ms: body.created_ms,
                 text: body.text,
+                kind: crate::domain::CommentKind::Note,
+                id: None,
+                resolves: None,
             });
         }
         for comments in by_task.values_mut() {
