@@ -2773,8 +2773,11 @@ mod client {
             // A reply may replace the notice that asked for a `cd`'s yes, so
             // the question is dropped with it: a `y` must never type what the
             // screen no longer asks.
-            if [open.req, open.touched_req, open.stat_req].contains(&Some(req)) {
-                open.cd = None;
+            if [open.req, open.touched_req, open.stat_req].contains(&Some(req))
+                && open.cd.take().is_some()
+            {
+                // Its question goes too, before the reply may set a note.
+                open.explorer.clear_note();
             }
             if open.req == Some(req) {
                 open.req = None;
@@ -4789,6 +4792,60 @@ mod client {
             assert!(app.exploring.as_ref().is_some_and(|o| o.cd.is_none()));
             app.take(Input::Keys(b"y".to_vec()));
             assert!(typed_in(&sent(&far[1])).is_empty(), "nothing typed");
+        }
+
+        /// A stat or change-marks reply that cancels a pending `cd` takes its
+        /// question off the screen too, so a `y` is never offered for it.
+        #[cfg(unix)]
+        #[test]
+        fn a_stat_or_marks_reply_removes_the_cd_question() {
+            for method in ["terminal.workspace-stat", "terminal.workspace-touched"] {
+                let (mut app, _inbox, far) = app(None);
+                let a = block(1);
+                app.panes.get_mut(&a).expect("A").status = true;
+                app.act(Action::Explorer);
+                let list = workspace_calls(&sent(&far[1]))[0].0;
+                pane_says(
+                    &mut app,
+                    a,
+                    Message::Text {
+                        req: list,
+                        text: ".\nd\tsrc".into(),
+                    },
+                );
+                let req = sent(&far[1])
+                    .iter()
+                    .find_map(|m| match m {
+                        Message::BlockCall { req, method: m, .. } if m == method => Some(*req),
+                        _ => None,
+                    })
+                    .expect("asked for");
+                app.take(Input::Keys(b"c".to_vec()));
+                let asking = |app: &App| {
+                    let open = app.exploring.as_ref().expect("open");
+                    explorer::render(&open.explorer, 60, 8)
+                        .iter()
+                        .any(|l| l.contains("y = yes"))
+                };
+                assert!(asking(&app), "{method}: asked");
+                let text = if method.ends_with("stat") {
+                    "d\t0\t60"
+                } else {
+                    ".\n"
+                };
+                pane_says(
+                    &mut app,
+                    a,
+                    Message::Text {
+                        req,
+                        text: text.into(),
+                    },
+                );
+                assert!(app.exploring.as_ref().is_some_and(|o| o.cd.is_none()));
+                assert!(!asking(&app), "{method}: question gone");
+                app.take(Input::Keys(b"y".to_vec()));
+                assert!(typed_in(&sent(&far[1])).is_empty(), "nothing typed");
+            }
         }
 
         /// The server refuses the change marks on an agent's block (D372): the
