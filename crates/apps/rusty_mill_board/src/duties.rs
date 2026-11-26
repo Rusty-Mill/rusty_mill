@@ -163,12 +163,20 @@ fn upsert(card: &Card, duty: Duty, same: impl Fn(&Duty) -> bool) -> Result<Card,
 
 /// A review by `actor` of the work in `column`.
 fn review_of<'a>(actor: &'a str, column: &'a Column) -> impl Fn(&Duty) -> bool + 'a {
-    move |d| matches!(d, Duty::Review { actor: a, column: c, .. } if a == actor && c == column)
+    move |d| matches!(d, Duty::Review { actor: a, column: c, .. } if hand(a) == hand(actor) && c == column)
+}
+
+/// The credential behind an actor name: its instances (`claude-cli/a1`) and registered agents
+/// (`claude-cloud#3f9a1c`) are one hand. Only an admin makes credentials, so keying the ledger
+/// by hand bounds it by credentials, not by labels a caller picks.
+fn hand(name: &str) -> &str {
+    name.split(['/', '#']).next().unwrap_or(name)
 }
 
 /// `card` claimed by `by`: an [`Duty::Author`] entry when the claim is to make something,
-/// unless the last entry already says the same. A repeat author of the column moves to the end
-/// (reviews before it no longer count, R4), so claim cycles do not grow the ledger.
+/// unless the last entry already says the same. A repeat author of the column (any instance of
+/// the same credential) moves to the end, with the newest name and provider (reviews before it
+/// no longer count, R4), so claim cycles and labels do not grow the ledger.
 ///
 /// # Errors
 /// If the ledger is full.
@@ -191,18 +199,19 @@ pub fn on_claim(card: &Card, flow: &Workflow, by: &Actor, now_ms: i64) -> Result
     upsert(
         card,
         entry,
-        |d| matches!(d, Duty::Author { actor, column: c, .. } if *actor == by.name && *c == column),
+        |d| matches!(d, Duty::Author { actor, column: c, .. } if hand(actor) == hand(&by.name) && *c == column),
     )
 }
 
-/// The author `by` may not review or approve for: one with the same name, or the same provider.
+/// The author `by` may not review or approve for: one of the same credential ([`hand`]), or
+/// the same provider.
 fn same_hand<'a>(card: &'a Card, by: &Actor) -> Option<&'a str> {
     card.duties.iter().find_map(|d| match d {
         Duty::Author {
             actor, provider, ..
         } => {
             let same_provider = provider.is_some() && *provider == by.provider;
-            (*actor == by.name || same_provider).then_some(actor.as_str())
+            (hand(actor) == hand(&by.name) || same_provider).then_some(actor.as_str())
         }
         _ => None,
     })
@@ -243,9 +252,10 @@ pub fn check_move(card: &Card, flow: &Workflow, to: &Column, by: &Actor) -> Resu
     Ok(())
 }
 
-/// Record what a move from `from` did. `by` is the actor the move was made as (a recorder
-/// counts as holding `close`, so its close is not an approval): a passing review for a review move, an approval for a
-/// gate an `Admin` holder crossed with `card_move`. `moved` is the card after the move.
+/// Record what a move from `from` did: a passing review for a review move, an approval for a
+/// gate an `Admin` holder crossed with `card_move`. `moved` is the card after the move, and
+/// `by` the actor it was made as (a recorder counts as holding `close`, so its close is not an
+/// approval).
 ///
 /// # Errors
 /// If the ledger is full.
@@ -496,11 +506,11 @@ fn approve_in(
     }
     let pending = needs_confirmation(flow, &from, a.to);
     let entry = approval(by, &from, a, pr_head, pending, None, now_ms);
-    // A new filing replaces the filer's expired one for this gate, so gate cycles do not grow
-    // the ledger.
+    // A new filing replaces the filer's pending or expired one for this gate, so refiling and
+    // gate cycles do not grow the ledger.
     let next = upsert(card, entry, |d| {
-        matches!(d, Duty::Approval { actor, from: f, to, expired: true, .. }
-            if *actor == by.name && *f == from && to == a.to)
+        matches!(d, Duty::Approval { actor, from: f, to, pending, expired, .. }
+            if (*pending || *expired) && hand(actor) == hand(&by.name) && *f == from && to == a.to)
     })?;
     Ok((next, !pending))
 }
@@ -530,9 +540,11 @@ fn approval(
     }
 }
 
-/// The owner's approval: confirm the newest pending one for this gate, else record their own. A
-/// filing on text edited since, or for another PR head, is not what the owner approved: it is
-/// expired (or kept), and the owner's own approval is recorded.
+/// The owner's approval: confirm the newest pending filing for this gate made on the text they
+/// read, else record their own. Filings on text edited since are not what the owner read: they
+/// expire and the card stays, so the owner approves again on a fresh readback (no lockout, and
+/// no gate crossed on unread text). A merge filing for another PR head leaves the owner's
+/// approval of this head recorded on its own.
 fn confirm_or_record(
     card: &Card,
     by: &Actor,
@@ -542,40 +554,44 @@ fn confirm_or_record(
     merge: bool,
     now_ms: i64,
 ) -> Result<(Card, bool), BoardError> {
-    let pending = card.duties.iter().rposition(|d| {
-        matches!(d, Duty::Approval { from: f, to, pending: true, .. } if f == from && to == a.to)
+    let filed = |d: &Duty| matches!(d, Duty::Approval { from: f, to, pending: true, .. } if f == from && to == a.to);
+    let read = card.duties.iter().rposition(|d| {
+        filed(d) && matches!(d, Duty::Approval { digest, .. } if *digest == a.digest)
     });
-    let Some(i) = pending else {
-        let mine = approval(by, from, a, pr_head, false, None, now_ms);
-        return push_owner(card, mine).map(|c| (c, !merge));
-    };
-    let mut next = card.clone();
-    if let Some(Duty::Approval {
-        pending,
-        confirmed_by,
-        pr_head: filed_head,
-        digest,
-        expired,
-        ..
-    }) = next.duties.get_mut(i)
-    {
-        // The owner confirms what the proxy filed: text edited since is a different card, so
-        // that filing expires and the owner's approval of the text they read stands alone.
-        if *digest != a.digest {
+    if let Some(i) = read {
+        let mut next = card.clone();
+        if let Some(Duty::Approval {
+            pending,
+            confirmed_by,
+            pr_head: filed_head,
+            ..
+        }) = next.duties.get_mut(i)
+        {
+            // A different PR head is a new approval.
+            if merge && filed_head.as_deref() != pr_head {
+                let mine = approval(by, from, a, pr_head, false, None, now_ms);
+                return push_owner(card, mine).map(|c| (c, false));
+            }
             *pending = false;
-            *expired = true;
-            let mine = approval(by, from, a, pr_head, false, None, now_ms);
-            return push_owner(&next, mine).map(|c| (c, !merge));
+            *confirmed_by = Some(by.name.clone());
         }
-        // A different PR head is a new approval.
-        if merge && filed_head.as_deref() != pr_head {
-            let mine = approval(by, from, a, pr_head, false, None, now_ms);
-            return push_owner(card, mine).map(|c| (c, false));
-        }
-        *pending = false;
-        *confirmed_by = Some(by.name.clone());
+        return Ok((next, !merge));
     }
-    Ok((next, !merge))
+    if card.duties.iter().any(filed) {
+        let mut next = card.clone();
+        for d in next.duties.iter_mut().filter(|d| filed(d)) {
+            if let Duty::Approval {
+                pending, expired, ..
+            } = d
+            {
+                *pending = false;
+                *expired = true;
+            }
+        }
+        return Ok((next, false));
+    }
+    let mine = approval(by, from, a, pr_head, false, None, now_ms);
+    push_owner(card, mine).map(|c| (c, !merge))
 }
 
 #[cfg(test)]
@@ -698,10 +714,15 @@ mod tests {
         );
         let dots = actor("dots", Some("openai"), &[Capability::Review]);
         assert!(check_move(&c, &flow(), &to, &dots).is_ok());
-        let unset = actor("cloud#3", None, &[Capability::Review]);
+        let unset = actor("local", None, &[Capability::Review]);
         assert!(
             check_move(&c, &flow(), &to, &unset).is_ok(),
-            "providers unset: by name only"
+            "providers unset: by credential only"
+        );
+        let agent = actor("cloud#3", None, &[Capability::Review]);
+        assert!(
+            check_move(&c, &flow(), &to, &agent).is_err(),
+            "another agent of the author's credential"
         );
         let back = Column::new("building").expect("col");
         let mut there = c.clone();
