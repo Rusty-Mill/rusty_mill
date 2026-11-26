@@ -1,7 +1,7 @@
 # #432 Codex session resume: design
 
-Status: approved by Nano 2026-11-26 (D200); build after the #600 builder work lands.
-Defaults D199; Q66 resolved by D200 (design and `BBP_PROVIDER_SESSION` approved).
+Status: approved by Nano 2026-11-26 (D204); build after the #600 builder work lands.
+Defaults D203; Q66 resolved by D204 (design and `BBP_PROVIDER_SESSION` approved).
 
 ## Problem
 
@@ -47,7 +47,7 @@ Two gaps the docs leave, which S0 settles on BaileyAi:
 ### 2. Capture (`moderator.rs`, pure parser in `launchers.rs`)
 - `codex_thread_id(log: &str) -> Result<Option<String>, String>`: `turn-N.log` also
   holds the harness's stderr and the broker's lines, so the first line is not always
-  Codex's. The rule (D199): take the first JSON line whose `type` is `thread.started`,
+  Codex's. The rule (D203): take the first JSON line whose `type` is `thread.started`,
   and only if it comes before any `item.*` or `turn.*` event. `Some(id)` for a UUID
   `thread_id`, `None` when there is no such line in time, `Err` for a bad id. The agent's
   own output arrives inside `item.*` / `turn.*` events, which come after `thread.started`,

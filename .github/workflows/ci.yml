@@ -181,6 +181,8 @@ jobs:
       # The #1092 inbox board deploy script's checks and fixture flow, against in-memory fakes:
       # no sudo, no bbp, no board (bash and jq only).
       - run: bash docs/projects/let-em-loose/1092-board-lib.test.sh
+      # The #1318 toy-run launch verdict against fixture rows (bash and jq only).
+      - run: bash docs/projects/let-em-loose/1318-toy-verdict.test.sh
 
   claude-hooks:
     # The remind-me cloud capture hook (.claude/hooks) is stdlib-only Python and its
