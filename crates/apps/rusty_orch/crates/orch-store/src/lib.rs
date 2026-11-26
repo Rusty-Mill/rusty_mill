@@ -623,6 +623,27 @@ impl Store {
             .map_or(Ok(Vec::new()), |r| r.into_sessions(board))
     }
 
+    /// [`Store::load_builder_sessions`] for the store in `dir`, read without
+    /// changing anything, as [`Store::read_lens_reviews`]: the directory's
+    /// existing lock, no file made, nothing written back.
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::read_lens_reviews`]: [`StoreError::Missing`] when `dir`
+    /// has no lock or builder session file; [`StoreError::Locked`],
+    /// [`StoreError::Lock`]; [`StoreError::Engine`] when the table or its
+    /// records companion cannot be read; [`StoreError::Corrupt`] when the
+    /// board's record does not check out.
+    pub fn read_builder_sessions(dir: &Path, board: &str) -> Result<Vec<Session>, StoreError> {
+        let records = read_table::<BuilderSessionRecord>(dir, BUILDER_SESSIONS_FILE)?
+            .ok_or_else(|| StoreError::Missing(dir.join(BUILDER_SESSIONS_FILE)))?;
+        let id = builder_sessions::key(board);
+        records
+            .into_iter()
+            .find(|r| r.id() == id)
+            .map_or(Ok(Vec::new()), |r| r.into_sessions(board))
+    }
+
     /// Save `sessions` as every builder session of `board`, replacing the
     /// board's record without checking its revision: load, admit and save
     /// under the one `&mut Store` the directory lock gives a process.
@@ -818,7 +839,8 @@ fn merge(mut old: Review, row: &Review) -> Review {
 
 /// Every saved record of the table `file` in the store at `dir`, read under
 /// the directory's existing lock and recovered as [`Store::open`] would,
-/// writing nothing; `None` when the table file doesn't exist.
+/// writing nothing; `None` when the table file doesn't exist. A table file
+/// whose header [`Store::open`] would refuse fails here too.
 fn read_table<R>(dir: &Path, file: &str) -> Result<Option<Vec<R>>, StoreError>
 where
     R: IndexedField<ById, Id = i64>
@@ -839,7 +861,7 @@ where
         return Ok(None);
     }
     Ok(Some(
-        GenericMmapStore::<R, ById, Revision>::read_portable_records(&path)?,
+        GenericMmapStore::<R, ById, Revision>::read_checked_records(&path)?,
     ))
 }
 

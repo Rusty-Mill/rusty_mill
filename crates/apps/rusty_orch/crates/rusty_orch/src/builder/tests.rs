@@ -7,6 +7,8 @@ use orch_lens::DataClass;
 use rusty_bbp::{ArtId, ClaimStatus, MsgId, Stakes};
 use rusty_json::Value;
 
+use std::collections::BTreeMap;
+
 use super::*;
 
 fn argv(extra: &[&str]) -> Vec<String> {
@@ -216,37 +218,154 @@ fn session_lines_drop_notes_keep_the_claim_and_sort() {
     assert_eq!(session_lines(vec![], None), "");
 }
 
+/// A temp root with a BBP dir, an orch state dir and a parsable config.
+struct Reader {
+    root: PathBuf,
+    o: SessionsOptions,
+}
+
+impl Reader {
+    fn new(name: &str) -> Self {
+        let root =
+            std::env::temp_dir().join(format!("orch-sessions-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (bbp, state, cfg) = (root.join("bbp"), root.join("state"), root.join("lens.json"));
+        std::fs::create_dir_all(&bbp).expect("bbp dir");
+        std::fs::create_dir_all(&state).expect("state dir");
+        std::fs::write(
+            &cfg,
+            include_str!("../../../orch-lens/tests/fixtures/lens/lens.json"),
+        )
+        .expect("config");
+        let o = SessionsOptions {
+            config: cfg,
+            dir: bbp,
+            task: "t".into(),
+            state,
+            claim: Some(MsgId(7)),
+        };
+        Self { root, o }
+    }
+
+    /// Save `rows` through the writer path, as `builder run` does.
+    fn save(&self, rows: &[Session]) {
+        let board = crate::lens::run::board(&self.o.dir, &self.o.task).expect("board");
+        let saved = with_store(&self.o.state, |s| {
+            s.save_builder_sessions(&board, rows)
+                .map_err(|e| e.to_string())
+        });
+        assert_eq!(saved, Ok(()));
+    }
+
+    /// Every entry of the state dir with its bytes.
+    fn snapshot(&self) -> BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(&self.o.state)
+            .expect("list")
+            .map(|e| {
+                let e = e.expect("entry");
+                let name = e.file_name().to_string_lossy().into_owned();
+                (name, std::fs::read(e.path()).expect("read"))
+            })
+            .collect()
+    }
+
+    fn state_file(&self, name: &str) -> PathBuf {
+        self.o.state.join(name)
+    }
+}
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn ended(n: u32, end: End) -> Session {
+    session(n, Phase::Ended { end, at: 99 })
+}
+
 #[test]
-fn sessions_reads_the_store_and_refuses_a_missing_state_dir() {
-    let root = std::env::temp_dir().join(format!("orch-builder-sessions-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    let (bbp, state, cfg) = (root.join("bbp"), root.join("state"), root.join("lens.json"));
-    std::fs::create_dir_all(&bbp).expect("bbp dir");
-    std::fs::write(
-        &cfg,
-        include_str!("../../../orch-lens/tests/fixtures/lens/lens.json"),
-    )
-    .expect("config");
+fn an_empty_state_dir_reads_as_no_sessions_and_stays_empty() {
+    let r = Reader::new("empty");
+    assert_eq!(sessions(&r.o), Ok(String::new()));
+    assert!(r.snapshot().is_empty(), "no lock or table was made");
+}
+
+#[test]
+fn a_missing_state_dir_is_refused_not_created() {
+    let r = Reader::new("missing");
     let o = SessionsOptions {
-        config: cfg,
-        dir: bbp.clone(),
-        task: "t".into(),
-        state: state.clone(),
-        claim: Some(MsgId(7)),
+        state: r.root.join("nope"),
+        ..r.o.clone()
     };
-    let missing = sessions(&o);
-    assert!(missing.is_err(), "no state dir: {missing:?}");
-    assert!(!state.exists(), "a missing state dir is not created");
-    std::fs::create_dir_all(&state).expect("state dir");
-    assert_eq!(sessions(&o), Ok(String::new()));
-    let board = crate::lens::run::board(&bbp, "t").expect("board");
-    let saved = with_store(&state, |s| {
-        s.save_builder_sessions(&board, &[session(1, Phase::Running)])
-            .map_err(|e| e.to_string())
-    });
-    assert_eq!(saved, Ok(()));
-    let out = sessions(&o).expect("read");
-    assert_eq!(out.lines().count(), 1);
-    assert!(out.contains(r#""state":"running""#), "{out}");
-    let _ = std::fs::remove_dir_all(&root);
+    assert!(sessions(&o).is_err());
+    assert!(!o.state.exists());
+}
+
+#[test]
+fn reading_a_store_changes_no_file() {
+    let r = Reader::new("unchanged");
+    r.save(&[ended(1, End::Stored(ArtId(42))), ended(2, End::Failed)]);
+    let before = r.snapshot();
+    let out = sessions(&r.o).expect("read");
+    assert_eq!(
+        sessions(&r.o).as_deref(),
+        Ok(out.as_str()),
+        "same answer twice"
+    );
+    assert_eq!(r.snapshot(), before, "entries and bytes unchanged");
+    // The rows the #1894 verdict fixture reads as `rusty_orch builder sessions` output.
+    assert_eq!(
+        out,
+        include_str!("../../tests/fixtures/builder-sessions.jsonl")
+    );
+}
+
+#[test]
+fn a_store_with_no_board_record_reads_as_no_sessions() {
+    let r = Reader::new("other-board");
+    let _ = with_store(&r.o.state, |_| Ok(())); // initialised, nothing saved
+    let before = r.snapshot();
+    assert_eq!(sessions(&r.o), Ok(String::new()));
+    assert_eq!(r.snapshot(), before);
+}
+
+#[test]
+fn a_partial_or_corrupt_store_fails_closed() {
+    let blob = |r: &Reader| {
+        let names: Vec<String> = r.snapshot().into_keys().collect();
+        let blob = names
+            .into_iter()
+            .find(|n| n.starts_with("builder-sessions.mmap.") && !n.ends_with(".inserts"))
+            .expect("records companion");
+        r.state_file(&blob)
+    };
+    type Break = fn(&Reader, PathBuf);
+    let cases: [(&str, Break); 5] = [
+        ("corrupt table header", |r, _| {
+            std::fs::write(r.state_file("builder-sessions.mmap"), b"GARBAGE!\0\0\0\0")
+                .expect("write");
+        }),
+        ("no lock", |r, _| {
+            std::fs::remove_file(r.state_file("lock")).expect("rm")
+        }),
+        ("no builder table", |r, _| {
+            std::fs::remove_file(r.state_file("builder-sessions.mmap")).expect("rm");
+        }),
+        ("no records companion", |_, blob| {
+            std::fs::remove_file(blob).expect("rm")
+        }),
+        ("corrupt companion", |_, blob| {
+            std::fs::write(blob, b"not a blob").expect("write")
+        }),
+    ];
+    for (name, break_it) in cases {
+        let r = Reader::new(&name.replace(' ', "-"));
+        r.save(&[ended(1, End::Failed)]);
+        let b = blob(&r);
+        break_it(&r, b);
+        let before = r.snapshot();
+        assert!(sessions(&r.o).is_err(), "{name}: must fail");
+        assert_eq!(r.snapshot(), before, "{name}: nothing repaired or made");
+    }
 }

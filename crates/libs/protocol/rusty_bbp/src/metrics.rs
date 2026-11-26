@@ -30,24 +30,45 @@ pub enum GateKind {
 pub struct GateAnswer {
     pub gate: GateKind,
     pub op: OpId,
+    /// For an approval, what it approved; `None` for a rejection.
+    pub approved: Option<Approved>,
+}
+
+/// What one approval approved, read from its `human_approval` event, so a host can check a
+/// receipt's binding against the log rather than against the receipt itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Approved {
+    pub subject: ArtId,
+    pub run: Option<RunId>,
+    /// The task revision the approval was judged at: its event's index in the log, since the
+    /// approval is the first event its command's action writes (a fence names this revision).
+    pub rev: Rev,
 }
 
 /// Every human approval and rejection in `events`, in order, with its op.
 pub fn gate_answers(events: &[Event]) -> Vec<GateAnswer> {
-    let mut pending: Vec<GateKind> = Vec::new();
+    let mut pending: Vec<(GateKind, Option<Approved>)> = Vec::new();
     let mut out = Vec::new();
-    for e in events {
+    for (i, e) in events.iter().enumerate() {
         match e {
-            Event::HumanApproval { gate, .. } => pending.push(match gate {
-                Gate::Plan => GateKind::PlanApproval,
-                Gate::Merge => GateKind::MergeApproval,
-            }),
-            Event::HumanRejection { .. } => pending.push(GateKind::Rejection),
+            Event::HumanApproval { gate, subject, run } => pending.push((
+                match gate {
+                    Gate::Plan => GateKind::PlanApproval,
+                    Gate::Merge => GateKind::MergeApproval,
+                },
+                Some(Approved {
+                    subject: *subject,
+                    run: *run,
+                    rev: Rev(i as u64),
+                }),
+            )),
+            Event::HumanRejection { .. } => pending.push((GateKind::Rejection, None)),
             // A command's events precede its `op_accepted`.
             Event::OpAccepted { op, .. } => {
-                out.extend(pending.drain(..).map(|gate| GateAnswer {
+                out.extend(pending.drain(..).map(|(gate, approved)| GateAnswer {
                     gate,
                     op: op.clone(),
+                    approved,
                 }));
             }
             _ => {}

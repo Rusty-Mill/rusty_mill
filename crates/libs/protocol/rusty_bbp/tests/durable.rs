@@ -297,6 +297,7 @@ fn open_task(dir: &Path, id: &str) -> Driver<FsStore> {
     let task = TaskId(id.into());
     let mut d = Driver::new(store, task.clone());
     let cmd = Command::Open(OpenTask {
+        gates: None,
         claims: None,
         mode: rusty_bbp::Mode::Stages,
         task,

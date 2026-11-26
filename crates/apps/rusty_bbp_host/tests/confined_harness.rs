@@ -56,7 +56,7 @@ fn setup(
 ) -> Config {
     let dir = root.join(name);
     let task = TaskId(name.into());
-    admin::open_task(
+    open_scratch(
         &dir,
         &task,
         "local",
@@ -550,7 +550,7 @@ fn codex_task(root: &Path, repo: &Path, script: &str, mut sandbox: HarnessSandbo
         &rusty_serde::json::to_string(&example["roster"]).expect("roster"),
     )
     .expect("roster");
-    admin::open_task(
+    open_scratch(
         &dir,
         &task,
         &repo.to_string_lossy(),
@@ -1079,4 +1079,53 @@ fn a_hiding_sandbox_is_refused_when_a_crlf_alternate_names_its_grant() {
         "no filtered copy was made"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// #447: the fixture's tasks answer their gates with `--as`, so they open scratch, their repo
+/// listed first as the operator would (D195).
+#[allow(clippy::too_many_arguments, dead_code)]
+fn open_scratch_live(
+    dir: &std::path::Path,
+    task: &rusty_bbp::TaskId,
+    repo: &str,
+    brief: &[u8],
+    human: &rusty_bbp::PrincipalId,
+    set: &rusty_bbp_host::profiles::ProfileSet,
+    roster: Vec<rusty_bbp::Role>,
+    live: u32,
+    policy: rusty_bbp::SchedulingPolicy,
+) -> Result<rusty_bbp::Response, String> {
+    use rusty_bbp_host::scratch_repos;
+    if scratch_repos::check(dir, repo).is_err() {
+        scratch_repos::add(
+            dir,
+            scratch_repos::Record::new(repo, "test", "test fixture", rusty_bbp::Time(0)),
+        )?;
+    }
+    rusty_bbp_host::admin::open_task_gated(
+        dir,
+        task,
+        repo,
+        brief,
+        human,
+        set,
+        roster,
+        (live, policy),
+        Some(rusty_bbp::Gates::Scratch),
+    )
+}
+
+/// [`open_scratch_live`] with one live turn, as `admin::open_task` opens.
+#[allow(dead_code)]
+fn open_scratch(
+    dir: &std::path::Path,
+    task: &rusty_bbp::TaskId,
+    repo: &str,
+    brief: &[u8],
+    human: &rusty_bbp::PrincipalId,
+    set: &rusty_bbp_host::profiles::ProfileSet,
+    roster: Vec<rusty_bbp::Role>,
+) -> Result<rusty_bbp::Response, String> {
+    let policy = rusty_bbp_host::admin::default_policy(1);
+    open_scratch_live(dir, task, repo, brief, human, set, roster, 1, policy)
 }

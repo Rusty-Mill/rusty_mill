@@ -273,6 +273,24 @@ fn each_human_gate_answer_is_listed_with_the_op_that_carried_it() {
 }
 
 #[test]
+fn an_approval_answer_names_what_it_approved_at_the_fenced_revision() {
+    let mut fx = Fx::new();
+    let spec = fx.reach_plan_gate();
+    let rev = fx.rev();
+    ok(fx.human(HumanAction::Fenced {
+        expected_rev: rev,
+        action: Box::new(HumanAction::Approve {
+            gate: Gate::Plan,
+            subject: spec,
+            run: None,
+        }),
+    }));
+    let got = metrics::gate_answers(&log_of(&fx));
+    let a = got[0].approved.expect("approved");
+    assert_eq!((a.subject, a.run, a.rev), (spec, None, rev));
+}
+
+#[test]
 fn a_rejection_is_a_gate_answer_and_agent_ops_are_not() {
     let mut fx = Fx::new();
     fx.reach_plan_gate();

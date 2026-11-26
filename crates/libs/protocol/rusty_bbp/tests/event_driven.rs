@@ -32,6 +32,7 @@ fn event_driven_needs_exactly_one_live_turn() {
     let mut store = MemStore::new();
     let open = |live, brief| {
         Command::Open(OpenTask {
+            gates: None,
             claims: None,
             mode: rusty_bbp::Mode::Stages,
             task: TaskId("T1".into()),

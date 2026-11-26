@@ -447,6 +447,7 @@ fn a_merge_close_record_survives_a_fresh_read_and_unclose_clears_it() {
         name: name.into(),
         caps: caps.iter().copied().collect(),
         projects: None,
+        provider: None,
     };
     let watch = actor(MERGE_WATCH, &[Capability::Record]);
     let human = actor("nano", &[Capability::Triage, Capability::Close]);

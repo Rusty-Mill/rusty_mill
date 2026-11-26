@@ -130,11 +130,15 @@ pub enum Capability {
     /// Mint credentials for itself (`agent_enrol`): at most [`crate::identities::MAX_CHILDREN`],
     /// never wider than the minter's own role and projects, and never `enrol` or `admin`.
     Enrol,
+    /// Cross a gate on the owner's stated approval (`card_approve`): the approver proxy's one
+    /// capability (#447). A merge or an unblock is filed pending until an `Admin` holder
+    /// confirms it.
+    Approve,
 }
 
 impl Capability {
     /// Every capability, in display order.
-    pub const ALL: [Capability; 12] = [
+    pub const ALL: [Capability; 13] = [
         Capability::Triage,
         Capability::Plan,
         Capability::Architect,
@@ -147,6 +151,7 @@ impl Capability {
         Capability::Project,
         Capability::Admin,
         Capability::Enrol,
+        Capability::Approve,
     ];
 
     /// What holding this lets a role do, for the settings view.
@@ -172,6 +177,9 @@ impl Capability {
             Capability::Enrol => {
                 "Mint credentials for its own workers: no wider than its own role and projects."
             }
+            Capability::Approve => {
+                "Cross a gate on the owner's stated approval (card_approve); merges and unblocks wait for the owner's confirmation."
+            }
         }
     }
 }
@@ -186,6 +194,10 @@ pub struct Actor {
     /// Projects this actor may work in; `None` means all of them.
     #[serde(default)]
     pub projects: Option<BTreeSet<String>>,
+    /// The model provider behind this actor (`anthropic`, `openai`, `local`, `human`, ...), from
+    /// its credential. Separation of duties compares it (see [`crate::duties`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 impl Actor {
@@ -711,6 +723,9 @@ pub struct Card {
     /// When the card should be done, Unix ms, if planned: what the roadmap draws ahead of today.
     #[serde(default)]
     pub target_ms: Option<i64>,
+    /// Who authored, reviewed and approved it (#447, [`crate::duties`]). Set only by the board.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duties: Vec<crate::duties::Duty>,
 }
 
 /// How much of each card a listing returns.
@@ -942,6 +957,13 @@ pub enum EventKind {
     Numbered,
     /// Closed without shipping ([`Card::close`]).
     Closed,
+    /// Reviewed with `card_review` (#447).
+    Reviewed,
+    /// A gate approval filed or confirmed with `card_approve`, without a move (#447).
+    Approved,
+    /// An owner's `card_approve` found the gate's filings made on text edited since: they
+    /// expired, nothing was approved and the card stayed (#447).
+    ApprovalExpired,
 }
 
 /// One entry in the append-only log. `id` is a UUIDv7 assigned by the store
@@ -1071,6 +1093,7 @@ impl Card {
             archived_ms: None,
             restored_ms: None,
             target_ms: None,
+            duties: Vec::new(),
         })
     }
 
@@ -1158,7 +1181,12 @@ impl Card {
     /// `by`, counted as holding `Close` for a move to Done when it holds `Record` (and not
     /// `Close`), this card carries a pull request link, and the card is in a work column:
     /// recording merged work, narrowed. The flag says that this happened.
-    fn recorder<'a>(&self, flow: &Workflow, by: &'a Actor, to: &Column) -> (Cow<'a, Actor>, bool) {
+    pub(crate) fn recorder<'a>(
+        &self,
+        flow: &Workflow,
+        by: &'a Actor,
+        to: &Column,
+    ) -> (Cow<'a, Actor>, bool) {
         let applies = *to == Column::DONE
             && by.caps.contains(&Capability::Record)
             && !by.caps.contains(&Capability::Close)
@@ -1253,7 +1281,7 @@ impl Card {
         Ok(self.arrive(to, now_ms))
     }
 
-    fn arrive(&self, to: &Column, now_ms: i64) -> Self {
+    pub(crate) fn arrive(&self, to: &Column, now_ms: i64) -> Self {
         Self {
             column: to.clone(),
             claim: None,
@@ -1776,6 +1804,7 @@ mod tests {
             name: name.into(),
             caps: caps.iter().copied().collect(),
             projects: None,
+            provider: None,
         }
     }
 

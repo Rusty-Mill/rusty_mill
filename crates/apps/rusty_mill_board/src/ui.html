@@ -1006,7 +1006,7 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),ev:el("div",null,"evidence"),ei:el("input"),dp:el("input"),rl:el("input"),sb:el("input"),mv:el("select"),up:el("input","","up"),ms:el("select"),x:{}};
+  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),ex:el("div",null,"refs"),ev:el("div",null,"evidence"),ap:el("div",null,"approvals"),ei:el("input"),dp:el("input"),rl:el("input"),sb:el("input"),mv:el("select"),up:el("input","","up"),ms:el("select"),x:{}};
   projects().forEach(p=>f.p.append(new Option(label(p),p)));
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
@@ -1070,7 +1070,7 @@ function show(id){
   const plan=el("div",null,"plan");plan.append(f.pr,el("span","Target","meta"),f.due);
   const links=el("div",null,"plan");links.append(el("span","Parent","meta"),f.up,el("span","Milestone","meta"),f.ms);
   const lists=el("div",null,"plan");lists.append(el("span","Waits on","meta"),f.dp,el("span","Related","meta"),f.rl,el("span","Superseded by","meta"),f.sb);
-  form.append(head,f.tr,f.banner,f.t,...typedRows.slice(0,1),f.b,...typedRows.slice(1),promptRow,f.g,plan,links,lists,evRow,f.mv,...(projects().length>1?[f.p]:[]),row,f.ex,f.cm,f.ci);
+  form.append(head,f.tr,f.banner,f.t,...typedRows.slice(0,1),f.b,...typedRows.slice(1),promptRow,f.g,plan,links,lists,evRow,f.ap,f.mv,...(projects().length>1?[f.p]:[]),row,f.ex,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
@@ -1146,6 +1146,15 @@ function syncDialog(){
     f.mv.hidden=to.length===0;
   }
   f.ev.replaceChildren(...(k.evidence??[]).map(l=>{const d=el("div"),a=el("a",l);a.href=l;a.target="_blank";a.rel="noopener noreferrer";d.append(a);return d}));
+  // Gate approvals the proxy filed for the owner to confirm (#447): a merge or an unblock waits for this tap.
+  f.ap.replaceChildren(...(k.duties??[]).filter(d=>d.duty==="approval"&&d.pending&&!d.expired&&d.from===k.column).map(d=>{
+    const r=el("div",null,"pending"),b=el("button","Confirm");b.type="button";
+    r.append(el("span","Approval waiting: "+colLabel(d.from)+" → "+colLabel(d.to)+(d.pr_head?" at "+d.pr_head:"")+", filed by "+d.actor+". "),el("q",d.verbatim)," ",b);
+    b.onclick=async()=>{b.disabled=true;try{const g=await api("card_get",{id:k.id});
+      const res=await act("card_approve",{id:k.id,to:d.to,digest:g.text_digest,verbatim:"Confirmed in the board by tap.",source:"board-ui",...(d.pr_head&&{pr_head:d.pr_head})});
+      if(res?.outcome==="expired")toast("The text changed since it was filed: nothing was approved. Read it back and approve again.")}
+      catch(e){toast(e.message)}finally{b.disabled=false}};
+    return r}));
   const theirs=snap(k);
   if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
   if(document.activeElement!==f.due)f.due.value=k.target_ms?isoDay(k.target_ms):"";

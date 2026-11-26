@@ -1,6 +1,6 @@
 # Workspace explorer (card #1573)
 
-Status: design; slices 1 (list) and 2 (stat, touched-by calls) built; server call accepted (handoff D337, Nano 2026-11-18). The wire slice still passes the owner gate when its PR is opened. Source: Nano, voice, 2026-11-18 (remind-me mem_797b5707, card #1573).
+Status: design; slices 1 (list), 2 (stat, touched-by calls) and 3 (TUI tree shows them) built; server call accepted (handoff D337, Nano 2026-11-18). The wire slice still passes the owner gate when its PR is opened. Source: Nano, voice, 2026-11-18 (remind-me mem_797b5707, card #1573).
 
 ## What
 
@@ -29,7 +29,7 @@ A server call limited to list, stat and touched-by, scoped to the session worksp
 ## Order
 
 1. Server call and ctl form (cloud-buildable, owner gate).
-2. TUI text tree (cloud-buildable).
+2. TUI text tree (cloud-buildable): lists, then shows the size and age of the row under the cursor and a letter beside each changed file (`*` on a directory with a change below it). Tree actions (copy path, cd, open in an editor) follow, each with its own gate.
 3. GUI panel on the D60 panel tokens (needs a Windows GUI build; not cloud-buildable).
 
 ## Decided
