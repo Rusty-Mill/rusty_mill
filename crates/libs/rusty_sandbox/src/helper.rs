@@ -232,9 +232,16 @@ pub fn require_enforced(
     }
 }
 
-/// Whether this kernel confines a job's signals to the job: Landlock ABI
-/// v6 (Linux 6.12) or later. Without it a job can signal any process of
-/// its user, though it still cannot trace or read one.
+/// Whether this kernel can confine a job's signals to the job: Landlock
+/// ABI v6 (Linux 6.12) or later.
+///
+/// Capability detection, not a report on a particular job: it reads the
+/// kernel's Landlock ABI version and checks nothing about any job that has
+/// run or is running. The helper applies the signal scope to every job
+/// whenever the kernel supports it, so on one kernel the answer holds for
+/// every job. It is `false` when Landlock is missing, disabled or its
+/// version cannot be read. Without the capability a job can signal any
+/// process of its user, though it still cannot trace or read one.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn signals_scoped() -> bool {
