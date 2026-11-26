@@ -39,16 +39,33 @@ Out of scope: changing the #704 gate (card).
 - **Factory arm:** each checkpoint is one claims task.
   - The intent is `checkpoint_N.md` verbatim. The base is the previous checkpoint's accepted workspace. Builders are Claude CLI only (D64, D188: candidates only with `.lel/submit` and a non-empty diff). The lenses are the normal ones (STARTER), including the holdout lens writing its own holdouts from the intent (D37). The erosion profile is report-only (D42, D115: there are no Python limits).
   - **SCB tests never enter BBP.** They are not profiles, holdouts or golden sets. They score the accepted workspace only after the task ends (D37 holdouts would gate acceptance and leak pass counts).
-  - If no claim is accepted, the workspace carries forward unchanged and the checkpoint scores as it stands.
+  - If no claim is accepted, the workspace carries forward unchanged. That snapshot is flagged **carry-forward** and reported as such (see the evidence rule below).
   - D44 scheduled cleanups are **off** by default, so the run matches the paper's setup; see option O3.
-- **Control arm (proposal, needs Nano):** one bare Claude CLI builder session per checkpoint, with the same model, spec and base and no lenses. The paper has no per-problem baselines, so without this arm the comparison is only against aggregates (the D57/#596 baseline-versus-treatment pattern).
+- **Control arm (proposal, needs Nano):** one bare Claude CLI builder session per checkpoint, with the same model and spec and no lenses. The paper has no per-problem baselines, so without this arm the comparison is only against aggregates (the D57/#596 baseline-versus-treatment pattern).
+- **Trajectories are end to end.** Both arms start from the same empty workspace at checkpoint 1. After that, each arm inherits **its own** previous workspace, as in the paper. Resetting both arms to a shared base at every step would answer a different, one-step question. This spike doesn't run that; if it ever does, it is labelled "one-step" and reported apart.
 - **Billing path:** both arms use the subscription CLI with the `no_overage` assertion, through orch's admission. SCB's own API-key harness is **not** used (ADR-0021, D38, D167). SCB is used only to score the snapshots.
-- **Scoring:** strict, ISO and core pass rates, SCB erosion and verbosity, and `rusty_erosion` for every checkpoint in both arms. Erosion and verbosity slopes per problem.
-- **"Slows decay" (pre-registered, proposed):**
-  - The factory's SCB erosion slope is at or below the control's on at least 2 of 3 problems.
-  - The factory's verbosity slope is no worse than the control's on at least 2 of 3 problems.
-  - The factory's strict-solved checkpoints are at least the control's minus 1.
+- **Scoring:** strict, ISO and core pass rates, SCB erosion and verbosity, and `rusty_erosion` for every checkpoint in both arms. Erosion and verbosity slopes per problem (least squares over checkpoint index). Reported in three separate tables: quality (erosion, verbosity), functional progress (strict, ISO and core per checkpoint), and carry-forward snapshots per arm.
+- **Evidence rule (pre-registered, proposed).** A trajectory, meaning one arm on one problem, is **evaluable** only if both hold:
+  - at most one of its checkpoints is carry-forward; and
+  - its workspace passes at least half of that checkpoint's core tests on at least half of its checkpoints.
+
+  A problem counts only when both arms' trajectories on it are evaluable. Otherwise the problem is **inconclusive** and its slopes are reported without a verdict. This stops two stalled arms (zero slope, 0 vs 0 solves) from passing.
+- **Per-problem outcome (pre-registered, proposed).** Let d = factory slope minus control slope.
+  - **Reduction** if d ≤ −0.005 per checkpoint for erosion (−0.003 for verbosity). For scale, the paper's agent and human-median erosion slopes are 0.0264 and 0.0053.
+  - **Tie** if \|d\| is under that margin.
+  - **Worse** if d is at or above the positive margin.
+  - Ties are reported as ties, never as reductions.
+- **Verdict (pre-registered, proposed):**
+  - **"Slows decay"** needs all of the following:
+    - at least 2 of the 3 problems are evaluable;
+    - erosion shows a reduction on at least 2 evaluable problems;
+    - verbosity is worse on none;
+    - the factory's total core-passing checkpoints are at least the control's minus 1.
+  - **"No worse"** if the gates hold with ties instead of reductions.
+  - **"Worse"** if erosion or verbosity is worse on 2 or more evaluable problems.
+  - **"Inconclusive"** if fewer than 2 problems are evaluable.
   - With n = 3 this is a signal, not a significance claim.
+  - A factory-only run (O2 b) can't reach any comparative verdict. It is reported descriptively against the paper's aggregates and the reference-solution curves.
 - **Mapping to the builder runtime:** the "fresh container plus previous workspace" model maps to a builder session on the D189 read-only mirror. The base commit is the previous accepted workspace in a local-only scratch repo, the same pattern as `dedup-manager` (600 design §4.3). The machine run goes to Nano as a paste-ready prompt in `/mnt/project-files/let-em-loose/`, with PowerShell for anything he types.
 
 ## 4. Cost
@@ -72,7 +89,7 @@ Out of scope: changing the #704 gate (card).
 3. **O1, Phase A sample:** (a) SCB reference solutions only (recommended); (b) also about 30 public Python repo histories.
 4. **O2, Phase B comparison:** (a) factory plus control arm (recommended); (b) factory only, with the paper's aggregates as context.
 5. **O3, D44 cleanups in the factory arm:** (a) off, matching the paper (recommended); (b) on, testing the factory's own claim about cleanups; (c) both, as a third arm at about +40% cost.
-6. **The pre-registered thresholds** in §3 A.4 and §3 B, or your own.
+6. **The pre-registered rules** in §3 A.4 and §3 B (evidence rule, tie margins, verdicts), or your own.
 7. **Phase B paid approval and ceiling:** not asked now. It comes back as its own ask once #1320 has run and Phase A has reported.
 
 ## 6. Drift noted
