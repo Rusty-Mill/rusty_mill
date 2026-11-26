@@ -2228,6 +2228,8 @@ impl Drop for PaneWriter {
 mod tests {
     #[test]
     fn a_host_is_named_by_its_absolute_utf8_path() {
+        use super::host_id;
+        use std::path::Path;
         let rel = host_id(Path::new("s.sock")).expect("a name");
         assert!(Path::new(&rel).is_absolute(), "{rel}");
         assert!(rel.ends_with("s.sock"));
