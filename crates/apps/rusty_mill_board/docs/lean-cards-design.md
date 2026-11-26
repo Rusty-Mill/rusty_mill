@@ -1,6 +1,6 @@
 # Lean cards: design for #1435, #1436 and #1437 (parent #1434)
 
-Status: **proposed, for Nano's approval.** Nothing here is built. All three changes are
+Status: **approved by Nano, 2026-11-26** (all five decisions as recommended: state line, budgets, comment kinds with the three-line handoff, `card_get` default under the agent profile only (option b), per-credential view profile). Nothing here is built. All three changes are
 additive to the MCP contract; none changes the SQLite schema (cards are JSON docs, ADR-0007).
 
 ## Problem
