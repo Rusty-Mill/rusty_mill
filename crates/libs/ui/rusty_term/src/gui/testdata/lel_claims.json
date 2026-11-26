@@ -1,0 +1,25 @@
+[
+  {
+    "id": 1, "text": "One shared HTTP client", "domains": ["net"], "status": "Accepted",
+    "score": 12, "accept_at": 8, "confidence": 95, "epoch": 0, "spent": 20, "budget": 100,
+    "evidence": [], "deps": [], "candidates": [], "sole_candidate": false,
+    "current": null, "failing": [], "tests_changed": [], "endorsement": null,
+    "holdout_due": false, "human_touched": false
+  },
+  {
+    "id": 2, "text": "Retry on 503", "domains": [], "status": "Open",
+    "score": 3, "accept_at": 8, "confidence": 68, "epoch": 1, "spent": 40, "budget": 100,
+    "evidence": [], "deps": [1], "candidates": [], "sole_candidate": false,
+    "current": 7, "failing": [{"profile": "unit", "report": 9}], "tests_changed": [], "endorsement": null,
+    "holdout_due": true, "human_touched": true,
+    "intent": {"current": 3, "proven_at": null}
+  },
+  {
+    "id": 3, "text": "Pick the layout", "domains": ["ui", "net"], "status": "Escalated",
+    "score": 0, "accept_at": 12, "confidence": 50, "epoch": 0, "spent": 90, "budget": 100,
+    "evidence": [], "deps": [], "candidates": [4, 5], "sole_candidate": false,
+    "current": null, "failing": [], "tests_changed": [], "endorsement": null,
+    "holdout_due": false, "human_touched": false,
+    "intent": {"current": 3, "proven_at": 2}
+  }
+]

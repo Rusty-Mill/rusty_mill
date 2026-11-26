@@ -469,13 +469,11 @@ fn the_workspace_tree_opens_against_a_real_server() {
     let from = tui.written();
     tui.master.write(b"\x1de").expect("ctrl-] e");
     tui.wait_for(b"workspace: j/k");
-    // Long enough for the listing, or a refusal, to be drawn.
-    std::thread::sleep(Duration::from_secs(1));
+    // The root's own row, after the wait notice: the listing has come.
+    tui.wait_for(b"v ./");
     let shown = String::from_utf8_lossy(&tui.since(from)).into_owned();
     assert!(!shown.contains("requires feature"), "{shown:?}");
     assert!(!shown.contains("not attached"), "{shown:?}");
-    // The root's own row, after the wait notice.
-    assert!(shown.contains("v ./"), "no listing came: {shown:?}");
     tui.master.write(b"q").expect("leave");
     std::thread::sleep(Duration::from_millis(300));
     tui.master.write(b"\x1dd").expect("detach");

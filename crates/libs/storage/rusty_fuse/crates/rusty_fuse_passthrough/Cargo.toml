@@ -1,0 +1,22 @@
+[package]
+name = "rusty_fuse_passthrough"
+description = "Read-only rusty_fuse reference backend that mirrors a plain host directory (NTFS, ext4, APFS) through the Filesystem port."
+version.workspace = true
+edition.workspace = true
+rust-version = "1.85"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[lints]
+workspace = true
+
+[dependencies]
+rusty_fuse = { path = "../rusty_fuse" }
+
+[dev-dependencies]
+rusty_fuse_conformance = { path = "../rusty_fuse_conformance" }

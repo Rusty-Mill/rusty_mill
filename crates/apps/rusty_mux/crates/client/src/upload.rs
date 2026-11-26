@@ -15,10 +15,10 @@ use crate::Conn;
 /// Bytes sent per call: the server's chunk limit.
 pub const CHUNK: usize = 1 << 20;
 
-/// Reads up to [`CHUNK`] bytes: fewer only at the end of `file`.
-fn fill(file: &mut impl Read) -> io::Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(CHUNK);
-    file.take(CHUNK as u64).read_to_end(&mut buf)?;
+/// Reads up to `size` bytes: fewer only at the end of `file`.
+fn fill(file: &mut impl Read, size: usize) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(size);
+    file.take(size as u64).read_to_end(&mut buf)?;
     Ok(buf)
 }
 
@@ -38,35 +38,54 @@ pub fn send<S: Read + Write>(
     file: &mut impl Read,
     first_req: u64,
 ) -> io::Result<String> {
-    let mut chunk = fill(file)?;
-    let mut offset = 0u32;
     let mut req = first_req;
-    loop {
-        // One chunk ahead, to know which is the last.
-        let next = fill(file)?;
-        let done = next.is_empty();
-        let len = u32::try_from(chunk.len()).map_err(io::Error::other)?;
-        let args = vec![
-            ("name".to_owned(), Value::Text(name.to_owned())),
-            ("offset".to_owned(), Value::Lines(offset)),
-            ("data".to_owned(), Value::Bytes(std::mem::take(&mut chunk))),
-            ("done".to_owned(), Value::Flag(done)),
-        ];
+    send_with(name, file, CHUNK, |args| {
+        let method = "terminal.upload".into();
         conn.send(&Message::BlockCall {
             req,
             block,
-            method: "terminal.upload".into(),
+            method,
             args,
         })?;
-        let text = reply(conn, req)?;
+        let text = reply(conn, req);
+        req += 1;
+        text
+    })
+}
+
+/// [`send`] for a caller that owns the connection's reads: `call` takes
+/// each chunk's `terminal.upload` arguments, makes the call and returns its
+/// reply text. Chunks are `chunk` bytes (1 to [`CHUNK`]): a caller that
+/// shares its connection with typing sends smaller ones, so a chunk's write
+/// holds the connection for less time. The same outcome rules as [`send`]
+/// apply.
+pub fn send_with(
+    name: &str,
+    file: &mut impl Read,
+    chunk: usize,
+    mut call: impl FnMut(Vec<(String, Value)>) -> io::Result<String>,
+) -> io::Result<String> {
+    let chunk = chunk.clamp(1, CHUNK);
+    let mut data = fill(file, chunk)?;
+    let mut offset = 0u32;
+    loop {
+        // One chunk ahead, to know which is the last.
+        let next = fill(file, chunk)?;
+        let done = next.is_empty();
+        let len = u32::try_from(data.len()).map_err(io::Error::other)?;
+        let text = call(vec![
+            ("name".to_owned(), Value::Text(name.to_owned())),
+            ("offset".to_owned(), Value::Lines(offset)),
+            ("data".to_owned(), Value::Bytes(std::mem::take(&mut data))),
+            ("done".to_owned(), Value::Flag(done)),
+        ])?;
         if done {
             return Ok(text);
         }
         offset = offset.checked_add(len).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "a file is at most 2 GiB")
         })?;
-        chunk = next;
-        req += 1;
+        data = next;
     }
 }
 
@@ -161,5 +180,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(server.join().unwrap(), [(0, 0, true)]);
+    }
+
+    #[test]
+    fn a_smaller_chunk_size_splits_the_file_and_is_kept_in_range() {
+        let mut seen = Vec::new();
+        let text = send_with("f", &mut [1u8; 25].as_slice(), 10, |args| {
+            let Some((_, Value::Bytes(data))) = args.iter().find(|(k, _)| k == "data") else {
+                panic!("{args:?}")
+            };
+            seen.push(data.len());
+            Ok("/p".into())
+        })
+        .unwrap();
+        assert_eq!((text.as_str(), seen), ("/p", vec![10, 10, 5]));
+        // Out of range sizes are clamped, never zero (which would loop).
+        let mut calls = 0;
+        send_with("f", &mut [1u8; 3].as_slice(), 0, |_| {
+            calls += 1;
+            Ok(String::new())
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
     }
 }
