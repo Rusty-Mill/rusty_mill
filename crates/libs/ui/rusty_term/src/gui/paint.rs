@@ -351,6 +351,7 @@ pub(crate) mod icons {
     pub(crate) const MAXIMIZE: &str = "M3.5 3.5h9v9h-9z";
     pub(crate) const CLOSE: &str = "M4 4l8 8M12 4l-8 8";
     /// Block headers (gui-design D47, D48).
+    pub(crate) const FILE: &str = "M4.5 2.5h5l3 3v8h-8zM9.5 2.5v3h3";
     pub(crate) const FOLDER: &str = "M2.5 4.5h4l1.5 1.5h5.5v6.5h-11z";
     pub(crate) const BRANCH: &str =
         "M5 3v10M5 13a1.8 1.8 0 1 0 0 .1M11 3a1.8 1.8 0 1 0 0 .1M11 4.8c0 4-6 3-6 6.2";

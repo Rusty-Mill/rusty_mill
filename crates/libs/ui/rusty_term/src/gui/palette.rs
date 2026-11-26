@@ -31,6 +31,8 @@ pub(crate) enum Cmd {
     Switcher,
     /// Show or leave the session overview (gui-design D97).
     Overview,
+    /// Open the workspace explorer panel (gui-design D99).
+    Explorer,
     Settings,
     ReloadConfig,
     TakeOver,
