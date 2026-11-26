@@ -203,6 +203,7 @@ Precise contracts used by this guide:
 | D202 | #705: `tree-sitter-python` 0.25 added to `rusty_erosion` (new `Cargo.lock` entry) | [stated] 2026-11-26 (705) |
 | D203 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
 | D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
+| D208 | #705: Phase B paid run approved, 11 checkpoints, factory vs bare Claude CLI control, D44 cleanups off, $170 shadow ceiling, after #1320; supersedes D134 and D201's "not approved" for this run only | [stated] 2026-11-26 (705, 1320) |
 
 ## D1. Lenses, not stages
 
@@ -1984,3 +1985,20 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_489a43a7e3194f5198c1fbc59032e132
 **Key.** lel:432:design-approved-build-after-600
 **Source.** Nano tapped "Approve, build after #600" ("Design and BBP_PROVIDER_SESSION approved; code waits until the #600 builder work lands (D164 order).") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE45mV9XoArWETD2NMavEjbEy` in the Let Em Loose project thread "Build BBP Codex session resume" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4KGZwc1M3KXuPWKygNkYSfd`), 2026-11-26 13:56Z. The coordinator relayed the tap; the card and its options were read. Resolves OPEN_QUESTIONS Q66. Numbered D204 (was D200) for the same reason. D203 and D204 were checked free on main and in every open PR on 2026-11-26.
+
+## D208. #705: Phase B paid run approved, 11 checkpoints, factory vs bare Claude CLI control, D44 cleanups off, $170 shadow ceiling, after #1320; supersedes D134 and D201's "not approved" for this run only
+
+**Decision.** Nano approves ONE #705 Phase B paid run as `705-slopcodebench-spike-design.md` §3 Phase B describes it: the 11-checkpoint subset (`dag_execution` 3, `file_backup` 4, `dynamic_buffer` 4), a factory arm against a bare Claude CLI control arm (O2 a restated), and D44 scheduled cleanups off in the factory arm (O3 a restated). The run starts once #1320 has landed and stops at $170 shadow dollars, the design §4 expected total. This supersedes D134, and D201's "Phase B spend not approved", for this one run only; D134 stands for everything else. A rerun, another arm (O3 c included), a different subset or a higher ceiling is ask-first again.
+**Why.** Design §5.7 and §7 brought Phase B back as its own ask after #1320 and the Phase A report, restating O2 and O3. Phase A has reported (PR #1908: concentration ρ 0.950, duplication ρ 0.636, both rules pass). The option Nano tapped names the subset, both arms, cleanups off, the #1320 wait and the ceiling.
+**Rejected.** The card's other options (not read here). Factory only (O2 b). Cleanups on or as a third arm (O3 b/c).
+**Tag.** [stated] · remind-me: mem_5d920b043455499ca146c2e1d9b1b330
+**Key.** lel:705:phase-b-paid-run-approved
+**Source.** Nano tapped "Phase B, ceiling $170" ("11 checkpoints, factory vs bare Claude CLI control, D44 cleanups off. It runs once #1320 lands and stops at $170.") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE47dVhwYiCKtxbkHZhePLhrL` ("Approve the Phase B paid run, and with which spend ceiling?") in the Let Em Loose project thread, 2026-11-26 22:29Z, just after typing "Approved" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4JDNWTtBZdVx9yscSBNTwGV`). Relayed by the #705 thread with the card text. Relates to D37, D38, D44, D64, D134, D140, D167, D188, D201, ADR-0021. Numbered D208 because D205 to D207 are taken on branch `claude/project-thread-82lhr1` (#723).
+
+**Notes.** What the approval does not change:
+- The $170 is shadow dollars against subscription quota, not a bill (ADR-0021). Dollar caps (`experiment_usd`, `task_usd`) do not enforce in v0 because the meter charges 0 per call (D140), so the operator stops the run at $170 by tracking shadow dollars.
+- The design §4 guards still apply: `task_calls` 60 per checkpoint task, and pause and report to Nano if the first problem uses more than 150 calls or $60 shadow.
+- Both arms need the Claude `no_overage` assertion in `/etc/let-em-loose/assertions.json` so the run fails closed (D140, D167).
+- SCB's API-key harness is not used (D38, D167).
+- The pre-registered rules stay as D201 approved them.
+- Review, merge and the other ask-first gates still apply.
