@@ -17,7 +17,7 @@ use std::path::Path;
 use rusty_crypto_key::constant_time_eq;
 use serde::{Deserialize, Serialize};
 
-use crate::api::Identity;
+use crate::api::{Identity, ViewProfile};
 use crate::board::Roles;
 use crate::domain::Capability;
 use crate::projects::Projects;
@@ -37,6 +37,7 @@ struct Entry {
     projects: Option<Vec<String>>,
     parent: Option<String>,
     provider: Option<String>,
+    view: Option<ViewProfile>,
 }
 
 /// One credential as the file holds it.
@@ -51,6 +52,8 @@ struct EntryOut<'a> {
     parent: Option<&'a String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider: &'a Option<String>,
+    #[serde(skip_serializing_if = "ViewProfile::is_full")]
+    view: ViewProfile,
 }
 
 /// Token -> identity, and which credentials were minted by which agent (child -> lead).
@@ -178,6 +181,7 @@ impl Credentials {
                     projects: e.projects,
                     connector: false,
                     provider: e.provider,
+                    view: e.view.unwrap_or_default(),
                 },
             ));
         }
@@ -298,12 +302,16 @@ impl Credentials {
         let actor = format!("{lead}.{label}");
         // A minted worker runs on its lead's provider.
         let provider = self.by_actor(lead).and_then(|i| i.provider.clone());
+        let view = self
+            .by_actor(lead)
+            .map_or_else(ViewProfile::default, |i| i.view);
         let token = self.add(Identity {
             actor: actor.clone(),
             role,
             projects,
             connector: false,
             provider,
+            view,
         })?;
         self.1.insert(actor, lead.to_owned());
         Ok(token)
@@ -413,6 +421,7 @@ impl Credentials {
                 projects: &i.projects,
                 parent: self.1.get(&i.actor),
                 provider: &i.provider,
+                view: i.view,
             })
             .collect();
         serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())
@@ -439,6 +448,7 @@ impl Credentials {
             projects: None,
             connector: false,
             provider: None,
+            view: ViewProfile::default(),
         })?;
         Ok((creds, token))
     }
@@ -479,6 +489,44 @@ mod tests {
     }
 
     #[test]
+    fn a_view_profile_is_read_defaults_to_full_survives_a_save_and_rejects_unknown_values() {
+        let roles = Roles::default();
+        let none = Projects::default();
+        let with = |view: &str| {
+            format!(r#"[{{"token":"{TOK}","actor":"claude","role":"builder"{view}}}]"#)
+        };
+        let get = |json: &str| {
+            Credentials::parse(json, &roles, &none).map(|c| c.identify(TOK).expect("known").view)
+        };
+        assert_eq!(get(&with("")), Ok(ViewProfile::Full));
+        assert_eq!(get(&with(r#","view":"full""#)), Ok(ViewProfile::Full));
+        assert_eq!(get(&with(r#","view":"agent""#)), Ok(ViewProfile::Agent));
+        assert!(get(&with(r#","view":"tiny""#)).is_err());
+        let saved = Credentials::parse(&with(r#","view":"agent""#), &roles, &none)
+            .expect("parse")
+            .to_json()
+            .expect("json");
+        assert!(saved.contains(r#""view": "agent""#), "{saved}");
+        let plain = Credentials::parse(&with(""), &roles, &none)
+            .expect("parse")
+            .to_json()
+            .expect("json");
+        assert!(!plain.contains("view"), "full is left out: {plain}");
+    }
+
+    #[test]
+    fn a_minted_agent_keeps_its_leads_view_profile() {
+        let json =
+            format!(r#"[{{"token":"{TOK}","actor":"claude","role":"builder","view":"agent"}}]"#);
+        let mut c =
+            Credentials::parse(&json, &Roles::default(), &Projects::default()).expect("parse");
+        let token = c
+            .add_child("claude", "w1", "builder".into(), None)
+            .expect("mint");
+        assert_eq!(c.identify(&token).expect("child").view, ViewProfile::Agent);
+    }
+
+    #[test]
     fn instance_names_extend_only_their_own_credential() {
         assert_eq!(instance_name("claude", "claude").as_deref(), Some("claude"));
         assert_eq!(
@@ -513,6 +561,7 @@ mod tests {
                 projects: None,
                 connector: false,
                 provider: None,
+                view: ViewProfile::default(),
             })
         );
         assert_eq!(c.identify("0123456789abcdef0124"), None);

@@ -208,6 +208,7 @@ fn owner() -> Identity {
         projects: None,
         connector: false,
         provider: None,
+        view: Default::default(),
     }
 }
 
@@ -239,6 +240,7 @@ fn a_model_token_is_forbidden() {
         projects: None,
         connector: false,
         provider: None,
+        view: Default::default(),
     };
     assert!(refused(call(&b, &model, "inbox_list", json!({}))).contains("Admin"));
     let act = json!({"id": "T1/msg:1/3", "rev": 7, "action": "approve"});

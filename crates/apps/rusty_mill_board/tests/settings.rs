@@ -1026,6 +1026,7 @@ fn without_files_settings_can_be_read_but_not_changed() {
         projects: None,
         connector: false,
         provider: None,
+        view: Default::default(),
     };
     let get = settings
         .call("settings_get", Some(&human), json!({}))

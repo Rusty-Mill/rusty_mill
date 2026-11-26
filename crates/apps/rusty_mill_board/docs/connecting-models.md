@@ -24,6 +24,11 @@ To keep a model inside one application of a monorepo, add `"projects": ["rocket_
 from the board's `--projects FILE`, which the server checks at start): that token cannot see, take or change
 cards of any other project, and `card_take` only ever returns its own.
 
+Add `"view": "agent"` to an entry to give that model lean reads: an unpaged `board_list` returns pages of 50 (follow
+`next_cursor`), and `card_get` returns the recent comments (`history: "all"` gets every one). It changes defaults only,
+never what the token may see or do, an explicit `limit`, `cursor` or `history` always wins, and a minted worker keeps its
+lead's profile. Leave it out for `full`, which is today's behaviour. `card_take` and `card_claim` still return the whole card.
+
 The simplest start is `rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.0.0.1:8787 --settings-dir ~/.mill`
 (with `RUSTY_TICK_TOKEN` set):
 the first start creates `~/.mill/identities.json` with an `admin` agent and prints its token once (open
