@@ -10614,6 +10614,25 @@ name = "rusty_font"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_fuse"
+version = "0.1.0"
+
+[[package]]
+name = "rusty_fuse_conformance"
+version = "0.1.0"
+dependencies = [
+ "rusty_fuse",
+]
+
+[[package]]
+name = "rusty_fuse_passthrough"
+version = "0.1.0"
+dependencies = [
+ "rusty_fuse",
+ "rusty_fuse_conformance",
+]
+
+[[package]]
 name = "rusty_git"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,18 @@
+[package]
+name = "rusty_fuse"
+description = "rusty_fuse port: the backend-agnostic Filesystem trait and its types. No I/O, no unsafe, no OS calls."
+version.workspace = true
+edition.workspace = true
+rust-version = "1.85"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[lints]
+workspace = true
+
+[dependencies]

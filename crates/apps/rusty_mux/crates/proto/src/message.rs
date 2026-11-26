@@ -307,6 +307,14 @@ impl Features {
     /// [`Message::BlockCall`], so the bit only says the server knows it.
     pub const DOWNLOAD: Self = Self(1 << 56);
 
+    /// The block methods `terminal.workspace-stat` and
+    /// `terminal.workspace-touched` (card #1573, slice 2): what one entry
+    /// under the block's launch directory is, and what `git status` says
+    /// changed there. They travel as [`Message::BlockCall`], so the bit only
+    /// says the server knows them. A server that grants it grants
+    /// [`Features::WORKSPACE`] too.
+    pub const WORKSPACE_STATUS: Self = Self(1 << 57);
+
     /// The block methods `terminal.prompts` and `terminal.find` (C55): the
     /// rows where the shell's prompts started (OSC 133/633 `A`) and the rows
     /// holding a text, over the block's scrollback and screen. They travel as
@@ -417,6 +425,10 @@ const NAMES: &[(Features, &str)] = &[
     (Features::ARCHIVE, "archive of dismissed blocks"),
     (Features::UPLOAD, "file upload to a block"),
     (Features::DOWNLOAD, "file download from a server"),
+    (
+        Features::WORKSPACE_STATUS,
+        "file status in the workspace explorer",
+    ),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
