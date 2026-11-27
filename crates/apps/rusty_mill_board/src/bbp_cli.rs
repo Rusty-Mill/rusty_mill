@@ -7,6 +7,9 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -23,16 +26,20 @@ pub struct BbpCli {
     bin: PathBuf,
     root: PathBuf,
     verify_deadline: Duration,
+    /// Pipe readers still running, shared by clones. One left behind by a timed-out
+    /// run blocks the next deadline-bound run, so stuck readers never pile up.
+    readers: Arc<AtomicUsize>,
 }
 
 impl BbpCli {
     /// The host's `bbp` binary and the BBP task directory it serves.
     #[must_use]
-    pub const fn new(bin: PathBuf, root: PathBuf) -> Self {
+    pub fn new(bin: PathBuf, root: PathBuf) -> Self {
         Self {
             bin,
             root,
             verify_deadline: VERIFY_DEADLINE,
+            readers: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -44,16 +51,32 @@ impl BbpCli {
         self
     }
 
-    /// Run `bbp <args>` with a deadline and a stdout ceiling of `max` bytes: its exit
-    /// status, stdout and (bounded) stderr. Past the deadline the child is killed and
-    /// this is [`InboxError::Host`]. The pipe readers are not joined then: a grandchild
-    /// (the guard's `sudo` target) may still hold the pipes, and must not block the caller.
+    /// Run `bbp <args>` with one deadline over the whole call (the exit and both
+    /// pipes reaching EOF) and a stdout ceiling of `max` bytes: its exit status, stdout
+    /// and (bounded) stderr. Past the deadline the child is killed and this is
+    /// [`InboxError::Host`]. A reader still blocked then (a grandchild, such as the
+    /// guard's `sudo` target, may hold the pipe) is left to finish on its own, and no
+    /// new run starts until it has: at most one set of stuck readers ever exists.
     fn run_deadline(
         &self,
         args: &[String],
         max: u64,
         deadline: Duration,
     ) -> Result<(ExitStatus, Vec<u8>, String), InboxError> {
+        if self.readers.load(Ordering::SeqCst) > 0 {
+            return Err(InboxError::Host(
+                "an earlier timed-out `bbp` run still holds its output; not starting another"
+                    .into(),
+            ));
+        }
+        let until = Instant::now() + deadline;
+        let timed_out = || {
+            InboxError::Host(format!(
+                "`bbp {}` timed out after {}s",
+                args.first().map_or("", String::as_str),
+                deadline.as_secs_f32()
+            ))
+        };
         let host = |e: std::io::Error| InboxError::Host(format!("{}: {e}", self.bin.display()));
         let mut child = Command::new(&self.bin)
             .args(args)
@@ -62,23 +85,8 @@ impl BbpCli {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(host)?;
-        let out = child.stdout.take();
-        let err = child.stderr.take();
-        let out_reader = std::thread::spawn(move || {
-            let mut body = Vec::new();
-            if let Some(o) = out {
-                let _ = o.take(max + 1).read_to_end(&mut body);
-            }
-            body
-        });
-        let err_reader = std::thread::spawn(move || {
-            let mut text = String::new();
-            if let Some(e) = err {
-                let _ = e.take(MAX_ERR).read_to_string(&mut text);
-            }
-            text
-        });
-        let until = Instant::now() + deadline;
+        let out = self.reader(child.stdout.take(), max + 1);
+        let err = self.reader(child.stderr.take(), MAX_ERR);
         let status = loop {
             if let Some(status) = child.try_wait().map_err(host)? {
                 break status;
@@ -86,22 +94,38 @@ impl BbpCli {
             if Instant::now() >= until {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(InboxError::Host(format!(
-                    "`bbp {}` timed out after {}s; killed",
-                    args.first().map_or("", String::as_str),
-                    deadline.as_secs_f32()
-                )));
+                return Err(timed_out());
             }
             std::thread::sleep(POLL);
         };
-        let body = out_reader.join().unwrap_or_default();
-        let stderr = err_reader.join().unwrap_or_default();
+        let left = || until.saturating_duration_since(Instant::now());
+        let body = out.recv_timeout(left()).map_err(|_| timed_out())?;
+        let stderr = err.recv_timeout(left()).map_err(|_| timed_out())?;
         if body.len() as u64 > max {
             return Err(InboxError::Host(format!(
                 "the host's answer is over {max} bytes; refused"
             )));
         }
-        Ok((status, body, stderr))
+        Ok((status, body, String::from_utf8_lossy(&stderr).into_owned()))
+    }
+
+    /// Read up to `max` bytes of `src` on its own thread, counted in `readers` until it ends.
+    fn reader<R: Read + Send + 'static>(
+        &self,
+        src: Option<R>,
+        max: u64,
+    ) -> mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let live = Live::new(Arc::clone(&self.readers));
+        std::thread::spawn(move || {
+            let _live = live;
+            let mut buf = Vec::new();
+            if let Some(src) = src {
+                let _ = src.take(max).read_to_end(&mut buf);
+            }
+            let _ = tx.send(buf);
+        });
+        rx
     }
 
     /// Run `bbp <args>` and parse what it prints on success.
@@ -414,6 +438,22 @@ impl Escalations for BbpCli {
                 argv[6]
             ))),
         }
+    }
+}
+
+/// One running pipe reader: counted from creation until dropped.
+struct Live(Arc<AtomicUsize>);
+
+impl Live {
+    fn new(count: Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

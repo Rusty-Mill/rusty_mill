@@ -313,7 +313,7 @@ fn a_stuck_verify_is_killed_at_its_deadline_as_a_host_error() {
 #[test]
 fn a_verify_whose_grandchild_holds_the_pipes_still_returns_at_the_deadline() {
     // As under the guard's sudo: killing the direct child leaves a process on the pipes.
-    let (bin, _serial) = verifier("grandchild", "sleep 30 &\nwait");
+    let (bin, _serial) = verifier("grandchild", "sleep 3 &\nwait");
     let cli = BbpCli::new(bin, "/srv/bbp".into())
         .with_verify_deadline(std::time::Duration::from_millis(200));
     let started = std::time::Instant::now();
@@ -336,4 +336,33 @@ echo '{"lines":3,"unchained":0,"head":"ab","partial":false,"expect_found":null}'
         .unwrap()
         .unwrap_err();
     assert_eq!(refused, "expected head not found");
+}
+
+#[test]
+fn a_wrapper_that_exits_while_a_grandchild_holds_stdout_is_bounded_and_not_stacked() {
+    // A clean exit is not EOF: the background `sleep` keeps stdout open.
+    let (bin, _serial) = verifier("held", "sleep 3 &\nexit 0");
+    let cli = BbpCli::new(bin, "/srv/bbp".into())
+        .with_verify_deadline(std::time::Duration::from_millis(200));
+    let started = std::time::Instant::now();
+    match cli.verify("C1", None) {
+        Err(InboxError::Host(m)) => assert!(m.contains("timed out"), "{m}"),
+        other => panic!("a held pipe is operational: {other:?}"),
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    // Its reader is still blocked, so the next run is refused, not stacked on top.
+    match cli.clone().verify("C1", None) {
+        Err(InboxError::Host(m)) => assert!(m.contains("still holds"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    // Once the grandchild is gone the reader ends, and runs resume.
+    let resumed = std::time::Instant::now();
+    while !matches!(cli.verify("C1", None), Err(InboxError::Host(ref m)) if m.contains("timed out"))
+    {
+        assert!(
+            resumed.elapsed() < std::time::Duration::from_secs(15),
+            "readers never ended"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
