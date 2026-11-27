@@ -67,6 +67,7 @@ fn a_malformed_policy_is_an_error_not_a_default() {
 fn open_task() -> OpenTask {
     let mut store = MemStore::new();
     OpenTask {
+        gates: None,
         claims: None,
         mode: rusty_bbp::Mode::Stages,
         task: TaskId("T1".into()),

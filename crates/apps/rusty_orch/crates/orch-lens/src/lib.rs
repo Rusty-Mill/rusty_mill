@@ -12,16 +12,20 @@
 //! - [`port`]: the [`Model`] port, one stateless question per call.
 //! - [`post`]: the strict reply protocol every adapter applies ([`check`]).
 //! - [`config`]: providers, data classes, ceilings and lenses, checked at load.
+//! - [`compose`]: #723 lens composition: lens + domain pack + the
+//!   knowledge and standards a question's domains select.
 //! - [`card`] and [`context`]: a fresh, fitted context per job, blind first.
 //! - [`class`]: data classes; nothing above a provider's clearance reaches it.
 //! - [`tier`]: routine or contested, and the cleared providers in order.
 //! - [`meter`]: integer micro-dollars, reserved before every call.
 //! - [`breaker`]: pause a task whose spend rises while its claims stay flat.
+//! - [`builder`]: #600 builder sessions: limits, admission, the session row.
 //! - [`schedule`]: which jobs run now; the blind-first, look-harder,
 //!   proposer, rebel and fairness rules as checks.
 //! - [`record`]: a lens's track record, one informational line.
 //! - [`taint`]: what a lens saw marks what it posts; never lowered.
 //! - [`saved`]: the scheduler's memory as plain data, for the store.
+//! - [`untested`]: #600's open-time check for Windows-only intent lines.
 
 #![cfg_attr(
     not(test),
@@ -30,9 +34,11 @@
 
 pub mod alien;
 pub mod breaker;
+pub mod builder;
 pub mod call;
 pub mod card;
 pub mod class;
+pub mod compose;
 pub mod config;
 pub mod context;
 pub mod hunt;
@@ -45,6 +51,7 @@ pub mod saved;
 pub mod schedule;
 pub mod taint;
 pub mod tier;
+pub mod untested;
 
 pub use class::DataClass;
 pub use config::LensConfig;

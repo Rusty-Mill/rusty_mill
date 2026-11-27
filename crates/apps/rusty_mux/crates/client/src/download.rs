@@ -22,21 +22,49 @@ pub fn fetch<S: Read + Write>(
     out: &mut impl Write,
     first_req: u64,
 ) -> io::Result<u64> {
-    let (mut offset, mut req) = (0u64, first_req);
-    let mut first = None;
-    loop {
-        let at = u32::try_from(offset)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "a file is at most 2 GiB"))?;
+    let mut req = first_req;
+    fetch_with(path, out, |args| {
         conn.send(&Message::BlockCall {
             req,
             block,
             method: "terminal.download".into(),
-            args: vec![
-                ("path".to_owned(), Value::Text(path.to_owned())),
-                ("offset".to_owned(), Value::Lines(at)),
-            ],
+            args,
         })?;
-        let (size, data) = split(&reply(conn, req)?)?;
+        let text = reply(conn, req);
+        req += 1;
+        text
+    })
+}
+
+/// [`fetch`] for a caller that owns the connection's reads: `call` takes
+/// each chunk's `terminal.download` arguments, makes the call and returns its
+/// reply text.
+pub fn fetch_with(
+    path: &str,
+    out: &mut impl Write,
+    call: impl FnMut(Vec<(String, Value)>) -> io::Result<String>,
+) -> io::Result<u64> {
+    fetch_progress(path, out, |_, _| {}, call)
+}
+
+/// [`fetch_with`] that calls `progress` with the bytes written and the
+/// file's size after each chunk.
+pub fn fetch_progress(
+    path: &str,
+    out: &mut impl Write,
+    mut progress: impl FnMut(u64, u64),
+    mut call: impl FnMut(Vec<(String, Value)>) -> io::Result<String>,
+) -> io::Result<u64> {
+    let mut offset = 0u64;
+    let mut first = None;
+    loop {
+        let at = u32::try_from(offset)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "a file is at most 2 GiB"))?;
+        let args = vec![
+            ("path".to_owned(), Value::Text(path.to_owned())),
+            ("offset".to_owned(), Value::Lines(at)),
+        ];
+        let (size, data) = split(&call(args)?)?;
         // The first size is the file's; a different one later means it
         // changed under the read, and what is in `out` is not that file.
         if *first.get_or_insert(size) != size {
@@ -54,6 +82,7 @@ pub fn fetch<S: Read + Write>(
         }
         out.write_all(&data)?;
         offset += data.len() as u64;
+        progress(offset, size);
         if offset >= size {
             return Ok(size);
         }
@@ -63,7 +92,6 @@ pub fn fetch<S: Read + Write>(
                 "the file got shorter while it was read",
             ));
         }
-        req += 1;
     }
 }
 
@@ -145,6 +173,34 @@ mod tests {
     #[test]
     fn a_file_comes_in_pieces_and_is_put_together() {
         assert_eq!(fetch_from(b"0123456789"), b"0123456789");
+    }
+
+    #[test]
+    fn progress_counts_the_bytes_written_up_to_the_size() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || serve(theirs, b"0123456789"));
+        let mut conn = Conn::new(ours);
+        let block = BlockId::from_uuid(rusty_uuid::Uuid::nil());
+        let (mut req, mut seen, mut out) = (1, Vec::new(), Vec::new());
+        fetch_progress(
+            "f",
+            &mut out,
+            |got, total| seen.push((got, total)),
+            |args| {
+                let method = "terminal.download".into();
+                conn.send(&Message::BlockCall {
+                    req,
+                    block,
+                    method,
+                    args,
+                })?;
+                let text = reply(&mut conn, req);
+                req += 1;
+                text
+            },
+        )
+        .unwrap();
+        assert_eq!(seen, [(4, 10), (8, 10), (10, 10)]);
     }
 
     #[test]

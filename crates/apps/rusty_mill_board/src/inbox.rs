@@ -181,6 +181,66 @@ pub struct Acted {
     pub claim: u64,
     /// What was done (a PR, a deploy id).
     pub marks: Vec<String>,
+    /// What its current candidate changes (#1400). Absent from a host that predates it,
+    /// and `null` when the claim has no readable candidate.
+    #[serde(default)]
+    pub diffstat: Option<Diffstat>,
+}
+
+/// One file's changed lines, from the host's candidate diffs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileStat {
+    /// The path, as the diff names it: agent-written, so shown as text only.
+    pub path: String,
+    /// Lines added.
+    pub added: u64,
+    /// Lines removed.
+    pub removed: u64,
+}
+
+/// What a candidate changes, capped by the host (10 files, paths cut at 200 characters).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Diffstat {
+    /// Files touched, listed or not.
+    pub files: u64,
+    /// Lines added.
+    pub added: u64,
+    /// Lines removed.
+    pub removed: u64,
+    /// The largest files.
+    pub top: Vec<FileStat>,
+    /// Files touched beyond `top`.
+    pub more: u64,
+}
+
+impl Diffstat {
+    /// One line for a card: `3 files, +41 -7: `a.rs` +30 -2, ... and 1 more`. Paths are
+    /// agent-written, so control characters and backticks become `?` and cannot break the
+    /// line or the code span.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let clean = |p: &str| -> String {
+            p.chars()
+                .map(|c| if c.is_control() || c == '`' { '?' } else { c })
+                .collect()
+        };
+        let mut parts: Vec<String> = self
+            .top
+            .iter()
+            .map(|f| format!("`{}` +{} -{}", clean(&f.path), f.added, f.removed))
+            .collect();
+        if self.more > 0 {
+            parts.push(format!("and {} more", self.more));
+        }
+        let noun = if self.files == 1 { "file" } else { "files" };
+        format!(
+            "{} {noun}, +{} -{}: {}",
+            self.files,
+            self.added,
+            self.removed,
+            parts.join(", ")
+        )
+    }
 }
 
 /// One exhausted task budget field.
@@ -815,6 +875,7 @@ mod tests {
         let pr = |claim| Acted {
             claim,
             marks: vec!["pr-7".into()],
+            diffstat: None,
         };
         e.acted = Some(vec![pr(1)]);
         let reject = Action::Reject { reason: None };
@@ -867,5 +928,47 @@ mod tests {
             Response::from_json(serde_json::json!("Ok")),
             Response::Accepted(_)
         ));
+    }
+
+    #[test]
+    fn a_diffstat_renders_as_one_safe_line() {
+        let f = |path: &str, added, removed| FileStat {
+            path: path.into(),
+            added,
+            removed,
+        };
+        let d = Diffstat {
+            files: 3,
+            added: 41,
+            removed: 7,
+            top: vec![f("src/a.rs", 30, 2), f("b`\n.rs", 11, 5)],
+            more: 1,
+        };
+        assert_eq!(
+            d.line(),
+            "3 files, +41 -7: `src/a.rs` +30 -2, `b??.rs` +11 -5, and 1 more"
+        );
+        let one = Diffstat {
+            files: 1,
+            added: 1,
+            removed: 0,
+            top: vec![f("x", 1, 0)],
+            more: 0,
+        };
+        assert_eq!(one.line(), "1 file, +1 -0: `x` +1 -0");
+    }
+
+    #[test]
+    fn the_host_row_with_or_without_a_diffstat_reads() {
+        let with = r#"{"claim":3,"marks":["pr-7"],"diffstat":{"files":1,"added":2,"removed":1,"top":[{"path":"a","added":2,"removed":1}],"more":0}}"#;
+        let a: Acted = serde_json::from_str(with).unwrap();
+        assert_eq!(a.diffstat.as_ref().map(|d| d.files), Some(1));
+        for old in [
+            r#"{"claim":3,"marks":[]}"#,
+            r#"{"claim":3,"marks":[],"diffstat":null}"#,
+        ] {
+            let a: Acted = serde_json::from_str(old).unwrap();
+            assert_eq!(a.diffstat, None);
+        }
     }
 }

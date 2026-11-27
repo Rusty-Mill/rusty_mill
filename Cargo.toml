@@ -151,6 +151,9 @@ members = [
     "crates/foundation/rusty_retry",
     "crates/foundation/rusty_rsa",
     "crates/libs/storage/rusty_sqlite",
+    "crates/libs/storage/rusty_fuse/crates/rusty_fuse",
+    "crates/libs/storage/rusty_fuse/crates/rusty_fuse_conformance",
+    "crates/libs/storage/rusty_fuse/crates/rusty_fuse_passthrough",
     "crates/foundation/rusty_time",
     "crates/foundation/rusty_uuid",
     "crates/libs/rusty_wiremock",
@@ -323,6 +326,8 @@ exclude = [
     "crates/apps/rush/fuzz",
     "crates/libs/ui/rusty_lines/bench",
     "crates/foundation/rusty_libc/bench",
+    # rusty_fuse Phase 0 spikes: throwaway, standalone, not built by workspace CI (D17).
+    "crates/libs/storage/rusty_fuse/spikes/fuse_hello",
     "crates/libs/net/rusty_tls/fuzz",
     "crates/libs/protocol/rusty_lsp/fuzz",
     "crates/platform/rustils/fuzz",

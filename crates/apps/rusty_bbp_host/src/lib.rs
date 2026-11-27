@@ -27,14 +27,17 @@ pub const BUILD_SHA: &str = env!("BBP_BUILD_SHA");
 
 pub mod admin;
 pub mod admission;
+pub mod approval;
 pub mod args;
 pub mod baseline;
 pub mod broker;
+pub mod canary;
 #[cfg(target_os = "linux")]
 pub mod cgroups;
 pub mod clean_tree;
 pub mod confine;
 pub mod decision;
+pub mod diffstat;
 pub mod dry_run;
 pub mod erosion_detail;
 pub mod erosion_limits;
@@ -57,6 +60,7 @@ pub mod protect;
 pub mod report;
 pub mod run_control;
 pub mod runner;
+pub mod scratch_repos;
 pub mod shadow;
 pub mod slots;
 pub mod tokens;

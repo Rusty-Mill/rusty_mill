@@ -17,7 +17,7 @@ use std::path::Path;
 use rusty_crypto_key::constant_time_eq;
 use serde::{Deserialize, Serialize};
 
-use crate::api::Identity;
+use crate::api::{Identity, ViewProfile};
 use crate::board::Roles;
 use crate::domain::Capability;
 use crate::projects::Projects;
@@ -36,6 +36,8 @@ struct Entry {
     role: String,
     projects: Option<Vec<String>>,
     parent: Option<String>,
+    provider: Option<String>,
+    view: Option<ViewProfile>,
 }
 
 /// One credential as the file holds it.
@@ -48,6 +50,10 @@ struct EntryOut<'a> {
     projects: &'a Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parent: Option<&'a String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: &'a Option<String>,
+    #[serde(skip_serializing_if = "ViewProfile::is_full")]
+    view: ViewProfile,
 }
 
 /// Token -> identity, and which credentials were minted by which agent (child -> lead).
@@ -106,6 +112,22 @@ pub fn new_token() -> Result<String, String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Check a provider name: 1-32 of a-z 0-9 _ -, such as `anthropic`, `openai`, `local`, `human`.
+///
+/// # Errors
+/// The reason, if it is not one.
+pub fn check_provider(p: &str) -> Result<(), &'static str> {
+    let ok = !p.is_empty()
+        && p.len() <= 32
+        && p.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err("provider must be 1-32 of a-z 0-9 _ -")
+    }
+}
+
 impl Credentials {
     /// Parse and validate a credentials file's JSON against the board's roles and projects.
     ///
@@ -145,6 +167,9 @@ impl Credentials {
                     return Err(bad(&format!("unknown project {unknown:?}")));
                 }
             }
+            if let Some(p) = &e.provider {
+                check_provider(p).map_err(bad)?;
+            }
             if let Some(parent) = e.parent {
                 parents.insert(e.actor.clone(), parent);
             }
@@ -155,6 +180,8 @@ impl Credentials {
                     role: e.role,
                     projects: e.projects,
                     connector: false,
+                    provider: e.provider,
+                    view: e.view.unwrap_or_default(),
                 },
             ));
         }
@@ -235,6 +262,20 @@ impl Credentials {
         Ok(())
     }
 
+    /// Set or unset `actor`'s provider.
+    ///
+    /// # Errors
+    /// If no credential names `actor`.
+    pub fn set_provider(&mut self, actor: &str, provider: Option<String>) -> Result<(), String> {
+        let (_, i) = self
+            .0
+            .iter_mut()
+            .find(|(_, i)| i.actor == actor)
+            .ok_or_else(|| format!("no agent {actor:?}"))?;
+        i.provider = provider;
+        Ok(())
+    }
+
     /// Mint a credential for `lead` named `lead.label` (`agent_enrol`): the caller checks the
     /// role and project ceilings; this checks the name, the cap and that `lead` is itself a
     /// top-level credential. Returns the token.
@@ -259,11 +300,18 @@ impl Credentials {
             return Err(format!("{lead:?} already has {MAX_CHILDREN} minted agents"));
         }
         let actor = format!("{lead}.{label}");
+        // A minted worker runs on its lead's provider.
+        let provider = self.by_actor(lead).and_then(|i| i.provider.clone());
+        let view = self
+            .by_actor(lead)
+            .map_or_else(ViewProfile::default, |i| i.view);
         let token = self.add(Identity {
             actor: actor.clone(),
             role,
             projects,
             connector: false,
+            provider,
+            view,
         })?;
         self.1.insert(actor, lead.to_owned());
         Ok(token)
@@ -286,7 +334,8 @@ impl Credentials {
                 };
                 let wider_caps = !cc.is_subset(lc)
                     || cc.contains(&Capability::Enrol)
-                    || cc.contains(&Capability::Admin);
+                    || cc.contains(&Capability::Admin)
+                    || cc.contains(&Capability::Approve);
                 let wider_projects = match (&l.projects, &c.projects) {
                     (None, _) => false,
                     (Some(_), None) => true,
@@ -371,6 +420,8 @@ impl Credentials {
                 role: &i.role,
                 projects: &i.projects,
                 parent: self.1.get(&i.actor),
+                provider: &i.provider,
+                view: i.view,
             })
             .collect();
         serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())
@@ -396,6 +447,8 @@ impl Credentials {
             role: role.into(),
             projects: None,
             connector: false,
+            provider: None,
+            view: ViewProfile::default(),
         })?;
         Ok((creds, token))
     }
@@ -436,6 +489,44 @@ mod tests {
     }
 
     #[test]
+    fn a_view_profile_is_read_defaults_to_full_survives_a_save_and_rejects_unknown_values() {
+        let roles = Roles::default();
+        let none = Projects::default();
+        let with = |view: &str| {
+            format!(r#"[{{"token":"{TOK}","actor":"claude","role":"builder"{view}}}]"#)
+        };
+        let get = |json: &str| {
+            Credentials::parse(json, &roles, &none).map(|c| c.identify(TOK).expect("known").view)
+        };
+        assert_eq!(get(&with("")), Ok(ViewProfile::Full));
+        assert_eq!(get(&with(r#","view":"full""#)), Ok(ViewProfile::Full));
+        assert_eq!(get(&with(r#","view":"agent""#)), Ok(ViewProfile::Agent));
+        assert!(get(&with(r#","view":"tiny""#)).is_err());
+        let saved = Credentials::parse(&with(r#","view":"agent""#), &roles, &none)
+            .expect("parse")
+            .to_json()
+            .expect("json");
+        assert!(saved.contains(r#""view": "agent""#), "{saved}");
+        let plain = Credentials::parse(&with(""), &roles, &none)
+            .expect("parse")
+            .to_json()
+            .expect("json");
+        assert!(!plain.contains("view"), "full is left out: {plain}");
+    }
+
+    #[test]
+    fn a_minted_agent_keeps_its_leads_view_profile() {
+        let json =
+            format!(r#"[{{"token":"{TOK}","actor":"claude","role":"builder","view":"agent"}}]"#);
+        let mut c =
+            Credentials::parse(&json, &Roles::default(), &Projects::default()).expect("parse");
+        let token = c
+            .add_child("claude", "w1", "builder".into(), None)
+            .expect("mint");
+        assert_eq!(c.identify(&token).expect("child").view, ViewProfile::Agent);
+    }
+
+    #[test]
     fn instance_names_extend_only_their_own_credential() {
         assert_eq!(instance_name("claude", "claude").as_deref(), Some("claude"));
         assert_eq!(
@@ -469,10 +560,40 @@ mod tests {
                 role: "builder".into(),
                 projects: None,
                 connector: false,
+                provider: None,
+                view: ViewProfile::default(),
             })
         );
         assert_eq!(c.identify("0123456789abcdef0124"), None);
         assert_eq!(c.identify(""), None);
+    }
+
+    #[test]
+    fn a_provider_is_kept_checked_and_inherited_by_minted_workers() {
+        let json = format!(
+            r#"[{{"token":"{TOK}","actor":"claude","role":"builder","provider":"anthropic"}}]"#
+        );
+        let mut c =
+            Credentials::parse(&json, &Roles::default(), &Projects::default()).expect("valid");
+        assert_eq!(
+            c.identify(TOK).and_then(|i| i.provider.as_deref()),
+            Some("anthropic")
+        );
+        let saved = c.to_json().expect("json");
+        assert!(saved.contains(r#""provider": "anthropic""#), "{saved}");
+        c.add_child("claude", "w1", "builder".into(), None)
+            .expect("mint");
+        assert_eq!(
+            c.by_actor("claude.w1").and_then(|i| i.provider.as_deref()),
+            Some("anthropic")
+        );
+        c.set_provider("claude", None).expect("unset");
+        assert_eq!(c.by_actor("claude").and_then(|i| i.provider.clone()), None);
+        let bad = json.replace("anthropic", "Anthropic AI");
+        assert!(
+            Credentials::parse(&bad, &Roles::default(), &Projects::default())
+                .is_err_and(|e| e.contains("provider"))
+        );
     }
 
     #[test]

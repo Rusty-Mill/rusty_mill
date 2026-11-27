@@ -39,8 +39,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::domain::{
-    BoardError, Card, CloseReason, Closure, Column, Comment, DEFAULT_PROJECT, Event, EventKind,
-    ExecutionLink, Span, next_event_id, reserved_tag,
+    BoardError, Card, CloseReason, Closure, Column, Comment, CommentKind, DEFAULT_PROJECT, Event,
+    EventKind, ExecutionLink, Span, next_event_id, reserved_tag,
 };
 use crate::external::{ExternalRef, Provider, RefState};
 use crate::http::Http;
@@ -285,12 +285,16 @@ struct BoardDoc {
     why: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     summary: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     external_refs: Vec<StoredRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    duties: Vec<crate::duties::Duty>,
     /// Fields this binary does not know, written back unchanged, so a newer board's fields
     /// survive this one's writes (a rollback loses nothing; ADR-0006).
     #[serde(flatten)]
@@ -314,6 +318,7 @@ impl BoardDoc {
             scope: card.scope.clone(),
             why: card.why.clone(),
             summary: card.summary.clone(),
+            state: card.state.clone(),
             target_ms: card.target_ms,
             external_refs: card
                 .external_refs
@@ -322,6 +327,7 @@ impl BoardDoc {
                 .map(StoredRef::from)
                 .collect(),
             evidence: card.evidence.clone(),
+            duties: card.duties.clone(),
             unknown: serde_json::Map::new(),
         }
     }
@@ -561,6 +567,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         scope: doc.scope,
         why: doc.why,
         summary: doc.summary,
+        state: doc.state,
         column,
         claim,
         tags,
@@ -592,6 +599,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         merged: None,
         unclosed_prs: Vec::new(),
         evidence: doc.evidence,
+        duties: doc.duties,
         archived_ms,
         restored_ms,
         target_ms: doc.target_ms,
@@ -823,6 +831,9 @@ impl<T: TickApi> TickStore<T> {
                 by: body.by.unwrap_or_else(|| OWNER.to_owned()),
                 at_ms: body.created_ms,
                 text: body.text,
+                kind: crate::domain::CommentKind::Note,
+                id: None,
+                resolves: None,
             });
         }
         for comments in by_task.values_mut() {
@@ -1174,6 +1185,11 @@ fn check_claim(card: &Card) -> Result<(), BoardError> {
 }
 
 impl<T: TickApi> Store for TickStore<T> {
+    /// Tick keeps a comment as text, author and time: no id survives a read.
+    fn keeps_comment_ids(&self) -> bool {
+        false
+    }
+
     /// rusty_tick has no field for it (retired, ADR-0007), so a merge close there cannot be undone.
     fn keeps_merge_record(&self) -> bool {
         false
@@ -1193,6 +1209,8 @@ impl<T: TickApi> Store for TickStore<T> {
 
     /// The tasks alone: one read of the project lists and the tag's pages, never the board
     /// documents or comments, so prompts, links and comments are left empty.
+    ///
+    /// The `state` line lives in the board document, so it is empty here; `card_get` has it.
     fn summaries(&self) -> Result<Vec<Card>, BoardError> {
         self.board(false)
     }
@@ -1267,6 +1285,18 @@ impl<T: TickApi> Store for TickStore<T> {
         if current.rev + 1 != read {
             return Err(BoardError::Conflict);
         }
+        // Tick keeps a comment as text, author and time only; refuse what it would lose
+        // rather than read a blocker back as a note (#1436).
+        if event.kind == EventKind::Commented
+            && card
+                .comments
+                .last()
+                .is_some_and(|c| c.kind != CommentKind::Note || c.resolves.is_some())
+        {
+            return Err(BoardError::Refused(
+                "the rusty_tick store keeps plain notes only: comment kinds and `resolves` need the SQLite store".into(),
+            ));
+        }
         let doc = match BoardDoc::of(card) != BoardDoc::of(&current) {
             true => Some(BoardDoc::kept(card, stored.as_ref()).checked()?),
             false => None,
@@ -1279,7 +1309,19 @@ impl<T: TickApi> Store for TickStore<T> {
                 let comment = card.comments.last().ok_or_else(|| {
                     BoardError::Storage("a comment event carries no comment".into())
                 })?;
-                self.put_comment(card, comment, read)
+                let version = self.put_comment(card, comment, read)?;
+                // A comment that also sets the `state` line changes the board document: a
+                // second fenced write, reported as partly saved if it fails.
+                match doc {
+                    Some(doc) => {
+                        self.put_doc(card, doc, version)
+                            .map_err(|e| BoardError::PartlySaved {
+                                rev: version - 1,
+                                why: e.to_string(),
+                            })
+                    }
+                    None => Ok(version),
+                }
             } else {
                 let patch = self.task_patch(&current, card)?;
                 let task_changed = patch.as_object().is_some_and(|p| !p.is_empty());

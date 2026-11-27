@@ -16,6 +16,7 @@ use rusty_bbp::PrincipalId;
 
 use crate::card::{render, Card, Show};
 use crate::class::{admit, DataClass};
+use crate::compose::Plan;
 
 /// Default cap on settled lines.
 pub const MAX_LINES: usize = 40;
@@ -36,10 +37,49 @@ pub struct Line {
     pub class: DataClass,
 }
 
+/// A lens's prefix around its lens prompt: intent and board rules
+/// before it, the reply protocol after. `wrap` gives [`prefix`]'s bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    head: String,
+    tail: String,
+}
+
+impl Frame {
+    /// The frame for a lens under `intent` and `rules`.
+    pub fn new(intent: &str, rules: &str) -> Self {
+        Self {
+            head: format!("# Intent\n{intent}\n\n# Board rules\n{rules}\n\n# Your lens\n"),
+            tail: format!("\n\n# Reply\n{}", crate::post::protocol()),
+        }
+    }
+
+    /// The prefix with `lens_prompt` in its place.
+    pub fn wrap(&self, lens_prompt: &str) -> String {
+        format!("{}{lens_prompt}{}", self.head, self.tail)
+    }
+
+    fn bytes(&self) -> usize {
+        self.head.len() + self.tail.len()
+    }
+}
+
+/// A job's prefix.
+#[derive(Debug, Clone, Copy)]
+pub enum Prefix<'a> {
+    /// Fixed bytes.
+    Flat(&'a str),
+    /// A composed lens prompt in its frame (#723): when prefix and card do
+    /// not fit a provider's window, the plan's sections are left out in
+    /// order, down to the bare lens prompt, and only the chosen prefix is
+    /// rendered.
+    Composed { frame: &'a Frame, plan: &'a Plan },
+}
+
 /// Everything one job's context is made from.
 #[derive(Debug, Clone, Copy)]
 pub struct Parts<'a> {
-    pub prefix: &'a str,
+    pub prefix: Prefix<'a>,
     pub card: &'a Card,
     pub lens: &'a PrincipalId,
     pub phase: Phase,
@@ -65,18 +105,27 @@ pub enum Refusal {
         card: DataClass,
         clearance: DataClass,
     },
-    /// Prefix and card alone exceed the window.
-    TooLarge { needed: u64, room: u64 },
+    /// Prefix and card alone exceed the window, even with every composed
+    /// section left out (`dropped`).
+    TooLarge {
+        needed: u64,
+        room: u64,
+        dropped: Vec<String>,
+    },
+}
+
+/// A context that fits, and the composed sections left out to make it fit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fitted {
+    pub prefix: String,
+    pub body: String,
+    pub dropped: Vec<String>,
 }
 
 /// The prefix: intent, rules, lens prompt and the reply protocol, in that
 /// order.
 pub fn prefix(intent: &str, rules: &str, lens_prompt: &str) -> String {
-    format!(
-        "{}\n# Reply\n{}",
-        raw_prefix(intent, rules, lens_prompt),
-        crate::post::protocol()
-    )
+    Frame::new(intent, rules).wrap(lens_prompt)
 }
 
 /// The prefix of a lens whose replies are not board posts (the #708 alien
@@ -86,8 +135,16 @@ pub fn raw_prefix(intent: &str, rules: &str, lens_prompt: &str) -> String {
     format!("# Intent\n{intent}\n\n# Board rules\n{rules}\n\n# Your lens\n{lens_prompt}\n")
 }
 
-/// Build `(prefix, body)` for one provider.
+/// Build `(prefix, body)` for one provider; see [`fit`].
 pub fn assemble(p: &Parts<'_>, w: Window) -> Result<(String, String), Refusal> {
+    fit(p, w).map(|f| (f.prefix, f.body))
+}
+
+/// Build one provider's context. The card and the base prefix are never
+/// cut: a composed prefix leaves out the fewest sections, in their order,
+/// that let it fit with the card and suffix before the card is refused.
+/// Settled lines and the track record take what is left.
+pub fn fit(p: &Parts<'_>, w: Window) -> Result<Fitted, Refusal> {
     if !admit(p.card.class, w.clearance) {
         return Err(Refusal::AboveClearance {
             card: p.card.class,
@@ -101,14 +158,8 @@ pub fn assemble(p: &Parts<'_>, w: Window) -> Result<(String, String), Refusal> {
     };
     let card = render(p.card, show, w.clearance);
     let suffix = p.suffix.map(|s| format!("\n{s}\n")).unwrap_or_default();
-    let fixed = (p.prefix.len() + card.len() + suffix.len()) as u64;
-    if fixed > room {
-        return Err(Refusal::TooLarge {
-            needed: fixed,
-            room,
-        });
-    }
-    let mut left = room - fixed;
+    let (prefix, dropped) = choose(p.prefix, room, card.len() + suffix.len())?;
+    let mut left = room - (prefix.len() + card.len() + suffix.len()) as u64;
     let record = p
         .record
         .map(|r| format!("\nYour track record: {r}\n"))
@@ -121,7 +172,36 @@ pub fn assemble(p: &Parts<'_>, w: Window) -> Result<(String, String), Refusal> {
     }
     body.push_str(&record.unwrap_or_default());
     body.push_str(&suffix);
-    Ok((p.prefix.to_owned(), body))
+    Ok(Fitted {
+        prefix,
+        body,
+        dropped,
+    })
+}
+
+/// The prefix that fits `room` beside `rest` bytes, and the sections left
+/// out for it. Only that prefix is rendered.
+fn choose(prefix: Prefix<'_>, room: u64, rest: usize) -> Result<(String, Vec<String>), Refusal> {
+    let need = |len: usize| (len + rest) as u64;
+    match prefix {
+        Prefix::Flat(p) if need(p.len()) <= room => Ok((p.to_owned(), Vec::new())),
+        Prefix::Flat(p) => Err(Refusal::TooLarge {
+            needed: need(p.len()),
+            room,
+            dropped: Vec::new(),
+        }),
+        Prefix::Composed { frame, plan } => {
+            let at = |k: usize| need(frame.bytes() + plan.bytes(k));
+            match (0..=plan.steps()).find(|&k| at(k) <= room) {
+                Some(k) => Ok((frame.wrap(&plan.render(k)), plan.left_out(k))),
+                None => Err(Refusal::TooLarge {
+                    needed: at(plan.steps()),
+                    room,
+                    dropped: plan.left_out(plan.steps()),
+                }),
+            }
+        }
+    }
 }
 
 /// The admitted lines, newest first, as many as fit after the record.
@@ -193,7 +273,7 @@ mod tests {
         let ls = lines(3);
         let me = lens();
         let parts = |c| Parts {
-            prefix: &pre,
+            prefix: Prefix::Flat(&pre),
             card: c,
             lens: &me,
             phase: Phase::Blind,
@@ -216,7 +296,7 @@ mod tests {
         )]);
         let me = lens();
         let mut parts = Parts {
-            prefix: "p",
+            prefix: Prefix::Flat("p"),
             card: &c,
             lens: &me,
             phase: Phase::Blind,
@@ -237,7 +317,7 @@ mod tests {
         let me = lens();
         let ls = lines(MAX_LINES + 5);
         let parts = Parts {
-            prefix: "p",
+            prefix: Prefix::Flat("p"),
             card: &c,
             lens: &me,
             phase: Phase::Informed,
@@ -258,7 +338,7 @@ mod tests {
         let me = lens();
         let ls = lines(10);
         let parts = Parts {
-            prefix: "p",
+            prefix: Prefix::Flat("p"),
             card: &c,
             lens: &me,
             phase: Phase::Informed,
@@ -296,7 +376,7 @@ mod tests {
         let c = card(vec![]);
         let me = lens();
         let parts = Parts {
-            prefix: "p",
+            prefix: Prefix::Flat("p"),
             card: &c,
             lens: &me,
             phase: Phase::Informed,
@@ -337,7 +417,7 @@ mod tests {
             class: DataClass::Sensitive,
         }];
         let parts = Parts {
-            prefix: "p",
+            prefix: Prefix::Flat("p"),
             card: &c,
             lens: &me,
             phase: Phase::Informed,
@@ -350,5 +430,173 @@ mod tests {
             !body.contains("secret path") && !body.contains("Settled"),
             "{body}"
         );
+    }
+
+    mod composed {
+        use super::*;
+        use crate::compose::{Limits, Selection, Text, RENDERS};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        fn plan(files: &[(&str, String)], limits: Limits) -> Plan {
+            let texts: BTreeMap<String, Text> = files
+                .iter()
+                .map(|(p, t)| ((*p).to_owned(), Text::Loaded(t.clone())))
+                .collect();
+            let pick = |dir: &str| -> BTreeSet<String> {
+                texts
+                    .keys()
+                    .filter(|p| p.starts_with(dir))
+                    .cloned()
+                    .collect()
+            };
+            let sel = Selection {
+                knowledge: pick("knowledge/"),
+                standards: pick("standards/"),
+            };
+            Plan::new("find faults", None, &sel, &texts, limits).expect("plans")
+        }
+
+        fn two() -> Plan {
+            plan(
+                &[
+                    ("knowledge/rust.md", "K".repeat(400)),
+                    ("standards/rust.md", "S".repeat(200)),
+                ],
+                Limits::default(),
+            )
+        }
+
+        /// A window whose room, after the output allowance, is `bytes`
+        /// rounded up (`up`) or down to whole tokens.
+        fn window(bytes: u64, up: bool) -> Window {
+            let tokens = if up {
+                bytes.div_ceil(BYTES_PER_TOKEN)
+            } else {
+                bytes / BYTES_PER_TOKEN
+            };
+            Window {
+                context_tokens: tokens as u32 + 10,
+                max_output_tokens: 10,
+                clearance: DataClass::Internal,
+            }
+        }
+
+        fn frame() -> Frame {
+            Frame::new("the brief", "rules")
+        }
+
+        fn fitted(plan: &Plan, w: Window) -> Result<Fitted, Refusal> {
+            let c = card(vec![]);
+            let me = lens();
+            let frame = frame();
+            let parts = Parts {
+                prefix: Prefix::Composed {
+                    frame: &frame,
+                    plan,
+                },
+                card: &c,
+                lens: &me,
+                phase: Phase::Blind,
+                lines: &[],
+                record: None,
+                suffix: None,
+            };
+            fit(&parts, w)
+        }
+
+        fn card_text() -> String {
+            render(&card(vec![]), Show::OwnOnly(&lens()), DataClass::Internal)
+        }
+
+        /// Bytes of prefix and card with `k` sections left out.
+        fn need(plan: &Plan, k: usize) -> u64 {
+            (frame().wrap(&plan.render(k)).len() + card_text().len()) as u64
+        }
+
+        #[test]
+        fn a_frame_wraps_to_the_flat_prefix() {
+            assert_eq!(
+                frame().wrap("find faults"),
+                prefix("the brief", "rules", "find faults")
+            );
+        }
+
+        #[test]
+        fn the_full_composition_is_used_when_it_fits() {
+            let p = two();
+            let f = fitted(&p, window(need(&p, 0), true)).expect("fits");
+            assert_eq!(f.prefix, frame().wrap(&p.render(0)));
+            assert!(f.prefix.contains(&"K".repeat(400)));
+            assert!(f.dropped.is_empty());
+            assert_eq!(f.body, card_text());
+        }
+
+        #[test]
+        fn sections_drop_in_order_until_the_card_fits() {
+            let p = two();
+            let f = fitted(&p, window(need(&p, 0) - 1, false)).expect("fits trimmed");
+            assert_eq!(f.prefix, frame().wrap(&p.render(1)));
+            assert!(f.prefix.contains(&"S".repeat(200)) && !f.prefix.contains('K'));
+            assert_eq!(f.dropped, vec!["knowledge/rust.md".to_owned()]);
+            let f = fitted(&p, window(need(&p, 2), true)).expect("base fits");
+            assert_eq!(f.prefix, prefix("the brief", "rules", "find faults"));
+            assert_eq!(
+                f.dropped,
+                vec![
+                    "knowledge/rust.md".to_owned(),
+                    "standards/rust.md".to_owned()
+                ]
+            );
+            assert_eq!(f.body, card_text(), "the card is whole");
+        }
+
+        #[test]
+        fn base_and_card_too_large_is_refused_with_the_drops() {
+            let p = two();
+            let w = window(need(&p, 2) - 1, false);
+            let room = u64::from(w.context_tokens - w.max_output_tokens) * BYTES_PER_TOKEN;
+            assert_eq!(
+                fitted(&p, w),
+                Err(Refusal::TooLarge {
+                    needed: need(&p, 2),
+                    room,
+                    dropped: vec![
+                        "knowledge/rust.md".to_owned(),
+                        "standards/rust.md".to_owned()
+                    ],
+                })
+            );
+        }
+
+        #[test]
+        fn many_small_sections_render_only_the_chosen_prefix() {
+            let files: Vec<(String, String)> = (0..2000)
+                .map(|i| (format!("knowledge/{i:04}.md"), "x".to_owned()))
+                .collect();
+            let files: Vec<(&str, String)> =
+                files.iter().map(|(p, t)| (p.as_str(), t.clone())).collect();
+            let limits = Limits {
+                file_bytes: 64,
+                total_bytes: 1 << 20,
+            };
+            let p = plan(&files, limits);
+            assert_eq!(p.steps(), 2000);
+            let base = frame().bytes() + card_text().len();
+            let room = (base + p.bytes(1000)) as u64;
+            RENDERS.with(|n| n.set(0));
+            let f = fitted(&p, window(room, false)).expect("fits trimmed");
+            assert_eq!(RENDERS.with(|n| n.get()), 1, "one prefix rendered");
+            let k = f.dropped.len();
+            assert!((1000..1004).contains(&k), "{k}");
+            assert_eq!(f.prefix.len(), frame().bytes() + p.bytes(k));
+            assert_eq!(
+                f.dropped.first().map(String::as_str),
+                Some("knowledge/1999.md")
+            );
+            RENDERS.with(|n| n.set(0));
+            let refused = fitted(&p, window(base as u64 - 1, false));
+            assert!(matches!(refused, Err(Refusal::TooLarge { .. })));
+            assert_eq!(RENDERS.with(|n| n.get()), 0, "a refusal renders nothing");
+        }
     }
 }

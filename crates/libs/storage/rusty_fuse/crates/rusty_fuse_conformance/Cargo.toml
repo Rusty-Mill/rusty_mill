@@ -1,0 +1,19 @@
+[package]
+name = "rusty_fuse_conformance"
+description = "Test support for rusty_fuse: an in-memory memfs backend, a shared fixture tree and assertions every backend must pass."
+version.workspace = true
+edition.workspace = true
+rust-version = "1.85"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[lints]
+workspace = true
+
+[dependencies]
+rusty_fuse = { path = "../rusty_fuse" }

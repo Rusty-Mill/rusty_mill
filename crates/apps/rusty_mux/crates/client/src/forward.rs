@@ -58,8 +58,18 @@ pub enum Ended {
     Lost(io::Error),
 }
 
+/// A forward the server ended with a reason (its dial was refused, say).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// The server's port the forward led to.
+    pub remote: u16,
+    pub reason: String,
+}
+
 /// One tunnelled connection, as the reader thread sees it.
 struct Fwd {
+    /// The server's port this forward leads to.
+    remote: u16,
     /// Bytes for the local socket.
     to_local: Sender<Vec<u8>>,
     /// Bytes the server will still take.
@@ -74,8 +84,9 @@ struct Fwd {
 }
 
 impl Fwd {
-    fn new(to_local: Sender<Vec<u8>>) -> Self {
+    fn new(remote: u16, to_local: Sender<Vec<u8>>) -> Self {
         Self {
+            remote,
             to_local,
             credit: Mutex::new(FORWARD_WINDOW),
             credited: Condvar::new(),
@@ -146,6 +157,8 @@ struct Shared<W> {
     /// Tunnels that hold a place.
     live: AtomicUsize,
     ended: Mutex<Option<Ended>>,
+    /// Told of each forward the server ended with a reason.
+    refused: Box<dyn Fn(Refused) + Send + Sync>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -266,6 +279,7 @@ where
         next: AtomicU64::new(1),
         live: AtomicUsize::new(0),
         ended: Mutex::new(None),
+        refused: Box::new(|_| {}),
     };
     thread::scope(|scope| {
         scope.spawn(|| read_frames(&shared, &mut rd, pending));
@@ -296,7 +310,8 @@ pub struct Want {
 /// `BlockClosed`) as `frames`, `wr` writes to the same connection, and
 /// ports to listen on arrive as `wants` while it runs. `first_req` keeps
 /// this run's request numbers apart from the owner's. Ends when `stopped`
-/// says so, the block closes or `frames` ends.
+/// says so, the block closes or `frames` ends. `refused` hears of each
+/// forward the server ends with a reason, such as a dial nothing answered.
 pub fn run_fed<W>(
     block: BlockId,
     first_req: u64,
@@ -304,6 +319,7 @@ pub fn run_fed<W>(
     wants: &Receiver<Want>,
     wr: W,
     stopped: &(dyn Fn() -> bool + Sync),
+    refused: Box<dyn Fn(Refused) + Send + Sync>,
 ) -> Ended
 where
     W: Write + Send,
@@ -316,6 +332,7 @@ where
         next: AtomicU64::new(first_req),
         live: AtomicUsize::new(0),
         ended: Mutex::new(None),
+        refused,
     };
     let fed = &shared;
     thread::scope(|scope| {
@@ -421,8 +438,13 @@ fn dispatch<W: Write>(shared: &Shared<W>, message: Message) {
                 shared.close(id, Some("forward acknowledgment out of bounds".into()));
             }
         }
-        Message::CloseForward { id, .. } => {
-            shared.retire(id);
+        Message::CloseForward { id, reason } => {
+            let remote = shared.find(id).map(|fwd| fwd.remote);
+            if shared.retire(id)
+                && let (Some(remote), Some(reason)) = (remote, reason)
+            {
+                (shared.refused)(Refused { remote, reason });
+            }
         }
         Message::Event {
             event: Event::BlockClosed { block },
@@ -484,7 +506,7 @@ fn tunnel<'scope, 'env, W: Write + Send>(
 fn open<W: Write>(shared: &Shared<W>, remote: u16) -> Option<(u64, Arc<Fwd>, Receiver<Vec<u8>>)> {
     let id = shared.id();
     let (to_local, from_server) = channel();
-    let fwd = Arc::new(Fwd::new(to_local));
+    let fwd = Arc::new(Fwd::new(remote, to_local));
     let (answer, answered) = channel();
     lock(&shared.asked).insert(id, answer);
     lock(&shared.forwards).insert(id, fwd.clone());
@@ -764,6 +786,7 @@ mod tests {
                 &wants,
                 near,
                 &|| stop.load(Ordering::SeqCst),
+                Box::new(|_| {}),
             );
             over.store(true, Ordering::SeqCst);
             ended
@@ -955,10 +978,10 @@ mod tests {
     #[test]
     fn data_past_the_chunk_or_the_window_is_not_admitted() {
         let (to_local, _from) = channel();
-        let fwd = Fwd::new(to_local);
+        let fwd = Fwd::new(80, to_local);
         assert!(!fwd.admit(0));
         assert!(!fwd.admit(FORWARD_CHUNK + 1));
-        let fwd = Fwd::new(channel().0);
+        let fwd = Fwd::new(80, channel().0);
         for _ in 0..FORWARD_WINDOW / FORWARD_CHUNK {
             assert!(fwd.admit(FORWARD_CHUNK));
         }
@@ -968,7 +991,7 @@ mod tests {
     #[test]
     fn frames_are_bounded_as_well_as_bytes_and_released_when_written_or_dropped() {
         let (to_local, queued) = channel();
-        let fwd = Fwd::new(to_local);
+        let fwd = Fwd::new(80, to_local);
         for _ in 0..MAX_HELD_FRAMES {
             assert!(fwd.admit(1));
             fwd.to_local.send(vec![0]).expect("queued");
@@ -977,7 +1000,7 @@ mod tests {
         // Writing one frees one place.
         let first = queued.recv().expect("frame");
         fwd.release(first.len());
-        let fwd2 = Fwd::new(channel().0);
+        let fwd2 = Fwd::new(80, channel().0);
         fwd2.frames.store(MAX_HELD_FRAMES - 1, Ordering::SeqCst);
         assert!(fwd2.admit(1));
         // Closing releases what is still queued.
@@ -989,7 +1012,7 @@ mod tests {
 
     #[test]
     fn an_acknowledgment_of_more_than_was_sent_is_refused() {
-        let fwd = Fwd::new(channel().0);
+        let fwd = Fwd::new(80, channel().0);
         assert!(!fwd.credit(1), "nothing is outstanding");
         *lock(&fwd.credit) = FORWARD_WINDOW - 10;
         assert!(!fwd.credit(0));
@@ -1029,6 +1052,56 @@ mod tests {
             read
         });
         (*lock(&told), read)
+    }
+
+    fn shared_hearing(into: Arc<Mutex<Vec<Refused>>>) -> Shared<Vec<u8>> {
+        Shared {
+            block: BlockId::from_uuid(Uuid::nil()),
+            wr: Mutex::new(Vec::new()),
+            forwards: Mutex::new(HashMap::new()),
+            asked: Mutex::new(HashMap::new()),
+            next: AtomicU64::new(1),
+            live: AtomicUsize::new(0),
+            ended: Mutex::new(None),
+            refused: Box::new(move |r| lock(&into).push(r)),
+        }
+    }
+
+    #[test]
+    fn a_close_with_a_reason_is_reported_with_its_remote_port_once() {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let shared = shared_hearing(heard.clone());
+        lock(&shared.forwards).insert(7, Arc::new(Fwd::new(5173, channel().0)));
+        let close = || Message::CloseForward {
+            id: 7,
+            reason: Some("connection refused".into()),
+        };
+        dispatch(&shared, close());
+        dispatch(&shared, close());
+        assert_eq!(
+            *lock(&heard),
+            [Refused {
+                remote: 5173,
+                reason: "connection refused".into()
+            }],
+            "a forward already gone is not reported again"
+        );
+    }
+
+    #[test]
+    fn a_close_without_a_reason_is_not_reported() {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let shared = shared_hearing(heard.clone());
+        lock(&shared.forwards).insert(7, Arc::new(Fwd::new(80, channel().0)));
+        dispatch(
+            &shared,
+            Message::CloseForward {
+                id: 7,
+                reason: None,
+            },
+        );
+        assert!(lock(&heard).is_empty());
+        assert!(shared.find(7).is_none(), "still retired");
     }
 
     #[test]

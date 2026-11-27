@@ -4,6 +4,10 @@
 
 ![Let Em Loose: how the pieces fit](map.svg)
 
+![Let Em Loose: how the Factory pieces fit](factory-map.svg)
+
+The second map reworks the software-factory map: the catalog, overlay and Expert-Agents stay; role threads, column hand-offs and both gates are gone. It was redrawn from card #724 (Q45). The original software-factory map is unchanged.
+
 Current erosion choices (D42/D44): report-only expiry pauses new affected tasks until thresholds are approved, preserving already-open tasks' settings/digests. Cleanup improves at least one metric and worsens neither; skip when both are zero. Budget Approve funds another attempt; explicit human accept/choose is the separate failure override. The map is a concept summary; D35 and QUESTIONS Q13–Q14 supply the revision fence and tool/evidence boundaries it cannot show.
 
 A working proposal for agentic development that isn't modelled on the assembly line.
