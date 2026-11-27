@@ -10,6 +10,12 @@
 //! (the human opens each maintenance task, D80), since its frozen set and
 //! holdout suite are read from it. No model is called, so a canary costs
 //! nothing.
+//!
+//! The caller's own deadline must outlast the workload: the sandbox runs in
+//! its own process group, and only this process's wall timer kills it, so a
+//! caller that kills `bbp canary` first would orphan the workload. With
+//! `max_wall_secs` the run is refused, before anything is checked out, when
+//! the set's wall limit is longer than the caller is willing to wait.
 
 use crate::baseline::{self, Baseline};
 use crate::profiles::{self, ProfileSet};
@@ -36,26 +42,46 @@ pub fn only(set: &ProfileSet, profile: &str) -> Result<ProfileSet, String> {
     Ok(one)
 }
 
-/// Run `task`'s frozen `profile` on `reference` in `repo`, under
-/// `work_root/baseline`, with `exec`.
+/// Refuse a set whose wall limit is longer than `max_wall_secs`.
+///
+/// # Errors
+///
+/// A message naming both limits.
+pub fn within(set: &ProfileSet, max_wall_secs: Option<u64>) -> Result<(), String> {
+    match max_wall_secs {
+        Some(max) if set.limits.wall_secs > max => Err(format!(
+            "the profile set's wall limit ({}s) is longer than --max-wall-secs ({max}s)",
+            set.limits.wall_secs
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// What to run: `task`'s frozen `profile` on `reference` in `repo`, under
+/// `work_root/baseline`, refused when its wall limit is over `max_wall_secs`.
+pub struct Request<'a> {
+    pub dir: &'a Path,
+    pub task: &'a TaskId,
+    pub repo: &'a Path,
+    pub work_root: &'a Path,
+    pub reference: &'a str,
+    pub profile: &'a str,
+    pub max_wall_secs: Option<u64>,
+}
+
+/// Run `r` with `exec`.
 ///
 /// # Errors
 ///
 /// A message when the task, its profile set or holdout suite can't be read,
-/// the profile isn't in the set, REF doesn't resolve, or the run is refused
-/// because the holdout suite could be read from it.
-pub fn run<E: Executor>(
-    exec: &E,
-    dir: &Path,
-    task: &TaskId,
-    repo: &Path,
-    work_root: &Path,
-    reference: &str,
-    profile: &str,
-) -> Result<Baseline, String>
+/// the profile isn't in the set, its wall limit is too long, REF doesn't
+/// resolve, or the run is refused because the holdout suite could be read
+/// from it.
+pub fn run<E: Executor>(exec: &E, r: &Request<'_>) -> Result<Baseline, String>
 where
     E::Error: std::fmt::Display,
 {
+    let (dir, task) = (r.dir, r.task);
     let (set, holdout) = {
         let d = open_driver(dir, task)?;
         let set = profiles::load(dir, task, d.state.profile_digest)?;
@@ -67,10 +93,11 @@ where
             .transpose()?;
         (set, holdout)
     };
-    let one = only(&set, profile)?;
-    let base = baseline::resolve(repo, reference)?;
-    runner::isolated_baseline(exec, &one, holdout.as_ref(), repo, work_root, &base)
-        .map_err(|r| format!("{:?}: {}", r.code, r.detail))
+    let one = only(&set, r.profile)?;
+    within(&one, r.max_wall_secs)?;
+    let base = baseline::resolve(r.repo, r.reference)?;
+    runner::isolated_baseline(exec, &one, holdout.as_ref(), r.repo, r.work_root, &base)
+        .map_err(|e| format!("{:?}: {}", e.code, e.detail))
 }
 
 /// [`run`] in the host sandbox, as one line of JSON.
@@ -78,17 +105,10 @@ where
 /// # Errors
 ///
 /// As [`run`], and when the host can't sandbox.
-pub fn json(
-    dir: &Path,
-    task: &TaskId,
-    repo: &Path,
-    work_root: &Path,
-    reference: &str,
-    profile: &str,
-) -> Result<String, String> {
+pub fn json(r: &Request<'_>) -> Result<String, String> {
     runner::probe_host()?;
-    let exec = runner::sandboxed(&dir.join("sandbox-state"))?;
-    let b = run(&exec, dir, task, repo, work_root, reference, profile)?;
+    let exec = runner::sandboxed(&r.dir.join("sandbox-state"))?;
+    let b = run(&exec, r)?;
     rusty_serde::json::to_string(&b).map_err(|e| e.to_string())
 }
 
@@ -112,5 +132,15 @@ mod tests {
             err.contains("\"lint\"") && err.contains("unit, e2e"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_wall_limit_past_the_callers_wait_is_refused() {
+        let mut set = ProfileSet::shell("unit", "true");
+        set.limits.wall_secs = 600;
+        assert_eq!(within(&set, None), Ok(()));
+        assert_eq!(within(&set, Some(600)), Ok(()));
+        let err = within(&set, Some(599)).expect_err("too long");
+        assert!(err.contains("600s") && err.contains("599s"), "{err}");
     }
 }

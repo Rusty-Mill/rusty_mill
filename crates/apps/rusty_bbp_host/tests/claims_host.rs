@@ -3402,8 +3402,18 @@ fn a_canary_reruns_one_frozen_profile_on_a_ref() {
     git(&repo, &["tag", "v1"]);
     let rev = state(&dir).rev;
     let work = dir.join("canary-work");
+    let t = task();
     let run = |r: &str, p: &str| {
-        rusty_bbp_host::canary::run(&Unconfined, &dir, &task(), &repo, &work, r, p)
+        let req = rusty_bbp_host::canary::Request {
+            dir: &dir,
+            task: &t,
+            repo: &repo,
+            work_root: &work,
+            reference: r,
+            profile: p,
+            max_wall_secs: Some(3000),
+        };
+        rusty_bbp_host::canary::run(&Unconfined, &req)
     };
     let bad = run(&red, "test").expect("ran");
     assert_eq!(bad.status, RunStatus::Failed, "{bad:?}");
@@ -3414,6 +3424,17 @@ fn a_canary_reruns_one_frozen_profile_on_a_ref() {
     let err = run("v1", "e2e").expect_err("no such profile");
     assert!(err.contains("\"e2e\""), "{err}");
     assert!(run("nope", "test").is_err());
+    let short = rusty_bbp_host::canary::Request {
+        dir: &dir,
+        task: &t,
+        repo: &repo,
+        work_root: &work,
+        reference: "v1",
+        profile: "test",
+        max_wall_secs: Some(1),
+    };
+    let err = rusty_bbp_host::canary::run(&Unconfined, &short).expect_err("wall too long");
+    assert!(err.contains("--max-wall-secs"), "{err}");
     assert_eq!(state(&dir).rev, rev, "nothing written to the task");
     let _ = std::fs::remove_dir_all(&dir);
 }

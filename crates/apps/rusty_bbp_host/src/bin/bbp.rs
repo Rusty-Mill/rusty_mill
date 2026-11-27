@@ -34,7 +34,7 @@
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
 //! bbp why     --dir D (--task T | T) [--turn N]            why each turn was granted (wake reason, or Explicit), replayed from the log, as JSON
-//! bbp canary  --dir D --task T --repo-path P --work W --ref REF --profile NAME   one frozen profile re-run on REF in the sandbox, as a report (JSON); writes nothing to the task (#599, D217)
+//! bbp canary  --dir D --task T --repo-path P --work W --ref REF --profile NAME [--max-wall-secs N]   one frozen profile re-run on REF in the sandbox, as a report (JSON); writes nothing to the task (#599, D217)
 //! bbp why     --dir D (--task T | T) --claim ID [--at REV] how one claim moved: each evidence and status change with the rule that fired, replayed from the log, as JSON
 //! bbp verify  --dir D --task T [--expect H]               check the log's hash chain without changing it; prints lines, unchained, head; H must be the hash of one of its lines
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
@@ -553,14 +553,25 @@ fn run() -> Result<String, String> {
         "verify" => return verify::json(&dir, &task, a.flags.get("expect").map(String::as_str)),
         "shadow" => return shadow::json(&dir, &task),
         "canary" => {
-            return canary::json(
-                &dir,
-                &task,
-                &PathBuf::from(a.flag("repo-path")?),
-                &PathBuf::from(a.flag("work")?),
-                a.flag("ref")?,
-                a.flag("profile")?,
-            )
+            let max_wall_secs = a
+                .flags
+                .get("max-wall-secs")
+                .map(|v| v.parse::<u64>())
+                .transpose()
+                .map_err(|_| "--max-wall-secs must be a number of seconds")?;
+            let (repo, work) = (
+                PathBuf::from(a.flag("repo-path")?),
+                PathBuf::from(a.flag("work")?),
+            );
+            return canary::json(&canary::Request {
+                dir: &dir,
+                task: &task,
+                repo: &repo,
+                work_root: &work,
+                reference: a.flag("ref")?,
+                profile: a.flag("profile")?,
+                max_wall_secs,
+            });
         }
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
