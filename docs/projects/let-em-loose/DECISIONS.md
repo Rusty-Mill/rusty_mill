@@ -221,6 +221,7 @@ Precise contracts used by this guide:
 | D220 | #1416: the LEL tab reads claims through a new read-only `bbp claims` verb and Mill Board `lel_claims`/`lel_spend` | [stated] 2026-11-27 (1416) |
 | D221 | #1416: `bbp claims` prints a plain array of claim views; brief text is not served yet | [default] 2026-11-27 (1416) |
 | D222 | #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR | [default] 2026-11-27 (1416) |
+| D225 | #1379: the sandbox fs/shell server is the crate `crates/apps/rusty_orch/crates/orch-fs-shell` (package and binary `orch-fs-shell`) | [default] 2026-11-27 (1379) |
 
 ## D1. Lenses, not stages
 
@@ -2165,3 +2166,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default]
 **Key.** lel:1416:slice4-actions
 **Source.** `1416-lel-tab-slice-plan.md` slices 3-4; D58, D173, D174; `rusty_mill_board` `inbox_act` and `Board::inbox_act` (`stale_rev:` refusal); let-em-loose-expert, 2026-11-27. Nano's 2026-11-27 "1 & 2" (cmsg_014f6o52E2iAAAgMm9v8hh1w7JrZ4XyJ3ufQT3qe7ayEWb) approved the read endpoints; what it answered is not restated in the thread, so no `[stated]` row is written for it. D220 and D221 are left free for the endpoint PR. Numbered D222 because open PRs hold D179-D219.
+
+## D225. #1379: the sandbox fs/shell server is the crate `orch-fs-shell`
+
+**Decision.** Inside the approved #726 design (726-sandbox-design.md §6, D180), #1379's server is a new crate `crates/apps/rusty_orch/crates/orch-fs-shell`, package and binary `orch-fs-shell`. It has a pure core (path rules, output caps, result shaping), a std fs/process adapter, and a stdio MCP server through `rusty_mcp_server::serve_stdio`, taking `--root <dir>` and `--mode builder|critic`. Tools: `read`, `list`, `stat`, `write` (builder only), `exec` {`argv`, `cwd`, `timeout_s` <= 600, `stdin`}, output capped at 1 MiB per stream. Absolute paths and `..` are refused before any I/O. No new dependency. The server has no sandbox code of its own: Landlock and the mount namespace come from `lel-jail` wrapping the process (§6). This settles the name and shape only; how the gateway launches it per session (registration as a `per_session` target) is a separate question and not part of this entry.
+**Why.** It follows the `orch-<noun>` pattern of its neighbours (`orch-jail`, `orch-lens`, `orch-store`, `orch-token` per D209) and names the card's "fs/shell". It avoids `orch-sandbox`, which is easy to confuse with the `rusty_sandbox` lib. A crate name is reversible implementation detail inside an approved design.
+**Rejected.** `orch-sandbox` (confusable with `rusty_sandbox`). A module inside orch-jail or orch-bbp (mixes the server with the jail or the launcher).
+**Tag.** [default] · remind-me: mem_8fc5a5e346944528925316e6ac00f185
+**Key.** lel:1379:fs-shell-crate-name
+**Source.** let-em-loose-expert, 2026-11-27, answering the #1375-#1379 build thread; 726-sandbox-design.md §6 ("name settled on the card"), §11 (no new dependency). Numbered D225 because D223 (PR #1946) and D224 (PR #1947) are taken on open PRs.

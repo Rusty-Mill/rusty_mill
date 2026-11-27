@@ -1,0 +1,25 @@
+[package]
+name = "orch-fs-shell"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "The sandbox fs/shell MCP server (Let Em Loose #1379): read, list, stat, write and exec confined to one agent session's root, served over stdio as a per-session gateway target inside lel-jail."
+license = "MIT"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[[bin]]
+name = "orch-fs-shell"
+path = "src/bin/orch-fs-shell.rs"
+
+[dependencies]
+# The MCP server and its stdio transport; first-party.
+rusty_mcp_server = { workspace = true }
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "warn"
