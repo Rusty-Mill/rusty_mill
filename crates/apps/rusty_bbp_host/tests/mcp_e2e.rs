@@ -482,7 +482,7 @@ fn an_owned_plan_gate_takes_only_a_receipt_bound_to_it() {
 }
 
 #[test]
-fn the_cli_refuses_a_by_label_in_op_and_a_receipt_without_the_board_key() {
+fn the_cli_refuses_a_by_label_in_op_and_a_receipt_the_board_did_not_sign() {
     let (dir, _task, spec) = owned_at_plan_gate("cli_owned");
     let run = |extra: &[&str]| {
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_bbp"))
@@ -512,7 +512,10 @@ fn the_cli_refuses_a_by_label_in_op_and_a_receipt_without_the_board_key() {
     std::fs::write(&file, b"{}\n00\n").expect("write");
     let f = file.to_str().expect("utf8");
     assert!(run(&["--approval", f, "--op", "x"]).contains("drop --op"));
-    assert!(run(&["--approval", f]).contains("no board approval key"));
+    assert!(
+        run(&["--approval", f]).contains("does not verify"),
+        "the installed board key refuses a receipt it did not sign"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
