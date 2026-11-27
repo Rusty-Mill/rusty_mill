@@ -246,6 +246,7 @@ fn re_filing_a_done_card_needs_close_or_triage() {
         name: "filer".into(),
         caps: BTreeSet::from([Capability::Project]),
         projects: None,
+        provider: None,
     };
     assert_eq!(
         b.assign(id, "orch", &filer),

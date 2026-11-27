@@ -393,7 +393,8 @@ mod tests {
     use rusty_mill_board::api::Shared;
     use rusty_mill_board::board::{Board, Roles as BoardRoles};
     use rusty_mill_board::domain::Column;
-    use rusty_mill_board::store::MemStore;
+    use rusty_mill_board::domain::{Event, EventKind};
+    use rusty_mill_board::store::{MemStore, Store};
     use rusty_mill_board::workflow::Workflow;
 
     use super::*;
@@ -1032,11 +1033,16 @@ mod tests {
 
     #[test]
     fn prompt_includes_recent_notes_and_is_bounded() {
-        let board: Shared = Board::new(Box::new(MemStore::default()), BoardRoles::default());
+        // A card from before the content limits, which the board no longer writes.
+        let store = MemStore::default();
+        let mut old = Card::new("T", "", vec![], 1).expect("card");
+        old.body = "b".repeat(30_000);
+        store
+            .insert(&old, Event::of(&old, EventKind::Created, "n"))
+            .expect("insert");
+        let board: Shared = Board::new(Box::new(store), BoardRoles::default());
         let h = board.roles().actor("n", "human").expect("role");
-        let mut card = board
-            .add(&h, "T", &"b".repeat(30_000), vec![])
-            .expect("add");
+        let mut card = board.get(old.id).expect("get");
         for i in 0..6 {
             card = board
                 .comment(card.id, &h, &format!("note {i}"))

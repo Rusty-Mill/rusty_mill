@@ -141,6 +141,17 @@ class ReverseDependencyTests(unittest.TestCase):
         md = metadata({"a": ("crates/a", []), "b": ("crates/b", ["a"]), "c": ("crates/c", [])})
         self.assertEqual(affected_packages(md, ["crates/a/src/lib.rs"]), ["a", "b"])
 
+    def test_a_file_another_crate_reads_selects_that_crate_too(self) -> None:
+        md = metadata(
+            {
+                "rusty_term": ("crates/libs/ui/rusty_term", []),
+                "rusty_mill_board": ("crates/apps/rusty_mill_board", []),
+                "other": ("crates/other", []),
+            }
+        )
+        fixture = "crates/libs/ui/rusty_term/src/gui/testdata/lel_inbox.json"
+        self.assertEqual(affected_packages(md, [fixture]), ["rusty_mill_board", "rusty_term"])
+
     def test_dependents_are_transitive(self) -> None:
         md = metadata({"a": ("crates/a", []), "b": ("crates/b", ["a"]), "c": ("crates/c", ["b"])})
         self.assertEqual(affected_packages(md, ["crates/a/src/lib.rs"]), ["a", "b", "c"])

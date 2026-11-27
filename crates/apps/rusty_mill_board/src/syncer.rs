@@ -3,14 +3,19 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::api::Shared;
 use crate::github::{GithubConfig, GithubForge};
+use crate::mergewatch::watch;
 use crate::sync::reconcile;
 
 /// Shortest interval between runs, in seconds.
 pub const MIN_SECS: u64 = 5;
+
+/// Shortest interval between merge watch runs: it reads whole pages of closed pull requests
+/// with the sync's token, so it runs far less often than the sync itself.
+const WATCH_EVERY: Duration = Duration::from_secs(300);
 
 struct Running {
     stop: Arc<AtomicBool>,
@@ -36,11 +41,25 @@ impl Syncer {
         }
     }
 
-    /// Start syncing with `config` every `every`, replacing any running sync.
+    /// Start syncing with `config` every `every`, replacing any running sync. With `auto_close`
+    /// the merge watch also closes cards a merged PR named (`Closes card #N`); without, it
+    /// only lists them.
     ///
     /// # Errors
     /// If the HTTP client or the thread cannot start (an existing sync keeps running).
-    pub fn start(&self, config: GithubConfig, repo: &str, every: Duration) -> Result<(), String> {
+    pub fn start(
+        &self,
+        config: GithubConfig,
+        repo: &str,
+        every: Duration,
+        auto_close: bool,
+    ) -> Result<(), String> {
+        if auto_close && !self.board.keeps_merge_record() {
+            rusty_log::warn!(
+                "auto_close is on, but this store cannot keep the record that undoes a merge close: the merge watch will close nothing"
+            );
+        }
+        let pulls = config.merged()?;
         let forge = GithubForge::new(config).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let (flag, board, run) = (
@@ -51,10 +70,17 @@ impl Syncer {
         std::thread::Builder::new()
             .name("github-sync".into())
             .spawn(move || {
+                let mut last_watch: Option<Instant> = None;
                 while !flag.load(Ordering::SeqCst) {
                     {
                         let _one_at_a_time = run.lock().unwrap_or_else(PoisonError::into_inner);
                         if !flag.load(Ordering::SeqCst) {
+                            if last_watch.is_none_or(|t| t.elapsed() >= WATCH_EVERY) {
+                                last_watch = Some(Instant::now());
+                                if let Err(e) = watch(&board, &pulls, auto_close) {
+                                    rusty_log::warn!(error = %e, "merge watch failed; will retry");
+                                }
+                            }
                             match reconcile(&board, &forge) {
                                 Ok(r)
                                     if r.is_quiet()

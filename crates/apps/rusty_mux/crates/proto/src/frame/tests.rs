@@ -556,6 +556,34 @@ fn every_message_round_trips() {
             id: 4,
             reason: None,
         },
+        Message::ArchiveBlock {
+            req: 31,
+            block,
+            card: Some("card-7".into()),
+            label: Some("good".into()),
+            why: None,
+        },
+        Message::ArchiveBlock {
+            req: 32,
+            block,
+            card: None,
+            label: None,
+            why: Some("done".into()),
+        },
+        Message::ArchiveList {
+            req: 33,
+            card: None,
+            before: None,
+        },
+        Message::ArchiveList {
+            req: 34,
+            card: Some("card-7".into()),
+            before: Some("000000000001-abcdef12".into()),
+        },
+        Message::ArchiveShow {
+            req: 35,
+            id: "000000000001-abcdef12".into(),
+        },
     ];
     for message in messages {
         round_trip(message);
@@ -1636,6 +1664,19 @@ fn agent_meta_round_trips_in_a_launch_and_an_entry() {
         entry: Entry::Agent {
             block: BlockId::from_uuid(Uuid::from_bytes([8; 16])),
             meta,
+        },
+    });
+}
+
+#[test]
+fn a_launch_in_a_blocks_workspace_round_trips() {
+    round_trip(Message::Split {
+        req: 1,
+        block: BlockId::from_uuid(Uuid::from_bytes([7; 16])),
+        side: Side::Right,
+        launch: Launch {
+            workspace_of: Some(BlockId::from_uuid(Uuid::from_bytes([6; 16]))),
+            ..Launch::default()
         },
     });
 }

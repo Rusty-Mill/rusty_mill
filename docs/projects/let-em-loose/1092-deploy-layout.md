@@ -32,9 +32,9 @@ Install to `/opt/lel/<git-sha>/bin/`, symlink `/opt/lel/current -> <git-sha>`. P
 The guard (all of it):
 ```sh
 #!/bin/sh
-# Runs as orch-runner via sudo. Allows: bbp inbox|human --dir /srv/lel/bbp <args without another --dir>.
+# Runs as orch-runner via sudo. Allows: bbp inbox|human|claims --dir /srv/lel/bbp <args without another --dir>.
 set -eu
-case "${1-}" in inbox|human) ;; *) echo "mill-board-bbp-guard: verb refused" >&2; exit 64 ;; esac
+case "${1-}" in inbox|human|claims) ;; *) echo "mill-board-bbp-guard: verb refused" >&2; exit 64 ;; esac
 if [ "${2-}" != --dir ] || [ "${3-}" != /srv/lel/bbp ]; then echo "mill-board-bbp-guard: --dir refused" >&2; exit 64; fi
 verb=$1; shift 3
 skip=0
@@ -47,10 +47,10 @@ for a in "$@"; do   # walks the args the way bbp's parser does: every --key take
 done
 exec /opt/lel/current/bin/bbp "$verb" --dir /srv/lel/bbp "$@"
 ```
-It accepts exactly the argv `bbp_cli.rs` builds (`inbox|human --dir <root> ...`), so the board needs no code change. The guarantee: as `orch-runner`, `mill-board` can run only `bbp inbox` and `bbp human`, only on `/srv/lel/bbp`.
+It accepts exactly the argv `bbp_cli.rs` builds (`inbox|human|claims --dir <root> ...`), so the board needs no code change. The guarantee: as `orch-runner`, `mill-board` can run only `bbp inbox`, `bbp human` and the read-only `bbp claims` (D220), only on `/srv/lel/bbp`. A host deployed before `claims` was added needs this one-word guard edit (root-owned) and a `bbp` that has the verb; until then `lel_claims` answers "verb refused".
 
 ## systemd
-- `mill-board.service`: the shipped unit plus the drop-in `/etc/systemd/system/mill-board.service.d/lel.conf` below. `EnvironmentFile=`, `ReadWritePaths=` and `ExecStart=` add to the shipped values, so each is cleared with an empty line first; otherwise the unit would still need `~baileyrd/.mill-board/board.env` and would keep running `/usr/local/bin/rusty_mill_board` after an upgrade flips `/opt/lel/current`. rusty_tick must already be up.
+- `mill-board.service`: the shipped unit plus the drop-in `/etc/systemd/system/mill-board.service.d/lel.conf` below. `EnvironmentFile=`, `ReadWritePaths=` and `ExecStart=` add to the shipped values, so each is cleared with an empty line first; otherwise the unit would still need `~baileyrd/.mill-board/board.env` and would keep running `/usr/local/bin/rusty_mill_board` after an upgrade flips `/opt/lel/current`.
   ```ini
   [Service]
   User=mill-board
@@ -67,7 +67,7 @@ It accepts exactly the argv `bbp_cli.rs` builds (`inbox|human --dir <root> ...`)
 - No `lel-orch.service`: `rusty_orch run` runs to completion, it is not a daemon. M1 starts runs by hand as orch-runner. A unit would be new design (D127).
 
 ## Network (plain HTTP, loopback)
-- Board to tick: `MILL_BOARD_TICK_URL=http://127.0.0.1:8788` + `RUSTY_TICK_TOKEN`. Board listens `127.0.0.1:8787` (`MILL_BOARD_HTTP`); set `MILL_BOARD_ALLOWED_HOSTS`.
+- Board storage: its own SQLite file, `MILL_BOARD_DB=/var/lib/mill-board/board.db`. This is a separate inbox board; the live Mill Board elsewhere is untouched (Nano, 2026-11-25, decision card in the Let Em Loose thread: "Second board on BaileyAi"; rusty_tick is retired). Board listens `127.0.0.1:8787` (`MILL_BOARD_HTTP`); set `MILL_BOARD_ALLOWED_HOSTS`.
 - orch to board (only with `--card`): `--board http://127.0.0.1:8787`, env `RUSTY_ORCH_BOARD_TOKEN/ACTOR/ROLE` (role with Build; its own agent token, created once in Settings).
 - orch to llama-swap: `base_url` in the lens config (`openai-http`; refuses non-loopback/non-RFC1918). Checked on BaileyAi 2026-11-17: llama-swap answers only on the LAN at `<llama-swap-host>:<port>` (not loopback), and serves `qwen3.6-35b-a3b` (lowercase), `gpt-oss-120b`, `qwen3-vl-30b-a3b`, `qwen3.6-35b-a3b-rocm`; see the deploy prompt step 3b.
 - Claude/Codex: subscription logins only, no API keys in env. Codex only via `podman exec lel-codex`; Claude host-side as orch-runner.

@@ -305,7 +305,7 @@ fn verdict(forge: &dyn Merged, url: &str) -> Result<Result<(), &'static str>, St
 }
 
 /// `(OWNER, NAME, N)` of a link [`pull_urls`] or [`pr_mentions`] built.
-fn pull_parts(url: &str) -> Option<(&str, &str, u64)> {
+pub(crate) fn pull_parts(url: &str) -> Option<(&str, &str, u64)> {
     let mut parts = url.strip_prefix(GITHUB)?.split('/');
     let (owner, name) = (parts.next()?, parts.next()?);
     let number = parts.next().filter(|p| *p == "pull").and(parts.next())?;
@@ -410,6 +410,9 @@ mod tests {
                 by: "dev".into(),
                 at_ms: 3,
                 text: (*t).to_owned(),
+                kind: crate::domain::CommentKind::Note,
+                id: None,
+                resolves: None,
             })
             .collect();
         c

@@ -152,6 +152,8 @@ impl State {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect(),
             cwd: config.cwd.to_string_lossy().into_owned(),
+            // The launch directory is not saved, so it is not known again.
+            workspace: Default::default(),
         };
         let unscreened = self.start(Start {
             block: revive.block,

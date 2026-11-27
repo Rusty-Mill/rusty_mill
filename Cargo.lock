@@ -2175,9 +2175,9 @@ dependencies = [
 
 [[package]]
 name = "cookie"
-version = "0.18.2"
+version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
+checksum = "d55f2d6c30eeec7d5c6f98bd4395d4abb1895629eab97ee6522d340623615f8a"
 dependencies = [
  "time",
  "version_check",
@@ -3852,9 +3852,9 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -7137,8 +7137,12 @@ dependencies = [
  "orch-cli",
  "orch-core",
  "orch-dispatch",
+ "orch-lens",
+ "platform",
+ "platform-linux",
  "rusty_atomic_file",
  "rusty_bbp",
+ "rusty_json",
  "rusty_serde",
 ]
 
@@ -7233,6 +7237,7 @@ dependencies = [
  "orch-core",
  "orch-dispatch",
  "orch-lens",
+ "rusty_bbp",
  "rusty_multimodal_db_engine",
  "serde",
 ]
@@ -7740,7 +7745,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "platform"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "thiserror 1.0.69",
 ]
@@ -7774,7 +7779,7 @@ dependencies = [
 
 [[package]]
 name = "platform-bsd"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "libc",
  "platform",
@@ -7784,7 +7789,7 @@ dependencies = [
 
 [[package]]
 name = "platform-linux"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "libc",
  "platform",
@@ -7797,7 +7802,7 @@ dependencies = [
 
 [[package]]
 name = "platform-mock"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "platform",
  "platform-parity",
@@ -7805,14 +7810,14 @@ dependencies = [
 
 [[package]]
 name = "platform-parity"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "platform",
 ]
 
 [[package]]
 name = "platform-windows"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "platform",
  "platform-mock",
@@ -10389,6 +10394,7 @@ dependencies = [
  "proptest",
  "rusty_atomic_file",
  "rusty_base64",
+ "rusty_crdt",
  "rusty_diff",
  "rusty_rsa",
  "rusty_serde",
@@ -10402,6 +10408,7 @@ dependencies = [
  "rusty_bbp",
  "rusty_codec",
  "rusty_libc",
+ "rusty_pk",
  "rusty_rand",
  "rusty_sandbox",
  "rusty_serde",
@@ -10523,6 +10530,7 @@ name = "rusty_erosion"
 version = "0.1.0"
 dependencies = [
  "tree-sitter",
+ "tree-sitter-python",
  "tree-sitter-rust",
 ]
 
@@ -10607,6 +10615,25 @@ version = "0.1.0"
 [[package]]
 name = "rusty_font"
 version = "0.1.0"
+
+[[package]]
+name = "rusty_fuse"
+version = "0.1.0"
+
+[[package]]
+name = "rusty_fuse_conformance"
+version = "0.1.0"
+dependencies = [
+ "rusty_fuse",
+]
+
+[[package]]
+name = "rusty_fuse_passthrough"
+version = "0.1.0"
+dependencies = [
+ "rusty_fuse",
+ "rusty_fuse_conformance",
+]
 
 [[package]]
 name = "rusty_git"
@@ -10882,6 +10909,7 @@ dependencies = [
  "rusty_mcp_server",
  "rusty_oauth",
  "rusty_oauth_server",
+ "rusty_pk",
  "rusty_rand",
  "rusty_request",
  "rusty_serve",
@@ -11053,6 +11081,7 @@ dependencies = [
  "rusty_tls",
  "rusty_tokio",
  "rusty_uuid",
+ "rusty_win32",
  "serde",
  "serde_json",
  "ts-hub",
@@ -11140,12 +11169,16 @@ dependencies = [
  "orch-codex",
  "orch-core",
  "orch-dispatch",
+ "orch-jail",
  "orch-lens",
  "orch-ollama",
  "orch-openai",
  "orch-store",
+ "platform",
+ "platform-linux",
  "rusty_atomic_file",
  "rusty_bbp",
+ "rusty_confined_fs",
  "rusty_http",
  "rusty_json",
  "rusty_rand",
@@ -11373,6 +11406,7 @@ dependencies = [
  "rusty_font",
  "rusty_gpu",
  "rusty_gui",
+ "rusty_json",
  "rusty_regx",
  "rusty_sha1",
  "rusty_term_core",
@@ -14330,6 +14364,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0af592be68c579aa78a16846bd19422978c3c52e438523d45ff5d1bff1f9d4a"
 
 [[package]]
+name = "tree-sitter-python"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bf85fd39652e740bf60f46f4cda9492c3a9ad75880575bf14960f775cb74a1c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-rust"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14875,9 +14919,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

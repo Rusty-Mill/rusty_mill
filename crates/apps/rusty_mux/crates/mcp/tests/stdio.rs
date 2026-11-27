@@ -70,6 +70,7 @@ fn shell() -> Config {
         cwd,
         console_host,
         state_dir: None,
+        protected: Default::default(),
         grapheme_clustering: false,
         config_file: None,
     }
@@ -281,7 +282,15 @@ fn tools_list_is_the_catalog_without_connection_methods() {
         .iter()
         .filter_map(|t| t.get("name").and_then(Value::as_str))
         .collect();
-    let connection = ["attach", "detach", "acquire-lease", "release-lease", "sync"];
+    let connection = [
+        "attach",
+        "detach",
+        "acquire-lease",
+        "release-lease",
+        "sync",
+        "terminal.upload",
+        "terminal.download",
+    ];
     let expected: Vec<&str> = CATALOG
         .iter()
         .map(|m| m.name)

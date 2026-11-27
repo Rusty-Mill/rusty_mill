@@ -8,7 +8,7 @@
 //! unset or not an absolute path there is no default.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The variable naming the socket when a command doesn't.
 pub const SOCKET_VAR: &str = "RUSTY_MUX_SOCKET";
@@ -41,6 +41,23 @@ pub enum Origin {
     Variable,
     /// [`default_socket`]: the only socket a client may start a server on.
     Default,
+}
+
+/// The longest socket path a Unix socket takes, in bytes (`sun_path` holds
+/// 108 with its NUL). Windows' AF_UNIX has the same limit (D257).
+pub const MAX_SOCKET_PATH: usize = 107;
+
+/// Refuses a socket path too long to bind or connect, naming the limit
+/// where the OS would only say "invalid argument".
+pub fn check_socket_path(path: &Path) -> Result<(), String> {
+    let len = path.as_os_str().len();
+    match len > MAX_SOCKET_PATH {
+        true => Err(format!(
+            "the socket path is {len} bytes, over the {MAX_SOCKET_PATH}-byte limit for a Unix socket: {}",
+            path.display()
+        )),
+        false => Ok(()),
+    }
 }
 
 /// `given`, else `$RUSTY_MUX_SOCKET` (if not empty), else the default, with
@@ -106,6 +123,18 @@ mod tests {
         let empty = [(SOCKET_VAR, ""), (BASE_VAR, BASE)];
         let default = default_socket(env(&empty)).expect("a default");
         assert_eq!(resolve(None, env(&empty)), Ok((default, Origin::Default)));
+    }
+
+    #[test]
+    fn a_socket_path_over_the_limit_is_refused_and_one_at_it_is_not() {
+        let at = PathBuf::from("a".repeat(MAX_SOCKET_PATH));
+        assert_eq!(check_socket_path(&at), Ok(()));
+        let over = PathBuf::from("a".repeat(MAX_SOCKET_PATH + 1));
+        let err = check_socket_path(&over).expect_err("too long");
+        assert!(
+            err.contains("108 bytes") && err.contains("107-byte"),
+            "{err}"
+        );
     }
 
     #[test]

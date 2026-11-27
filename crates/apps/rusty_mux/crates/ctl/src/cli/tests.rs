@@ -127,6 +127,86 @@ fn flags_take_a_separate_or_attached_value() {
     );
 }
 
+fn words(line: &str) -> Vec<String> {
+    line.split(' ').map(String::from).collect()
+}
+
+fn parsed(line: &str) -> Result<Vec<Call>, String> {
+    match parse(&words(line))?.command {
+        Command::Calls(calls) => Ok(calls),
+        other => panic!("not calls: {other:?}"),
+    }
+}
+
+fn stdin_of(calls: &[Call]) -> Option<&Value> {
+    calls.iter().find_map(|c| {
+        c.args.iter().find_map(|(n, a)| match a {
+            Arg::Value(v) if *n == "data" => Some(v),
+            _ => None,
+        })
+    })
+}
+
+#[test]
+fn a_stdin_flag_parses_to_a_placeholder_and_reads_nothing_yet() {
+    let calls = parsed(&format!("input --block {ID} --data-stdin")).expect("parses");
+    assert!(
+        calls[0]
+            .args
+            .iter()
+            .any(|(n, a)| *n == "data" && *a == Arg::Stdin)
+    );
+}
+
+#[test]
+fn the_filled_flag_carries_stdin_and_other_lines_never_touch_it() {
+    let mut calls = parsed(&format!("input --block {ID} --data-stdin")).expect("parses");
+    let mut input: &[u8] = b"big\npayload";
+    fill_stdin(&mut calls, Some(&mut input)).expect("filled");
+    assert_eq!(
+        stdin_of(&calls),
+        Some(&Value::Bytes(b"big\npayload".to_vec()))
+    );
+    let mut plain = parsed(&format!("input --block {ID} --data x")).expect("parses");
+    fill_stdin(&mut plain, None).expect("no stdin needed");
+}
+
+#[test]
+fn a_library_caller_without_stdin_refuses_the_flag() {
+    let mut calls = parsed(&format!("input --block {ID} --data-stdin")).expect("parses");
+    let err = fill_stdin(&mut calls, None).expect_err("no stdin");
+    assert!(err.contains("own stdin"), "{err}");
+}
+
+#[test]
+fn stdin_is_bounded_at_what_one_request_carries() {
+    let line = format!("input --block {ID} --data-stdin");
+    let mut calls = parsed(&line).expect("parses");
+    let mut at: &[u8] = &vec![b'x'; MAX_STDIN];
+    fill_stdin(&mut calls, Some(&mut at)).expect("at the limit");
+    let mut calls = parsed(&line).expect("parses");
+    let mut over: &[u8] = &vec![b'x'; MAX_STDIN + 1];
+    let err = fill_stdin(&mut calls, Some(&mut over)).expect_err("over");
+    assert!(err.contains("most one request carries"), "{err}");
+}
+
+#[test]
+fn a_stdin_flag_is_refused_beside_its_value_twice_or_with_a_value_of_its_own() {
+    for line in [
+        format!("input --block {ID} --data x --data-stdin"),
+        format!("input --block {ID} --data-stdin --data-stdin"),
+        format!("input --block {ID} --data-stdin=false"),
+        format!("resize --block {ID} --cols-stdin --rows 24"),
+    ] {
+        assert!(parsed(&line).is_err(), "{line}");
+    }
+    let two = format!("input --block {ID} --data-stdin + input --block {ID} --data-stdin");
+    let mut calls = parsed(&two).expect("each parses");
+    let mut input: &[u8] = b"x";
+    let err = fill_stdin(&mut calls, Some(&mut input)).expect_err("two");
+    assert!(err.contains("only one"), "{err}");
+}
+
 #[test]
 fn plus_chains_requests() {
     let line =
@@ -646,5 +726,101 @@ fn forward_refuses_what_is_not_a_port() {
         "forward --port 80",
     ] {
         assert!(parse(&args(line)).is_err(), "{line}");
+    }
+}
+
+#[test]
+fn upload_names_a_file_and_prepares_an_attach_and_a_lease() {
+    let upload = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Upload(upload)) => Ok(upload),
+        Ok(other) => panic!("expected upload, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    let parsed = upload(&format!("upload --block {ID} /tmp/a/pic.png")).unwrap();
+    assert_eq!(parsed.name, "pic.png");
+    assert_eq!(parsed.file, std::path::PathBuf::from("/tmp/a/pic.png"));
+    let names: Vec<&str> = parsed.prepare.iter().map(|c| c.method.name).collect();
+    assert_eq!(names, ["attach", "acquire-lease"]);
+    let named = upload(&format!("upload --block {ID} --name x.png pic.png")).unwrap();
+    assert_eq!(named.name, "x.png");
+    // `--` lets a file start with a dash.
+    let dashed = upload(&format!("upload --block {ID} -- -x")).unwrap();
+    assert_eq!(dashed.name, "-x");
+    for bad in [
+        "upload",
+        "upload --",
+        "upload a b",
+        "upload --name",
+        "upload --out f a",
+        "upload ..",
+    ] {
+        assert!(parse(&args(bad)).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn download_names_a_path_and_where_it_goes() {
+    let download = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Download(download)) => Ok(download),
+        Ok(other) => panic!("expected download, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    let parsed = download(&format!("download --block {ID} notes.txt")).unwrap();
+    assert_eq!(parsed.path, "notes.txt");
+    assert_eq!(parsed.out, None);
+    let out = download(&format!("download --block {ID} --out here.txt /etc/x")).unwrap();
+    assert_eq!(out.out, Some(std::path::PathBuf::from("here.txt")));
+    for bad in [
+        "download",
+        "download a b",
+        "download --out",
+        "download --name n a",
+    ] {
+        assert!(parse(&args(bad)).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn copy_names_two_hosts_and_a_block_on_each() {
+    let copy = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Copy(copy)) => Ok(copy),
+        Ok(other) => panic!("expected copy, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    let parsed = copy(&format!(
+        "copy --block {ID} --to-block {ID} a:/srv/x/pic.png b"
+    ))
+    .unwrap();
+    assert_eq!(
+        (parsed.from_host.as_str(), parsed.to_host.as_str()),
+        ("a", "b")
+    );
+    assert_eq!(
+        (parsed.path.as_str(), parsed.name.as_str()),
+        ("/srv/x/pic.png", "pic.png")
+    );
+    let names: Vec<&str> = parsed.to_prepare.iter().map(|c| c.method.name).collect();
+    assert_eq!(names, ["attach", "acquire-lease"]);
+    // A Windows path keeps its drive colon and yields its file name.
+    let win = copy(&format!(
+        "copy --block {ID} --to-block {ID} a:C:\\d\\n.txt b"
+    ))
+    .unwrap();
+    assert_eq!(
+        (win.path.as_str(), win.name.as_str()),
+        ("C:\\d\\n.txt", "n.txt")
+    );
+    let named = copy(&format!("copy --block {ID} --to-block {ID} --name n a:p b")).unwrap();
+    assert_eq!(named.name, "n");
+    for bad in [
+        "copy a:p b".to_owned(),
+        format!("copy --block {ID} a:p b"),
+        format!("copy --block {ID} --to-block {ID} p b"),
+        format!("copy --block {ID} --to-block {ID} :p b"),
+        format!("copy --block {ID} --to-block {ID} a:p"),
+        format!("copy --block {ID} --to-block {ID} a:dir/ b"),
+        format!("copy --block {ID} --to-block {ID} --out f a:p b"),
+    ] {
+        assert!(parse(&args(&bad)).is_err(), "{bad}");
     }
 }

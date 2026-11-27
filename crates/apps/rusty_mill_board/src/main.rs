@@ -224,6 +224,13 @@ struct Cli {
     /// Accepted Host names (HTTP only).
     #[arg(long = "allowed-host", env = "MILL_BOARD_ALLOWED_HOSTS", value_delimiter = ',', default_values_t = ["127.0.0.1".to_owned(), "localhost".to_owned(), "[::1]".to_owned()])]
     allowed_hosts: Vec<String>,
+    /// The Ed25519 seed (64 hex, chmod 600) the board signs BBP approval receipts with (#447,
+    /// `approval_issue`). Created on first start; its public key is logged, and `bbp` verifies
+    /// receipts only against the copy committed at
+    /// `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub`. Every receipt issued is
+    /// recorded in `<FILE>.issued.jsonl`. Unset refuses `approval_issue`.
+    #[arg(long, env = "MILL_BOARD_APPROVAL_KEY")]
+    approval_key: Option<PathBuf>,
     /// The orch host's `bbp` binary, for the decision inbox (#595). Mill Board runs it
     /// to read escalations and to act on them; it never reads BBP files itself.
     #[arg(long, env = "MILL_BOARD_BBP_BIN", requires = "bbp_root")]
@@ -618,6 +625,13 @@ fn run(cli: Cli) -> Result<(), String> {
     if let Some(path) = &files.projects {
         board = board.with_projects_sink(projects_sink(path.clone()));
     }
+    if let Some(path) = &cli.approval_key {
+        let key = rusty_mill_board::receipts::load_or_create(path)?;
+        rusty_log::info!(public_key = %rusty_mill_board::receipts::public_hex(&key), "approval receipts are signed with this key");
+        let issued = rusty_mill_board::receipts::issued_path(path);
+        rusty_log::info!(path = %issued.display(), "issued approval receipts are recorded here");
+        board = board.with_approval_key(key, issued);
+    }
     if let (Some(bin), Some(root)) = (&cli.bbp_bin, &cli.bbp_root) {
         board = board.with_escalations(Arc::new(BbpCli::new(bin.clone(), root.clone())));
     }
@@ -644,6 +658,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 repo: repo.clone(),
                 api: cli.github_api.clone(),
                 interval_secs: cli.github_secs,
+                auto_close: false,
                 token: cli
                     .github_token
                     .clone()
@@ -655,7 +670,12 @@ fn run(cli: Cli) -> Result<(), String> {
     let syncer = Syncer::new(board.clone());
     if let Some(file) = &github {
         let config = file.config()?;
-        syncer.start(config, &file.repo, Duration::from_secs(file.interval_secs))?;
+        syncer.start(
+            config,
+            &file.repo,
+            Duration::from_secs(file.interval_secs),
+            file.auto_close,
+        )?;
     }
 
     let in_flight: Arc<InFlight> = Arc::default();

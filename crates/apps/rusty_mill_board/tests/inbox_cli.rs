@@ -35,6 +35,8 @@ case "$1" in inbox) cat <<'J'
 {INBOX}
 J
 exit 0;; esac
+case "$1" in claims) cat '{claims}'; exit $?;; esac
+case "$1" in decision) cat '{answer}'; exit $?;; esac
 line="$*"
 case "$line" in *"--dry-run yes"*)
   echo '{{"rev":0,"response":"Ok","events":[{{"A":1}},{{"B":2}}]}}'; exit 0;; esac
@@ -42,6 +44,8 @@ for f in {fences}; do case "$line" in *"--fence $f "*) echo '{{"Rejected":{{"cod
 echo '"Ok"'
 "#,
         calls = calls.display(),
+        claims = dir.join("claims.json").display(),
+        answer = dir.join("decision.json").display(),
         fences = stale
             .iter()
             .map(u64::to_string)
@@ -93,7 +97,7 @@ fn approve_on_budget_extends_then_reopens_with_chained_fences() {
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     let e = cli.open(&["C1".into()]).unwrap().remove(0);
     assert_eq!(
-        cli.act(&e, &Action::Approve, "nano").unwrap(),
+        cli.act(&e, &Action::Approve, "nano", None).unwrap(),
         Outcome::Done
     );
     let human: Vec<String> = calls(&log).into_iter().skip(1).collect();
@@ -115,7 +119,7 @@ fn a_stale_commit_stops_the_sequence_and_says_where() {
     let (bin, log, _serial) = fake("stale", &[18]);
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     let e = cli.open(&["C1".into()]).unwrap().remove(0);
-    let out = cli.act(&e, &Action::Approve, "nano").unwrap();
+    let out = cli.act(&e, &Action::Approve, "nano", None).unwrap();
     assert_eq!(
         out,
         Outcome::Refused {
@@ -147,14 +151,18 @@ fn an_invalid_action_sends_nothing() {
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     let e = cli.open(&["C1".into()]).unwrap().remove(0);
     let n = calls(&log).len();
-    assert!(cli.act(&e, &Action::Choose { chosen: 9 }, "nano").is_err());
+    assert!(
+        cli.act(&e, &Action::Choose { chosen: 9 }, "nano", None)
+            .is_err()
+    );
     assert!(
         cli.act(
             &e,
             &Action::Refine {
                 note: String::new()
             },
-            "nano"
+            "nano",
+            None
         )
         .is_err()
     );
@@ -166,4 +174,109 @@ fn a_failing_host_is_an_error_not_an_outcome() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let cli = BbpCli::new("/nonexistent/bbp".into(), "/srv/bbp".into());
     assert!(matches!(cli.open(&["C1".into()]), Err(InboxError::Host(_))));
+}
+
+fn answers(bin: &Path, json: &str) {
+    fs::write(bin.with_file_name("decision.json"), json).unwrap();
+}
+
+#[test]
+fn a_decision_id_rides_a_single_command_and_is_looked_up_by_it() {
+    let (bin, log, _serial) = fake("decision", &[]);
+    let cli = BbpCli::new(bin.clone(), "/srv/bbp".into());
+    let mut e = cli.open(&["C1".into()]).unwrap().remove(0);
+    e.acted = Some(vec![]); // a host that reports acted-on work
+    // Approve on a budget is two commands: a repeat would replay the first without events
+    // and fence the second wrongly, so an id is refused before anything is sent.
+    let two = cli.act(&e, &Action::Approve, "nano", Some("dec-1"));
+    assert!(matches!(two, Err(InboxError::Invalid(_))), "{two:?}");
+    assert_eq!(calls(&log).len(), 1, "only the inbox read ran");
+
+    let drop = Action::Reject { reason: None };
+    assert_eq!(
+        cli.act(&e, &drop, "nano", Some("dec-1")).unwrap(),
+        Outcome::Done
+    );
+    let sent = calls(&log);
+    for n in [1, 2] {
+        assert!(sent[n].contains("--decision dec-1.0"), "{sent:?}");
+    }
+
+    answers(&bin, r#"[{"decision":"dec-1.0","applied":true,"rev":19}]"#);
+    assert_eq!(cli.applied("C1", "dec-1").unwrap(), Some(19));
+    assert_eq!(
+        calls(&log).last().unwrap(),
+        "decision --dir /srv/bbp --task C1 --decision dec-1.0"
+    );
+    answers(
+        &bin,
+        r#"[{"decision":"dec-1.0","applied":false,"rev":null}]"#,
+    );
+    assert_eq!(cli.applied("C1", "dec-1").unwrap(), None);
+}
+
+/// Absence is evidence only from a host that answered for exactly this id: an empty
+/// answer, another id's row, two rows, an inconsistent row, or a host without the verb
+/// are errors, so nothing is ever settled from them.
+#[test]
+fn a_lookup_that_does_not_answer_for_its_id_is_an_error() {
+    let (bin, _log, _serial) = fake("decision-bad", &[]);
+    let cli = BbpCli::new(bin.clone(), "/srv/bbp".into());
+    for bad in [
+        "[]",
+        r#"[{"decision":"other.0","applied":false,"rev":null}]"#,
+        r#"[{"decision":"dec-1.0","applied":false,"rev":null},{"decision":"dec-1.0","applied":false,"rev":null}]"#,
+        r#"[{"decision":"dec-1.0","applied":true,"rev":null}]"#,
+        r#"[{"decision":"dec-1.0","applied":false,"rev":5}]"#,
+        r#"{"decision":"dec-1.0"}"#,
+    ] {
+        answers(&bin, bad);
+        assert!(
+            matches!(cli.applied("C1", "dec-1"), Err(InboxError::Host(_))),
+            "{bad}"
+        );
+    }
+    // An old host has no `decision` verb: its answer is an error exit.
+    fs::remove_file(bin.with_file_name("decision.json")).unwrap();
+    assert!(matches!(
+        cli.applied("C1", "dec-1"),
+        Err(InboxError::Host(_))
+    ));
+}
+
+#[test]
+fn claims_reads_the_host_array_with_the_exact_argv() {
+    let (bin, log, _serial) = fake("claims", &[]);
+    fs::write(
+        bin.with_file_name("claims.json"),
+        r#"[{"id":1,"spent":2,"budget":9}]"#,
+    )
+    .unwrap();
+    let cli = BbpCli::new(bin, "/srv/bbp".into());
+    let v = cli.claims("C1").unwrap();
+    assert_eq!(v[0]["budget"], 9);
+    assert_eq!(calls(&log), ["claims --dir /srv/bbp --task C1 --json yes"]);
+    assert!(matches!(cli.claims("--x"), Err(InboxError::Invalid(_))));
+    assert_eq!(calls(&log).len(), 1, "a bad id runs nothing");
+}
+
+#[test]
+fn an_oversized_claims_answer_is_refused_not_buffered() {
+    let (bin, _log, _serial) = fake("big", &[]);
+    // Valid JSON, 9 MiB: over the 8 MiB ceiling.
+    let big = format!("[\"{}\"]", "x".repeat(9 << 20));
+    fs::write(bin.with_file_name("claims.json"), big).unwrap();
+    let cli = BbpCli::new(bin, "/srv/bbp".into());
+    let Err(InboxError::Host(why)) = cli.claims("C1") else {
+        panic!("expected a refusal")
+    };
+    assert!(why.contains("over") && why.contains("refused"), "{why}");
+}
+
+#[test]
+fn a_failing_claims_host_reports_its_stderr() {
+    let (bin, _log, _serial) = fake("fail", &[]);
+    // No claims.json: the stand-in's `cat` fails with a message on stderr.
+    let cli = BbpCli::new(bin, "/srv/bbp".into());
+    assert!(matches!(cli.claims("C1"), Err(InboxError::Host(m)) if m.contains("claims.json")));
 }

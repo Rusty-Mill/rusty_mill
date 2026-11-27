@@ -336,6 +336,12 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
     if w.st.opened {
         return Err(rej(Code::AlreadyOpen, "task already opened"));
     }
+    if o.mode == Mode::Claims && o.gates.is_some() {
+        return Err(rej(
+            Code::BadClaimsConfig,
+            "gates: scratch gates have no claims-mode rule yet (D190)",
+        ));
+    }
     if o.mode == Mode::Claims {
         crate::claims_engine::check_open(o)?;
     } else if o.holdout_digest.is_some() {
@@ -391,6 +397,7 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
         claims: claims.then(|| o.claims.unwrap_or_default()),
         holdout_digest: o.holdout_digest,
         baseline_digest: o.baseline_digest,
+        gates: o.gates,
     });
     let id = w.st.next_art_id();
     w.emit(Event::ArtifactStored(ArtifactRecord {
@@ -1091,12 +1098,12 @@ fn check_request(st: &TaskState, role: &Role, d: &Draft) -> R<Option<ArtId>> {
     }
 }
 
-/// Refuse a logged version whose fold lacked a line or base, naming it.
+/// Refuse a logged version whose fold did not apply, saying why.
 fn unapplied(st: &TaskState, version: ArtId) -> R<()> {
     match st.unapplied.get(&version) {
         Some(m) => Err(rej(
             Code::RefUnresolved,
-            format!("{version} did not apply when the log was folded: {m} is missing"),
+            format!("{version} did not apply when the log was folded: {m}"),
         )),
         None => Ok(()),
     }

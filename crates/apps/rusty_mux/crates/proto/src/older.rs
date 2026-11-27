@@ -6,11 +6,15 @@ use crate::Features;
 
 /// Features a current server grants only when started a certain way, so
 /// their absence says nothing about its version: UDP needs `--udp`, and the
-/// tailscale status event (C27) and listening ports (C80) are offered on
-/// Linux only.
+/// tailscale status event (C27), listening ports (C80) and the workspace
+/// call (D337) are offered on Linux only.
 const CONDITIONAL: Features = Features::DATAGRAM
     .union(Features::TAILSCALE_STATUS)
-    .union(Features::PORTS);
+    .union(Features::PORTS)
+    .union(Features::WORKSPACE)
+    .union(Features::WORKSPACE_STATUS)
+    .union(Features::LAUNCH_IN_WORKSPACE)
+    .union(Features::DOWNLOAD);
 
 /// A server older than this client: what to tell the user, once per
 /// connection.
@@ -73,6 +77,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_server_without_a_linux_only_feature_is_not_older() {
+        assert_eq!(
+            Older::check(Features::WORKSPACE, Features::NONE, Some("0.1.0")),
+            None
+        );
+    }
+
+    #[test]
     fn a_server_with_everything_asked_for_says_nothing() {
         let asked = Features::LAYOUT.union(Features::FOCUS);
         assert_eq!(Older::check(asked, asked, Some("0.1.0")), None);
@@ -82,6 +94,13 @@ mod tests {
     fn udp_missing_says_nothing_about_age() {
         let asked = Features::LAYOUT.union(Features::DATAGRAM);
         assert_eq!(Older::check(asked, Features::LAYOUT, None), None);
+    }
+
+    #[test]
+    fn file_download_missing_says_nothing_about_age() {
+        // Only a Linux server offers it; a Windows one is not older.
+        let asked = Features::LAYOUT.union(Features::DOWNLOAD);
+        assert_eq!(Older::check(asked, Features::LAYOUT, Some("0.1.0")), None);
     }
 
     #[test]

@@ -17,7 +17,15 @@ fn every_catalog_method_has_a_shape_and_most_are_tools() {
         .filter(|m| shape(m) != Shape::Connection)
         .map(|m| m.name)
         .collect();
-    for name in ["attach", "detach", "acquire-lease", "release-lease", "sync"] {
+    for name in [
+        "attach",
+        "detach",
+        "acquire-lease",
+        "release-lease",
+        "sync",
+        "terminal.upload",
+        "terminal.download",
+    ] {
         assert!(!tools.contains(&name), "{name}");
     }
     for name in [
@@ -29,7 +37,7 @@ fn every_catalog_method_has_a_shape_and_most_are_tools() {
     ] {
         assert!(tools.contains(&name), "{name}");
     }
-    assert_eq!(tools.len(), CATALOG.len() - 5);
+    assert_eq!(tools.len(), CATALOG.len() - 7);
 }
 
 #[test]
@@ -62,6 +70,56 @@ fn keys_are_sent_under_the_lease() {
         argv(known("terminal.send-keys"), Some(&call)).map(|a| a.join(" ")),
         Ok("attach --block=2 + acquire-lease --block=2 + \
             terminal.send-keys --block=2 --key=ctrl+c --key=enter"
+            .into())
+    );
+}
+
+#[test]
+fn a_rerun_is_made_under_the_lease_and_says_it_runs_a_program() {
+    let call = args(r#"{"block": "2"}"#);
+    assert_eq!(
+        argv(known("terminal.rerun"), Some(&call)).map(|a| a.join(" ")),
+        Ok("attach --block=2 + acquire-lease --block=2 + terminal.rerun --block=2".into())
+    );
+    let hints = annotations(known("terminal.rerun"));
+    assert_eq!(hints["destructiveHint"], true);
+    assert_eq!(hints["openWorldHint"], true);
+}
+
+#[test]
+fn archiving_a_block_is_marked_destructive() {
+    let hints = annotations(known("archive-block"));
+    assert_eq!(hints["destructiveHint"], true);
+    assert_eq!(annotations(known("archive-list"))["readOnlyHint"], true);
+}
+
+#[test]
+fn workspace_status_calls_are_made_under_the_lease() {
+    let call = args(r#"{"block": "2", "path": "src/a.rs"}"#);
+    assert_eq!(
+        argv(known("terminal.workspace-stat"), Some(&call)).map(|a| a.join(" ")),
+        Ok("attach --block=2 + acquire-lease --block=2 + \
+            terminal.workspace-stat --block=2 --path=src/a.rs"
+            .into())
+    );
+    let call = args(r#"{"block": "2"}"#);
+    assert_eq!(
+        argv(known("terminal.workspace-touched"), Some(&call)).map(|a| a.join(" ")),
+        Ok("attach --block=2 + acquire-lease --block=2 + \
+            terminal.workspace-touched --block=2"
+            .into())
+    );
+}
+
+#[test]
+fn a_workspace_listing_is_made_under_the_lease() {
+    // The server refuses it without the lease, so a fresh connection must
+    // attach and take it first, as for typing.
+    let call = args(r#"{"block": "2", "path": "src"}"#);
+    assert_eq!(
+        argv(known("terminal.workspace-list"), Some(&call)).map(|a| a.join(" ")),
+        Ok("attach --block=2 + acquire-lease --block=2 + \
+            terminal.workspace-list --block=2 --path=src"
             .into())
     );
 }
@@ -198,6 +256,7 @@ fn tools_carry_the_catalog_schema_and_hints() {
         "terminal.shell",
         "terminal.history",
         "terminal.list-dir",
+        "terminal.workspace-list",
     ] {
         let reads = tool(known(name));
         assert_eq!(

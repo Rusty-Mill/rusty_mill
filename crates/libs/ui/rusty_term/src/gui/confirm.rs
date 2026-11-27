@@ -9,7 +9,7 @@
 
 use super::blocks::wrap;
 use super::chrome::Chrome;
-use super::link_policy::Link;
+use super::link_policy::{Link, Loopback};
 use super::paint::{Pixmap, Rect, mix};
 use super::text::{UiText, Weight};
 
@@ -47,6 +47,9 @@ pub(crate) enum Subject {
     Block(u64),
     /// Open a link (C63, D70).
     Link(Link),
+    /// Forward a loopback port of pane `key`'s host, then open the link
+    /// here (mux C81, D341).
+    Forward(u64, Loopback),
 }
 
 /// What a key or click on an open confirm did.
@@ -97,6 +100,25 @@ pub(crate) fn link_copy(link: &Link) -> (String, String) {
         None => "Open this link?".to_owned(),
     };
     (title, body)
+}
+
+/// The copy for forwarding `target` (C81, D341): says where the port is,
+/// since `localhost` in a remote pane is not this machine.
+pub(crate) fn forward_copy(target: &Loopback) -> (String, String) {
+    (
+        format!("Forward port {} from this pane's host?", target.port),
+        format!(
+            "{}://localhost:{} is on the machine this pane runs on. This opens a tunnel to it \
+             on this computer and opens it in your browser. It asks once per host and port, then \
+             remembers.",
+            target.scheme, target.port
+        ),
+    )
+}
+
+/// The forward prompt's buttons: Cancel (focused) and the accent one.
+pub(crate) fn forward_buttons() -> Vec<String> {
+    vec!["Cancel".to_owned(), "Forward and open".to_owned()]
 }
 
 /// The link prompt's "Always trust" button, as an [`Answer::Pick`] ("Open

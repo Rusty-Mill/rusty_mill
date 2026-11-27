@@ -15,6 +15,8 @@ orch-core = { workspace = true }
 orch-dispatch = { workspace = true }
 # The lens meter's snapshot type (#594), stored as `MeterRecord`.
 orch-lens = { workspace = true }
+# Claim and candidate ids of the builder_session table (#1404).
+rusty_bbp = { workspace = true }
 # The record store (ADR-0010). Its record bound needs `serde` derives on the
 # snapshot types, which is the one registry dependency this family carries.
 rusty_multimodal_db_engine = { workspace = true }

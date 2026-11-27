@@ -164,7 +164,18 @@ impl<I: Clone + Ord, T: Clone + Eq> Rga<I, T> {
 
     /// The visible elements with their ids, in sequence order.
     pub fn iter(&self) -> Iter<'_, I, T> {
-        Iter {
+        Iter { walk: self.walk() }
+    }
+
+    /// Every element with its id and whether it is visible, tombstones
+    /// included, in sequence order. Two replicas that applied the same ops
+    /// yield the same elements, so this is what an equality check compares.
+    pub fn elements(&self) -> impl Iterator<Item = (&I, &T, bool)> + '_ {
+        self.walk().map(|n| (&n.id, &n.value, n.live))
+    }
+
+    fn walk(&self) -> Walk<'_, I, T> {
+        Walk {
             rga: self,
             stack: self.roots.iter().rev().copied().collect(),
         }
@@ -325,22 +336,32 @@ impl<I: Clone + Ord, T: Clone + Eq> Rga<I, T> {
 
 /// Iterator over the visible `(id, value)` pairs of an [`Rga`], in order.
 pub struct Iter<'a, I, T> {
-    rga: &'a Rga<I, T>,
-    stack: Vec<usize>,
+    walk: Walk<'a, I, T>,
 }
 
 impl<'a, I, T> Iterator for Iter<'a, I, T> {
     type Item = (&'a I, &'a T);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(ix) = self.stack.pop() {
-            let node = &self.rga.nodes[ix];
-            self.stack.extend(node.children.iter().rev());
-            if node.live {
-                return Some((&node.id, &node.value));
-            }
-        }
-        None
+        self.walk.find(|n| n.live).map(|n| (&n.id, &n.value))
+    }
+}
+
+/// Pre-order walk over every node, tombstones included. Iterative, so a long
+/// chain cannot overflow the stack.
+struct Walk<'a, I, T> {
+    rga: &'a Rga<I, T>,
+    stack: Vec<usize>,
+}
+
+impl<'a, I, T> Iterator for Walk<'a, I, T> {
+    type Item = &'a Node<I, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let ix = self.stack.pop()?;
+        let node = &self.rga.nodes[ix];
+        self.stack.extend(node.children.iter().rev());
+        Some(node)
     }
 }
 
@@ -423,6 +444,14 @@ mod tests {
         // A tombstoned element still anchors an insert.
         r.apply(&ins(9, Some(2), 'X')).unwrap();
         assert_eq!(text(&r), "aXc");
+    }
+
+    #[test]
+    fn elements_include_tombstones_in_sequence_order() {
+        let mut r = typed("abc");
+        r.apply(&Op::Delete { target: 2 }).unwrap();
+        let all: Vec<(u32, char, bool)> = r.elements().map(|(i, c, l)| (*i, *c, l)).collect();
+        assert_eq!(all, [(1, 'a', true), (2, 'b', false), (3, 'c', true)]);
     }
 
     #[test]

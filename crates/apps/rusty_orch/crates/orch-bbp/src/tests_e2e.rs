@@ -61,8 +61,26 @@ pub(super) fn setup() -> (PathBuf, Config) {
     std::fs::write(c.repo.join("flag"), "no\n").unwrap();
     git(&c.repo, &["add", "."]);
     git(&c.repo, &["commit", "-qm", "base"]);
+    list_scratch(&c);
     std::fs::write(&c.profiles, r#"{"profiles":[{"name":"test","program":"/bin/sh","args":["-c","test \"$(cat flag)\" = ok && test -z \"$GH_TOKEN$OPENAI_API_KEY$BBP_TASK\""]}],"read_roots":["/bin","/usr","/lib","/lib64"],"env":[["PATH","/usr/bin:/bin"]],"limits":{"cpu_secs":10,"wall_secs":10,"memory_bytes":1073741824,"file_bytes":1048576,"open_files":256,"processes":4096},"tree":"sha256(git write-tree id)"}"#).unwrap();
     (dir, c)
+}
+/// #447 (D195): the operator lists the fixture repo, so its `gates: scratch` tasks open and the
+/// scripted human answers gates with a label.
+pub(super) fn list_scratch(c: &Config) {
+    let out = Command::new(&c.binary)
+        .args(["gates", "scratch-add", "--dir"])
+        .arg(&c.dir)
+        .arg("--repo")
+        .arg(&c.repo)
+        .args(["--source", "test fixture"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 fn events(h: &Handle) -> Vec<Event> {
     FsStore::open(&h.dir)

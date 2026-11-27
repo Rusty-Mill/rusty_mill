@@ -4,7 +4,7 @@
 use crate::agents::{AgentInfo, Grant};
 use std::cell::Cell;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,7 +17,9 @@ use crate::domain::{
     import_id, is_pull_link, text_hash,
 };
 use crate::external::Observation;
-use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
+use crate::inbox::{
+    Acted, Action, Diffstat, DryRun, Escalation, Escalations, InboxError, Outcome, plan,
+};
 use crate::metrics::{Metrics, metrics};
 use crate::milestones::{MemMilestones, Milestone, MilestoneEdit, MilestoneStore};
 use crate::projects::{Projects, Statuses};
@@ -101,6 +103,7 @@ impl Roles {
             name: name.to_owned(),
             caps: caps.clone(),
             projects: None,
+            provider: None,
         })
     }
 }
@@ -137,6 +140,37 @@ pub struct Board<S> {
     milestones: Box<dyn MilestoneStore>,
     /// Agents registered on shared connectors.
     agents: Mutex<crate::agents::Registry>,
+    /// Held by every writer of a parent link or of dependencies (`add_card`, `plan`), by the
+    /// merge close and `unclose`, and by `take`, `claim` and `move_card`. So a card cannot gain
+    /// a child between the close's childlessness check and its commit, and a dependency edit,
+    /// a claim or a move that starts a card cannot go stale under an unclose (#1620). Every
+    /// claim and every move serializes on it, including moves into columns that are not work
+    /// columns: cheap in process, and simpler than reading the workflow first. **Lock order:
+    /// this gate first, then the workflow guard**; never the other way, or a waiting workflow
+    /// writer can deadlock the board.
+    links: Mutex<()>,
+    /// What the merge watch last found (#1620).
+    merged_open: Mutex<(
+        Vec<crate::mergewatch::MergedOpen>,
+        crate::mergewatch::WatchStatus,
+    )>,
+    /// Signs approval receipts for BBP human gates (#447), and the file each issued receipt is
+    /// recorded in; `None` refuses `approval_issue`.
+    approval_key: Option<Arc<(rusty_pk::ed25519::SigningKey, std::path::PathBuf)>>,
+}
+
+/// The parent-link gate, even if a holder panicked: it guards no data.
+impl<S> Board<S> {
+    fn links(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Whether `card` has started: it is claimed, or sits in a work column.
+fn started(flow: &Workflow, card: &Card) -> bool {
+    card.claim.is_some() || flow.kind(&card.column) == Some(crate::workflow::Kind::Work)
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -213,7 +247,56 @@ impl<S: Store> Board<S> {
             escalations: None,
             milestones: Box::new(MemMilestones::default()),
             agents: Mutex::default(),
+            links: Mutex::new(()),
+            merged_open: Mutex::default(),
+            approval_key: None,
         }
+    }
+
+    /// Sign BBP approval receipts with `key` (#447), recording each one issued in `issued` (one
+    /// receipt JSON per line, owner-only).
+    #[must_use]
+    pub fn with_approval_key(
+        mut self,
+        key: rusty_pk::ed25519::SigningKey,
+        issued: std::path::PathBuf,
+    ) -> Self {
+        self.approval_key = Some(Arc::new((key, issued)));
+        self
+    }
+
+    /// Sign a receipt that `by` approved one BBP gate in the words of `r.verbatim` (#447). The
+    /// approver is `by`, whatever `r` names, and the time is the board's. A plan needs `approve`
+    /// or `admin`; a merge needs `admin` (the owner), as a merge `card_approve` waits for the
+    /// owner's confirmation (D1). Every receipt issued is recorded before it is returned.
+    ///
+    /// # Errors
+    /// `Forbidden` without the capability; `Refused` when no key is configured, `bbp` would
+    /// refuse the receipt, or it cannot be recorded.
+    pub fn issue_approval(
+        &self,
+        by: &Actor,
+        r: crate::receipts::Receipt,
+    ) -> Result<String, BoardError> {
+        let admin = by.caps.contains(&Capability::Admin);
+        if r.gate == "merge" && !admin {
+            return Err(BoardError::Forbidden(Capability::Admin));
+        }
+        if !admin && !by.caps.contains(&Capability::Approve) {
+            return Err(BoardError::Forbidden(Capability::Approve));
+        }
+        let (key, issued) = self.approval_key.as_deref().ok_or_else(|| {
+            BoardError::Refused("this board has no approval key (--approval-key)".into())
+        })?;
+        let r = crate::receipts::Receipt {
+            approver: by.name.clone(),
+            issued_ms: (self.clock)(),
+            ..r
+        };
+        let file = crate::receipts::issue(key, &r).map_err(BoardError::Refused)?;
+        crate::receipts::record(issued, &file).map_err(BoardError::Refused)?;
+        rusty_log::info!(approver = %r.approver, task = %r.task, gate = %r.gate, fence = r.fence, source = %r.source, "approval receipt issued");
+        Ok(file)
     }
 
     /// Serve these projects instead of only `default`.
@@ -298,6 +381,12 @@ impl<S: Store> Board<S> {
     pub fn with_move_rules(self, rules: MoveRules) -> Self {
         self.set_move_rules(rules);
         self
+    }
+
+    /// Whether the store keeps the record `card_unclose` needs: when it does not, the merge
+    /// watch closes nothing.
+    pub fn keeps_merge_record(&self) -> bool {
+        self.store.keeps_merge_record()
     }
 
     /// Use `workflow` instead of [`Workflow::default`].
@@ -713,6 +802,25 @@ impl<S: Store> Board<S> {
             .collect())
     }
 
+    /// The claims of BBP task `task` (a JSON array of claim views), for the LEL
+    /// tab's map. Read-only and admin-only like [`Board::inbox`], and only a task
+    /// linked from a card `by` may work in.
+    ///
+    /// # Errors
+    /// As [`Board::inbox`], plus [`BoardError::Refused`] for a task no card links.
+    pub fn lel_claims(&self, by: &Actor, task: &str) -> Result<serde_json::Value, BoardError> {
+        let source = self.inbox_source(by)?;
+        let linked = self.cards()?.into_iter().any(|c| {
+            by.may_work_in(&c.project) && c.execution.as_ref().is_some_and(|x| x.bbp_task == task)
+        });
+        if !linked {
+            return Err(BoardError::Refused(format!(
+                "no card you can work in links BBP task {task}"
+            )));
+        }
+        source.claims(task).map_err(inbox_error)
+    }
+
     /// Preview (`dry_run`) or take `action` on escalation `id`, read at `rev`.
     /// The escalation is re-read first: one that has closed, or moved past
     /// `rev`, is refused before anything is sent, and BBP fences the rest.
@@ -738,6 +846,22 @@ impl<S: Store> Board<S> {
             return self.closed_escalation(by, id, rev, action, dry_run);
         };
         if e.rev != rev {
+            // An earlier send at `rev` may have lost its answer: the log may now show it applied.
+            if !dry_run {
+                let project = owner.as_ref().map_or(DEFAULT_PROJECT, |c| &c.project);
+                let decision = Decision {
+                    escalation: id,
+                    rev,
+                    action,
+                };
+                if let Some((card, tracked)) = self.remediation_card(by, project, &decision)? {
+                    let settled = self.settle(by, source, &e.task, &card, tracked)?;
+                    return Ok(InboxAnswer::Recorded {
+                        card: InboxCard::of(&card),
+                        settled,
+                    });
+                }
+            }
             return Err(BoardError::Refused(format!(
                 "stale_rev: {id} is at rev {}, not {rev}; re-read the inbox",
                 e.rev
@@ -752,13 +876,20 @@ impl<S: Store> Board<S> {
         let dropped = e.dropped_acted(action).map_err(inbox_error)?;
         if dropped.is_empty() {
             let outcome = source
-                .act(&e, action, &answerer(&by.name))
+                .act(&e, action, &answerer(&by.name), None)
                 .map_err(inbox_error)?;
             return Ok(InboxAnswer::Outcome(outcome));
         }
         if !self.store.durable() {
             return Err(BoardError::Refused(
                 "this decision drops acted-on work, and its Remediate card must be written to a durable store first: start the board with --tick-url".into(),
+            ));
+        }
+        // A decision id rides one command (a replay writes no events, so a later command
+        // would be fenced on the wrong rev): refuse before any card is written.
+        if plan(&e, action).map_err(inbox_error)?.len() != 1 {
+            return Err(BoardError::Refused(
+                "a decision that drops acted-on work must be one command".into(),
             ));
         }
         // Write ahead: the Remediate card is committed before BBP is asked to drop the
@@ -771,25 +902,44 @@ impl<S: Store> Board<S> {
             rev,
             action,
         };
-        let card = self.remediate(by, &project, &e, &decision, &dropped, &dry)?;
-        let outcome =
-            source
-                .act(&e, action, &answerer(&by.name))
-                .map_err(|err| match inbox_error(err) {
-                    BoardError::Storage(why) => BoardError::Storage(format!(
-                        "{why}; its Remediate card {} was written first, so retry to reconcile",
-                        card.label()
-                    )),
-                    other => other,
-                })?;
+        // A host that predates `bbp decision` would ignore the id and apply the send
+        // untracked, so its card is filed at the legacy id, which is never settled.
+        let probe = source.applied(&e.task, &decision.tracked_id(&project)?.to_string());
+        if let Err(err) = &probe {
+            rusty_log::warn!(task = %e.task, error = %err, "bbp cannot track decision ids: filing an untracked card");
+        }
+        let capable = probe.is_ok();
+        let (card, tracked) =
+            self.remediate(by, &project, &e, &decision, &dropped, &dry, capable)?;
+        // Only a send this board can track later carries an id: a card from before ids
+        // (`tracked` false) may have been applied without one, so it is sent as it was.
+        let id = tracked.then(|| card.id.to_string());
+        let outcome = source
+            .act(&e, action, &answerer(&by.name), id.as_deref())
+            .map_err(|err| match inbox_error(err) {
+                BoardError::Storage(why) => BoardError::Storage(format!(
+                    "{why}; its Remediate card {} was written first, so retry to reconcile",
+                    card.label()
+                )),
+                other => other,
+            })?;
         if let Outcome::Refused { step: 0, code, .. } = &outcome {
             // Only this send is known to have written nothing: another send of the same
-            // decision shares the card and may commit before or after any re-read.
-            self.comment(
-                card.id,
-                by,
-                &format!("BBP refused this send ({code}). Another send of the same decision may still apply it, so check BBP's log before closing this card."),
-            )?;
+            // decision shares the card and may commit before or after a re-read, so the log
+            // is asked whether it applied.
+            // Read the card again: a concurrent send may have filed an untracked one since.
+            let tracked = self
+                .remediation_card(by, &project, &decision)?
+                .is_some_and(|(_, tracked)| tracked);
+            let settled = self.settle(by, source, &e.task, &self.get(card.id)?, tracked)?;
+            if settled == Settled::Unknown {
+                let said = format!(
+                    "BBP refused this send ({code}). Another send of the same decision may still apply it, so check BBP's log before closing this card."
+                );
+                if !self.get(card.id)?.comments.iter().any(|c| c.text == said) {
+                    self.comment(card.id, by, &said)?;
+                }
+            }
         }
         Ok(InboxAnswer::Remediated { outcome, card })
     }
@@ -815,10 +965,51 @@ impl<S: Store> Board<S> {
             rev,
             action,
         };
-        self.remediation_card(by, &project, &decision)?
-            .map(|card| InboxCard::of(&card))
-            .map(|card| InboxAnswer::Recorded { card })
-            .ok_or_else(closed)
+        let (card, tracked) = self
+            .remediation_card(by, &project, &decision)?
+            .ok_or_else(closed)?;
+        let source = self.inbox_source(by)?;
+        let settled = self.settle(by, source, task, &card, tracked)?;
+        Ok(InboxAnswer::Recorded {
+            card: InboxCard::of(&card),
+            settled,
+        })
+    }
+
+    /// Note on a Remediate `card` what BBP's log says of its decision. Only the log's word
+    /// that the id was applied is acted on (a note, once); the log's silence proves nothing
+    /// (a send may still land, or a host may have dropped the id), so the card is never
+    /// closed from it, and a card whose send carried no id (`tracked` false) says nothing.
+    fn settle(
+        &self,
+        by: &Actor,
+        source: &Arc<dyn Escalations>,
+        task: &str,
+        card: &Card,
+        tracked: bool,
+    ) -> Result<Settled, BoardError> {
+        // Absence from the log means "not applied" only for a send that carried an id. A
+        // card filed before ids existed may well have been applied: it stays for a person.
+        if !tracked {
+            return Ok(Settled::Unknown);
+        }
+        let applied = match source.applied(task, &card.id.to_string()) {
+            Ok(applied) => applied,
+            Err(err) => {
+                rusty_log::warn!(card = %card.id, error = %err, "cannot settle a Remediate card");
+                return Ok(Settled::Unknown);
+            }
+        };
+        if let Some(rev) = applied {
+            let said = format!(
+                "BBP's log shows this decision was applied (rev {rev}). Undo or reconcile the dropped work."
+            );
+            if !card.comments.iter().any(|c| c.text == said) {
+                self.comment(card.id, by, &said)?;
+            }
+            return Ok(Settled::Applied { rev });
+        }
+        Ok(Settled::Unknown)
     }
 
     /// The project of the card linked to BBP task `task`, as `inbox` attaches it.
@@ -831,27 +1022,40 @@ impl<S: Store> Board<S> {
             .map_or_else(|| DEFAULT_PROJECT.to_owned(), |c| c.project))
     }
 
-    /// The Remediate card written for `decision` in `project`. It is found by its
-    /// derived id, never by its tag: a tag anyone can add to any card is no record.
+    /// The Remediate card written for `decision` in `project`, and whether its send is
+    /// tracked in BBP's log. It is found by its derived id, never by its tag: a tag anyone
+    /// can add to any card is no record. The id says whether its send is tracked: a card at
+    /// the legacy id was sent without a decision id, so BBP's log can say nothing of it.
     fn remediation_card(
         &self,
         by: &Actor,
         project: &str,
         decision: &Decision<'_>,
-    ) -> Result<Option<Card>, BoardError> {
+    ) -> Result<Option<(Card, bool)>, BoardError> {
         if !by.may_work_in(project) {
             return Ok(None);
         }
-        Ok(self
-            .store
-            .get(decision.card_id(project)?)?
-            .filter(|c| c.project == project))
+        // The legacy card wins: an untracked send is always preceded by its card, so while
+        // one exists a decision may have applied without an id, whatever else is filed.
+        for (id, tracked) in [
+            (decision.card_id(project)?, false),
+            (decision.tracked_id(project)?, true),
+        ] {
+            if let Some(card) = self.store.get(id)?.filter(|c| c.project == project) {
+                return Ok(Some((card, tracked)));
+            }
+        }
+        Ok(None)
     }
 
     /// The one Backlog "Remediate" card for `decision`'s dropped acted-on work (#595 §4),
     /// at the id derived from `project` and the exact decision, so a retry of it finds
     /// the card rather than adding a second, and a different decision never reuses it.
-    /// Its `remediate:` tag is for people only.
+    /// Its `remediate:` tag is for people only. A new card is `tracked` when the host can
+    /// record the send's decision id; the second value says whether the card returned is.
+    /// Two retries that probe differently may each file a card: settlement reads the legacy
+    /// one first, so the decision is then never settled and neither card is closed.
+    #[allow(clippy::too_many_arguments)]
     fn remediate(
         &self,
         by: &Actor,
@@ -860,9 +1064,14 @@ impl<S: Store> Board<S> {
         decision: &Decision<'_>,
         dropped: &[&Acted],
         dry: &DryRun,
-    ) -> Result<InboxCard, BoardError> {
-        if let Some(card) = self.remediation_card(by, project, decision)? {
-            return Ok(InboxCard::of(&card));
+        tracked: bool,
+    ) -> Result<(InboxCard, bool), BoardError> {
+        if let Some((card, was_tracked)) = self.remediation_card(by, project, decision)? {
+            // A tracked card is reused only while the host can still record ids: after a
+            // rollback the send would go untracked, so the legacy card is filed first.
+            if !was_tracked || tracked {
+                return Ok((InboxCard::of(&card), was_tracked));
+            }
         }
         let tag = format!("remediate:{}", e.id);
         let text = |id: u64| {
@@ -878,10 +1087,14 @@ impl<S: Store> Board<S> {
         );
         for x in dropped {
             body.push_str(&format!(
-                "- msg:{} \"{}\": {}\n",
+                "- msg:{} \"{}\": {}\n  {}\n",
                 x.claim,
                 text(x.claim),
-                x.marks.join(", ")
+                x.marks.join(", "),
+                x.diffstat.as_ref().map_or_else(
+                    || "No diffstat: the claim has no readable candidate, or the host predates #1400.".to_owned(),
+                    Diffstat::line,
+                )
             ));
         }
         let events: Vec<&str> = dry
@@ -895,21 +1108,25 @@ impl<S: Store> Board<S> {
             dry.step.args.join(" "),
             events.join(", ")
         ));
-        body.push_str("\nFiled before the decision was sent to BBP. If BBP's log shows it was not applied, close this card.\n");
+        body.push_str("\nFiled before the decision was sent to BBP. If BBP's log does not show it was applied, check before closing this card.\n");
         let title = format!(
             "Remediate: {}",
             text(dropped.first().map_or(0, |x| x.claim))
         );
         let card = Card {
-            id: decision.card_id(project)?,
+            id: if tracked {
+                decision.tracked_id(project)?
+            } else {
+                decision.card_id(project)?
+            },
             ..Card::new(&title, &body, vec![tag], (self.clock)())?
         };
         match self.create(by, project, card) {
-            Ok(card) => Ok(InboxCard::of(&card)),
+            Ok(card) => Ok((InboxCard::of(&card), tracked)),
             // A concurrent retry of the same decision wrote it first.
             Err(BoardError::Conflict) => self
                 .remediation_card(by, project, decision)?
-                .map(|c| InboxCard::of(&c))
+                .map(|(c, tracked)| (InboxCard::of(&c), tracked))
                 .ok_or(BoardError::Conflict),
             Err(other) => Err(other),
         }
@@ -1101,7 +1318,78 @@ impl<S: Store> Board<S> {
     pub fn metrics(&self, keep: impl Fn(&Card) -> bool) -> Result<Metrics, BoardError> {
         let mut cards = self.cards()?;
         cards.retain(|c| keep(c));
-        Ok(metrics(&self.workflow(), &cards, (self.clock)()))
+        let mut m = metrics(&self.workflow(), &cards, (self.clock)());
+        let live: HashMap<Uuid, &Card> = cards.iter().map(|c| (c.id, c)).collect();
+        let projects = self.projects();
+        let seen = self
+            .merged_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Re-check every cached match against the card and registry as they are now: the card
+        // is open, unarchived and in scope, and each link's repository is one of its project's.
+        m.merged_open = seen
+            .0
+            .iter()
+            .filter_map(|o| {
+                let c = live.get(&o.id)?;
+                if c.column == Column::DONE || c.archived_ms.is_some() {
+                    return None;
+                }
+                let mut prs: Vec<_> = o
+                    .prs
+                    .iter()
+                    .filter(|l| {
+                        projects
+                            .repos_of(&c.project)
+                            .any(|r| projects.github_of(r) == Some(l.repo.as_str()))
+                    })
+                    .cloned()
+                    .collect();
+                prs.sort_by_key(|l| l.why);
+                Some(crate::mergewatch::MergedOpen {
+                    number: c.number,
+                    project: c.project.clone(),
+                    title: c.title.clone(),
+                    column: c.column.clone(),
+                    why: prs.first()?.why,
+                    prs,
+                    ..o.clone()
+                })
+            })
+            .collect();
+        m.merged_watch = seen.1.clone();
+        Ok(m)
+    }
+
+    /// Replace what the merge watch found (see [`crate::mergewatch::scan`]); `truncated` when it
+    /// read only the newest closed pull requests of some repository, `partial` when some
+    /// repository could not be read.
+    pub fn set_merged_open(
+        &self,
+        found: Vec<crate::mergewatch::MergedOpen>,
+        truncated: bool,
+        partial: bool,
+    ) {
+        *self
+            .merged_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = (
+            found,
+            crate::mergewatch::WatchStatus {
+                checked_ms: Some((self.clock)()),
+                truncated,
+                error: partial,
+            },
+        );
+    }
+
+    /// Record that the merge watch's latest run failed; the last list stays, marked as stale.
+    pub fn note_merge_watch_failed(&self) {
+        self.merged_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .1
+            .error = true;
     }
 
     /// One card.
@@ -1170,6 +1458,7 @@ impl<S: Store> Board<S> {
             name: NUMBERER.into(),
             caps: BTreeSet::new(),
             projects: None,
+            provider: None,
         };
         let cards = self.store.list()?;
         let on_board = cards.iter().filter_map(|c| c.number).max().unwrap_or(0);
@@ -1334,6 +1623,7 @@ impl<S: Store> Board<S> {
         if !new.evidence.is_empty() {
             card.evidence = card.add_evidence(&new.evidence, card.created_ms)?.evidence;
         }
+        let _links = new.parent.map(|_| self.links());
         if let Some(p) = new.parent {
             // A new card has no children, so no parent can close a loop through it.
             self.store.get(p)?.ok_or(BoardError::NotFound(p))?;
@@ -1492,6 +1782,10 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::OutOfScope(p.to_owned()));
             }
         }
+        // The link gate is taken before the workflow guard, as everywhere (see `Board::links`),
+        // and held across every dependency check and commit below: `unclose` reopens a
+        // prerequisite under the same gate, so a take's check cannot go stale before its write.
+        let _links = self.links();
         let flow = self.flow();
         let queues = flow.work_queues();
         let rank = |c: &Card| queues.iter().position(|q| *q == c.column);
@@ -1579,7 +1873,7 @@ impl<S: Store> Board<S> {
                     return Err(BoardError::Conflict);
                 }
                 self.check_takeable(c)?;
-                c.claim(by, now)
+                crate::duties::on_claim(&c.claim(by, now)?, flow, by, now)
             });
         };
         if !works(enter) {
@@ -1599,10 +1893,11 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::Claimed(holder.clone()));
             }
             let entered = c.move_to(flow, enter, by, now)?;
-            Ok(Card {
+            let claimed = Card {
                 claim: Some(by.name.clone()),
                 ..entered
-            })
+            };
+            crate::duties::on_claim(&claimed, flow, by, now)
         })
     }
 
@@ -1650,7 +1945,8 @@ impl<S: Store> Board<S> {
             if !by.may_work_in(&current.project) {
                 return Err(BoardError::OutOfScope(current.project));
             }
-            let next = op(&current, (self.clock)())?;
+            // A card that leaves a gate expires what was filed for it (#447).
+            let next = crate::duties::on_leave(&current, op(&current, (self.clock)())?);
             // Domain operations may deliberately return the unchanged aggregate
             // for an idempotent replay.  Such a replay is already durable and
             // must not be sent through the store's rev + 1 CAS.
@@ -1673,16 +1969,53 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::move_to`], or [`Card::move_freely`] when the rules are off.
     pub fn move_card(&self, id: Uuid, to: &Column, by: &Actor) -> Result<Card, BoardError> {
+        self.move_card_with_state(id, to, by, None)
+    }
+
+    /// [`Board::move_card`], also setting the card's `state` line in the same write, so no
+    /// other writer's newer state can be overwritten between the move and the line.
+    ///
+    /// # Errors
+    /// As [`Board::move_card`], or a `state` that fails [`crate::domain::check_state`].
+    pub fn move_card_with_state(
+        &self,
+        id: Uuid,
+        to: &Column,
+        by: &Actor,
+        state: Option<&str>,
+    ) -> Result<Card, BoardError> {
+        let with_state = |moved: Card| -> Result<Card, BoardError> {
+            let Some(state) = state else { return Ok(moved) };
+            crate::domain::check_state(state)?;
+            Ok(Card {
+                state: state.to_owned(),
+                ..moved
+            })
+        };
+        // A move into a work column starts the card: serialize it with `unclose`'s scan.
+        let _links = self.links();
         let flow = self.flow();
         match self.move_rules() {
             MoveRules::Enforced => self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
                 self.check_starts(&flow, c, to)?;
-                c.move_to(&flow, to, by, now)
+                crate::duties::check_move(c, &flow, to, by)?;
+                let moved = c.move_to(&flow, to, by, now)?;
+                // The ledger records the move as made: a recorder's close holds `close`.
+                let (made_as, _) = c.recorder(&flow, by, to);
+                with_state(crate::duties::on_move(
+                    &moved, &flow, &c.column, &made_as, now,
+                )?)
             }),
             MoveRules::Open => {
                 let card = self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
                     self.check_starts(&flow, c, to)?;
-                    c.move_freely(&flow, to, by, now)
+                    crate::duties::check_move(c, &flow, to, by)?;
+                    let moved = c.move_freely(&flow, to, by, now)?;
+                    // The ledger records the move as made: a recorder's close holds `close`.
+                    let (made_as, _) = c.recorder(&flow, by, to);
+                    with_state(crate::duties::on_move(
+                        &moved, &flow, &c.column, &made_as, now,
+                    )?)
                 })?;
                 rusty_log::info!(card = %id, actor = %by.name, to = %to, "card moved with movement rules off");
                 Ok(card)
@@ -1793,6 +2126,65 @@ impl<S: Store> Board<S> {
         self.apply(id, by, EventKind::Archived, |c, now| c.archive(now))
     }
 
+    /// Close a card because pull request `pr`, read from GitHub repository `repo`, merged and
+    /// said so: see [`Card::closed_by_merge`]. Logged as a move by `by` (the merge watch).
+    /// Needs `Record`.
+    ///
+    /// The match was made on a snapshot, so it is checked again on the card as it is now, and
+    /// committed once, never retried: the card must still be at revision `rev`, in a project `by`
+    /// may work in whose repositories include `repo`, and have no children.
+    ///
+    /// # Errors
+    /// [`BoardError::Conflict`] if the card changed since `rev` or the commit lost a race,
+    /// [`BoardError::Refused`] if the repository no longer matches or the card is a parent,
+    /// a missing capability or card, or see [`Card::closed_by_merge`].
+    pub fn close_merged(
+        &self,
+        id: Uuid,
+        rev: u64,
+        pr: &str,
+        repo: &str,
+        by: &Actor,
+    ) -> Result<Card, BoardError> {
+        if !self.store.keeps_merge_record() {
+            return Err(BoardError::Refused(
+                "this store cannot keep the record that undoes a merge close".into(),
+            ));
+        }
+        let _links = self.links();
+        let flow = self.flow();
+        let current = self.get_in(&flow, id)?;
+        if !by.may_work_in(&current.project) {
+            return Err(BoardError::OutOfScope(current.project));
+        }
+        if current.rev != rev {
+            return Err(BoardError::Conflict);
+        }
+        let projects = self.projects();
+        if !projects
+            .repos_of(&current.project)
+            .any(|r| projects.github_of(r) == Some(repo))
+        {
+            return Err(BoardError::Refused(
+                "the pull request's repository is not the card's".into(),
+            ));
+        }
+        // `cards_in`, not `cards`: a second read of the workflow lock could queue behind a
+        // waiting writer while this holds the link gate.
+        if self.cards_in(&flow)?.iter().any(|c| c.parent == Some(id)) {
+            return Err(BoardError::Refused(
+                "a parent closes with its children".into(),
+            ));
+        }
+        let next = crate::duties::on_leave(
+            &current,
+            current.closed_by_merge(&flow, pr, by, (self.clock)())?,
+        );
+        let event = Event::of(&next, EventKind::Moved, &by.name);
+        let rev = self.store.replace(&next, event)?;
+        Ok(Card { rev, ..next })
+    }
+
     /// Put a shelved card (archived, or past the default Done window) back on the default
     /// views: see [`Card::restore`]. Needs `Close`.
     ///
@@ -1805,6 +2197,43 @@ impl<S: Store> Board<S> {
         let window = window_ms(DONE_WINDOW_DAYS);
         self.apply(id, by, EventKind::Restored, |c, now| {
             Ok(c.restore(now, window))
+        })
+    }
+
+    /// Undo the merge watch's close of a card: see [`Card::unclosed`]. Logged as a move by
+    /// `by`. Needs `Triage`. Refused while an open card that depends on this one has started
+    /// (claimed, or in a work column): reopening the prerequisite would pull the ground from
+    /// under it, so a person decides; one still waiting simply waits again.
+    ///
+    /// # Errors
+    /// A missing capability or card, a started dependent, or see [`Card::unclosed`].
+    pub fn unclose(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
+        // Under the gate every start of a card holds (take, claim, move), so none can start a
+        // dependent between the look at the dependents and the reopening.
+        let _links = self.links();
+        let flow = self.flow();
+        // Authorize and validate the card itself first: only then look at other cards, and
+        // never say more about them than that one has started.
+        let current = self.get_in(&flow, id)?;
+        if !by.may_work_in(&current.project) {
+            return Err(BoardError::OutOfScope(current.project));
+        }
+        current.unclosed(&flow, by, (self.clock)())?;
+        // Back into a work column: a paused project takes no new work.
+        if let Some(m) = &current.merged {
+            self.check_starts(&flow, &current, &m.was)?;
+        }
+        if self
+            .cards_in(&flow)?
+            .iter()
+            .any(|c| c.deps.contains(&id) && c.column != Column::DONE && started(&flow, c))
+        {
+            return Err(BoardError::Refused(
+                "an open card that depends on this one has started; move or finish it first".into(),
+            ));
+        }
+        self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
+            c.unclosed(&flow, by, now)
         })
     }
 
@@ -1864,10 +2293,69 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::claim`].
     pub fn claim(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
-        self.apply(id, by, EventKind::Claimed, |c, now| {
+        // A claim starts the card: serialize it with `unclose`'s scan (gate before workflow).
+        let _links = self.links();
+        let flow = self.flow();
+        self.apply_in(&flow, id, by, EventKind::Claimed, |c, now| {
             self.check_accepts(&c.project)?;
-            c.claim(by, now)
+            crate::duties::on_claim(&c.claim(by, now)?, &flow, by, now)
         })
+    }
+
+    /// Review the work of a card's current column (#447): passed, or changes asked for.
+    ///
+    /// # Errors
+    /// See [`crate::duties::review`].
+    pub fn review(&self, id: Uuid, by: &Actor, pass: bool, note: &str) -> Result<Card, BoardError> {
+        let flow = self.flow();
+        self.apply_in(&flow, id, by, EventKind::Reviewed, |c, now| {
+            crate::duties::review(c, &flow, by, pass, note, now)
+        })
+    }
+
+    /// Approve a gate on the owner's stated approval (#447): move the card through it, or file
+    /// the approval (pending for the proxy's merges and unblocks, recorded for a merge the
+    /// owner confirms).
+    ///
+    /// # Errors
+    /// See [`crate::duties::approve`]; a move into a work column also needs the card's
+    /// dependencies done, as any start does.
+    pub fn approve(
+        &self,
+        id: Uuid,
+        by: &Actor,
+        approval: &crate::duties::Approval<'_>,
+    ) -> Result<(Card, crate::duties::Outcome), BoardError> {
+        use crate::duties::Outcome;
+        // A move into a work column starts the card: serialize it with `unclose`'s scan.
+        let _links = self.links();
+        let flow = self.flow();
+        let to = approval.to;
+        // The outcome decides the event, so ask first, and refuse a commit that would decide
+        // otherwise (the card changed in between).
+        let current = self.get_in(&flow, id)?;
+        // Scope first, so an out-of-scope caller learns nothing of the card from a refusal.
+        if !by.may_work_in(&current.project) {
+            return Err(BoardError::OutOfScope(current.project));
+        }
+        let (_, outcome) = crate::duties::approve(&current, &flow, by, approval, (self.clock)())?;
+        let kind = match outcome {
+            Outcome::Moves => EventKind::Moved,
+            Outcome::Stays => EventKind::Approved,
+            Outcome::Expired => EventKind::ApprovalExpired,
+        };
+        let card = self.apply_in(&flow, id, by, kind, |c, now| {
+            let (approved, now_outcome) = crate::duties::approve(c, &flow, by, approval, now)?;
+            if now_outcome != outcome {
+                return Err(BoardError::Conflict);
+            }
+            if outcome != Outcome::Moves {
+                return Ok(approved);
+            }
+            self.check_starts(&flow, c, to)?;
+            Ok(approved.arrive(to, now))
+        })?;
+        Ok((card, outcome))
     }
 
     /// Release a claim.
@@ -1945,6 +2433,8 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::NotFound(*linked));
             }
         }
+        // Parent and dependency edits are what the unclose scan reads: serialize them with it.
+        let _links = (plan.parent.is_some() || plan.deps.is_some()).then(|| self.links());
         if let Some(Some(parent)) = plan.parent {
             self.check_parent(id, parent)?;
         }
@@ -1996,9 +2486,46 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::comment`].
     pub fn comment(&self, id: Uuid, by: &Actor, text: &str) -> Result<Card, BoardError> {
+        self.comment_with_state(id, by, text, None)
+    }
+
+    /// [`Board::comment`], also setting the card's `state` line when one is given.
+    ///
+    /// # Errors
+    /// See [`Card::comment_with_state`].
+    pub fn comment_with(
+        &self,
+        id: Uuid,
+        by: &Actor,
+        new: &crate::domain::NewComment<'_>,
+    ) -> Result<Card, BoardError> {
+        let keeps_ids = self.store.keeps_comment_ids();
         self.apply(id, by, EventKind::Commented, |c, now| {
-            c.comment(by, text, now)
+            let mut next = c.comment_with(by, new, now)?;
+            if !keeps_ids && let Some(added) = next.comments.last_mut() {
+                added.id = None;
+            }
+            Ok(next)
         })
+    }
+
+    /// [`Board::comment`], also setting the card's `state` line.
+    ///
+    /// # Errors
+    /// See [`Card::comment_with_state`].
+    pub fn comment_with_state(
+        &self,
+        id: Uuid,
+        by: &Actor,
+        text: &str,
+        state: Option<&str>,
+    ) -> Result<Card, BoardError> {
+        let new = crate::domain::NewComment {
+            text,
+            state,
+            ..crate::domain::NewComment::default()
+        };
+        self.comment_with(id, by, &new)
     }
 }
 
@@ -2100,7 +2627,22 @@ pub enum InboxAnswer {
     Recorded {
         /// The Backlog card to undo or reconcile the work.
         card: InboxCard,
+        /// What BBP's log says of the send: applied (noted), or unknown. The card is never closed from it.
+        settled: Settled,
     },
+}
+
+/// What BBP's log says of a decision that dropped acted-on work, and so of its Remediate card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Settled {
+    /// Applied at this rev: the card stays for the dropped work.
+    Applied {
+        /// The task revision just after BBP recorded the send.
+        rev: u64,
+    },
+    /// Not known: the send may still land, or the host cannot say. The card stays.
+    Unknown,
 }
 
 /// Namespace of the Remediate card ids (UUIDv5).
@@ -2115,12 +2657,27 @@ struct Decision<'a> {
 }
 
 impl Decision<'_> {
-    /// The id of this decision's Remediate card in `project`. Every other card id is
-    /// random, so a card at this id was written by [`Board::inbox_act`] for it.
-    fn card_id(&self, project: &str) -> Result<Uuid, BoardError> {
+    fn key(&self, project: &str) -> Result<String, BoardError> {
         let action =
             serde_json::to_string(self.action).map_err(|e| BoardError::Storage(e.to_string()))?;
-        let key = format!("{project}\n{}\n{}\n{action}", self.escalation, self.rev);
+        Ok(format!(
+            "{project}\n{}\n{}\n{action}",
+            self.escalation, self.rev
+        ))
+    }
+
+    /// The id of a Remediate card filed before BBP recorded decision ids: its send carried
+    /// none, so BBP's log can say nothing of it. Every other card id is random, so a card
+    /// at this id was written by [`Board::inbox_act`] for this decision.
+    fn card_id(&self, project: &str) -> Result<Uuid, BoardError> {
+        Ok(Uuid::new_v5(&REMEDIATION_NS, self.key(project)?.as_bytes()))
+    }
+
+    /// The id of this decision's Remediate card in `project`, and the decision id its send
+    /// carries to BBP. A card at this id was written by a board that sends under it, so
+    /// a log with no such id is positive proof the send was not applied.
+    fn tracked_id(&self, project: &str) -> Result<Uuid, BoardError> {
+        let key = format!("{}\ndecision-id", self.key(project)?);
         Ok(Uuid::new_v5(&REMEDIATION_NS, key.as_bytes()))
     }
 }

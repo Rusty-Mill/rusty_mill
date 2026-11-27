@@ -29,10 +29,29 @@ struct Fake {
     lose_answer: AtomicBool,
     /// Refuse the command at this step; the ones before it commit.
     refuse_at: Option<usize>,
+    /// The code a refusal carries (default `dep_closed`).
+    refuse_code: Option<&'static str>,
+    /// A refusal that comes from another send of the same decision winning the fence.
+    winner_is_same_decision: bool,
+    /// Fail before the host is reached: nothing is applied or recorded.
+    fail_before: AtomicBool,
+    /// The next send is refused at step 0 without writing anything (a tracked card stays).
+    refuse_next: AtomicBool,
+    /// The host predates `bbp decision`.
+    old_host: AtomicBool,
+    /// The host ignores the decision id it is sent (rolled back between probe and send).
+    ignore_id: AtomicBool,
+    /// `open` answers only a lone task, not a list (so the board's inbox cannot see rows).
+    list_only_alone: AtomicBool,
+    /// The decision ids the host applied, with the rev.
+    decided: Mutex<Vec<String>>,
     /// The `verb args` of every command each act sent.
     planned: Mutex<Vec<Vec<String>>>,
     asked: Mutex<Vec<Vec<String>>>,
     acted: Mutex<Vec<(String, Action, String)>>,
+    /// What `claims` answers, and the tasks it was asked for.
+    claims: Mutex<Value>,
+    claim_reads: Mutex<Vec<String>>,
 }
 
 impl Fake {
@@ -47,6 +66,9 @@ impl Fake {
 impl Escalations for Fake {
     fn open(&self, tasks: &[String]) -> Result<Vec<Escalation>, InboxError> {
         self.asked.lock().unwrap().push(tasks.to_vec());
+        if self.list_only_alone.load(Ordering::SeqCst) && tasks.len() != 1 {
+            return Ok(Vec::new());
+        }
         Ok(self
             .rows
             .lock()
@@ -65,7 +87,39 @@ impl Escalations for Fake {
             then: steps.collect(),
         })
     }
-    fn act(&self, e: &Escalation, a: &Action, by: &str) -> Result<Outcome, InboxError> {
+    fn claims(&self, task: &str) -> Result<Value, InboxError> {
+        self.claim_reads.lock().unwrap().push(task.to_owned());
+        Ok(self.claims.lock().unwrap().clone())
+    }
+    fn applied(&self, _task: &str, decision: &str) -> Result<Option<u64>, InboxError> {
+        if self.old_host.load(Ordering::SeqCst) {
+            return Err(InboxError::Host("unknown subcommand decision".into()));
+        }
+        let at = self
+            .decided
+            .lock()
+            .unwrap()
+            .iter()
+            .position(|d| d == decision);
+        Ok(at.map(|n| 8 + n as u64))
+    }
+    fn act(
+        &self,
+        e: &Escalation,
+        a: &Action,
+        by: &str,
+        decision: Option<&str>,
+    ) -> Result<Outcome, InboxError> {
+        if self.fail_before.load(Ordering::SeqCst) {
+            return Err(InboxError::Host("connection refused".into()));
+        }
+        if self.refuse_next.swap(false, Ordering::SeqCst) {
+            return Ok(Outcome::Refused {
+                step: 0,
+                code: "dep_closed".into(),
+                detail: "a dependency closed".into(),
+            });
+        }
         let steps = plan(e, a)?;
         self.planned.lock().unwrap().push(
             steps
@@ -81,13 +135,22 @@ impl Escalations for Fake {
             // Another send of the decision won the fence first.
             self.rows.lock().unwrap().retain(|r| r.id != e.id);
         }
+        let record = |this: &Self| {
+            if let Some(id) = decision.filter(|_| !this.ignore_id.load(Ordering::SeqCst)) {
+                this.decided.lock().unwrap().push(id.to_owned());
+            }
+        };
         if let Some(step) = self.refuse_at {
+            if self.winner_is_same_decision {
+                record(self);
+            }
             return Ok(Outcome::Refused {
                 step,
-                code: "dep_closed".into(),
+                code: self.refuse_code.unwrap_or("dep_closed").into(),
                 detail: "a dependency closed".into(),
             });
         }
+        record(self);
         if self.consume {
             self.rows.lock().unwrap().retain(|r| r.id != e.id);
         }
@@ -151,6 +214,8 @@ fn owner() -> Identity {
         role: "human".into(),
         projects: None,
         connector: false,
+        provider: None,
+        view: Default::default(),
     }
 }
 
@@ -181,6 +246,8 @@ fn a_model_token_is_forbidden() {
         role: "builder".into(),
         projects: None,
         connector: false,
+        provider: None,
+        view: Default::default(),
     };
     assert!(refused(call(&b, &model, "inbox_list", json!({}))).contains("Admin"));
     let act = json!({"id": "T1/msg:1/3", "rev": 7, "action": "approve"});
@@ -336,6 +403,17 @@ fn shipped() -> Escalation {
     e.acted = Some(vec![rusty_mill_board::inbox::Acted {
         claim: 1,
         marks: vec!["pr-7".into()],
+        diffstat: Some(rusty_mill_board::inbox::Diffstat {
+            files: 2,
+            added: 5,
+            removed: 1,
+            top: vec![rusty_mill_board::inbox::FileStat {
+                path: "src/a.rs".into(),
+                added: 5,
+                removed: 1,
+            }],
+            more: 1,
+        }),
     }]);
     e
 }
@@ -397,6 +475,13 @@ fn rejecting_acted_on_work_files_one_remediate_card() {
     assert_eq!(made.len(), 1);
     assert!(
         made[0].body.contains("pr-7") && made[0].body.contains("claim msg:1 drop"),
+        "{}",
+        made[0].body
+    );
+    assert!(
+        made[0]
+            .body
+            .contains("2 files, +5 -1: `src/a.rs` +5 -1, and 1 more"),
         "{}",
         made[0].body
     );
@@ -714,4 +799,408 @@ fn a_memory_only_board_refuses_a_drop_of_acted_on_work() {
         json!({"outcome": "Done"}),
         "a decision that drops nothing still works"
     );
+}
+
+fn fresh() -> (Arc<MemStore>, Arc<AtomicBool>) {
+    (
+        Arc::new(MemStore::default()),
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+fn last_comment(c: &Card) -> &str {
+    c.comments.last().map_or("", |c| c.text.as_str())
+}
+
+/// The answer to a send was lost after BBP applied it: the retry reads BBP's log, keeps the
+/// card, and says at which rev.
+#[test]
+fn a_lost_answer_that_was_applied_keeps_its_card() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        lose_answer: AtomicBool::new(true),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    let board = board_over(&store, &down, &fake, false);
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(
+        out["recorded"]["settled"],
+        json!({"applied": {"rev": 8}}),
+        "{out}"
+    );
+    let card = &remediate_cards(&board)[0];
+    assert!(card.closed.is_none(), "an applied drop keeps its card");
+    assert!(last_comment(card).contains("applied (rev 8)"), "{card:?}");
+    // Asking again does not repeat the note.
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(
+        remediate_cards(&board)[0].comments.len(),
+        card.comments.len()
+    );
+}
+
+/// The send never reached BBP and another decision then closed the escalation: the log's
+/// silence proves nothing (a host may have dropped the id), so the card stays for a person.
+#[test]
+fn a_lost_answer_that_was_not_applied_leaves_its_card_open() {
+    let fake = Arc::new(Fake::with(vec![shipped()]));
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    fake.refuse_next.store(true, Ordering::SeqCst);
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
+    // Someone else resolved the escalation meanwhile.
+    fake.rows.lock().unwrap().clear();
+
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board)[0].closed.is_none());
+}
+
+/// The same, with the escalation still open but moved past the rev the send was read at.
+#[test]
+fn a_retry_at_a_stale_rev_leaves_the_card_open() {
+    let fake = Arc::new(Fake::with(vec![shipped()]));
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    fake.refuse_next.store(true, Ordering::SeqCst);
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
+    fake.rows.lock().unwrap()[0].rev = 9;
+
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board)[0].closed.is_none());
+}
+
+/// A send that loses the fence to another decision leaves its card open: the log can't say
+/// the winner dropped nothing.
+/// Losing to a send of the same decision keeps the card, since that send applied it.
+#[test]
+fn a_losing_send_settles_its_card_from_the_log() {
+    let lose = |same: bool| {
+        let fake = Arc::new(Fake {
+            consume: true,
+            refuse_at: Some(0),
+            refuse_code: Some("StaleRev"),
+            winner_is_same_decision: same,
+            ..Fake::with(vec![shipped()])
+        });
+        let (store, down) = fresh();
+        let board = board_over(&store, &down, &fake, true);
+        call(&board, &owner(), "inbox_act", reject()).unwrap();
+        remediate_cards(&board).remove(0)
+    };
+    let other = lose(false);
+    assert!(other.closed.is_none(), "{other:?}");
+    let same = lose(true);
+    assert!(same.closed.is_none(), "{same:?}");
+    assert!(last_comment(&same).contains("applied"), "{same:?}");
+}
+
+/// A host that predates `bbp decision` cannot settle anything: the card stays, as before.
+#[test]
+fn an_old_host_leaves_the_card_for_a_person() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        lose_answer: AtomicBool::new(true),
+        old_host: AtomicBool::new(true),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    let board = board_over(&store, &down, &fake, false);
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board)[0].closed.is_none());
+}
+
+/// The id a drop is sent under is the Remediate card's id, so the card and BBP's log meet.
+#[test]
+fn a_drop_is_sent_under_its_cards_id() {
+    let fake = Arc::new(Fake::with(vec![shipped()]));
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    let card = out["remediated"]["card"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(*fake.decided.lock().unwrap(), [card]);
+}
+
+/// A Remediate card filed before BBP recorded decision ids, at the id the old board gave it.
+/// Its send carried no id, so BBP's log cannot say whether it was applied.
+fn legacy_card(store: &MemStore) -> Card {
+    const NS: Uuid = Uuid::from_u128(0x6d69_6c6c_2d72_656d_6564_6961_7465_0595);
+    let action = serde_json::to_string(&Action::Reject { reason: None }).unwrap();
+    let key = format!("default\nT1/msg:1/3\n7\n{action}");
+    let card = Card {
+        id: Uuid::new_v5(&NS, key.as_bytes()),
+        ..Card::new(
+            "Remediate: ship it",
+            "filed before the send",
+            vec!["remediate:T1/msg:1/3".to_owned()],
+            1,
+        )
+        .unwrap()
+    };
+    let event = Event::of(&card, rusty_mill_board::domain::EventKind::Created, "nano");
+    store.insert(&card, event).unwrap();
+    card
+}
+
+/// After an upgrade, a retry of a decision the old board sent finds no id in BBP's log. That
+/// proves nothing: the old send may have applied. The card stays for a person.
+#[test]
+fn a_card_from_before_decision_ids_is_never_closed_on_absence() {
+    let fake = Arc::new(Fake::with(vec![]));
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    let legacy = legacy_card(&store);
+    // The old send applied and the escalation is gone; BBP holds no id for it.
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert_eq!(out["recorded"]["card"]["id"], legacy.id.to_string());
+    assert!(board.get(legacy.id).unwrap().closed.is_none());
+    assert_eq!(remediate_cards(&board).len(), 1, "no second card");
+    assert!(
+        fake.acted.lock().unwrap().is_empty(),
+        "nothing is sent again"
+    );
+}
+
+/// The escalation is still open at the same rev, so the retry is sent again: as the old
+/// board sent it, under no id, onto the card it already has. Refused or not, that card stays.
+#[test]
+fn a_retry_of_an_old_send_reuses_its_card_and_sends_no_id() {
+    let fake = Arc::new(Fake {
+        refuse_at: Some(0),
+        refuse_code: Some("StaleRev"),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    let legacy = legacy_card(&store);
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(
+        out["remediated"]["card"]["id"],
+        legacy.id.to_string(),
+        "{out}"
+    );
+    assert!(fake.decided.lock().unwrap().is_empty(), "no id was sent");
+    let card = board.get(legacy.id).unwrap();
+    assert!(card.closed.is_none(), "{card:?}");
+    assert!(last_comment(&card).contains("check BBP's log"), "{card:?}");
+    assert_eq!(remediate_cards(&board).len(), 1, "no second card");
+}
+
+/// A host that predates `bbp decision` ignores `--decision`, so a drop sent to it is
+/// untracked. If the host is upgraded afterwards, the log's silence about that send must
+/// not close its card: the card was filed at the legacy id, which is never settled.
+#[test]
+fn a_drop_sent_to_a_host_that_cannot_track_it_is_never_closed_after_an_upgrade() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        lose_answer: AtomicBool::new(true),
+        old_host: AtomicBool::new(true),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    assert!(fake.decided.lock().unwrap().is_empty(), "no id was sent");
+
+    fake.old_host.store(false, Ordering::SeqCst); // the host is upgraded
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board)[0].closed.is_none());
+    assert_eq!(remediate_cards(&board).len(), 1);
+}
+
+/// Two retries of one decision probe the host with different outcomes, so one files the
+/// tracked card and the other the legacy one. The untracked send may have won the fence:
+/// the tracked card's retry must not conclude that nothing was dropped, whichever order
+/// the two cards were filed in, and neither card is closed.
+#[test]
+fn concurrent_retries_with_different_probes_never_close_either_card() {
+    let fake = Arc::new(Fake::with(vec![shipped()]));
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    // Retry A: the probe passes, its card is filed, and the host is then unreachable.
+    fake.refuse_next.store(true, Ordering::SeqCst);
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(remediate_cards(&board).len(), 1);
+    // Retry B: its probe failed, so it filed the legacy card and sent untracked, and won.
+    let legacy = legacy_card(&store);
+    fake.rows.lock().unwrap().clear();
+
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert_eq!(
+        out["recorded"]["card"]["id"],
+        legacy.id.to_string(),
+        "{out}"
+    );
+    assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
+}
+
+/// The other order: the legacy card exists first, so a retry whose probe passes adds no
+/// second card and sends no id.
+#[test]
+fn a_passing_probe_after_a_legacy_card_files_nothing_and_sends_no_id() {
+    let fake = Arc::new(Fake::with(vec![shipped()]));
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    legacy_card(&store);
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(remediate_cards(&board).len(), 1);
+    assert!(fake.decided.lock().unwrap().is_empty());
+}
+
+/// A tracked card exists but the host has since been rolled back: the retry's probe fails,
+/// so the legacy card is filed before the send goes untracked. After the host is upgraded
+/// again, the log's silence about that send must not close either card.
+#[test]
+fn a_host_rolled_back_after_a_tracked_card_never_closes_it() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        lose_answer: AtomicBool::new(true),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    fake.refuse_next.store(true, Ordering::SeqCst); // the first try never reaches BBP
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(remediate_cards(&board).len(), 1);
+
+    fake.fail_before.store(false, Ordering::SeqCst);
+    fake.old_host.store(true, Ordering::SeqCst); // rolled back: cannot record ids
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    assert_eq!(
+        remediate_cards(&board).len(),
+        2,
+        "the legacy card was filed first"
+    );
+    assert!(
+        fake.decided.lock().unwrap().is_empty(),
+        "the send carried no id"
+    );
+
+    fake.old_host.store(false, Ordering::SeqCst); // upgraded again
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
+}
+
+/// The uncertainty is written before the send: a send whose answer never came back (a lost
+/// answer, a crash, an unreachable host) leaves its mark on the card, so no retry, however it
+/// overlaps, settles the card as "not applied" from the log's silence.
+#[test]
+fn a_send_with_no_answer_is_never_settled_as_not_applied() {
+    for lose in [false, true] {
+        let fake = Arc::new(Fake {
+            consume: true,
+            ignore_id: AtomicBool::new(true),
+            lose_answer: AtomicBool::new(lose),
+            ..Fake::with(vec![shipped()])
+        });
+        fake.fail_before.store(!lose, Ordering::SeqCst);
+        let (store, down) = fresh();
+        let board = board_over(&store, &down, &fake, true);
+        refused_storage(call(&board, &owner(), "inbox_act", reject()));
+        fake.fail_before.store(false, Ordering::SeqCst);
+        fake.lose_answer.store(false, Ordering::SeqCst);
+        // Someone else resolved the escalation, and the host never recorded the id.
+        fake.rows.lock().unwrap().clear();
+
+        let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+        assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+        assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
+    }
+}
+
+/// The host is rolled back between the capability probe and the send, so it applies the send
+/// without recording its id: the log is silent, so the card is never closed from it.
+#[test]
+fn a_send_whose_id_never_reached_the_log_leaves_its_card_open() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        ignore_id: AtomicBool::new(true),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
+
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board).iter().all(|c| c.closed.is_none()));
+}
+
+/// The board's inbox can hide an escalation BBP still lists (here a host that answers a lone
+/// task and not a list). Gone from the board's view is not gone from BBP, so nothing settles.
+#[test]
+fn an_escalation_bbp_still_lists_is_not_gone() {
+    let fake = Arc::new(Fake {
+        list_only_alone: AtomicBool::new(true),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = fresh();
+    let board = board_over(&store, &down, &fake, true);
+    let nano = board.roles().actor("nano", "human").unwrap();
+    let other = board.add(&nano, "another task", "", vec![]).unwrap();
+    board.bind_execution(other.id, link("T2"), &nano).unwrap();
+    fake.fail_before.store(true, Ordering::SeqCst);
+    // Sent while it was visible to the board? No: the board never lists it now, but a card
+    // for the decision exists from an earlier send.
+    fake.list_only_alone.store(false, Ordering::SeqCst);
+    refused_storage(call(&board, &owner(), "inbox_act", reject()));
+    fake.fail_before.store(false, Ordering::SeqCst);
+    fake.list_only_alone.store(true, Ordering::SeqCst);
+
+    let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
+    assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
+    assert!(remediate_cards(&board)[0].closed.is_none());
+}
+
+#[test]
+fn lel_claims_and_spend_read_a_linked_task_only() {
+    let (b, fake) = setup();
+    *fake.claims.lock().unwrap() = json!([
+        {"id": 1, "text": "ship it", "status": "Open", "confidence": 50, "spent": 3, "budget": 16, "evidence": []},
+        {"id": 2, "text": "and this", "status": "Open", "confidence": 60, "spent": 0, "budget": 8}
+    ]);
+    let out = call(&b, &owner(), "lel_claims", json!({"task": "T1"})).unwrap();
+    assert_eq!(out.as_array().unwrap().len(), 2);
+    let spend = call(&b, &owner(), "lel_spend", json!({"task": "T1"})).unwrap();
+    assert_eq!(
+        spend,
+        json!([{"id": 1, "spent": 3, "budget": 16}, {"id": 2, "spent": 0, "budget": 8}])
+    );
+    // T9 exists on the host but no card links it.
+    assert!(refused(call(&b, &owner(), "lel_claims", json!({"task": "T9"}))).contains("no card"));
+    assert_eq!(*fake.claim_reads.lock().unwrap(), ["T1", "T1"]);
+}
+
+#[test]
+fn lel_reads_need_a_bound_admin() {
+    let (b, fake) = setup();
+    let model = Identity {
+        actor: "codex".into(),
+        role: "builder".into(),
+        projects: None,
+        connector: false,
+        provider: None,
+        view: Default::default(),
+    };
+    for op in ["lel_claims", "lel_spend"] {
+        assert!(refused(call(&b, &model, op, json!({"task": "T1"}))).contains("Admin"));
+        let unbound = ops().iter().find(|o| o.name == op).expect("op").call(
+            &b,
+            None,
+            json!({"task": "T1", "actor": "nano", "role": "human"}),
+        );
+        assert!(refused(unbound).contains("authenticated"));
+    }
+    assert!(fake.claim_reads.lock().unwrap().is_empty());
 }

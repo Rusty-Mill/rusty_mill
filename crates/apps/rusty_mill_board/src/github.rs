@@ -10,6 +10,7 @@ use serde_json::json;
 
 use crate::backfill::{Lookup, Merged, plain};
 use crate::http::Http;
+use crate::mergewatch::{MergedPr, MergedPulls, Recent};
 use crate::sync::{Draft, Forge, Issue, SyncError};
 
 const PAGE: usize = 100;
@@ -51,6 +52,16 @@ impl GithubConfig {
             repo: repo.to_owned(),
             token,
         })
+    }
+}
+
+impl GithubConfig {
+    /// The merge watch's reader, with this config's API base and token.
+    ///
+    /// # Errors
+    /// If the HTTP client cannot start.
+    pub fn merged(&self) -> Result<GithubMerged, String> {
+        GithubMerged::new(&self.api, &self.token)
     }
 }
 
@@ -123,6 +134,123 @@ impl GithubMerged {
             token,
             http: Http::new(Duration::from_secs(30))?,
         })
+    }
+}
+
+/// Pages of closed pull requests the merge watch reads per repository (newest activity first).
+const WATCH_PAGES: usize = 5;
+
+#[derive(Deserialize)]
+struct RawClosed {
+    html_url: String,
+    body: Option<String>,
+    merged_at: Option<String>,
+    updated_at: Option<String>,
+    author_association: Option<String>,
+    base: Option<RawBase>,
+}
+
+#[derive(Deserialize)]
+struct RawBase {
+    #[serde(rename = "ref")]
+    branch: String,
+    repo: Option<RawBaseRepo>,
+}
+
+#[derive(Deserialize)]
+struct RawBaseRepo {
+    default_branch: String,
+}
+
+/// Seconds a pull request may change after its merge and still count as unedited: the merge
+/// itself touches it.
+const MERGE_SLACK_SECS: i64 = 60;
+
+impl RawClosed {
+    /// May a `Closes card #N` in this body close a card? Only if it merged into the repository's
+    /// default branch (a merge into a feature branch has not shipped), its author may merge here
+    /// (owner, member or collaborator), and nothing touched it after the merge. The body is read
+    /// as it is now and the API gives no edit history, so a later change of any kind (an edit,
+    /// but also a comment or label) withholds the right to close: the card stays listed for a
+    /// person. This is evidence, not authentication: it cannot tell who wrote the text.
+    fn may_close(&self) -> bool {
+        let on_default = self.base.as_ref().is_some_and(|b| {
+            b.repo
+                .as_ref()
+                .is_some_and(|r| r.default_branch == b.branch)
+        });
+        let trusted = matches!(
+            self.author_association.as_deref(),
+            Some("OWNER" | "MEMBER" | "COLLABORATOR")
+        );
+        let untouched = match (
+            self.merged_at.as_deref().and_then(epoch_secs),
+            self.updated_at.as_deref().and_then(epoch_secs),
+        ) {
+            (Some(merged), Some(updated)) => updated <= merged + MERGE_SLACK_SECS,
+            _ => false,
+        };
+        on_default && trusted && untouched
+    }
+}
+
+/// Unix seconds of a GitHub timestamp, `YYYY-MM-DDTHH:MM:SSZ`.
+fn epoch_secs(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    let num = |from: usize, len: usize| -> Option<i64> {
+        s.get(from..from + len)?.parse::<u32>().ok().map(i64::from)
+    };
+    if b.len() != 20 || b[4] != b'-' || b[10] != b'T' || b[19] != b'Z' {
+        return None;
+    }
+    let (y, m, d) = (num(0, 4)?, num(5, 2)?, num(8, 2)?);
+    let (hh, mm, ss) = (num(11, 2)?, num(14, 2)?, num(17, 2)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Days from civil (Hinnant): the proleptic Gregorian calendar.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) * 86_400 + hh * 3600 + mm * 60 + ss)
+}
+
+impl MergedPulls for GithubMerged {
+    fn recent_merged(&self, slug: &str) -> Result<Recent, String> {
+        let Some((owner, name)) = slug.split_once('/').filter(|(o, n)| plain(o) && plain(n)) else {
+            return Err(format!("{slug}: not a repository"));
+        };
+        let mut out = Recent::default();
+        for page in 1..=WATCH_PAGES {
+            let url = format!(
+                "{}/repos/{owner}/{name}/pulls?state=closed&sort=updated&direction=desc&per_page={PAGE}&page={page}",
+                self.api
+            );
+            let (status, text) = send(&self.http, &self.token, "GET", &url, None)?;
+            if status != 200 {
+                let snippet: String = text.chars().take(BODY_SNIPPET).collect();
+                return Err(format!("GET {} -> {status}: {snippet}", url_path(&url)));
+            }
+            let raw: Vec<RawClosed> = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+            let n = raw.len();
+            out.prs.extend(
+                raw.into_iter()
+                    .filter(|p| p.merged_at.is_some())
+                    .map(|p| MergedPr {
+                        repo: slug.to_owned(),
+                        may_close: p.may_close(),
+                        url: p.html_url,
+                        body: p.body.unwrap_or_default(),
+                    }),
+            );
+            if n < PAGE {
+                break;
+            }
+            out.truncated = page == WATCH_PAGES;
+        }
+        Ok(out)
     }
 }
 
@@ -367,5 +495,121 @@ mod tests {
         let seen = server.join().expect("server");
         assert_eq!(seen[0], "GET /repos/o/r/pulls/1 HTTP/1.1");
         assert_eq!(seen.len(), 4, "the bad repository never left the process");
+    }
+
+    #[test]
+    fn recent_merged_keeps_merged_pulls_only() {
+        let (base, server) = serve(&[(
+            200,
+            r#"[{"html_url":"https://github.com/o/r/pull/1","body":"Closes card #5","merged_at":"2026-11-20T00:00:00Z","updated_at":"2026-11-20T00:00:05Z","base":{"ref":"main","repo":{"default_branch":"main"}},"author_association":"MEMBER"},
+                {"html_url":"https://github.com/o/r/pull/2","body":null,"merged_at":null},
+                {"html_url":"https://github.com/o/r/pull/3","body":null,"merged_at":"2026-11-21T00:00:00Z"}]"#,
+        )]);
+        let forge = GithubMerged::new(&base, "hunter2").expect("client");
+        let recent = forge.recent_merged("o/r").expect("merged");
+        assert!(!recent.truncated);
+        let got = recent.prs;
+        let urls: Vec<&str> = got.iter().map(|p| p.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                "https://github.com/o/r/pull/1",
+                "https://github.com/o/r/pull/3"
+            ]
+        );
+        assert_eq!(got[0].body, "Closes card #5");
+        assert_eq!(got[0].repo, "o/r");
+        assert!(got[1].body.is_empty());
+        // Pull 3 lacks what the right to close needs, but stays listed.
+        assert_eq!((got[0].may_close, got[1].may_close), (true, false));
+        assert!(forge.recent_merged("not a slug").is_err());
+        assert!(server.join().expect("server")[0].starts_with("GET /repos/o/r/pulls?state=closed"));
+    }
+
+    /// One closed pull request, merged at 2026-11-20T00:00:00Z.
+    fn closed(branch: &str, assoc: &str, updated: &str) -> RawClosed {
+        serde_json::from_str(&format!(
+            r#"{{"html_url":"https://github.com/o/r/pull/1","body":"b","merged_at":"2026-11-20T00:00:00Z","updated_at":"{updated}","base":{{"ref":"{branch}","repo":{{"default_branch":"main"}}}},"author_association":"{assoc}"}}"#
+        ))
+        .expect("pull request")
+    }
+
+    #[test]
+    fn only_untouched_default_branch_work_by_someone_who_may_merge_can_close() {
+        assert!(closed("main", "MEMBER", "2026-11-20T00:00:30Z").may_close());
+        assert!(closed("main", "OWNER", "2026-11-20T00:01:00Z").may_close());
+        assert!(closed("main", "COLLABORATOR", "2026-11-19T23:59:00Z").may_close());
+        // Each condition alone withholds it: a feature branch, an outsider, a later touch.
+        assert!(!closed("feature", "MEMBER", "2026-11-20T00:00:00Z").may_close());
+        for assoc in ["CONTRIBUTOR", "NONE", "FIRST_TIME_CONTRIBUTOR"] {
+            assert!(!closed("main", assoc, "2026-11-20T00:00:00Z").may_close());
+        }
+        assert!(!closed("main", "OWNER", "2026-11-27T00:00:00Z").may_close());
+        // Unreadable or missing times, or no base, never allow it.
+        assert!(!closed("main", "OWNER", "yesterday").may_close());
+        let bare: RawClosed = serde_json::from_str(
+            r#"{"html_url":"u","merged_at":"2026-11-20T00:00:00Z","author_association":"OWNER"}"#,
+        )
+        .expect("pull request");
+        assert!(!bare.may_close());
+    }
+
+    #[test]
+    fn timestamps_become_unix_seconds() {
+        assert_eq!(epoch_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(epoch_secs("2000-03-01T00:00:00Z"), Some(951_868_800));
+        assert_eq!(epoch_secs("2026-11-20T01:02:03Z"), Some(1_795_136_523));
+        for bad in [
+            "",
+            "2026-11-20",
+            "2026-13-20T00:00:00Z",
+            "2026-11-20T00:00:00+01:00",
+        ] {
+            assert_eq!(epoch_secs(bad), None, "{bad}");
+        }
+    }
+
+    const BASE: &str =
+        r#","base":{"ref":"main","repo":{"default_branch":"main"}},"author_association":"MEMBER""#;
+
+    fn page(n: usize, merged: bool) -> String {
+        let merged_at = if merged {
+            r#""2026-11-20T00:00:00Z""#
+        } else {
+            "null"
+        };
+        let items: Vec<String> = (0..n)
+            .map(|i| {
+                format!(r#"{{"html_url":"https://github.com/o/r/pull/{i}","body":"b","merged_at":{merged_at}{BASE}}}"#)
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    }
+
+    #[test]
+    fn recent_merged_reads_pages_and_flags_a_cut_off_read() {
+        let (full, short) = (page(PAGE, true), page(3, true));
+        // Two full pages then a short one: 203 merged, not truncated.
+        let (base, server) = serve(&[(200, &full), (200, &full), (200, &short)]);
+        let forge = GithubMerged::new(&base, "hunter2").expect("client");
+        let got = forge.recent_merged("o/r").expect("merged");
+        assert_eq!((got.prs.len(), got.truncated), (2 * PAGE + 3, false));
+        assert_eq!(server.join().expect("server").len(), 3);
+        // Five full pages: stops at the page cap and says so.
+        let replies = vec![(200, full.as_str()); WATCH_PAGES];
+        let (base, server) = serve(&replies);
+        let forge = GithubMerged::new(&base, "hunter2").expect("client");
+        let got = forge.recent_merged("o/r").expect("merged");
+        assert_eq!((got.prs.len(), got.truncated), (WATCH_PAGES * PAGE, true));
+        assert_eq!(server.join().expect("server").len(), WATCH_PAGES);
+    }
+
+    #[test]
+    fn recent_merged_fails_on_a_bad_status_or_body() {
+        let (base, server) = serve(&[(404, r#"{"message":"Not Found"}"#), (200, "not json")]);
+        let forge = GithubMerged::new(&base, "hunter2").expect("client");
+        assert!(forge.recent_merged("o/r").expect_err("404").contains("404"));
+        assert!(forge.recent_merged("o/r").is_err());
+        server.join().expect("server");
     }
 }

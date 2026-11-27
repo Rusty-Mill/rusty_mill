@@ -33,7 +33,7 @@ pub use claims::{
 };
 pub use claims_engine::{MAX_TAKEOVER_BATCH, MAX_TAKEOVER_MINUTES, TAKEOVER_DRAIN_MS};
 pub use codec::{decode_artifact, encode_artifact, spec_markdown, SpecFile};
-pub use coedit::{Doc, LineId, LineOp, Missing, SpecEdit, Version};
+pub use coedit::{Doc, LineId, LineOp, SpecEdit, Unapplied, Version};
 pub use command::{
     AgentAction, Code, Command, HostAction, HumanAction, OpenTask, Rejection, Response,
 };
@@ -45,7 +45,7 @@ pub use event::{
 pub use fs_store::{log_path_for, FsError, FsStore};
 pub use history::claim_history;
 pub use ids::*;
-pub use policy::SchedulingPolicy;
+pub use policy::{Gates, SchedulingPolicy};
 pub use record::*;
 pub use role::*;
 pub use shadow::{Comparison, Shadow, ShadowKind};

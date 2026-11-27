@@ -6,14 +6,16 @@
 //! anchor by id rather than by position, and still applies on top of edits
 //! made after its author read the base. A version's text is its predecessor's
 //! with the edit's ops applied: inserted lines go directly after their anchor,
-//! newest first. That is RGA's order whenever ids follow the log (a new line
-//! is always the newest sibling), so this fold is already the CRDT fold. What
-//! a CRDT would change is admission: today an edit is refused when it is
-//! anchored on a line that an edit made since its base also anchored on
-//! ([`overlap`]); a CRDT accepts it.
+//! newest first. The fold is `rusty_crdt`'s [`Rga`]: each inserted line is an
+//! element whose parent is its anchor (or the line before it in the same op),
+//! and ids follow the log, so a new line is always the newest sibling. What a
+//! CRDT could change beyond that is admission, and it does not: an edit is
+//! still refused when it is anchored on a line that an edit made since its
+//! base also anchored on ([`overlap`]).
 
 use crate::command::{Code, Rejection};
 use crate::ids::{ArtId, Sha256};
+use rusty_crdt::{Applied, Op, Rga};
 use rusty_serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -58,26 +60,28 @@ pub struct SpecEdit {
     pub ops: Vec<LineOp>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Line {
-    id: LineId,
-    text: String,
-    live: bool,
+/// A co-edited spec's lines, tombstones included.
+#[derive(Clone, Debug, Default)]
+pub struct Doc {
+    rga: Rga<LineId, String>,
+    /// The newest version that inserted a line. Derived from the lines, so
+    /// equality need not compare it.
+    newest: Option<ArtId>,
 }
 
-/// A co-edited spec's lines, tombstones included.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Doc {
-    lines: Vec<Line>,
+/// Equal when the lines, tombstones included, are equal in order.
+impl PartialEq for Doc {
+    fn eq(&self, other: &Self) -> bool {
+        self.rga.elements().eq(other.rga.elements())
+    }
 }
+
+impl Eq for Doc {}
 
 impl Doc {
     /// The visible lines, in order.
     pub fn lines(&self) -> impl Iterator<Item = (LineId, &str)> {
-        self.lines
-            .iter()
-            .filter(|l| l.live)
-            .map(|l| (l.id, l.text.as_str()))
+        self.rga.iter().map(|(id, t)| (*id, t.as_str()))
     }
 
     /// The visible text, one line per visible line.
@@ -86,43 +90,60 @@ impl Doc {
     }
 
     fn visible(&self, id: LineId) -> bool {
-        self.lines.iter().any(|l| l.id == id && l.live)
-    }
-
-    fn position(&self, id: LineId) -> Option<usize> {
-        self.lines.iter().position(|l| l.id == id)
+        self.lines().any(|(l, _)| l == id)
     }
 
     /// This doc with `ops` applied in order, inserted lines numbered under
     /// `at`. Fails with the first anchor that is not in the doc at all; a
-    /// tombstoned anchor is fine.
-    pub fn apply(&self, at: ArtId, ops: &[LineOp]) -> Result<Doc, LineId> {
+    /// tombstoned anchor is fine. `at` must be newer than every version that
+    /// inserted a line, as log order guarantees: the fold places a new line
+    /// as its anchor's newest child, so an older `at` would land elsewhere
+    /// than the edit meant, and an equal one would reuse line ids.
+    pub fn apply(&self, at: ArtId, ops: &[LineOp]) -> Result<Doc, Unapplied> {
+        if let Some(newest) = self.newest.filter(|n| at <= *n) {
+            return Err(Unapplied::NotNewer { at, newest });
+        }
         let mut doc = self.clone();
         let mut n = 0;
         for op in ops {
             match op {
                 LineOp::Insert { after, lines } => {
-                    let start = match after {
-                        None => 0,
-                        Some(a) => doc.position(*a).ok_or(*a)? + 1,
-                    };
-                    let new = lines.iter().map(|text| {
+                    // Checked here too, so an insert with no lines still
+                    // fails on a missing anchor, as the splice fold did.
+                    if let Some(a) = after.filter(|a| !doc.rga.contains(a)) {
+                        return Err(Unapplied::Line(a));
+                    }
+                    let mut parent = *after;
+                    for text in lines {
+                        let id = LineId { art: at, n };
                         n += 1;
-                        Line {
-                            id: LineId { art: at, n: n - 1 },
-                            text: text.clone(),
-                            live: true,
-                        }
-                    });
-                    doc.lines.splice(start..start, new.collect::<Vec<_>>());
+                        let value = text.clone();
+                        doc.put(id, Op::Insert { id, parent, value })?;
+                        doc.newest = Some(at);
+                        parent = Some(id);
+                    }
                 }
-                LineOp::Delete { line } => {
-                    let i = doc.position(*line).ok_or(*line)?;
-                    doc.lines[i].live = false;
-                }
+                LineOp::Delete { line } => doc.put(*line, Op::Delete { target: *line })?,
             }
         }
         Ok(doc)
+    }
+
+    /// Apply one element op. `key` is the line it inserts or deletes. An
+    /// insert must add a new line; `apply`'s check on `at` already rules out
+    /// a reused one, which would fail here as not newer. Deleting a
+    /// tombstone again is fine.
+    fn put(&mut self, key: LineId, op: Op<LineId, String>) -> Result<(), Unapplied> {
+        let insert = matches!(op, Op::Insert { .. });
+        match self.rga.apply(&op) {
+            Ok(Applied::Changed) => Ok(()),
+            Ok(Applied::Duplicate) if !insert => Ok(()),
+            Ok(Applied::Pending { missing }) => Err(Unapplied::Line(missing)),
+            Ok(Applied::Duplicate) | Err(_) => Err(Unapplied::NotNewer {
+                at: key.art,
+                newest: key.art,
+            }),
+        }
     }
 }
 
@@ -168,20 +189,29 @@ pub fn overlap(ops: &[LineOp], since: &[Option<LineId>]) -> Vec<Option<LineId>> 
     out
 }
 
-/// What a logged co-edited version needed and its fold did not find.
+/// Why a logged co-edited version did not apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Missing {
+pub enum Unapplied {
     /// An op's anchor is in no earlier version.
     Line(LineId),
     /// Its base is not an indexed version.
     Base(ArtId),
+    /// Its id `at` is not newer than `newest`, the newest version that
+    /// inserted a line: only a hand-made or out-of-order log does this.
+    NotNewer { at: ArtId, newest: ArtId },
 }
 
-impl std::fmt::Display for Missing {
+impl std::fmt::Display for Unapplied {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Missing::Line(l) => write!(f, "line {}#{}", l.art, l.n),
-            Missing::Base(b) => write!(f, "base {b}"),
+            Unapplied::Line(l) => write!(f, "line {}#{} is missing", l.art, l.n),
+            Unapplied::Base(b) => write!(f, "base {b} is missing"),
+            Unapplied::NotNewer { at, newest } => {
+                write!(
+                    f,
+                    "{at} is not newer than {newest}, which already added lines"
+                )
+            }
         }
     }
 }
@@ -247,8 +277,85 @@ mod tests {
         assert_eq!(d.text(), "# A\nx\na2\n# B\nb1");
         assert_eq!(
             d.apply(at(5), &[ins(Some(id(9, 0)), &["?"])]),
-            Err(id(9, 0))
+            Err(Unapplied::Line(id(9, 0)))
         );
+    }
+
+    #[test]
+    fn a_reused_line_id_fails_even_when_the_insert_is_identical() {
+        let d = two_sections();
+        let not_newer = Err(Unapplied::NotNewer {
+            at: at(2),
+            newest: at(2),
+        });
+        let same = [ins(None, &["# A", "a1", "a2", "# B", "b1"])];
+        assert_eq!(d.apply(at(2), &same), not_newer);
+        let other = [ins(Some(id(2, 4)), &["new"])];
+        assert_eq!(d.apply(at(2), &other), not_newer);
+    }
+
+    #[test]
+    fn an_older_version_id_is_refused_not_placed_elsewhere() {
+        // (5, 0) is after a1; an edit numbered 3 placing a line after a1
+        // would land after (5, 0) in the RGA, where the edit did not mean.
+        let d = two_sections();
+        let d = d.apply(at(5), &[ins(Some(id(2, 1)), &["new"])]).unwrap();
+        let older = [ins(Some(id(2, 1)), &["old"])];
+        assert_eq!(
+            d.apply(at(3), &older),
+            Err(Unapplied::NotNewer {
+                at: at(3),
+                newest: at(5)
+            })
+        );
+        assert!(d.apply(at(6), &older).is_ok());
+    }
+
+    #[test]
+    fn a_delete_only_version_does_not_raise_the_floor() {
+        let d = two_sections();
+        let d = d
+            .apply(at(9), &[LineOp::Delete { line: id(2, 1) }])
+            .unwrap();
+        assert!(d.apply(at(3), &[ins(Some(id(2, 0)), &["x"])]).is_ok());
+    }
+
+    #[test]
+    fn unapplied_names_what_went_wrong() {
+        assert_eq!(
+            Unapplied::Line(id(2, 1)).to_string(),
+            "line art:2#1 is missing"
+        );
+        assert_eq!(
+            Unapplied::NotNewer {
+                at: at(3),
+                newest: at(5)
+            }
+            .to_string(),
+            "art:3 is not newer than art:5, which already added lines"
+        );
+    }
+
+    #[test]
+    fn deleting_a_tombstone_again_is_fine() {
+        let d = two_sections();
+        let del = [LineOp::Delete { line: id(2, 1) }];
+        let once = d.apply(at(3), &del).unwrap();
+        let twice = once.apply(at(4), &del).unwrap();
+        assert_eq!(twice, once);
+        let both = d.apply(at(3), &[del[0].clone(), del[0].clone()]).unwrap();
+        assert_eq!(both, once);
+    }
+
+    #[test]
+    fn an_empty_insert_still_fails_on_a_missing_anchor() {
+        let d = two_sections();
+        assert_eq!(
+            d.apply(at(3), &[ins(Some(id(9, 0)), &[])]),
+            Err(Unapplied::Line(id(9, 0)))
+        );
+        assert_eq!(d.apply(at(3), &[ins(Some(id(2, 1)), &[])]), Ok(d.clone()));
+        assert_eq!(d.apply(at(3), &[ins(None, &[])]), Ok(d));
     }
 
     #[test]

@@ -18,9 +18,24 @@ impl<S: Read + Write> Conn<S> {
         }
     }
 
+    /// A connection that carries on from `pending`, bytes already read off
+    /// `stream` that no frame has used.
+    pub fn with_pending(stream: S, pending: Vec<u8>) -> Self {
+        Self {
+            stream,
+            buf: pending,
+        }
+    }
+
     /// The stream, to set its options.
     pub fn get_ref(&self) -> &S {
         &self.stream
+    }
+
+    /// Writes bytes already framed, whole, so another writer's frames never
+    /// interleave with them while the caller holds this connection.
+    pub fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.stream.write_all(bytes)
     }
 
     pub fn send(&mut self, message: &Message) -> io::Result<()> {

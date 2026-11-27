@@ -19,11 +19,15 @@
 pub mod attach;
 #[cfg(any(target_os = "linux", windows))]
 pub mod autostart;
+pub mod clipboard;
 pub mod conn;
+pub mod download;
 pub mod forward;
 pub mod ssh;
 #[cfg(unix)]
 pub mod tls;
+pub mod upload;
+pub mod workspace;
 
 pub use conn::Conn;
 pub use rusty_mux_proto::older;

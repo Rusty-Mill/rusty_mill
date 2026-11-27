@@ -119,6 +119,7 @@ fn real_server_with(udp: Option<Duration>) -> (PathBuf, Option<u16>) {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
                 state_dir: None,
+                protected: Default::default(),
                 grapheme_clustering: false,
                 config_file: None,
             };
@@ -453,6 +454,30 @@ fn a_frozen_path_is_brought_back_with_the_screen_and_the_lease() {
     assert!(text.contains("detached from block"), "{text:?}");
     assert!(!text.contains("path to the server was down"), "{text:?}");
     assert!(!running(seen[1].0), "the second ssh outlived the client");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// The workspace tree opens against a real server: the block's own
+/// connection asks for the listing feature bits and holds the lease the
+/// call is authorised by, and the answer is not a refusal.
+#[test]
+fn the_workspace_tree_opens_against_a_real_server() {
+    let socket = real_server();
+    let work = relaying_ssh("workspace", &[]);
+    let tui = ssh_client(&work, &socket);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    let from = tui.written();
+    tui.master.write(b"\x1de").expect("ctrl-] e");
+    tui.wait_for(b"workspace: j/k");
+    // The root's own row, after the wait notice: the listing has come.
+    tui.wait_for(b"v ./");
+    let shown = String::from_utf8_lossy(&tui.since(from)).into_owned();
+    assert!(!shown.contains("requires feature"), "{shown:?}");
+    assert!(!shown.contains("not attached"), "{shown:?}");
+    tui.master.write(b"q").expect("leave");
+    std::thread::sleep(Duration::from_millis(300));
+    tui.master.write(b"\x1dd").expect("detach");
+    tui.exit();
     std::fs::remove_dir_all(&work).expect("cleanup");
 }
 

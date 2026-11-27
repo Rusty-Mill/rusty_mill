@@ -45,7 +45,7 @@ platform = { workspace = true }
 # rusty_rdp's own pinning convention for its `platform` dependency
 # (rustils' docs/versioning.md §3: a bare SHA carries the same guarantee
 # as a tag).
-rusty_tokio = { workspace = true, version = "0.2.0", optional = true }
+rusty_tokio = { workspace = true, optional = true }
 # The AEAD primitives under the hand-rolled record layer (see the
 # `handrolled-engine` feature, and docs/adr/0002-*.md §6). The engine
 # hand-rolls the *protocol*; AES-GCM and ChaCha20-Poly1305 stay `ring`,

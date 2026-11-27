@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
@@ -19,7 +20,7 @@ use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
 use rusty_mux_proto::{
     AgentMeta, Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Ownership,
-    ShowTo, Takeover, encode,
+    Program, ShowTo, Takeover, encode,
 };
 use rusty_mux_status::{Parts, Status};
 use rusty_term_core::{AnsiParser, Grid};
@@ -28,8 +29,10 @@ use rusty_tokio::task::JoinHandle;
 use rusty_uuid::Uuid;
 
 use crate::Config;
+use crate::archive;
 use crate::checkpoint::validate_size;
 use crate::datagram::Registry;
+use crate::download;
 use crate::echo::Waiting;
 use crate::forward::{self, Forwards};
 use crate::history::History;
@@ -40,9 +43,10 @@ use crate::passed::{Fd, Passed};
 use crate::ports;
 use crate::process;
 use crate::pty::{self, Process, Pty};
-use crate::spool::Spool;
+use crate::spool::{self, Spool};
 use crate::store::{Started, Store};
 use crate::terminal;
+use crate::upload;
 
 mod persist;
 pub(crate) use persist::save_periodically;
@@ -61,6 +65,9 @@ const CHUNK: usize = 16 << 10;
 const REPLY_MAX: usize = crate::outbox::BUDGET / 2;
 /// What a `Text` reply adds to its text: tags, request id and length prefix.
 const REPLY_FRAME: usize = 64;
+/// An archive record, header (under 2 KiB) and transcript, is read back in one
+/// `Text` reply (`archive-show`), so the largest one must fit in it.
+const _: () = assert!(archive::MAX_TRANSCRIPT + 2048 + REPLY_FRAME <= REPLY_MAX);
 
 /// Events kept for clients that reconnect.
 const HISTORY: usize = 4096;
@@ -122,7 +129,9 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::FLOATS)
     .union(Features::TERMINAL_FIND)
     .union(Features::AGENT_META)
+    .union(Features::UPLOAD)
     .union(Features::PORT_FORWARD)
+    .union(Features::ARCHIVE)
     .union(UNIX_ONLY);
 
 /// What a float edit needs: floating takes a block out of the layout, as a
@@ -141,11 +150,17 @@ const SHOW_PERIOD: Duration = Duration::from_secs(1);
 /// Offered on Linux only: signal and release (C76) act on a Unix process
 /// group, and orch, their one client, runs there; the tailscale status
 /// event (C27) comes from a `tailscaled` this server asks on Linux, and
-/// `terminal.ports` (C80) reads the sockets from `/proc`.
+/// `terminal.ports` (C80) reads the sockets from `/proc`; the workspace
+/// call (D337) confines its walk with `openat`, which only Linux has here.
 #[cfg(target_os = "linux")]
 const UNIX_ONLY: Features = Features::SIGNAL_RELEASE
     .union(Features::TAILSCALE_STATUS)
-    .union(Features::PORTS);
+    .union(Features::PORTS)
+    // Downloads are read through the kernel's own account of the opened file.
+    .union(Features::DOWNLOAD)
+    .union(Features::WORKSPACE)
+    .union(Features::WORKSPACE_STATUS)
+    .union(Features::LAUNCH_IN_WORKSPACE);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
 
@@ -256,12 +271,27 @@ struct BlockRt {
     /// Launched with `hold` (C78): the block stays, read-only, once its
     /// program exits.
     hold: bool,
+    /// Its launch passed an environment, descriptors or ownership (C75, C46),
+    /// as an agent's jailed block is launched. Not known for a restored block.
+    custom: bool,
     /// Who works it, as its launcher named them (D336). Stored and echoed,
     /// never acted on; not kept across a restart.
     agent: Option<AgentMeta>,
     /// Its PTY was released (C76): read-only, with its program, if still
     /// running, left to its owner.
     released: bool,
+    /// Its program was started by this server run, so what it was started
+    /// as is known (not a block restored from disk, whose record cannot say
+    /// who launched it).
+    launched: bool,
+    /// Its program has ended and been reaped, and the exit was announced:
+    /// nothing of the last run is still to be heard of.
+    finished: bool,
+    /// How its program ended, if it did while this server watched.
+    exit: Option<ExitStatus>,
+    /// Its output ended and its program is being reaped: still running as
+    /// far as its outcome goes, until [`State::exited`] records it.
+    reaping: bool,
 }
 
 /// A block's running program: its PTY and the task reading it.
@@ -306,6 +336,14 @@ struct Unscreened {
 impl Unscreened {
     /// The block, reading its PTY into `grid` from now on.
     fn screened(self, shared: &Shared, grid: Grid, parser: AnsiParser) -> BlockRt {
+        let mut rt = BlockRt::read_only(grid, parser, self.started.clone());
+        self.revive(shared, &mut rt);
+        rt
+    }
+
+    /// Gives `rt`, a block with no program, this one: its reader starts and
+    /// the screen it has stays (C45, D338).
+    fn revive(self, shared: &Shared, rt: &mut BlockRt) {
         let wake = Rc::new(Notify::new());
         let reader = rusty_tokio::task::spawn_local(pump(
             shared.clone(),
@@ -313,19 +351,20 @@ impl Unscreened {
             self.pty.clone(),
             wake.clone(),
         ));
-        let live = Live {
+        rt.live = Some(Live {
             pty: self.pty,
             revoke: Rc::default(),
             process: self.process,
             wake,
             reader,
-        };
-        BlockRt {
-            foreground: self.foreground,
-            echo: self.echo,
-            ..BlockRt::read_only(grid, parser, self.started)
-        }
-        .with(live)
+        });
+        rt.foreground = self.foreground;
+        rt.echo = self.echo;
+        rt.started = self.started;
+        rt.unsaved = true;
+        rt.finished = false;
+        rt.exit = None;
+        rt.reaping = false;
     }
 }
 
@@ -348,16 +387,40 @@ impl BlockRt {
             spool: None,
             input_seq: 0,
             hold: false,
+            custom: false,
             agent: None,
             released: false,
+            launched: false,
+            finished: false,
+            exit: None,
+            reaping: false,
         }
     }
 
-    fn with(self, live: Live) -> Self {
-        Self {
-            live: Some(live),
-            ..self
+    /// Refuses `method` on an agent's block, until there is a jail-aware
+    /// design (Nano, 2026-11-24, "Refuse on agent blocks"). It judges by the
+    /// launch facts, not by the optional `AGENT_META`: a launch with an
+    /// environment, descriptors or ownership, or the `lel-jail` program,
+    /// which is all a restored block still shows (and a block with no
+    /// program is refused outright).
+    fn refuse_agent(&self, method: &str) -> Result<(), Refusal> {
+        // A block with no program is one restored read-only, whose launch
+        // facts were not kept (D72), or one that has exited: it cannot be
+        // told from an agent's, so it fails closed. A restored shell is
+        // started afresh with the default launch, so it is known not to be.
+        if self.live.is_none() {
+            return Err(format!(
+                "{method}: the block has no running program, so it is unknown whether it is an agent's"
+            )
+            .into());
         }
+        let jail = std::path::Path::new(&self.started.program)
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("lel-jail"));
+        if self.custom || self.agent.is_some() || jail {
+            return Err(format!("{method}: refused on an agent's block").into());
+        }
+        Ok(())
     }
 
     /// The program, or a refusal saying the block is read-only.
@@ -489,6 +552,8 @@ pub(crate) struct State {
     listings: listing::Gate,
     /// Where sessions are saved across restarts, with `Config::state_dir`.
     store: Option<Store>,
+    /// Each block's upload authority (C82), made at its first upload.
+    uploads: RefCell<HashMap<BlockId, Arc<upload::Slot>>>,
     /// The event number the store last saved the model at.
     saved_at: Option<u64>,
     /// Numbers each save, newest highest.
@@ -526,6 +591,9 @@ pub(crate) enum Kept {
 
 impl State {
     pub(crate) fn shared(config: Config, socket: Option<PathBuf>) -> Shared {
+        if let Some(file) = &config.config_file {
+            config.protected.path(file.clone());
+        }
         Rc::new(RefCell::new(Self {
             base: config.clone(),
             config,
@@ -556,6 +624,7 @@ impl State {
             lister: listing::lister(),
             listings: listing::Gate::default(),
             store: None,
+            uploads: RefCell::default(),
             saved_at: None,
             generation: 0,
             account: None,
@@ -610,43 +679,46 @@ impl State {
         Ok(Outcome::Later(finished))
     }
 
-    /// `terminal.list-dir`: reads the directory on the blocking pool under
-    /// [`listing::DEADLINE`], in a task of its own, and answers once read
-    /// ([`Self::listed`]). The connection waits for it before its next
-    /// request; no other client, PTY or task waits.
-    fn list_dir(
+    /// `terminal.list-dir` and `terminal.download`: runs `work` on the
+    /// blocking pool under [`listing::DEADLINE`], in a task of its own, and
+    /// answers once done ([`Self::listed`]). The connection waits for it
+    /// before its next request; no other client, PTY or task waits.
+    fn run_blocking(
         &mut self,
         shared: &Shared,
         client: ClientId,
         req: u64,
-        base: Option<String>,
-        path: Option<String>,
+        method: &'static str,
+        work: Blocking,
     ) -> Result<oneshot::Receiver<()>, String> {
         let cancel = self
             .clients
             .get(&client)
             .map(|out| out.cancel().clone())
             .ok_or("no such client")?;
-        let slot = self
-            .listings
-            .take()
-            .map_err(|e| format!("terminal.list-dir: {e}"))?;
-        let lister = self.lister.clone();
+        let slot = self.listings.take().map_err(|e| format!("{method}: {e}"))?;
         let work = rusty_tokio::spawn_blocking(move || {
             // Held until the thread ends, not until the deadline.
             let _slot = slot;
-            lister(base.as_deref(), path.as_deref())
+            work()
         });
         let (done, finished) = oneshot::channel();
         let weak = Rc::downgrade(shared);
         rusty_tokio::task::spawn_local(async move {
             let answer = match rusty_tokio::time::timeout(listing::DEADLINE, work).await {
                 Ok(Ok(listed)) => listed,
-                Ok(Err(e)) => Err(format!("the listing failed: {e}")),
-                Err(_) => Err("the listing timed out".into()),
+                Ok(Err(e)) => Err(format!("the read failed: {e}")),
+                Err(_) if method == "terminal.upload" => {
+                    Err("the chunk timed out and may still be written, a last one \
+                     as the finished file: check what arrived before sending it again"
+                        .into())
+                }
+                Err(_) => Err("the read timed out".into()),
             };
             if let Some(shared) = weak.upgrade() {
-                shared.borrow_mut().listed(client, &cancel, req, answer);
+                shared
+                    .borrow_mut()
+                    .listed(client, &cancel, req, method, answer);
             }
             // The connection may have gone; nothing waits then.
             let _ = done.send(());
@@ -661,13 +733,14 @@ impl State {
         client: ClientId,
         cancel: &Rc<Notify>,
         req: u64,
+        method: &str,
         answer: Result<String, String>,
     ) {
         let message = match answer {
             Ok(text) => Message::Text { req, text },
             Err(reason) => Message::Failed {
                 req,
-                reason: format!("terminal.list-dir: {reason}"),
+                reason: format!("{method}: {reason}"),
                 code: None,
             },
         };
@@ -1199,8 +1272,8 @@ impl State {
             }
             Ok(Outcome::Write(write)) => Some(Pending::Write(write)),
             Ok(Outcome::Later(done)) => Some(Pending::Reload(done)),
-            Ok(Outcome::Listing { base, path }) => {
-                match this.list_dir(shared, client, req, base, path) {
+            Ok(Outcome::Blocking { method, work }) => {
+                match this.run_blocking(shared, client, req, method, work) {
                     Ok(done) => Some(Pending::Reload(done)),
                     Err(reason) => {
                         this.send(
@@ -1379,6 +1452,27 @@ impl State {
                 self.require(client, Features::FOCUS, "move-focus")
                     .and_then(|()| done(self.mux.move_focus(window, toward))),
             ),
+            M::ArchiveBlock {
+                req,
+                block,
+                card,
+                label,
+                why,
+            } => (
+                req,
+                self.require(client, Features::ARCHIVE, "archive-block")
+                    .and_then(|()| self.archive_block(client, block, card, label, why)),
+            ),
+            M::ArchiveList { req, card, before } => (
+                req,
+                self.require(client, Features::ARCHIVE, "archive-list")
+                    .and_then(|()| self.archive_list(client, req, card, before)),
+            ),
+            M::ArchiveShow { req, id } => (
+                req,
+                self.require(client, Features::ARCHIVE, "archive-show")
+                    .and_then(|()| self.archive_show(client, req, id)),
+            ),
             M::ReloadConfig { req } => (
                 req,
                 self.require(client, Features::CONFIG_RELOAD, "reload-config")
@@ -1423,6 +1517,20 @@ impl State {
                 ),
             ),
             M::Sync { req } => (req, Ok(Outcome::Done(None))),
+            // It starts a program, which a call has no runtime for: here.
+            M::BlockCall {
+                req,
+                block,
+                method,
+                args,
+            } if method == "terminal.rerun" => (
+                req,
+                self.require(client, Features::BLOCK_CALL.union(Features::HOLD), &method)
+                    .and_then(|()| match args.is_empty() {
+                        true => self.rerun(shared, client, block),
+                        false => Err(String::from("terminal.rerun takes no arguments").into()),
+                    }),
+            ),
             M::BlockCall {
                 req,
                 block,
@@ -1989,6 +2097,19 @@ impl State {
         if launch.agent.is_some() {
             self.require(client, Features::AGENT_META, "a launch naming an agent")?;
         }
+        if launch.workspace_of.is_some() {
+            self.require(
+                client,
+                Features::LAUNCH_IN_WORKSPACE,
+                "a launch in a block's workspace",
+            )?;
+            if launch.cwd.is_some() {
+                return Err(
+                    "bad_launch(workspace_of): a launch names a cwd or a workspace, not both"
+                        .into(),
+                );
+            }
+        }
         if launch.input == InputMode::OwnerOnly {
             self.require(client, Features::INPUT_GATE, "an owner-only launch")?;
             if !launch.own {
@@ -2116,6 +2237,61 @@ impl State {
             }
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.pid())
                 .ok_or("the program's working directory is unknown")?,
+            "terminal.workspace-list" => {
+                // The same lease rule as `terminal.list-dir` (D316); the
+                // root is the directory the program was launched in, not
+                // where it has since moved (D337).
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                let root = rt
+                    .started
+                    .workspace()
+                    .ok_or("the workspace root is unknown after a server restart")?
+                    .clone();
+                let path = named.iter().find_map(|(n, v)| match (*n, v) {
+                    ("path", Value::Text(p)) => Some(p.as_str()),
+                    _ => None,
+                });
+                let path = path.map(str::to_owned);
+                let lister = self.lister.clone();
+                return Ok(Outcome::Blocking {
+                    method: "terminal.workspace-list",
+                    work: Box::new(move || lister(None, path.as_deref(), Some(&root))),
+                });
+            }
+            "terminal.workspace-stat" | "terminal.workspace-touched" => {
+                // `git status` runs the repository's own filters as the
+                // server's account, and an agent's jail does not hold the
+                // server: refused on agent blocks, as upload and download.
+                if found.name == "terminal.workspace-touched" {
+                    rt.refuse_agent("terminal.workspace-touched")?;
+                }
+                // As `terminal.workspace-list`: the lease, and the held
+                // launch directory as the root (D337).
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                let root = rt
+                    .started
+                    .workspace()
+                    .ok_or("the workspace root is unknown after a server restart")?
+                    .clone();
+                let path = named.iter().find_map(|(n, v)| match (*n, v) {
+                    ("path", Value::Text(p)) => Some(p.clone()),
+                    _ => None,
+                });
+                let name = found.name;
+                return Ok(Outcome::Blocking {
+                    method: name,
+                    work: Box::new(move || match name {
+                        "terminal.workspace-stat" => {
+                            listing::stat(&root, path.as_deref().unwrap_or(""))
+                        }
+                        _ => listing::touched(&root),
+                    }),
+                });
+            }
             "terminal.list-dir" => {
                 // It shows the host's files as the server's account, so it
                 // takes what typing into the block takes: the lease, which
@@ -2128,9 +2304,50 @@ impl State {
                     ("path", Value::Text(p)) => Some(p.as_str()),
                     _ => None,
                 });
-                return Ok(Outcome::Listing {
-                    base,
-                    path: path.map(str::to_owned),
+                let path = path.map(str::to_owned);
+                let lister = self.lister.clone();
+                return Ok(Outcome::Blocking {
+                    method: "terminal.list-dir",
+                    work: Box::new(move || lister(base.as_deref(), path.as_deref(), None)),
+                });
+            }
+            "terminal.download" => {
+                rt.refuse_agent("terminal.download")?;
+                // It reads any file the server's account can, as list-dir
+                // lists any directory: the lease, which a watch-only grant
+                // (C14) never holds.
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                let base = terminal::pwd(&rt.grid, rt.pid());
+                let path = named.iter().find_map(|(n, v)| match (*n, v) {
+                    ("path", Value::Text(p)) => Some(p.clone()),
+                    _ => None,
+                });
+                let offset = lines(&named, "offset");
+                // The configured directory, not the opened store's: a store that failed
+                // to open still leaves its directory out of reach.
+                let private = self.config.state_dir.clone();
+                // The config file, the TLS key, the tokens and the allowlist
+                // are as secret as the state directory.
+                let keep = self.config.protected.clone();
+                let path = path.ok_or("terminal.download: missing path")?;
+                return Ok(Outcome::Blocking {
+                    method: "terminal.download",
+                    work: Box::new(move || {
+                        download::read(base.as_deref(), &path, offset, private.as_deref(), &keep)
+                    }),
+                });
+            }
+            "terminal.upload" => {
+                rt.refuse_agent("terminal.upload")?;
+                // It writes to the server's disk, so it takes the lease.
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                return Ok(Outcome::Blocking {
+                    method: "terminal.upload",
+                    work: self.upload(block, &named)?,
                 });
             }
             "terminal.title" => rt.grid.title.clone(),
@@ -2425,6 +2642,32 @@ impl State {
             .session();
         // The id is chosen first so the program starts knowing it.
         let block = BlockId::from_uuid(Uuid::new_v4());
+        // The program starts in the very directory the workspace holds: the
+        // spawn changes into the held descriptor, not the configured path, so
+        // the two cannot name different directories. Where it can't be held,
+        // the program starts at the path and the workspace stays unknown.
+        let mut spawn = config.clone();
+        let (workspace, cwd) = match launch.workspace_of {
+            // Another block's held directory, by handle (D378): never the
+            // configured path, so where it can't be entered the launch is
+            // refused, not started somewhere else.
+            Some(source) => {
+                let (workspace, cwd) = self.workspace_of(client, source)?;
+                spawn.cwd = workspace
+                    .spawn_cwd()
+                    .ok_or("the workspace cannot be entered here")?
+                    .into();
+                (workspace, cwd)
+            }
+            None => {
+                let mut workspace = listing::Workspace::open(std::path::Path::new(&config.cwd));
+                match workspace.spawn_cwd() {
+                    Some(held) => spawn.cwd = held.into(),
+                    None => workspace = listing::Workspace::default(),
+                }
+                (workspace, config.cwd.to_string_lossy().into_owned())
+            }
+        };
         let started = Started {
             shell: launch.program.is_none(),
             read_only: false,
@@ -2434,14 +2677,15 @@ impl State {
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect(),
-            cwd: config.cwd.to_string_lossy().into_owned(),
+            cwd,
+            workspace,
         };
         let rt = self.start(Start {
             block,
             session,
             window,
             size,
-            config: &config,
+            config: &spawn,
             started,
             owned: launch.own,
             env: launch.env.as_deref(),
@@ -2460,9 +2704,35 @@ impl State {
         );
         let mut rt = rt.screened(shared, grid, parser);
         rt.hold = launch.hold;
+        rt.launched = true;
+        rt.custom = launch.env.is_some() || launch.fds > 0 || launch.own;
         rt.agent = launch.agent.clone();
         self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
+    }
+
+    /// The held workspace of `source` and its last known directory, for a
+    /// launch that starts there (D378). As `terminal.workspace-list`: the
+    /// input lease on `source`, and a root that is known. Refused on an
+    /// agent's block, whose jail does not hold the server (D372).
+    fn workspace_of(
+        &self,
+        client: ClientId,
+        source: BlockId,
+    ) -> Result<(listing::Workspace, String), Refusal> {
+        self.mux
+            .authorize_input(client, source)
+            .map_err(Refusal::from)?;
+        let rt = self
+            .blocks
+            .get(&source)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(source))?;
+        rt.refuse_agent("a launch in a block's workspace")?;
+        let workspace = rt
+            .started
+            .workspace()
+            .ok_or("the workspace root is unknown after a server restart")?;
+        Ok((workspace.clone(), rt.started.cwd.clone()))
     }
 
     /// Holds `rt` as `block`'s, spooling the history its grid evicts
@@ -2513,6 +2783,228 @@ impl State {
             echo,
             started,
         })
+    }
+
+    /// `terminal.rerun` (D338): starts again the command a held block (not yet
+    /// a restored one) was started with, in the block, under the lease. The screen
+    /// stays and a line says when. Never done on its own (D72), and not for
+    /// a block launched with its own environment, descriptors or owner.
+    fn rerun(
+        &mut self,
+        shared: &Shared,
+        client: ClientId,
+        block: BlockId,
+    ) -> Result<Outcome, Refusal> {
+        const METHOD: &str = "terminal.rerun";
+        if self.stopping {
+            return Err(String::from("the server is stopping").into());
+        }
+        self.mux
+            .authorize_input(client, block)
+            .map_err(Refusal::from)?;
+        let rt = self
+            .blocks
+            .get(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        if rt.released {
+            return Err(format!("{METHOD}: the block's program was released to its owner").into());
+        }
+        if rt.live.is_some() {
+            return Err(format!("{METHOD}: the block's program is still running").into());
+        }
+        // A restored block does not say who launched it, so an agent's
+        // cannot be told from a command's: refused until provenance is kept.
+        if !rt.launched {
+            return Err(format!(
+                "{METHOD}: the block was restored after a restart, and what launched it \
+                 is not known"
+            )
+            .into());
+        }
+        // Not the last run's reaping, nor its exit still to be announced:
+        // a late one would read as the new run's.
+        if !rt.finished {
+            return Err(format!("{METHOD}: the block's last run has not finished ending").into());
+        }
+        // Not on the launcher's word: what the launch passed is what decides.
+        if rt.custom || rt.agent.is_some() {
+            return Err(format!(
+                "{METHOD}: a block launched with its own environment, descriptors or \
+                 owner (an agent's, say) is re-run through its launcher"
+            )
+            .into());
+        }
+        let target = self
+            .mux
+            .block(block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        let (window, size, owned) = (target.window(), target.size(), target.owner().is_some());
+        let session = self
+            .mux
+            .window(window)
+            .ok_or(rusty_mux_core::Error::UnknownWindow(window))?
+            .session();
+        // What it was started as, even a default shell: a config reloaded
+        // since would otherwise start something else. It starts where its
+        // shell last reported being (OSC 7, D375) while that is still a
+        // local directory; else in the directory it was launched in, the
+        // one the workspace explorer shows (D337): the held descriptor when
+        // there is one, which survives a rename of the path, else the
+        // launch path, which must still be a directory.
+        let reported = terminal::reported_dir(&rt.grid);
+        let held = rt
+            .started
+            .workspace
+            .spawn_cwd()
+            .filter(|_| reported.is_none());
+        let launch = Launch {
+            program: Some(Program {
+                command: rt.started.program.clone(),
+                args: rt.started.args.clone(),
+            }),
+            cwd: reported
+                .map(|d| d.to_string_lossy().into_owned())
+                .or_else(|| {
+                    Some(rt.started.cwd.clone()).filter(|d| held.is_none() && !d.is_empty())
+                }),
+            ..Launch::default()
+        };
+        let mut config = launched(&self.config, &launch)?;
+        if let Some(held) = held {
+            config.cwd = held.into();
+        }
+        let started = Started {
+            read_only: false,
+            ..rt.started.clone()
+        };
+        let program = self.start(Start {
+            block,
+            session,
+            window,
+            size,
+            config: &config,
+            started,
+            owned,
+            env: None,
+            fds: Vec::new(),
+        })?;
+        // CAN first, so a sequence the old program left unfinished ends.
+        let mark = format!("\x18\r\n\x1b[2m-- re-run at {} --\x1b[0m\r\n", utc_clock());
+        self.inject(block, mark.as_bytes());
+        if let Some(rt) = self.blocks.get_mut(&block) {
+            program.revive(shared, rt);
+        }
+        Ok(Outcome::Done(None))
+    }
+
+    /// `archive-block` (C84): saves a block whose program is gone, then
+    /// closes it, for whoever may close it. The record is written first, so
+    /// a failed write leaves the block as it was.
+    fn archive_block(
+        &mut self,
+        client: ClientId,
+        block: BlockId,
+        card: Option<String>,
+        label: Option<String>,
+        why: Option<String>,
+    ) -> Result<Outcome, Refusal> {
+        let (card, label, why) = (
+            card.unwrap_or_default(),
+            label.unwrap_or_default(),
+            why.unwrap_or_default(),
+        );
+        for (name, text) in [("card", &card), ("label", &label), ("why", &why)] {
+            archive::check_text(name, text).map_err(|e| format!("archive-block: {e}"))?;
+        }
+        let state = self
+            .store
+            .as_ref()
+            .map(|store| store.dir().to_path_buf())
+            .ok_or("archive-block: this server keeps no state directory")?;
+        self.mux
+            .authorize_close(client, block)
+            .map_err(Refusal::from)?;
+        let rt = self
+            .blocks
+            .get(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        if rt.live.is_some() || rt.released || rt.reaping {
+            return Err("archive-block: the block's program is still running".into());
+        }
+        let transcript = transcript(rt)?;
+        let by = self
+            .mux
+            .client(client)
+            .map_or_else(String::new, |c| c.principal().id().to_owned());
+        let when = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let id = format!(
+            "{when:012}-{}",
+            block.to_string().get(..8).unwrap_or_default()
+        );
+        let exit = match rt.exit {
+            Some(ExitStatus::Code(n)) => format!("code:{n}"),
+            Some(ExitStatus::Signal(n)) => format!("signal:{n}"),
+            None => "unknown".to_owned(),
+        };
+        let record = archive::Record {
+            id: &id,
+            when,
+            exit: &exit,
+            card: &card,
+            label: &label,
+            why: &why,
+            by: &by,
+            block: &block.to_string(),
+            program: &one_line(&rt.started.program)
+                .chars()
+                .take(256)
+                .collect::<String>(),
+            sensitive: archive::sensitive(&transcript),
+        };
+        archive::write(&state, &record, &transcript)
+            .map_err(|e| format!("archive-block: writing the record: {e}"))?;
+        self.mux.close_block(block).map_err(Refusal::from)?;
+        Ok(Outcome::Done(None))
+    }
+
+    /// The state directory, for a client that may read the archive: the
+    /// server's own account, or any client of a server one account uses.
+    fn archive_dir(&self, client: ClientId, what: &str) -> Result<PathBuf, Refusal> {
+        let asker = self.mux.client(client).ok_or("unknown client")?.principal();
+        if self.account.as_ref().is_some_and(|a| a.id() != asker.id()) {
+            return Err(
+                format!("{what}: only the server's own account may read the archive").into(),
+            );
+        }
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| format!("{what}: this server keeps no state directory"))?;
+        Ok(store.dir().to_path_buf())
+    }
+
+    fn archive_list(
+        &self,
+        client: ClientId,
+        req: u64,
+        card: Option<String>,
+        before: Option<String>,
+    ) -> Result<Outcome, Refusal> {
+        let dir = self.archive_dir(client, "archive-list")?;
+        let text = archive::list(&dir, card.as_deref(), before.as_deref())
+            .map_err(|e| format!("archive-list: reading the archive: {e}"))?;
+        reply("archive-list", &[Message::Text { req, text }])
+    }
+
+    fn archive_show(&self, client: ClientId, req: u64, id: String) -> Result<Outcome, Refusal> {
+        let dir = self.archive_dir(client, "archive-show")?;
+        let text = archive::show(&dir, &id).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => format!("archive-show: no record {id}"),
+            _ => format!("archive-show: reading the record: {e}"),
+        })?;
+        reply("archive-show", &[Message::Text { req, text }])
     }
 
     /// Where a block's program is, for `rusty-mux-ctl` run inside it.
@@ -3018,6 +3510,7 @@ impl State {
             rt.started.read_only = true;
             rt.unsaved = true;
             live.pty.release();
+            rt.reaping = true;
             return Some(live.process);
         }
         self.blocks.remove(&block).and_then(|rt| rt.release(false))
@@ -3027,10 +3520,17 @@ impl State {
     /// block, unless a client closed it while the program was reaped or it
     /// is held (C78).
     fn exited(&mut self, block: BlockId, status: Option<ExitStatus>) {
+        if let Some(rt) = self.blocks.get_mut(&block) {
+            rt.finished = true;
+        }
         if let Some(status) = status
             && self.mux.note_exit(block, status).is_err()
         {
             return;
+        }
+        if let Some(rt) = self.blocks.get_mut(&block) {
+            rt.exit = status;
+            rt.reaping = false;
         }
         let held = self.blocks.get(&block).is_some_and(|rt| rt.hold);
         if held {
@@ -3105,11 +3605,65 @@ impl State {
         self.flush();
     }
 
+    /// `terminal.upload`: one chunk of a file into `block`'s upload folder.
+    fn upload(&self, block: BlockId, named: &[(&str, Value)]) -> Result<Blocking, Refusal> {
+        let text = |param| {
+            named.iter().find_map(|(n, v)| match v {
+                Value::Text(t) if *n == param => Some(t.clone()),
+                _ => None,
+            })
+        };
+        let data = named.iter().find_map(|(n, v)| match v {
+            Value::Bytes(b) if *n == "data" => Some(b.as_slice()),
+            _ => None,
+        });
+        // Before a copy is made or a shared slot is taken.
+        if data.is_some_and(|d| d.len() > upload::CHUNK_MAX) {
+            return Err(format!(
+                "terminal.upload: a chunk is at most {} bytes",
+                upload::CHUNK_MAX
+            )
+            .into());
+        }
+        let data = data.map(<[u8]>::to_vec);
+        let done = named
+            .iter()
+            .any(|(n, v)| *n == "done" && matches!(v, Value::Flag(true)));
+        let (Some(name), Some(data)) = (text("name"), data) else {
+            return Err("terminal.upload: missing name or data".to_owned().into());
+        };
+        let offset = u64::from(lines(named, "offset"));
+        let store = self.store.clone().ok_or(
+            "terminal.upload: the server keeps no state directory to put files in".to_owned(),
+        )?;
+        let slot = Arc::clone(self.uploads.borrow_mut().entry(block).or_default());
+        let deadline = Instant::now() + listing::DEADLINE;
+        // The disk work runs off the event loop, like a listing, and one
+        // block's transfers take turns.
+        Ok(Box::new(move || {
+            let dir = store.upload_path(block);
+            slot.run(&dir, deadline, || {
+                let dir = store.upload_dir(block).map_err(|e| e.to_string())?;
+                Ok(match upload::receive(&dir, &name, offset, &data, done)? {
+                    upload::Received::Partial(n) => n.to_string(),
+                    upload::Received::Done(path) => path.display().to_string(),
+                })
+            })
+        }))
+    }
+
     /// Deletes closed `block`'s spool by its path, whether or not a handle
     /// to it is left. A stopping server closes no block, so keeps them all.
     fn forget_history(&self, block: BlockId) {
         if let Some(Err(e)) = self.store.as_ref().map(|s| s.remove_spool(block)) {
             eprintln!("rusty-mux-server: removing block {block}'s history: {e}");
+        }
+        let slot = self.uploads.borrow_mut().remove(&block);
+        match (slot, self.store.as_ref()) {
+            // Transfers in flight end first; the slot clears the folder.
+            (Some(slot), Some(store)) => slot.close(store.upload_path(block)),
+            (None, Some(store)) => upload::discard(store.upload_path(block)),
+            _ => {}
         }
     }
 
@@ -3203,6 +3757,20 @@ fn passed_fds(want: u8, passed: Passed) -> Result<Vec<Fd>, Refusal> {
         .into());
     }
     Ok(fds)
+}
+
+/// The time of day in UTC, as `HH:MM:SS UTC`, for a line shown in a block.
+fn utc_clock() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let day = secs % 86_400;
+    format!(
+        "{:02}:{:02}:{:02} UTC",
+        day / 3600,
+        day % 3600 / 60,
+        day % 60
+    )
 }
 
 /// The server's `config` with what `launch` asks for instead. A relative
@@ -3374,13 +3942,16 @@ enum Outcome {
     /// Answered later, by the task the request started; resolves once it
     /// has.
     Later(oneshot::Receiver<()>),
-    /// `terminal.list-dir`, to be read off this thread: the directory
-    /// `path` names from `base`.
-    Listing {
-        base: Option<String>,
-        path: Option<String>,
+    /// A read of the host's files (`terminal.list-dir`,
+    /// `terminal.download`), to run off this thread; its text is the reply.
+    Blocking {
+        method: &'static str,
+        work: Blocking,
     },
 }
+
+/// What a [`Outcome::Blocking`] runs.
+type Blocking = Box<dyn FnOnce() -> Result<String, String> + Send>;
 
 /// The line count `param` holds, 0 when left out.
 fn lines(named: &[(&str, Value)], param: &str) -> u32 {
@@ -3412,6 +3983,59 @@ fn capture(named: &[(&str, Value)]) -> terminal::Capture {
 
 /// `terminal.history`: the spooled lines `named` asks for, as
 /// `terminal.format` would show them in `grid`, the block's.
+/// `rt`'s history past its scrollback and its screen, as one text, or why
+/// it is too long to archive.
+fn transcript(rt: &BlockRt) -> Result<String, Refusal> {
+    let capture = terminal::Capture {
+        history: u32::MAX,
+        trim: true,
+        unwrap: false,
+        vt: false,
+    };
+    let past = match &rt.spool {
+        Some(spool) => {
+            // One read gives at most READ_MAX lines; a longer history
+            // would be archived short, and the block deleted with the rest.
+            if spool.lines() > spool::READ_MAX {
+                return Err(format!(
+                    "archive-block: the history is over {} lines, more than one archive record keeps",
+                    spool::READ_MAX
+                )
+                .into());
+            }
+            let read = spool
+                .read(0, spool.lines())
+                .map_err(|e| format!("archive-block: reading the history: {e}"))?;
+            format_history(&read, &rt.grid, capture, archive::MAX_TRANSCRIPT)
+                .map_err(|_| "archive-block: the transcript is too long to archive")?
+        }
+        // Spooling stopped (a write failed): what it kept is still on disk,
+        // and closing the block would delete it unarchived.
+        None => {
+            return Err(
+                "archive-block: the block's history is not being kept, so it cannot be archived whole"
+                    .into(),
+            );
+        }
+    };
+    let screen = terminal::format(&rt.grid, capture, archive::MAX_TRANSCRIPT)
+        .ok_or("archive-block: the transcript is too long to archive")?;
+    if past.is_empty() {
+        return Ok(screen);
+    }
+    if past.len() + screen.len() >= archive::MAX_TRANSCRIPT {
+        return Err("archive-block: the transcript is too long to archive".into());
+    }
+    Ok(format!("{past}\n{screen}"))
+}
+
+/// `text` with anything that would break a header line made a space.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 fn history(spool: Option<&Spool>, grid: &Grid, named: &[(&str, Value)]) -> Result<String, Refusal> {
     let spool = spool.ok_or(
         "no history is kept past this block's scrollback: the server keeps no state, \
@@ -3606,6 +4230,7 @@ mod regression {
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
                     state_dir: None,
+                    protected: Default::default(),
                     grapheme_clustering: false,
                     config_file: None,
                 },
@@ -3636,6 +4261,7 @@ mod regression {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
                 state_dir: None,
+                protected: Default::default(),
                 grapheme_clustering: clustering,
                 config_file: None,
             },
@@ -3950,7 +4576,7 @@ mod regression {
             let (shared, _account, block, _inbox) = fixture();
             let (go, wait) = std::sync::mpsc::channel::<()>();
             let wait = std::sync::Mutex::new(wait);
-            shared.borrow_mut().lister = std::sync::Arc::new(move |_, _| {
+            shared.borrow_mut().lister = std::sync::Arc::new(move |_, _, _| {
                 wait.lock()
                     .map_err(|e| e.to_string())?
                     .recv()
@@ -4402,6 +5028,7 @@ mod regression {
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
             state_dir: None,
+            protected: Default::default(),
             grapheme_clustering: false,
             config_file: Some("/stalled.json".into()),
         };
@@ -4745,6 +5372,7 @@ mod regression {
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
                     state_dir: None,
+                    protected: Default::default(),
                     grapheme_clustering: false,
                     config_file: None,
                 },
@@ -4822,6 +5450,7 @@ mod regression {
             program: "sh".into(),
             args: vec![],
             cwd: "/".into(),
+            workspace: Default::default(),
         };
         BlockRt::read_only(grid, AnsiParser::new(), started)
     }

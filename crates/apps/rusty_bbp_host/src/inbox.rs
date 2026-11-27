@@ -8,6 +8,7 @@
 //! escalation of the same claim has a different id. Every action the inbox
 //! takes is fenced on `rev`.
 
+use crate::diffstat::{self, Diffstat};
 use crate::erosion_detail::{self, ErosionDetail};
 use crate::open_driver;
 use rusty_bbp::claims::{card, ClaimView, EvidenceView, Sight};
@@ -16,6 +17,7 @@ use rusty_bbp::event::Event;
 use rusty_bbp::*;
 use rusty_serde::Serialize;
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::Path;
 
 /// Why the human is asked, in BBP's words (`claim_escalated` reasons, plus
@@ -105,6 +107,9 @@ pub struct Acted {
     pub claim: MsgId,
     /// The references of its marks that were not aborted (a PR, a deploy id).
     pub marks: Vec<String>,
+    /// What the claim's current candidate changes (#1400). `None` when it has
+    /// no stored candidate, or its diffs cannot be read.
+    pub diffstat: Option<Diffstat>,
 }
 
 /// One exhausted task budget field.
@@ -132,6 +137,9 @@ pub fn read(dir: &Path, tasks: &[TaskId]) -> Result<Vec<Escalation>, String> {
                 .claim
                 .as_ref()
                 .and_then(|c| erosion_detail::for_claim(&d.state, c, blob));
+            for a in &mut e.acted {
+                a.diffstat = candidate_stat(&d.state, a.claim, blob);
+            }
             (n, e)
         }));
     }
@@ -142,6 +150,80 @@ pub fn read(dir: &Path, tasks: &[TaskId]) -> Result<Vec<Escalation>, String> {
 /// The JSON `bbp inbox` prints.
 pub fn json(dir: &Path, tasks: &[TaskId]) -> Result<String, String> {
     rusty_serde::json::to_string(&read(dir, tasks)?).map_err(|e| e.to_string())
+}
+
+/// Every claim of a claims task as the LEL tab reads it (`bbp claims`): the same
+/// `ClaimView` the inbox shows for an escalated claim, for all of them, in id
+/// order. Read-only: it reads a private copy of the task's log, so the store's
+/// torn-tail repair (which truncates) can only touch the copy. It appends no
+/// events, takes no session credential and never reads the master secret.
+pub fn claims(dir: &Path, task: &TaskId) -> Result<Vec<ClaimView>, String> {
+    claims_within(dir, task, MAX_LOG)
+}
+
+/// The largest log `bbp claims` will snapshot and replay (it holds the log in
+/// memory once decoded). A bigger one is refused before it is opened.
+pub const MAX_LOG: u64 = 64 << 20;
+
+/// [`claims`] with an explicit log-size ceiling, enforced while copying so a
+/// log that grows during the copy is still cut off.
+pub fn claims_within(dir: &Path, task: &TaskId, max: u64) -> Result<Vec<ClaimView>, String> {
+    let log = crate::log_path_for(dir, task);
+    if !log.exists() {
+        return Err(format!("no such task: {}", task.0));
+    }
+    let scratch = Scratch::new()?;
+    let tasks = scratch.0.join("tasks");
+    std::fs::create_dir(&tasks).map_err(|e| e.to_string())?;
+    let name = log.file_name().ok_or("log path has no name")?;
+    let io = |e: std::io::Error| format!("{}: {e}", log.display());
+    let mut src = std::fs::File::open(&log).map_err(io)?.take(max + 1);
+    let mut dst = std::fs::File::create(tasks.join(name)).map_err(io)?;
+    if std::io::copy(&mut src, &mut dst).map_err(io)? > max {
+        return Err(format!("{} is larger than {max} bytes; not read", task.0));
+    }
+    let store = FsStore::open(&scratch.0).map_err(|e| e.to_string())?;
+    let mut d = Driver::new(store, task.clone());
+    d.reload().map_err(|e| format!("{e:?}"))?;
+    if d.state.mode != Mode::Claims {
+        return Err(format!("{} is not a claims task", task.0));
+    }
+    Ok(d.state
+        .claims
+        .claims
+        .values()
+        .map(|r| card(&d.state, r, &Sight::all()))
+        .collect())
+}
+
+/// A private scratch directory under the system temp dir, removed on drop.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new() -> Result<Scratch, String> {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("bbp-claims-{}-{n}", std::process::id()));
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+        #[cfg(not(unix))]
+        let _ = &mut b;
+        b.create(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Scratch(path))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The JSON `bbp claims` prints: an array of claim views.
+pub fn claims_json(dir: &Path, task: &TaskId) -> Result<String, String> {
+    rusty_serde::json::to_string(&claims(dir, task)?).map_err(|e| e.to_string())
 }
 
 /// The open escalations of one task, from its state and its log.
@@ -274,8 +356,27 @@ fn acted(st: &TaskState, ids: impl Iterator<Item = MsgId>) -> Vec<Acted> {
                 .filter(|m| m.outcome != Some(MarkOutcome::Aborted))
                 .map(|m| m.reference.clone())
                 .collect(),
+            diffstat: None,
         })
         .collect()
+}
+
+/// The diffstat of `claim`'s current candidate: its diff artifacts, in apply order.
+fn candidate_stat(
+    st: &TaskState,
+    claim: MsgId,
+    blob: impl Fn(&BlobRef) -> Option<Vec<u8>>,
+) -> Option<Diffstat> {
+    let cand = st.artifacts.get(&st.claims.get(claim)?.current?)?;
+    let ArtifactPayload::Candidate(m) = &cand.payload else {
+        return None;
+    };
+    let patches: Vec<Vec<u8>> = m
+        .diffs
+        .iter()
+        .map(|id| blob(&st.artifacts.get(id)?.blob))
+        .collect::<Option<_>>()?;
+    diffstat::of(&patches.iter().map(Vec::as_slice).collect::<Vec<_>>())
 }
 
 fn of_claim(st: &TaskState, c: MsgId, seq: usize, reason: Reason) -> Escalation {

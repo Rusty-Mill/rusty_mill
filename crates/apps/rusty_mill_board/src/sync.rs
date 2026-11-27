@@ -17,7 +17,8 @@
 //!   proven baseline, a difference is reported and neither side is touched.
 //! - unlinked **open** issues become Backlog cards; closed ones are not imported.
 //! - an issue closed on the forge while its card is not Done is reported as
-//!   drift, never reopened and never moved (moving to Done needs review).
+//!   drift, never reopened and never moved (moving to Done needs review; the one exception is
+//!   a merged pull request that says `Closes card #N`, see [`crate::mergewatch`] and ADR-0008).
 //!
 //! The sync actor holds no capabilities: it can create, edit and link cards
 //! but cannot move them.
@@ -257,6 +258,7 @@ pub fn reconcile(board: &Shared, forge: &dyn Forge) -> Result<Report, SyncError>
         name: "github-sync".into(),
         caps: BTreeSet::new(),
         projects: None,
+        provider: None,
     };
     let issues = forge.list_issues()?;
     let by_number: HashMap<u64, &Issue> = issues.iter().map(|i| (i.number, i)).collect();

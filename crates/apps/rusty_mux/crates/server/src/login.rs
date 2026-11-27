@@ -858,11 +858,18 @@ fn read_map(path: &Path) -> io::Result<AccountMap> {
 /// without blocking, so a FIFO is refused, not waited on), and one over
 /// [`MAX_MAP`] bytes.
 pub(crate) fn read_checked(path: &Path, what: &str) -> io::Result<String> {
+    read_identified(path, what).map(|(text, _)| text)
+}
+
+/// [`read_checked`], with the device and inode of the very descriptor it
+/// read, so what was loaded can be told from what the path names later.
+pub(crate) fn read_identified(path: &Path, what: &str) -> io::Result<(String, crate::FileId)> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(rusty_libc::fd::O_NONBLOCK)
         .open(path)?;
     let meta = file.metadata()?;
+    let id = (meta.dev(), meta.ino());
     let me = rusty_libc::process::geteuid();
     let mine = meta.uid() == 0 || meta.uid() == me;
     if !meta.is_file() || !mine || meta.permissions().mode() & 0o022 != 0 {
@@ -882,7 +889,7 @@ pub(crate) fn read_checked(path: &Path, what: &str) -> io::Result<String> {
             format!("{}: the {what} is over {MAX_MAP} bytes", path.display()),
         ));
     }
-    Ok(text)
+    Ok((text, id))
 }
 
 /// Reads the map again; on success, closes every relay its principal no

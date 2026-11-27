@@ -20,9 +20,12 @@
 
 pub use rusty_mux_proto::checkpoint;
 #[cfg(any(target_os = "linux", windows))]
+mod archive;
+#[cfg(any(target_os = "linux", windows))]
 mod conn;
 #[cfg(any(target_os = "linux", windows))]
 mod datagram;
+mod download;
 #[cfg(any(target_os = "linux", windows))]
 mod echo;
 #[cfg(target_os = "linux")]
@@ -66,6 +69,7 @@ mod terminal;
 #[cfg(target_os = "linux")]
 mod tls;
 mod udp_ports;
+mod upload;
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -77,6 +81,7 @@ use rusty_mux_core::{Principal, Transport};
 use rusty_tokio::io::UnixStream;
 use rusty_tokio::io::{UdpSocket, UnixListener};
 
+pub use download::{FileId, Protected};
 #[cfg(target_os = "linux")]
 pub use login::{
     Limits, Login, MAX_MAP, PamGate, Reload, bind as bind_front_door, serve_login, serve_login_with,
@@ -110,6 +115,10 @@ pub struct Config {
     /// The store directory sessions are saved to and restored from across
     /// restarts (C45); `None` saves nothing.
     pub state_dir: Option<std::path::PathBuf>,
+    /// Files `terminal.download` never reads whatever their path: the TLS
+    /// key, the tokens, the allowlist, and the config file. A shared server
+    /// fills in its own as it loads them.
+    pub protected: Protected,
 }
 
 /// The Windows console host behind each block.

@@ -80,6 +80,12 @@ CASES = (
          "maintenance::e2e::sandboxed_maintenance_recovers_and_prepares_reviewed_pr_without_merging"),
     Case("watch-replay", "rusty_orch", ("--lib",),
          "watch::e2e::findings_are_posted_once_and_superseded_through_a_real_bbp"),
+    Case("builder-stored", "rusty_orch", ("--lib",),
+         "builder::e2e::a_jailed_builder_stores_its_candidate_and_frees_its_slot"),
+    Case("builder-mux-restart", "rusty_orch", ("--lib",),
+         "builder::e2e::a_mux_restart_aborts_the_turn_and_debits_nothing"),
+    Case("builder-deadline", "rusty_orch", ("--lib",),
+         "builder::e2e::the_holder_deadline_ends_the_session_with_orch_killed"),
     *(Case(mode, "rusty_bbp_host", ("--test", "moderator_e2e"),
            f"confined_{mode}_recovery") for mode in ("timeout", "cancel", "kill")),
 )
