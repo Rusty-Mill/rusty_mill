@@ -203,6 +203,11 @@ Precise contracts used by this guide:
 | D202 | #705: `tree-sitter-python` 0.25 added to `rusty_erosion` (new `Cargo.lock` entry) | [stated] 2026-11-26 (705) |
 | D203 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
 | D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
+| D185 | #723: Nano confirms "Work cards ... 723" means start the #723 design now (supersedes D164's hold for #723 only); build waits for design approval | [stated] 2026-11-25 (723) |
+| D186 | #723: the composition's project layer is DOMAIN.md + the Ai Env Manager manifest, not `.factory/overlay.md` | [stated] 2026-11-17, recorded 2026-11-25 (723) |
+| D205 | #723: the lens composition design (PR #1871, `723-lens-composition-design.md`) is approved as written; build may start | [stated] 2026-11-26 (723) |
+| D206 | #723 / Q48: one role set for orch; the lens is the role, Factory role files give only ground rules, Factory's gated pipeline stays outside orch | [stated] 2026-11-26 (723) |
+| D207 | #723 / Q46: knowledge and standards stay in Factory `knowledge/` and `standards/`, read through a catalog adapter | [stated] 2026-11-26 (723) |
 | D209 | #1382: the token mint lives in a new sans-IO crate `orch-token`; orch-bbp writes the token file and `jail.json` slot | [default] 2026-11-27 (1382) |
 | D212 | #1382: code waits for the gateway cards #1375-#1379; only the slice plan merges now | [stated] 2026-11-27 (1382) |
 | D216 | #1414: `rusty_orch lens why` output joins `bbp why --claim` steps to lens_record jobs; model and cost not reported yet (Q67) | [default] 2026-11-27 (1414) |
@@ -1992,6 +1997,51 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:432:design-approved-build-after-600
 **Source.** Nano tapped "Approve, build after #600" ("Design and BBP_PROVIDER_SESSION approved; code waits until the #600 builder work lands (D164 order).") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE45mV9XoArWETD2NMavEjbEy` in the Let Em Loose project thread "Build BBP Codex session resume" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4KGZwc1M3KXuPWKygNkYSfd`), 2026-11-26 13:56Z. The coordinator relayed the tap; the card and its options were read. Resolves OPEN_QUESTIONS Q66. Numbered D204 (was D200) for the same reason. D203 and D204 were checked free on main and in every open PR on 2026-11-26.
 
+## D185. #723: Nano's "Work cards ... 723" starts the #723 design now
+
+**Decision.** Nano's 2026-11-25 request "Work cards 600, 723, 724, 726, 732, and 1234" means start #723's design now. PR #1871 stays as the #723 design for his review. This supersedes D164's "the packs design (#723, D133, Q46 to Q48) ... stay for later" for #723 only; D164's other holds (#1456 and the other Backlog cards) stand. Building still waits for Nano's approval of the design on the card (D25), and ask-first gates and review/merge rules still apply.
+**Why.** Two expert readings of the work request conflicted, so it was put to Nano, and he chose this option.
+**Rejected.** b) D164's hold stands for #723. This corrects PR #1873's D180 clause "#723 keeps its own D25 step and D164's hold": the D25 step stays; the D164 hold does not.
+**Tag.** [stated] · remind-me: mem_4907327b4535417799f4d127827233d2
+**Key.** lel:general:work-cards-2026-11-25
+**Source.** Nano tapped "Yes, design now" on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4T4ZHJJtg2RCmKbjJNGfpUU` ("Design lens composition for orch" thread), 2026-11-25T16:00:16Z, question "Did 'Work cards ... 723' mean start #723's design now?", option consequence "PR #1871 stays as the #723 design for your review; building still waits for your approval on the card." Interprets Nano's project chat message `cmsg_01WgyiM31RsSnZTgNuPX2VE4QwG5GgYDSPAb6XKLcSCLq1` (2026-11-25T15:46:29Z). Supersedes D164 for #723 only. Numbered D185 after #1874 (D177 to D179) and #1873 (D180 to D184).
+
+## D186. #723: the composition's project layer is DOMAIN.md plus the manifest, not `.factory/overlay.md`
+
+**Decision.** In the #723 lens composition, the project layer is the target repo's domain pack `DOMAIN.md` (a short digest, loaded every session) plus the manifest Ai Env Manager writes (it lists what to load). The project-expert pack is asked on demand and is not composed into every prompt. `.factory/overlay.md` is not an input. The #723 card body's "overlay" wording and D133 reading 1 ("role + overlay + knowledge") are stale on this point.
+**Why.** Nano decided on 2026-11-17 that the project overlay retires and the project layer becomes the expert pack, `DOMAIN.md` and the manifest. That is newer than the card body, and no DECISIONS entry adopted overlays (D135 rejected `overlays/` for lens files), so nothing [stated] or [agreed] is reversed.
+**Rejected.** Keeping `.factory/overlay.md` as the domain pack, as the card body says.
+**Not settled here.** The same memory also retires INTENT.md. That conflicts with QA.md § intent interview ([stated] card #600, 2026-11-02, "committed unchanged as INTENT.md") and #1234 in `600-build-plan.md`, so it was escalated and is not recorded.
+**Tag.** [stated] · remind-me: mem_a8b8311111ec4975b3f986915516e902
+**Key.** lel:723:project-layer-domain-pack-not-overlay
+**Source.** remind-me `mem_749600d25c4449ee9b617faa1476181c` (tag stated; Nano, claude.ai session, 2026-11-17; a model paraphrase with no message id). Related: `mem_215883a682504a6ebe57d931fb6e5a09` (domain packs are repo-level plus project-level, Nano 2026-11-13), D133. Numbered D186 after D185.
+
+## D205. #723: the lens composition design is approved as written
+
+**Decision.** Nano approved the #723 design in `723-lens-composition-design.md` (PR #1871) as written. This is the D25 approval for #723, so the build may start along the design's slices: a pure composer in orch-lens with fixture-catalog tests, a Factory catalog adapter, `lens run` switched behind config (off by default; prompts unchanged when off), and a separate Factory PR for `domains.toml`. BBP is unchanged. Ask-first gates (BBP schema, public API, dependency bumps, paid calls, deployments) and the review/merge rules still apply.
+**Why.** He concurred with the request to approve the design and with its two recommendations (D206, D207).
+**Rejected.** Building before approval (D25).
+**Tag.** [stated] · remind-me: mem_dde248de46a5408e982471749f54d6f3
+**Key.** lel:723:design-approved
+**Source.** Nano, thread "Design lens composition for orch", message `cmsg_01WgyiM31RsSnZTgNuPX2VE49wxaDgTxaYrjqV9GwJfJeE`, 2026-11-26T22:19:47Z, verbatim: "Concur with recommendations", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE41WimMRPL5nxi6QqDxiBivo` (2026-11-25), which asked his OK on the #723 design in PR #1871 and his answers to Q48 and Q46 with the recommendations recorded here. Follows D185. Numbered D205 after main's D204.
+
+## D206. #723 / Q48: one role set for orch; the lens is the role
+
+**Decision.** Factory's workflow roles and the board lenses are one set of roles for orch. The lens is the role (D133). Factory role files give only ground rules, and Factory's gated pipeline stays outside orch. Closes Q48 with option a.
+**Why.** It matches D133 and the card's "drop the pipeline and gates", and changes nothing in Factory's own pipeline.
+**Rejected.** b) two sets, both composed by orch; c) retiring Factory workflow roles altogether.
+**Tag.** [stated] · remind-me: mem_fc7c789f8fef4395a3eac9eeabe56217
+**Key.** lel:723:one-role-set-lens-is-role
+**Source.** Nano, thread "Design lens composition for orch", message `cmsg_01WgyiM31RsSnZTgNuPX2VE49wxaDgTxaYrjqV9GwJfJeE`, 2026-11-26T22:19:47Z, verbatim: "Concur with recommendations", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE41WimMRPL5nxi6QqDxiBivo` (2026-11-25), which asked his OK on the #723 design in PR #1871 and his answers to Q48 and Q46 with the recommendations recorded here. Numbered D206 after D205.
+
+## D207. #723 / Q46: knowledge and standards packs stay in Factory, read through a catalog adapter
+
+**Decision.** The composer reads knowledge and standards from Factory `knowledge/` and `standards/` through a catalog adapter. Lens files stay in Factory `lenses/` (D135), and `DOMAIN.md` stays in the target repo (D186). Closes Q46 with option a.
+**Why.** Factory is the source of truth (D19), and a later move only needs a new adapter.
+**Rejected.** b) a pack catalog in `baileyrd/pack-validation`; c) copies in each repo under `.agents/packs/`.
+**Tag.** [stated] · remind-me: mem_00d0bc4a13804023a51fbf894ccfba09
+**Key.** lel:723:packs-in-factory-via-adapter
+**Source.** Nano, thread "Design lens composition for orch", message `cmsg_01WgyiM31RsSnZTgNuPX2VE49wxaDgTxaYrjqV9GwJfJeE`, 2026-11-26T22:19:47Z, verbatim: "Concur with recommendations", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE41WimMRPL5nxi6QqDxiBivo` (2026-11-25), which asked his OK on the #723 design in PR #1871 and his answers to Q48 and Q46 with the recommendations recorded here. Numbered D207 after D206.
 ## D209. #1382: the token mint lives in a new sans-IO crate `orch-token`; orch-bbp writes the token file and `jail.json` slot
 
 **Decision.** Inside the approved #726 design (726-sandbox-design.md §2, D180), #1382's minter is a new sans-IO crate `crates/apps/rusty_orch/crates/orch-token`: it turns the §2 claims and a signing key into an ES256 JWT (`kid`, `jti`, `exp`) and gives the JWKS entry for the public key, using the workspace's vendored `jsonwebtoken` (no new workspace dependency). orch-bbp, which launches builders, calls it and writes the token file and the existing `jail.json` `token` {`file`, `var`} slot (D107). This settles placement only; build order still follows §10 ("#1382 last") and the card's "Waits on" unless Nano says otherwise. Nano confirmed that order in D212.
