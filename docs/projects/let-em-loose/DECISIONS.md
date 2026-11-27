@@ -214,6 +214,8 @@ Precise contracts used by this guide:
 | D217 | #1415: `bbp canary` prints a profile report on a resolved ref; orch `Canary` adapter keys failures `canary:<sha>:<profile>`; $0, runs under any `watch_usd` | [default] 2026-11-27 (1415) |
 | D218 | bbp_factory Backlog cards released to be worked; supersedes D164's "later" and D201's "D164 stands" | [stated] 2026-11-27 (general, 1414, 1415) |
 | D219 | #1414: additive `project` and `memory_type` on remind-me's POST /api/memories approved; built on a rusty-remind-me card; lessons wait for it | [stated] 2026-11-27 (1414) |
+| D220 | #1416: the LEL tab reads claims through a new read-only `bbp claims` verb and Mill Board `lel_claims`/`lel_spend` | [stated] 2026-11-27 (1416) |
+| D221 | #1416: `bbp claims` prints a plain array of claim views; brief text is not served yet | [default] 2026-11-27 (1416) |
 | D222 | #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR | [default] 2026-11-27 (1416) |
 
 ## D1. Lenses, not stages
@@ -2095,6 +2097,24 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_599fc0b478d04efd95c7b56a6adb51fe
 **Key.** lel:1414:remind-me-add-route-project
 **Source.** Nano tapped option A, "Approve, card in remind-me" ("A rusty-remind-me card adds the two optional fields to POST /api/memories; lessons get built once it ships."), on decision card `cmsg_014AqbZs58L565hMV2pFkCX534TuNPPe8jEACb5bJecqGf` in thread `cmsg_014AqbZs58L565hMV2pFkCX5PE69AJuM8XMccee5BsJiwR`, 2026-11-27T02:00:28Z. The coordinator relayed the tap; the expert read the card and its options. The gap was found by the #1414 build thread on rusty-remind-me main (routes.rs lines 308–358). Settles D58's "an additive fix there is flagged then"; relates to D216, D217, D218. Numbered D219 from this thread's reserved range D216-D219.
+
+## D220. #1416: the LEL tab reads claims through a new read-only `bbp claims` verb and Mill Board `lel_claims`/`lel_spend`
+
+**Decision.** Add `bbp claims --dir D --task T [--json yes]` to the host: every claim of a claims task as a JSON array of the `ClaimView` the inbox already prints, in id order, read-only. Mill Board gains two admin-only read ops over it, `lel_claims` (the array, for a task a card links) and `lel_spend` (`[{id, spent, budget}]` derived from the same read, Q42). The root-owned `mill-board-bbp-guard` admits `claims` as well as `inbox|human`, still pinning `--dir`. D173's "no BBP change" is read as "no protocol, log or orch change": the verb is a new host CLI surface, so it was gated.
+**Why.** `claim_card` and `claims_delta` are MCP tools that need a session credential; no `bbp` verb prints claims, so the board (D35, D132) had nothing to wrap. A verb keeps the host the only BBP reader and writer.
+**Rejected.** A read-only MCP session for the board (a new trust path, bypasses D132); deriving from `show`, `card` and `inbox` (cannot list claims or per-claim spend).
+**Tag.** [stated] · Nano chose "Approve verb and guard change" on decision card `cmsg_014f6o52E2iAAAgMm9v8hh1wP41bhUZDR4VAYjba5V7ymT`, 2026-11-27T14:15Z.
+**Key.** lel:1416:bbp-claims-verb
+**Source.** The #1416 endpoint thread, 2026-11-27; let-em-loose-expert escalation; D35, D132, D168, D173, D174; `rusty_bbp_host` `src/inbox.rs` `claims`; `1092-deploy-layout.md` guard.
+
+## D221. #1416: `bbp claims` prints a plain array of claim views; brief text is not served yet
+
+**Decision.** The verb's output stays a plain array so `lel_map::parse` reads it unchanged. The brief text is not served: `lel_map::Intent.brief` stays `None` until a later change adds it (`--brief yes` printing an object is the option), and the intent version is derived from the claims as `lel_map` already does. There is no `lel_intent` op in this PR.
+**Why.** Smallest reversible shape; deferral is safe because the field is already optional.
+**Rejected.** An object shape now, which would change the top level of the output before anyone needs it.
+**Tag.** [default]
+**Key.** lel:1416:claims-verb-shape
+**Source.** let-em-loose-expert, 2026-11-27; `lel_map.rs` `Intent`; D220.
 
 ## D222. #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR
 

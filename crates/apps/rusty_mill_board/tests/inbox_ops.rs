@@ -49,6 +49,9 @@ struct Fake {
     planned: Mutex<Vec<Vec<String>>>,
     asked: Mutex<Vec<Vec<String>>>,
     acted: Mutex<Vec<(String, Action, String)>>,
+    /// What `claims` answers, and the tasks it was asked for.
+    claims: Mutex<Value>,
+    claim_reads: Mutex<Vec<String>>,
 }
 
 impl Fake {
@@ -83,6 +86,10 @@ impl Escalations for Fake {
             events: vec![],
             then: steps.collect(),
         })
+    }
+    fn claims(&self, task: &str) -> Result<Value, InboxError> {
+        self.claim_reads.lock().unwrap().push(task.to_owned());
+        Ok(self.claims.lock().unwrap().clone())
     }
     fn applied(&self, _task: &str, decision: &str) -> Result<Option<u64>, InboxError> {
         if self.old_host.load(Ordering::SeqCst) {
@@ -1154,4 +1161,46 @@ fn an_escalation_bbp_still_lists_is_not_gone() {
     let out = call(&board, &owner(), "inbox_act", reject()).unwrap();
     assert_eq!(out["recorded"]["settled"], "unknown", "{out}");
     assert!(remediate_cards(&board)[0].closed.is_none());
+}
+
+#[test]
+fn lel_claims_and_spend_read_a_linked_task_only() {
+    let (b, fake) = setup();
+    *fake.claims.lock().unwrap() = json!([
+        {"id": 1, "text": "ship it", "status": "Open", "confidence": 50, "spent": 3, "budget": 16, "evidence": []},
+        {"id": 2, "text": "and this", "status": "Open", "confidence": 60, "spent": 0, "budget": 8}
+    ]);
+    let out = call(&b, &owner(), "lel_claims", json!({"task": "T1"})).unwrap();
+    assert_eq!(out.as_array().unwrap().len(), 2);
+    let spend = call(&b, &owner(), "lel_spend", json!({"task": "T1"})).unwrap();
+    assert_eq!(
+        spend,
+        json!([{"id": 1, "spent": 3, "budget": 16}, {"id": 2, "spent": 0, "budget": 8}])
+    );
+    // T9 exists on the host but no card links it.
+    assert!(refused(call(&b, &owner(), "lel_claims", json!({"task": "T9"}))).contains("no card"));
+    assert_eq!(*fake.claim_reads.lock().unwrap(), ["T1", "T1"]);
+}
+
+#[test]
+fn lel_reads_need_a_bound_admin() {
+    let (b, fake) = setup();
+    let model = Identity {
+        actor: "codex".into(),
+        role: "builder".into(),
+        projects: None,
+        connector: false,
+        provider: None,
+        view: Default::default(),
+    };
+    for op in ["lel_claims", "lel_spend"] {
+        assert!(refused(call(&b, &model, op, json!({"task": "T1"}))).contains("Admin"));
+        let unbound = ops().iter().find(|o| o.name == op).expect("op").call(
+            &b,
+            None,
+            json!({"task": "T1", "actor": "nano", "role": "human"}),
+        );
+        assert!(refused(unbound).contains("authenticated"));
+    }
+    assert!(fake.claim_reads.lock().unwrap().is_empty());
 }

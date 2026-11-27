@@ -3480,3 +3480,73 @@ fn a_gate_that_refuses_after_checkout_runs_nothing() {
     assert!(b.tree.is_some(), "the checkout was prepared first");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn bbp_claims_lists_every_claim_read_only() {
+    let dir = tempdir("claims-read");
+    claims_task(&dir);
+    assert!(inbox::claims(&dir, &task()).unwrap().is_empty());
+    let a = claim(&dir, "a", "ship it", true);
+    let b = claim(&dir, "b", "and this", false);
+    let before = state(&dir).rev;
+    let views = inbox::claims(&dir, &task()).unwrap();
+    assert_eq!(views.iter().map(|v| v.id.0).collect::<Vec<_>>(), [a, b]);
+    assert_eq!(state(&dir).rev, before, "a read appends no events");
+    let json = inbox::claims_json(&dir, &task()).unwrap();
+    // The fields the LEL tab's `lel_map::parse` requires (drift guard).
+    assert!(json.starts_with('['));
+    for key in [
+        "id",
+        "text",
+        "domains",
+        "status",
+        "score",
+        "confidence",
+        "spent",
+        "budget",
+        "deps",
+        "candidates",
+    ] {
+        assert!(
+            json.contains(&format!("\"{key}\":")),
+            "{key} missing: {json}"
+        );
+    }
+    assert!(inbox::claims(&dir, &TaskId("nope".into())).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bbp_claims_refuses_a_log_over_the_ceiling() {
+    let dir = tempdir("claims-big");
+    claims_task(&dir);
+    claim(&dir, "a", "ship it", true);
+    let len = std::fs::metadata(rusty_bbp::log_path_for(&dir, &task()))
+        .unwrap()
+        .len();
+    assert!(inbox::claims_within(&dir, &task(), len).is_ok());
+    let err = inbox::claims_within(&dir, &task(), len - 1).unwrap_err();
+    assert!(err.contains("larger than"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An interrupted append leaves a partial last line. `bbp claims` must read
+/// the complete prefix and leave the log's bytes exactly as they were.
+#[test]
+fn bbp_claims_leaves_a_torn_log_tail_untouched() {
+    let dir = tempdir("claims-torn");
+    claims_task(&dir);
+    let a = claim(&dir, "a", "ship it", true);
+    let log = rusty_bbp::log_path_for(&dir, &task());
+    let mut bytes = std::fs::read(&log).unwrap();
+    bytes.extend_from_slice(b"{\"prev\":\"torn");
+    std::fs::write(&log, &bytes).unwrap();
+    let views = inbox::claims(&dir, &task()).unwrap();
+    assert_eq!(views.iter().map(|v| v.id.0).collect::<Vec<_>>(), [a]);
+    assert_eq!(
+        std::fs::read(&log).unwrap(),
+        bytes,
+        "the log is not repaired"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
