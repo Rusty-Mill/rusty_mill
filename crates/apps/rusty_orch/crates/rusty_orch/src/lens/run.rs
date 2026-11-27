@@ -36,12 +36,12 @@ use orch_core::AgentId;
 use orch_lens::breaker::{judge, Breaker, Mark, Outcome};
 use orch_lens::call::{Ctx, Models};
 use orch_lens::card::Card;
-use orch_lens::compose::{prefix_key, Limits, PrefixKey};
+use orch_lens::compose::{domain_set, Limits};
 use orch_lens::config::Tools;
-use orch_lens::context::{prefix, Line, Rung};
+use orch_lens::context::{Frame, Line};
 use orch_lens::meter::{Meter, Stop};
 use orch_lens::record::{Review, Tally};
-use orch_lens::round::{round, Board, Halt, View};
+use orch_lens::round::{round, Board, Composing, Halt, View};
 use orch_lens::schedule::State;
 use orch_lens::taint::Taints;
 use orch_lens::{LensConfig, Model};
@@ -317,8 +317,9 @@ pub struct Prompts {
 struct Prefixes {
     text: BTreeMap<String, String>,
     built_on: BTreeMap<String, Option<ArtId>>,
-    /// The brief each lens's prefix was built on, for composed prefixes.
-    intent: BTreeMap<String, String>,
+    /// Each lens's frame on the brief its prefix was built on, for
+    /// composed prefixes.
+    frame: BTreeMap<String, Frame>,
 }
 
 impl Prefixes {
@@ -330,59 +331,49 @@ impl Prefixes {
         if self.built_on.get(lens) == Some(&id) {
             return Ok(());
         }
-        let intent = seat.brief()?;
-        self.text
-            .insert(lens.to_owned(), prefix(&intent, &prompts.rules, prompt));
+        let frame = Frame::new(&seat.brief()?, &prompts.rules);
+        self.text.insert(lens.to_owned(), frame.wrap(prompt));
         self.built_on.insert(lens.to_owned(), id);
-        self.intent.insert(lens.to_owned(), intent);
+        self.frame.insert(lens.to_owned(), frame);
         Ok(())
     }
 
-    /// #723: per distinct domain set among `cards`, the composed prefix
-    /// and every smaller one down to the base prefix, built on the same
-    /// brief as the flat prefix. Each job then uses the largest that fits
-    /// its provider. Empty when composition is off. Files left out by the
-    /// catalog's own limits are logged here; the round reports what a
-    /// provider's window left out.
+    /// #723: `lens`'s frame and a plan per distinct domain set among
+    /// `cards`, built on the same brief as the flat prefix. Each job then
+    /// renders only the prefix that fits its provider. Empty when
+    /// composition is off. Files left out by the catalog's own limits are
+    /// logged here; the round reports what a provider's window left out.
     fn composed(
         &self,
         lens: &str,
         cards: &[Card],
         prompts: &Prompts,
         log: &mut String,
-    ) -> Result<BTreeMap<PrefixKey, Vec<Rung>>, String> {
-        let (Some(catalog), Some(prompt), Some(intent)) = (
+    ) -> Result<BTreeMap<String, Composing>, String> {
+        let (Some(catalog), Some(prompt), Some(frame)) = (
             prompts.catalog.as_ref(),
             prompts.lens.get(lens),
-            self.intent.get(lens),
+            self.frame.get(lens),
         ) else {
             return Ok(BTreeMap::new());
         };
-        let mut out = BTreeMap::new();
+        let mut plans = BTreeMap::new();
         for card in cards {
-            let key = prefix_key(lens, &card.domains);
-            if out.contains_key(&key) {
+            let set = domain_set(&card.domains);
+            if plans.contains_key(&set) {
                 continue;
             }
-            let ladder = catalog.ladder(prompt, &key.1)?;
-            let first = ladder.first().map_or(0, |c| c.dropped.len());
-            for d in ladder
-                .first()
-                .map(|c| c.dropped.as_slice())
-                .unwrap_or_default()
-            {
-                let _ = writeln!(log, "{lens} [{}]: {d} left out to fit", key.1.join(", "));
+            let plan = catalog.plan(prompt, &set)?;
+            for d in plan.dropped() {
+                let _ = writeln!(log, "{lens} [{}]: {d} left out to fit", set.join(", "));
             }
-            let rungs = ladder
-                .into_iter()
-                .map(|c| Rung {
-                    prefix: prefix(intent, &prompts.rules, &c.prompt),
-                    dropped: c.dropped[first..].to_vec(),
-                })
-                .collect();
-            out.insert(key, rungs);
+            plans.insert(set, plan);
         }
-        Ok(out)
+        let composing = Composing {
+            frame: frame.clone(),
+            plans,
+        };
+        Ok(BTreeMap::from([(lens.to_owned(), composing)]))
     }
 }
 
@@ -2222,8 +2213,8 @@ mod tests {
         };
         let mut prefixes = Prefixes::default();
         prefixes
-            .intent
-            .insert("adversary".to_owned(), "the brief".to_owned());
+            .frame
+            .insert("adversary".to_owned(), Frame::new("the brief", "rules"));
         let on = |id: u64, domains: &[&str]| Card {
             domains: domains.iter().map(|d| (*d).to_owned()).collect(),
             ..card(id)
@@ -2233,21 +2224,27 @@ mod tests {
         let got = prefixes
             .composed("adversary", &cards, &prompts, &mut log)
             .expect("composes");
-        assert_eq!(got.len(), 2, "one prefix per domain set");
-        let rust_rungs = &got[&prefix_key("adversary", &["rust".to_owned()])];
-        let tty_rungs = &got[&prefix_key("adversary", &["tty".to_owned()])];
-        let (rust, tty) = (&rust_rungs[0].prefix, &tty_rungs[0].prefix);
-        assert_ne!(rust, tty);
-        let base = prefix("the brief", "rules", "find faults");
-        assert_eq!(rust_rungs.last().map(|r| &r.prefix), Some(&base));
-        assert_eq!(
-            rust_rungs.last().map(|r| r.dropped.clone()),
-            Some(vec!["k/rust.md".to_owned(), "DOMAIN.md".to_owned()])
+        let plans = &got["adversary"].plans;
+        assert_eq!(plans.len(), 2, "one plan per domain set");
+        let frame = &got["adversary"].frame;
+        let (rust, tty) = (
+            &plans[&vec!["rust".to_owned()]],
+            &plans[&vec!["tty".to_owned()]],
         );
-        assert!(rust_rungs[0].dropped.is_empty());
-        assert!(rust.contains("Ownership first.") && rust.contains("# Project\nDedup 20 TB."));
-        assert!(rust.starts_with("# Intent\nthe brief\n"));
-        assert!(tty.contains("VT is a state machine.") && !tty.contains("Ownership"));
+        let (rust_full, tty_full) = (frame.wrap(&rust.render(0)), frame.wrap(&tty.render(0)));
+        assert_ne!(rust_full, tty_full);
+        let base = orch_lens::context::prefix("the brief", "rules", "find faults");
+        assert_eq!(frame.wrap(&rust.render(rust.steps())), base);
+        assert_eq!(
+            rust.left_out(rust.steps()),
+            vec!["k/rust.md".to_owned(), "DOMAIN.md".to_owned()]
+        );
+        assert!(rust.dropped().is_empty());
+        assert!(
+            rust_full.contains("Ownership first.") && rust_full.contains("# Project\nDedup 20 TB.")
+        );
+        assert!(rust_full.starts_with("# Intent\nthe brief\n"));
+        assert!(tty_full.contains("VT is a state machine.") && !tty_full.contains("Ownership"));
         let off = Prompts {
             catalog: None,
             ..prompts

@@ -626,8 +626,7 @@ mod tests {
         )]);
         let lens = PrincipalId("adversary".to_owned());
         let parts = Parts {
-            prefix: "# Intent\nx\n",
-            smaller: &[],
+            prefix: crate::context::Prefix::Flat("# Intent\nx\n"),
             card: &c,
             lens: &lens,
             phase: Phase::Informed,

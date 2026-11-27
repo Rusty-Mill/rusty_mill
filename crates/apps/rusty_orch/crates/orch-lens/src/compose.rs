@@ -27,7 +27,7 @@ pub struct Packs {
     pub standards: Vec<String>,
 }
 
-/// Domain token to the files it loads (Factory `domains.toml`).
+/// Domain token to the files it loads (Factory `domains.json`).
 pub type DomainMap = BTreeMap<String, Packs>;
 
 /// What a question's domains select. Equal selections compose equal bytes.
@@ -51,6 +51,25 @@ impl Default for Limits {
         Self {
             file_bytes: 8 * 1024,
             total_bytes: 32 * 1024,
+        }
+    }
+}
+
+/// A catalog file as the shell read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Text {
+    /// The file's contents.
+    Loaded(String),
+    /// Larger than the shell's read cap, so not read; dropped if selected.
+    OverCap,
+}
+
+impl Text {
+    /// The contents, if read and no larger than `cap` bytes.
+    fn within(&self, cap: usize) -> Option<&str> {
+        match self {
+            Self::Loaded(t) if t.len() <= cap => Some(t),
+            _ => None,
         }
     }
 }
@@ -136,14 +155,11 @@ fn inside(p: &str) -> bool {
             .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
-/// A composed prefix's key: the lens id and a claim's domains, sorted and
-/// deduped, so domain order never picks a different prefix.
-pub type PrefixKey = (String, Vec<String>);
-
-/// The [`PrefixKey`] for `lens` on a claim in `domains`.
-pub fn prefix_key(lens: &str, domains: &[String]) -> PrefixKey {
+/// A claim's domains, sorted and deduped: the key a lens's composed
+/// prefix is found by, so domain order never picks a different prefix.
+pub fn domain_set(domains: &[String]) -> Vec<String> {
     let set: BTreeSet<&String> = domains.iter().collect();
-    (lens.to_owned(), set.into_iter().cloned().collect())
+    set.into_iter().cloned().collect()
 }
 
 /// The name reported when the domain pack is dropped.
@@ -165,15 +181,15 @@ pub fn select(map: &DomainMap, domains: &[String]) -> (Selection, BTreeSet<Strin
 }
 
 /// Compose `lens` with the domain pack and the selected files from `texts`
-/// (path to contents). Oversized files, the domain pack included, are
-/// dropped first; then, until the
+/// (path to contents). Oversized files ([`Text::OverCap`], or larger than
+/// `file_bytes`), the domain pack included, are dropped first; then, until the
 /// rest fits `total_bytes`, knowledge files go (last first), then the
 /// domain pack, then standards (last first).
 pub fn compose(
     lens: &str,
-    domain_pack: Option<&str>,
+    domain_pack: Option<&Text>,
     sel: &Selection,
-    texts: &BTreeMap<String, String>,
+    texts: &BTreeMap<String, Text>,
     limits: Limits,
 ) -> Result<Composed, ComposeError> {
     let mut d = Draft::new(lens, domain_pack, sel, texts, limits)?;
@@ -181,24 +197,118 @@ pub fn compose(
     Ok(d.composed())
 }
 
-/// The composed prompt that fits `total_bytes`, then every smaller one in
-/// the same drop order, one more section or file left out each step, down
-/// to the bare lens prompt. Never empty; the last entry's prompt is `lens`.
-/// The caller picks the first that fits a provider's window.
-pub fn ladder(
-    lens: &str,
-    domain_pack: Option<&str>,
-    sel: &Selection,
-    texts: &BTreeMap<String, String>,
-    limits: Limits,
-) -> Result<Vec<Composed>, ComposeError> {
-    let mut d = Draft::new(lens, domain_pack, sel, texts, limits)?;
-    d.fit(limits.total_bytes);
-    let mut out = vec![d.composed()];
-    while d.drop_one() {
-        out.push(d.composed());
+/// A composition that fits `total_bytes`, not yet rendered: what is in,
+/// in drop order, and the prompt's byte length at each step of leaving one
+/// more out, so a caller can pick the step that fits a provider's window
+/// and render only that one ([`Plan::render`]). Linear in what is in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    lens: String,
+    pack: Option<String>,
+    knowledge: Vec<(String, String)>,
+    standards: Vec<(String, String)>,
+    /// Left out by the limits, before any window.
+    dropped: Vec<String>,
+    /// `sizes[k]`: the prompt's bytes with the first `k` items of the drop
+    /// order left out. Never empty; the last is the bare lens prompt's.
+    sizes: Vec<usize>,
+}
+
+impl Plan {
+    /// Plan `lens` with the domain pack and the selected files, as
+    /// [`compose`] would compose them.
+    pub fn new(
+        lens: &str,
+        domain_pack: Option<&Text>,
+        sel: &Selection,
+        texts: &BTreeMap<String, Text>,
+        limits: Limits,
+    ) -> Result<Self, ComposeError> {
+        let mut d = Draft::new(lens, domain_pack, sel, texts, limits)?;
+        d.fit(limits.total_bytes);
+        let owned = |files: &[File<'_>]| {
+            files
+                .iter()
+                .map(|(p, t)| ((*p).to_owned(), (*t).to_owned()))
+                .collect()
+        };
+        let mut plan = Self {
+            lens: lens.to_owned(),
+            pack: d.pack.map(str::to_owned),
+            knowledge: owned(&d.knowledge.files),
+            standards: owned(&d.standards.files),
+            dropped: d.dropped.clone(),
+            sizes: vec![lens.len() + d.size()],
+        };
+        while d.drop_one() {
+            plan.sizes.push(lens.len() + d.size());
+        }
+        Ok(plan)
     }
-    Ok(out)
+
+    /// How many items can still be left out.
+    pub fn steps(&self) -> usize {
+        self.sizes.len() - 1
+    }
+
+    /// The prompt's bytes with `k` items left out (`k` past
+    /// [`Plan::steps`] counts as all of them).
+    pub fn bytes(&self, k: usize) -> usize {
+        self.sizes
+            .get(k)
+            .or(self.sizes.last())
+            .copied()
+            .unwrap_or(self.lens.len())
+    }
+
+    /// What the limits left out before any window, in drop order.
+    pub fn dropped(&self) -> &[String] {
+        &self.dropped
+    }
+
+    /// The first `k` items of the drop order: knowledge (last first), the
+    /// domain pack, standards (last first).
+    pub fn left_out(&self, k: usize) -> Vec<String> {
+        let rev = |files: &[(String, String)]| {
+            files.iter().rev().map(|f| f.0.clone()).collect::<Vec<_>>()
+        };
+        rev(&self.knowledge)
+            .into_iter()
+            .chain(self.pack.as_ref().map(|_| DOMAIN_PACK.to_owned()))
+            .chain(rev(&self.standards))
+            .take(k)
+            .collect()
+    }
+
+    /// The prompt with `k` items left out; `bytes(k)` long.
+    pub fn render(&self, k: usize) -> String {
+        #[cfg(test)]
+        RENDERS.with(|n| n.set(n.get() + 1));
+        let nk = self.knowledge.len();
+        let pack = self.pack.as_deref().filter(|_| k <= nk);
+        let past = k.saturating_sub(nk + usize::from(self.pack.is_some()));
+        render(
+            &self.lens,
+            pack,
+            &first(&self.knowledge, nk.saturating_sub(k)),
+            &first(&self.standards, self.standards.len().saturating_sub(past)),
+        )
+    }
+}
+
+/// The first `keep` of `files`, borrowed.
+fn first(files: &[(String, String)], keep: usize) -> Vec<File<'_>> {
+    files
+        .iter()
+        .take(keep)
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Prompts rendered by [`Plan::render`] on this thread.
+    pub(crate) static RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A composition in progress: what is still in, and what was left out.
@@ -213,16 +323,18 @@ struct Draft<'a> {
 impl<'a> Draft<'a> {
     fn new(
         lens: &'a str,
-        domain_pack: Option<&'a str>,
+        domain_pack: Option<&'a Text>,
         sel: &'a Selection,
-        texts: &'a BTreeMap<String, String>,
+        texts: &'a BTreeMap<String, Text>,
         limits: Limits,
     ) -> Result<Self, ComposeError> {
         let mut dropped = Vec::new();
-        let mut pack = domain_pack.filter(|p| !p.trim().is_empty());
-        if pack.is_some_and(|p| p.len() > limits.file_bytes) {
-            pack = None;
-            dropped.push(DOMAIN_PACK.to_owned());
+        let mut pack = None;
+        if let Some(text) = domain_pack {
+            match text.within(limits.file_bytes) {
+                Some(p) => pack = Some(p).filter(|p| !p.trim().is_empty()),
+                None => dropped.push(DOMAIN_PACK.to_owned()),
+            }
         }
         let knowledge = Part::load("Knowledge", &sel.knowledge, texts, limits, &mut dropped)?;
         let standards = Part::load("Standards", &sel.standards, texts, limits, &mut dropped)?;
@@ -296,7 +408,7 @@ impl<'a> Part<'a> {
     fn load(
         title: &'static str,
         paths: &'a BTreeSet<String>,
-        texts: &'a BTreeMap<String, String>,
+        texts: &'a BTreeMap<String, Text>,
         limits: Limits,
         dropped: &mut Vec<String>,
     ) -> Result<Self, ComposeError> {
@@ -305,11 +417,10 @@ impl<'a> Part<'a> {
             let text = texts
                 .get(path)
                 .ok_or_else(|| ComposeError::Missing(path.clone()))?;
-            if text.len() > limits.file_bytes {
-                dropped.push(path.clone());
-                continue;
+            match text.within(limits.file_bytes) {
+                Some(text) => files.push((path.as_str(), text)),
+                None => dropped.push(path.clone()),
             }
-            files.push((path.as_str(), text.as_str()));
         }
         let file_bytes = files.iter().map(|f| file(*f)).sum();
         Ok(Self {
@@ -412,14 +523,14 @@ mod tests {
         m
     }
 
-    fn texts() -> BTreeMap<String, String> {
+    fn texts() -> BTreeMap<String, Text> {
         [
             ("knowledge/rust.md", "Ownership first.\n"),
             ("standards/rust.md", "MUST: no unwrap in library code.\n"),
             ("knowledge/terminal.md", "VT parsing is a state machine.\n"),
         ]
         .into_iter()
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .map(|(k, v)| (k.to_owned(), Text::Loaded(v.to_owned())))
         .collect()
     }
 
@@ -429,7 +540,25 @@ mod tests {
 
     fn build(domains: &[&str], pack: Option<&str>, limits: Limits) -> Composed {
         let (sel, _) = select(&map(), &doms(domains));
-        compose("find faults", pack, &sel, &texts(), limits).expect("composes")
+        let pack = pack.map(|p| Text::Loaded(p.to_owned()));
+        compose("find faults", pack.as_ref(), &sel, &texts(), limits).expect("composes")
+    }
+
+    #[test]
+    fn an_over_cap_file_is_dropped_only_when_selected() {
+        let mut t = texts();
+        t.insert("standards/rust.md".into(), Text::OverCap);
+        let (rust, _) = select(&map(), &doms(&["rust"]));
+        let c = compose("l", Some(&Text::OverCap), &rust, &t, Limits::default()).expect("composes");
+        assert_eq!(
+            c.dropped,
+            vec![DOMAIN_PACK.to_owned(), "standards/rust.md".to_owned()]
+        );
+        assert!(c.prompt.contains("Ownership first.") && !c.prompt.contains("# Standards"));
+        let (term, _) = select(&map(), &doms(&["terminal"]));
+        let c = compose("l", None, &term, &t, Limits::default()).expect("composes");
+        assert!(c.dropped.is_empty());
+        assert!(c.prompt.contains("VT parsing"));
     }
 
     #[test]
@@ -583,28 +712,20 @@ mod tests {
         }
     }
 
+    fn plan(domains: &[&str], pack: Option<&str>, limits: Limits) -> Plan {
+        let (sel, _) = select(&map(), &doms(domains));
+        let pack = pack.map(|p| Text::Loaded(p.to_owned()));
+        Plan::new("find faults", pack.as_ref(), &sel, &texts(), limits).expect("plans")
+    }
+
     #[test]
-    fn the_ladder_steps_down_in_drop_order_to_the_bare_lens() {
-        let (sel, _) = select(&map(), &doms(&["rust", "terminal"]));
-        let rungs = ladder(
-            "find faults",
-            Some("brief"),
-            &sel,
-            &texts(),
-            Limits::default(),
-        )
-        .expect("composes");
+    fn a_plan_steps_down_in_drop_order_to_the_bare_lens() {
+        let p = plan(&["rust", "terminal"], Some("brief"), Limits::default());
         let full = build(&["rust", "terminal"], Some("brief"), Limits::default());
-        assert_eq!(rungs[0], full);
-        let dropped: Vec<&str> = rungs
-            .last()
-            .expect("rung")
-            .dropped
-            .iter()
-            .map(String::as_str)
-            .collect();
+        assert_eq!(p.render(0), full.prompt);
+        assert_eq!(p.steps(), 4);
         assert_eq!(
-            dropped,
+            p.left_out(p.steps()),
             vec![
                 "knowledge/terminal.md",
                 "knowledge/rust.md",
@@ -612,21 +733,25 @@ mod tests {
                 "standards/rust.md"
             ]
         );
-        assert_eq!(rungs.len(), 5);
-        assert_eq!(rungs.last().expect("rung").prompt, "find faults");
-        assert!(rungs
-            .windows(2)
-            .all(|w| w[0].prompt.len() > w[1].prompt.len()));
-        let flat = ladder(
-            "find faults",
-            None,
-            &Selection::default(),
-            &texts(),
-            Limits::default(),
-        )
-        .expect("composes");
-        assert_eq!(flat.len(), 1);
-        assert_eq!(flat[0].prompt, "find faults");
+        for k in 0..=p.steps() {
+            assert_eq!(p.render(k).len(), p.bytes(k), "step {k}");
+        }
+        assert!((0..p.steps()).all(|k| p.bytes(k) > p.bytes(k + 1)));
+        assert_eq!(p.render(p.steps()), "find faults");
+        assert_eq!(p.bytes(99), "find faults".len());
+        let flat = plan(&[], None, Limits::default());
+        assert_eq!((flat.steps(), flat.render(0).as_str()), (0, "find faults"));
+    }
+
+    #[test]
+    fn a_plan_keeps_what_the_limits_dropped_apart_from_its_steps() {
+        let limits = Limits {
+            file_bytes: 20,
+            ..Limits::default()
+        };
+        let p = plan(&["rust"], Some("brief"), limits);
+        assert_eq!(p.dropped(), ["standards/rust.md".to_owned()]);
+        assert_eq!(p.left_out(9), vec!["knowledge/rust.md", DOMAIN_PACK]);
     }
 
     #[test]

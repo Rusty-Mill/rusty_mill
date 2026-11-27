@@ -8,14 +8,17 @@
 //! target repo for `DOMAIN.md`) without following a symlink anywhere below
 //! it, and the opened handle must be a regular file, so no check can be
 //! raced between test and use. Each file is read only up to its byte cap;
-//! a larger file is refused, not truncated. A missing root reads as if
-//! every file under it were missing.
+//! a larger file is not loaded but marked [`Text::OverCap`], so it is
+//! dropped and reported only when a question selects it. The map itself
+//! must fit its cap. A missing root reads as if every file under it were
+//! missing. Any other failure (permissions, a symlink, not UTF-8, a bad
+//! map) fails open.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
 use std::path::Path;
 
-use orch_lens::compose::{self, Composed, DomainMap, Limits, Selection};
+use orch_lens::compose::{self, Composed, DomainMap, Limits, Plan, Selection, Text};
 
 /// The domain map's file name, at the catalog root.
 pub const MAP: &str = "domains.json";
@@ -28,8 +31,8 @@ pub const MAP_BYTES: usize = 64 * 1024;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalog {
     map: DomainMap,
-    texts: BTreeMap<String, String>,
-    domain_pack: Option<String>,
+    texts: BTreeMap<String, Text>,
+    domain_pack: Option<Text>,
     limits: Limits,
 }
 
@@ -48,9 +51,17 @@ impl Catalog {
     /// `repo/DOMAIN.md`. Either file may be absent: no map selects
     /// nothing, and no pack composes no project section.
     pub fn open(factory: &Path, repo: &Path, limits: Limits) -> Result<Self, String> {
+        let shown = factory.join(MAP);
         let map = match read(factory, MAP, MAP_BYTES, Need::Optional)? {
-            Some(text) => compose::parse_map(&text)
-                .map_err(|e| format!("{}: {e}", factory.join(MAP).display()))?,
+            Some(Text::Loaded(text)) => {
+                compose::parse_map(&text).map_err(|e| format!("{}: {e}", shown.display()))?
+            }
+            Some(Text::OverCap) => {
+                return Err(format!(
+                    "{}: over the {MAP_BYTES}-byte cap",
+                    shown.display()
+                ))
+            }
             None => DomainMap::new(),
         };
         let texts = read_all(factory, &map, limits.file_bytes)?;
@@ -68,7 +79,7 @@ impl Catalog {
         let (selection, unknown) = compose::select(&self.map, domains);
         let composed = compose::compose(
             lens_prompt,
-            self.domain_pack.as_deref(),
+            self.domain_pack.as_ref(),
             &selection,
             &self.texts,
             self.limits,
@@ -81,14 +92,14 @@ impl Catalog {
         })
     }
 
-    /// The composed prompt for `domains`, then every smaller one down to
-    /// the bare lens prompt ([`compose::ladder`]), so a caller can fit a
-    /// provider's window without cutting the card.
-    pub fn ladder(&self, lens_prompt: &str, domains: &[String]) -> Result<Vec<Composed>, String> {
+    /// The unrendered composition for `domains` ([`compose::Plan`]), so a
+    /// caller can fit each provider's window without cutting the card and
+    /// render only the prefix it picks.
+    pub fn plan(&self, lens_prompt: &str, domains: &[String]) -> Result<Plan, String> {
         let (selection, _) = compose::select(&self.map, domains);
-        compose::ladder(
+        Plan::new(
             lens_prompt,
-            self.domain_pack.as_deref(),
+            self.domain_pack.as_ref(),
             &selection,
             &self.texts,
             self.limits,
@@ -97,11 +108,7 @@ impl Catalog {
     }
 }
 
-fn read_all(
-    factory: &Path,
-    map: &DomainMap,
-    cap: usize,
-) -> Result<BTreeMap<String, String>, String> {
+fn read_all(factory: &Path, map: &DomainMap, cap: usize) -> Result<BTreeMap<String, Text>, String> {
     let paths: BTreeSet<&String> = map
         .values()
         .flat_map(|p| p.knowledge.iter().chain(&p.standards))
@@ -123,9 +130,9 @@ enum Need {
 }
 
 /// Read `root/rel` if it is a regular file reached without a symlink
-/// below `root`, holding at most `cap` bytes of UTF-8. A missing file, or a
-/// missing root, is `None` when `need` allows it.
-fn read(root: &Path, rel: &str, cap: usize, need: Need) -> Result<Option<String>, String> {
+/// below `root`: its UTF-8 text, or [`Text::OverCap`] past `cap` bytes. A
+/// missing file, or a missing root, is `None` when `need` allows it.
+fn read(root: &Path, rel: &str, cap: usize, need: Need) -> Result<Option<Text>, String> {
     let shown = root.join(rel);
     let shown = shown.display();
     let file = match rusty_confined_fs::open_for_read(root, Path::new(rel)) {
@@ -140,10 +147,10 @@ fn read(root: &Path, rel: &str, cap: usize, need: Need) -> Result<Option<String>
         .read_to_end(&mut bytes)
         .map_err(|e| format!("cannot read {shown}: {e}"))?;
     if bytes.len() > cap {
-        return Err(format!("{shown}: over the {cap}-byte cap"));
+        return Ok(Some(Text::OverCap));
     }
     String::from_utf8(bytes)
-        .map(Some)
+        .map(|t| Some(Text::Loaded(t)))
         .map_err(|_| format!("{shown}: not UTF-8"))
 }
 
@@ -217,18 +224,47 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_input_is_refused_before_loading() {
+    fn an_oversized_file_is_dropped_only_when_selected() {
         let f = factory("big");
+        write(
+            &f,
+            "standards/rust.md",
+            "MUST: a standard well over the cap.",
+        );
+        let repo = scratch("big-repo");
+        write(&repo, DOMAIN_PACK, "A domain digest well over the cap.");
         let limits = Limits {
-            file_bytes: 10,
+            file_bytes: 24,
             ..Limits::default()
         };
-        let err = Catalog::open(&f, &scratch("big-repo"), limits).unwrap_err();
-        assert!(err.contains("over the 10-byte cap"), "{err}");
-        let repo = scratch("big-pack");
-        write(&repo, DOMAIN_PACK, "A domain digest well over ten bytes.");
-        let err = Catalog::open(&scratch("big-empty"), &repo, limits).unwrap_err();
-        assert!(err.contains(DOMAIN_PACK) && err.contains("cap"), "{err}");
+        let c = Catalog::open(&f, &repo, limits).expect("over-cap files do not fail open");
+        let term = c
+            .build("find faults", &doms(&["terminal"]))
+            .expect("builds");
+        assert_eq!(term.composed.dropped, vec![DOMAIN_PACK.to_owned()]);
+        assert_eq!(
+            term.composed.prompt,
+            "find faults\n\n# Knowledge\n## knowledge/terminal.md\nVT is a state machine.\n"
+        );
+        let rust = c.build("find faults", &doms(&["rust"])).expect("builds");
+        assert_eq!(
+            rust.composed.dropped,
+            vec![DOMAIN_PACK.to_owned(), "standards/rust.md".to_owned()]
+        );
+        assert!(rust.composed.prompt.contains("Ownership first."));
+        assert!(!rust.composed.prompt.contains("MUST"));
+    }
+
+    #[test]
+    fn an_oversized_map_fails_open() {
+        let f = scratch("big-map");
+        write(
+            &f,
+            MAP,
+            &format!("{{\"pad\": \"{}\"}}", "x".repeat(MAP_BYTES)),
+        );
+        let err = Catalog::open(&f, &scratch("big-map-repo"), Limits::default()).unwrap_err();
+        assert!(err.contains(MAP) && err.contains("cap"), "{err}");
     }
 
     #[test]
