@@ -77,23 +77,36 @@ struct Session {
     id: String,
     /// An earlier turn of the role started the conversation.
     resume: bool,
+    /// The provider's own id for the conversation, captured by the moderator
+    /// from the first turn's log (`BBP_PROVIDER_SESSION`; Codex only).
+    provider: Option<String>,
+}
+
+/// A lowercase hyphenated UUID, the only id form a session passes on.
+fn is_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => matches!(c, '0'..='9' | 'a'..='f'),
+        })
 }
 
 impl Session {
-    /// `BBP_SESSION_ID` and `BBP_SESSION_RESUME` as the moderator sets them:
-    /// both or neither, a lowercase UUID and `yes` or `no`.
-    fn parse(id: Option<String>, resume: Option<String>) -> Result<Option<Session>, String> {
+    /// `BBP_SESSION_ID`, `BBP_SESSION_RESUME` and `BBP_PROVIDER_SESSION` as the
+    /// moderator sets them: the first two both or neither, a lowercase UUID and
+    /// `yes` or `no`; the third only on a resumed turn, a lowercase UUID.
+    fn parse(
+        id: Option<String>,
+        resume: Option<String>,
+        provider: Option<String>,
+    ) -> Result<Option<Session>, String> {
         let (id, resume) = match (id, resume) {
-            (None, None) => return Ok(None),
+            (None, None) if provider.is_none() => return Ok(None),
             (Some(id), Some(resume)) => (id, resume),
+            (None, None) => return Err("BBP_PROVIDER_SESSION needs a session".into()),
             _ => return Err("BBP_SESSION_ID and BBP_SESSION_RESUME come together".into()),
         };
-        let uuid = id.len() == 36
-            && id.char_indices().all(|(i, c)| match i {
-                8 | 13 | 18 | 23 => c == '-',
-                _ => matches!(c, '0'..='9' | 'a'..='f'),
-            });
-        if !uuid {
+        if !is_uuid(&id) {
             return Err("BBP_SESSION_ID is not a session UUID".into());
         }
         let resume = match resume.as_str() {
@@ -101,13 +114,72 @@ impl Session {
             "no" => false,
             _ => return Err("BBP_SESSION_RESUME must be yes or no".into()),
         };
-        Ok(Some(Session { id, resume }))
+        match &provider {
+            Some(_) if !resume => {
+                return Err("BBP_PROVIDER_SESSION comes only on a resumed turn".into())
+            }
+            Some(p) if !is_uuid(p) => {
+                return Err("BBP_PROVIDER_SESSION is not a session UUID".into())
+            }
+            _ => {}
+        }
+        Ok(Some(Session {
+            id,
+            resume,
+            provider,
+        }))
     }
 
     fn from_env() -> Result<Option<Session>, String> {
         let var = |k: &str| std::env::var_os(k).map(|v| v.to_string_lossy().into_owned());
-        Session::parse(var("BBP_SESSION_ID"), var("BBP_SESSION_RESUME"))
+        Session::parse(
+            var("BBP_SESSION_ID"),
+            var("BBP_SESSION_RESUME"),
+            var("BBP_PROVIDER_SESSION"),
+        )
     }
+
+    /// The Codex thread a resumed turn continues; `None` on a first turn.
+    fn codex_resume(&self) -> Result<Option<&str>, String> {
+        match (self.resume, &self.provider) {
+            (false, _) => Ok(None),
+            (true, Some(id)) => Ok(Some(id)),
+            (true, None) => Err(CODEX_NO_ID.into()),
+        }
+    }
+}
+
+const CODEX_NO_ID: &str = "codex resume needs the session id captured from its first turn";
+
+/// Codex's thread id from one turn's log, which also holds the harness's
+/// stderr and the broker's lines: the first JSON line of type
+/// `thread.started`, if it comes before any `item.*` or `turn.*` event (the
+/// agent's own output arrives only inside those, so it cannot plant an id).
+/// `None` when no such line comes in time; an error for a malformed id.
+pub(crate) fn codex_thread_id(log: &str) -> Result<Option<String>, String> {
+    #[derive(Deserialize)]
+    struct Event {
+        #[rusty_serde(rename = "type")]
+        kind: String,
+        #[rusty_serde(default)]
+        thread_id: Option<String>,
+    }
+    for line in log.lines().map(str::trim).filter(|l| l.starts_with('{')) {
+        let Ok(event) = rusty_serde::json::from_str::<Event>(line) else {
+            continue;
+        };
+        if event.kind.starts_with("item.") || event.kind.starts_with("turn.") {
+            return Ok(None);
+        }
+        if event.kind != "thread.started" {
+            continue;
+        }
+        return match event.thread_id {
+            Some(id) if is_uuid(&id) => Ok(Some(id)),
+            _ => Err("codex thread.started names no session UUID".into()),
+        };
+    }
+    Ok(None)
 }
 
 /// What a launcher checks before it starts its provider, taken from the
@@ -435,7 +507,6 @@ fn arguments(
     let mut args: Vec<String> = match provider {
         Provider::Codex => [
             "exec",
-            "--ephemeral",
             "--ignore-user-config",
             "--ignore-rules",
             "--strict-config",
@@ -485,6 +556,11 @@ fn arguments(
         let at = args.len() - 1;
         args.splice(at..at, flags);
     }
+    // Without a session nothing is kept; a session's first turn keeps the
+    // rollout its later turns resume.
+    if provider == Provider::Codex && session.is_none() {
+        args.insert(1, "--ephemeral".into());
+    }
     if provider == Provider::Codex {
         let env = channel
             .env()
@@ -509,6 +585,13 @@ fn arguments(
     if let Some(model) = model {
         args.extend(["--model".into(), model.into()]);
     }
+    // Global flags and `-c` overrides apply to `resume`, and `--sandbox`
+    // before it keeps a resumed turn from inheriting a wider sandbox.
+    if provider == Provider::Codex {
+        if let Some(id) = session.map(Session::codex_resume).transpose()?.flatten() {
+            args.extend(["resume".into(), id.into()]);
+        }
+    }
     // Claude's --mcp-config is variadic: the prompt must not become a second
     // config source when no --model follows it.
     args.push("--".into());
@@ -526,12 +609,11 @@ pub fn run(provider: Provider) -> Result<(), String> {
     let options = Options::parse(std::env::args().skip(1))?;
     let channel = Channel::from_env()?;
     let session = Session::from_env()?;
-    // Codex names its sessions itself; resuming one would mean trusting an id
-    // read back from the provider's own store.
-    if provider == Provider::Codex && session.is_some() {
-        return Err(
-            "the codex launcher cannot keep a session: codex chooses its own session ids".into(),
-        );
+    // Codex names its sessions itself: a resumed turn needs the id the
+    // moderator captured from the first turn's log, never one read back from
+    // Codex's own store.
+    if provider == Provider::Codex {
+        session.as_ref().map(Session::codex_resume).transpose()?;
     }
     let bbp = PathBuf::from(std::env::var_os("BBP_BIN").ok_or("missing BBP_BIN")?);
     if !bbp.is_absolute() {
