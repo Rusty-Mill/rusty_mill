@@ -32,6 +32,24 @@ A server call limited to list, stat and touched-by, scoped to the session worksp
 2. TUI text tree (cloud-buildable): lists, then shows the size and age of the row under the cursor and a letter beside each changed file (`*` on a directory with a change below it). Tree actions follow, each with its own gate: copy path is built (`y`, OSC 52, D374); `c` cd is built with a confirm step (D375/D376, needs Nano's confirmation on its PR, Q107); open in an editor is not.
 3. GUI panel on the D60 panel tokens (needs a Windows GUI build; not cloud-buildable).
 
+## Open in editor needs the block's own workspace (D377)
+
+The action is not built. The tree names a file relative to the block's workspace root, which the server holds as a directory handle (D342) and no call returns. A new block starts in the server's configured directory, which can be another directory with a same-named file. The client cannot prove the root, so a launch from the client would be a guess: PR #1929 tried a size and modification-time check, the review rejected it (neither is file identity), and its code was reverted. Nano chose to scope a server-side root first (D377, decision card 2026-11-27): this is that scope, with no wire, code or Feature bit until a later go and the owner gate on its own PR (D337, D375).
+
+**Candidates**
+
+- **A (recommended): `Launch.workspace_of: Option<BlockId>`**, a new optional launch field behind a new Feature bit (implies `WORKSPACE`). The new block starts in the held workspace of that block: the server takes that block's workspace handle where `create_block` now opens `config.cwd`, and `spawn_cwd` gives the directory. It excludes `cwd` (both is a bad launch). Nothing from the client names a path, so there is nothing to traverse.
+  - Gates, as the list call: the input lease on the source block (D316) and on the new block's window; refused for an agent block (D372), after a server restart (D347), and off Linux (D346). The server refuses the field unless the bit was negotiated, since an old server would drop an unknown field and start in the wrong directory.
+  - The file is data: argv, never shell text. The server resolves it under the root with the `O_NOFOLLOW` walk of the other workspace calls and refuses a link or a missing file, so the launch can only name a file the tree could list.
+  - The TUI hides `o` and says why when the bit is absent. The GUI panel uses the same call (its look is the design expert's).
+- **B: a block call `terminal.workspace-edit <path>`** that launches the editor itself beside the block. Old peers get a refusal, but a launch inside a block call returns a new block id, an odd shape, and the server would pick the program.
+- **C (rejected): a call returning an absolute path.** The held handle's `/proc` path means nothing to a client, and a real path can be renamed or swapped after it is read, which is the race D342 exists to prevent.
+- **D (rejected): expose the configured directory.** Not authoritative once a shell has moved or the directory was renamed.
+
+**First slice, when Nano says go:** the Feature bit and `Launch.workspace_of` in `rusty_mux_proto`, the server resolution with a test per refusal (no lease, agent block, unknown root, both `cwd` and `workspace_of`, link, missing file), and the `rusty-mux-ctl` form. The TUI `o` follows, the GUI last.
+
+**For Nano:** which program runs. (a) the client names the program and arguments in `Launch` (recommended: it already travels there, no server policy; a remote mux needs the editor installed, and `sh -c 'exec ${EDITOR:-vi} "$1"'` uses the server account's `$EDITOR`); (b) a server-side rule picks the editor; (c) drop the editor and keep copy path (D374). Also the wire itself: the bit and field are an owner gate, with Nano's words on the PR that builds them.
+
 ## Decided
 
 - **Q96** (D337, Nano 2026-11-18): wire call, list/stat/touched-by only, canonicalised paths, same gate as Q95.

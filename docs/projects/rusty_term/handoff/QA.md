@@ -99,3 +99,7 @@ Source: D274; D275; MESH.md stage 4; hub-build-plan.md H8.
 ## Where does the TUI workspace tree live and what does the first go cover?
 Asked 2026-11-24 (card #1573, order item 2). The go ("Go, go") covers the TUI tree over `terminal.workspace-list` only; stat, touched-by and new wire need their own go. The tree is a read-only modal overlay opened by prefix `e`, built from a pure model first (PR #1853); copy path, cd in a block and open in an editor are later questions.
 Source: D349; D337; D340; D343; D348; `tui/src/keys.rs`; `tui/src/find.rs`.
+
+## How does open-in-editor get the workspace root?
+Asked 2026-11-27 (card #1573). Nano chose to scope a server-side root first (D377, decision card cmsg_017MoLbtrGAAcyE1PVPZXuN691eJ44uMWoe2tYaF32xEXQ). That is a design note only: no wire until a later go and the owner gate. D376's "no wire" interim for the editor no longer holds; the editor action stays unbuilt. Candidate shapes are in Q108.
+Source: D377; D376; D375; `server/src/state.rs` launched()/create_block; `server/src/listing.rs` Workspace::spawn_cwd.
