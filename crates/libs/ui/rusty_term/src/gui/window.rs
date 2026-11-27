@@ -6757,7 +6757,7 @@ impl WindowState<'_> {
         let proxy = self.proxy.clone();
         let tell = self.proxy.clone();
         let name = file_label(std::path::Path::new(&path));
-        self.source.download(
+        self.source.download_with_progress(
             key,
             path,
             Box::new(move |got, total| {

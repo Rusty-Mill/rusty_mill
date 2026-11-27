@@ -1537,7 +1537,7 @@ fn a_file_of_the_blocks_host_is_saved_in_the_downloads_folder() {
     let ask = |path: &std::path::Path| {
         let (tx, rx) = channel();
         let log = Arc::clone(&seen);
-        attached.source.download(
+        attached.source.download_with_progress(
             key,
             path.to_string_lossy().into_owned(),
             Box::new(move |got, total| log.lock().expect("log").push((got, total))),
@@ -1557,6 +1557,19 @@ fn a_file_of_the_blocks_host_is_saved_in_the_downloads_folder() {
     let again = ask(&remote).expect("saved again");
     assert_ne!(again, saved);
     assert_eq!(std::fs::read(&again).expect("second file"), body);
+    // The plain call still works, with no progress.
+    let (tx, rx) = channel();
+    attached.source.download(
+        key,
+        remote.to_string_lossy().into_owned(),
+        Box::new(move |r| drop(tx.send(r))),
+    );
+    let plain = rx
+        .recv_timeout(PATIENCE)
+        .expect("an answer")
+        .expect("saved plain");
+    assert_eq!(std::fs::read(&plain).expect("plain file"), body);
+    std::fs::remove_file(&plain).expect("cleanup plain");
 
     let missing = ask(&state.join("nope")).expect_err("no such file");
     assert!(missing.contains("nope"), "{missing}");

@@ -665,7 +665,17 @@ impl Source for MuxSource {
         self.pane(key).is_some_and(|b| b.downloads)
     }
 
-    fn download(&self, key: u64, path: String, progress: DownloadProgress, done: DownloadDone) {
+    fn download(&self, key: u64, path: String, done: DownloadDone) {
+        self.download_with_progress(key, path, Box::new(|_, _| {}), done);
+    }
+
+    fn download_with_progress(
+        &self,
+        key: u64,
+        path: String,
+        progress: DownloadProgress,
+        done: DownloadDone,
+    ) {
         match self.pane(key) {
             Some(block) => block.download(path, progress, done),
             None => done(Err("the block is not open".into())),

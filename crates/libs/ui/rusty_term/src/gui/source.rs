@@ -410,11 +410,22 @@ pub trait Source {
     /// Fetches the file at `path` (absolute, or relative to the pane's
     /// folder) of pane `key`'s host into this machine's Downloads folder and
     /// calls `done` once, from any thread, with where it was saved or why
-    /// not. `progress` is called with the bytes received and the file's size
-    /// as chunks arrive, from any thread, before `done`. Not called when
-    /// [`Source::downloads`] is `false`.
-    fn download(&self, _key: u64, _path: String, _progress: DownloadProgress, done: DownloadDone) {
+    /// not. Not called when [`Source::downloads`] is `false`.
+    fn download(&self, _key: u64, _path: String, done: DownloadDone) {
         done(Err("this source downloads no files".into()));
+    }
+    /// [`Source::download`] that also calls `progress` with the bytes
+    /// received and the file's size as chunks arrive, from any thread, before
+    /// `done`. A source that can't report progress keeps this default, which
+    /// downloads without it.
+    fn download_with_progress(
+        &self,
+        key: u64,
+        path: String,
+        _progress: DownloadProgress,
+        done: DownloadDone,
+    ) {
+        self.download(key, path, done);
     }
 }
 
