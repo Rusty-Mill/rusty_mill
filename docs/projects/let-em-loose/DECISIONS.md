@@ -205,6 +205,10 @@ Precise contracts used by this guide:
 | D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
 | D209 | #1382: the token mint lives in a new sans-IO crate `orch-token`; orch-bbp writes the token file and `jail.json` slot | [default] 2026-11-27 (1382) |
 | D212 | #1382: code waits for the gateway cards #1375-#1379; only the slice plan merges now | [stated] 2026-11-27 (1382) |
+| D216 | #1414: `rusty_orch lens why` output joins `bbp why --claim` steps to lens_record jobs; model and cost not reported yet (Q67) | [default] 2026-11-27 (1414) |
+| D217 | #1415: `bbp canary` prints a profile report on a resolved ref; orch `Canary` adapter keys failures `canary:<sha>:<profile>`; $0, runs under any `watch_usd` | [default] 2026-11-27 (1415) |
+| D218 | bbp_factory Backlog cards released to be worked; supersedes D164's "later" and D201's "D164 stands" | [stated] 2026-11-27 (general, 1414, 1415) |
+| D219 | #1414: additive `project` and `memory_type` on remind-me's POST /api/memories approved; built on a rusty-remind-me card; lessons wait for it | [stated] 2026-11-27 (1414) |
 | D222 | #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR | [default] 2026-11-27 (1416) |
 
 ## D1. Lenses, not stages
@@ -2005,6 +2009,42 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_a9952c1bcd964445b645426c843bac3a
 **Key.** lel:1382:build-after-gateway-cards
 **Source.** Nano tapped option a "Wait for #1375-#1379" ("Only the slice plan merges now. Code starts when the gateway cards land, as the approved order says.") on decision card `cmsg_014AqbZs58L565hMV2pFkCX546kxWjy74njHksp6qNKnci` in the Rusty BBP_SWF thread "Route jailed agent tools through gateway" (`cmsg_014AqbZs58L565hMV2pFkCX5UApVszPE7rf26gn9xJeNYk`), 2026-11-27T02:00:47Z. Confirms D180 §10; reverses nothing. Numbered D212 because D205 to D211 are taken on open PRs.
+
+## D216. #1414: `rusty_orch lens why` output joins `bbp why --claim` steps to lens_record jobs; model and cost not reported yet (Q67)
+
+**Decision.** `rusty_orch lens why --bbp B --dir D --task T --claim N --state S [--at REV]` prints one JSON line: the `bbp why --claim` History object, where each step whose msg is in the items of an orch-store `lens_record` row gains `"job": {"lens", "epoch", "look_harder", "unsure"}`; a step no orch job posted has no `job` key. Model and cost are not reported: `LensRecordRecord::v1` stores neither, and the meter is per-task spend only. Adding them is an orch-store schema change, open as OPEN_QUESTIONS Q67. The command is in D58's approved list (`rusty_orch lens why`), so it needs no new-command approval, unlike D111 or D117, which D58 did not list. Flags and output shape are build detail.
+**Why.** It uses only data orch already stores. An absent `job` key leaves nothing to remove later, and model and cost can be added to the object once Q67 is decided.
+**Rejected.** A `lens_record` v2 with model and cost now (schema change, ask-first: Q67). Reading the model from the current lens config binding (wrong once the binding changes).
+**Tag.** [default] · remind-me: mem_6cb63b0c9e5e4a1b8e9848a019d451ee
+**Key.** lel:1414:lens-why-shape
+**Source.** let-em-loose-expert, 2026-11-27, answering the #1414/#1415 build thread; D58, D92, 599-build-plan.md §5, `crates/apps/rusty_orch/crates/orch-store/src/lens_records.rs`, `meters.rs`. Numbered D216 from the D216-D219 range the coordinator reserved for this thread on 2026-11-27 (D205-D215 are in open PRs #1871, #1927, #1930, #1931 and #1932).
+
+## D217. #1415: `bbp canary` prints a profile report on a resolved ref; orch `Canary` adapter keys failures `canary:<sha>:<profile>`; $0, runs under any `watch_usd`
+
+**Decision.** Host: `bbp canary --dir D --task T --repo-path P --work W --ref REF --profile NAME` resolves REF to a sha, runs only the named profile from the task's frozen profile set on a clean sandboxed checkout through `runner::isolated_baseline` (the #598 baseline runner), prints a Baseline-shaped JSON report, and writes nothing to the task. The task must be open; D80 says the human opens the maintenance task. orch: a `Canary` adapter on the `Watch` port calls it. A failing profile is a finding with key `canary:<resolved sha>:<profile>`, slot `canary:<profile>` and domain `regression`, posted through `watch_finding` under D83. So a new failing sha supersedes the previous claim. A green run posts nothing. A host error is an adapter error (reported, the other adapters still run, exit 1). Profiles are test commands with no model calls, so a canary costs $0 and runs whatever `watch_usd` is: the adapter never refuses because of the cap's value. It doesn't read `watch_usd` yet, and its doc comment says so. The card's gate (spend above a zero cap needs Nano's go) is never reached. Deadline: the adapter's process deadline is 3600s and it passes `--budget-secs 3540`; `bbp canary` refuses, starting nothing, when the budget left can't cover the profile's wall limit plus 60s cleanup, checked once up front and again after all setup (baseline lock wait, checkout, test listing, scratch directory), immediately before the sandbox launches (review on PR #1933). On the supported Linux path under normal scheduling, the group `SIGKILL` is sent at least 60s before the budget ends; it can't be caught and the sandbox denies `setsid`/`setpgid`, so no workload survives it even if orch then kills bbp. Reaping and the report are outside that guarantee; the 60s is a reserve for them, not a bound: if they outlast it, orch records a timeout and loses the report, but nothing is orphaned. The sandbox has its own process group and only bbp's wall timer kills it, so orch's deadline must not fire before that kill; after it, it orphans nothing. D58 lists both the host `canary` run on a released ref and the `canary` adapter, so neither needs a new-command approval.
+**Why.** A print-only run adds no log or schema change and reuses the existing runner. The key and slot follow D83, and the domain names what the finding is, as `security`, `dependencies` and `platform` do for the other adapters.
+**Rejected.** Writing the canary report into the task's log (a log change, and the finding already posts through `watch_finding`). Refusing to run when `watch_usd > 0` (a cap isn't spend). Running a profile from outside the frozen set.
+**Tag.** [default] · remind-me: mem_889e191d298a4dfdbddacb84ba2ff139
+**Key.** lel:1415:canary-adapter
+**Source.** let-em-loose-expert, 2026-11-27, answering the #1414/#1415 build thread; D58, D80, D83, 599-build-plan.md §4 and PR order 4, card #1415, `crates/apps/rusty_orch/crates/rusty_orch/src/watch.rs`, `crates/apps/rusty_bbp_host/src/runner.rs` `isolated_baseline`.
+
+## D218. bbp_factory Backlog cards released to be worked; supersedes D164's "later" and D201's "D164 stands"
+
+**Decision.** Nano: "spin up multiple threads to work cards for bbp_factory cards in backlog". The bbp_factory Backlog cards are released to be worked now. This supersedes D164's "the other `bbp_factory` Backlog cards stay for later" and D201's "D164 stands for every other card". #1414 and #1415, both inside D58's approved #599 design, can move to building. Each card still needs an approved design (D25), and ask-first gates, spending, deployment and review/merge rules still apply. Card-specific decisions stand: D204 (#432 builds after #600) is unchanged, because the message names no cards. #1414's lessons part stays stopped by D58's remind-me gate until Nano answers the additive route fix.
+**Why.** This is the newest attributable Nano instruction on the bbp_factory Backlog. The freeze lifted with D164 and the first run has happened, so D164's "later" was the only remaining hold.
+**Rejected.** Reading it as overriding card-specific orderings (D204). Reading it as waiving design approval or ask-first gates.
+**Tag.** [stated] · remind-me: mem_974c71002f284fdc931e610a011b6bfd
+**Key.** lel:general:bbp-factory-backlog-released
+**Source.** Nano, project "Rusty BBP_SWF" timeline, message `cmsg_014AqbZs58L565hMV2pFkCX5HkQt8BJtDyHJXBtmvHiQTP`, 2026-11-27T01:51:13Z, read by the expert. Relayed by the coordinator to the #1414/#1415 build thread. Supersedes parts of D164 and D201; relates to D58, D204 and millwright `lel-bbp-backlog-first-run-only`. Numbered D218 from this thread's reserved range D216-D219.
+
+## D219. #1414: additive `project` and `memory_type` on remind-me's POST /api/memories approved; built on a rusty-remind-me card; lessons wait for it
+
+**Decision.** Nano approves an additive public API change in rusty-remind-me. POST /api/memories (`api_add` in `crates/remind_me_api/src/routes.rs`) gains two optional fields, `project` and `memory_type`, which it drops today even though `MemoryAddInput` has `project`. The change is built on a rusty-remind-me board card (Mill Board #1632), in that repo. #1414's lessons (599-build-plan.md §3) are built once it ships. Until then they stay stopped by D58's gate, and #1414's `lens why` (D216) and #1415's canary (D217) go ahead. Review and merge rules in rusty-remind-me apply to the change.
+**Why.** The fix is small and additive, and D58 anticipated it when it approved lessons. Lessons need `project` to be scoped to Let Em Loose and `memory_type` to be stored as a `learning`.
+**Rejected.** b) Writing lessons with tags only and no `project` (would change plan §3). c) Deferring lessons with no fix.
+**Tag.** [stated] · remind-me: mem_599fc0b478d04efd95c7b56a6adb51fe
+**Key.** lel:1414:remind-me-add-route-project
+**Source.** Nano tapped option A, "Approve, card in remind-me" ("A rusty-remind-me card adds the two optional fields to POST /api/memories; lessons get built once it ships."), on decision card `cmsg_014AqbZs58L565hMV2pFkCX534TuNPPe8jEACb5bJecqGf` in thread `cmsg_014AqbZs58L565hMV2pFkCX5PE69AJuM8XMccee5BsJiwR`, 2026-11-27T02:00:28Z. The coordinator relayed the tap; the expert read the card and its options. The gap was found by the #1414 build thread on rusty-remind-me main (routes.rs lines 308–358). Settles D58's "an additive fix there is flagged then"; relates to D216, D217, D218. Numbered D219 from this thread's reserved range D216-D219.
 
 ## D222. #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR
 

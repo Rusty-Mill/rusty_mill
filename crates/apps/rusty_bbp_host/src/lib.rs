@@ -31,6 +31,7 @@ pub mod approval;
 pub mod args;
 pub mod baseline;
 pub mod broker;
+pub mod canary;
 #[cfg(target_os = "linux")]
 pub mod cgroups;
 pub mod clean_tree;
