@@ -203,7 +203,7 @@ Precise contracts used by this guide:
 | D202 | #705: `tree-sitter-python` 0.25 added to `rusty_erosion` (new `Cargo.lock` entry) | [stated] 2026-11-26 (705) |
 | D203 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
 | D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
-| D209 | #432: S1 may open as a draft PR before the S0 live Codex check; it leaves draft only with S0's result | [default] 2026-11-27 (432) |
+| D211 | #432: S1 may open as a draft PR before the S0 live Codex check; it leaves draft only with S0's result | [default] 2026-11-27 (432) |
 
 ## D1. Lenses, not stages
 
@@ -1986,11 +1986,11 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:432:design-approved-build-after-600
 **Source.** Nano tapped "Approve, build after #600" ("Design and BBP_PROVIDER_SESSION approved; code waits until the #600 builder work lands (D164 order).") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE45mV9XoArWETD2NMavEjbEy` in the Let Em Loose project thread "Build BBP Codex session resume" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4KGZwc1M3KXuPWKygNkYSfd`), 2026-11-26 13:56Z. The coordinator relayed the tap; the card and its options were read. Resolves OPEN_QUESTIONS Q66. Numbered D204 (was D200) for the same reason. D203 and D204 were checked free on main and in every open PR on 2026-11-26.
 
-## D209. #432: S1 may open as a draft PR before the S0 live Codex check; it leaves draft only with S0's result
+## D211. #432: S1 may open as a draft PR before the S0 live Codex check; it leaves draft only with S0's result
 
 **Decision.** D204's wait is met: the #600 builder code on D66's §8 list has merged on main (2053a9b9): #1404 (PR #1874), #1405 (PR #1875), and #1318 S1 to S6 (S5 PR #1889, S6 PR #1890, the sessions reader PRs #1901 and #1903). The D167 toy run and #1320 are runs, not builder work, so #432 doesn't wait for them. S1 may be built and opened as a **draft** PR before S0 has run. It stays draft, with no review requested, until Nano's S0 result is in the PR description: the `thread_id` round-trips into `codex exec resume`, and `-c` is accepted after `resume`. If S0 contradicts either point, S1 is revised before it leaves draft. Parse-level facts from a Codex CLI installed in the cloud container (no login, no API key, no model call), such as `codex exec resume --help` and whether `-c` and `--json` parse after `resume`, may go in the description early, labelled as not the live check.
 **Why.** A draft is reversible and gets no review, so the review and merge gate still waits on S0, as the design orders. S0 needs Nano's machine, so drafting first keeps the thread from idling.
 **Rejected.** Build nothing until S0 has run (slower, same merged result). Request review before S0 (the card asks for the check before building and for its result in the PR).
 **Tag.** [default] · remind-me: mem_9b11499bcae344258d5156e48eb86bf0
 **Key.** lel:432:s1-draft-before-s0
-**Source.** Caller question from the #432 build thread, 2026-11-27; `432-codex-session-resume-design.md` § Slices; D204; D164; `600-build-plan.md` §7 and §9; `1318-builder-launch-slices.md` §3 and §4; card #432's prompt. Numbered D209 because open PRs #1871 (D205 to D207) and #1927 (D208) hold the numbers before it.
+**Source.** Caller question from the #432 build thread, 2026-11-27; `432-codex-session-resume-design.md` § Slices; D204; D164; `600-build-plan.md` §7 and §9; `1318-builder-launch-slices.md` §3 and §4; card #432's prompt. Numbered D211 (was D209) because open PRs #1871 (D205 to D207), #1927 (D208), #1930 (D209) and #1931 (D209, D210) hold the numbers before it.
