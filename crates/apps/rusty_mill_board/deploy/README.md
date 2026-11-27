@@ -72,6 +72,40 @@ Back up rusty_tick's data directory, and `settings/` here (owner-only: it holds 
 OAuth, the connectors' grants). Copy both
 off the host so a lost disk does not take them all.
 
+### SQLite store (`--db`)
+
+With `MILL_BOARD_DB` the cards are one WAL file. `backup.sh` takes a consistent copy with SQLite's
+online backup (the board keeps running; never `cp` the live file), requires `PRAGMA integrity_check`
+= `ok` on the copy, gzips it, keeps the newest `MILL_BOARD_BACKUP_KEEP`, and mirrors them with
+rsync to `MILL_BOARD_BACKUP_DEST/<host>/`. It never prunes the destination when the local copies
+were wiped.
+
+```sh
+sudo install -m 755 crates/apps/rusty_mill_board/deploy/backup.sh /usr/local/bin/mill-board-backup
+install -m 600 crates/apps/rusty_mill_board/deploy/backup.env.example ~/.mill-board/backup.env
+$EDITOR ~/.mill-board/backup.env
+sudo install -m 644 crates/apps/rusty_mill_board/deploy/mill-board-backup.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now mill-board-backup.timer
+sudo systemctl start mill-board-backup.service && journalctl -u mill-board-backup -n 20   # try once
+```
+
+`settings/` (tokens, OAuth grants) is not in the SQLite file: copy it off the host too.
+
+**Restore** (a copy of the file, so try it on a copy first):
+
+```sh
+f=mill-board-<stamp>.sqlite3.gz
+sha256sum -c $f.sha256 && gunzip -k $f
+sqlite3 mill-board-<stamp>.sqlite3 'pragma integrity_check'      # ok
+# trial: serve the copy on a spare port, count cards in the UI
+rusty_mill_board --db mill-board-<stamp>.sqlite3 --http 127.0.0.1:8799
+# real restore: stop the board, keep the old file, put the copy in place, start
+sudo systemctl stop mill-board
+mv ~/.mill-board/mill-board.sqlite3{,.bad}; rm -f ~/.mill-board/mill-board.sqlite3-{wal,shm}
+cp mill-board-<stamp>.sqlite3 ~/.mill-board/mill-board.sqlite3
+sudo systemctl start mill-board
+```
+
 ## Upgrade and rollback
 
 Upgrading from a board file (`MILL_BOARD_STORE`): move the cards into rusty_tick first
