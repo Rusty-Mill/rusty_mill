@@ -2038,6 +2038,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_9b11499bcae344258d5156e48eb86bf0
 **Key.** lel:432:s1-draft-before-s0
 **Source.** Caller question from the #432 build thread, 2026-11-27; `432-codex-session-resume-design.md` § Slices; D204; D164; `600-build-plan.md` §7 and §9; `1318-builder-launch-slices.md` §3 and §4; card #432's prompt. Numbered D211 (was D209) because open PRs #1871 (D205 to D207), #1927 (D208), #1930 (D209) and #1931 (D209, D210) hold the numbers before it.
+
 ## D185. #723: Nano's "Work cards ... 723" starts the #723 design now
 
 **Decision.** Nano's 2026-11-25 request "Work cards 600, 723, 724, 726, 732, and 1234" means start #723's design now. PR #1871 stays as the #723 design for his review. This supersedes D164's "the packs design (#723, D133, Q46 to Q48) ... stay for later" for #723 only; D164's other holds (#1456 and the other Backlog cards) stand. Building still waits for Nano's approval of the design on the card (D25), and ask-first gates and review/merge rules still apply.
