@@ -5,12 +5,13 @@ agent session it launches; the jailed agent reaches tools only through the gatew
 gateway digests post on the claim.
 
 Status: **draft, 2026-11-27.** No new design. The behaviour is approved in `726-sandbox-design.md`
-(PR #1873, D180; O3 default = D183): §2 token, §9.4 gateway-only egress, §9.6 witness, §10 build order,
+(D180; O3 default = D183), approved but still on open PR #1873, not on main,: §2 token, §9.4 gateway-only egress, §9.6 witness, §10 build order,
 §11 ask-first. That approval satisfies D25 for #1382, so this file only cuts the work into slices and
 lists the deltas. Crate placement is D209; build order is D212. The plan takes no D or Q number of its own.
 
 **Build order.** §10 puts #1382 last, and the card waits on #1318, #1378 and #1379. Nano confirmed it
-(D212, 2026-11-27): only this plan merges now; code starts when #1375–#1379 land.
+(D212, 2026-11-27): only this plan merges now; code starts when #1375–#1379 land, and each slice
+below still waits on its own listed dependencies.
 
 ## 1. What exists
 
