@@ -3516,6 +3516,20 @@ fn bbp_claims_lists_every_claim_read_only() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn bbp_claims_refuses_a_log_over_the_ceiling() {
+    let dir = tempdir("claims-big");
+    claims_task(&dir);
+    claim(&dir, "a", "ship it", true);
+    let len = std::fs::metadata(rusty_bbp::log_path_for(&dir, &task()))
+        .unwrap()
+        .len();
+    assert!(inbox::claims_within(&dir, &task(), len).is_ok());
+    let err = inbox::claims_within(&dir, &task(), len - 1).unwrap_err();
+    assert!(err.contains("larger than"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An interrupted append leaves a partial last line. `bbp claims` must read
 /// the complete prefix and leave the log's bytes exactly as they were.
 #[test]

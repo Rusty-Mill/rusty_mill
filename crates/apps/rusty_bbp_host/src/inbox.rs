@@ -17,6 +17,7 @@ use rusty_bbp::event::Event;
 use rusty_bbp::*;
 use rusty_serde::Serialize;
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::Path;
 
 /// Why the human is asked, in BBP's words (`claim_escalated` reasons, plus
@@ -157,6 +158,16 @@ pub fn json(dir: &Path, tasks: &[TaskId]) -> Result<String, String> {
 /// torn-tail repair (which truncates) can only touch the copy. It appends no
 /// events, takes no session credential and never reads the master secret.
 pub fn claims(dir: &Path, task: &TaskId) -> Result<Vec<ClaimView>, String> {
+    claims_within(dir, task, MAX_LOG)
+}
+
+/// The largest log `bbp claims` will snapshot and replay (it holds the log in
+/// memory once decoded). A bigger one is refused before it is opened.
+pub const MAX_LOG: u64 = 64 << 20;
+
+/// [`claims`] with an explicit log-size ceiling, enforced while copying so a
+/// log that grows during the copy is still cut off.
+pub fn claims_within(dir: &Path, task: &TaskId, max: u64) -> Result<Vec<ClaimView>, String> {
     let log = crate::log_path_for(dir, task);
     if !log.exists() {
         return Err(format!("no such task: {}", task.0));
@@ -165,7 +176,12 @@ pub fn claims(dir: &Path, task: &TaskId) -> Result<Vec<ClaimView>, String> {
     let tasks = scratch.0.join("tasks");
     std::fs::create_dir(&tasks).map_err(|e| e.to_string())?;
     let name = log.file_name().ok_or("log path has no name")?;
-    std::fs::copy(&log, tasks.join(name)).map_err(|e| format!("{}: {e}", log.display()))?;
+    let io = |e: std::io::Error| format!("{}: {e}", log.display());
+    let mut src = std::fs::File::open(&log).map_err(io)?.take(max + 1);
+    let mut dst = std::fs::File::create(tasks.join(name)).map_err(io)?;
+    if std::io::copy(&mut src, &mut dst).map_err(io)? > max {
+        return Err(format!("{} is larger than {max} bytes; not read", task.0));
+    }
     let store = FsStore::open(&scratch.0).map_err(|e| e.to_string())?;
     let mut d = Driver::new(store, task.clone());
     d.reload().map_err(|e| format!("{e:?}"))?;
