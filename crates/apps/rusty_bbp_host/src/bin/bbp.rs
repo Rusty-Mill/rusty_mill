@@ -34,7 +34,7 @@
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
 //! bbp why     --dir D (--task T | T) [--turn N]            why each turn was granted (wake reason, or Explicit), replayed from the log, as JSON
-//! bbp canary  --dir D --task T --repo-path P --work W --ref REF --profile NAME [--max-wall-secs N]   one frozen profile re-run on REF in the sandbox, as a report (JSON); writes nothing to the task (#599, D217)
+//! bbp canary  --dir D --task T --repo-path P --work W --ref REF --profile NAME [--budget-secs N]   one frozen profile re-run on REF in the sandbox, as a report (JSON); writes nothing to the task (#599, D217)
 //! bbp why     --dir D (--task T | T) --claim ID [--at REV] how one claim moved: each evidence and status change with the rule that fired, replayed from the log, as JSON
 //! bbp verify  --dir D --task T [--expect H]               check the log's hash chain without changing it; prints lines, unchained, head; H must be the hash of one of its lines
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
@@ -43,7 +43,7 @@
 //!                                          #598: run PROGRAM confined (no endpoints), reading only the real_data roots, writing only its plan ($BBP_PLAN);
 //!                                          prints the plan's path, digest and entry count, never the plan
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
-//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
+//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--budget-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
 //! bbp slot-hold                           holds the slot lock on stdout until stdin closes and no other process is in the group it leads; started by bbp mod
 //! bbp slot-hold --cgroup PATH [--deadline-ms N]   D104: holds the slot lock on stdout until stdin closes and the cgroup is empty; at the deadline writes cgroup.kill
 //! bbp slot-hold --cgroup PATH --slots DIR [--deadline-ms N]   D108: takes a free agent slot from DIR itself and prints the descriptor it holds it on as stdout's first line; exits non-zero, taking nothing, when every agent slot is held
@@ -553,12 +553,16 @@ fn run() -> Result<String, String> {
         "verify" => return verify::json(&dir, &task, a.flags.get("expect").map(String::as_str)),
         "shadow" => return shadow::json(&dir, &task),
         "canary" => {
-            let max_wall_secs = a
+            let budget = a
                 .flags
-                .get("max-wall-secs")
+                .get("budget-secs")
                 .map(|v| v.parse::<u64>())
                 .transpose()
-                .map_err(|_| "--max-wall-secs must be a number of seconds")?;
+                .map_err(|_| "--budget-secs must be a number of seconds")?
+                .map(|n| canary::Budget {
+                    started: std::time::Instant::now(),
+                    total: std::time::Duration::from_secs(n),
+                });
             let (repo, work) = (
                 PathBuf::from(a.flag("repo-path")?),
                 PathBuf::from(a.flag("work")?),
@@ -570,7 +574,7 @@ fn run() -> Result<String, String> {
                 work_root: &work,
                 reference: a.flag("ref")?,
                 profile: a.flag("profile")?,
-                max_wall_secs,
+                budget,
             });
         }
         "runner" => {

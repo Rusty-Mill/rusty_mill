@@ -202,6 +202,9 @@ daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
     task. A red run is a finding keyed `canary:<sha>:<profile>` in slot
     `canary:<profile>`, domain `regression`; green posts nothing. No model is
     called, so it costs $0 and `watch_usd` isn't read yet.
+    With `--budget-secs N` the run is refused, starting nothing, when the
+    time left can't cover the wall limit plus 60s cleanup, up front and
+    again after setup; orch passes 3540 under its 3600s deadline.
 - Findings are posted by the task's `watcher` role (D79) as low-stakes,
   reversible claims citing the brief. A claim needs a second author to
   accept, and a human still merges.

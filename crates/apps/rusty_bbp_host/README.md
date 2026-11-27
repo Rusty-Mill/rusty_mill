@@ -30,10 +30,10 @@ bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 bbp card    --dir D --task T              the core card plus the task's scheduling `policy`, as JSON
 bbp why     --dir D (--task T | T) [--turn N]   why each turn was granted, replayed from the log, as JSON
 bbp why     --dir D (--task T | T) --claim ID [--at REV]   how one claim moved and which rule fired, as JSON
-bbp canary  --dir D --task T --repo-path P --work W --ref REF --profile NAME [--max-wall-secs N]   one frozen profile re-run on REF in the sandbox, as JSON; writes nothing to the task (#599, D217)
+bbp canary  --dir D --task T --repo-path P --work W --ref REF --profile NAME [--budget-secs N]   one frozen profile re-run on REF in the sandbox, as JSON; writes nothing to the task (#599, D217)
 bbp tick    --dir D --task T              fire deadlines and grant the first turn; `bbp mod` does this itself
 bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
-bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
+bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--budget-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
 bbp human   --dir D --task T [--rev N] [--fence N] [--as WHO] [--approval FILE] VERB ARGS...
   approve-plan ART | approve-merge ART RUN | reject STATE REASON... | decision MSG accept|reject NOTE...
   ask ROLE TEXT... | answer MSG TEXT... | rerun ART | receipt ART REVISION | resume STATE

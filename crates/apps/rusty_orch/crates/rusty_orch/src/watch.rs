@@ -56,11 +56,12 @@ pub const WATCHER: &str = "watcher";
 const ADAPTER_DEADLINE: Duration = Duration::from_secs(600);
 /// How long a canary may run. Killing `bbp canary` would orphan its sandbox
 /// workload (its own process group, killed only by bbp's wall timer), so bbp
-/// is told the longest wall limit it may run, [`CANARY_MAX_WALL_SECS`], and
-/// refuses a longer one; the rest of the deadline covers the checkout.
+/// gets [`CANARY_BUDGET_SECS`] of this as `--budget-secs` and refuses to
+/// start the sandbox unless what is left covers the wall limit and cleanup;
+/// the rest is slack for starting and reaping bbp.
 const CANARY_DEADLINE: Duration = Duration::from_secs(3600);
-/// The longest profile wall limit a canary runs (`--max-wall-secs`).
-const CANARY_MAX_WALL_SECS: u64 = 3000;
+/// The budget bbp runs a canary within (`--budget-secs`).
+const CANARY_BUDGET_SECS: u64 = 3540;
 
 /// One shipped app (`factory/apps/<app>.json`, D80).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -211,10 +212,7 @@ impl Watch for Canary {
         ]
         .iter()
         .map(|a| a.to_string_lossy().into_owned())
-        .chain([
-            "--max-wall-secs".to_owned(),
-            CANARY_MAX_WALL_SECS.to_string(),
-        ])
+        .chain(["--budget-secs".to_owned(), CANARY_BUDGET_SECS.to_string()])
         .collect();
         let exit = run
             .run_in(None, &argv, &[], CANARY_DEADLINE, &[])
@@ -1354,7 +1352,7 @@ mod tests {
         let calls = run.calls.lock().unwrap();
         assert_eq!(
             calls[0].0.join(" "),
-            "/bin/bbp canary --dir /var/bbp --task maint-demo --repo-path /srv/demo --work /var/state/canary/demo --ref v1.0.0 --profile unit --max-wall-secs 3000"
+            "/bin/bbp canary --dir /var/bbp --task maint-demo --repo-path /srv/demo --work /var/state/canary/demo --ref v1.0.0 --profile unit --budget-secs 3540"
         );
         assert_eq!(calls[0].2, CANARY_DEADLINE);
         let refused = FakeCommand::new(Ok(exit(1, "", "bbp: no profile \"unit\"\n")));

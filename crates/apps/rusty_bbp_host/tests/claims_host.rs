@@ -3411,7 +3411,10 @@ fn a_canary_reruns_one_frozen_profile_on_a_ref() {
             work_root: &work,
             reference: r,
             profile: p,
-            max_wall_secs: Some(3000),
+            budget: Some(rusty_bbp_host::canary::Budget {
+                started: std::time::Instant::now(),
+                total: std::time::Duration::from_secs(3600),
+            }),
         };
         rusty_bbp_host::canary::run(&Unconfined, &req)
     };
@@ -3424,17 +3427,51 @@ fn a_canary_reruns_one_frozen_profile_on_a_ref() {
     let err = run("v1", "e2e").expect_err("no such profile");
     assert!(err.contains("\"e2e\""), "{err}");
     assert!(run("nope", "test").is_err());
-    let short = rusty_bbp_host::canary::Request {
+    // A budget already spent is refused before anything is checked out.
+    let spent = rusty_bbp_host::canary::Request {
         dir: &dir,
         task: &t,
         repo: &repo,
-        work_root: &work,
+        work_root: &dir.join("spent-work"),
         reference: "v1",
         profile: "test",
-        max_wall_secs: Some(1),
+        budget: Some(rusty_bbp_host::canary::Budget {
+            started: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(3590))
+                .unwrap(),
+            total: std::time::Duration::from_secs(3600),
+        }),
     };
-    let err = rusty_bbp_host::canary::run(&Unconfined, &short).expect_err("wall too long");
-    assert!(err.contains("--max-wall-secs"), "{err}");
+    let counting = Counting::default();
+    let err = rusty_bbp_host::canary::run(&counting, &spent).expect_err("budget spent");
+    assert!(err.starts_with("budget:"), "{err}");
+    assert_eq!(counting.0.get(), 0, "no sandbox started");
+    assert!(!dir.join("spent-work").exists(), "nothing checked out");
     assert_eq!(state(&dir).rev, rev, "nothing written to the task");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A baseline whose gate refuses after the checkout runs nothing, and says
+/// why in the report: the #599 canary's elapsed-budget check (D217).
+#[test]
+fn a_gate_that_refuses_after_checkout_runs_nothing() {
+    let dir = tempdir("gate");
+    let (repo, base) = repo(&dir);
+    let counting = Counting::default();
+    let b = runner::isolated_baseline_gated(
+        &counting,
+        &profiles(),
+        None,
+        &repo,
+        &dir.join("work"),
+        &base,
+        &|| Err("budget: 10s left".into()),
+    )
+    .expect("prepared");
+    assert_eq!(counting.0.get(), 0, "no sandbox started");
+    assert_eq!(b.status, RunStatus::Error);
+    assert!(b.profiles.is_empty());
+    assert_eq!(b.error.as_deref(), Some("budget: 10s left"));
+    assert!(b.tree.is_some(), "the checkout was prepared first");
     let _ = std::fs::remove_dir_all(&dir);
 }

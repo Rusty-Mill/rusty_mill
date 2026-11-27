@@ -4,18 +4,21 @@
 //! The maintenance watcher (`rusty_orch watch`) calls it for each app: REF is
 //! resolved to a full commit, the named profile runs on a clean sandboxed
 //! checkout of it through the #598 baseline runner
-//! ([`crate::runner::isolated_baseline`]), and the result is printed as a
-//! [`Baseline`]. Nothing is written to the task: a red canary becomes a claim
-//! only through the watcher's `watch_finding` post. The task must be open
-//! (the human opens each maintenance task, D80), since its frozen set and
-//! holdout suite are read from it. No model is called, so a canary costs
+//! ([`crate::runner::isolated_baseline_gated`]), and the result is printed as
+//! a [`Baseline`]. Nothing is written to the task: a red canary becomes a
+//! claim only through the watcher's `watch_finding` post. The task must be
+//! open (the human opens each maintenance task, D80), since its frozen set
+//! and holdout suite are read from it. No model is called, so a canary costs
 //! nothing.
 //!
-//! The caller's own deadline must outlast the workload: the sandbox runs in
-//! its own process group, and only this process's wall timer kills it, so a
-//! caller that kills `bbp canary` first would orphan the workload. With
-//! `max_wall_secs` the run is refused, before anything is checked out, when
-//! the set's wall limit is longer than the caller is willing to wait.
+//! The caller's deadline must outlast the whole run, cleanup included: the
+//! sandbox runs in its own process group and only this process's wall timer
+//! kills it, so a caller that kills `bbp canary` first would orphan the
+//! workload. With a [`Budget`] (`--budget-secs N`, counted from this
+//! process's start) the run is refused when the budget can't cover the wall
+//! limit plus [`CLEANUP`]: once up front, and again after the lock wait,
+//! checkout and test listing, just before the sandbox would start. A refusal
+//! starts nothing and is the report's `error`.
 
 use crate::baseline::{self, Baseline};
 use crate::profiles::{self, ProfileSet};
@@ -23,6 +26,38 @@ use crate::{holdout, open_driver, runner};
 use rusty_bbp::TaskId;
 use rusty_sandbox::Executor;
 use std::path::Path;
+use std::time::{Duration, Instant};
+
+/// Time kept back for the sandbox's teardown after its wall timer fires.
+pub const CLEANUP: Duration = Duration::from_secs(60);
+
+/// How long the caller will wait for this run, from `started`.
+#[derive(Clone, Copy, Debug)]
+pub struct Budget {
+    pub started: Instant,
+    pub total: Duration,
+}
+
+impl Budget {
+    /// `Ok` while what is left still covers `wall` and [`CLEANUP`].
+    ///
+    /// # Errors
+    ///
+    /// A message giving the time left and the time the run needs.
+    pub fn covers(&self, wall: Duration) -> Result<(), String> {
+        let left = self.total.saturating_sub(self.started.elapsed());
+        let need = wall + CLEANUP;
+        if left < need {
+            return Err(format!(
+                "budget: {}s left, the run needs {}s (the wall limit plus {}s cleanup); nothing started",
+                left.as_secs(),
+                need.as_secs(),
+                CLEANUP.as_secs()
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// `set` cut down to the one profile named `profile`.
 ///
@@ -42,23 +77,8 @@ pub fn only(set: &ProfileSet, profile: &str) -> Result<ProfileSet, String> {
     Ok(one)
 }
 
-/// Refuse a set whose wall limit is longer than `max_wall_secs`.
-///
-/// # Errors
-///
-/// A message naming both limits.
-pub fn within(set: &ProfileSet, max_wall_secs: Option<u64>) -> Result<(), String> {
-    match max_wall_secs {
-        Some(max) if set.limits.wall_secs > max => Err(format!(
-            "the profile set's wall limit ({}s) is longer than --max-wall-secs ({max}s)",
-            set.limits.wall_secs
-        )),
-        _ => Ok(()),
-    }
-}
-
 /// What to run: `task`'s frozen `profile` on `reference` in `repo`, under
-/// `work_root/baseline`, refused when its wall limit is over `max_wall_secs`.
+/// `work_root/baseline`, within `budget` when one is given.
 pub struct Request<'a> {
     pub dir: &'a Path,
     pub task: &'a TaskId,
@@ -66,7 +86,7 @@ pub struct Request<'a> {
     pub work_root: &'a Path,
     pub reference: &'a str,
     pub profile: &'a str,
-    pub max_wall_secs: Option<u64>,
+    pub budget: Option<Budget>,
 }
 
 /// Run `r` with `exec`.
@@ -74,9 +94,10 @@ pub struct Request<'a> {
 /// # Errors
 ///
 /// A message when the task, its profile set or holdout suite can't be read,
-/// the profile isn't in the set, its wall limit is too long, REF doesn't
-/// resolve, or the run is refused because the holdout suite could be read
-/// from it.
+/// the profile isn't in the set, the budget can't cover it from the start,
+/// REF doesn't resolve, or the run is refused because the holdout suite
+/// could be read from it. A budget that runs short during setup is the
+/// report's `error` instead.
 pub fn run<E: Executor>(exec: &E, r: &Request<'_>) -> Result<Baseline, String>
 where
     E::Error: std::fmt::Display,
@@ -94,10 +115,20 @@ where
         (set, holdout)
     };
     let one = only(&set, r.profile)?;
-    within(&one, r.max_wall_secs)?;
+    let wall = Duration::from_secs(one.limits.wall_secs.max(1));
+    let ready = || r.budget.map_or(Ok(()), |b| b.covers(wall));
+    ready()?;
     let base = baseline::resolve(r.repo, r.reference)?;
-    runner::isolated_baseline(exec, &one, holdout.as_ref(), r.repo, r.work_root, &base)
-        .map_err(|e| format!("{:?}: {}", e.code, e.detail))
+    runner::isolated_baseline_gated(
+        exec,
+        &one,
+        holdout.as_ref(),
+        r.repo,
+        r.work_root,
+        &base,
+        &ready,
+    )
+    .map_err(|e| format!("{:?}: {}", e.code, e.detail))
 }
 
 /// [`run`] in the host sandbox, as one line of JSON.
@@ -135,12 +166,29 @@ mod tests {
     }
 
     #[test]
-    fn a_wall_limit_past_the_callers_wait_is_refused() {
-        let mut set = ProfileSet::shell("unit", "true");
-        set.limits.wall_secs = 600;
-        assert_eq!(within(&set, None), Ok(()));
-        assert_eq!(within(&set, Some(600)), Ok(()));
-        let err = within(&set, Some(599)).expect_err("too long");
-        assert!(err.contains("600s") && err.contains("599s"), "{err}");
+    fn a_budget_covers_the_wall_limit_and_cleanup_or_refuses() {
+        let wall = Duration::from_secs(600);
+        let fresh = Budget {
+            started: Instant::now(),
+            total: Duration::from_secs(3600),
+        };
+        assert_eq!(fresh.covers(wall), Ok(()));
+        let tight = Budget {
+            total: wall + CLEANUP - Duration::from_secs(1),
+            ..fresh
+        };
+        let err = tight.covers(wall).expect_err("too tight");
+        assert!(
+            err.contains("660s") && err.contains("nothing started"),
+            "{err}"
+        );
+        // Time already spent counts against it.
+        let spent = Budget {
+            started: Instant::now()
+                .checked_sub(Duration::from_secs(3000))
+                .expect("clock"),
+            ..fresh
+        };
+        assert!(spent.covers(wall).is_err(), "600s left < 660s needed");
     }
 }

@@ -7,7 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
+
+use orch_cli::{CommandRunner, StdCommand};
 
 use orch_lens::record::{
     tallies, ArtId, Change, Item, MsgId, Report, Review, Rule, Step, Tally, Trail,
@@ -128,6 +130,11 @@ pub fn read(
     Ok(tallies(reviews, &trails))
 }
 
+/// How long one `bbp why --claim` may run. Its stdout is capped at
+/// [`orch_cli::MAX_STDOUT_BYTES`]; past either bound the process group is
+/// killed and the read is an error.
+pub(super) const WHY_DEADLINE: Duration = Duration::from_secs(60);
+
 /// `bbp why --claim`'s one line of JSON, as the claim stood at `at` if given.
 pub(super) fn why(
     bbp: &Path,
@@ -136,25 +143,42 @@ pub(super) fn why(
     claim: MsgId,
     at: Option<u64>,
 ) -> Result<String, String> {
-    let mut cmd = Command::new(bbp);
-    cmd.arg("why")
-        .arg("--dir")
-        .arg(dir)
-        .args(["--task", task, "--claim", &claim.0.to_string()]);
+    why_with(&StdCommand, bbp, dir, task, claim, at)
+}
+
+/// [`why`] through `run`, bounded by [`WHY_DEADLINE`] and the stdout cap.
+fn why_with(
+    run: &dyn CommandRunner,
+    bbp: &Path,
+    dir: &Path,
+    task: &str,
+    claim: MsgId,
+    at: Option<u64>,
+) -> Result<String, String> {
+    let mut argv: Vec<String> = vec![
+        bbp.to_string_lossy().into_owned(),
+        "why".into(),
+        "--dir".into(),
+        dir.to_string_lossy().into_owned(),
+        "--task".into(),
+        task.into(),
+        "--claim".into(),
+        claim.0.to_string(),
+    ];
     if let Some(rev) = at {
-        cmd.args(["--at", &rev.to_string()]);
+        argv.extend(["--at".to_owned(), rev.to_string()]);
     }
-    let out = cmd
-        .output()
-        .map_err(|e| format!("cannot run {}: {e}", bbp.display()))?;
-    if !out.status.success() {
+    let what = format!("bbp why --claim {}", claim.0);
+    let out = run
+        .run_in(None, &argv, &[], WHY_DEADLINE, &[])
+        .map_err(|e| format!("{what}: {e}"))?;
+    if out.status != 0 {
         return Err(format!(
-            "bbp why --claim {}: {}",
-            claim.0,
+            "{what}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    String::from_utf8(out.stdout).map_err(|e| format!("bbp why --claim {}: {e}", claim.0))
+    String::from_utf8(out.stdout).map_err(|e| format!("{what}: {e}"))
 }
 
 /// A claim's [`Trail`] from `bbp why --claim` JSON.
@@ -417,6 +441,38 @@ pub(super) mod tests {
         let err = retry_locked(|| run(&o)).expect_err("bbp failed");
         assert_eq!(err, "bbp why --claim 4: no such task");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A `bbp why` that hangs or floods stdout is cut off and is an error
+    /// naming the claim, and `--at` is passed when given.
+    #[test]
+    fn a_bounded_why_reports_timeouts_and_overflow() {
+        use orch_cli::fake::{exit, FakeCommand};
+        use orch_cli::ExecError;
+        let (b, d) = (Path::new("/bin/bbp"), Path::new("/d"));
+        let ok = FakeCommand::new(Ok(exit(0, "{}", "")));
+        assert_eq!(
+            why_with(&ok, b, d, "t", MsgId(4), Some(7)),
+            Ok("{}".to_owned())
+        );
+        let calls = ok.calls.lock().expect("calls");
+        assert_eq!(
+            calls[0].0.join(" "),
+            "/bin/bbp why --dir /d --task t --claim 4 --at 7"
+        );
+        assert_eq!(calls[0].2, WHY_DEADLINE);
+        drop(calls);
+        let hung = FakeCommand::new(Err(ExecError::Timeout(WHY_DEADLINE)));
+        assert_eq!(
+            why_with(&hung, b, d, "t", MsgId(4), None),
+            Err("bbp why --claim 4: process exceeded 60s".to_owned())
+        );
+        let flood = FakeCommand::new(Err(ExecError::StdoutOverflow));
+        let e = why_with(&flood, b, d, "t", MsgId(4), None).expect_err("overflow");
+        assert!(
+            e.starts_with("bbp why --claim 4: process wrote more than"),
+            "{e}"
+        );
     }
 
     /// Retries `f` while the store is locked: another test's child process
