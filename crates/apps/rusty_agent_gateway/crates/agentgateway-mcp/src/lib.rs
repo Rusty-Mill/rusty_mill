@@ -16,6 +16,7 @@ mod glob;
 mod guardrails;
 mod header_override;
 mod identity;
+mod launch;
 mod lens_policy;
 mod naming;
 mod rules;

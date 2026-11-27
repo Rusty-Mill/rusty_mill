@@ -218,6 +218,7 @@ Precise contracts used by this guide:
 | D221 | #1416: `bbp claims` prints a plain array of claim views; brief text is not served yet | [default] 2026-11-27 (1416) |
 | D222 | #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR | [default] 2026-11-27 (1416) |
 | D223 | #1375-#1378: the gateway's §11 public API and config items approved as a set (session binding, `identity`, `mode`/`connections`, `session_ended`, `per_session` default, `lelPolicy`) | [stated] 2026-11-27 (1375, 1376, 1377, 1378) |
+| D226 | #1379: the gateway launches each per_session stdio child from a new per-target setting that templates its command, args and env from verified token claims | [stated] 2026-11-27 (1379, 1377) |
 
 ## D1. Lenses, not stages
 
@@ -2134,3 +2135,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_1e5e8f36a56e46139db411e77ae7ba66
 **Key.** lel:726:gateway-api-set-1375-1378
 **Source.** Nano tapped option a "Approve all as a set" on hearthbot decision card `cmsg_014AqbZs58L565hMV2pFkCX5UNV6kJ3yhNuFThUg2wfiLi` ("Approve the gateway API and config changes for #1375-#1378 as one set?"), 2026-11-27T20:53:16Z, in thread "Build gateway prerequisites for jailed tools" (`cmsg_014AqbZs58L565hMV2pFkCX5LGapWPvdnjCJaxHPN2rCuz`). The option read: "I build #1376, #1377, #1378, then #1379, in order, and #1877 (#1375) can merge. Session binding, identity, mode/connections, session_ended hook, per_session default, lelPolicy." The card's reason: "It is the design you approved in D180, and the per_session default is your own D102. D180 approved no §11 item, so nothing can be built until you say yes." Relayed by the coordinator; the card was not read here. Clears part of D180's §11 gate; reverses nothing.
+
+## D226. #1379: per_session stdio children are launched from a template over verified token claims
+
+**Decision.** The gateway starts each `per_session` stdio child (`orch-fs-shell`, D225, inside that session's `lel-jail` and `jail.json`) from a new per-target setting: the stdio command, args and env are built from the verified token's claims with #1376's template syntax, and every claim value used in them is limited to `[A-Za-z0-9._-]`. Nothing in the launch comes from call arguments (726-sandbox-design.md §6). Build consequence, not Nano's words: a claim value outside that set refuses the launch rather than being escaped. This approves that one new gateway config field, which D223's set did not include; registering `orch-fs-shell` as a target still follows the design, and review, CI and merge rules still apply.
+**Why.** The gateway builds the launch from the token, as §6 says, so the session's jail is in place before the server starts. It reuses #1376's templates and does not wait for #1380's layout to be final, because the template carries the layout.
+**Rejected.** b) The gateway passes the verified claims to every per_session stdio child in a fixed env var, and a wrapper or the server maps them to paths. c) Leaving registration until #1380's layout is decided.
+**Tag.** [stated] · remind-me: mem_488bfc4f58b14cac8ae3af8b1ea15669
+**Key.** lel:1379:stdio-launch-from-token
+**Source.** Nano tapped "Launch templated from the token" on hearthbot decision card `cmsg_014AqbZs58L565hMV2pFkCX54tdYAhvCHGDEodQgoeiZi2` ("How should the gateway start each session's fs/shell server inside that session's jail?"), 2026-11-27T21:47:59Z, in the project thread `cmsg_014AqbZs58L565hMV2pFkCX5LGapWPvdnjCJaxHPN2rCuz`. The option read: "New per-target setting: stdio command, args and env built from verified token claims (#1376 syntax), claim values limited to [A-Za-z0-9._-]." Relayed by the coordinator; the card was not read here. Answers the expert's 2026-11-27 escalation; extends D223, reverses nothing. Numbered D226 because D224 (PR #1947) and D225 (PR #1951) are taken on open PRs.

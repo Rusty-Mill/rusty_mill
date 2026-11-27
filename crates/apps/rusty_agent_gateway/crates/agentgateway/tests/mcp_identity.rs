@@ -72,6 +72,32 @@ fn mock_server() -> String {
     yaml_path(&path)
 }
 
+/// The `board` target: stamps `actor` from the token.
+const BOARD: &str = r#"                    - name: board
+                      stdio:
+                        cmd: "{server}"
+                        env:
+                          MOCK_LABEL: board
+                          MOCK_TOOLS: "card_comment"
+                          MOCK_ECHO_ARGS: "1"
+                      identity:
+                        strip: { "*": [actor, agent_key] }
+                        set: { actor: "lel-gateway/{{jwt.lel.lens}}-{{jwt.lel.claim:4}}" }"#;
+
+/// A `board` target whose session children are launched from the token: the
+/// child's label is the token's `lel.claim`.
+const LAUNCHED: &str = r#"                    - name: board
+                      stdio:
+                        cmd: "{server}"
+                        env:
+                          MOCK_LABEL: probe
+                          MOCK_TOOLS: "card_comment"
+                        session:
+                          cmd: "{server}"
+                          env:
+                            MOCK_LABEL: "{{jwt.lel.claim}}"
+                            MOCK_TOOLS: "card_comment""#;
+
 struct Harness {
     client: mcp::Client,
     shutdown: CancellationToken,
@@ -82,6 +108,12 @@ impl Harness {
     /// A gateway whose `board` target stamps `actor` from the token, with
     /// `jwtAuth` required, and a client presenting `bearer`.
     async fn start(bearer: &str) -> Harness {
+        Self::start_with(bearer, BOARD).await
+    }
+
+    /// A gateway with one target, `target` (YAML under `stdio:`'s parent,
+    /// with `{server}` for the mock's path), behind `jwtAuth`.
+    async fn start_with(bearer: &str, target: &str) -> Harness {
         let port = free_port();
         let dir = tempfile::tempdir().expect("should create a temp dir");
         let jwks = dir.path().join("jwks.json");
@@ -106,19 +138,10 @@ binds:
             backends:
               - mcp:
                   targets:
-                    - name: board
-                      stdio:
-                        cmd: "{server}"
-                        env:
-                          MOCK_LABEL: board
-                          MOCK_TOOLS: "card_comment"
-                          MOCK_ECHO_ARGS: "1"
-                      identity:
-                        strip: {{ "*": [actor, agent_key] }}
-                        set: {{ actor: "lel-gateway/{{{{jwt.lel.lens}}}}-{{{{jwt.lel.claim:4}}}}" }}
+{target}
 "#,
             jwks = yaml_path(&jwks),
-            server = mock_server()
+            target = target.replace("{server}", &mock_server()),
         );
 
         let config = Config::from_yaml(&yaml).expect("config should parse");
@@ -198,6 +221,40 @@ async fn a_token_without_the_lens_claim_is_refused() {
         .await
         .expect_err("a call that can't be stamped must not reach the upstream");
     assert!(err.contains("lel.lens"), "got: {err}");
+
+    harness.stop().await;
+}
+
+#[rusty_tokio::test]
+async fn a_session_child_is_launched_from_the_token() {
+    let harness = Harness::start_with(
+        &token(json!({ "sub": "rusty_mill/c-77/builder-rust/1", "lel.claim": "c-77" })),
+        LAUNCHED,
+    )
+    .await;
+
+    let echo = harness
+        .comment("{}")
+        .await
+        .expect("the session's child should answer");
+    assert!(echo.starts_with("c-77:card_comment"), "got: {echo}");
+
+    harness.stop().await;
+}
+
+#[rusty_tokio::test]
+async fn a_claim_that_could_leave_its_segment_launches_nothing() {
+    let harness = Harness::start_with(
+        &token(json!({ "sub": "someone", "lel.claim": ".." })),
+        LAUNCHED,
+    )
+    .await;
+
+    let err = harness
+        .comment("{}")
+        .await
+        .expect_err("a launch with `..` must not start");
+    assert!(err.contains("lel.claim"), "got: {err}");
 
     harness.stop().await;
 }

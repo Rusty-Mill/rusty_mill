@@ -61,6 +61,15 @@ pub enum IdentityError {
         name: String,
     },
 
+    /// A claim's value is not allowed where the template puts it.
+    #[error(
+        "the token's `{claim}` claim can't be used here: only [A-Za-z0-9._-], and not `.` or `..`"
+    )]
+    Value {
+        /// The claim key.
+        claim: String,
+    },
+
     /// The call's arguments are not a JSON object, so nothing can be set.
     #[error("tool arguments must be a JSON object")]
     Arguments,
@@ -79,10 +88,26 @@ enum Part {
 
 /// A value written as literal text and `{{jwt.<claim>[:n]}}` placeholders.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Template(Vec<Part>);
+pub(crate) struct Template(Vec<Part>);
 
 impl Template {
+    /// Parse an identity value, which must name at least one claim.
     fn parse(value: &str, at: &str) -> Result<Self, IdentityError> {
+        let template = Self::parse_any(value, at)?;
+        if !template.0.iter().any(|p| matches!(p, Part::Claim { .. })) {
+            // An identity that names no claim is a constant, and a constant
+            // identity says nothing about who called.
+            return Err(IdentityError::Config {
+                at: at.to_owned(),
+                value: value.to_owned(),
+                kind: "template: it names no `{{jwt.<claim>}}`",
+            });
+        }
+        Ok(template)
+    }
+
+    /// Parse a value that may be all literal text.
+    pub(crate) fn parse_any(value: &str, at: &str) -> Result<Self, IdentityError> {
         let bad = |value: &str, kind| IdentityError::Config {
             at: at.to_owned(),
             value: value.to_owned(),
@@ -109,11 +134,6 @@ impl Template {
         if !rest.is_empty() {
             parts.push(Part::Text(rest.to_owned()));
         }
-        if !parts.iter().any(|p| matches!(p, Part::Claim { .. })) {
-            // An identity that names no claim is a constant, and a constant
-            // identity says nothing about who called.
-            return Err(bad(value, "template: it names no `{{jwt.<claim>}}`"));
-        }
         Ok(Template(parts))
     }
 
@@ -130,6 +150,16 @@ impl Template {
     }
 
     fn resolve(&self, claims: Option<&serde_json::Value>) -> Result<String, IdentityError> {
+        self.resolve_checked(claims, |_| true)
+    }
+
+    /// Fill the template, refusing a claim value `allowed` rejects (checked
+    /// after any `:n` cut) with [`IdentityError::Value`].
+    pub(crate) fn resolve_checked(
+        &self,
+        claims: Option<&serde_json::Value>,
+        allowed: impl Fn(&str) -> bool,
+    ) -> Result<String, IdentityError> {
         let mut out = String::new();
         for part in &self.0 {
             match part {
@@ -137,10 +167,14 @@ impl Template {
                 Part::Claim { key, take } => {
                     let value = claim_text(claims, key)
                         .ok_or_else(|| IdentityError::Unresolved { claim: key.clone() })?;
-                    match take {
-                        Some(n) => out.extend(value.chars().take(*n)),
-                        None => out.push_str(&value),
+                    let value: String = match take {
+                        Some(n) => value.chars().take(*n).collect(),
+                        None => value,
+                    };
+                    if !allowed(&value) {
+                        return Err(IdentityError::Value { claim: key.clone() });
                     }
+                    out.push_str(&value);
                 }
             }
         }

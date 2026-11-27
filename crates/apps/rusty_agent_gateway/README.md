@@ -168,6 +168,26 @@ and `--check` lists every target that took it. Calls, prompt gets and resource
 reads are keyed; listings use the target's first connection. Clients with
 neither a session nor a token have no identity to keep apart and share one key.
 
+A `per_session` stdio target can start each session's child from the verified
+token, so the child runs inside that session's jail:
+
+```yaml
+  - name: sandbox
+    stdio:
+      cmd: orch-fs-shell                       # the probe: startup check and listings
+      args: [--root, /var/empty, --mode, critic]
+      session:                                  # each session's own child
+        cmd: lel-jail
+        args: ["/srv/lel/{{jwt.lel.claim}}/jail.json"]
+```
+
+`session` takes `cmd`, `args` and `env`, each a `{{jwt.<claim>[:n]}}` template
+as in `identity`. **A claim value must be `[A-Za-z0-9._-]+` and not `.` or
+`..`**; anything else, or a missing claim, refuses the call and starts nothing.
+Claims that fill the launch differently get different children. Nothing in a
+launch comes from the call. A `session` launch on a target that isn't
+`per_session` stops startup.
+
 ### Lens policies
 
 A route can carry Let Em Loose lens policies, which decide per token which

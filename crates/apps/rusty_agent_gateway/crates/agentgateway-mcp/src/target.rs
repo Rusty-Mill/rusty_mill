@@ -34,7 +34,7 @@ use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use agentgateway_config::{McpTarget, McpTargetKind, UpstreamMode};
+use agentgateway_config::{McpTarget, McpTargetKind, StdioTarget, UpstreamMode};
 use rusty_mcp_client_native::json::Value;
 use rusty_mcp_client_native::proto::{
     CallToolParams, CallToolResponse, CallToolResult, GetPromptParams, GetPromptResult,
@@ -51,6 +51,7 @@ use crate::{
     gate::{GateError, TargetFilter},
     header_override::HeaderOverride,
     identity::{Identity, IdentityError},
+    launch::Launch,
 };
 
 /// How many connections a target that speaks HTTP may have open at once.
@@ -209,6 +210,8 @@ impl Pool {
 pub struct SessionKey {
     session: String,
     principal: String,
+    /// The verified claims, for a target that launches from them.
+    claims: Option<serde_json::Value>,
 }
 
 impl SessionKey {
@@ -228,6 +231,7 @@ impl SessionKey {
         SessionKey {
             session: session.unwrap_or_default().to_owned(),
             principal,
+            claims: claims.cloned(),
         }
     }
 }
@@ -250,13 +254,24 @@ struct Pools {
     /// Connections per keyed pool.
     per_key: usize,
     idle: Duration,
+    /// A `stdio` target's per-session launch, and the handshake budget its
+    /// children get.
+    launch: Option<(Launch, Duration)>,
 }
 
 impl Pools {
     /// The pool for an operation by `who` with `headers` going upstream.
-    fn for_call(&self, who: &SessionKey, headers: &HeaderOverride) -> Option<Arc<Pool>> {
+    ///
+    /// # Errors
+    /// The target launches from the token and `who`'s claims can't fill it.
+    fn for_call(
+        &self,
+        who: &SessionKey,
+        headers: &HeaderOverride,
+    ) -> Result<Option<Arc<Pool>>, ClientError> {
+        let mut dial = Arc::clone(&self.shared.dial);
         let (key, session) = match self.mode {
-            UpstreamMode::Pooled => return None,
+            UpstreamMode::Pooled => return Ok(None),
             UpstreamMode::PerCredential => {
                 let credential = headers
                     .set
@@ -266,16 +281,25 @@ impl Pools {
                     .unwrap_or_default();
                 (credential, String::new())
             }
-            UpstreamMode::PerSession => (
-                format!("{}\u{0}{}", who.session, who.principal),
-                who.session.clone(),
-            ),
+            UpstreamMode::PerSession => {
+                let mut key = format!("{}\u{0}{}", who.session, who.principal);
+                if let Some((launch, timeout)) = &self.launch {
+                    let resolved = launch.resolve(who.claims.as_ref()).map_err(|err| {
+                        ClientError::Io(io::Error::new(io::ErrorKind::PermissionDenied, err))
+                    })?;
+                    // Claims that launch differently get their own child.
+                    key.push('\0');
+                    key.push_str(&resolved.key());
+                    dial = stdio_dial(resolved.cmd, resolved.args, resolved.env, *timeout);
+                }
+                (key, who.session.clone())
+            }
         };
         let now = Instant::now();
         let mut map = lock(&self.by_key);
         let expired = take(&mut map, |k| now.duration_since(k.last_used) > self.idle);
         let entry = map.entry(key).or_insert_with(|| Keyed {
-            pool: Arc::new(Pool::new(Arc::clone(&self.shared.dial), self.per_key, None)),
+            pool: Arc::new(Pool::new(dial, self.per_key, None)),
             session,
             last_used: now,
         });
@@ -283,7 +307,7 @@ impl Pools {
         let pool = Arc::clone(&entry.pool);
         drop(map);
         drop(expired);
-        Some(pool)
+        Ok(Some(pool))
     }
 
     /// Close every keyed pool serving `session`.
@@ -436,6 +460,46 @@ impl std::fmt::Debug for Target {
     }
 }
 
+/// Dial a child process: `cmd` with `args` and `env`, then the handshake.
+fn stdio_dial(
+    cmd: String,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    timeout: Duration,
+) -> Arc<Dial> {
+    Arc::new(move |left: Duration| {
+        let mut command = Command::new(&cmd);
+        command.args(&args);
+        for (key, value) in &env {
+            command.env(key, value);
+        }
+        let transport = StdioTransport::spawn(command)?;
+        handshake(Link::Stdio(transport), left, timeout)
+    })
+}
+
+/// A `stdio` target's `session` launch, compiled. Only a `per_session`
+/// target may have one: a shared child can't be in one session's jail.
+fn session_launch(config: &McpTarget, at: &str) -> Result<Option<Launch>, TargetError> {
+    let McpTargetKind::Stdio(StdioTarget {
+        session: Some(launch),
+        ..
+    }) = &config.kind
+    else {
+        return Ok(None);
+    };
+    let at = format!("{at}.stdio.session");
+    if config.mode() != UpstreamMode::PerSession {
+        return Err(IdentityError::Config {
+            at,
+            value: config.name.clone(),
+            kind: "target for a session launch: it needs `mode: per_session`",
+        }
+        .into());
+    }
+    Ok(Some(Launch::new(launch, &at)?))
+}
+
 impl Target {
     /// Dial a target and complete the MCP handshake.
     ///
@@ -479,20 +543,13 @@ impl Target {
         }
         let name = config.name.clone();
         let timeout = call_timeout.unwrap_or(DEFAULT_CALL_TIMEOUT);
+        let launch = session_launch(config, at)?.map(|launch| (launch, timeout));
 
         let (dial, max): (Arc<Dial>, usize) = match &config.kind {
             McpTargetKind::Stdio(stdio) => {
-                let (cmd, args, env) = (stdio.cmd.clone(), stdio.args.clone(), stdio.env.clone());
-                let dial = move |left: Duration| {
-                    let mut command = Command::new(&cmd);
-                    command.args(&args);
-                    for (key, value) in &env {
-                        command.env(key, value);
-                    }
-                    let transport = StdioTransport::spawn(command)?;
-                    handshake(Link::Stdio(transport), left, timeout)
-                };
-                (Arc::new(dial), 1)
+                let env = stdio.env.clone().into_iter().collect();
+                let dial = stdio_dial(stdio.cmd.clone(), stdio.args.clone(), env, timeout);
+                (dial, 1)
             }
             McpTargetKind::Mcp(http) => {
                 let path = over.path.as_deref().unwrap_or(&http.path);
@@ -553,6 +610,7 @@ impl Target {
                     _ => max,
                 },
                 idle: SESSION_IDLE,
+                launch,
             },
             timeout,
         })
@@ -602,7 +660,7 @@ impl Target {
         who: &SessionKey,
     ) -> Result<Value, ClientError> {
         let deadline = Instant::now() + self.timeout;
-        let keyed = self.pools.for_call(who, headers);
+        let keyed = self.pools.for_call(who, headers)?;
         let pool = keyed.as_deref().unwrap_or(&self.pools.shared);
         pool.lease(deadline)?
             .call(deadline, method, params, &self.native(headers))
