@@ -43,7 +43,7 @@
 //!                                          #598: run PROGRAM confined (no endpoints), reading only the real_data roots, writing only its plan ($BBP_PLAN);
 //!                                          prints the plan's path, digest and entry count, never the plan
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
-//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--budget-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
+//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
 //! bbp slot-hold                           holds the slot lock on stdout until stdin closes and no other process is in the group it leads; started by bbp mod
 //! bbp slot-hold --cgroup PATH [--deadline-ms N]   D104: holds the slot lock on stdout until stdin closes and the cgroup is empty; at the deadline writes cgroup.kill
 //! bbp slot-hold --cgroup PATH --slots DIR [--deadline-ms N]   D108: takes a free agent slot from DIR itself and prints the descriptor it holds it on as stdout's first line; exits non-zero, taking nothing, when every agent slot is held
