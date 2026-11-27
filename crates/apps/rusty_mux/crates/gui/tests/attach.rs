@@ -12,6 +12,7 @@
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rusty_mux_client::Conn;
@@ -1532,21 +1533,43 @@ fn a_file_of_the_blocks_host_is_saved_in_the_downloads_folder() {
     let body: Vec<u8> = (0..(400 << 10) + 7).map(|i| i as u8).collect();
     std::fs::write(&remote, &body).expect("write");
 
+    let seen = Arc::new(Mutex::new(Vec::new()));
     let ask = |path: &std::path::Path| {
         let (tx, rx) = channel();
-        attached.source.download(
+        let log = Arc::clone(&seen);
+        attached.source.download_with_progress(
             key,
             path.to_string_lossy().into_owned(),
+            Box::new(move |got, total| log.lock().expect("log").push((got, total))),
             Box::new(move |r| drop(tx.send(r))),
         );
         rx.recv_timeout(PATIENCE).expect("an answer")
     };
     let saved = ask(&remote).expect("saved");
+    {
+        let seen = seen.lock().expect("log");
+        let total = body.len() as u64;
+        assert_eq!(seen.last(), Some(&(total, total)), "ends at the size");
+        assert!(seen.windows(2).all(|w| w[0].0 < w[1].0), "only forwards");
+    }
     assert_eq!(std::fs::read(&saved).expect("saved file"), body);
     // A second download of the same name keeps the first.
     let again = ask(&remote).expect("saved again");
     assert_ne!(again, saved);
     assert_eq!(std::fs::read(&again).expect("second file"), body);
+    // The plain call still works, with no progress.
+    let (tx, rx) = channel();
+    attached.source.download(
+        key,
+        remote.to_string_lossy().into_owned(),
+        Box::new(move |r| drop(tx.send(r))),
+    );
+    let plain = rx
+        .recv_timeout(PATIENCE)
+        .expect("an answer")
+        .expect("saved plain");
+    assert_eq!(std::fs::read(&plain).expect("plain file"), body);
+    std::fs::remove_file(&plain).expect("cleanup plain");
 
     let missing = ask(&state.join("nope")).expect_err("no such file");
     assert!(missing.contains("nope"), "{missing}");
