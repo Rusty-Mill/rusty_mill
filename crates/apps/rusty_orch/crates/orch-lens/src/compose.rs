@@ -27,7 +27,7 @@ pub struct Packs {
     pub standards: Vec<String>,
 }
 
-/// Domain token to the files it loads (Factory `domains.toml`).
+/// Domain token to the files it loads (Factory `domains.json`).
 pub type DomainMap = BTreeMap<String, Packs>;
 
 /// What a question's domains select. Equal selections compose equal bytes.
@@ -51,6 +51,25 @@ impl Default for Limits {
         Self {
             file_bytes: 8 * 1024,
             total_bytes: 32 * 1024,
+        }
+    }
+}
+
+/// A catalog file as the shell read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Text {
+    /// The file's contents.
+    Loaded(String),
+    /// Larger than the shell's read cap, so not read; dropped if selected.
+    OverCap,
+}
+
+impl Text {
+    /// The contents, if read and no larger than `cap` bytes.
+    fn within(&self, cap: usize) -> Option<&str> {
+        match self {
+            Self::Loaded(t) if t.len() <= cap => Some(t),
+            _ => None,
         }
     }
 }
@@ -155,22 +174,24 @@ pub fn select(map: &DomainMap, domains: &[String]) -> (Selection, BTreeSet<Strin
 }
 
 /// Compose `lens` with the domain pack and the selected files from `texts`
-/// (path to contents). Oversized files, the domain pack included, are
-/// dropped first; then, until the
+/// (path to contents). Oversized files ([`Text::OverCap`], or larger than
+/// `file_bytes`), the domain pack included, are dropped first; then, until the
 /// rest fits `total_bytes`, knowledge files go (last first), then the
 /// domain pack, then standards (last first).
 pub fn compose(
     lens: &str,
-    domain_pack: Option<&str>,
+    domain_pack: Option<&Text>,
     sel: &Selection,
-    texts: &BTreeMap<String, String>,
+    texts: &BTreeMap<String, Text>,
     limits: Limits,
 ) -> Result<Composed, ComposeError> {
     let mut dropped = Vec::new();
-    let mut pack = domain_pack.filter(|p| !p.trim().is_empty());
-    if pack.is_some_and(|p| p.len() > limits.file_bytes) {
-        pack = None;
-        dropped.push(DOMAIN_PACK.to_owned());
+    let mut pack = None;
+    if let Some(text) = domain_pack {
+        match text.within(limits.file_bytes) {
+            Some(p) => pack = Some(p).filter(|p| !p.trim().is_empty()),
+            None => dropped.push(DOMAIN_PACK.to_owned()),
+        }
     }
     let mut knowledge = Part::load("Knowledge", &sel.knowledge, texts, limits, &mut dropped)?;
     let mut standards = Part::load("Standards", &sel.standards, texts, limits, &mut dropped)?;
@@ -212,7 +233,7 @@ impl<'a> Part<'a> {
     fn load(
         title: &'static str,
         paths: &'a BTreeSet<String>,
-        texts: &'a BTreeMap<String, String>,
+        texts: &'a BTreeMap<String, Text>,
         limits: Limits,
         dropped: &mut Vec<String>,
     ) -> Result<Self, ComposeError> {
@@ -221,11 +242,10 @@ impl<'a> Part<'a> {
             let text = texts
                 .get(path)
                 .ok_or_else(|| ComposeError::Missing(path.clone()))?;
-            if text.len() > limits.file_bytes {
-                dropped.push(path.clone());
-                continue;
+            match text.within(limits.file_bytes) {
+                Some(text) => files.push((path.as_str(), text)),
+                None => dropped.push(path.clone()),
             }
-            files.push((path.as_str(), text.as_str()));
         }
         let file_bytes = files.iter().map(|f| file(*f)).sum();
         Ok(Self {
@@ -328,14 +348,14 @@ mod tests {
         m
     }
 
-    fn texts() -> BTreeMap<String, String> {
+    fn texts() -> BTreeMap<String, Text> {
         [
             ("knowledge/rust.md", "Ownership first.\n"),
             ("standards/rust.md", "MUST: no unwrap in library code.\n"),
             ("knowledge/terminal.md", "VT parsing is a state machine.\n"),
         ]
         .into_iter()
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .map(|(k, v)| (k.to_owned(), Text::Loaded(v.to_owned())))
         .collect()
     }
 
@@ -345,7 +365,25 @@ mod tests {
 
     fn build(domains: &[&str], pack: Option<&str>, limits: Limits) -> Composed {
         let (sel, _) = select(&map(), &doms(domains));
-        compose("find faults", pack, &sel, &texts(), limits).expect("composes")
+        let pack = pack.map(|p| Text::Loaded(p.to_owned()));
+        compose("find faults", pack.as_ref(), &sel, &texts(), limits).expect("composes")
+    }
+
+    #[test]
+    fn an_over_cap_file_is_dropped_only_when_selected() {
+        let mut t = texts();
+        t.insert("standards/rust.md".into(), Text::OverCap);
+        let (rust, _) = select(&map(), &doms(&["rust"]));
+        let c = compose("l", Some(&Text::OverCap), &rust, &t, Limits::default()).expect("composes");
+        assert_eq!(
+            c.dropped,
+            vec![DOMAIN_PACK.to_owned(), "standards/rust.md".to_owned()]
+        );
+        assert!(c.prompt.contains("Ownership first.") && !c.prompt.contains("# Standards"));
+        let (term, _) = select(&map(), &doms(&["terminal"]));
+        let c = compose("l", None, &term, &t, Limits::default()).expect("composes");
+        assert!(c.dropped.is_empty());
+        assert!(c.prompt.contains("VT parsing"));
     }
 
     #[test]
