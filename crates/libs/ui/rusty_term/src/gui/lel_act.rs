@@ -331,7 +331,7 @@ mod tests {
         );
         let remediated = r#"{"remediated":{"outcome":{"Refused":{"step":0,"code":"StaleRev","detail":"x"}},"card":{}}}"#;
         assert!(matches!(
-            answer(&p.apply(), true, &remediated),
+            answer(&p.apply(), true, remediated),
             Answer::Stale(_)
         ));
         let applied = r#"{"remediated":{"outcome":"Done","card":{}}}"#;
