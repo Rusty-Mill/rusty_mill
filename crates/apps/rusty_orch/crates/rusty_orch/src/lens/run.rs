@@ -377,6 +377,15 @@ impl Prefixes {
     }
 }
 
+/// The directory holding `config`, `.` for a bare file name, so a root
+/// opened by descriptor (the #723 catalog) is never the empty path.
+fn config_dir(config: &Path) -> PathBuf {
+    match config.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
 /// The task-wide claim set the breaker marks: every seat's cards merged
 /// by claim id, the newest revision's view of each claim winning. Lenses
 /// follow different domains, so one lens's view alone would count claims
@@ -603,7 +612,7 @@ pub fn run(o: &Options) -> Result<String, String> {
     let text = std::fs::read_to_string(&o.config)
         .map_err(|e| format!("cannot read {}: {e}", o.config.display()))?;
     let config = LensConfig::parse(&text).map_err(|e| format!("{}: {e}", o.config.display()))?;
-    let base = o.config.parent().map(PathBuf::from).unwrap_or_default();
+    let base = config_dir(&o.config);
     let rules = match &o.rules {
         Some(p) => {
             std::fs::read_to_string(p).map_err(|e| format!("cannot read {}: {e}", p.display()))?
@@ -2185,6 +2194,17 @@ mod tests {
             options(argv("check c.json"), PathBuf::new()),
             Err(ArgsError::Usage(_))
         ));
+    }
+
+    #[test]
+    fn a_bare_config_name_lives_in_the_current_directory() {
+        assert_eq!(config_dir(Path::new("lenses.json")), PathBuf::from("."));
+        assert_eq!(config_dir(Path::new("./lenses.json")), PathBuf::from("."));
+        assert_eq!(
+            config_dir(Path::new("cfg/lenses.json")),
+            PathBuf::from("cfg")
+        );
+        assert_eq!(config_dir(Path::new("/")), PathBuf::from("."));
     }
 
     #[test]
