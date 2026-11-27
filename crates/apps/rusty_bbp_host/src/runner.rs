@@ -247,6 +247,25 @@ pub fn isolated_baseline<E: Executor>(
 where
     E::Error: std::fmt::Display,
 {
+    isolated_baseline_gated(exec, set, holdout, repo, work_root, base, &|| Ok(()))
+}
+
+/// [`isolated_baseline`] with `ready` asked once the checkout is prepared,
+/// just before anything executes: an `Err` is the report's `error` and
+/// nothing runs. The #599 canary uses it to refuse a run its caller's
+/// deadline can no longer cover (D217).
+pub fn isolated_baseline_gated<E: Executor>(
+    exec: &E,
+    set: &ProfileSet,
+    holdout: Option<&crate::holdout::HoldoutSet>,
+    repo: &Path,
+    work_root: &Path,
+    base: &str,
+    ready: &dyn Fn() -> Result<(), String>,
+) -> Result<crate::baseline::Baseline, Rejection>
+where
+    E::Error: std::fmt::Display,
+{
     let refuse =
         |what: &str, e: String| Rejection::new(Code::BadClaimsConfig, format!("{what}: {e}"));
     let absolute = |p: &Path| {
@@ -257,12 +276,13 @@ where
         return Err(refuse("holdout", e));
     }
     let _held = baseline_lock(&work_root).map_err(|e| refuse("work", e))?;
-    Ok(baseline(
+    Ok(baseline_gated(
         exec,
         set,
         &repo,
         &work_root.join("baseline"),
         base,
+        ready,
     ))
 }
 
@@ -294,13 +314,41 @@ pub fn baseline<E: Executor>(
 where
     E::Error: std::fmt::Display,
 {
+    baseline_gated(exec, set, repo, work, base, &|| Ok(()))
+}
+
+/// [`baseline`], asking `ready` once setup is done (checkout, test listing,
+/// scratch directory), immediately before the first sandbox launch.
+fn baseline_gated<E: Executor>(
+    exec: &E,
+    set: &ProfileSet,
+    repo: &Path,
+    work: &Path,
+    base: &str,
+    ready: &dyn Fn() -> Result<(), String>,
+) -> crate::baseline::Baseline
+where
+    E::Error: std::fmt::Display,
+{
     let checked_out = prepare(repo, work, base, &[]).and_then(|tree| {
         let tests = crate::baseline::test_files(work, &set.test_paths)?;
         Ok((tree, tests))
     });
     match checked_out {
         Ok((tree, tests)) => {
-            let o = execute(exec, set, work);
+            let o = match execute(exec, set, work, ready) {
+                Ok(o) => o,
+                Err(refused) => {
+                    return crate::baseline::Baseline {
+                        base: base.to_owned(),
+                        tree: Some(Sha256::of(tree.as_bytes())),
+                        status: RunStatus::Error,
+                        profiles: vec![],
+                        tests,
+                        error: Some(refused),
+                    };
+                }
+            };
             // No profile ran: the run's own short reason is the explanation.
             let error = (o.status == RunStatus::Error && o.profiles.is_empty())
                 .then(|| format!("execute: {}", o.log.trim()));
@@ -447,16 +495,23 @@ fn scratch_dir(work: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn execute<E: Executor>(exec: &E, set: &ProfileSet, work: &Path) -> Outcome
+/// Run `set` in the sandbox. `ready` is asked after all setup, just before
+/// the first launch; its `Err` is returned as is and nothing is launched.
+fn execute<E: Executor>(
+    exec: &E,
+    set: &ProfileSet,
+    work: &Path,
+    ready: &dyn Fn() -> Result<(), String>,
+) -> Result<Outcome, String>
 where
     E::Error: std::fmt::Display,
 {
     if set.profiles.is_empty() {
-        return Outcome {
+        return Ok(Outcome {
             status: RunStatus::Error,
             profiles: vec![],
             log: "profile set has no profiles\n".into(),
-        };
+        });
     }
     let mut log = String::new();
     let mut results = Vec::new();
@@ -472,11 +527,11 @@ where
     let limits = match limits {
         Ok(l) => l,
         Err(e) => {
-            return Outcome {
+            return Ok(Outcome {
                 status: RunStatus::Error,
                 profiles: vec![],
                 log: format!("invalid limits: {e}"),
-            }
+            })
         }
     };
     let mut read_roots: Vec<PathBuf> = set.read_roots.iter().map(PathBuf::from).collect();
@@ -490,11 +545,11 @@ where
     let tmp = match scratch_dir(work) {
         Ok(t) => t,
         Err(e) => {
-            return Outcome {
+            return Ok(Outcome {
                 status: RunStatus::Error,
                 profiles: vec![],
                 log: format!("scratch directory: {e}\n"),
-            }
+            })
         }
     };
     let mut env = set.env.clone();
@@ -510,13 +565,14 @@ where
     ) {
         Ok(s) => s,
         Err(e) => {
-            return Outcome {
+            return Ok(Outcome {
                 status: RunStatus::Error,
                 profiles: vec![],
                 log: format!("invalid sandbox spec: {e}"),
-            }
+            })
         }
     };
+    ready()?;
     for p in &set.profiles {
         log.push_str(&format!(
             "=== {} : {} {}\n",
@@ -561,11 +617,11 @@ where
             }
         }
     }
-    Outcome {
+    Ok(Outcome {
         status,
         profiles: results,
         log,
-    }
+    })
 }
 
 fn worst(a: RunStatus, b: RunStatus) -> RunStatus {
@@ -767,7 +823,11 @@ where
                 tests = changed;
                 (
                     Some(Sha256::of(tree.as_bytes())),
-                    execute(exec, &set, &work),
+                    execute(exec, &set, &work, &|| Ok(())).unwrap_or_else(|refused| Outcome {
+                        status: RunStatus::Error,
+                        profiles: vec![],
+                        log: refused,
+                    }),
                 )
             }
             Err(e) => (
