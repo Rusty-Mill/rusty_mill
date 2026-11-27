@@ -30,6 +30,7 @@ mod confirm;
 mod cpu;
 mod damage;
 pub mod explorer;
+mod explorer_view;
 mod floats;
 mod font;
 #[cfg(feature = "gui-gpu")]
