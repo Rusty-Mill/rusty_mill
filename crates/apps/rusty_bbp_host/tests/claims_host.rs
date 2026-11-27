@@ -3388,3 +3388,38 @@ fn an_empty_task_id_does_not_poison_the_ledger() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn bbp_claims_lists_every_claim_read_only() {
+    let dir = tempdir("claims-read");
+    claims_task(&dir);
+    assert!(inbox::claims(&dir, &task()).unwrap().is_empty());
+    let a = claim(&dir, "a", "ship it", true);
+    let b = claim(&dir, "b", "and this", false);
+    let before = state(&dir).rev;
+    let views = inbox::claims(&dir, &task()).unwrap();
+    assert_eq!(views.iter().map(|v| v.id.0).collect::<Vec<_>>(), [a, b]);
+    assert_eq!(state(&dir).rev, before, "a read writes nothing");
+    let json = inbox::claims_json(&dir, &task()).unwrap();
+    // The fields the LEL tab's `lel_map::parse` requires (drift guard).
+    assert!(json.starts_with('['));
+    for key in [
+        "id",
+        "text",
+        "domains",
+        "status",
+        "score",
+        "confidence",
+        "spent",
+        "budget",
+        "deps",
+        "candidates",
+    ] {
+        assert!(
+            json.contains(&format!("\"{key}\":")),
+            "{key} missing: {json}"
+        );
+    }
+    assert!(inbox::claims(&dir, &TaskId("nope".into())).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}

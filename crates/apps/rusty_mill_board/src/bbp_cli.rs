@@ -195,6 +195,27 @@ impl Escalations for BbpCli {
         Ok(Outcome::Done)
     }
 
+    fn claims(&self, task: &str) -> Result<Value, InboxError> {
+        if !valid_task(task) {
+            return Err(InboxError::Invalid(format!("bad BBP task id {task:?}")));
+        }
+        let argv = [
+            "claims".to_owned(),
+            "--dir".to_owned(),
+            self.root_str(),
+            "--task".to_owned(),
+            task.to_owned(),
+            "--json".to_owned(),
+            "yes".to_owned(),
+        ];
+        let v = self.run(&argv)?;
+        if v.is_array() {
+            Ok(v)
+        } else {
+            Err(InboxError::Host("`bbp claims` did not print a list".into()))
+        }
+    }
+
     fn applied(&self, task: &str, decision: &str) -> Result<Option<u64>, InboxError> {
         if !valid_task(task) {
             return Err(InboxError::Invalid(format!("bad BBP task id {task:?}")));

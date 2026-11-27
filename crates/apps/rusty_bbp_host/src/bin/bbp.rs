@@ -17,6 +17,7 @@
 //! bbp takeover-ended --dir D --task T --takeover N --reason released|expired|revoked|turn-ended|mux-lost   D104: orch ends a takeover (`released` only after `bbp human takeover-release N`)
 //! bbp golden-run DIR                        the golden: profile's case runner: checks the sign-off, runs each case in the current directory, prints verdicts only
 //! bbp inbox   --dir D --task T[,T2...] [--json yes]   open escalations of claims tasks as JSON: irreversible first, then by task as given, oldest first within a task
+//! bbp claims  --dir D --task T [--json yes]   every claim of a claims task as a JSON array of claim views, in id order (read-only; the LEL tab's map, via Mill Board `lel_claims`); an unknown or non-claims task is an error
 //! bbp decision --dir D --task T --decision ID[,ID2...]   was each decision id (`bbp human --decision`) applied, and at which rev: `[{"decision":ID,"applied":bool,"rev":N|null}]`, read from the log
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
@@ -264,6 +265,9 @@ fn run() -> Result<String, String> {
         let mut tasks: Vec<TaskId> = task.0.split(',').map(|t| TaskId(t.to_owned())).collect();
         tasks.extend(a.positional.iter().map(|t| TaskId(t.clone())));
         return inbox::json(&dir, &tasks);
+    }
+    if sub == "claims" {
+        return inbox::claims_json(&dir, &task);
     }
     if sub == "decision" {
         return decision::json(&dir, &task, a.flag("decision")?);

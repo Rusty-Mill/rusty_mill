@@ -205,6 +205,8 @@ Precise contracts used by this guide:
 | D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
 | D209 | #1382: the token mint lives in a new sans-IO crate `orch-token`; orch-bbp writes the token file and `jail.json` slot | [default] 2026-11-27 (1382) |
 | D212 | #1382: code waits for the gateway cards #1375-#1379; only the slice plan merges now | [stated] 2026-11-27 (1382) |
+| D220 | #1416: the LEL tab reads claims through a new read-only `bbp claims` verb and Mill Board `lel_claims`/`lel_spend` | [stated] 2026-11-27 (1416) |
+| D221 | #1416: `bbp claims` prints a plain array of claim views; brief text is not served yet | [default] 2026-11-27 (1416) |
 
 ## D1. Lenses, not stages
 
@@ -2004,3 +2006,21 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_a9952c1bcd964445b645426c843bac3a
 **Key.** lel:1382:build-after-gateway-cards
 **Source.** Nano tapped option a "Wait for #1375-#1379" ("Only the slice plan merges now. Code starts when the gateway cards land, as the approved order says.") on decision card `cmsg_014AqbZs58L565hMV2pFkCX546kxWjy74njHksp6qNKnci` in the Rusty BBP_SWF thread "Route jailed agent tools through gateway" (`cmsg_014AqbZs58L565hMV2pFkCX5UApVszPE7rf26gn9xJeNYk`), 2026-11-27T02:00:47Z. Confirms D180 §10; reverses nothing. Numbered D212 because D205 to D211 are taken on open PRs.
+
+## D220. #1416: the LEL tab reads claims through a new read-only `bbp claims` verb and Mill Board `lel_claims`/`lel_spend`
+
+**Decision.** Add `bbp claims --dir D --task T [--json yes]` to the host: every claim of a claims task as a JSON array of the `ClaimView` the inbox already prints, in id order, read-only. Mill Board gains two admin-only read ops over it, `lel_claims` (the array, for a task a card links) and `lel_spend` (`[{id, spent, budget}]` derived from the same read, Q42). The root-owned `mill-board-bbp-guard` admits `claims` as well as `inbox|human`, still pinning `--dir`. D173's "no BBP change" is read as "no protocol, log or orch change": the verb is a new host CLI surface, so it was gated.
+**Why.** `claim_card` and `claims_delta` are MCP tools that need a session credential; no `bbp` verb prints claims, so the board (D35, D132) had nothing to wrap. A verb keeps the host the only BBP reader and writer.
+**Rejected.** A read-only MCP session for the board (a new trust path, bypasses D132); deriving from `show`, `card` and `inbox` (cannot list claims or per-claim spend).
+**Tag.** [stated] · Nano chose "Approve verb and guard change" on decision card `cmsg_014f6o52E2iAAAgMm9v8hh1wP41bhUZDR4VAYjba5V7ymT`, 2026-11-27T14:15Z.
+**Key.** lel:1416:bbp-claims-verb
+**Source.** The #1416 endpoint thread, 2026-11-27; let-em-loose-expert escalation; D35, D132, D168, D173, D174; `rusty_bbp_host` `src/inbox.rs` `claims`; `1092-deploy-layout.md` guard.
+
+## D221. #1416: `bbp claims` prints a plain array of claim views; brief text is not served yet
+
+**Decision.** The verb's output stays a plain array so `lel_map::parse` reads it unchanged. The brief text is not served: `lel_map::Intent.brief` stays `None` until a later change adds it (`--brief yes` printing an object is the option), and the intent version is derived from the claims as `lel_map` already does. There is no `lel_intent` op in this PR.
+**Why.** Smallest reversible shape; deferral is safe because the field is already optional.
+**Rejected.** An object shape now, which would change the top level of the output before anyone needs it.
+**Tag.** [default]
+**Key.** lel:1416:claims-verb-shape
+**Source.** let-em-loose-expert, 2026-11-27; `lel_map.rs` `Intent`; D220.

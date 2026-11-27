@@ -151,6 +151,30 @@ pub fn json(dir: &Path, tasks: &[TaskId]) -> Result<String, String> {
     rusty_serde::json::to_string(&read(dir, tasks)?).map_err(|e| e.to_string())
 }
 
+/// Every claim of a claims task as the LEL tab reads it (`bbp claims`): the same
+/// `ClaimView` the inbox shows for an escalated claim, for all of them, in id
+/// order. Read-only: nothing is written and no session credential is involved.
+pub fn claims(dir: &Path, task: &TaskId) -> Result<Vec<ClaimView>, String> {
+    if !crate::log_path_for(dir, task).exists() {
+        return Err(format!("no such task: {}", task.0));
+    }
+    let d = open_driver(dir, task)?;
+    if d.state.mode != Mode::Claims {
+        return Err(format!("{} is not a claims task", task.0));
+    }
+    Ok(d.state
+        .claims
+        .claims
+        .values()
+        .map(|r| card(&d.state, r, &Sight::all()))
+        .collect())
+}
+
+/// The JSON `bbp claims` prints: an array of claim views.
+pub fn claims_json(dir: &Path, task: &TaskId) -> Result<String, String> {
+    rusty_serde::json::to_string(&claims(dir, task)?).map_err(|e| e.to_string())
+}
+
 /// The open escalations of one task, from its state and its log.
 /// An ended task has none: its human verbs are refused, so nothing in it is actionable.
 pub fn open(st: &TaskState, events: &[Event]) -> Vec<Escalation> {
