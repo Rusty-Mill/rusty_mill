@@ -153,7 +153,8 @@ pub fn json(dir: &Path, tasks: &[TaskId]) -> Result<String, String> {
 
 /// Every claim of a claims task as the LEL tab reads it (`bbp claims`): the same
 /// `ClaimView` the inbox shows for an escalated claim, for all of them, in id
-/// order. Read-only: nothing is written and no session credential is involved.
+/// order. Read-only in that it appends no events and takes no session credential;
+/// like every host verb it opens the store, which truncates a torn log tail.
 pub fn claims(dir: &Path, task: &TaskId) -> Result<Vec<ClaimView>, String> {
     if !crate::log_path_for(dir, task).exists() {
         return Err(format!("no such task: {}", task.0));

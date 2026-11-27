@@ -4,8 +4,9 @@
 //! only writer of the BBP log, behind its lock and revision fence. Mill Board
 //! never reads BBP files.
 
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
@@ -39,6 +40,46 @@ impl BbpCli {
             return Err(InboxError::Host(err.trim().to_owned()));
         }
         serde_json::from_slice(&out.stdout)
+            .map_err(|e| InboxError::Host(format!("unreadable output: {e}")))
+    }
+
+    /// As [`BbpCli::run`], but stdout is read through a byte ceiling: a host that
+    /// prints more than `max` bytes is killed and refused, never buffered whole.
+    fn run_bounded(&self, args: &[String], max: u64) -> Result<Value, InboxError> {
+        let host = |e: std::io::Error| InboxError::Host(format!("{}: {e}", self.bin.display()));
+        let mut child = Command::new(&self.bin)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(host)?;
+        let mut err = child.stderr.take();
+        // stderr drains on its own thread so a chatty host cannot block on a full pipe.
+        let err_reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(e) = err.as_mut() {
+                let _ = e.take(MAX_ERR).read_to_string(&mut text);
+            }
+            text
+        });
+        let mut body = Vec::new();
+        if let Some(out) = child.stdout.take() {
+            out.take(max + 1).read_to_end(&mut body).map_err(host)?;
+        }
+        if body.len() as u64 > max {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(InboxError::Host(format!(
+                "the host's answer is over {max} bytes; refused rather than buffered"
+            )));
+        }
+        let status = child.wait().map_err(host)?;
+        let stderr = err_reader.join().unwrap_or_default();
+        if !status.success() {
+            return Err(InboxError::Host(stderr.trim().to_owned()));
+        }
+        serde_json::from_slice(&body)
             .map_err(|e| InboxError::Host(format!("unreadable output: {e}")))
     }
 
@@ -110,6 +151,13 @@ impl BbpCli {
 
 /// The answerer label a preview carries; it never reaches the log.
 const PREVIEW_AS: &str = "inbox";
+
+/// The most `bbp claims` may print: 8 MiB. A task's claims and their evidence
+/// are bounded per message but not in total, so the board bounds the read.
+const MAX_CLAIMS: u64 = 8 << 20;
+
+/// The most stderr kept from a bounded run.
+const MAX_ERR: u64 = 16 << 10;
 
 fn valid_task(t: &str) -> bool {
     !t.is_empty() && !t.contains(',') && !t.starts_with("--")
@@ -208,7 +256,7 @@ impl Escalations for BbpCli {
             "--json".to_owned(),
             "yes".to_owned(),
         ];
-        let v = self.run(&argv)?;
+        let v = self.run_bounded(&argv, MAX_CLAIMS)?;
         if v.is_array() {
             Ok(v)
         } else {

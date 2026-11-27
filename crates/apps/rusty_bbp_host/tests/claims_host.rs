@@ -3399,7 +3399,7 @@ fn bbp_claims_lists_every_claim_read_only() {
     let before = state(&dir).rev;
     let views = inbox::claims(&dir, &task()).unwrap();
     assert_eq!(views.iter().map(|v| v.id.0).collect::<Vec<_>>(), [a, b]);
-    assert_eq!(state(&dir).rev, before, "a read writes nothing");
+    assert_eq!(state(&dir).rev, before, "a read appends no events");
     let json = inbox::claims_json(&dir, &task()).unwrap();
     // The fields the LEL tab's `lel_map::parse` requires (drift guard).
     assert!(json.starts_with('['));
