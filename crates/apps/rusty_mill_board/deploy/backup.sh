@@ -104,6 +104,19 @@ copies_in() {
     grep -c 'mill-board-.*\.sqlite3\.gz\.sha256$' || true
 }
 
+# True when $1 holds, for each name in $2, links to $dir's copy and its checksum, the gzip matching
+# that checksum, and no other entry.
+stage_intact() {
+    local stage=$1 names=$2 n total=0
+    while IFS= read -r n; do
+        [[ -L $stage/$n && $(readlink -- "$stage/$n") == "$dir/$n" ]] || return 1
+        [[ -L $stage/$n.sha256 && $(readlink -- "$stage/$n.sha256") == "$dir/$n.sha256" ]] || return 1
+        (cd "$stage" && sha256sum -c --status -- "$n.sha256" 2>/dev/null) || return 1
+        total=$((total + 2))
+    done <<<"$names"
+    [[ $(find "$stage" -mindepth 1 -maxdepth 1 | wc -l) -eq $total ]]
+}
+
 ship() {
     local base=${MILL_BOARD_BACKUP_DEST:?set MILL_BOARD_BACKUP_DEST: an rsync target off this host}
     # A mounted destination that is not mounted would fill the local disk under the mount point.
@@ -139,9 +152,9 @@ ship() {
     if ((here < keep && here < there)); then
         echo "mill-board-backup: only $here copies here, $there at the destination; not pruning it" >&2
     else
-        # The staging directory must still hold exactly the verified pairs: never prune from less.
-        [[ $(find "$stage" -maxdepth 1 -type l | wc -l) -eq $((2 * $(grep -c . <<<"$names"))) ]] ||
-            die "staging changed under this run: nothing pruned"
+        # The staging directory must still hold exactly the verified pairs: every expected name is
+        # there, links to this host's own file, and still matches its checksum; nothing else is.
+        stage_intact "$stage" "$names" || die "staging changed under this run: nothing pruned"
         rsync -aL --delete --timeout=600 "${filter[@]}" "$stage/" "$dest/"
     fi
     echo "mill-board-backup: shipped to $dest"

@@ -404,3 +404,27 @@ fn an_emptied_staging_directory_never_prunes() {
         "every off-host copy survives"
     );
 }
+
+#[test]
+fn a_staging_directory_with_the_right_count_but_the_wrong_names_never_prunes() {
+    let rig = Rig::new();
+    for _ in 0..2 {
+        snap(&rig, 3);
+    }
+    ok(&rig.run("ship", 3, None, &[]));
+    let there = names(&dest_host(&rig));
+    // Swaps one expected link for a stray one during verification: the entry count still matches.
+    let body = format!(
+        "case \"$*\" in *--itemize-changes*) cd '{}'/.ship && rm -f \"$(ls | head -n1)\" && ln -s /nonexistent stray ;; esac; exec /usr/bin/rsync \"$@\"",
+        rig.local().display()
+    );
+    let bin = rig.fake("rsync", &body);
+    let out = rig.run("ship", 3, Some(&bin), &[]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("staging changed"));
+    assert_eq!(
+        names(&dest_host(&rig)),
+        there,
+        "every off-host copy survives"
+    );
+}
