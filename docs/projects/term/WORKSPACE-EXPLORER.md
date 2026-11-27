@@ -29,7 +29,7 @@ A server call limited to list, stat and touched-by, scoped to the session worksp
 ## Order
 
 1. Server call and ctl form (cloud-buildable, owner gate).
-2. TUI text tree (cloud-buildable): lists, then shows the size and age of the row under the cursor and a letter beside each changed file (`*` on a directory with a change below it). Tree actions follow, each with its own gate: copy path is built (`y`, OSC 52, D374); `c` cd is built with a confirm step (D375/D376, needs Nano's confirmation on its PR, Q107); open in an editor is not.
+2. TUI text tree (cloud-buildable): lists, then shows the size and age of the row under the cursor and a letter beside each changed file (`*` on a directory with a change below it). Tree actions follow, each with its own gate: copy path is built (`y`, OSC 52, D374); `c` cd is built with a confirm step (D375/D376, needs Nano's confirmation on its PR, Q107); `o` open in editor is built (new block running the server's `$EDITOR`; Nano's go 2026-11-27, D376).
 3. GUI panel on the D60 panel tokens (needs a Windows GUI build; not cloud-buildable).
 
 ## Decided

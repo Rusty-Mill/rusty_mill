@@ -1029,6 +1029,7 @@ mod client {
             next,
             inspect: features.contains(Features::INSPECT),
             layouts: features.contains(Features::LAYOUT),
+            launching: features.contains(Features::LAUNCH),
             editing: features.contains(Features::LAYOUT_EDIT),
             floating: features.contains(Features::FLOATS),
             focusing: features.contains(Features::FOCUS),
@@ -1611,6 +1612,9 @@ mod client {
         /// Whether the server keeps layouts; without, only the first block
         /// shows.
         layouts: bool,
+        /// Whether the server starts a named program in a new block:
+        /// [`Features::LAUNCH`].
+        launching: bool,
         /// Whether the server edits layouts: [`Features::LAYOUT_EDIT`].
         editing: bool,
         /// Whether the server floats blocks: [`Features::FLOATS`].
@@ -2723,6 +2727,31 @@ mod client {
             }
             match explorer::press(&mut open.explorer, bytes) {
                 Explored::Leave => self.live(),
+                Explored::Edit(file) => {
+                    let block = open.block;
+                    let program = explorer::edit_program(&file);
+                    match program {
+                        None => open.explorer.say("open refused: unsafe name"),
+                        Some(_) if !(self.layouts && self.launching) => open
+                            .explorer
+                            .say("open needs a server with layouts and launch"),
+                        Some(program) => {
+                            self.live();
+                            let req = self.request(|req| Message::Split {
+                                req,
+                                block,
+                                side: Side::Right,
+                                launch: Launch {
+                                    program: Some(program),
+                                    ..Launch::default()
+                                },
+                            });
+                            self.split = Some(req);
+                            return;
+                        }
+                    }
+                    self.draw();
+                }
                 Explored::Cd(dir) => {
                     match explorer::cd_command(&dir) {
                         Some(line) => {
@@ -3901,6 +3930,7 @@ mod client {
                 next: 1,
                 inspect: false,
                 layouts: true,
+                launching: true,
                 editing: true,
                 floating: false,
                 floats: Vec::new(),
@@ -4846,6 +4876,38 @@ mod client {
                 app.take(Input::Keys(b"y".to_vec()));
                 assert!(typed_in(&sent(&far[1])).is_empty(), "nothing typed");
             }
+        }
+
+        /// `o` on a file splits its block with the editor program, as a
+        /// program and argument (no shell text), and closes the tree.
+        #[cfg(unix)]
+        #[test]
+        fn o_opens_the_file_in_a_new_block_with_the_editor_program() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.act(Action::Explorer);
+            let list = workspace_calls(&sent(&far[1]))[0].0;
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: list,
+                    text: ".\nf\ta b.rs".into(),
+                },
+            );
+            app.take(Input::Keys(b"jo".to_vec()));
+            assert!(app.exploring.is_none(), "closed");
+            let split = sent(&far[0])
+                .into_iter()
+                .find_map(|m| match m {
+                    Message::Split { launch, block, .. } => Some((block, launch)),
+                    _ => None,
+                })
+                .expect("a split");
+            assert_eq!(split.0, a);
+            let program = split.1.program.expect("a program");
+            assert_eq!(program.command, "sh");
+            assert_eq!(program.args.last().map(String::as_str), Some("./a b.rs"));
         }
 
         /// The server refuses the change marks on an agent's block (D372): the
