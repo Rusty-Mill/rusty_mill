@@ -453,6 +453,7 @@ impl Args<'_> {
             fds: 0,
             hold: false,
             agent: None,
+            workspace_of: None,
         })
     }
 
