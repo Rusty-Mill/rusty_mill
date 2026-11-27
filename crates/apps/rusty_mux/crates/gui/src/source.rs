@@ -48,9 +48,9 @@ use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Entry, Features, Launch, Message, Program, ShowTo, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
-    Act, BlockInfo, Bound, Detached, Dir, DownloadDone, Explore, Explored, Feed, Float as Pane,
-    ForwardDone, Link, ListDone, Listed, Notice, PaneIo, Remote, Session, Show, Source, Take, Tree,
-    UploadDone, UploadProgress,
+    Act, BlockInfo, Bound, Detached, Dir, DownloadDone, DownloadProgress, Explore, Explored, Feed,
+    Float as Pane, ForwardDone, Link, ListDone, Listed, Notice, PaneIo, Remote, Session, Show,
+    Source, Take, Tree, UploadDone, UploadProgress,
 };
 
 use crate::floats;
@@ -665,9 +665,9 @@ impl Source for MuxSource {
         self.pane(key).is_some_and(|b| b.downloads)
     }
 
-    fn download(&self, key: u64, path: String, done: DownloadDone) {
+    fn download(&self, key: u64, path: String, progress: DownloadProgress, done: DownloadDone) {
         match self.pane(key) {
-            Some(block) => block.download(path, done),
+            Some(block) => block.download(path, progress, done),
             None => done(Err("the block is not open".into())),
         }
     }
@@ -2007,19 +2007,33 @@ impl Block {
     /// the Downloads folder and calls `done` with where it was saved. A chunk
     /// left unanswered for [`UPLOAD_WAIT`], or a lost connection, ends it and
     /// leaves no partial file.
-    fn download(self: &Arc<Self>, path: String, done: DownloadDone) {
+    fn download(self: &Arc<Self>, path: String, progress: DownloadProgress, done: DownloadDone) {
         let Some(name) = saved_name(&path) else {
             return done(Err(format!("{path} is not a file")));
         };
         let block = Arc::clone(self);
-        std::thread::spawn(move || done(block.download_file(&path, &name)));
+        std::thread::spawn(move || done(block.download_file(&path, &name, &progress)));
     }
 
-    fn download_file(&self, path: &str, name: &str) -> Result<String, String> {
+    fn download_file(
+        &self,
+        path: &str,
+        name: &str,
+        progress: &DownloadProgress,
+    ) -> Result<String, String> {
         let dir = downloads_dir().ok_or("there is no Downloads folder")?;
         let (mut file, saved) = create_unique(&dir, name)?;
         let id = self.block;
-        let fetched = rusty_mux_client::download::fetch_with(path, &mut file, |args| {
+        let mut shown = None;
+        let told = |got: u64, total: u64| {
+            // Told when the percent moves, not once per chunk.
+            let percent = (got.min(total) * 100).checked_div(total).unwrap_or(100);
+            if shown != Some(percent) {
+                shown = Some(percent);
+                progress(got, total);
+            }
+        };
+        let fetched = rusty_mux_client::download::fetch_progress(path, &mut file, told, |args| {
             let (tx, rx) = channel();
             let mut args = Some(args);
             let req = self.send(|req| {
