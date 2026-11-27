@@ -32,22 +32,34 @@ Install to `/opt/lel/<git-sha>/bin/`, symlink `/opt/lel/current -> <git-sha>`. P
 The guard (all of it):
 ```sh
 #!/bin/sh
-# Runs as orch-runner via sudo. Allows: bbp inbox|human|claims --dir /srv/lel/bbp <args without another --dir>.
+# Runs as orch-runner via sudo. Allows: bbp inbox|human|claims|verify --dir /srv/lel/bbp <args without another --dir>;
+# verify takes only --task and --expect <64 lowercase hex> (#1551, D213).
 set -eu
-case "${1-}" in inbox|human|claims) ;; *) echo "mill-board-bbp-guard: verb refused" >&2; exit 64 ;; esac
-if [ "${2-}" != --dir ] || [ "${3-}" != /srv/lel/bbp ]; then echo "mill-board-bbp-guard: --dir refused" >&2; exit 64; fi
+no() { echo "mill-board-bbp-guard: $1" >&2; exit 64; }
+case "${1-}" in inbox|human|claims|verify) ;; *) no "verb refused" ;; esac
+if [ "${2-}" != --dir ] || [ "${3-}" != /srv/lel/bbp ]; then no "--dir refused"; fi
 verb=$1; shift 3
-skip=0
+key=
 for a in "$@"; do   # walks the args the way bbp's parser does: every --key takes the next token as its value
-  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  if [ -n "$key" ]; then
+    if [ "$verb" = verify ]; then
+      case "$key" in
+        --task) ;;
+        --expect) case "$a" in *[!0-9a-f]*) no "--expect refused" ;; esac; [ "${#a}" -eq 64 ] || no "--expect refused" ;;
+        *) no "$key refused for verify" ;;
+      esac
+    fi
+    key=; continue
+  fi
   case "$a" in
-    --dir) echo "mill-board-bbp-guard: second --dir refused" >&2; exit 64 ;;
-    --*) skip=1 ;;
+    --dir) no "second --dir refused" ;;
+    --*) key=$a ;;
+    *) [ "$verb" != verify ] || no "argument refused for verify" ;;
   esac
 done
 exec /opt/lel/current/bin/bbp "$verb" --dir /srv/lel/bbp "$@"
 ```
-It accepts exactly the argv `bbp_cli.rs` builds (`inbox|human|claims --dir <root> ...`), so the board needs no code change. The guarantee: as `orch-runner`, `mill-board` can run only `bbp inbox`, `bbp human` and the read-only `bbp claims` (D220), only on `/srv/lel/bbp`. A host deployed before `claims` was added needs this one-word guard edit (root-owned) and a `bbp` that has the verb; until then `lel_claims` answers "verb refused".
+It accepts exactly the argv `bbp_cli.rs` builds (`inbox|human|claims|verify --dir <root> ...`), so the board needs no code change. The guarantee: as `orch-runner`, `mill-board` can run only `bbp inbox`, `bbp human`, the read-only `bbp claims` (D220) and the read-only `bbp verify --task T [--expect H]` (#1551, D213), only on `/srv/lel/bbp`. Installing the `verify` line on BaileyAi needs Nano's host-change authorisation (D213). A host deployed before `claims` was added needs this one-word guard edit (root-owned) and a `bbp` that has the verb; until then `lel_claims` answers "verb refused".
 
 ## systemd
 - `mill-board.service`: the shipped unit plus the drop-in `/etc/systemd/system/mill-board.service.d/lel.conf` below. `EnvironmentFile=`, `ReadWritePaths=` and `ExecStart=` add to the shipped values, so each is cleared with an empty line first; otherwise the unit would still need `~baileyrd/.mill-board/board.env` and would keep running `/usr/local/bin/rusty_mill_board` after an upgrade flips `/opt/lel/current`.
