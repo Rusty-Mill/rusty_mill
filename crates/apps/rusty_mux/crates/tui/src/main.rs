@@ -2694,8 +2694,11 @@ mod client {
             };
             open.req = req;
             if req.is_none() {
-                open.explorer
-                    .refuse("the server has not answered earlier listings");
+                open.explorer.refuse(if open.view_only {
+                    "this block is not leased for listing"
+                } else {
+                    "the server has not answered earlier listings"
+                });
             }
         }
 
@@ -2703,9 +2706,11 @@ mod client {
         /// request, to know its refusal from the lease's. `None` at
         /// [`LISTINGS`] unanswered: none is forgotten, so no more is asked.
         fn workspace_call(&mut self, method: &str, args: Vec<(String, Value)>) -> Option<u64> {
-            let block = self.exploring.as_ref()?.block;
+            let open = self.exploring.as_ref()?;
+            let (block, peer) = (open.block, open.view_only);
             let pane = self.panes.get_mut(&block)?;
-            if pane.listings.len() >= LISTINGS {
+            // A peer is read only under the lease it took for listing (D380).
+            if pane.listings.len() >= LISTINGS || (peer && !pane.leased) {
                 return None;
             }
             let req = pane.send(|req| Message::BlockCall {
@@ -2720,6 +2725,10 @@ mod client {
 
         /// Makes the calls the open tree wants besides listings.
         fn ask_workspace(&mut self) {
+            // A peer is listing-only (D380): no change marks, no stat.
+            if self.exploring.as_ref().is_some_and(|o| o.view_only) {
+                return;
+            }
             while let Some(ask) = self.exploring.as_mut().and_then(|o| o.explorer.wants()) {
                 let (method, args) = match &ask {
                     Call::Touched => ("terminal.workspace-touched", Vec::new()),
@@ -2781,10 +2790,10 @@ mod client {
                 }
                 return self.draw();
             };
-            let status = self.panes.get(&peer).is_some_and(|p| p.status);
             self.exploring = Some(Exploring {
                 block: peer,
-                explorer: Explorer::opened(status),
+                // Not the block's status: a peer asks for listings only.
+                explorer: Explorer::opened(false),
                 req: None,
                 touched_req: None,
                 stat_req: None,
@@ -5224,14 +5233,20 @@ mod client {
             let (a, b) = (block(1), block(2));
             app.window = Some(WindowId::from_uuid(rusty_uuid::Uuid::from_bytes([3; 16])));
             app.cards = [(a, "#1573".to_owned()), (b, "#1573".to_owned())].into();
+            // Status is advertised: the origin asks for marks and stats, a
+            // peer must not.
+            for id in [a, b] {
+                app.panes.get_mut(&id).expect("pane").status = true;
+            }
             app.act(Action::Explorer);
             assert!(!app.exploring.as_ref().expect("open").view_only, "origin");
             app.take(Input::Keys(b"]".to_vec()));
             assert!(app.exploring.as_ref().expect("open").view_only);
-            let asked = sent(&far[2])
-                .into_iter()
+            let mut seen = sent(&far[2]);
+            let asked = seen
+                .iter()
                 .find_map(|m| match m {
-                    Message::AcquireLease { req, .. } => Some(req),
+                    Message::AcquireLease { req, .. } => Some(*req),
                     _ => None,
                 })
                 .expect("asked");
@@ -5243,7 +5258,8 @@ mod client {
                     created: None,
                 },
             );
-            let list = workspace_calls(&sent(&far[2]))[0].0;
+            seen = sent(&far[2]);
+            let list = workspace_calls(&seen)[0].0;
             pane_says(
                 &mut app,
                 b,
@@ -5254,17 +5270,30 @@ mod client {
             );
             // Listing still works: a directory is fetched.
             app.take(Input::Keys(b"j\r".to_vec()));
-            assert_eq!(workspace_calls(&sent(&far[2])).len(), 1, "listed src");
+            seen.extend(sent(&far[2]));
+            assert_eq!(workspace_calls(&seen).len(), 2, "listed src");
             // Edit and cd are refused, and `y` after `c` types nothing.
             app.take(Input::Keys(b"jjo".to_vec()));
             app.take(Input::Keys(b"ky".to_vec()));
             app.take(Input::Keys(b"c".to_vec()));
             app.take(Input::Keys(b"y".to_vec()));
-            let acted = sent(&far[2])
-                .into_iter()
+            seen.extend(sent(&far[2]));
+            let acted = seen
+                .iter()
                 .filter(|m| matches!(m, Message::CreateBlock { .. } | Message::Input { .. }))
                 .count();
             assert_eq!(acted, 0, "no launch, no input");
+            let methods: Vec<&String> = seen
+                .iter()
+                .filter_map(|m| match m {
+                    Message::BlockCall { method, .. } => Some(method),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                methods.iter().all(|m| *m == "terminal.workspace-list"),
+                "only listings: {methods:?}"
+            );
             assert!(app.exploring.is_some(), "still open to read");
         }
 
