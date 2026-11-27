@@ -1051,6 +1051,7 @@ mod client {
             exploring: None,
             split: None,
             arriving: None,
+            cards: shape.cards.into_iter().collect(),
             opened: 0,
             mirrored: None,
             passed: None,
@@ -1371,6 +1372,11 @@ mod client {
         /// The change marks and the stat of the cursor's row, asked for.
         touched_req: Option<u64>,
         stat_req: Option<u64>,
+        /// The block the tree was opened over, which has the focus again when
+        /// it closes after a switch to another block of its card.
+        origin: BlockId,
+        /// Waiting for the lease on `block` before the first listing.
+        lease_wait: bool,
         /// A `cd` waiting for the user's `y`: the directory and the line to
         /// type, shown first so the user sees what goes into the shell.
         cd: Option<(String, Vec<u8>)>,
@@ -1529,11 +1535,13 @@ mod client {
                     self.opened_req = None;
                     return Ok(Change::StartRefused(reason));
                 }
-                Message::Failed { req, .. } => {
+                Message::Failed { req, reason, .. } => {
                     // A refused lease, or input after losing it.
                     if self.asking == Some(req) {
                         self.asking = None;
                         self.waiting.clear();
+                        self.unpredict();
+                        return Ok(Change::LeaseRefused(reason));
                     }
                     let was = std::mem::take(&mut self.leased);
                     self.unpredict();
@@ -1578,6 +1586,8 @@ mod client {
         Started(BlockId),
         /// The server refused to start it.
         StartRefused(String),
+        /// The server refused the lease asked for.
+        LeaseRefused(String),
         /// The lease was lost.
         Unleased,
     }
@@ -1670,6 +1680,8 @@ mod client {
         split: Option<u64>,
         /// The split's new block, until the layout shows it.
         arriving: Option<BlockId>,
+        /// The card each block is worked for, as the last List told.
+        cards: HashMap<BlockId, String>,
         /// Block connections opened so far, to tag each.
         opened: u64,
         /// The input modes last mirrored from the focused block while
@@ -2000,6 +2012,7 @@ mod client {
             self.gone = false;
             self.relayout(shape.layout, shape.zoomed);
             self.refloat(shape.floats);
+            self.cards = shape.cards.into_iter().collect();
             self.take_focus(shape.focused);
             true
         }
@@ -2241,6 +2254,7 @@ mod client {
             if let Some(shape) = back.layout {
                 (self.layout, self.zoomed) = (shape.layout, shape.zoomed);
                 self.floats = shape.floats;
+                self.cards = shape.cards.into_iter().collect();
                 if let Some(focused) = shape.focused.filter(|_| self.focusing) {
                     self.focus = focused;
                 }
@@ -2654,6 +2668,8 @@ mod client {
                 req: None,
                 touched_req: None,
                 stat_req: None,
+                origin: block,
+                lease_wait: false,
                 cd: None,
             });
             self.list_workspace(None);
@@ -2724,6 +2740,76 @@ mod client {
             }
         }
 
+        /// Moves the tree to the next (or previous) block of the same card
+        /// that is shown here (D379): the focus goes there, so the lease the
+        /// listing needs is taken the way a focused block's is, and given
+        /// back when the focus leaves (D380). The card is the launcher's own
+        /// label; it groups blocks the session holds and reaches no path.
+        fn card_peer(&mut self, forward: bool) {
+            let Some((from, origin)) = self.exploring.as_ref().map(|o| (o.block, o.origin)) else {
+                return;
+            };
+            let Some(card) = self.cards.get(&from) else {
+                if let Some(open) = self.exploring.as_mut() {
+                    open.explorer.say("this block has no card");
+                }
+                return self.draw();
+            };
+            let shown: Vec<BlockId> = self
+                .visible()
+                .into_iter()
+                .map(|(b, _)| b)
+                .filter(|b| self.cards.get(b) == Some(card))
+                .filter(|b| self.panes.get(b).is_some_and(|p| p.workspace))
+                .collect();
+            let at = shown.iter().position(|b| *b == from).unwrap_or(0);
+            let step = if forward {
+                1
+            } else {
+                shown.len().saturating_sub(1)
+            };
+            let peer = shown.get((at + step) % shown.len().max(1)).copied();
+            let Some(peer) = peer.filter(|p| *p != from) else {
+                if let Some(open) = self.exploring.as_mut() {
+                    open.explorer
+                        .say("no other block of this card is shown here");
+                }
+                return self.draw();
+            };
+            let status = self.panes.get(&peer).is_some_and(|p| p.status);
+            self.exploring = Some(Exploring {
+                block: peer,
+                explorer: Explorer::opened(status),
+                req: None,
+                touched_req: None,
+                stat_req: None,
+                origin,
+                lease_wait: true,
+                cd: None,
+            });
+            self.focus_on(peer);
+            self.sync();
+            self.start_listing();
+            self.draw();
+        }
+
+        /// Lists the open tree's root once its block's lease is held; until
+        /// then the lease is waited for (it is asked when the focus moves).
+        fn start_listing(&mut self) {
+            let Some(open) = self.exploring.as_mut() else {
+                return;
+            };
+            let leased = self.panes.get(&open.block).is_some_and(|p| p.leased);
+            if !leased {
+                open.explorer.say("taking the lease to read this block...");
+                return;
+            }
+            open.lease_wait = false;
+            open.explorer.clear_note();
+            self.list_workspace(None);
+            self.ask_workspace();
+        }
+
         /// Opens `file` of the tree in an editor, in a new block that starts in
         /// the tree's block's own workspace (D378). The request goes on that
         /// block's connection, which holds the lease the server asks for. This
@@ -2788,6 +2874,7 @@ mod client {
             match explorer::press(&mut open.explorer, bytes) {
                 Explored::Leave => self.live(),
                 Explored::Edit(file) => self.edit(file),
+                Explored::Card(forward) => self.card_peer(forward),
                 Explored::Cd(dir) => {
                     match explorer::cd_command(&dir) {
                         Some(line) => {
@@ -2871,7 +2958,12 @@ mod client {
         fn live(&mut self) {
             self.browsing = false;
             self.finding = None;
-            self.exploring = None;
+            // A tree moved to another block of its card gives the focus back.
+            let origin = self.exploring.take().map(|o| o.origin);
+            if let Some(origin) = origin.filter(|o| *o != self.focus && self.panes.contains_key(o))
+            {
+                self.focus_on(origin);
+            }
             for pane in self.panes.values_mut() {
                 if let Some((grid, _)) = pane.term.as_mut() {
                     grid.reset_view();
@@ -3131,6 +3223,22 @@ mod client {
                 Ok(Change::Leased) => {
                     self.lease();
                     self.fit();
+                    if self
+                        .exploring
+                        .as_ref()
+                        .is_some_and(|o| o.block == block && o.lease_wait)
+                    {
+                        self.start_listing();
+                        self.draw();
+                    }
+                }
+                // Held by another client: said in the tree, never taken over.
+                Ok(Change::LeaseRefused(why)) => {
+                    if let Some(open) = self.exploring.as_mut().filter(|o| o.block == block) {
+                        open.lease_wait = false;
+                        open.explorer.refuse(&format!("leased elsewhere: {why}"));
+                        self.draw();
+                    }
                 }
                 Ok(Change::Closed) => {
                     pane.closed = true;
@@ -4017,6 +4125,7 @@ mod client {
                 exploring: None,
                 split: None,
                 arriving: None,
+                cards: HashMap::new(),
                 opened: 0,
                 mirrored: None,
                 passed: None,
@@ -5058,6 +5167,78 @@ mod client {
                 note.is_some_and(|n| n.starts_with("open refused: the workspace root")),
                 "{note:?}"
             );
+        }
+
+        /// `]` moves the tree to the next shown block of the same card: the
+        /// focus follows, its lease is asked for, the listing waits for it, and
+        /// closing the tree gives the first block its focus back.
+        #[cfg(unix)]
+        #[test]
+        fn a_card_key_moves_the_tree_to_the_cards_next_block_under_its_lease() {
+            let (mut app, _inbox, far) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.cards = [(a, "#1573".to_owned()), (b, "#1573".to_owned())].into();
+            app.act(Action::Explorer);
+            app.take(Input::Keys(b"]".to_vec()));
+            assert_eq!(app.exploring.as_ref().map(|o| o.block), Some(b));
+            assert_eq!(app.focus, b);
+            let asked = sent(&far[2])
+                .into_iter()
+                .find_map(|m| match m {
+                    Message::AcquireLease { req, .. } => Some(req),
+                    _ => None,
+                })
+                .expect("the lease is asked for");
+            assert!(workspace_calls(&sent(&far[2])).is_empty(), "not before it");
+            pane_says(
+                &mut app,
+                b,
+                Message::Done {
+                    req: asked,
+                    created: None,
+                },
+            );
+            assert_eq!(workspace_calls(&sent(&far[2])).len(), 1, "now listed");
+            app.take(Input::Keys(b"q".to_vec()));
+            assert_eq!(app.focus, a, "the first block has the focus back");
+        }
+
+        /// A block with no card, or alone on its card, has nowhere to go; a
+        /// lease held by another client is said, not taken.
+        #[cfg(unix)]
+        #[test]
+        fn the_card_key_says_when_there_is_no_peer_or_the_lease_is_held() {
+            let (mut app, _inbox, far) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.act(Action::Explorer);
+            app.take(Input::Keys(b"]".to_vec()));
+            assert_eq!(app.exploring.as_ref().map(|o| o.block), Some(a));
+            let note = app.exploring.as_ref().and_then(|o| o.explorer.note());
+            assert_eq!(note, Some("this block has no card"));
+            app.cards = [(a, "#1".to_owned()), (b, "#2".to_owned())].into();
+            app.take(Input::Keys(b"]".to_vec()));
+            let note = app.exploring.as_ref().and_then(|o| o.explorer.note());
+            assert_eq!(note, Some("no other block of this card is shown here"));
+            app.cards = [(a, "#1".to_owned()), (b, "#1".to_owned())].into();
+            app.take(Input::Keys(b"]".to_vec()));
+            let asked = sent(&far[2])
+                .into_iter()
+                .find_map(|m| match m {
+                    Message::AcquireLease { req, .. } => Some(req),
+                    _ => None,
+                })
+                .expect("asked");
+            pane_says(
+                &mut app,
+                b,
+                Message::Failed {
+                    req: asked,
+                    reason: "held by another client".into(),
+                    code: None,
+                },
+            );
+            assert!(workspace_calls(&sent(&far[2])).is_empty(), "nothing read");
+            assert!(!app.panes[&b].leased);
         }
 
         /// The server refuses the change marks on an agent's block (D372): the

@@ -47,7 +47,9 @@ pub const CONTROL: Features = Features::CHECKPOINT_V6
 /// [`CONTROL`] for a client that draws floating blocks (C42): the TUI. A
 /// client that does not must not ask, or the server would tell it focus is
 /// on a block it cannot show.
-pub const FLOATING: Features = CONTROL.union(Features::FLOATS);
+/// It also asks who works each block ([`Features::AGENT_META`]), for the
+/// TUI's card-wide workspace tree.
+pub const FLOATING: Features = CONTROL.union(Features::FLOATS).union(Features::AGENT_META);
 
 /// What a block's connection asks for. `TERMINAL_CONTROL` tells the
 /// server this client's copy of the terminal can be reset safely.
@@ -292,6 +294,9 @@ pub struct Shape {
     /// The window's floating blocks, back to front, from a server with
     /// [`Features::FLOATS`].
     pub floats: Vec<Float>,
+    /// The card each block is worked for, from a server with
+    /// [`Features::AGENT_META`]: only blocks launched with one.
+    pub cards: Vec<(BlockId, String)>,
 }
 
 /// What `window` shows, from a List's `entries`; `None` when the window
@@ -343,6 +348,16 @@ pub fn window_shape(entries: &[Message], window: WindowId) -> Option<Shape> {
             _ => None,
         })
         .unwrap_or_default();
+    shape.cards = entries
+        .iter()
+        .filter_map(|m| match m {
+            Message::Entry {
+                entry: Entry::Agent { block, meta },
+                ..
+            } if !meta.card.is_empty() => Some((*block, meta.card.clone())),
+            _ => None,
+        })
+        .collect();
     Some(shape)
 }
 

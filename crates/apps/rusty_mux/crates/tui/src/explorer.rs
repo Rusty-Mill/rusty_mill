@@ -102,6 +102,9 @@ pub enum Step {
     /// Still open; the user asked to open this file (relative to the
     /// workspace, real names) in an editor: see [`edit_program`].
     Edit(String),
+    /// Still open; the user asked for the next (`true`) or previous block on
+    /// the same card, whose workspace the tree then shows (D379, D380).
+    Card(bool),
 }
 
 /// Longest path [`cd_command`] types.
@@ -173,6 +176,8 @@ pub fn press(explorer: &mut Explorer, bytes: &[u8]) -> Step {
                     return Step::Cd(path);
                 }
             }
+            b']' => return Step::Card(true),
+            b'[' => return Step::Card(false),
             b'o' => {
                 let file = explorer.tree().is_some_and(|t| {
                     t.rows()
@@ -207,7 +212,7 @@ pub fn press(explorer: &mut Explorer, bytes: &[u8]) -> Step {
 #[must_use]
 pub fn render(explorer: &Explorer, width: usize, height: usize) -> Vec<String> {
     let mut lines = vec![clip(
-        "workspace: j/k move, Enter open, h up, y copy path, c cd, o open in editor, q leave",
+        "workspace: j/k move, Enter open, h up, y copy path, c cd, o open in editor, [ ] card blocks, q leave",
         width,
     )];
     let status = match (explorer.note(), explorer.waiting()) {
