@@ -1832,7 +1832,7 @@ binds:
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     assert_eq!(
-        config.lint(),
+        common::lint_but_mode(&config),
         Vec::<String>::new(),
         "one target, so the override is unambiguous and lints clean"
     );
@@ -2372,7 +2372,7 @@ binds:
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     assert_eq!(
-        config.lint(),
+        common::lint_but_mode(&config),
         Vec::<String>::new(),
         "a path rewrite over several targets is well-defined"
     );
@@ -2698,7 +2698,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(common::lint_but_mode(&config), Vec::<String>::new());
 
     let gateway = common::build(&config, None)
         .await

@@ -161,9 +161,9 @@ impl HttpHandler {
         let replay = (config.resume_buffer > 0)
             .then(|| Replay::new(config.resume_buffer, config.resume_grace));
         Self {
+            sessions: Sessions::new(Arc::clone(&server)),
             server,
             config,
-            sessions: Sessions::default(),
             replay,
         }
     }
@@ -358,8 +358,13 @@ impl Drop for Registered {
     }
 }
 
-#[derive(Default)]
-struct Sessions(Mutex<HashMap<String, Arc<Session>>>);
+/// The open classic sessions. Every way a session ends (`DELETE`, going
+/// idle) tells the server, so a source holding per-session state upstream can
+/// let it go ([`crate::ToolSource::session_ended`]).
+struct Sessions {
+    map: Mutex<HashMap<String, Arc<Session>>>,
+    server: Arc<Server>,
+}
 
 /// Why a session could not be opened.
 enum OpenError {
@@ -368,12 +373,29 @@ enum OpenError {
 }
 
 impl Sessions {
+    fn new(server: Arc<Server>) -> Self {
+        Sessions {
+            map: Mutex::new(HashMap::new()),
+            server,
+        }
+    }
+
+    /// Tell the server these sessions are over. Called with no lock held: a
+    /// source may take a while to close what it held for them.
+    fn ended(&self, ids: Vec<String>) {
+        for id in ids {
+            self.server.session_ended(&id);
+        }
+    }
+
     /// The live session `id`, refreshed; `None` if unknown or idle too long.
     fn get(&self, id: &str, idle: Duration) -> Option<Arc<Session>> {
-        let mut map = lock(&self.0);
+        let mut map = lock(&self.map);
         let session = map.get(id)?;
         if session.idle_for() > idle {
             map.remove(id);
+            drop(map);
+            self.ended(vec![id.to_owned()]);
             return None;
         }
         session.touch();
@@ -388,9 +410,19 @@ impl Sessions {
         max: usize,
         idle: Duration,
     ) -> Result<(String, Arc<Session>), OpenError> {
-        let mut map = lock(&self.0);
+        let mut map = lock(&self.map);
         if map.len() >= max {
-            map.retain(|_, s| s.idle_for() <= idle);
+            let expired: Vec<String> = map
+                .iter()
+                .filter(|(_, s)| s.idle_for() > idle)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &expired {
+                map.remove(id);
+            }
+            drop(map);
+            self.ended(expired);
+            map = lock(&self.map);
         }
         if map.len() >= max {
             return Err(OpenError::Full);
@@ -415,7 +447,9 @@ impl Sessions {
     }
 
     fn end(&self, id: &str) -> Option<Arc<Session>> {
-        lock(&self.0).remove(id)
+        let session = lock(&self.map).remove(id)?;
+        self.ended(vec![id.to_owned()]);
+        Some(session)
     }
 }
 

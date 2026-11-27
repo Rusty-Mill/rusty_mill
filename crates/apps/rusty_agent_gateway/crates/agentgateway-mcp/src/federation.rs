@@ -45,7 +45,7 @@ use crate::{
     naming::{Resolution, ToolNamer},
     rules::{Call, RuleError, RuleSet, Subject},
     span,
-    target::{Override, Target, TargetError},
+    target::{Override, SessionKey, Target, TargetError},
     transform::{Transform, TransformError},
 };
 
@@ -423,6 +423,17 @@ impl Who {
     fn claims(&self) -> Option<&serde_json::Value> {
         self.claims.as_ref()
     }
+
+    /// Who a keyed upstream operation is for: the downstream session and the
+    /// token's principal. Session binding (#1375) keeps a session to the
+    /// principal that opened it, so the pair can't be borrowed.
+    fn key(&self) -> SessionKey {
+        let session = self
+            .headers
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok());
+        SessionKey::new(session, self.claims())
+    }
 }
 
 /// `_meta` as forwarded upstream: only the trace context. The client's own
@@ -572,6 +583,16 @@ impl ToolSource for Federation {
     ) -> Option<Result<CallToolResult, ErrorData>> {
         Some(self.call_tool(ctx, request))
     }
+
+    /// Close every `per_session` upstream the ended session held.
+    fn session_ended(&self, session: &str) {
+        for target in &self.inner.targets {
+            let closed = target.end_session(session);
+            if closed > 0 {
+                rusty_log::debug!(target = %target.name, closed, "closed per-session upstreams");
+            }
+        }
+    }
 }
 
 impl Federation {
@@ -692,7 +713,7 @@ impl Federation {
             return Err(error(ErrorCode::INVALID_REQUEST, err.to_string()));
         }
 
-        let result = match target.call(&params, &upstream_headers) {
+        let result = match target.call(&params, &upstream_headers, &who.key()) {
             Ok(result) => result,
             Err(ClientError::Timeout) => {
                 rusty_log::warn!(
@@ -845,7 +866,7 @@ impl Federation {
 
         let result = self
             .upstream(target, "prompts/get", || {
-                target.get_prompt(&params, &headers)
+                target.get_prompt(&params, &headers, &who.key())
             })
             .ok_or_else(|| {
                 error(
@@ -1025,7 +1046,7 @@ impl Federation {
 
         let mut result = self
             .upstream(target, "resources/read", || {
-                target.read_resource(&params, &headers)
+                target.read_resource(&params, &headers, &who.key())
             })
             .ok_or_else(|| {
                 error(

@@ -10,7 +10,8 @@
 //! timed-out call does not keep this process (and the test's stderr) alive.
 //!
 //! `MOCK_ECHO_ARGS` set makes each tool append its arguments as JSON, so a
-//! test can see exactly what the gateway sent upstream.
+//! test can see exactly what the gateway sent upstream. `MOCK_ECHO_PID` set
+//! appends ` pid=<id>`, so a test can tell which child process answered.
 //!
 //! `MOCK_PROMPTS` and `MOCK_RESOURCES` add prompts and resources. Both default
 //! to empty, and a server with neither advertises neither capability — which
@@ -70,6 +71,7 @@ fn main() -> std::io::Result<()> {
     );
 
     let echo_args = std::env::var_os("MOCK_ECHO_ARGS").is_some();
+    let echo_pid = std::env::var_os("MOCK_ECHO_PID").is_some();
 
     // Only what this instance actually has is registered, and the server
     // advertises a capability only for what is registered, so a test can
@@ -88,6 +90,10 @@ fn main() -> std::io::Result<()> {
                 (true, Some(args)) => format!("{text} {}", args.to_json_string()),
                 (true, None) => format!("{text} null"),
                 (false, _) => text.clone(),
+            };
+            let text = match echo_pid {
+                true => format!("{text} pid={}", std::process::id()),
+                false => text,
             };
             Ok(CallToolResult {
                 content: vec![ContentBlock::text(text)],

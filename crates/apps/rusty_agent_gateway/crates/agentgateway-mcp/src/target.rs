@@ -7,18 +7,34 @@
 //! state the server had built up.
 //!
 //! A native client runs one call at a time, so a target keeps a small pool of
-//! them ([`HTTP_CONNECTIONS`] for an HTTP server, one for a child process,
-//! which has a single stdin) and a call takes whichever is free, waiting for
-//! one when all are busy. The first is dialled when the target comes up, so a
-//! target that cannot be reached is reported at startup; the others are dialled
-//! as calls need them.
+//! them ([`HTTP_CONNECTIONS`] for an HTTP server unless `connections` says
+//! otherwise, one for a child process, which has a single stdin) and a call
+//! takes whichever is free, waiting for one when all are busy. The first is
+//! dialled when the target comes up, so a target that cannot be reached is
+//! reported at startup; the others are dialled as calls need them.
+//!
+//! # Who shares a pool
+//!
+//! A target's `mode` decides (726-sandbox-design §4, LEL D102, D223):
+//!
+//! - `pooled`: one pool for every caller.
+//! - `per_credential`: one pool per credential the gateway presents upstream
+//!   (the outgoing `authorization` header).
+//! - `per_session`, the default: one connection (or child) per downstream
+//!   session and principal, so two agents never share a stateful server. It is
+//!   closed when the session ends ([`Target::end_session`]) or after
+//!   [`SESSION_IDLE`] unused.
+//!
+//! Only calls, prompt gets and resource reads are keyed. Listings and the
+//! startup warm-up have no caller and use the first connection.
 
+use std::collections::HashMap;
 use std::io;
 use std::process::Command;
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use agentgateway_config::{McpTarget, McpTargetKind};
+use agentgateway_config::{McpTarget, McpTargetKind, UpstreamMode};
 use rusty_mcp_client_native::json::Value;
 use rusty_mcp_client_native::proto::{
     CallToolParams, CallToolResponse, CallToolResult, GetPromptParams, GetPromptResult,
@@ -39,6 +55,9 @@ use crate::{
 
 /// How many connections a target that speaks HTTP may have open at once.
 pub const HTTP_CONNECTIONS: usize = 8;
+
+/// How long a `per_session` upstream lives unused before it is closed.
+pub const SESSION_IDLE: Duration = Duration::from_secs(15 * 60);
 
 /// How long a call may wait for its answer when the route sets no backend
 /// budget.
@@ -157,14 +176,134 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The open connections of one target.
+/// The open connections of one pool.
 struct Pool {
     state: Mutex<Slots>,
     freed: Condvar,
-    dial: Box<Dial>,
+    dial: Arc<Dial>,
     max: usize,
     /// How many times a connection has been taken.
     leases: std::sync::atomic::AtomicUsize,
+}
+
+impl Pool {
+    /// A pool holding `first` and allowed `max` connections.
+    fn new(dial: Arc<Dial>, max: usize, first: Option<Conn>) -> Self {
+        let open = usize::from(first.is_some());
+        Pool {
+            state: Mutex::new(Slots {
+                idle: first.into_iter().collect(),
+                open,
+            }),
+            freed: Condvar::new(),
+            dial,
+            max,
+            leases: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+/// Who a keyed operation is for: the downstream session and the principal the
+/// verified token names. Built by the federation from the call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionKey {
+    session: String,
+    principal: String,
+}
+
+impl SessionKey {
+    /// The key for a call under `session` (its `Mcp-Session-Id`, if any) by
+    /// the holder of `claims`. The principal is `iss` and `sub`, or the whole
+    /// claims when there is no `sub`, the same rule session binding uses.
+    /// Calls with neither a session nor a token share one key: there is no
+    /// identity to keep apart.
+    pub fn new(session: Option<&str>, claims: Option<&serde_json::Value>) -> Self {
+        let principal = match claims {
+            None => String::new(),
+            Some(claims) => match (claims.get("iss"), claims.get("sub")) {
+                (iss, Some(sub)) => format!("{}\n{sub}", iss.unwrap_or(&serde_json::Value::Null)),
+                _ => claims.to_string(),
+            },
+        };
+        SessionKey {
+            session: session.unwrap_or_default().to_owned(),
+            principal,
+        }
+    }
+}
+
+/// One keyed pool and when it was last used.
+struct Keyed {
+    pool: Arc<Pool>,
+    /// The downstream session it serves, for [`Target::end_session`].
+    session: String,
+    last_used: Instant,
+}
+
+/// The pools of one target.
+struct Pools {
+    mode: UpstreamMode,
+    /// The first connection's pool: every operation under `pooled`, and
+    /// listings under the other modes.
+    shared: Pool,
+    by_key: Mutex<HashMap<String, Keyed>>,
+    /// Connections per keyed pool.
+    per_key: usize,
+    idle: Duration,
+}
+
+impl Pools {
+    /// The pool for an operation by `who` with `headers` going upstream.
+    fn for_call(&self, who: &SessionKey, headers: &HeaderOverride) -> Option<Arc<Pool>> {
+        let (key, session) = match self.mode {
+            UpstreamMode::Pooled => return None,
+            UpstreamMode::PerCredential => {
+                let credential = headers
+                    .set
+                    .iter()
+                    .find(|(name, _)| *name == http::header::AUTHORIZATION)
+                    .map(|(_, value)| String::from_utf8_lossy(value.as_bytes()).into_owned())
+                    .unwrap_or_default();
+                (credential, String::new())
+            }
+            UpstreamMode::PerSession => (
+                format!("{}\u{0}{}", who.session, who.principal),
+                who.session.clone(),
+            ),
+        };
+        let now = Instant::now();
+        let mut map = lock(&self.by_key);
+        let expired = take(&mut map, |k| now.duration_since(k.last_used) > self.idle);
+        let entry = map.entry(key).or_insert_with(|| Keyed {
+            pool: Arc::new(Pool::new(Arc::clone(&self.shared.dial), self.per_key, None)),
+            session,
+            last_used: now,
+        });
+        entry.last_used = now;
+        let pool = Arc::clone(&entry.pool);
+        drop(map);
+        drop(expired);
+        Some(pool)
+    }
+
+    /// Close every keyed pool serving `session`.
+    fn end_session(&self, session: &str) -> usize {
+        let mut map = lock(&self.by_key);
+        let ended = take(&mut map, |k| !k.session.is_empty() && k.session == session);
+        drop(map);
+        // Dropped here, without the lock: closing a child can take a moment.
+        ended.len()
+    }
+}
+
+/// Remove and return the entries `pick` chooses.
+fn take(map: &mut HashMap<String, Keyed>, pick: impl Fn(&Keyed) -> bool) -> Vec<Keyed> {
+    let keys: Vec<String> = map
+        .iter()
+        .filter(|(_, k)| pick(k))
+        .map(|(key, _)| key.clone())
+        .collect();
+    keys.iter().filter_map(|key| map.remove(key)).collect()
 }
 
 struct Slots {
@@ -281,7 +420,7 @@ pub struct Target {
     /// Who the gateway says it acts for on each call, from the token.
     pub identity: Identity,
     capabilities: ServerCapabilities,
-    pool: Pool,
+    pools: Pools,
     /// What one operation (a call, or a whole paged listing) may take, from
     /// asking for a connection to the last answer.
     timeout: Duration,
@@ -310,11 +449,12 @@ impl Target {
         call_timeout: Option<Duration>,
         at: &str,
     ) -> Result<Self, TargetError> {
-        Self::connect_with(config, over, call_timeout, HTTP_CONNECTIONS, at)
+        let connections = config.connections.unwrap_or(HTTP_CONNECTIONS);
+        Self::connect_with(config, over, call_timeout, connections, at)
     }
 
     /// [`Target::connect`] with at most `connections` open to an HTTP target
-    /// (a child process always has one).
+    /// per pool (a child process always has one), whatever the config says.
     pub fn connect_with(
         config: &McpTarget,
         over: &Override,
@@ -340,7 +480,7 @@ impl Target {
         let name = config.name.clone();
         let timeout = call_timeout.unwrap_or(DEFAULT_CALL_TIMEOUT);
 
-        let (dial, max): (Box<Dial>, usize) = match &config.kind {
+        let (dial, max): (Arc<Dial>, usize) = match &config.kind {
             McpTargetKind::Stdio(stdio) => {
                 let (cmd, args, env) = (stdio.cmd.clone(), stdio.args.clone(), stdio.env.clone());
                 let dial = move |left: Duration| {
@@ -352,7 +492,7 @@ impl Target {
                     let transport = StdioTransport::spawn(command)?;
                     handshake(Link::Stdio(transport), left, timeout)
                 };
-                (Box::new(dial), 1)
+                (Arc::new(dial), 1)
             }
             McpTargetKind::Mcp(http) => {
                 let path = over.path.as_deref().unwrap_or(&http.path);
@@ -371,7 +511,7 @@ impl Target {
                     let transport = HttpTransport::new(HttpConfig::new(url.as_str()))?;
                     handshake(Link::Http(Box::new(transport)), left, timeout)
                 };
-                (Box::new(dial), connections.max(1))
+                (Arc::new(dial), connections.max(1))
             }
             McpTargetKind::Sse(_) => {
                 return Err(TargetError::UnsupportedTransport { name });
@@ -401,18 +541,40 @@ impl Target {
             http,
             identity,
             capabilities,
-            pool: Pool {
-                state: Mutex::new(Slots {
-                    idle: vec![first],
-                    open: 1,
-                }),
-                freed: Condvar::new(),
-                dial,
-                max,
-                leases: std::sync::atomic::AtomicUsize::new(0),
+            pools: Pools {
+                mode: config.mode(),
+                shared: Pool::new(dial, max, Some(first)),
+                by_key: Mutex::new(HashMap::new()),
+                // A stateful server gets one connection per session: two
+                // concurrent calls on one session queue, as they would on a
+                // client of its own.
+                per_key: match config.mode() {
+                    UpstreamMode::PerSession => 1,
+                    _ => max,
+                },
+                idle: SESSION_IDLE,
             },
             timeout,
         })
+    }
+
+    /// How long a `per_session` upstream may sit unused before it is closed
+    /// (default [`SESSION_IDLE`]).
+    #[must_use]
+    pub fn with_session_idle(mut self, idle: Duration) -> Self {
+        self.pools.idle = idle;
+        self
+    }
+
+    /// The downstream session `session` ended: close its upstreams. Answers
+    /// how many keyed pools were closed.
+    pub fn end_session(&self, session: &str) -> usize {
+        self.pools.end_session(session)
+    }
+
+    /// How many keyed pools are open now. For metrics and tests.
+    pub fn sessions(&self) -> usize {
+        lock(&self.pools.by_key).len()
     }
 
     /// The headers for one request: `headers` (a guardrail's changes to the
@@ -430,16 +592,19 @@ impl Target {
         rusty_mcp_client_native::HeaderOverride::default()
     }
 
-    /// One request to the target, within one operation budget.
+    /// One request by `who` to the target, within one operation budget, on
+    /// the pool the target's mode picks for it.
     fn request(
         &self,
         method: &str,
         params: Option<Value>,
         headers: &HeaderOverride,
+        who: &SessionKey,
     ) -> Result<Value, ClientError> {
         let deadline = Instant::now() + self.timeout;
-        self.pool
-            .lease(deadline)?
+        let keyed = self.pools.for_call(who, headers);
+        let pool = keyed.as_deref().unwrap_or(&self.pools.shared);
+        pool.lease(deadline)?
             .call(deadline, method, params, &self.native(headers))
     }
 
@@ -453,7 +618,7 @@ impl Target {
     ) -> Result<Vec<T>, ClientError> {
         let deadline = Instant::now() + self.timeout;
         let native = self.native(headers);
-        let mut lease = self.pool.lease(deadline)?;
+        let mut lease = self.pools.shared.lease(deadline)?;
         let mut all = Vec::new();
         let mut cursor = None;
         loop {
@@ -495,8 +660,9 @@ impl Target {
         &self,
         params: &CallToolParams,
         headers: &HeaderOverride,
+        who: &SessionKey,
     ) -> Result<CallToolResult, ClientError> {
-        let answer = self.request("tools/call", Some(params.to_value()), headers)?;
+        let answer = self.request("tools/call", Some(params.to_value()), headers, who)?;
         match CallToolResponse::from_value(&answer)? {
             CallToolResponse::Complete(result) => Ok(result),
             CallToolResponse::InputRequired(_) | CallToolResponse::Task(_) => {
@@ -511,7 +677,16 @@ impl Target {
     /// How many times a connection has been taken from the pool so far: one per
     /// call, and one per whole paged listing. For metrics and tests.
     pub fn leases(&self) -> usize {
-        self.pool.leases.load(std::sync::atomic::Ordering::Relaxed)
+        let keyed: usize = lock(&self.pools.by_key)
+            .values()
+            .map(|k| k.pool.leases.load(std::sync::atomic::Ordering::Relaxed))
+            .sum();
+        keyed
+            + self
+                .pools
+                .shared
+                .leases
+                .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether this target advertised prompts in its handshake.
@@ -545,8 +720,9 @@ impl Target {
         &self,
         params: &GetPromptParams,
         headers: &HeaderOverride,
+        who: &SessionKey,
     ) -> Result<GetPromptResult, ClientError> {
-        let answer = self.request("prompts/get", Some(params.to_value()), headers)?;
+        let answer = self.request("prompts/get", Some(params.to_value()), headers, who)?;
         Ok(GetPromptResult::from_value(&answer)?)
     }
 
@@ -574,8 +750,9 @@ impl Target {
         &self,
         params: &ReadResourceParams,
         headers: &HeaderOverride,
+        who: &SessionKey,
     ) -> Result<ReadResourceResult, ClientError> {
-        let answer = self.request("resources/read", Some(params.to_value()), headers)?;
+        let answer = self.request("resources/read", Some(params.to_value()), headers, who)?;
         Ok(ReadResourceResult::from_value(&answer)?)
     }
 }

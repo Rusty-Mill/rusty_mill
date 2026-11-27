@@ -62,6 +62,20 @@ impl BackendTarget {
 
 impl Backend {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
+        if let BackendTarget::Mcp(backend) = &self.target {
+            for (i, target) in backend.targets.iter().enumerate() {
+                if target.mode.is_none() {
+                    // Not a fault: a statement about what the gateway does
+                    // with a target it was told nothing about (LEL D102).
+                    findings.push(format!(
+                        "{at}.mcp.targets[{i}] (`{}`): no `mode`, so it is `per_session`: one \
+                         upstream connection per client session; set `mode: pooled` for a \
+                         stateless server",
+                        target.name
+                    ));
+                }
+            }
+        }
         // Not a finding, a warning about what the configuration *does*: a
         // `dynamic` backend turns the route into a forward proxy, and that is
         // worth saying to anyone running `--check` rather than only in the
@@ -174,6 +188,40 @@ pub struct McpTarget {
     /// Who the gateway acts for on this target, taken from the verified token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<TargetIdentity>,
+
+    /// Who shares this target's upstream connections. Absent means
+    /// [`UpstreamMode::PerSession`], the safe reading for a server nobody has
+    /// said is stateless; `Config::lint` lists every target that took it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<UpstreamMode>,
+
+    /// Most connections open at once to an HTTP target, per pool. Default 8.
+    /// A `stdio` target always has one child per pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<usize>,
+}
+
+impl McpTarget {
+    /// The mode in force: the configured one, or `per_session`.
+    pub fn mode(&self) -> UpstreamMode {
+        self.mode.unwrap_or_default()
+    }
+}
+
+/// Who shares a target's upstream connections.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamMode {
+    /// One pool for every caller; the server keeps no per-caller state, and
+    /// who called travels with each call (`identity`).
+    Pooled,
+    /// One pool per credential the gateway presents upstream: the outgoing
+    /// `authorization` header, as `identity` or a header modifier set it.
+    PerCredential,
+    /// One connection, or one child process, per downstream session and
+    /// principal, closed when the session ends or sits idle.
+    #[default]
+    PerSession,
 }
 
 /// A target's `identity`: arguments and headers on `tools/call` that carry who

@@ -32,4 +32,4 @@ pub use header_override::HeaderOverride;
 pub use identity::{Identity, IdentityError};
 pub use naming::{Resolution, ToolNamer};
 pub use rules::{Call, RuleError, RuleSet, Subject};
-pub use target::{Override, Target, TargetError};
+pub use target::{Override, SESSION_IDLE, SessionKey, Target, TargetError};

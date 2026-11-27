@@ -50,6 +50,14 @@ pub trait ToolSource: Send + Sync {
         ctx: &CallContext,
         call: &CallToolParams,
     ) -> Option<Result<CallToolResult, ErrorData>>;
+
+    /// The classic HTTP session `session` (its `Mcp-Session-Id`) has ended:
+    /// the client sent `DELETE`, or it went idle. A source that holds state
+    /// for a session (a proxy's per-session upstream) drops it here. Runs on
+    /// the request thread that noticed. Defaults to doing nothing.
+    fn session_ended(&self, session: &str) {
+        let _ = session;
+    }
 }
 
 /// Prompts that are not known when the server is built, such as those of
@@ -266,6 +274,14 @@ pub struct Server {
 }
 
 impl Server {
+    /// Tell the tool source that `session` has ended.
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
+    pub(crate) fn session_ended(&self, session: &str) {
+        if let Some(source) = &self.tool_source {
+            source.session_ended(session);
+        }
+    }
+
     /// Start describing a server called `name` at `version`.
     pub fn builder(name: impl Into<String>, version: impl Into<String>) -> ServerBuilder {
         ServerBuilder {
