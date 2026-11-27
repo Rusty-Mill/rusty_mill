@@ -680,6 +680,18 @@ impl Federation {
         // An upstream failure skips the response phase. There is no result to
         // inspect, and asking a guardrail to approve a failure is not a
         // question it can answer.
+        // Identity is stamped last, after every rewrite, so the upstream sees
+        // whom the token names and never what the call or a processor said.
+        // A call that can't be stamped is refused, not sent anonymous.
+        if let Err(err) =
+            target
+                .identity
+                .apply(&tool, &mut params, &mut upstream_headers, who.claims())
+        {
+            rusty_log::warn!(target = %target.name, tool = %federated, %err, "identity refused the call");
+            return Err(error(ErrorCode::INVALID_REQUEST, err.to_string()));
+        }
+
         let result = match target.call(&params, &upstream_headers) {
             Ok(result) => result,
             Err(ClientError::Timeout) => {

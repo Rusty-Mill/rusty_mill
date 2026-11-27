@@ -217,6 +217,7 @@ Precise contracts used by this guide:
 | D220 | #1416: the LEL tab reads claims through a new read-only `bbp claims` verb and Mill Board `lel_claims`/`lel_spend` | [stated] 2026-11-27 (1416) |
 | D221 | #1416: `bbp claims` prints a plain array of claim views; brief text is not served yet | [default] 2026-11-27 (1416) |
 | D222 | #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR | [default] 2026-11-27 (1416) |
+| D223 | #1375-#1378: the gateway's §11 public API and config items approved as a set (session binding, `identity`, `mode`/`connections`, `session_ended`, `per_session` default, `lelPolicy`) | [stated] 2026-11-27 (1375, 1376, 1377, 1378) |
 
 ## D1. Lenses, not stages
 
@@ -2124,3 +2125,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default]
 **Key.** lel:1416:slice4-actions
 **Source.** `1416-lel-tab-slice-plan.md` slices 3-4; D58, D173, D174; `rusty_mill_board` `inbox_act` and `Board::inbox_act` (`stale_rev:` refusal); let-em-loose-expert, 2026-11-27. Nano's 2026-11-27 "1 & 2" (cmsg_014f6o52E2iAAAgMm9v8hh1w7JrZ4XyJ3ufQT3qe7ayEWb) approved the read endpoints; what it answered is not restated in the thread, so no `[stated]` row is written for it. D220 and D221 are left free for the endpoint PR. Numbered D222 because open PRs hold D179-D219.
+
+## D223. #1375-#1378: the gateway's §11 public API and config items are approved as a set
+
+**Decision.** Nano approved as one set the ask-first items of `726-sandbox-design.md` §11 that #1375-#1378 need: (1) #1375: `rusty_mcp_server` binds each session to the principal that created it, and any other principal or none gets the unknown-session 404 (PR #1877 may merge); (2) #1376: the per-target gateway config block `identity` {`strip`, `set`, `headers`}; (3) #1377: per-target `mode: pooled | per_credential | per_session` and `connections: N`, the new public trait method `ToolSource::session_ended(session)`, and the default change that a target with no `mode` is `per_session`, each such target reported by `Config::lint`; (4) #1378: the gateway config extension `lelPolicy: {dir}`. Build order stays §10's: #1376, #1377, #1378, then #1379. Not covered: the `jail.json` `mounts`/`net` fields, BaileyAi host writes, the `lel-gateway` Mill Board credential and gateway deployment, which each still need their own yes. Review by `dottiusmaximus`, CI and merge rules still apply.
+**Why.** D180 approved the design but no §11 item, so these slices could not be built or merged without his yes. They are the design as approved, and the `per_session` default is D102 [stated].
+**Rejected.** b) Approving the set but keeping targets without `mode` pooled for now (would depart from D102). c) Asking slice by slice.
+**Tag.** [stated] · remind-me: mem_1e5e8f36a56e46139db411e77ae7ba66
+**Key.** lel:726:gateway-api-set-1375-1378
+**Source.** Nano tapped option a "Approve all as a set" on hearthbot decision card `cmsg_014AqbZs58L565hMV2pFkCX5UNV6kJ3yhNuFThUg2wfiLi` ("Approve the gateway API and config changes for #1375-#1378 as one set?"), 2026-11-27T20:53:16Z, in thread "Build gateway prerequisites for jailed tools" (`cmsg_014AqbZs58L565hMV2pFkCX5LGapWPvdnjCJaxHPN2rCuz`). The option read: "I build #1376, #1377, #1378, then #1379, in order, and #1877 (#1375) can merge. Session binding, identity, mode/connections, session_ended hook, per_session default, lelPolicy." The card's reason: "It is the design you approved in D180, and the per_session default is your own D102. D180 approved no §11 item, so nothing can be built until you say yes." Relayed by the coordinator; the card was not read here. Clears part of D180's §11 gate; reverses nothing.

@@ -170,6 +170,43 @@ pub struct McpTarget {
     /// Optional allow/deny rules over this target's tools.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filters: Vec<ToolFilter>,
+
+    /// Who the gateway acts for on this target, taken from the verified token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<TargetIdentity>,
+}
+
+/// A target's `identity`: arguments and headers on `tools/call` that carry who
+/// the caller is, filled only from the verified token's claims.
+///
+/// The gateway authenticates to the upstream with its own credential and says
+/// whom it acts for here; an agent can't name itself, because what it sends in
+/// those places is stripped first. Values are templates over claims,
+/// `{{jwt.<claim>}}` or `{{jwt.<claim>:<n>}}` for the first `n` characters,
+/// where `<claim>` is a top-level key such as `sub` or `lel.lens`.
+///
+/// ```yaml
+/// identity:
+///   strip: { "*": [actor, role, agent_id, agent_key] }
+///   set: { actor: "lel-gateway/{{jwt.lel.lens}}-{{jwt.lel.claim:8}}" }
+///   headers: { x-lel-sub: "{{jwt.sub}}" }
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetIdentity {
+    /// Tool-name glob (`*` matches any run) to argument names removed from the
+    /// call before it goes upstream.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub strip: BTreeMap<String, Vec<String>>,
+
+    /// Argument name to claim template, set on every call. Overwrites what the
+    /// caller sent under that name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub set: BTreeMap<String, String>,
+
+    /// Header name to claim template, sent on every call. `mcp:` targets only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
 }
 
 one_of_enum! {
