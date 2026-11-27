@@ -76,6 +76,47 @@ pub struct Gateway {
 /// hold in memory.
 pub const DEFAULT_MAX_REQUEST_BODY_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Load a route's lens policies: every `*.toml` in `lelPolicy.dir`.
+///
+/// A missing or unreadable directory, or any bad file, stops startup: a gate
+/// that silently loaded nothing would deny every call while looking
+/// configured, and one that loaded half would be worse.
+fn lens_policies(
+    policy: Option<&agentgateway_config::LelPolicy>,
+    at: &str,
+) -> anyhow::Result<Option<agentgateway_mcp::LensPolicies>> {
+    use anyhow::Context as _;
+
+    let Some(policy) = policy else {
+        return Ok(None);
+    };
+    let at = format!("{at}.policies.lelPolicy");
+    let mut files = Vec::new();
+    let entries = std::fs::read_dir(&policy.dir)
+        .with_context(|| format!("{at}: reading `{}`", policy.dir))?;
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("{at}: reading `{}`", policy.dir))?
+            .path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .with_context(|| format!("{at}: `{}` is not a UTF-8 name", path.display()))?
+            .to_owned();
+        let bytes =
+            std::fs::read(&path).with_context(|| format!("{at}: reading `{}`", path.display()))?;
+        files.push((name, bytes));
+    }
+    let policies = agentgateway_mcp::LensPolicies::from_files(files).with_context(|| at.clone())?;
+    if policies.is_empty() {
+        rusty_log::warn!(route = %at, dir = %policy.dir, "no lens policies found; every tool is denied");
+    }
+    Ok(Some(policies))
+}
+
 /// Resolve a route's `urlRewrite` into the parts of a single MCP target's
 /// address it replaces.
 ///
@@ -368,6 +409,7 @@ impl Gateway {
                         route.policies.request_header_modifier.as_ref(),
                         mcp_overrides(&route.policies, &route.matches, mcp, &at)?,
                         backend_timeout,
+                        lens_policies(route.policies.lel_policy.as_ref(), &at)?,
                         &at,
                     )
                     .await?;

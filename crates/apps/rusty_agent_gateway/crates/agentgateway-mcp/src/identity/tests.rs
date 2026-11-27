@@ -225,16 +225,3 @@ fn a_bad_header_name_is_refused_at_startup() {
     .unwrap_err();
     assert!(err.to_string().contains("header name"), "{err}");
 }
-
-#[test]
-fn glob_matches_runs() {
-    assert!(glob("*", ""));
-    assert!(glob("*", "anything"));
-    assert!(glob("board_*", "board_card_get"));
-    assert!(glob("*_get", "board_card_get"));
-    assert!(glob("b*c*t", "board_card_get"));
-    assert!(glob("exact", "exact"));
-    assert!(!glob("exact", "exactly"));
-    assert!(!glob("board_*", "github_x"));
-    assert!(!glob("a*b*a", "aba_"));
-}

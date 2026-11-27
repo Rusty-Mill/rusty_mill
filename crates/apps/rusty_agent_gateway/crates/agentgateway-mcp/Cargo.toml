@@ -44,6 +44,11 @@ rusty_tonic = { workspace = true, features = ["rusty-tokio"] }
 rusty_mcp_middleware = { workspace = true, default-features = false, features = ["otel"] }
 thiserror = "2"
 rusty_log = { workspace = true }
+# Lens policies (LEL #1378): first-party TOML, sha256 and hex, no new
+# third-party code.
+rusty_codec = { workspace = true }
+rusty_sha2 = { workspace = true }
+rusty_hex = { workspace = true }
 
 [dev-dependencies]
 rusty_mcp_server = { workspace = true, features = ["http"] }

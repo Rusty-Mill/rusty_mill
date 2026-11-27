@@ -168,6 +168,37 @@ and `--check` lists every target that took it. Calls, prompt gets and resource
 reads are keyed; listings use the target's first connection. Clients with
 neither a session nor a token have no identity to keep apart and share one key.
 
+### Lens policies
+
+A route can carry Let Em Loose lens policies, which decide per token which
+tools a jailed agent sees and may call:
+
+```yaml
+policies:
+  jwtAuth: { ... }
+  lelPolicy:
+    dir: /srv/lel/lens-policies     # every <lens>.toml in it
+```
+
+```toml
+# critic.toml
+schema = 1
+lens = "critic"                     # must match the file name
+role = "critic"                     # or "builder"
+
+[tools]                             # federated names, `*` globs
+allow = ["sandbox_read", "sandbox_list"]
+deny  = []
+```
+
+A token selects a file by its `lel.lens` claim and must carry the sha256 of
+that file's bytes as `lel.policy`, so it is bound to the policy as written. A
+tool must match an `allow` and no `deny`. **An unknown lens, a stale digest or
+no token sees no tools and can call none**, and a lens-policy route serves no
+prompts or resources. The check runs on the listing and again on every call,
+alongside `mcpAuthorization`. A bad file stops startup. `[workspace]`,
+`[skills]` and `[grants]` are read by orch and the sandbox, not by this gate.
+
 ### Degraded operation
 
 A target that fails to come up does not take the gateway down. Five targets
@@ -186,7 +217,7 @@ Implemented and tested:
 - Hostname matching on listeners and routes, including single-label wildcards
 - `mcp` backends: `stdio` and Streamable HTTP (`mcp:`) targets, federating
   tools, prompts and resources with name and URI qualification, `via` egress,
-  per-target `filters`, `identity` and `mode` (see [Identity upstream](#identity-upstream) and [Upstream modes](#upstream-modes)), route-level `mcpAuthorization` — both the `allowTools`/`denyTools`
+  per-target `filters`, `identity` and `mode` (see [Identity upstream](#identity-upstream) and [Upstream modes](#upstream-modes)), route-level `mcpAuthorization` and `lelPolicy` (see [Lens policies](#lens-policies)) — both the `allowTools`/`denyTools`
   lists and upstream's CEL `rules`, see [Authorization](#authorization)
 - `mcpGuardrails`: external MCP policy processors over gRPC, able to rewrite as
   well as refuse — see [Guardrails](#guardrails)

@@ -1642,3 +1642,39 @@ fn every_mode_spells_as_documented() {
     }
     assert!(serde_json::from_str::<UpstreamMode>("\"perSession\"").is_err());
 }
+
+const LENS_ROUTE: &str = r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              lelPolicy:
+                dir: /srv/lel/policies
+            backends:
+              - mcp:
+                  targets:
+                    - name: sandbox
+                      mode: pooled
+                      stdio: { cmd: sandbox }
+"#;
+
+#[test]
+fn lel_policy_parses_and_without_jwt_auth_lint_says_it_denies_everything() {
+    let config = Config::from_yaml(LENS_ROUTE).expect("fixture parses");
+    let policies = &config.binds[0].listeners[0].routes[0].policies;
+    assert_eq!(
+        policies
+            .as_ref()
+            .and_then(|p| p.lel_policy.as_ref())
+            .map(|p| p.dir.as_str()),
+        Some("/srv/lel/policies")
+    );
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("lelPolicy") && f.contains("denies every tool")),
+        "{findings:?}"
+    );
+}
