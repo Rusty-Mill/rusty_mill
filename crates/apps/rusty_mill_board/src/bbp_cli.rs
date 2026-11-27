@@ -4,12 +4,11 @@
 //! only writer of the BBP log, behind its lock and revision fence. Mill Board
 //! never reads BBP files.
 
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -26,20 +25,16 @@ pub struct BbpCli {
     bin: PathBuf,
     root: PathBuf,
     verify_deadline: Duration,
-    /// Pipe readers still running, shared by clones. One left behind by a timed-out
-    /// run blocks the next deadline-bound run, so stuck readers never pile up.
-    readers: Arc<AtomicUsize>,
 }
 
 impl BbpCli {
     /// The host's `bbp` binary and the BBP task directory it serves.
     #[must_use]
-    pub fn new(bin: PathBuf, root: PathBuf) -> Self {
+    pub const fn new(bin: PathBuf, root: PathBuf) -> Self {
         Self {
             bin,
             root,
             verify_deadline: VERIFY_DEADLINE,
-            readers: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -51,42 +46,29 @@ impl BbpCli {
         self
     }
 
-    /// Run `bbp <args>` with one deadline over the whole call (the exit and both
-    /// pipes reaching EOF) and a stdout ceiling of `max` bytes: its exit status, stdout
-    /// and (bounded) stderr. Past the deadline the child is killed and this is
-    /// [`InboxError::Host`]. A reader still blocked then (a grandchild, such as the
-    /// guard's `sudo` target, may hold the pipe) is left to finish on its own, and no
-    /// new run starts until it has: at most one set of stuck readers ever exists.
+    /// Run `bbp <args>` within `deadline`: its exit status, up to `max` bytes of stdout
+    /// and a bounded stderr. Past the deadline the child is killed and this is
+    /// [`InboxError::Host`]. Output goes to unlinked capture files, not pipes, and is
+    /// read once the child has exited: a descendant that keeps the output open (such as
+    /// the guard's `sudo` target) cannot block this call or leave a reader behind, so
+    /// one stuck run never holds up the next task's.
     fn run_deadline(
         &self,
         args: &[String],
         max: u64,
         deadline: Duration,
     ) -> Result<(ExitStatus, Vec<u8>, String), InboxError> {
-        if self.readers.load(Ordering::SeqCst) > 0 {
-            return Err(InboxError::Host(
-                "an earlier timed-out `bbp` run still holds its output; not starting another"
-                    .into(),
-            ));
-        }
-        let until = Instant::now() + deadline;
-        let timed_out = || {
-            InboxError::Host(format!(
-                "`bbp {}` timed out after {}s",
-                args.first().map_or("", String::as_str),
-                deadline.as_secs_f32()
-            ))
-        };
         let host = |e: std::io::Error| InboxError::Host(format!("{}: {e}", self.bin.display()));
+        let (out_w, out_r) = capture().map_err(host)?;
+        let (err_w, err_r) = capture().map_err(host)?;
         let mut child = Command::new(&self.bin)
             .args(args)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(out_w)
+            .stderr(err_w)
             .spawn()
             .map_err(host)?;
-        let out = self.reader(child.stdout.take(), max + 1);
-        let err = self.reader(child.stderr.take(), MAX_ERR);
+        let until = Instant::now() + deadline;
         let status = loop {
             if let Some(status) = child.try_wait().map_err(host)? {
                 break status;
@@ -94,38 +76,24 @@ impl BbpCli {
             if Instant::now() >= until {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(timed_out());
+                return Err(InboxError::Host(format!(
+                    "`bbp {}` timed out after {}s",
+                    args.first().map_or("", String::as_str),
+                    deadline.as_secs_f32()
+                )));
             }
             std::thread::sleep(POLL);
         };
-        let left = || until.saturating_duration_since(Instant::now());
-        let body = out.recv_timeout(left()).map_err(|_| timed_out())?;
-        let stderr = err.recv_timeout(left()).map_err(|_| timed_out())?;
+        let mut body = Vec::new();
+        out_r.take(max + 1).read_to_end(&mut body).map_err(host)?;
         if body.len() as u64 > max {
             return Err(InboxError::Host(format!(
                 "the host's answer is over {max} bytes; refused"
             )));
         }
+        let mut stderr = Vec::new();
+        err_r.take(MAX_ERR).read_to_end(&mut stderr).map_err(host)?;
         Ok((status, body, String::from_utf8_lossy(&stderr).into_owned()))
-    }
-
-    /// Read up to `max` bytes of `src` on its own thread, counted in `readers` until it ends.
-    fn reader<R: Read + Send + 'static>(
-        &self,
-        src: Option<R>,
-        max: u64,
-    ) -> mpsc::Receiver<Vec<u8>> {
-        let (tx, rx) = mpsc::sync_channel(1);
-        let live = Live::new(Arc::clone(&self.readers));
-        std::thread::spawn(move || {
-            let _live = live;
-            let mut buf = Vec::new();
-            if let Some(src) = src {
-                let _ = src.take(max).read_to_end(&mut buf);
-            }
-            let _ = tx.send(buf);
-        });
-        rx
     }
 
     /// Run `bbp <args>` and parse what it prints on success.
@@ -441,20 +409,23 @@ impl Escalations for BbpCli {
     }
 }
 
-/// One running pipe reader: counted from creation until dropped.
-struct Live(Arc<AtomicUsize>);
-
-impl Live {
-    fn new(count: Arc<AtomicUsize>) -> Self {
-        count.fetch_add(1, Ordering::SeqCst);
-        Self(count)
-    }
-}
-
-impl Drop for Live {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
+/// A fresh capture file for a child's output: a write handle for the child and a read
+/// handle for the board. The file is unlinked at once, so nothing is left to clean up.
+fn capture() -> std::io::Result<(File, File)> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "mill-board-bbp-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let write = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    let read = File::open(&path);
+    // Best effort: where an open file cannot be unlinked, it stays in the temp dir.
+    let _ = std::fs::remove_file(&path);
+    Ok((write, read?))
 }
 
 /// What `bbp verify` prints on success.
