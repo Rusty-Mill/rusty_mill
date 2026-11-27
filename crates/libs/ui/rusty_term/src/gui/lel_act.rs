@@ -7,6 +7,8 @@
 //! again. Nothing here launches a build: "Try both builds" only lays the
 //! candidates side by side (Q43 interim, D222).
 
+use rusty_json::Value;
+
 use super::lel::{Claim, Row};
 
 /// What the human decides.
@@ -131,14 +133,51 @@ pub(crate) enum Answer {
     Refused(String),
 }
 
-/// Reads the host's reply. `ok` is whether the call succeeded; an error body is
-/// the host's text (`stale_rev: ...` for a moved escalation).
+/// Reads the host's reply. `ok` is whether the call succeeded. A failed call
+/// carries the host's text (`stale_rev: ...` for a moved escalation). A
+/// successful call can still hold BBP's own refusal (`dry_run.response.Rejected`,
+/// `outcome.Refused`, `remediated.outcome.Refused`), so the body is read before
+/// anything is called done; a body of an unknown shape is a refusal, never a
+/// success.
 pub(crate) fn answer(req: &Request, ok: bool, body: &str) -> Answer {
-    match (ok, req.dry_run) {
-        (true, true) => Answer::Previewed,
-        (true, false) => Answer::Done,
-        (false, _) if body.starts_with("stale_rev") => Answer::Stale(body.to_owned()),
-        (false, _) => Answer::Refused(body.to_owned()),
+    if !ok {
+        return if body.starts_with("stale_rev") {
+            Answer::Stale(body.to_owned())
+        } else {
+            Answer::Refused(body.to_owned())
+        };
+    }
+    let Ok(v) = Value::parse(body) else {
+        return Answer::Refused("the reply was not readable".to_owned());
+    };
+    let refusal = |r: Option<&Value>| {
+        let r = r?;
+        let code = r.get("code")?.as_str()?;
+        let detail = r.get("detail").and_then(Value::as_str).unwrap_or("");
+        Some(if code == "StaleRev" {
+            Answer::Stale(format!("stale_rev: {detail}"))
+        } else {
+            Answer::Refused(format!("{code}: {detail}"))
+        })
+    };
+    let outcome = v
+        .get("remediated")
+        .and_then(|r| r.get("outcome"))
+        .or(v.get("outcome"));
+    if let Some(a) = refusal(
+        v.get("dry_run")
+            .and_then(|d| d.get("response"))
+            .and_then(|r| r.get("Rejected")),
+    )
+    .or_else(|| refusal(outcome.and_then(|o| o.get("Refused"))))
+    {
+        return a;
+    }
+    let done = outcome.and_then(Value::as_str) == Some("Done") || v.get("recorded").is_some();
+    match (req.dry_run, v.get("dry_run").is_some(), done) {
+        (true, true, _) => Answer::Previewed,
+        (false, _, true) => Answer::Done,
+        _ => Answer::Refused("the reply had an unknown shape".to_owned()),
     }
 }
 
@@ -258,18 +297,64 @@ mod tests {
         assert!(!c.args().contains("reason"));
     }
 
+    const DRY: &str = r#"{"dry_run":{"step":{"verb":"claim","args":[]},"response":{"Accepted":"Ok"},"events":[],"then":[]}}"#;
+    const DRY_STALE: &str = r#"{"dry_run":{"step":{"verb":"claim","args":[]},"response":{"Rejected":{"code":"StaleRev","detail":"human view changed"}},"events":[],"then":[]}}"#;
+    const DONE: &str = r#"{"outcome":"Done"}"#;
+    const REFUSED: &str =
+        r#"{"outcome":{"Refused":{"step":1,"code":"DepClosed","detail":"a dependency closed"}}}"#;
+    const STALE: &str =
+        r#"{"outcome":{"Refused":{"step":0,"code":"StaleRev","detail":"human view changed"}}}"#;
+
     #[test]
     fn a_stale_rev_is_shown_not_retried() {
         let r = &rows()[0];
         let p = Request::preview(r, Act::Approve).unwrap();
-        assert_eq!(answer(&p, true, "{}"), Answer::Previewed);
-        assert_eq!(answer(&p.apply(), true, "{}"), Answer::Done);
+        assert_eq!(answer(&p, true, DRY), Answer::Previewed);
+        assert_eq!(answer(&p.apply(), true, DONE), Answer::Done);
         let msg = "stale_rev: T1/msg:12/3 is at rev 42, not 41; re-read the inbox";
         assert_eq!(answer(&p.apply(), false, msg), Answer::Stale(msg.into()));
         assert_eq!(
             answer(&p, false, "closed"),
             Answer::Refused("closed".into())
         );
+    }
+
+    #[test]
+    fn a_host_refusal_inside_a_successful_call_is_not_success() {
+        let r = &rows()[0];
+        let p = Request::preview(r, Act::Approve).unwrap();
+        assert!(matches!(answer(&p, true, DRY_STALE), Answer::Stale(_)));
+        assert!(matches!(answer(&p.apply(), true, STALE), Answer::Stale(_)));
+        assert_eq!(
+            answer(&p.apply(), true, REFUSED),
+            Answer::Refused("DepClosed: a dependency closed".into())
+        );
+        let remediated = r#"{"remediated":{"outcome":{"Refused":{"step":0,"code":"StaleRev","detail":"x"}},"card":{}}}"#;
+        assert!(matches!(
+            answer(&p.apply(), true, &remediated),
+            Answer::Stale(_)
+        ));
+        let applied = r#"{"remediated":{"outcome":"Done","card":{}}}"#;
+        assert_eq!(answer(&p.apply(), true, applied), Answer::Done);
+        assert_eq!(
+            answer(&p.apply(), true, r#"{"recorded":{"card":{}}}"#),
+            Answer::Done
+        );
+    }
+
+    #[test]
+    fn an_unreadable_or_unknown_reply_fails_closed() {
+        let r = &rows()[0];
+        let p = Request::preview(r, Act::Approve).unwrap();
+        for body in ["{}", "not json", r#"{"outcome":"Maybe"}"#] {
+            assert!(
+                matches!(answer(&p.apply(), true, body), Answer::Refused(_)),
+                "{body}"
+            );
+        }
+        // A preview never reads as done, and a real send never as a preview.
+        assert!(matches!(answer(&p, true, DONE), Answer::Refused(_)));
+        assert!(matches!(answer(&p.apply(), true, DRY), Answer::Refused(_)));
     }
 
     #[test]
