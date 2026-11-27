@@ -44,12 +44,18 @@ if n == 0:
 PY
 }
 
-# A copy counts only as a pair: the gzip and its checksum, published checksum last. The names of
-# the complete pairs here, oldest first.
+# A copy counts only as a verified pair: the gzip, its checksum (published last), and the gzip
+# matching it. A stale or damaged gzip is warned about and counted as nothing, so it can neither
+# keep a good copy from retention nor authorize pruning. Names of the verified pairs, oldest first.
 pairs() {
     local f
     for f in "$dir"/mill-board-*.sqlite3.gz; do
-        if [[ -f $f && -f $f.sha256 ]]; then basename "$f"; fi
+        [[ -f $f && -f $f.sha256 ]] || continue
+        if (cd "$dir" && sha256sum -c --status -- "$(basename "$f").sha256" 2>/dev/null); then
+            basename "$f"
+        else
+            echo "mill-board-backup: $(basename "$f") does not match its checksum: ignoring it" >&2
+        fi
     done | sort
 }
 
@@ -98,7 +104,7 @@ ship() {
     local mnt=${MILL_BOARD_BACKUP_REQUIRE_MOUNT:-}
     [[ -z $mnt ]] || mountpoint -q -- "$mnt" || die "$mnt is not mounted: not shipping"
     # One subdirectory per host, so hosts sharing a destination never prune each other.
-    local dest here there stage names listing
+    local dest here there stage names listing n
     dest="$base/$(hostname -s)"
     names=$(pairs)
     here=$(copies_in <<<"$(sed 's/$/.sha256/' <<<"$names")")
@@ -107,7 +113,6 @@ ship() {
     stage="$dir/.ship"
     rm -rf -- "$stage"
     mkdir -p "$stage"
-    local n
     while IFS= read -r n; do
         ln -s -- "$dir/$n" "$stage/$n"
         ln -s -- "$dir/$n.sha256" "$stage/$n.sha256"
@@ -116,14 +121,14 @@ ship() {
     # Pass 1 only adds (checksum last, rsync renames a file into place when it is whole).
     local filter=(--include='mill-board-*' --exclude='*')
     rsync -aL --timeout=600 "${filter[@]}" "$stage/" "$dest/" || die "shipping to $dest failed: nothing pruned"
-    # Prune only once the destination lists every pair just sent, and unless this host holds fewer
-    # than it should and fewer than the destination (a wiped local directory).
+    # Prune only once the receiver's bytes match the verified local pairs (a checksum comparison,
+    # not names), and unless this host holds fewer copies than it should and fewer than the
+    # destination (a wiped local directory). Otherwise the destination stays add-only.
+    local differs
+    differs=$(rsync -rLn --checksum --itemize-changes --timeout=600 "${filter[@]}" "$stage/" "$dest/") ||
+        die "cannot verify $dest: nothing pruned"
+    [[ -z $differs ]] || die "destination copies differ from the verified local ones: nothing pruned"
     listing=$(rsync --list-only --timeout=60 "$dest/" 2>/dev/null) || die "cannot list $dest: nothing pruned"
-    local missing=0
-    while IFS= read -r n; do
-        grep -q -- " $n\$" <<<"$listing" && grep -q -- " $n.sha256\$" <<<"$listing" || missing=1
-    done <<<"$names"
-    ((missing == 0)) || die "destination lacks some shipped copies: nothing pruned"
     there=$(copies_in <<<"$listing")
     if ((here < keep && here < there)); then
         echo "mill-board-backup: only $here copies here, $there at the destination; not pruning it" >&2

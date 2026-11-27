@@ -276,3 +276,73 @@ fn an_absent_mount_is_refused() {
     assert!(!out.status.success());
     assert!(!dest_host(&rig).exists(), "nothing shipped");
 }
+
+/// Overwrites four bytes in `file` without changing its size or modification time, so rsync's
+/// quick check still thinks it is the same file.
+fn corrupt_in_place(file: &Path) {
+    let reference = file.with_extension("ref");
+    fs::copy(file, &reference).expect("ref");
+    Command::new("touch")
+        .arg("-r")
+        .arg(file)
+        .arg(&reference)
+        .status()
+        .expect("touch");
+    let shell = format!(
+        "printf 'XXXX' | dd of='{}' bs=1 seek=12 conv=notrunc 2>/dev/null && touch -r '{}' '{}'",
+        file.display(),
+        reference.display(),
+        file.display()
+    );
+    assert!(
+        Command::new("sh")
+            .arg("-c")
+            .arg(shell)
+            .status()
+            .expect("dd")
+            .success()
+    );
+    fs::remove_file(reference).ok();
+}
+
+#[test]
+fn a_gzip_that_does_not_match_its_checksum_counts_for_nothing() {
+    let rig = Rig::new();
+    snap(&rig, 2);
+    ok(&rig.run("ship", 2, None, &[]));
+    let good = pairs(&dest_host(&rig));
+    snap(&rig, 2);
+    let bad = pairs(&rig.local()).pop().expect("newest");
+    corrupt_in_place(&rig.local().join(&bad));
+    // The damaged copy is not shipped, and it does not stand in for the good one at retention.
+    let out = rig.run("ship", 2, None, &[]);
+    ok(&out);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("does not match its checksum"));
+    assert_eq!(
+        pairs(&dest_host(&rig)),
+        good,
+        "the verified copy is still the only one off-host"
+    );
+}
+
+#[test]
+fn a_damaged_copy_at_the_receiver_stops_pruning() {
+    let rig = Rig::new();
+    for _ in 0..2 {
+        snap(&rig, 3);
+    }
+    ok(&rig.run("ship", 3, None, &[]));
+    let there = pairs(&dest_host(&rig));
+    assert_eq!(there.len(), 2);
+    corrupt_in_place(&dest_host(&rig).join(&there[1]));
+    snap(&rig, 2); // local keeps the newest two: the oldest copy is no longer local
+    let out = rig.run("ship", 2, None, &[]);
+    assert!(
+        !out.status.success(),
+        "a receiver that differs is not trusted to prune"
+    );
+    assert!(
+        pairs(&dest_host(&rig)).contains(&there[0]),
+        "the oldest off-host copy survives"
+    );
+}

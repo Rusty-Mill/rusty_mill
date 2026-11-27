@@ -77,9 +77,9 @@ off the host so a lost disk does not take them all.
 With `MILL_BOARD_DB` the cards are one WAL file. `backup.sh` takes a consistent copy with SQLite's
 online backup (the board keeps running; never `cp` the live file), requires `PRAGMA integrity_check`
 = `ok` on the copy, gzips it, keeps the newest `MILL_BOARD_BACKUP_KEEP`, and mirrors them with
-rsync to `MILL_BOARD_BACKUP_DEST/<host>/`. A copy counts only as a pair (gzip plus its `.sha256`,
-published last): retention, shipping and pruning ignore a lone gzip, and the next snapshot removes
-it. The destination is pruned only after it lists every pair just sent, and never when this host
+rsync to `MILL_BOARD_BACKUP_DEST/<host>/`. A copy counts only as a verified pair (gzip plus its `.sha256`,
+published last, and the gzip must match it): retention, shipping and pruning ignore a lone gzip, and the next snapshot removes
+it. The destination is pruned only after a checksum comparison shows its copies equal the verified local pairs, and never when this host
 holds fewer copies than it should and fewer than the destination (a wiped local directory). A
 failed shipment prunes nothing. Set `MILL_BOARD_BACKUP_REQUIRE_MOUNT` to refuse to ship when the
 destination's mount is absent. The unit is sandboxed (`ProtectSystem=strict`): it may write
