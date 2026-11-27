@@ -12,6 +12,7 @@
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rusty_mux_client::Conn;
@@ -991,6 +992,55 @@ fn a_folder_is_listed_over_the_blocks_connection_once_it_holds_the_lease() {
     std::fs::remove_dir_all(&tmp).expect("cleanup");
 }
 
+#[test]
+fn a_forward_to_a_port_nothing_listens_on_tells_the_window_why() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (mut writer, feed) = feed_of(attached.source.open(key, 80, 24).expect("opened"));
+    assert!(attached.source.forwards(key), "the server tunnels ports");
+    assert_eq!(
+        attached.source.host_id(key).as_deref(),
+        socket.canonicalize().expect("canonical").to_str(),
+        "the server's socket names its host"
+    );
+    assert_eq!(attached.source.host_id(key + 99), None, "no such pane");
+    type_until_echoed(writer.as_mut(), &feed, 1);
+    // The client listens on the remote port's number when it is free, and the
+    // server dials this machine too: hold the number while the forward
+    // listens elsewhere, then let it go so nothing answers the dial.
+    let held = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let dead = held.local_addr().expect("addr").port();
+    let (tx, rx) = channel();
+    attached
+        .source
+        .forward(key, dead, Box::new(move |r| drop(tx.send(r))));
+    let bound = rx
+        .recv_timeout(PATIENCE)
+        .expect("an answer")
+        .expect("listening");
+    assert_ne!(bound.local, dead);
+    drop(held);
+    let mut local = TcpStream::connect(("127.0.0.1", bound.local)).expect("the local port");
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if let Ok(Feed::ForwardRefused { port, reason }) =
+            feed.recv_timeout(Duration::from_millis(50))
+        {
+            assert_eq!(port, dead);
+            assert!(!reason.is_empty());
+            // The browser's connection is closed too.
+            assert_eq!(local.read(&mut [0u8; 1]).unwrap_or(0), 0);
+            return;
+        }
+    }
+    panic!("no refusal reached the window");
+}
+
 /// Reads `feed` until a clipboard read arrives, its selection (C54).
 fn next_clipboard_read(feed: &Receiver<Feed>) -> bool {
     let deadline = Instant::now() + PATIENCE;
@@ -1413,11 +1463,16 @@ fn a_file_is_sent_to_the_blocks_host_once_the_pane_holds_the_lease() {
     assert!(!attached.source.uploads(key + 99), "no such pane");
     type_until_echoed(writer.as_mut(), &feed, 1);
 
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let ask = |path: &std::path::Path| {
         let (tx, rx) = channel();
-        attached
-            .source
-            .upload(key, path.to_owned(), Box::new(move |r| drop(tx.send(r))));
+        let log = std::sync::Arc::clone(&seen);
+        attached.source.upload(
+            key,
+            path.to_owned(),
+            Box::new(move |sent, total| log.lock().expect("log").push((sent, total))),
+            Box::new(move |r| drop(tx.send(r))),
+        );
         rx.recv_timeout(PATIENCE).expect("an answer")
     };
     let local = state.join("local.bin");
@@ -1426,6 +1481,18 @@ fn a_file_is_sent_to_the_blocks_host_once_the_pane_holds_the_lease() {
     let sent = ask(&local).expect("sent");
     assert!(sent.ends_with("local.bin"), "{sent}");
     assert_eq!(std::fs::read(&sent).expect("on the server"), body);
+    {
+        let seen = seen.lock().expect("log");
+        let total = body.len() as u64;
+        assert_eq!(seen.last(), Some(&(total, total)), "ends at the whole file");
+        assert!(
+            seen.len() > 2 && seen.len() <= 101,
+            "per percent: {}",
+            seen.len()
+        );
+        assert!(seen.iter().all(|&(_, t)| t == total));
+        assert!(seen.windows(2).all(|w| w[0].0 < w[1].0), "moves forward");
+    }
 
     let missing = ask(&state.join("nope")).expect_err("no such file");
     assert!(missing.contains("nope"), "{missing}");
@@ -1437,6 +1504,86 @@ fn a_file_is_sent_to_the_blocks_host_once_the_pane_holds_the_lease() {
     if made.is_ok_and(|s| s.success()) {
         let refused = ask(&fifo).expect_err("a FIFO is not a file");
         assert!(refused.contains("not a file"), "{refused}");
+    }
+    std::fs::remove_dir_all(&state).expect("cleanup");
+}
+
+#[test]
+fn a_file_of_the_blocks_host_is_saved_in_the_downloads_folder() {
+    let state = std::env::temp_dir().join(format!("rusty-mux-gui-down-{}", std::process::id()));
+    std::fs::create_dir_all(&state).expect("mkdir");
+    let socket = start_server_in(Some(state.join("state")));
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (mut writer, feed) = feed_of(attached.source.open(key, 80, 24).expect("opened"));
+    assert!(attached.source.downloads(key), "the server gives files");
+    assert!(!attached.source.downloads(key + 99), "no such pane");
+    type_until_echoed(writer.as_mut(), &feed, 1);
+
+    // The Downloads folder is the user's own: made only if missing, and the
+    // file this test saves is removed again.
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let downloads = home.join("Downloads");
+    let made = !downloads.exists();
+    std::fs::create_dir_all(&downloads).expect("Downloads");
+    let name = format!("rusty-mux-gui-down-{}.bin", std::process::id());
+    let remote = state.join(&name);
+    let body: Vec<u8> = (0..(400 << 10) + 7).map(|i| i as u8).collect();
+    std::fs::write(&remote, &body).expect("write");
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ask = |path: &std::path::Path| {
+        let (tx, rx) = channel();
+        let log = Arc::clone(&seen);
+        attached.source.download_with_progress(
+            key,
+            path.to_string_lossy().into_owned(),
+            Box::new(move |got, total| log.lock().expect("log").push((got, total))),
+            Box::new(move |r| drop(tx.send(r))),
+        );
+        rx.recv_timeout(PATIENCE).expect("an answer")
+    };
+    let saved = ask(&remote).expect("saved");
+    {
+        let seen = seen.lock().expect("log");
+        let total = body.len() as u64;
+        assert_eq!(seen.last(), Some(&(total, total)), "ends at the size");
+        assert!(seen.windows(2).all(|w| w[0].0 < w[1].0), "only forwards");
+    }
+    assert_eq!(std::fs::read(&saved).expect("saved file"), body);
+    // A second download of the same name keeps the first.
+    let again = ask(&remote).expect("saved again");
+    assert_ne!(again, saved);
+    assert_eq!(std::fs::read(&again).expect("second file"), body);
+    // The plain call still works, with no progress.
+    let (tx, rx) = channel();
+    attached.source.download(
+        key,
+        remote.to_string_lossy().into_owned(),
+        Box::new(move |r| drop(tx.send(r))),
+    );
+    let plain = rx
+        .recv_timeout(PATIENCE)
+        .expect("an answer")
+        .expect("saved plain");
+    assert_eq!(std::fs::read(&plain).expect("plain file"), body);
+    std::fs::remove_file(&plain).expect("cleanup plain");
+
+    let missing = ask(&state.join("nope")).expect_err("no such file");
+    assert!(missing.contains("nope"), "{missing}");
+    assert!(
+        !downloads.join("nope").exists(),
+        "a refused download leaves no file"
+    );
+    let folder = ask(std::path::Path::new("/")).expect_err("not a file");
+    assert!(folder.contains("not a file"), "{folder}");
+
+    std::fs::remove_file(&saved).expect("cleanup");
+    std::fs::remove_file(&again).expect("cleanup");
+    if made {
+        std::fs::remove_dir(&downloads).expect("cleanup Downloads");
     }
     std::fs::remove_dir_all(&state).expect("cleanup");
 }

@@ -3388,3 +3388,165 @@ fn an_empty_task_id_does_not_poison_the_ledger() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #599 canary (D217): the task's frozen profile re-run on a released ref,
+/// red on a red ref and green on a green one, with nothing written to the
+/// task; an unknown profile or ref is an error naming it.
+#[test]
+fn a_canary_reruns_one_frozen_profile_on_a_ref() {
+    let dir = tempdir("canary");
+    let (repo, red) = repo(&dir);
+    claims_task(&dir);
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    git(&repo, &["tag", "v1"]);
+    let rev = state(&dir).rev;
+    let work = dir.join("canary-work");
+    let t = task();
+    let run = |r: &str, p: &str| {
+        let req = rusty_bbp_host::canary::Request {
+            dir: &dir,
+            task: &t,
+            repo: &repo,
+            work_root: &work,
+            reference: r,
+            profile: p,
+            budget: Some(rusty_bbp_host::canary::Budget {
+                started: std::time::Instant::now(),
+                total: std::time::Duration::from_secs(3600),
+            }),
+        };
+        rusty_bbp_host::canary::run(&Unconfined, &req)
+    };
+    let bad = run(&red, "test").expect("ran");
+    assert_eq!(bad.status, RunStatus::Failed, "{bad:?}");
+    assert_eq!(bad.base, red);
+    let good = run("v1", "test").expect("ran");
+    assert!(good.green(), "{good:?}");
+    assert_eq!(good.profiles.len(), 1);
+    let err = run("v1", "e2e").expect_err("no such profile");
+    assert!(err.contains("\"e2e\""), "{err}");
+    assert!(run("nope", "test").is_err());
+    // A budget already spent is refused before anything is checked out.
+    let spent = rusty_bbp_host::canary::Request {
+        dir: &dir,
+        task: &t,
+        repo: &repo,
+        work_root: &dir.join("spent-work"),
+        reference: "v1",
+        profile: "test",
+        budget: Some(rusty_bbp_host::canary::Budget {
+            started: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(3590))
+                .unwrap(),
+            total: std::time::Duration::from_secs(3600),
+        }),
+    };
+    let counting = Counting::default();
+    let err = rusty_bbp_host::canary::run(&counting, &spent).expect_err("budget spent");
+    assert!(err.starts_with("budget:"), "{err}");
+    assert_eq!(counting.0.get(), 0, "no sandbox started");
+    assert!(!dir.join("spent-work").exists(), "nothing checked out");
+    assert_eq!(state(&dir).rev, rev, "nothing written to the task");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A baseline whose gate refuses after the checkout runs nothing, and says
+/// why in the report: the #599 canary's elapsed-budget check (D217).
+#[test]
+fn a_gate_that_refuses_after_checkout_runs_nothing() {
+    let dir = tempdir("gate");
+    let (repo, base) = repo(&dir);
+    let counting = Counting::default();
+    let b = runner::isolated_baseline_gated(
+        &counting,
+        &profiles(),
+        None,
+        &repo,
+        &dir.join("work"),
+        &base,
+        // Asked after all setup: the scratch directory beside the checkout
+        // already exists, so slow setup is counted before the launch.
+        &|| match dir.join("work/baseline.tmp").is_dir() {
+            true => Err("budget: 10s left".into()),
+            false => Err("asked before the scratch directory".into()),
+        },
+    )
+    .expect("prepared");
+    assert_eq!(counting.0.get(), 0, "no sandbox started");
+    assert_eq!(b.status, RunStatus::Error);
+    assert!(b.profiles.is_empty());
+    assert_eq!(b.error.as_deref(), Some("budget: 10s left"));
+    assert!(b.tree.is_some(), "the checkout was prepared first");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bbp_claims_lists_every_claim_read_only() {
+    let dir = tempdir("claims-read");
+    claims_task(&dir);
+    assert!(inbox::claims(&dir, &task()).unwrap().is_empty());
+    let a = claim(&dir, "a", "ship it", true);
+    let b = claim(&dir, "b", "and this", false);
+    let before = state(&dir).rev;
+    let views = inbox::claims(&dir, &task()).unwrap();
+    assert_eq!(views.iter().map(|v| v.id.0).collect::<Vec<_>>(), [a, b]);
+    assert_eq!(state(&dir).rev, before, "a read appends no events");
+    let json = inbox::claims_json(&dir, &task()).unwrap();
+    // The fields the LEL tab's `lel_map::parse` requires (drift guard).
+    assert!(json.starts_with('['));
+    for key in [
+        "id",
+        "text",
+        "domains",
+        "status",
+        "score",
+        "confidence",
+        "spent",
+        "budget",
+        "deps",
+        "candidates",
+    ] {
+        assert!(
+            json.contains(&format!("\"{key}\":")),
+            "{key} missing: {json}"
+        );
+    }
+    assert!(inbox::claims(&dir, &TaskId("nope".into())).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bbp_claims_refuses_a_log_over_the_ceiling() {
+    let dir = tempdir("claims-big");
+    claims_task(&dir);
+    claim(&dir, "a", "ship it", true);
+    let len = std::fs::metadata(rusty_bbp::log_path_for(&dir, &task()))
+        .unwrap()
+        .len();
+    assert!(inbox::claims_within(&dir, &task(), len).is_ok());
+    let err = inbox::claims_within(&dir, &task(), len - 1).unwrap_err();
+    assert!(err.contains("larger than"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An interrupted append leaves a partial last line. `bbp claims` must read
+/// the complete prefix and leave the log's bytes exactly as they were.
+#[test]
+fn bbp_claims_leaves_a_torn_log_tail_untouched() {
+    let dir = tempdir("claims-torn");
+    claims_task(&dir);
+    let a = claim(&dir, "a", "ship it", true);
+    let log = rusty_bbp::log_path_for(&dir, &task());
+    let mut bytes = std::fs::read(&log).unwrap();
+    bytes.extend_from_slice(b"{\"prev\":\"torn");
+    std::fs::write(&log, &bytes).unwrap();
+    let views = inbox::claims(&dir, &task()).unwrap();
+    assert_eq!(views.iter().map(|v| v.id.0).collect::<Vec<_>>(), [a]);
+    assert_eq!(
+        std::fs::read(&log).unwrap(),
+        bytes,
+        "the log is not repaired"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

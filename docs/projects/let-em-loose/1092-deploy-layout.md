@@ -32,9 +32,9 @@ Install to `/opt/lel/<git-sha>/bin/`, symlink `/opt/lel/current -> <git-sha>`. P
 The guard (all of it):
 ```sh
 #!/bin/sh
-# Runs as orch-runner via sudo. Allows: bbp inbox|human --dir /srv/lel/bbp <args without another --dir>.
+# Runs as orch-runner via sudo. Allows: bbp inbox|human|claims --dir /srv/lel/bbp <args without another --dir>.
 set -eu
-case "${1-}" in inbox|human) ;; *) echo "mill-board-bbp-guard: verb refused" >&2; exit 64 ;; esac
+case "${1-}" in inbox|human|claims) ;; *) echo "mill-board-bbp-guard: verb refused" >&2; exit 64 ;; esac
 if [ "${2-}" != --dir ] || [ "${3-}" != /srv/lel/bbp ]; then echo "mill-board-bbp-guard: --dir refused" >&2; exit 64; fi
 verb=$1; shift 3
 skip=0
@@ -47,7 +47,7 @@ for a in "$@"; do   # walks the args the way bbp's parser does: every --key take
 done
 exec /opt/lel/current/bin/bbp "$verb" --dir /srv/lel/bbp "$@"
 ```
-It accepts exactly the argv `bbp_cli.rs` builds (`inbox|human --dir <root> ...`), so the board needs no code change. The guarantee: as `orch-runner`, `mill-board` can run only `bbp inbox` and `bbp human`, only on `/srv/lel/bbp`.
+It accepts exactly the argv `bbp_cli.rs` builds (`inbox|human|claims --dir <root> ...`), so the board needs no code change. The guarantee: as `orch-runner`, `mill-board` can run only `bbp inbox`, `bbp human` and the read-only `bbp claims` (D220), only on `/srv/lel/bbp`. A host deployed before `claims` was added needs this one-word guard edit (root-owned) and a `bbp` that has the verb; until then `lel_claims` answers "verb refused".
 
 ## systemd
 - `mill-board.service`: the shipped unit plus the drop-in `/etc/systemd/system/mill-board.service.d/lel.conf` below. `EnvironmentFile=`, `ReadWritePaths=` and `ExecStart=` add to the shipped values, so each is cleared with an empty line first; otherwise the unit would still need `~baileyrd/.mill-board/board.env` and would keep running `/usr/local/bin/rusty_mill_board` after an upgrade flips `/opt/lel/current`.

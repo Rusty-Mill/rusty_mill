@@ -17,6 +17,7 @@
 //! bbp takeover-ended --dir D --task T --takeover N --reason released|expired|revoked|turn-ended|mux-lost   D104: orch ends a takeover (`released` only after `bbp human takeover-release N`)
 //! bbp golden-run DIR                        the golden: profile's case runner: checks the sign-off, runs each case in the current directory, prints verdicts only
 //! bbp inbox   --dir D --task T[,T2...] [--json yes]   open escalations of claims tasks as JSON: irreversible first, then by task as given, oldest first within a task
+//! bbp claims  --dir D --task T [--json yes]   every claim of a claims task as a JSON array of claim views, in id order (read-only: it reads a private copy of the log, so a torn tail is left as is; the LEL tab's map, via Mill Board `lel_claims`); an unknown or non-claims task is an error
 //! bbp decision --dir D --task T --decision ID[,ID2...]   was each decision id (`bbp human --decision`) applied, and at which rev: `[{"decision":ID,"applied":bool,"rev":N|null}]`, read from the log
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
@@ -34,6 +35,7 @@
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
 //! bbp why     --dir D (--task T | T) [--turn N]            why each turn was granted (wake reason, or Explicit), replayed from the log, as JSON
+//! bbp canary  --dir D --task T --repo-path P --work W --ref REF --profile NAME [--budget-secs N]   one frozen profile re-run on REF in the sandbox, as a report (JSON); writes nothing to the task (#599, D217)
 //! bbp why     --dir D (--task T | T) --claim ID [--at REV] how one claim moved: each evidence and status change with the rule that fired, replayed from the log, as JSON
 //! bbp verify  --dir D --task T [--expect H]               check the log's hash chain without changing it; prints lines, unchained, head; H must be the hash of one of its lines
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
@@ -53,9 +55,9 @@
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, admission, args::Args, baseline, broker, decision, dry_run, golden, grade, holdout,
-    human, inbox, mcp, moderator, pairs, pins, profiles, report, response_json, runner, shadow,
-    slots, tokens, verify, why,
+    admin, admission, args::Args, baseline, broker, canary, decision, dry_run, golden, grade,
+    holdout, human, inbox, mcp, moderator, pairs, pins, profiles, report, response_json, runner,
+    shadow, slots, tokens, verify, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -142,7 +144,7 @@ fn dry_run(argv: &[String]) -> Result<String, String> {
 fn run() -> Result<String, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let sub = argv.first().cloned().ok_or(
-        "usage: bbp <mcp|open|assign|card|tick|human|erosion|runner|metrics|tokens|pairs|agents-check|grade|why|verify|shadow|mod> ...",
+        "usage: bbp <mcp|open|assign|card|tick|human|erosion|runner|metrics|tokens|pairs|agents-check|grade|why|verify|shadow|canary|mod> ...",
     )?;
     if sub == "__sandbox" {
         let rest: Vec<OsString> = std::env::args_os().skip(2).collect();
@@ -264,6 +266,9 @@ fn run() -> Result<String, String> {
         let mut tasks: Vec<TaskId> = task.0.split(',').map(|t| TaskId(t.to_owned())).collect();
         tasks.extend(a.positional.iter().map(|t| TaskId(t.clone())));
         return inbox::json(&dir, &tasks);
+    }
+    if sub == "claims" {
+        return inbox::claims_json(&dir, &task);
     }
     if sub == "decision" {
         return decision::json(&dir, &task, a.flag("decision")?);
@@ -551,6 +556,31 @@ fn run() -> Result<String, String> {
         }
         "verify" => return verify::json(&dir, &task, a.flags.get("expect").map(String::as_str)),
         "shadow" => return shadow::json(&dir, &task),
+        "canary" => {
+            let budget = a
+                .flags
+                .get("budget-secs")
+                .map(|v| v.parse::<u64>())
+                .transpose()
+                .map_err(|_| "--budget-secs must be a number of seconds")?
+                .map(|n| canary::Budget {
+                    started: std::time::Instant::now(),
+                    total: std::time::Duration::from_secs(n),
+                });
+            let (repo, work) = (
+                PathBuf::from(a.flag("repo-path")?),
+                PathBuf::from(a.flag("work")?),
+            );
+            return canary::json(&canary::Request {
+                dir: &dir,
+                task: &task,
+                repo: &repo,
+                work_root: &work,
+                reference: a.flag("ref")?,
+                profile: a.flag("profile")?,
+                budget,
+            });
+        }
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
             let work = PathBuf::from(a.flag("work")?);

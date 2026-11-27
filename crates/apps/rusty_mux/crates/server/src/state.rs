@@ -20,7 +20,7 @@ use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
 use rusty_mux_proto::{
     AgentMeta, Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Ownership,
-    ShowTo, Takeover, encode,
+    Program, ShowTo, Takeover, encode,
 };
 use rusty_mux_status::{Parts, Status};
 use rusty_term_core::{AnsiParser, Grid};
@@ -159,7 +159,8 @@ const UNIX_ONLY: Features = Features::SIGNAL_RELEASE
     // Downloads are read through the kernel's own account of the opened file.
     .union(Features::DOWNLOAD)
     .union(Features::WORKSPACE)
-    .union(Features::WORKSPACE_STATUS);
+    .union(Features::WORKSPACE_STATUS)
+    .union(Features::LAUNCH_IN_WORKSPACE);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
 
@@ -279,6 +280,13 @@ struct BlockRt {
     /// Its PTY was released (C76): read-only, with its program, if still
     /// running, left to its owner.
     released: bool,
+    /// Its program was started by this server run, so what it was started
+    /// as is known (not a block restored from disk, whose record cannot say
+    /// who launched it).
+    launched: bool,
+    /// Its program has ended and been reaped, and the exit was announced:
+    /// nothing of the last run is still to be heard of.
+    finished: bool,
     /// How its program ended, if it did while this server watched.
     exit: Option<ExitStatus>,
     /// Its output ended and its program is being reaped: still running as
@@ -328,6 +336,14 @@ struct Unscreened {
 impl Unscreened {
     /// The block, reading its PTY into `grid` from now on.
     fn screened(self, shared: &Shared, grid: Grid, parser: AnsiParser) -> BlockRt {
+        let mut rt = BlockRt::read_only(grid, parser, self.started.clone());
+        self.revive(shared, &mut rt);
+        rt
+    }
+
+    /// Gives `rt`, a block with no program, this one: its reader starts and
+    /// the screen it has stays (C45, D338).
+    fn revive(self, shared: &Shared, rt: &mut BlockRt) {
         let wake = Rc::new(Notify::new());
         let reader = rusty_tokio::task::spawn_local(pump(
             shared.clone(),
@@ -335,19 +351,20 @@ impl Unscreened {
             self.pty.clone(),
             wake.clone(),
         ));
-        let live = Live {
+        rt.live = Some(Live {
             pty: self.pty,
             revoke: Rc::default(),
             process: self.process,
             wake,
             reader,
-        };
-        BlockRt {
-            foreground: self.foreground,
-            echo: self.echo,
-            ..BlockRt::read_only(grid, parser, self.started)
-        }
-        .with(live)
+        });
+        rt.foreground = self.foreground;
+        rt.echo = self.echo;
+        rt.started = self.started;
+        rt.unsaved = true;
+        rt.finished = false;
+        rt.exit = None;
+        rt.reaping = false;
     }
 }
 
@@ -373,15 +390,10 @@ impl BlockRt {
             custom: false,
             agent: None,
             released: false,
+            launched: false,
+            finished: false,
             exit: None,
             reaping: false,
-        }
-    }
-
-    fn with(self, live: Live) -> Self {
-        Self {
-            live: Some(live),
-            ..self
         }
     }
 
@@ -1505,6 +1517,20 @@ impl State {
                 ),
             ),
             M::Sync { req } => (req, Ok(Outcome::Done(None))),
+            // It starts a program, which a call has no runtime for: here.
+            M::BlockCall {
+                req,
+                block,
+                method,
+                args,
+            } if method == "terminal.rerun" => (
+                req,
+                self.require(client, Features::BLOCK_CALL.union(Features::HOLD), &method)
+                    .and_then(|()| match args.is_empty() {
+                        true => self.rerun(shared, client, block),
+                        false => Err(String::from("terminal.rerun takes no arguments").into()),
+                    }),
+            ),
             M::BlockCall {
                 req,
                 block,
@@ -2071,6 +2097,19 @@ impl State {
         if launch.agent.is_some() {
             self.require(client, Features::AGENT_META, "a launch naming an agent")?;
         }
+        if launch.workspace_of.is_some() {
+            self.require(
+                client,
+                Features::LAUNCH_IN_WORKSPACE,
+                "a launch in a block's workspace",
+            )?;
+            if launch.cwd.is_some() {
+                return Err(
+                    "bad_launch(workspace_of): a launch names a cwd or a workspace, not both"
+                        .into(),
+                );
+            }
+        }
         if launch.input == InputMode::OwnerOnly {
             self.require(client, Features::INPUT_GATE, "an owner-only launch")?;
             if !launch.own {
@@ -2607,12 +2646,28 @@ impl State {
         // spawn changes into the held descriptor, not the configured path, so
         // the two cannot name different directories. Where it can't be held,
         // the program starts at the path and the workspace stays unknown.
-        let mut workspace = listing::Workspace::open(std::path::Path::new(&config.cwd));
         let mut spawn = config.clone();
-        match workspace.spawn_cwd() {
-            Some(held) => spawn.cwd = held.into(),
-            None => workspace = listing::Workspace::default(),
-        }
+        let (workspace, cwd) = match launch.workspace_of {
+            // Another block's held directory, by handle (D378): never the
+            // configured path, so where it can't be entered the launch is
+            // refused, not started somewhere else.
+            Some(source) => {
+                let (workspace, cwd) = self.workspace_of(client, source)?;
+                spawn.cwd = workspace
+                    .spawn_cwd()
+                    .ok_or("the workspace cannot be entered here")?
+                    .into();
+                (workspace, cwd)
+            }
+            None => {
+                let mut workspace = listing::Workspace::open(std::path::Path::new(&config.cwd));
+                match workspace.spawn_cwd() {
+                    Some(held) => spawn.cwd = held.into(),
+                    None => workspace = listing::Workspace::default(),
+                }
+                (workspace, config.cwd.to_string_lossy().into_owned())
+            }
+        };
         let started = Started {
             shell: launch.program.is_none(),
             read_only: false,
@@ -2622,7 +2677,7 @@ impl State {
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect(),
-            cwd: config.cwd.to_string_lossy().into_owned(),
+            cwd,
             workspace,
         };
         let rt = self.start(Start {
@@ -2649,10 +2704,35 @@ impl State {
         );
         let mut rt = rt.screened(shared, grid, parser);
         rt.hold = launch.hold;
+        rt.launched = true;
         rt.custom = launch.env.is_some() || launch.fds > 0 || launch.own;
         rt.agent = launch.agent.clone();
         self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
+    }
+
+    /// The held workspace of `source` and its last known directory, for a
+    /// launch that starts there (D378). As `terminal.workspace-list`: the
+    /// input lease on `source`, and a root that is known. Refused on an
+    /// agent's block, whose jail does not hold the server (D372).
+    fn workspace_of(
+        &self,
+        client: ClientId,
+        source: BlockId,
+    ) -> Result<(listing::Workspace, String), Refusal> {
+        self.mux
+            .authorize_input(client, source)
+            .map_err(Refusal::from)?;
+        let rt = self
+            .blocks
+            .get(&source)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(source))?;
+        rt.refuse_agent("a launch in a block's workspace")?;
+        let workspace = rt
+            .started
+            .workspace()
+            .ok_or("the workspace root is unknown after a server restart")?;
+        Ok((workspace.clone(), rt.started.cwd.clone()))
     }
 
     /// Holds `rt` as `block`'s, spooling the history its grid evicts
@@ -2703,6 +2783,118 @@ impl State {
             echo,
             started,
         })
+    }
+
+    /// `terminal.rerun` (D338): starts again the command a held block (not yet
+    /// a restored one) was started with, in the block, under the lease. The screen
+    /// stays and a line says when. Never done on its own (D72), and not for
+    /// a block launched with its own environment, descriptors or owner.
+    fn rerun(
+        &mut self,
+        shared: &Shared,
+        client: ClientId,
+        block: BlockId,
+    ) -> Result<Outcome, Refusal> {
+        const METHOD: &str = "terminal.rerun";
+        if self.stopping {
+            return Err(String::from("the server is stopping").into());
+        }
+        self.mux
+            .authorize_input(client, block)
+            .map_err(Refusal::from)?;
+        let rt = self
+            .blocks
+            .get(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        if rt.released {
+            return Err(format!("{METHOD}: the block's program was released to its owner").into());
+        }
+        if rt.live.is_some() {
+            return Err(format!("{METHOD}: the block's program is still running").into());
+        }
+        // A restored block does not say who launched it, so an agent's
+        // cannot be told from a command's: refused until provenance is kept.
+        if !rt.launched {
+            return Err(format!(
+                "{METHOD}: the block was restored after a restart, and what launched it \
+                 is not known"
+            )
+            .into());
+        }
+        // Not the last run's reaping, nor its exit still to be announced:
+        // a late one would read as the new run's.
+        if !rt.finished {
+            return Err(format!("{METHOD}: the block's last run has not finished ending").into());
+        }
+        // Not on the launcher's word: what the launch passed is what decides.
+        if rt.custom || rt.agent.is_some() {
+            return Err(format!(
+                "{METHOD}: a block launched with its own environment, descriptors or \
+                 owner (an agent's, say) is re-run through its launcher"
+            )
+            .into());
+        }
+        let target = self
+            .mux
+            .block(block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        let (window, size, owned) = (target.window(), target.size(), target.owner().is_some());
+        let session = self
+            .mux
+            .window(window)
+            .ok_or(rusty_mux_core::Error::UnknownWindow(window))?
+            .session();
+        // What it was started as, even a default shell: a config reloaded
+        // since would otherwise start something else. It starts where its
+        // shell last reported being (OSC 7, D375) while that is still a
+        // local directory; else in the directory it was launched in, the
+        // one the workspace explorer shows (D337): the held descriptor when
+        // there is one, which survives a rename of the path, else the
+        // launch path, which must still be a directory.
+        let reported = terminal::reported_dir(&rt.grid);
+        let held = rt
+            .started
+            .workspace
+            .spawn_cwd()
+            .filter(|_| reported.is_none());
+        let launch = Launch {
+            program: Some(Program {
+                command: rt.started.program.clone(),
+                args: rt.started.args.clone(),
+            }),
+            cwd: reported
+                .map(|d| d.to_string_lossy().into_owned())
+                .or_else(|| {
+                    Some(rt.started.cwd.clone()).filter(|d| held.is_none() && !d.is_empty())
+                }),
+            ..Launch::default()
+        };
+        let mut config = launched(&self.config, &launch)?;
+        if let Some(held) = held {
+            config.cwd = held.into();
+        }
+        let started = Started {
+            read_only: false,
+            ..rt.started.clone()
+        };
+        let program = self.start(Start {
+            block,
+            session,
+            window,
+            size,
+            config: &config,
+            started,
+            owned,
+            env: None,
+            fds: Vec::new(),
+        })?;
+        // CAN first, so a sequence the old program left unfinished ends.
+        let mark = format!("\x18\r\n\x1b[2m-- re-run at {} --\x1b[0m\r\n", utc_clock());
+        self.inject(block, mark.as_bytes());
+        if let Some(rt) = self.blocks.get_mut(&block) {
+            program.revive(shared, rt);
+        }
+        Ok(Outcome::Done(None))
     }
 
     /// `archive-block` (C84): saves a block whose program is gone, then
@@ -3328,6 +3520,9 @@ impl State {
     /// block, unless a client closed it while the program was reaped or it
     /// is held (C78).
     fn exited(&mut self, block: BlockId, status: Option<ExitStatus>) {
+        if let Some(rt) = self.blocks.get_mut(&block) {
+            rt.finished = true;
+        }
         if let Some(status) = status
             && self.mux.note_exit(block, status).is_err()
         {
@@ -3562,6 +3757,20 @@ fn passed_fds(want: u8, passed: Passed) -> Result<Vec<Fd>, Refusal> {
         .into());
     }
     Ok(fds)
+}
+
+/// The time of day in UTC, as `HH:MM:SS UTC`, for a line shown in a block.
+fn utc_clock() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let day = secs % 86_400;
+    format!(
+        "{:02}:{:02}:{:02} UTC",
+        day / 3600,
+        day % 3600 / 60,
+        day % 60
+    )
 }
 
 /// The server's `config` with what `launch` asks for instead. A relative

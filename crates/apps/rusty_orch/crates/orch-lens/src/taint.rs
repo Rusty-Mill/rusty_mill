@@ -118,7 +118,7 @@ mod tests {
         ];
         let lens = PrincipalId("l".into());
         let parts = Parts {
-            prefix: "",
+            prefix: crate::context::Prefix::Flat(""),
             card: &c,
             lens: &lens,
             phase: Phase::Informed,

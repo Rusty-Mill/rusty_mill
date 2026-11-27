@@ -39,6 +39,9 @@ pub enum Feed {
     /// [`BackendHandle::clipboard_reply`]; only a pane whose
     /// [`PaneIo::serves_clipboard`] is set gets these.
     ClipboardRead { primary: bool },
+    /// The server ended a forward of the pane with a reason, such as a dial
+    /// nothing answered (C81): shown as a notice.
+    ForwardRefused { port: u16, reason: String },
 }
 
 /// Where this window stands on typing into an owner-only block, whose
@@ -373,6 +376,12 @@ pub trait Source {
     fn forwarded_port(&self, _key: u64, _port: u16) -> Option<Bound> {
         None
     }
+    /// A stable, opaque name for pane `key`'s host, one line, the same on
+    /// every connection to it (such as the server's socket): what a saved
+    /// forward trust is kept under. `None` keeps trust for the window only.
+    fn host_id(&self, _key: u64) -> Option<String> {
+        None
+    }
     /// Whether the source can send a file to pane `key`'s host (mux C82),
     /// so a file dropped or pasted on that pane is uploaded and its path
     /// there typed. A source that can't leaves the file's own path to be
@@ -381,10 +390,42 @@ pub trait Source {
         false
     }
     /// Sends the file at `path` to pane `key`'s host and calls `done` once,
-    /// from any thread, with its path there or why not. Not called when
-    /// [`Source::uploads`] is `false`.
-    fn upload(&self, _key: u64, _path: std::path::PathBuf, done: UploadDone) {
+    /// from any thread, with its path there or why not. `progress` is called
+    /// with the bytes sent and the file's size as chunks are answered, from
+    /// any thread, before `done`. Not called when [`Source::uploads`] is
+    /// `false`.
+    fn upload(
+        &self,
+        _key: u64,
+        _path: std::path::PathBuf,
+        _progress: UploadProgress,
+        done: UploadDone,
+    ) {
         done(Err("this source uploads no files".into()));
+    }
+    /// Whether the source can fetch a file of pane `key`'s host (mux C83).
+    fn downloads(&self, _key: u64) -> bool {
+        false
+    }
+    /// Fetches the file at `path` (absolute, or relative to the pane's
+    /// folder) of pane `key`'s host into this machine's Downloads folder and
+    /// calls `done` once, from any thread, with where it was saved or why
+    /// not. Not called when [`Source::downloads`] is `false`.
+    fn download(&self, _key: u64, _path: String, done: DownloadDone) {
+        done(Err("this source downloads no files".into()));
+    }
+    /// [`Source::download`] that also calls `progress` with the bytes
+    /// received and the file's size as chunks arrive, from any thread, before
+    /// `done`. A source that can't report progress keeps this default, which
+    /// downloads without it.
+    fn download_with_progress(
+        &self,
+        key: u64,
+        path: String,
+        _progress: DownloadProgress,
+        done: DownloadDone,
+    ) {
+        self.download(key, path, done);
     }
 }
 
@@ -431,6 +472,18 @@ pub type Uploaded = Result<String, String>;
 
 /// What a source calls once with an upload's outcome.
 pub type UploadDone = Box<dyn FnOnce(Uploaded) + Send>;
+
+/// Where a downloaded file was saved, or why it was not.
+pub type Downloaded = Result<String, String>;
+
+/// What a source calls once with a download's outcome.
+pub type DownloadDone = Box<dyn FnOnce(Downloaded) + Send>;
+
+/// What a source calls with a download's bytes received and the file's size.
+pub type DownloadProgress = Box<dyn Fn(u64, u64) + Send>;
+
+/// What a source calls with an upload's bytes sent and the file's size.
+pub type UploadProgress = Box<dyn Fn(u64, u64) + Send>;
 
 /// A folder listing's text, or why the host refused it.
 pub type Listed = Result<String, String>;

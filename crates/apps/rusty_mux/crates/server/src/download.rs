@@ -1,10 +1,10 @@
 //! `terminal.download` (C83): a file of the server's host, read a chunk at a
 //! time for a copy to the client.
 
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#![cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 
 use std::fs::{self, File};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -47,6 +47,7 @@ fn private_root(private: Option<&Path>) -> Result<Option<PathBuf>, String> {
         .transpose()
 }
 
+#[cfg(target_os = "linux")]
 /// Checks the object `f` really is, not the name it was opened by: it is
 /// the file `file` still names, and it is not inside `root`. Linux asks the
 /// kernel for the opened object's own path; elsewhere the name is resolved
@@ -91,20 +92,26 @@ pub(crate) fn read(
     private: Option<&Path>,
     keep: &Protected,
 ) -> Result<String, String> {
-    // Only Linux can place the opened object by the kernel. Elsewhere a path
-    // is not resolved at all (resolving may reach another machine) and a
-    // file inside the state directory could not be told from one outside:
-    // nothing is read until that platform has its own check.
-    #[cfg(not(target_os = "linux"))]
+    // Linux places the opened object by the kernel, Windows by its handle.
+    // Elsewhere a path is not resolved at all (resolving may reach another
+    // machine) and a file inside the state directory could not be told from
+    // one outside: nothing is read until that platform has its own check.
+    #[cfg(target_os = "linux")]
+    return read_linux(base, path, offset, private, keep);
+    #[cfg(windows)]
+    return win::read(base, path, offset, private, keep);
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         let _ = (base, path, offset, private, keep);
         Err("downloading is not supported on this platform yet".into())
     }
-    #[cfg(target_os = "linux")]
-    read_linux(base, path, offset, private, keep)
 }
 
-/// The device and inode of an opened file.
+#[cfg(windows)]
+#[path = "download_win.rs"]
+mod win;
+
+/// The device and inode of an opened file (Windows: volume serial and file index).
 pub type FileId = (u64, u64);
 
 /// The files downloads never read. A file is named by its path, looked up
@@ -178,12 +185,16 @@ impl Protected {
     /// is read. The lock is held only to copy the lists; the paths are
     /// resolved after it is let go, so a slow file system never holds up a
     /// reload.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn secrets(&self) -> Result<(Vec<Secret>, u64), String> {
-        self.secrets_with(protected)
+        #[cfg(windows)]
+        let resolve = win::protected;
+        #[cfg(target_os = "linux")]
+        let resolve = protected;
+        self.secrets_with(resolve)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn secrets_with(
         &self,
         resolve: impl FnOnce(&[PathBuf]) -> Result<Vec<Secret>, String>,
@@ -209,14 +220,14 @@ impl Protected {
     }
 
     /// Whether the policy is still the one of `generation`.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn is_current(&self, generation: u64) -> bool {
         self.set().generation == generation
     }
 }
 
 /// A file never read, as it really is, and its device and inode.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 type Secret = (PathBuf, (u64, u64));
 
 /// The files that are never read, as they really are, with their identity
@@ -287,7 +298,7 @@ fn read_linux_with(
     }
     // Never waits on a pipe swapped in since the check above, and never
     // follows a link swapped in: the type is judged on what was opened.
-    let mut f = fs::OpenOptions::new()
+    let f = fs::OpenOptions::new()
         .read(true)
         .custom_flags(rusty_libc::fd::O_NONBLOCK | rusty_libc::fd::O_NOFOLLOW)
         .open(&file)
@@ -309,7 +320,22 @@ fn read_linux_with(
     if !meta.is_file() {
         return Err(format!("{} is not a regular file", file.display()));
     }
-    let size = meta.len();
+    chunk(f, &file, meta.len(), offset, keep, generation, after_read)
+}
+
+/// The reply for the chunk of `f` at `offset`, once the file was judged
+/// under `generation`: dropped if a reload changed the policy since.
+#[cfg(any(target_os = "linux", windows))]
+fn chunk(
+    mut f: File,
+    file: &Path,
+    size: u64,
+    offset: u32,
+    keep: &Protected,
+    generation: u64,
+    after_read: impl FnOnce(),
+) -> Result<String, String> {
+    let io = |e: std::io::Error| format!("{}: {e}", file.display());
     if size > FILE_MAX {
         return Err(format!("{} is over {FILE_MAX} bytes", file.display()));
     }
@@ -326,7 +352,7 @@ fn read_linux_with(
     Ok(format!("{size}\n{}", rusty_base64::encode_standard(&chunk)))
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(all(test, not(any(target_os = "linux", windows))))]
 mod refusal_tests {
     #[test]
     fn nothing_is_read_where_the_opened_file_cannot_be_checked() {

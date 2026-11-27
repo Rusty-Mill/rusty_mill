@@ -75,6 +75,18 @@ fn keys_are_sent_under_the_lease() {
 }
 
 #[test]
+fn a_rerun_is_made_under_the_lease_and_says_it_runs_a_program() {
+    let call = args(r#"{"block": "2"}"#);
+    assert_eq!(
+        argv(known("terminal.rerun"), Some(&call)).map(|a| a.join(" ")),
+        Ok("attach --block=2 + acquire-lease --block=2 + terminal.rerun --block=2".into())
+    );
+    let hints = annotations(known("terminal.rerun"));
+    assert_eq!(hints["destructiveHint"], true);
+    assert_eq!(hints["openWorldHint"], true);
+}
+
+#[test]
 fn archiving_a_block_is_marked_destructive() {
     let hints = annotations(known("archive-block"));
     assert_eq!(hints["destructiveHint"], true);

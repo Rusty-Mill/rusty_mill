@@ -48,8 +48,9 @@ use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Entry, Features, Launch, Message, Program, ShowTo, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
-    Act, BlockInfo, Bound, Detached, Dir, Explore, Explored, Feed, Float as Pane, ForwardDone,
-    Link, ListDone, Listed, Notice, PaneIo, Remote, Session, Show, Source, Take, Tree, UploadDone,
+    Act, BlockInfo, Bound, Detached, Dir, DownloadDone, DownloadProgress, Explore, Explored, Feed,
+    Float as Pane, ForwardDone, Link, ListDone, Listed, Notice, PaneIo, Remote, Session, Show,
+    Source, Take, Tree, UploadDone, UploadProgress,
 };
 
 use crate::floats;
@@ -94,7 +95,8 @@ pub const BLOCK: Features = PANE
     .union(Features::BLOCK_CALL)
     .union(Features::DIR_LISTING)
     .union(Features::PORT_FORWARD)
-    .union(Features::UPLOAD);
+    .union(Features::UPLOAD)
+    .union(Features::DOWNLOAD);
 
 /// Never set: the handshakes here are not cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -146,6 +148,9 @@ pub fn attach_with(
     start: Start,
 ) -> Result<Attached, String> {
     let start_cwd = start.first.cwd.clone();
+    let host = host_id(socket);
+    // Pinned: this and every later connection of the client go to one place.
+    let socket = host.as_deref().map_or(socket, Path::new);
     let (stream, mut conn) = hello(socket)?;
     let mut req = Requests {
         conn: &mut conn,
@@ -178,6 +183,7 @@ pub fn attach_with(
     let (asks, inbox) = std::sync::mpsc::channel();
     let state = Arc::new(State {
         socket: socket.to_owned(),
+        host,
         control: Mutex::new(Conn::new(clone(&stream)?)),
         next: AtomicU64::new(next),
         tells_focus: welcomed.features.contains(Features::FOCUS),
@@ -229,6 +235,22 @@ pub fn attach_with(
     })
 }
 
+/// The server's pinned destination: `socket` with every link resolved, as an
+/// absolute UTF-8 path. Every connection of the client goes to this path and
+/// persisted consent is named by it, so the name is the destination reached,
+/// not a path that can be pointed elsewhere later. `None` where it cannot be
+/// pinned (no such path, not UTF-8, too long to connect to, not Unix): consent
+/// then stays with the window and the path given is used as it was.
+fn host_id(socket: &Path) -> Option<String> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let path = socket.canonicalize().ok()?;
+    // A name the connection could not use is no pin: keep the path given.
+    rusty_mux_proto::endpoint::check_socket_path(&path).ok()?;
+    path.to_str().map(str::to_owned)
+}
+
 /// Connects to `socket` and says the GUI's Hello, asking for no takeover.
 fn hello(socket: &Path) -> Result<(UnixStream, Conn<UnixStream>), String> {
     let stream = connect(socket)?;
@@ -255,6 +277,8 @@ enum Ask {
 /// What the client and the window share.
 struct State {
     socket: PathBuf,
+    /// [`host_id`] of the socket, pinned at attach: `socket` is that same path.
+    host: Option<String>,
     control: Mutex<Conn<UnixStream>>,
     next: AtomicU64,
     /// The server takes `FocusBlock` (C41).
@@ -611,13 +635,49 @@ impl Source for MuxSource {
         self.pane(key).is_some_and(|b| b.forwards)
     }
 
+    /// The server's socket as an absolute path, pinned when this
+    /// client attached (every connection goes to it), so a socket later
+    /// retargeted never renames the host an open pane reaches: what a saved
+    /// forward trust belongs to.
+    fn host_id(&self, key: u64) -> Option<String> {
+        self.pane(key)?;
+        self.0.host.clone()
+    }
+
     fn uploads(&self, key: u64) -> bool {
         self.pane(key).is_some_and(|b| b.uploads)
     }
 
-    fn upload(&self, key: u64, path: std::path::PathBuf, done: UploadDone) {
+    fn upload(
+        &self,
+        key: u64,
+        path: std::path::PathBuf,
+        progress: UploadProgress,
+        done: UploadDone,
+    ) {
         match self.pane(key) {
-            Some(block) => block.upload(path, done),
+            Some(block) => block.upload(path, progress, done),
+            None => done(Err("the block is not open".into())),
+        }
+    }
+
+    fn downloads(&self, key: u64) -> bool {
+        self.pane(key).is_some_and(|b| b.downloads)
+    }
+
+    fn download(&self, key: u64, path: String, done: DownloadDone) {
+        self.download_with_progress(key, path, Box::new(|_, _| {}), done);
+    }
+
+    fn download_with_progress(
+        &self,
+        key: u64,
+        path: String,
+        progress: DownloadProgress,
+        done: DownloadDone,
+    ) {
+        match self.pane(key) {
+            Some(block) => block.download(path, progress, done),
             None => done(Err("the block is not open".into())),
         }
     }
@@ -1585,7 +1645,9 @@ struct Block {
     listings: Mutex<HashMap<u64, ListDone>>,
     /// The server takes files on this connection (C82).
     uploads: bool,
-    /// Who waits for an upload chunk's answer, by request number.
+    /// The server gives files on this connection (C83).
+    downloads: bool,
+    /// Who waits for an upload or download chunk's answer, by request number.
     uploading: Mutex<HashMap<u64, Sender<Result<String, String>>>>,
     /// The server tunnels ports on this connection (C81).
     forwards: bool,
@@ -1607,10 +1669,84 @@ const FORWARD_REQ: u64 = 1 << 40;
 const FORWARD_FRAMES: usize = 1024;
 const FORWARD_WANTS: usize = 16;
 
+/// The file name a download is saved as: the last part of the server's
+/// `path`, whatever separator that host uses. `None` when there is none, or
+/// when it could climb out of the Downloads folder.
+fn saved_name(path: &str) -> Option<String> {
+    let name = path.rsplit(['/', '\\']).next()?;
+    let bad = name.is_empty() || name == "." || name == ".." || name.contains([':', '\0']);
+    (!bad).then(|| name.to_owned())
+}
+
+/// This machine's Downloads folder, if it has one.
+fn downloads_dir() -> Option<PathBuf> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+    let dir = PathBuf::from(home).join("Downloads");
+    dir.is_dir().then_some(dir)
+}
+
+/// Creates `name` in `dir`, or `name-1`, `name-2`... when it is taken, never
+/// replacing a file; the open file and its path.
+fn create_unique(dir: &Path, name: &str) -> Result<(std::fs::File, PathBuf), String> {
+    for n in 0..1000 {
+        let file = match n {
+            0 => name.to_owned(),
+            n => format!("{name}-{n}"),
+        };
+        let path = dir.join(file);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(f) => return Ok((f, path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+    }
+    Err(format!("too many files named {name} in {}", dir.display()))
+}
+
 /// Bytes in one chunk of an upload. Each is written under the lock typing
 /// shares, so a small one keeps a slow link from holding up keystrokes for
 /// long.
 const UPLOAD_CHUNK: usize = 64 << 10;
+
+/// Bounds a write to the server by [`WRITE_WAIT`], so one that stalls ends
+/// the connection instead of holding the writer's lock, and typing with it,
+/// for ever.
+fn bound_writes(stream: &UnixStream) -> Result<(), String> {
+    stream
+        .set_write_timeout(Some(WRITE_WAIT))
+        .map_err(|e| format!("cannot bound writes to the server: {e}"))
+}
+
+/// `wrote`, a write to the server's connection `stream`; a failed one, a
+/// timed-out one too, may have left half a frame on the wire, so the
+/// connection is let go and the error is one nobody retries (a timeout
+/// would be resent whole behind its own prefix).
+fn drop_on_failure<T>(stream: &UnixStream, wrote: std::io::Result<T>) -> std::io::Result<T> {
+    use std::io::ErrorKind::{Interrupted, TimedOut, WouldBlock};
+    let Err(e) = wrote else { return wrote };
+    let _ = stream.shutdown(Shutdown::Both);
+    Err(match e.kind() {
+        WouldBlock | TimedOut | Interrupted => std::io::ErrorKind::BrokenPipe.into(),
+        _ => e,
+    })
+}
+
+/// The bytes of file data in one chunk's `terminal.upload` arguments.
+fn chunk_len(args: &[(String, Value)]) -> u64 {
+    args.iter()
+        .find_map(|(k, v)| match v {
+            Value::Bytes(b) if k == "data" => Some(b.len() as u64),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+/// How long a write to the server may take before the connection is let go.
+const WRITE_WAIT: Duration = Duration::from_secs(30);
 
 /// How long the server may take to answer one chunk of an upload.
 const UPLOAD_WAIT: Duration = Duration::from_secs(30);
@@ -1647,7 +1783,8 @@ impl std::io::Write for ConnWriter {
         if self.1.load(Ordering::SeqCst) || self.0.conn_gen.load(Ordering::SeqCst) != self.2 {
             return Err(std::io::ErrorKind::BrokenPipe.into());
         }
-        conn.write_raw(buf)?;
+        let wrote = conn.write_raw(buf);
+        drop_on_failure(&lock(&self.0.stream), wrote)?;
         Ok(buf.len())
     }
 
@@ -1677,6 +1814,7 @@ impl Block {
             Missed::Retry(why) | Missed::Broken(why, _) => why,
             Missed::Dropped => "the server let the client go".into(),
         })?;
+        bound_writes(&opened.stream)?;
         let (revive, revived) = std::sync::mpsc::channel();
         let shared = Arc::new(Block {
             block,
@@ -1703,6 +1841,9 @@ impl Block {
             uploads: opened
                 .features
                 .contains(Features::BLOCK_CALL.union(Features::UPLOAD)),
+            downloads: opened
+                .features
+                .contains(Features::BLOCK_CALL.union(Features::DOWNLOAD)),
             uploading: Mutex::new(HashMap::new()),
             forwards: opened.features.contains(Features::PORT_FORWARD),
             forwarder: Mutex::new(None),
@@ -1735,6 +1876,12 @@ impl Block {
     /// screen again (an attached client's takeover), and the lease is
     /// asked for again if wanted, as silence may have lost it.
     fn revive(&self, opened: Opened) {
+        if bound_writes(&opened.stream).is_err() {
+            // Unbounded writes could hang the pane: let the connection go
+            // and the pane reconnects.
+            let _ = opened.stream.shutdown(Shutdown::Both);
+            return;
+        }
         *lock(&self.takeover) = opened.takeover;
         {
             // The runs of the old connection end before the new one is
@@ -1759,7 +1906,7 @@ impl Block {
         let req = self.next.fetch_add(1, Ordering::Relaxed);
         let conn = &mut self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         // A failed send ends the reader too, which ends the pane.
-        let _ = conn.send(&make(req));
+        let _ = drop_on_failure(&lock(&self.stream), conn.send(&make(req)));
         req
     }
 
@@ -1796,7 +1943,12 @@ impl Block {
     /// server does. A chunk the server leaves unanswered for [`UPLOAD_WAIT`],
     /// or a lost connection, ends it; see `rusty_mux_client::upload::send`
     /// for what an error after the last chunk means.
-    fn upload(self: &Arc<Self>, path: std::path::PathBuf, done: UploadDone) {
+    fn upload(
+        self: &Arc<Self>,
+        path: std::path::PathBuf,
+        progress: UploadProgress,
+        done: UploadDone,
+    ) {
         if !self.lease().held {
             return done(Err(
                 "Another client holds this block's input; take it over to send files.".into(),
@@ -1806,10 +1958,15 @@ impl Block {
             return done(Err("that is not a file".into()));
         };
         let block = Arc::clone(self);
-        std::thread::spawn(move || done(block.upload_file(&path, &name)));
+        std::thread::spawn(move || done(block.upload_file(&path, &name, &progress)));
     }
 
-    fn upload_file(&self, path: &std::path::Path, name: &str) -> Result<String, String> {
+    fn upload_file(
+        &self,
+        path: &std::path::Path,
+        name: &str,
+        progress: &UploadProgress,
+    ) -> Result<String, String> {
         // Looked at before it is opened: opening a FIFO would wait for a
         // writer for ever and the upload would never answer.
         let not_file = || format!("{} is not a file", path.display());
@@ -1822,7 +1979,11 @@ impl Block {
             return Err(not_file());
         }
         let id = self.block;
+        let total = looked.len();
+        let mut sent = 0u64;
+        let mut shown = None;
         rusty_mux_client::upload::send_with(name, &mut file, UPLOAD_CHUNK, |args| {
+            let len = chunk_len(&args);
             let (tx, rx) = channel();
             let mut args = Some(args);
             let req = self.send(|req| {
@@ -1837,11 +1998,81 @@ impl Block {
             // Answered by the reader; a lost connection drops the sender.
             let answer = rx.recv_timeout(UPLOAD_WAIT);
             lock(&self.uploading).remove(&req);
+            let text = answer
+                .map_err(|_| std::io::Error::other("the server did not answer"))?
+                .map_err(std::io::Error::other)?;
+            sent += len;
+            // Told when the percent moves, not once per chunk.
+            let percent = (sent.min(total) * 100).checked_div(total).unwrap_or(100);
+            if shown != Some(percent) {
+                shown = Some(percent);
+                progress(sent, total);
+            }
+            Ok(text)
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    /// Fetches the file at `path` in chunks, from a thread of its own, into
+    /// the Downloads folder and calls `done` with where it was saved. A chunk
+    /// left unanswered for [`UPLOAD_WAIT`], or a lost connection, ends it and
+    /// leaves no partial file.
+    fn download(self: &Arc<Self>, path: String, progress: DownloadProgress, done: DownloadDone) {
+        let Some(name) = saved_name(&path) else {
+            return done(Err(format!("{path} is not a file")));
+        };
+        let block = Arc::clone(self);
+        std::thread::spawn(move || done(block.download_file(&path, &name, &progress)));
+    }
+
+    fn download_file(
+        &self,
+        path: &str,
+        name: &str,
+        progress: &DownloadProgress,
+    ) -> Result<String, String> {
+        let dir = downloads_dir().ok_or("there is no Downloads folder")?;
+        let (mut file, saved) = create_unique(&dir, name)?;
+        let id = self.block;
+        let mut shown = None;
+        let told = |got: u64, total: u64| {
+            // Told when the percent moves, not once per chunk.
+            let percent = (got.min(total) * 100).checked_div(total).unwrap_or(100);
+            if shown != Some(percent) {
+                shown = Some(percent);
+                progress(got, total);
+            }
+        };
+        let fetched = rusty_mux_client::download::fetch_progress(path, &mut file, told, |args| {
+            let (tx, rx) = channel();
+            let mut args = Some(args);
+            let req = self.send(|req| {
+                lock(&self.uploading).insert(req, tx);
+                Message::BlockCall {
+                    req,
+                    block: id,
+                    method: "terminal.download".into(),
+                    args: args.take().unwrap_or_default(),
+                }
+            });
+            let answer = rx.recv_timeout(UPLOAD_WAIT);
+            lock(&self.uploading).remove(&req);
             answer
                 .map_err(|_| std::io::Error::other("the server did not answer"))?
                 .map_err(std::io::Error::other)
-        })
-        .map_err(|e| e.to_string())
+        });
+        // Writeback errors (a full quota, say) surface at the sync, not the
+        // write: the file counts as saved only once the sync succeeds.
+        let fetched = fetched.and_then(|size| file.sync_all().map(|()| size));
+        drop(file);
+        match fetched {
+            Ok(_) => Ok(saved.display().to_string()),
+            Err(e) => {
+                // Not the file asked for: leave none behind.
+                let _ = std::fs::remove_file(&saved);
+                Err(e.to_string())
+            }
+        }
     }
 
     /// Answers every waiting listing with `why`: its connection is gone.
@@ -1936,6 +2167,7 @@ impl Block {
         let (wants_tx, wants) = sync_channel(FORWARD_WANTS);
         let stop = Arc::new(AtomicBool::new(false));
         let (block, flag) = (Arc::clone(self), Arc::clone(&stop));
+        let told = Arc::clone(self);
         let id = RUNS.fetch_add(1, Ordering::Relaxed);
         let conn = self.conn_gen.load(Ordering::SeqCst);
         let spawned = std::thread::Builder::new()
@@ -1950,6 +2182,7 @@ impl Block {
                     &wants,
                     ConnWriter(Arc::clone(&block), Arc::clone(&flag), conn),
                     &|| flag.load(Ordering::SeqCst),
+                    Box::new(move |refused| told.refused(refused)),
                 );
                 if let forward::Ended::Lost(e) = ended {
                     eprintln!("rusty-mux-gui: block {}: forwards ended: {e}", block.block);
@@ -1976,6 +2209,18 @@ impl Block {
             wants: wants_tx,
             stop,
             ports: HashMap::new(),
+        }
+    }
+
+    /// Tells the window a forward ended with a reason, such as a dial
+    /// nothing answered.
+    fn refused(&self, refused: forward::Refused) {
+        if let Some(tell) = &*lock(&self.to_window) {
+            // A full feed drops the notice rather than stall the forwards.
+            let _ = tell.try_send(Feed::ForwardRefused {
+                port: refused.remote,
+                reason: refused.reason,
+            });
         }
     }
 
@@ -2349,13 +2594,66 @@ impl Drop for PaneWriter {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn a_host_is_the_resolved_destination_and_none_where_it_cannot_be_pinned() {
+        use super::host_id;
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!("rusty-mux-gui-host-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = dir.canonicalize().expect("canonical dir");
+        let (real, alias) = (dir.join("real.sock"), dir.join("alias.sock"));
+        std::fs::write(&real, b"").expect("file");
+        std::os::unix::fs::symlink(&real, &alias).expect("link");
+        let named = host_id(&alias).expect("a name");
+        assert_eq!(Some(named.as_str()), real.to_str(), "links are resolved");
+        assert_eq!(host_id(&real), Some(named));
+        assert_eq!(host_id(&dir.join("missing.sock")), None);
+        let raw = dir.join(std::ffi::OsStr::from_bytes(b"\xff.sock"));
+        std::fs::write(&raw, b"").expect("file");
+        assert_eq!(host_id(&raw), None, "no lossy name");
+        let deep = (0..8).fold(dir.clone(), |p, _| p.join("d".repeat(20)));
+        std::fs::create_dir_all(&deep).expect("deep");
+        std::fs::write(deep.join("s.sock"), b"").expect("file");
+        assert_eq!(
+            host_id(&deep.join("s.sock")),
+            None,
+            "too long to connect to"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
     use std::ffi::OsString;
 
     use rusty_mux_core::{BlockId, InputMode, SessionId, Size, WindowId};
     use rusty_mux_proto::{Entry, Message};
     use rusty_uuid::Uuid;
 
-    use super::{Follow, anchor, first_block, forwarded};
+    use super::{Follow, anchor, create_unique, first_block, forwarded, saved_name};
+    #[test]
+    fn a_download_is_saved_under_the_last_part_of_the_servers_path() {
+        assert_eq!(saved_name("/home/me/a b.txt").as_deref(), Some("a b.txt"));
+        assert_eq!(saved_name("C:\\dev\\x.log").as_deref(), Some("x.log"));
+        assert_eq!(saved_name("C:x").as_deref(), None, "a drive-relative name");
+        assert_eq!(saved_name("dir\\x.log").as_deref(), Some("x.log"));
+        assert_eq!(saved_name("x").as_deref(), Some("x"));
+        for bad in ["", "/", "/a/", "..", "/a/..", "."] {
+            assert_eq!(saved_name(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_taken_name_gets_a_number_and_nothing_is_replaced() {
+        let dir = std::env::temp_dir().join(format!("rusty-mux-gui-uniq-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let (_, first) = create_unique(&dir, "f.txt").expect("first");
+        std::fs::write(&first, b"keep").expect("write");
+        let (_, second) = create_unique(&dir, "f.txt").expect("second");
+        assert_eq!(second.file_name().and_then(|n| n.to_str()), Some("f.txt-1"));
+        assert_eq!(std::fs::read(&first).expect("read"), b"keep");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
 
     #[test]
     fn a_lease_change_while_the_explorer_starts_is_delivered_after_it() {
@@ -2403,6 +2701,45 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_that_stalls_lets_the_connection_go_and_is_not_retried() {
+        use std::io::{ErrorKind, Read, Write};
+        let (mut a, mut b) = std::os::unix::net::UnixStream::pair().expect("pair");
+        a.set_write_timeout(Some(std::time::Duration::from_millis(50)))
+            .expect("timeout");
+        // Nobody reads `b`: the buffer fills and the write stalls part-way.
+        let stalled = a.write_all(&vec![7u8; 64 << 20]);
+        assert_eq!(
+            stalled.as_ref().err().map(|e| e.kind()),
+            Some(ErrorKind::WouldBlock)
+        );
+        let kind = super::drop_on_failure(&a, stalled)
+            .expect_err("failed")
+            .kind();
+        assert_eq!(kind, ErrorKind::BrokenPipe, "not a kind to retry");
+        // The peer reads what was written, then the end of the connection.
+        let mut rest = Vec::new();
+        b.read_to_end(&mut rest).expect("ends");
+        assert!(!rest.is_empty() && rest.len() < 64 << 20, "a partial frame");
+        assert_eq!(super::drop_on_failure(&a, Ok(3)).expect("kept"), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_to_the_server_are_bounded_and_chunk_sizes_counted() {
+        let (a, _b) = std::os::unix::net::UnixStream::pair().expect("pair");
+        assert_eq!(a.write_timeout().expect("get"), None);
+        super::bound_writes(&a).expect("bound");
+        assert_eq!(a.write_timeout().expect("get"), Some(super::WRITE_WAIT));
+        let data = vec![(
+            "data".to_owned(),
+            rusty_mux_proto::schema::Value::Bytes(vec![0; 7]),
+        )];
+        assert_eq!(super::chunk_len(&data), 7);
+        assert_eq!(super::chunk_len(&[]), 0);
     }
 
     #[test]
