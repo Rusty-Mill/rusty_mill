@@ -205,6 +205,7 @@ Precise contracts used by this guide:
 | D203 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
 | D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
 | D208 | #705: Phase B paid run approved, 11 checkpoints, factory vs bare Claude CLI control, D44 cleanups off, $170 shadow ceiling, after #1320; supersedes D134 and D201's "not approved" for this run only | [stated] 2026-11-26 (705, 1320) |
+| D211 | #432: S1 may open as a draft PR before the S0 live Codex check; it leaves draft only with S0's result | [default] 2026-11-27 (432) |
 | D185 | #723: Nano confirms "Work cards ... 723" means start the #723 design now (supersedes D164's hold for #723 only); build waits for design approval | [stated] 2026-11-25 (723) |
 | D186 | #723: the composition's project layer is DOMAIN.md + the Ai Env Manager manifest, not `.factory/overlay.md` | [stated] 2026-11-17, recorded 2026-11-25 (723) |
 | D205 | #723: the lens composition design (PR #1871, `723-lens-composition-design.md`) is approved as written; build may start | [stated] 2026-11-26 (723) |
@@ -2028,6 +2029,16 @@ The first three were approved first. The last three were added to Q35 after that
 - SCB's API-key harness is not used (D38, D167).
 - The pre-registered rules stay as D201 approved them.
 - Review, merge and the other ask-first gates still apply.
+
+## D211. #432: S1 may open as a draft PR before the S0 live Codex check; it leaves draft only with S0's result
+
+**Decision.** D204's wait is met: the #600 builder code on D66's §8 list has merged on main (2053a9b9): #1404 (PR #1874), #1405 (PR #1875), and #1318 S1 to S6 (S5 PR #1889, S6 PR #1890, the sessions reader PRs #1901 and #1903). The D167 toy run and #1320 are runs, not builder work, so #432 doesn't wait for them. S1 may be built and opened as a **draft** PR before S0 has run. It stays draft, with no review requested, until Nano's S0 result is in the PR description: the `thread_id` round-trips into `codex exec resume`, and `-c` is accepted after `resume`. If S0 contradicts either point, S1 is revised before it leaves draft. Parse-level facts from a Codex CLI installed in the cloud container (no login, no API key, no model call), such as `codex exec resume --help` and whether `-c` and `--json` parse after `resume`, may go in the description early, labelled as not the live check.
+**Why.** A draft is reversible and gets no review, so the review and merge gate still waits on S0, as the design orders. S0 needs Nano's machine, so drafting first keeps the thread from idling.
+**Rejected.** Build nothing until S0 has run (slower, same merged result). Request review before S0 (the card asks for the check before building and for its result in the PR).
+**Tag.** [default] · remind-me: mem_9b11499bcae344258d5156e48eb86bf0
+**Key.** lel:432:s1-draft-before-s0
+**Source.** Caller question from the #432 build thread, 2026-11-27; `432-codex-session-resume-design.md` § Slices; D204; D164; `600-build-plan.md` §7 and §9; `1318-builder-launch-slices.md` §3 and §4; card #432's prompt. Numbered D211 (was D209) because open PRs #1871 (D205 to D207), #1927 (D208), #1930 (D209) and #1931 (D209, D210) hold the numbers before it.
+
 ## D185. #723: Nano's "Work cards ... 723" starts the #723 design now
 
 **Decision.** Nano's 2026-11-25 request "Work cards 600, 723, 724, 726, 732, and 1234" means start #723's design now. PR #1871 stays as the #723 design for his review. This supersedes D164's "the packs design (#723, D133, Q46 to Q48) ... stay for later" for #723 only; D164's other holds (#1456 and the other Backlog cards) stand. Building still waits for Nano's approval of the design on the card (D25), and ask-first gates and review/merge rules still apply.
