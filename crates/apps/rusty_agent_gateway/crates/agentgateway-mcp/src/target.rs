@@ -34,6 +34,7 @@ use rusty_mcp_client_native::{
 use crate::{
     gate::{GateError, TargetFilter},
     header_override::HeaderOverride,
+    identity::{Identity, IdentityError},
 };
 
 /// How many connections a target that speaks HTTP may have open at once.
@@ -49,6 +50,10 @@ pub enum TargetError {
     /// The target's tool filters did not compile.
     #[error(transparent)]
     Gate(#[from] GateError),
+
+    /// The target's identity block did not compile.
+    #[error(transparent)]
+    Identity(#[from] IdentityError),
 
     /// The subprocess could not be spawned.
     #[error("target `{name}`: spawning `{cmd}`: {source}")]
@@ -273,6 +278,8 @@ pub struct Target {
     /// aimed at one has nowhere to land, and is dropped rather than quietly
     /// appearing somewhere else.
     pub http: bool,
+    /// Who each call says it comes from, stamped from the caller's token.
+    pub identity: Identity,
     capabilities: ServerCapabilities,
     pool: Pool,
     /// What one operation (a call, or a whole paged listing) may take, from
@@ -316,6 +323,8 @@ impl Target {
         at: &str,
     ) -> Result<Self, TargetError> {
         let filter = TargetFilter::new(&config.filters, at)?;
+        let http = matches!(config.kind, McpTargetKind::Mcp(_));
+        let identity = Identity::new(config.identity.as_ref(), http, at)?;
         let name = config.name.clone();
         let timeout = call_timeout.unwrap_or(DEFAULT_CALL_TIMEOUT);
 
@@ -377,7 +386,8 @@ impl Target {
         Ok(Target {
             name,
             filter,
-            http: matches!(config.kind, McpTargetKind::Mcp(_)),
+            http,
+            identity,
             capabilities,
             pool: Pool {
                 state: Mutex::new(Slots {

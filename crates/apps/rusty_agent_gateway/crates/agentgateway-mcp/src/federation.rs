@@ -680,6 +680,21 @@ impl Federation {
         // An upstream failure skips the response phase. There is no result to
         // inspect, and asking a guardrail to approve a failure is not a
         // question it can answer.
+        // Identity is stamped last, after guardrails, so neither the caller
+        // nor a processor's rewrite can put a different actor on the call.
+        // It fails closed: a call that can't carry the caller's identity is
+        // refused rather than sent under someone else's.
+        if let Err(why) =
+            target
+                .identity
+                .stamp(&mut params.arguments, &mut upstream_headers, who.claims())
+        {
+            return Err(error(
+                ErrorCode::INVALID_REQUEST,
+                format!("tool `{federated}`: {why}"),
+            ));
+        }
+
         let result = match target.call(&params, &upstream_headers) {
             Ok(result) => result,
             Err(ClientError::Timeout) => {

@@ -421,6 +421,31 @@ An expression that does not compile is a startup failure, not a skipped rule —
 otherwise a typo in an `allow` silently serves nothing and a typo in a `deny`
 silently refuses nothing.
 
+### Stamping the caller's identity upstream
+
+A gateway extension (upstream agentgateway has no such field). A target's
+`identity` block makes the upstream see who the verified token says the caller
+is, never what the call claims:
+
+```yaml
+targets:
+  - name: board
+    mcp: { host: 127.0.0.1, port: 8790, path: /mcp }
+    identity:
+      strip: [actor, role, agent_id, agent_key]   # removed from every call
+      set:                                         # written back from the token
+        actor: "lel-gateway/{{jwt.lel.lens}}"
+      headers:                                     # HTTP targets only
+        x-lel-principal: "{{jwt.sub}}"
+```
+
+`{{jwt.<claim>}}` names one top-level string claim, whole (`jwt.lel.lens` is the
+claim called `lel.lens`). Stamping runs after every gate and guardrail, just
+before the upstream call, so neither the caller nor a processor's rewrite can
+change it. It fails closed: a call with no verified token, or a token missing a
+claim a template needs, is refused rather than sent unstamped. `strip` alone
+needs no token. `headers` on a `stdio` target is refused at startup.
+
 ## Guardrails
 
 An `mcpGuardrails` processor is an MCP-aware policy service the gateway

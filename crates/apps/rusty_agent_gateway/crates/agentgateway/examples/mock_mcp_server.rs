@@ -9,6 +9,9 @@
 //! and `tools/list` prompt, and it ends early when the caller cancels, so a
 //! timed-out call does not keep this process (and the test's stderr) alive.
 //!
+//! `MOCK_ECHO_ARGS=1` appends the call's arguments, as JSON, to each tool's
+//! reply, so a test can see exactly what the gateway sent upstream.
+//!
 //! `MOCK_PROMPTS` and `MOCK_RESOURCES` add prompts and resources. Both default
 //! to empty, and a server with neither advertises neither capability — which
 //! is what lets a test check that the gateway only claims what its targets can
@@ -69,18 +72,24 @@ fn main() -> std::io::Result<()> {
     // Only what this instance actually has is registered, and the server
     // advertises a capability only for what is registered, so a test can
     // check the gateway's own advertisement follows its targets.
+    let echo_args = std::env::var("MOCK_ECHO_ARGS").is_ok_and(|v| v == "1");
     let mut builder = Server::builder("mock-mcp-server", "0.1.0");
     for name in list("MOCK_TOOLS", "echo,ping") {
         let mut tool = Tool::new(name.clone(), object_schema());
         tool.description = Some(format!("{name} on {label}"));
         // The label is what lets a test tell which target served the call.
         let text = format!("{label}:{name}");
-        builder = builder.tool(tool, move |ctx, _call| {
+        builder = builder.tool(tool, move |ctx, call| {
             // Each call runs on a thread of its own, so a sleep here is slow
             // only for this call; startup and `tools/list` stay prompt.
             nap(delay, &ctx.cancel_token());
+            let reply = match (&call.arguments, echo_args) {
+                (Some(args), true) => format!("{text} {}", args.to_json_string()),
+                (None, true) => format!("{text} null"),
+                _ => text.clone(),
+            };
             Ok(CallToolResult {
-                content: vec![ContentBlock::text(text.clone())],
+                content: vec![ContentBlock::text(reply)],
                 ..CallToolResult::default()
             })
         });

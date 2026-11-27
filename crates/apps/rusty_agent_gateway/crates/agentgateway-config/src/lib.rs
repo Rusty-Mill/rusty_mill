@@ -40,8 +40,8 @@ mod policy;
 
 pub use backend::{
     AiBackend, AiProvider, AiProviderParams, Backend, BackendTarget, DynamicBackend, FilterAction,
-    McpBackend, McpTarget, McpTargetKind, NameMode, ServiceRef, SseTarget, StdioTarget,
-    StreamableHttpTarget, ToolFilter,
+    McpBackend, McpIdentity, McpTarget, McpTargetKind, NameMode, ServiceRef, SseTarget,
+    StdioTarget, StreamableHttpTarget, ToolFilter,
 };
 pub use inventory::{Health, NamedBackend, Service, ServicePorts, Workload};
 pub use matcher::{

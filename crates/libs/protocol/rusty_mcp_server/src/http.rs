@@ -370,6 +370,8 @@ impl Drop for Registered {
 /// session; otherwise its whole claims. `None` when the host ran no auth.
 ///
 /// The two forms carry different prefixes, so one can never equal the other.
+/// A token with no `iss` and one with `iss: ""` give the same key: both mean
+/// "no issuer", and a host that runs several issuers sets `iss` on each.
 fn owner_of(principal: Option<&Value>) -> Option<String> {
     let principal = principal?;
     match principal.get("sub").and_then(Value::as_str) {
@@ -574,7 +576,7 @@ impl HttpHandler {
             self.check_version_rules(headers, header_version.as_ref(), &message, has_session)?;
         // 2026-07-28 `_meta` requests are stateless: any session id is ignored.
         let session = if modern { None } else { looked_up? };
-        self.dispatch(message, header_version, modern, session, caller)
+        self.dispatch(message, header_version, modern, session, caller, owner)
     }
 
     /// The session a request names, refused with `404` when it is unknown,
@@ -1003,6 +1005,7 @@ impl HttpHandler {
         modern: bool,
         session: Option<Arc<Session>>,
         caller: Caller,
+        owner: Option<&str>,
     ) -> Result<Response, Response> {
         // What a request without `_meta` is taken to speak: its header, else
         // its session's revision, else the oldest revision that has no header.
@@ -1014,7 +1017,6 @@ impl HttpHandler {
             });
         let is_initialize =
             matches!(&message, Message::Request { method, .. } if method == "initialize");
-        let owner = owner_of(caller.principal.as_ref());
         if let (Some(session), Message::Notification { method, params }) = (&session, &message) {
             if method == "notifications/cancelled" {
                 let id = params
@@ -1061,7 +1063,9 @@ impl HttpHandler {
                     _ => json_reply(status, &reply),
                 };
                 if is_initialize && !modern {
-                    if let Some(id) = self.open_session(&reply, init_params, owner)? {
+                    if let Some(id) =
+                        self.open_session(&reply, init_params, owner.map(str::to_owned))?
+                    {
                         response = response.with_header(SESSION_HEADER, &id).map_err(|_| {
                             reject(
                                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1172,6 +1176,14 @@ mod owner_tests {
             .tool(Tool::new("noop", schema), |_c, _p| {
                 Ok(CallToolResult::default())
             })
+            // So the standalone GET stream is offered and its owner check is reached.
+            .notify_changes(
+                &crate::changes::ChangeBroadcaster::new(),
+                ChangeKinds {
+                    tools_list: true,
+                    ..ChangeKinds::default()
+                },
+            )
             .build()
             .unwrap();
         HttpHandler::new(Arc::new(server), HttpConfig::default())
@@ -1256,6 +1268,19 @@ mod owner_tests {
         let ended = send(&h, Method::Delete, Some(&id), "", claims(A));
         assert_eq!(ended.status.as_u16(), 200);
         assert_eq!(list(&h, &id, claims(A)), 404);
+    }
+
+    #[test]
+    fn another_principal_cannot_open_the_sessions_stream() {
+        let h = handler();
+        let id = open(&h, claims(A));
+        let b = r#"{"iss":"orch","sub":"b"}"#;
+        let stream = send(&h, Method::Get, Some(&id), "", claims(b));
+        assert_eq!(
+            stream.status.as_u16(),
+            404,
+            "same answer as an unknown session"
+        );
     }
 
     #[test]

@@ -170,6 +170,40 @@ pub struct McpTarget {
     /// Optional allow/deny rules over this target's tools.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filters: Vec<ToolFilter>,
+
+    /// Who the gateway says each call comes from, taken from the caller's
+    /// verified token. A gateway extension; upstream agentgateway has no such
+    /// field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<McpIdentity>,
+}
+
+/// Identity stamped on every `tools/call` to one target (Let Em Loose #1376).
+///
+/// Values are templates over the verified token's top-level claims:
+/// `{{jwt.sub}}`, `{{jwt.lel.lens}}` (a claim *named* `lel.lens`). Nothing the
+/// caller sends can supply them.
+///
+/// ```yaml
+/// identity:
+///   strip: [actor, role, agent_id, agent_key]
+///   set: { actor: "lel-gateway/{{jwt.lel.lens}}" }
+///   headers: { x-lel-principal: "{{jwt.sub}}" }
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIdentity {
+    /// Tool arguments removed from every call, whatever the caller sent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strip: Vec<String>,
+
+    /// Tool arguments set (overwriting) from the token.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub set: BTreeMap<String, String>,
+
+    /// Upstream request headers set from the token; HTTP targets only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
 }
 
 one_of_enum! {
