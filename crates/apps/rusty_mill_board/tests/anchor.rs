@@ -156,3 +156,29 @@ fn a_board_without_a_bbp_host_does_nothing() {
     );
     assert_eq!(board.anchor_tick().unwrap(), 0);
 }
+
+#[test]
+fn a_timed_out_verify_skips_only_its_task_and_the_pass_goes_on() {
+    let stuck = Err(InboxError::Host(
+        "`bbp verify` timed out after 120s; killed".into(),
+    ));
+    let (board, fake, first) = setup(vec![stuck, head(3, A)]);
+    let nano = board.roles().actor("nano", "human").unwrap();
+    let second = board.add(&nano, "run task T2", "", vec![]).unwrap().id;
+    board.bind_execution(second, link("T2"), &nano).unwrap();
+    assert_eq!(
+        board.anchor_tick().unwrap(),
+        1,
+        "the other task is still anchored"
+    );
+    assert_eq!(fake.asked.lock().unwrap().len(), 2);
+    let written: Vec<String> = [first, second]
+        .into_iter()
+        .flat_map(|id| anchors(&board, id))
+        .collect();
+    assert_eq!(written.len(), 1);
+    assert!(
+        written[0].contains(&format!("head={A}")),
+        "a timeout is never FAILED: {written:?}"
+    );
+}

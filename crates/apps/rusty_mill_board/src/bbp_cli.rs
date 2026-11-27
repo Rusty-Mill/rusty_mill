@@ -6,7 +6,8 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -21,13 +22,86 @@ use crate::inbox::{
 pub struct BbpCli {
     bin: PathBuf,
     root: PathBuf,
+    verify_deadline: Duration,
 }
 
 impl BbpCli {
     /// The host's `bbp` binary and the BBP task directory it serves.
     #[must_use]
     pub const fn new(bin: PathBuf, root: PathBuf) -> Self {
-        Self { bin, root }
+        Self {
+            bin,
+            root,
+            verify_deadline: VERIFY_DEADLINE,
+        }
+    }
+
+    /// How long one `bbp verify` may run before it is killed and logged as a host
+    /// error, so a stuck verifier never stalls the anchor pass. Default: [`VERIFY_DEADLINE`].
+    #[must_use]
+    pub const fn with_verify_deadline(mut self, deadline: Duration) -> Self {
+        self.verify_deadline = deadline;
+        self
+    }
+
+    /// Run `bbp <args>` with a deadline and a stdout ceiling of `max` bytes: its exit
+    /// status, stdout and (bounded) stderr. Past the deadline the child is killed and
+    /// this is [`InboxError::Host`]. The pipe readers are not joined then: a grandchild
+    /// (the guard's `sudo` target) may still hold the pipes, and must not block the caller.
+    fn run_deadline(
+        &self,
+        args: &[String],
+        max: u64,
+        deadline: Duration,
+    ) -> Result<(ExitStatus, Vec<u8>, String), InboxError> {
+        let host = |e: std::io::Error| InboxError::Host(format!("{}: {e}", self.bin.display()));
+        let mut child = Command::new(&self.bin)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(host)?;
+        let out = child.stdout.take();
+        let err = child.stderr.take();
+        let out_reader = std::thread::spawn(move || {
+            let mut body = Vec::new();
+            if let Some(o) = out {
+                let _ = o.take(max + 1).read_to_end(&mut body);
+            }
+            body
+        });
+        let err_reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(e) = err {
+                let _ = e.take(MAX_ERR).read_to_string(&mut text);
+            }
+            text
+        });
+        let until = Instant::now() + deadline;
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(host)? {
+                break status;
+            }
+            if Instant::now() >= until {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(InboxError::Host(format!(
+                    "`bbp {}` timed out after {}s; killed",
+                    args.first().map_or("", String::as_str),
+                    deadline.as_secs_f32()
+                )));
+            }
+            std::thread::sleep(POLL);
+        };
+        let body = out_reader.join().unwrap_or_default();
+        let stderr = err_reader.join().unwrap_or_default();
+        if body.len() as u64 > max {
+            return Err(InboxError::Host(format!(
+                "the host's answer is over {max} bytes; refused"
+            )));
+        }
+        Ok((status, body, stderr))
     }
 
     /// Run `bbp <args>` and parse what it prints on success.
@@ -160,6 +234,16 @@ const MAX_CLAIMS: u64 = 8 << 20;
 /// The most stderr kept from a bounded run.
 const MAX_ERR: u64 = 16 << 10;
 
+/// The most `bbp verify` may print: its answer is one short JSON object.
+const MAX_VERIFY: u64 = 64 << 10;
+
+/// The default deadline for one `bbp verify`. Verify reads one task's log
+/// once; minutes means the host is stuck, not busy.
+pub const VERIFY_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How often a deadline-bound run checks whether its child has exited.
+const POLL: Duration = Duration::from_millis(20);
+
 fn valid_task(t: &str) -> bool {
     !t.is_empty() && !t.contains(',') && !t.starts_with("--")
 }
@@ -266,8 +350,9 @@ impl Escalations for BbpCli {
     }
 
     /// `bbp` prints `bbp: <reason>` and exits 1 when it refuses; that is the answer, recorded
-    /// by the caller. Anything else (no binary, the guard's exit 64, a signal) is
-    /// [`InboxError::Host`], so a broken deploy never reads as a rewritten log.
+    /// by the caller. Anything else (no binary, the guard's exit 64, a signal, a run past
+    /// the deadline) is [`InboxError::Host`], so a broken or stuck deploy never reads as a
+    /// rewritten log.
     fn verify(
         &self,
         task: &str,
@@ -286,21 +371,17 @@ impl Escalations for BbpCli {
         if let Some(h) = expect {
             argv.extend(["--expect".to_owned(), h.to_owned()]);
         }
-        let out = Command::new(&self.bin)
-            .args(&argv)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| InboxError::Host(format!("{}: {e}", self.bin.display())))?;
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if out.status.code() == Some(1)
+        let (status, stdout, stderr) =
+            self.run_deadline(&argv, MAX_VERIFY, self.verify_deadline)?;
+        if status.code() == Some(1)
             && let Some(reason) = stderr.trim().strip_prefix("bbp: ")
         {
             return Ok(Err(reason.to_owned()));
         }
-        if !out.status.success() {
+        if !status.success() {
             return Err(InboxError::Host(stderr.trim().to_owned()));
         }
-        let v: VerifyOut = serde_json::from_slice(&out.stdout)
+        let v: VerifyOut = serde_json::from_slice(&stdout)
             .map_err(|e| InboxError::Host(format!("unreadable verify: {e}")))?;
         Ok(Ok(Verified {
             lines: v.lines,

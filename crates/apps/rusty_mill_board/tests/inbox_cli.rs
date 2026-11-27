@@ -280,3 +280,60 @@ fn a_failing_claims_host_reports_its_stderr() {
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     assert!(matches!(cli.claims("C1"), Err(InboxError::Host(m)) if m.contains("claims.json")));
 }
+
+/// A stand-in `bbp` whose `verify` runs `body` (shell), in a fresh dir.
+fn verifier(tag: &str, body: &str) -> (PathBuf, MutexGuard<'static, ()>) {
+    let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let dir = std::env::temp_dir().join(format!("mill_verify_{}_{tag}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("bbp");
+    fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    (bin, serial)
+}
+
+#[test]
+fn a_stuck_verify_is_killed_at_its_deadline_as_a_host_error() {
+    let (bin, _serial) = verifier("stuck", "exec sleep 30");
+    let cli = BbpCli::new(bin, "/srv/bbp".into())
+        .with_verify_deadline(std::time::Duration::from_millis(200));
+    let started = std::time::Instant::now();
+    let err = cli.verify("C1", None).unwrap_err();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "it did not wait for the child"
+    );
+    match err {
+        InboxError::Host(m) => assert!(m.contains("timed out"), "{m}"),
+        other => panic!("a timeout is operational, not a refusal: {other:?}"),
+    }
+}
+
+#[test]
+fn a_verify_whose_grandchild_holds_the_pipes_still_returns_at_the_deadline() {
+    // As under the guard's sudo: killing the direct child leaves a process on the pipes.
+    let (bin, _serial) = verifier("grandchild", "sleep 30 &\nwait");
+    let cli = BbpCli::new(bin, "/srv/bbp".into())
+        .with_verify_deadline(std::time::Duration::from_millis(200));
+    let started = std::time::Instant::now();
+    assert!(matches!(cli.verify("C1", None), Err(InboxError::Host(_))));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[test]
+fn verify_reads_a_head_and_records_a_refusal() {
+    let (bin, _serial) = verifier(
+        "answers",
+        r#"case "$*" in *--expect*) echo 'bbp: expected head not found' >&2; exit 1;; esac
+echo '{"lines":3,"unchained":0,"head":"ab","partial":false,"expect_found":null}'"#,
+    );
+    let cli = BbpCli::new(bin, "/srv/bbp".into());
+    let ok = cli.verify("C1", None).unwrap().unwrap();
+    assert_eq!((ok.lines, ok.unchained, ok.head.as_str()), (3, 0, "ab"));
+    let refused = cli
+        .verify("C1", Some(&"0".repeat(64)))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused, "expected head not found");
+}
