@@ -29,7 +29,7 @@ A server call limited to list, stat and touched-by, scoped to the session worksp
 ## Order
 
 1. Server call and ctl form (cloud-buildable, owner gate).
-2. TUI text tree (cloud-buildable): lists, then shows the size and age of the row under the cursor and a letter beside each changed file (`*` on a directory with a change below it). Tree actions follow, each with its own gate: copy path is built (`y`, OSC 52, D374); `c` cd is built with a confirm step (D375/D376, needs Nano's confirmation on its PR, Q107); open in an editor is not.
+2. TUI text tree (cloud-buildable): lists, then shows the size and age of the row under the cursor and a letter beside each changed file (`*` on a directory with a change below it). Tree actions follow, each with its own gate: copy path is built (`y`, OSC 52, D374); `c` cd is built with a confirm step (D375/D376, needs Nano's confirmation on its PR, Q107); `o` open in editor is built over `Launch.workspace_of` (D378): a new block in the same window, started in the tree's block's workspace, running the server account's `$EDITOR`; it needs the lease and the new bit, and says only where the block starts, not that it opens the picked file (file identity is unresolved, D377).
 3. GUI panel on the D60 panel tokens (needs a Windows GUI build; not cloud-buildable).
 
 ## Open in editor needs the block's own workspace (D377)
@@ -47,7 +47,7 @@ The action is not built. The tree names a file relative to the block's workspace
 - **C (rejected): a call returning an absolute path.** The held handle's `/proc` path means nothing to a client, and a real path can be renamed or swapped after it is read, which is the race D342 exists to prevent.
 - **D (rejected): expose the configured directory.** Not authoritative once a shell has moved or the directory was renamed.
 
-**First slice, when Nano says go:** the Feature bit and `Launch.workspace_of` in `rusty_mux_proto`, the server resolution with a test per refusal (no lease, agent block, unknown root, both `cwd` and `workspace_of`, bit not negotiated), and the `rusty-mux-ctl` form. It establishes the workspace only (guarantee 1). The TUI `o` follows and may claim no more than that, so it does not call the opened file the one picked while file identity is unresolved; the GUI last.
+**First slice (Nano's go, D378; built: the bit, the field and the server resolution with the tests below; the `rusty-mux-ctl` form is not):** the Feature bit and `Launch.workspace_of` in `rusty_mux_proto`, the server resolution with a test per refusal (no lease, agent block, unknown root, both `cwd` and `workspace_of`, bit not negotiated). It establishes the workspace only (guarantee 1). The TUI `o` follows and may claim no more than that, so it does not call the opened file the one picked while file identity is unresolved; the GUI last.
 
 **For Nano:** which program runs. (a) the client names the program and arguments in `Launch` (recommended: it already travels there, no server policy; a remote mux needs the editor installed, and `sh -c 'exec ${EDITOR:-vi} "$1"'` uses the server account's `$EDITOR`); (b) a server-side rule picks the editor; (c) drop the editor and keep copy path (D374). Also the wire itself: the bit and field are an owner gate, with Nano's words on the PR that builds them.
 

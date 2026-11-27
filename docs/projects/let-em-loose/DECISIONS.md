@@ -211,6 +211,7 @@ Precise contracts used by this guide:
 | D219 | #1414: additive `project` and `memory_type` on remind-me's POST /api/memories approved; built on a rusty-remind-me card; lessons wait for it | [stated] 2026-11-27 (1414) |
 | D220 | #1416: the LEL tab reads claims through a new read-only `bbp claims` verb and Mill Board `lel_claims`/`lel_spend` | [stated] 2026-11-27 (1416) |
 | D221 | #1416: `bbp claims` prints a plain array of claim views; brief text is not served yet | [default] 2026-11-27 (1416) |
+| D222 | #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR | [default] 2026-11-27 (1416) |
 
 ## D1. Lenses, not stages
 
@@ -2064,3 +2065,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default]
 **Key.** lel:1416:claims-verb-shape
 **Source.** let-em-loose-expert, 2026-11-27; `lel_map.rs` `Intent`; D220.
+
+## D222. #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR
+
+**Decision.** `gui/lel_act.rs` builds the `inbox_act` arguments from the displayed row: `id`, the displayed `rev` as the fence, and `dry_run: true` first, then the same call with `dry_run: false`. A stale rev is shown and the inbox re-read, never resent. Reject on a whole-task stop needs a reason; Choose must name a candidate; Approve on a taste call is refused ("choose instead"). Approve on an irreversible claim opens the D58 confirm (Cancel focus first, Reject, "Accept claim"; no execution wording). "Try both builds" lays the candidates side by side and launches nothing (Q43 interim). Slice 4 needs only the existing `inbox_list` and `inbox_act`. The new read-only claims, intent and spend endpoints (D173 public API change) stay out of this PR and go in their own, as the slice plan says.
+**Why.** The slice plan orders one small PR per slice, and the rusty_term crate has no dependency on the Mill Board. Keeping the action model free of I/O makes the fence rules testable.
+**Rejected.** Retrying on a stale rev; bundling the endpoints with the view model.
+**Tag.** [default]
+**Key.** lel:1416:slice4-actions
+**Source.** `1416-lel-tab-slice-plan.md` slices 3-4; D58, D173, D174; `rusty_mill_board` `inbox_act` and `Board::inbox_act` (`stale_rev:` refusal); let-em-loose-expert, 2026-11-27. Nano's 2026-11-27 "1 & 2" (cmsg_014f6o52E2iAAAgMm9v8hh1w7JrZ4XyJ3ufQT3qe7ayEWb) approved the read endpoints; what it answered is not restated in the thread, so no `[stated]` row is written for it. D220 and D221 are left free for the endpoint PR. Numbered D222 because open PRs hold D179-D219.
