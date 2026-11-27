@@ -771,6 +771,7 @@ fn launch(value: &Value) -> Result<Launch, String> {
         },
         hold,
         agent: agent_meta(value)?,
+        workspace_of: None,
     })
 }
 
