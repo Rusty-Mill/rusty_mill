@@ -11,17 +11,23 @@
 //! and holdout suite are read from it. No model is called, so a canary costs
 //! nothing.
 //!
-//! The caller's deadline must outlast the whole run, cleanup included: the
-//! sandbox runs in its own process group and only this process's wall timer
-//! kills it, so a caller that kills `bbp canary` first would orphan the
-//! workload. With a [`Budget`] (`--budget-secs N`, counted from this
+//! The sandbox runs in its own process group and only this process's wall
+//! timer kills it, so a caller that kills `bbp canary` before that timer
+//! fires would orphan the workload. With a [`Budget`] (`--budget-secs N`, counted from this
 //! process's start) the run is refused when the budget can't cover the wall
 //! limit plus [`CLEANUP`]: once up front, and again after all setup (the
 //! lock wait, checkout, test listing and scratch directory), immediately
 //! before the sandbox launches. A refusal starts nothing and is the report's
-//! `error`. [`CLEANUP`] is a reserve, not a guarantee: it is time left for the
-//! wall timer's group kill and reaping to finish before the caller's
-//! deadline, and nothing here bounds how long that teardown takes.
+//! `error`.
+//!
+//! What this guarantees: a run that starts sends `SIGKILL` to the whole
+//! sandbox group at its wall limit, at least [`CLEANUP`] before the budget
+//! ends. `SIGKILL` can't be caught and the sandbox's seccomp filter denies
+//! `setsid`/`setpgid` (`rusty_sandbox` `helper::group_lock`), so once it is
+//! sent no workload process survives, even if the caller then kills this
+//! process. What it doesn't: [`CLEANUP`] is a reserve for reaping and
+//! printing the report, not a bound on them. If those outlast it, the caller
+//! loses the report and records a timeout, but nothing is orphaned.
 
 use crate::baseline::{self, Baseline};
 use crate::profiles::{self, ProfileSet};
@@ -31,8 +37,8 @@ use rusty_sandbox::Executor;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// Time reserved for the sandbox's teardown after its wall timer fires. A
-/// reserve only: teardown is not bounded by it.
+/// Time between the sandbox's group kill and the end of the budget, for
+/// reaping and the report. A reserve only: neither is bounded by it.
 pub const CLEANUP: Duration = Duration::from_secs(60);
 
 /// How long the caller will wait for this run, from `started`.
