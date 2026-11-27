@@ -100,7 +100,7 @@ enum Inbound {
     /// Stdin ended or failed.
     End,
     /// A message on the connection of this generation.
-    Frame(u64, Message),
+    Frame(u64, Box<Message>),
     /// The connection of this generation ended.
     Dropped(u64),
 }
@@ -239,7 +239,7 @@ pub(crate) fn run(
                 return Ok(Exit::Ok);
             }
             Inbound::Frame(generation, message) if generation == owner.link.generation => {
-                owner.answer(message)?;
+                owner.answer(*message)?;
             }
             Inbound::Dropped(generation) if generation == owner.link.generation => {
                 if !owner.reconnect()? {
@@ -525,7 +525,7 @@ fn open(
         loop {
             match conn.recv() {
                 Ok(message) => {
-                    if tx.send(Inbound::Frame(generation, message)).is_err() {
+                    if tx.send(Inbound::Frame(generation, Box::new(message))).is_err() {
                         return;
                     }
                 }
