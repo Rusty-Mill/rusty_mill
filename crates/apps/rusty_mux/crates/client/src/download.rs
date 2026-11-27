@@ -42,6 +42,17 @@ pub fn fetch<S: Read + Write>(
 pub fn fetch_with(
     path: &str,
     out: &mut impl Write,
+    call: impl FnMut(Vec<(String, Value)>) -> io::Result<String>,
+) -> io::Result<u64> {
+    fetch_progress(path, out, |_, _| {}, call)
+}
+
+/// [`fetch_with`] that calls `progress` with the bytes written and the
+/// file's size after each chunk.
+pub fn fetch_progress(
+    path: &str,
+    out: &mut impl Write,
+    mut progress: impl FnMut(u64, u64),
     mut call: impl FnMut(Vec<(String, Value)>) -> io::Result<String>,
 ) -> io::Result<u64> {
     let mut offset = 0u64;
@@ -71,6 +82,7 @@ pub fn fetch_with(
         }
         out.write_all(&data)?;
         offset += data.len() as u64;
+        progress(offset, size);
         if offset >= size {
             return Ok(size);
         }
@@ -161,6 +173,34 @@ mod tests {
     #[test]
     fn a_file_comes_in_pieces_and_is_put_together() {
         assert_eq!(fetch_from(b"0123456789"), b"0123456789");
+    }
+
+    #[test]
+    fn progress_counts_the_bytes_written_up_to_the_size() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || serve(theirs, b"0123456789"));
+        let mut conn = Conn::new(ours);
+        let block = BlockId::from_uuid(rusty_uuid::Uuid::nil());
+        let (mut req, mut seen, mut out) = (1, Vec::new(), Vec::new());
+        fetch_progress(
+            "f",
+            &mut out,
+            |got, total| seen.push((got, total)),
+            |args| {
+                let method = "terminal.download".into();
+                conn.send(&Message::BlockCall {
+                    req,
+                    block,
+                    method,
+                    args,
+                })?;
+                let text = reply(&mut conn, req);
+                req += 1;
+                text
+            },
+        )
+        .unwrap();
+        assert_eq!(seen, [(4, 10), (8, 10), (10, 10)]);
     }
 
     #[test]

@@ -276,6 +276,24 @@ struct WhoArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct LelArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// The BBP task id: the `task` of an `inbox_list` row, or a card's `bbp_task`.
+    task: String,
+}
+
+/// `[{id, spent, budget}]` from a claims array: the spend meter's per-claim numbers (Q42).
+fn spend_of(claims: &Value) -> Value {
+    let rows = claims.as_array().map_or(&[][..], Vec::as_slice);
+    Value::Array(
+        rows.iter()
+            .map(|c| json!({"id": c["id"], "spent": c["spent"], "budget": c["budget"]}))
+            .collect(),
+    )
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct InboxActArgs {
     #[serde(flatten)]
     who: Who,
@@ -1484,6 +1502,22 @@ pub fn ops() -> Vec<Op> {
                 Ok(json!(
                     b.inbox_act(&who, &a.id, a.rev, &a.action, a.dry_run)?
                 ))
+            },
+        ),
+        op(
+            "lel_claims",
+            "The claims of one BBP task for the Let Em Loose tab (needs an authenticated admin credential; read-only): a list of claim views with `id`, `text`, `status`, `confidence`, `spent`, `budget`, `deps`, `domains` and `candidates`. `task` must be linked from a card you can work in.",
+            |b, i, a: LelArgs| {
+                let who = bound_acting(b, i, &a.who)?;
+                b.lel_claims(&who, &a.task)
+            },
+        ),
+        op(
+            "lel_spend",
+            "Per-claim spend of one BBP task for the Let Em Loose tab (needs an authenticated admin credential; read-only): a list of `{id, spent, budget}`, from the same read as `lel_claims`.",
+            |b, i, a: LelArgs| {
+                let who = bound_acting(b, i, &a.who)?;
+                Ok(spend_of(&b.lel_claims(&who, &a.task)?))
             },
         ),
         op(

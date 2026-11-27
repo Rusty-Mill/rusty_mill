@@ -36,11 +36,12 @@ use orch_core::AgentId;
 use orch_lens::breaker::{judge, Breaker, Mark, Outcome};
 use orch_lens::call::{Ctx, Models};
 use orch_lens::card::Card;
+use orch_lens::compose::{domain_set, Limits};
 use orch_lens::config::Tools;
-use orch_lens::context::{prefix, Line};
+use orch_lens::context::{Frame, Line};
 use orch_lens::meter::{Meter, Stop};
 use orch_lens::record::{Review, Tally};
-use orch_lens::round::{round, Board, Halt, View};
+use orch_lens::round::{round, Board, Composing, Halt, View};
 use orch_lens::schedule::State;
 use orch_lens::taint::Taints;
 use orch_lens::{LensConfig, Model};
@@ -49,6 +50,7 @@ use rusty_bbp::ArtId;
 
 use super::assertions::{self, Grants};
 use super::bbp::{run_id, Child, Diffs, Rpc, Session};
+use super::catalog::Catalog;
 use super::check::DEFAULT_ASSERTIONS;
 use super::hunts::{Kit, Ordinary};
 use super::registry::Registry;
@@ -305,6 +307,8 @@ pub struct Prompts {
     pub rules: String,
     /// Each lens's own prompt, by lens id.
     pub lens: BTreeMap<String, String>,
+    /// #723: the Factory catalog when the config turns composition on.
+    pub catalog: Option<Catalog>,
 }
 
 /// Each lens's prefix, rebuilt whenever its seat sees a new brief (#598):
@@ -313,6 +317,9 @@ pub struct Prompts {
 struct Prefixes {
     text: BTreeMap<String, String>,
     built_on: BTreeMap<String, Option<ArtId>>,
+    /// Each lens's frame on the brief its prefix was built on, for
+    /// composed prefixes.
+    frame: BTreeMap<String, Frame>,
 }
 
 impl Prefixes {
@@ -324,11 +331,58 @@ impl Prefixes {
         if self.built_on.get(lens) == Some(&id) {
             return Ok(());
         }
-        let intent = seat.brief()?;
-        self.text
-            .insert(lens.to_owned(), prefix(&intent, &prompts.rules, prompt));
+        let frame = Frame::new(&seat.brief()?, &prompts.rules);
+        self.text.insert(lens.to_owned(), frame.wrap(prompt));
         self.built_on.insert(lens.to_owned(), id);
+        self.frame.insert(lens.to_owned(), frame);
         Ok(())
+    }
+
+    /// #723: `lens`'s frame and a plan per distinct domain set among
+    /// `cards`, built on the same brief as the flat prefix. Each job then
+    /// renders only the prefix that fits its provider. Empty when
+    /// composition is off. Files left out by the catalog's own limits are
+    /// logged here; the round reports what a provider's window left out.
+    fn composed(
+        &self,
+        lens: &str,
+        cards: &[Card],
+        prompts: &Prompts,
+        log: &mut String,
+    ) -> Result<BTreeMap<String, Composing>, String> {
+        let (Some(catalog), Some(prompt), Some(frame)) = (
+            prompts.catalog.as_ref(),
+            prompts.lens.get(lens),
+            self.frame.get(lens),
+        ) else {
+            return Ok(BTreeMap::new());
+        };
+        let mut plans = BTreeMap::new();
+        for card in cards {
+            let set = domain_set(&card.domains);
+            if plans.contains_key(&set) {
+                continue;
+            }
+            let plan = catalog.plan(prompt, &set)?;
+            for d in plan.dropped() {
+                let _ = writeln!(log, "{lens} [{}]: {d} left out to fit", set.join(", "));
+            }
+            plans.insert(set, plan);
+        }
+        let composing = Composing {
+            frame: frame.clone(),
+            plans,
+        };
+        Ok(BTreeMap::from([(lens.to_owned(), composing)]))
+    }
+}
+
+/// The directory holding `config`, `.` for a bare file name, so a root
+/// opened by descriptor (the #723 catalog) is never the empty path.
+fn config_dir(config: &Path) -> PathBuf {
+    match config.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+        _ => PathBuf::from("."),
     }
 }
 
@@ -407,6 +461,9 @@ pub fn passes(
                 .update(&lens.id, seat.as_mut(), prompts)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
             let cards = seat.cards(config);
+            let composed = prefixes
+                .composed(&lens.id, &cards, prompts, log)
+                .map_err(|e| format!("{}: {e}", lens.id))?;
             let calls = metering.meter.calls(metering.task);
             let seen = task_cards(seats, config);
             let now = Mark::of(calls, metering.meter.task_spent(metering.task), &seen);
@@ -438,6 +495,7 @@ pub fn passes(
                 cards: &cards,
                 lines: &lines,
                 prefixes: &prefixes.text,
+                composed: &composed,
                 records: &tracks,
             };
             let ctx = Ctx {
@@ -464,6 +522,16 @@ pub fn passes(
             guard.raise(&report.taints)?;
             keep(state).map_err(|e| format!("lens state not saved: {e}"))?;
             started += report.ran.len();
+            for (key, provider, dropped) in &report.trimmed {
+                let _ = writeln!(
+                    log,
+                    "pass {pass} {} {} {:?} {provider}: left out {} to fit its window",
+                    key.lens,
+                    key.claim,
+                    key.slot,
+                    dropped.join(", ")
+                );
+            }
             for (key, end) in &report.ran {
                 let _ = writeln!(
                     log,
@@ -544,7 +612,7 @@ pub fn run(o: &Options) -> Result<String, String> {
     let text = std::fs::read_to_string(&o.config)
         .map_err(|e| format!("cannot read {}: {e}", o.config.display()))?;
     let config = LensConfig::parse(&text).map_err(|e| format!("{}: {e}", o.config.display()))?;
-    let base = o.config.parent().map(PathBuf::from).unwrap_or_default();
+    let base = config_dir(&o.config);
     let rules = match &o.rules {
         Some(p) => {
             std::fs::read_to_string(p).map_err(|e| format!("cannot read {}: {e}", p.display()))?
@@ -572,9 +640,15 @@ pub fn run(o: &Options) -> Result<String, String> {
         None => Meter::new(config.ceilings, 0),
     };
     let mut seats: BTreeMap<String, Box<dyn Seat>> = BTreeMap::new();
+    let catalog = if config.compose {
+        Some(Catalog::open(&base, &o.repo, Limits::default())?)
+    } else {
+        None
+    };
     let mut prompts = Prompts {
         rules,
         lens: BTreeMap::new(),
+        catalog,
     };
     let run = run_id()?;
     let _ = writeln!(log, "run {run}");
@@ -1002,6 +1076,7 @@ mod tests {
                 .iter()
                 .map(|l| (l.id.clone(), l.id.clone()))
                 .collect(),
+            catalog: None,
         };
         let mut ceilings = cfg.ceilings;
         ceilings.task_calls = task_calls;
@@ -2119,5 +2194,84 @@ mod tests {
             options(argv("check c.json"), PathBuf::new()),
             Err(ArgsError::Usage(_))
         ));
+    }
+
+    #[test]
+    fn a_bare_config_name_lives_in_the_current_directory() {
+        assert_eq!(config_dir(Path::new("lenses.json")), PathBuf::from("."));
+        assert_eq!(config_dir(Path::new("./lenses.json")), PathBuf::from("."));
+        assert_eq!(
+            config_dir(Path::new("cfg/lenses.json")),
+            PathBuf::from("cfg")
+        );
+        assert_eq!(config_dir(Path::new("/")), PathBuf::from("."));
+    }
+
+    #[test]
+    fn composed_prefixes_differ_by_claim_domain_from_one_catalog() {
+        let root = std::env::temp_dir().join(format!("orch-run-compose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (factory, repo) = (root.join("factory"), root.join("repo"));
+        for (dir, rel, text) in [
+            (
+                &factory,
+                "domains.json",
+                r#"{"rust": {"knowledge": ["k/rust.md"]}, "tty": {"knowledge": ["k/tty.md"]}}"#,
+            ),
+            (&factory, "k/rust.md", "Ownership first."),
+            (&factory, "k/tty.md", "VT is a state machine."),
+            (&repo, "DOMAIN.md", "Dedup 20 TB."),
+        ] {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+            std::fs::write(path, text).expect("write");
+        }
+        let prompts = Prompts {
+            rules: "rules".to_owned(),
+            lens: BTreeMap::from([("adversary".to_owned(), "find faults".to_owned())]),
+            catalog: Some(Catalog::open(&factory, &repo, Limits::default()).expect("opens")),
+        };
+        let mut prefixes = Prefixes::default();
+        prefixes
+            .frame
+            .insert("adversary".to_owned(), Frame::new("the brief", "rules"));
+        let on = |id: u64, domains: &[&str]| Card {
+            domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+            ..card(id)
+        };
+        let cards = [on(1, &["rust"]), on(2, &["tty"]), on(3, &["rust"])];
+        let mut log = String::new();
+        let got = prefixes
+            .composed("adversary", &cards, &prompts, &mut log)
+            .expect("composes");
+        let plans = &got["adversary"].plans;
+        assert_eq!(plans.len(), 2, "one plan per domain set");
+        let frame = &got["adversary"].frame;
+        let (rust, tty) = (
+            &plans[&vec!["rust".to_owned()]],
+            &plans[&vec!["tty".to_owned()]],
+        );
+        let (rust_full, tty_full) = (frame.wrap(&rust.render(0)), frame.wrap(&tty.render(0)));
+        assert_ne!(rust_full, tty_full);
+        let base = orch_lens::context::prefix("the brief", "rules", "find faults");
+        assert_eq!(frame.wrap(&rust.render(rust.steps())), base);
+        assert_eq!(
+            rust.left_out(rust.steps()),
+            vec!["k/rust.md".to_owned(), "DOMAIN.md".to_owned()]
+        );
+        assert!(rust.dropped().is_empty());
+        assert!(
+            rust_full.contains("Ownership first.") && rust_full.contains("# Project\nDedup 20 TB.")
+        );
+        assert!(rust_full.starts_with("# Intent\nthe brief\n"));
+        assert!(tty_full.contains("VT is a state machine.") && !tty_full.contains("Ownership"));
+        let off = Prompts {
+            catalog: None,
+            ..prompts
+        };
+        assert!(prefixes
+            .composed("adversary", &cards, &off, &mut log)
+            .expect("ok")
+            .is_empty());
     }
 }

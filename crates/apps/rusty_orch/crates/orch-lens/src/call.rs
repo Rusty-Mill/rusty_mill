@@ -23,7 +23,7 @@ use orch_dispatch::{AgentError, ClassifiedError};
 
 use crate::class::DataClass;
 use crate::config::{Provider, Tools};
-use crate::context::{assemble, Parts, Refusal, Window};
+use crate::context::{fit, Parts, Refusal, Window};
 use crate::meter::{cost, worst_case, Meter, Stop};
 use crate::port::{Answer, Model, Question, Reply, Shape};
 use crate::post::{allowance, Post};
@@ -65,6 +65,9 @@ pub enum End {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Called {
     pub passed: Vec<(AgentId, String)>,
+    /// Composed sections each provider's context left out to fit its
+    /// window (#723), including those tried before a refusal.
+    pub trimmed: Vec<(AgentId, Vec<String>)>,
     pub end: End,
     /// A settlement that could not be saved. The saved reservation then
     /// settles at its worst case on restart; the shell should stop.
@@ -94,16 +97,26 @@ pub fn call(job: &Job, parts: &Parts<'_>, mut ctx: Ctx<'_>, models: &mut dyn Mod
         ..*parts
     };
     let mut passed = Vec::new();
+    let mut trimmed = Vec::new();
     let mut experiment = false;
     let mut unsaved = None;
     for &id in &job.providers {
-        match attempt(job, &parts, id, &mut ctx, models, &mut unsaved) {
+        match attempt(
+            job,
+            &parts,
+            id,
+            &mut ctx,
+            models,
+            &mut unsaved,
+            &mut trimmed,
+        ) {
             Step::Pass(reason) => {
                 passed.push((id, reason));
                 if let Some(e) = &unsaved {
                     let end = End::Unsaved(e.clone());
                     return Called {
                         passed,
+                        trimmed,
                         end,
                         unsaved,
                     };
@@ -116,6 +129,7 @@ pub fn call(job: &Job, parts: &Parts<'_>, mut ctx: Ctx<'_>, models: &mut dyn Mod
             Step::End(end) => {
                 return Called {
                     passed,
+                    trimmed,
                     end,
                     unsaved,
                 }
@@ -129,6 +143,7 @@ pub fn call(job: &Job, parts: &Parts<'_>, mut ctx: Ctx<'_>, models: &mut dyn Mod
     };
     Called {
         passed,
+        trimmed,
         end,
         unsaved,
     }
@@ -147,6 +162,7 @@ fn attempt(
     ctx: &mut Ctx<'_>,
     models: &mut dyn Models,
     unsaved: &mut Option<String>,
+    trimmed: &mut Vec<(AgentId, Vec<String>)>,
 ) -> Step {
     let providers = ctx.providers;
     let Some(provider) = providers.get(&id) else {
@@ -157,9 +173,21 @@ fn attempt(
         max_output_tokens: MAX_OUTPUT_TOKENS,
         clearance: provider.max_class,
     };
-    let (prefix, body) = match assemble(parts, window) {
-        Ok(text) => text,
-        Err(refusal) => return Step::Pass(refused(&refusal)),
+    let (prefix, body) = match fit(parts, window) {
+        Ok(f) => {
+            if !f.dropped.is_empty() {
+                trimmed.push((id, f.dropped));
+            }
+            (f.prefix, f.body)
+        }
+        Err(refusal) => {
+            if let Refusal::TooLarge { dropped, .. } = &refusal {
+                if !dropped.is_empty() {
+                    trimmed.push((id, dropped.clone()));
+                }
+            }
+            return Step::Pass(refused(&refusal));
+        }
     };
     let Some(model) = models.get(id, job.tools) else {
         return Step::Pass("not built".to_owned());
@@ -430,9 +458,14 @@ fn refused(r: &Refusal) -> String {
         Refusal::AboveClearance { card, clearance } => {
             format!("claim is {card:?}, provider cleared for {clearance:?}")
         }
-        Refusal::TooLarge { needed, room } => {
-            format!("context needs {needed} bytes, window holds {room}")
-        }
+        Refusal::TooLarge {
+            needed,
+            room,
+            dropped,
+        } if dropped.is_empty() => format!("context needs {needed} bytes, window holds {room}"),
+        Refusal::TooLarge { needed, room, .. } => format!(
+            "context needs {needed} bytes with every composed section left out, window holds {room}"
+        ),
     }
 }
 
@@ -593,7 +626,7 @@ mod tests {
         )]);
         let lens = PrincipalId("adversary".to_owned());
         let parts = Parts {
-            prefix: "# Intent\nx\n",
+            prefix: crate::context::Prefix::Flat("# Intent\nx\n"),
             card: &c,
             lens: &lens,
             phase: Phase::Informed,

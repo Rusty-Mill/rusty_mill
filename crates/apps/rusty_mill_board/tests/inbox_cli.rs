@@ -35,6 +35,7 @@ case "$1" in inbox) cat <<'J'
 {INBOX}
 J
 exit 0;; esac
+case "$1" in claims) cat '{claims}'; exit $?;; esac
 case "$1" in decision) cat '{answer}'; exit $?;; esac
 line="$*"
 case "$line" in *"--dry-run yes"*)
@@ -43,6 +44,7 @@ for f in {fences}; do case "$line" in *"--fence $f "*) echo '{{"Rejected":{{"cod
 echo '"Ok"'
 "#,
         calls = calls.display(),
+        claims = dir.join("claims.json").display(),
         answer = dir.join("decision.json").display(),
         fences = stale
             .iter()
@@ -240,4 +242,41 @@ fn a_lookup_that_does_not_answer_for_its_id_is_an_error() {
         cli.applied("C1", "dec-1"),
         Err(InboxError::Host(_))
     ));
+}
+
+#[test]
+fn claims_reads_the_host_array_with_the_exact_argv() {
+    let (bin, log, _serial) = fake("claims", &[]);
+    fs::write(
+        bin.with_file_name("claims.json"),
+        r#"[{"id":1,"spent":2,"budget":9}]"#,
+    )
+    .unwrap();
+    let cli = BbpCli::new(bin, "/srv/bbp".into());
+    let v = cli.claims("C1").unwrap();
+    assert_eq!(v[0]["budget"], 9);
+    assert_eq!(calls(&log), ["claims --dir /srv/bbp --task C1 --json yes"]);
+    assert!(matches!(cli.claims("--x"), Err(InboxError::Invalid(_))));
+    assert_eq!(calls(&log).len(), 1, "a bad id runs nothing");
+}
+
+#[test]
+fn an_oversized_claims_answer_is_refused_not_buffered() {
+    let (bin, _log, _serial) = fake("big", &[]);
+    // Valid JSON, 9 MiB: over the 8 MiB ceiling.
+    let big = format!("[\"{}\"]", "x".repeat(9 << 20));
+    fs::write(bin.with_file_name("claims.json"), big).unwrap();
+    let cli = BbpCli::new(bin, "/srv/bbp".into());
+    let Err(InboxError::Host(why)) = cli.claims("C1") else {
+        panic!("expected a refusal")
+    };
+    assert!(why.contains("over") && why.contains("refused"), "{why}");
+}
+
+#[test]
+fn a_failing_claims_host_reports_its_stderr() {
+    let (bin, _log, _serial) = fake("fail", &[]);
+    // No claims.json: the stand-in's `cat` fails with a message on stderr.
+    let cli = BbpCli::new(bin, "/srv/bbp".into());
+    assert!(matches!(cli.claims("C1"), Err(InboxError::Host(m)) if m.contains("claims.json")));
 }
