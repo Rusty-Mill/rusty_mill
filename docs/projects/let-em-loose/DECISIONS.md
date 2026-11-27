@@ -211,7 +211,7 @@ Precise contracts used by this guide:
 | D209 | #1382: the token mint lives in a new sans-IO crate `orch-token`; orch-bbp writes the token file and `jail.json` slot | [default] 2026-11-27 (1382) |
 | D212 | #1382: code waits for the gateway cards #1375-#1379; only the slice plan merges now | [stated] 2026-11-27 (1382) |
 | D213 | #1551: the D132 guard admits `verify` beside `inbox` and `human`, same `--dir` rules | [default] 2026-11-27 (1551) |
-| D214 | #1551: the anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off unless set; BaileyAi sets 900 | [default] 2026-11-27 (1551) |
+| D214 | #1551: the anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off unless set; BaileyAi sets 900 only after design approval and host authorisation | [default] 2026-11-27 (1551) |
 | D215 | #1551: the claim-log anchor lives on the BaileyAi inbox board only; an off-machine copy waits for outside agents | [stated] 2026-11-27 (1551) |
 | D216 | #1414: `rusty_orch lens why` output joins `bbp why --claim` steps to lens_record jobs; model and cost not reported yet (Q67) | [default] 2026-11-27 (1414) |
 | D217 | #1415: `bbp canary` prints a profile report on a resolved ref; orch `Canary` adapter keys failures `canary:<sha>:<profile>`; $0, runs under any `watch_usd` | [default] 2026-11-27 (1415) |
@@ -2067,21 +2067,23 @@ The first three were approved first. The last three were added to Q35 after that
 
 ## D213. #1551: the D132 guard admits `verify` beside `inbox` and `human`, same `--dir` rules
 
-**Decision.** For the #1551 claim-log anchor, `mill-board-bbp-guard` admits `verify` as a third verb. The rules D132 sets for the other two apply unchanged: `--dir /srv/lel/bbp` exactly as `bbp_cli.rs` gives it, and any further `--dir` refused. `--task` is checked as for `inbox`, and `--expect` is accepted only as 64 lowercase hex characters. Deploying the change on BaileyAi waits for Nano's approval of the #1551 design (D25). It is a host change that D131's M1 authorisation does not cover.
+**Decision.** For the #1551 claim-log anchor, `mill-board-bbp-guard` admits `verify` as a third verb. The rules D132 sets for the other two apply unchanged: `--dir /srv/lel/bbp` exactly as `bbp_cli.rs` gives it, and any further `--dir` refused. `--task` is checked as for `inbox`, and `--expect` is accepted only as 64 lowercase hex characters. Changing the guard on BaileyAi needs both of two separate approvals from Nano: his approval of the #1551 design (D25), and his own authorisation of this host change. D131's M1 authorisation does not cover it, and deploying on BaileyAi stays ask-first (D128), so design approval alone does not allow it.
 **Why.** `bbp verify` never modifies the log (D70) and stays on the one directory. The verb list is the `[default]` half of D132 (mechanism), so widening it reverses no `[stated]` entry, and narrowing it back is one line.
 **Rejected.** A second guard script for `verify` (two doors to keep in step). Letting the board read the log itself (D35, ADR-0003).
 **Tag.** [default] · remind-me: mem_6027e64884264d3db58c9f1fc98b9039
 **Key.** lel:1551:guard-admits-verify
 **Source.** let-em-loose-expert, 2026-11-27, open question 2 of the #1551 design draft (`1551-claim-log-anchor-design.md`). Numbered D213 because D205-D212 are taken in open PRs #1871, #1927, #1930 and #1932.
+**Correction.** 2026-11-27: the first text let the deploy wait on design approval only. PR #1931 review comment 4722964069 found that D131 does not cover this host change and D128 keeps BaileyAi deployment ask-first, so the Decision now requires a separate host-change authorisation as well. Amended in place because D213 has not merged.
 
-## D214. #1551: the anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off unless set; BaileyAi sets 900
+## D214. #1551: the anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off unless set; BaileyAi sets 900 only after design approval and host authorisation
 
-**Decision.** The board's anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off when it is unset or 0. The BaileyAi inbox board's `board.env` sets it to 900 once the #1551 design is approved. A task is anchored only when its head has changed since the last trusted anchor.
+**Decision.** The board's anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off when it is unset or 0. The BaileyAi inbox board's `board.env` sets it to 900 only when Nano has given both of two separate approvals: approval of the #1551 design (D25), and his own authorisation of this host change. D131's M1 authorisation does not cover it, and deploying on BaileyAi stays ask-first (D128). A task is anchored only when its head has changed since the last trusted anchor.
 **Why.** Off by default leaves every other board (the live board, tests) unchanged. 900 s bounds the rewrite window to 15 minutes, at a cost of one read-only `bbp verify` per linked task per tick and at most one comment. The value is a config line.
 **Rejected.** On by default (changes boards that serve no BBP inbox). Anchoring only on task close (leaves a whole running task unpinned).
 **Tag.** [default] · remind-me: mem_90b3b02e5e0c449faedeaf360e14fb7a
 **Key.** lel:1551:anchor-timer-default
 **Source.** let-em-loose-expert, 2026-11-27, open question 3 of the #1551 design draft.
+**Correction.** 2026-11-27: the first text set 900 once the design was approved. PR #1931 review comment 4722964069 found that D131 does not cover this host change and D128 keeps BaileyAi deployment ask-first, so setting the timer now also needs Nano's separate host-change authorisation. Title amended to match. Amended in place because D214 has not merged.
 
 ## D215. #1551: the claim-log anchor lives on the BaileyAi inbox board only; an off-machine copy waits for outside agents
 

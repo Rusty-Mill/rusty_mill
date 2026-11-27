@@ -40,7 +40,7 @@ and comments the printed `head` and `lines`. A pull means a rewritten log cannot
 fresh anchor first: the board checks the old head before it records a new one.
 
 **When.** On a timer, every `MILL_BOARD_BBP_ANCHOR_SECS` (off when unset or 0; BaileyAi sets 900
-after approval, D214), for every task the inbox serves (cards with `execution.bbp_task`) and every
+once Nano approves the design and separately authorises the host change, D214), for every task the inbox serves (cards with `execution.bbp_task`) and every
 task that already has a trusted anchor, whatever its card's link or archive state now. Otherwise
 `orch-runner`'s Build token could stop anchoring by unlinking or archiving the card. A task is
 anchored only when its head changed since the last anchor, so an idle task adds no comments. The window an
@@ -77,9 +77,10 @@ another actor is ignored.
 - Root on BaileyAi can rewrite both the log and the board file. The board is a different user, not
   a different machine. Covering root needs a copy off the machine, deferred by D215 until outside
   or untrusted agents join.
-- Legacy unchained lines (#722, D69) are never pinned: `check` accepts an unchained prefix, and the
-  first chained line's `prev` pins only the last legacy line. The board anchors a task only when
-  `verify` reports a chained head (`unchained < lines`); an all-legacy log is not anchored.
+- A log made only of legacy unchained lines (#722, D69) has nothing to pin. The board anchors a
+  task only when `verify` reports a chained head (`unchained < lines`). Once a chained line
+  follows, its `prev` is the hash of the whole legacy prefix (`check` in `fs_store.rs`), so the
+  prefix is covered like the rest.
 - A task never linked to a card is not anchored. Orch links one when run with `--card`.
 - Anchoring is a poll. BBP coordination is meant to be event-based; this poll is the board
   watching the log, not agents coordinating, and never touches BBP's control flow.
@@ -95,5 +96,5 @@ another actor is ignored.
 
 Settled as defaults by the let-em-loose-expert:
 - The guard admits `verify` with D132's `--dir` rules, `--task` checked as for `inbox`, and
-  `--expect` only as 64 lowercase hex (D213). Deploying it waits for design approval.
-- The timer env var is off unless set; BaileyAi sets 900 (D214).
+  `--expect` only as 64 lowercase hex (D213). Changing it on BaileyAi needs Nano's design approval and his separate host-change authorisation (D128, D131).
+- The timer env var is off unless set; BaileyAi sets 900 under the same two approvals (D214).
