@@ -61,8 +61,8 @@ use super::render::{CpuRenderer, FloatLayer, PaneFrame, Renderer, Scene, SearchC
 use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use super::source::{
-    Act, Explore, Explored, Feed, Float, FloatAt, Forwarded, Listed, PaneIo, Remote, Show, Source,
-    Tree, Uploaded,
+    Act, Downloaded, Explore, Explored, Feed, Float, FloatAt, Forwarded, Listed, PaneIo, Remote,
+    Show, Source, Tree, Uploaded,
 };
 use super::strip::{self, Spot, StripState};
 use super::{link_policy, link_trust};
@@ -235,6 +235,9 @@ pub(crate) enum UserEvent {
     /// A file dropped or pasted on a pane was sent to its host (C82): the
     /// pane and the file's path there, or why not.
     Uploaded(u64, Uploaded),
+    /// A file the palette's "Download file…" fetched from a pane's host
+    /// (C83): the pane, and where it was saved here or why not.
+    Downloaded(u64, Downloaded),
     /// An upload for a pane went on: the banner text saying how far.
     UploadProgress(u64, super::source::Notice),
 }
@@ -6597,6 +6600,12 @@ impl WindowState<'_> {
                     ..entry(id, label, can)
                 });
             }
+            if self.source.downloads(key) {
+                out.push(Entry {
+                    detail: detail.to_owned(),
+                    ..entry(Id::Download, "Download file…", can)
+                });
+            }
         }
         out
     }
@@ -6651,6 +6660,10 @@ impl WindowState<'_> {
                 self.palette.close();
                 self.type_text(&text);
             }
+            Some(Out::Download(path)) => {
+                self.palette.close();
+                self.start_download(path);
+            }
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -6684,8 +6697,38 @@ impl WindowState<'_> {
             Id::Session(key) => self.source.switch(key),
             Id::Window(key) => self.source.select(key),
             // Browse stays in the palette; it never runs.
-            Id::GoTo | Id::Insert => {}
+            Id::GoTo | Id::Insert | Id::Download => {}
         }
+    }
+
+    /// Fetch `path` of the palette's block's host into the Downloads folder
+    /// (D100); the answer comes back as [`UserEvent::Downloaded`].
+    fn start_download(&mut self, path: String) {
+        let Some(key) = self.palette_origin else {
+            return;
+        };
+        let proxy = self.proxy.clone();
+        self.source.download(
+            key,
+            path,
+            Box::new(move |downloaded| {
+                let _ = proxy.send_event(UserEvent::Downloaded(key, downloaded));
+            }),
+        );
+    }
+
+    /// A download finished: the notice says where the file is, or why not.
+    fn downloaded(&mut self, downloaded: Downloaded) {
+        self.show_notice(Some(match downloaded {
+            Ok(path) => super::source::Notice {
+                title: "File saved".to_owned(),
+                detail: path,
+            },
+            Err(why) => super::source::Notice {
+                title: "File not sent".to_owned(),
+                detail: why,
+            },
+        }));
     }
 
     /// Read a folder for the palette's browse, on the focused block's
@@ -7793,6 +7836,14 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                 // answer still frees its queue.
                 if let Some(w) = self.windows.iter_mut().find(|w| w.uploads.busy_with(key)) {
                     w.uploaded(key, uploaded);
+                }
+            }
+            UserEvent::Downloaded(key, downloaded) => {
+                // The window that asked; the notice is for the person, so a
+                // pane that has gone since still gets one.
+                let at = self.windows.iter().position(|w| w.has_pane(key));
+                if let Some(w) = self.windows.get_mut(at.unwrap_or(0)) {
+                    w.downloaded(downloaded);
                 }
             }
             UserEvent::UploadProgress(key, notice) => {

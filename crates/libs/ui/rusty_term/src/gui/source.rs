@@ -394,6 +394,17 @@ pub trait Source {
     ) {
         done(Err("this source uploads no files".into()));
     }
+    /// Whether the source can fetch a file of pane `key`'s host (mux C83).
+    fn downloads(&self, _key: u64) -> bool {
+        false
+    }
+    /// Fetches the file at `path` (absolute, or relative to the pane's
+    /// folder) of pane `key`'s host into this machine's Downloads folder and
+    /// calls `done` once, from any thread, with where it was saved or why
+    /// not. Not called when [`Source::downloads`] is `false`.
+    fn download(&self, _key: u64, _path: String, done: DownloadDone) {
+        done(Err("this source downloads no files".into()));
+    }
 }
 
 /// How much of a block's workspace the source can show (gui-design D99).
@@ -439,6 +450,12 @@ pub type Uploaded = Result<String, String>;
 
 /// What a source calls once with an upload's outcome.
 pub type UploadDone = Box<dyn FnOnce(Uploaded) + Send>;
+
+/// Where a downloaded file was saved, or why it was not.
+pub type Downloaded = Result<String, String>;
+
+/// What a source calls once with a download's outcome.
+pub type DownloadDone = Box<dyn FnOnce(Downloaded) + Send>;
 
 /// What a source calls with an upload's bytes sent and the file's size.
 pub type UploadProgress = Box<dyn Fn(u64, u64) + Send>;

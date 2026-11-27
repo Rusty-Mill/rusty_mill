@@ -1457,3 +1457,61 @@ fn a_file_is_sent_to_the_blocks_host_once_the_pane_holds_the_lease() {
     }
     std::fs::remove_dir_all(&state).expect("cleanup");
 }
+
+#[test]
+fn a_file_of_the_blocks_host_is_saved_in_the_downloads_folder() {
+    let state = std::env::temp_dir().join(format!("rusty-mux-gui-down-{}", std::process::id()));
+    std::fs::create_dir_all(&state).expect("mkdir");
+    let socket = start_server_in(Some(state.join("state")));
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (mut writer, feed) = feed_of(attached.source.open(key, 80, 24).expect("opened"));
+    assert!(attached.source.downloads(key), "the server gives files");
+    assert!(!attached.source.downloads(key + 99), "no such pane");
+    type_until_echoed(writer.as_mut(), &feed, 1);
+
+    // The Downloads folder is the user's own: made only if missing, and the
+    // file this test saves is removed again.
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let downloads = home.join("Downloads");
+    let made = !downloads.exists();
+    std::fs::create_dir_all(&downloads).expect("Downloads");
+    let name = format!("rusty-mux-gui-down-{}.bin", std::process::id());
+    let remote = state.join(&name);
+    let body: Vec<u8> = (0..(400 << 10) + 7).map(|i| i as u8).collect();
+    std::fs::write(&remote, &body).expect("write");
+
+    let ask = |path: &std::path::Path| {
+        let (tx, rx) = channel();
+        attached.source.download(
+            key,
+            path.to_string_lossy().into_owned(),
+            Box::new(move |r| drop(tx.send(r))),
+        );
+        rx.recv_timeout(PATIENCE).expect("an answer")
+    };
+    let saved = ask(&remote).expect("saved");
+    assert_eq!(std::fs::read(&saved).expect("saved file"), body);
+    // A second download of the same name keeps the first.
+    let again = ask(&remote).expect("saved again");
+    assert_ne!(again, saved);
+    assert_eq!(std::fs::read(&again).expect("second file"), body);
+
+    let missing = ask(&state.join("nope")).expect_err("no such file");
+    assert!(missing.contains("nope"), "{missing}");
+    assert!(
+        !downloads.join("nope").exists(),
+        "a refused download leaves no file"
+    );
+    let folder = ask(std::path::Path::new("/")).expect_err("not a file");
+    assert!(folder.contains("not a file"), "{folder}");
+
+    std::fs::remove_file(&saved).expect("cleanup");
+    std::fs::remove_file(&again).expect("cleanup");
+    if made {
+        std::fs::remove_dir(&downloads).expect("cleanup Downloads");
+    }
+    std::fs::remove_dir_all(&state).expect("cleanup");
+}
