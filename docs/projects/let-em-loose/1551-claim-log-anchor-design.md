@@ -75,7 +75,11 @@ another actor is ignored.
 ## Limits
 
 - Root on BaileyAi can rewrite both the log and the board file. The board is a different user, not
-  a different machine. Covering root needs a copy off the machine (open question 1).
+  a different machine. Covering root needs a copy off the machine, deferred by D215 until outside
+  or untrusted agents join.
+- Legacy unchained lines (#722, D69) are never pinned: `check` accepts an unchained prefix, and the
+  first chained line's `prev` pins only the last legacy line. The board anchors a task only when
+  `verify` reports a chained head (`unchained < lines`); an all-legacy log is not anchored.
 - A task never linked to a card is not anchored. Orch links one when run with `--card`.
 - Anchoring is a poll. BBP coordination is meant to be event-based; this poll is the board
   watching the log, not agents coordinating, and never touches BBP's control flow.
