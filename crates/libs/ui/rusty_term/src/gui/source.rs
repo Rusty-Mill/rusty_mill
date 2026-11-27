@@ -414,6 +414,19 @@ pub trait Source {
     fn download(&self, _key: u64, _path: String, done: DownloadDone) {
         done(Err("this source downloads no files".into()));
     }
+    /// [`Source::download`] that also calls `progress` with the bytes
+    /// received and the file's size as chunks arrive, from any thread, before
+    /// `done`. A source that can't report progress keeps this default, which
+    /// downloads without it.
+    fn download_with_progress(
+        &self,
+        key: u64,
+        path: String,
+        _progress: DownloadProgress,
+        done: DownloadDone,
+    ) {
+        self.download(key, path, done);
+    }
 }
 
 /// How much of a block's workspace the source can show (gui-design D99).
@@ -465,6 +478,9 @@ pub type Downloaded = Result<String, String>;
 
 /// What a source calls once with a download's outcome.
 pub type DownloadDone = Box<dyn FnOnce(Downloaded) + Send>;
+
+/// What a source calls with a download's bytes received and the file's size.
+pub type DownloadProgress = Box<dyn Fn(u64, u64) + Send>;
 
 /// What a source calls with an upload's bytes sent and the file's size.
 pub type UploadProgress = Box<dyn Fn(u64, u64) + Send>;

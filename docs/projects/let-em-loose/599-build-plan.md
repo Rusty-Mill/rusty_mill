@@ -204,8 +204,8 @@ daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
     called, so it costs $0 and `watch_usd` isn't read yet.
     With `--budget-secs N` the run is refused, starting nothing, when the
     time left can't cover the wall limit plus 60s cleanup, up front and
-    again after all setup, immediately before launch, so the sandbox's
-    group kill always comes first (the 60s after it is a reserve for the
+    again after all setup, immediately before launch, so on Linux under
+    normal scheduling the sandbox's group kill comes first (the 60s after it is a reserve for the
     report, not a bound); orch passes 3540 under its 3600s deadline.
 - Findings are posted by the task's `watcher` role (D79) as low-stakes,
   reversible claims citing the brief. A claim needs a second author to

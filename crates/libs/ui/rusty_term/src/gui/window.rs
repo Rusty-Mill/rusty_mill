@@ -243,6 +243,7 @@ pub(crate) enum UserEvent {
     Downloaded(u64, Downloaded),
     /// An upload for a pane went on: the banner text saying how far.
     UploadProgress(u64, super::source::Notice),
+    DownloadProgress(super::source::Notice),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -6754,9 +6755,15 @@ impl WindowState<'_> {
             return;
         };
         let proxy = self.proxy.clone();
-        self.source.download(
+        let tell = self.proxy.clone();
+        let name = file_label(std::path::Path::new(&path));
+        self.source.download_with_progress(
             key,
             path,
+            Box::new(move |got, total| {
+                let notice = progress_notice("Receiving file", &name, got, total);
+                let _ = tell.send_event(UserEvent::DownloadProgress(notice));
+            }),
             Box::new(move |downloaded| {
                 let _ = proxy.send_event(UserEvent::Downloaded(key, downloaded));
             }),
@@ -6856,7 +6863,7 @@ impl WindowState<'_> {
                 key,
                 path,
                 Box::new(move |sent, total| {
-                    let notice = progress_notice(&name, sent, total);
+                    let notice = progress_notice("Sending file", &name, sent, total);
                     let _ = tell.send_event(UserEvent::UploadProgress(key, notice));
                 }),
                 Box::new(move |uploaded| {
@@ -7906,6 +7913,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                     w.upload_progress(notice);
                 }
             }
+            UserEvent::DownloadProgress(notice) => {
+                if let Some(w) = self.windows.first_mut() {
+                    w.show_notice(Some(notice));
+                }
+            }
             UserEvent::Listed(ask, listed) => {
                 if let Some(w) = self.windows.first_mut() {
                     w.palette_listed(ask, listed);
@@ -8457,10 +8469,10 @@ fn file_label(path: &std::path::Path) -> String {
 }
 
 /// The banner text of an upload `sent` bytes into `total`.
-fn progress_notice(name: &str, sent: u64, total: u64) -> super::source::Notice {
+fn progress_notice(title: &str, name: &str, sent: u64, total: u64) -> super::source::Notice {
     let percent = (sent.min(total) * 100).checked_div(total).unwrap_or(100);
     super::source::Notice {
-        title: "Sending file".to_owned(),
+        title: title.to_owned(),
         detail: format!("{name}: {percent}%"),
     }
 }
@@ -9691,14 +9703,18 @@ mod tests {
 
     #[test]
     fn an_upload_notice_names_the_file_and_how_far_it_is() {
-        let notice = super::progress_notice("a.png", 1, 4);
+        let notice = super::progress_notice("Sending file", "a.png", 1, 4);
         assert_eq!(notice.detail, "a.png: 25%");
         assert_eq!(
-            super::progress_notice("a", 9, 4).detail,
+            super::progress_notice("Sending file", "a", 9, 4).detail,
             "a: 100%",
             "capped"
         );
-        assert_eq!(super::progress_notice("e", 0, 0).detail, "e: 100%", "empty");
+        assert_eq!(
+            super::progress_notice("Sending file", "e", 0, 0).detail,
+            "e: 100%",
+            "empty"
+        );
         let path = std::path::Path::new("/tmp/dir/b.txt");
         assert_eq!(super::file_label(path), "b.txt");
     }

@@ -11177,6 +11177,7 @@ dependencies = [
  "platform-linux",
  "rusty_atomic_file",
  "rusty_bbp",
+ "rusty_confined_fs",
  "rusty_http",
  "rusty_json",
  "rusty_rand",

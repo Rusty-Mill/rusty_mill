@@ -20,14 +20,16 @@
 //! before the sandbox launches. A refusal starts nothing and is the report's
 //! `error`.
 //!
-//! What this guarantees: a run that starts sends `SIGKILL` to the whole
-//! sandbox group at its wall limit, at least [`CLEANUP`] before the budget
-//! ends. `SIGKILL` can't be caught and the sandbox's seccomp filter denies
-//! `setsid`/`setpgid` (`rusty_sandbox` `helper::group_lock`), so once it is
-//! sent no workload process survives, even if the caller then kills this
-//! process. What it doesn't: [`CLEANUP`] is a reserve for reaping and
-//! printing the report, not a bound on them. If those outlast it, the caller
-//! loses the report and records a timeout, but nothing is orphaned.
+//! What this guarantees, on the supported Linux path (the only one the host
+//! sandbox runs on) under normal scheduling: a run that starts sends
+//! `SIGKILL` to the whole sandbox group at its wall limit, at least
+//! [`CLEANUP`] before the budget ends. `SIGKILL` can't be caught and the
+//! sandbox's seccomp filter denies `setsid`/`setpgid` (`rusty_sandbox`
+//! `helper::group_lock`), so once it is sent no workload process survives,
+//! even if the caller then kills this process. Reaping and the report are
+//! outside the guarantee: [`CLEANUP`] is a reserve for them, not a bound. If
+//! they outlast it, the caller loses the report and records a timeout, but
+//! nothing is orphaned.
 
 use crate::baseline::{self, Baseline};
 use crate::profiles::{self, ProfileSet};
