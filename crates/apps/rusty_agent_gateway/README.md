@@ -118,6 +118,30 @@ the method does not exist. A target that never advertised prompts is not asked
 for them either — a missing capability is not a fault, and a mixed federation is
 the normal case.
 
+### Identity upstream
+
+The gateway reaches an upstream with its own credential, so the upstream only
+learns whom a call is for from what the gateway says. A target's `identity`
+says it on every `tools/call`, filled only from the verified `jwtAuth` token:
+
+```yaml
+targets:
+  - name: board
+    mcp: { host: 127.0.0.1, port: 7300 }
+    identity:
+      strip: { "*": [actor, role, agent_id, agent_key] }   # tool glob -> arguments
+      set: { actor: "lel-gateway/{{jwt.lel.lens}}-{{jwt.lel.claim:8}}" }
+      headers: { x-lel-sub: "{{jwt.sub}}" }               # `mcp:` targets only
+```
+
+`strip` drops what an agent could use to name itself, then `set` writes the
+arguments from claims. `{{jwt.<claim>}}` reads a top-level claim (`lel.lens` is
+the key `"lel.lens"`); `:<n>` keeps its first `n` characters. It runs after the
+guardrail chain, so no rewrite can put an agent-chosen identity back. A claim
+that is missing, empty or not text refuses the call rather than sending it
+anonymous, and a template that names no claim, or `headers` on a `stdio`
+target, is a startup error.
+
 ### Degraded operation
 
 A target that fails to come up does not take the gateway down. Five targets
@@ -136,7 +160,7 @@ Implemented and tested:
 - Hostname matching on listeners and routes, including single-label wildcards
 - `mcp` backends: `stdio` and Streamable HTTP (`mcp:`) targets, federating
   tools, prompts and resources with name and URI qualification, `via` egress,
-  per-target `filters`, route-level `mcpAuthorization` — both the `allowTools`/`denyTools`
+  per-target `filters` and `identity` (see [Identity upstream](#identity-upstream)), route-level `mcpAuthorization` — both the `allowTools`/`denyTools`
   lists and upstream's CEL `rules`, see [Authorization](#authorization)
 - `mcpGuardrails`: external MCP policy processors over gRPC, able to rewrite as
   well as refuse — see [Guardrails](#guardrails)
