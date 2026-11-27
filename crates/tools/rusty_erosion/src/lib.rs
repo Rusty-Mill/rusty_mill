@@ -8,8 +8,9 @@
 //!   tokens, over all tokens.
 //!
 //! The gate compares a candidate with its pinned baseline ([`Report::delta`]),
-//! never the absolute level. v0 measures Rust only; other code is listed as
-//! `unmeasured`. The metric is a heuristic and can be gamed by splitting
+//! never the absolute level. The gate measures Rust only; other code is listed
+//! as `unmeasured`. [`measure_in`] can also measure Python (card #705). The
+//! metric is a heuristic and can be gamed by splitting
 //! functions or renaming; the delta's counts exist so calibration can watch.
 //!
 //! ```
@@ -22,5 +23,5 @@
 pub mod adapter;
 pub mod core;
 
-pub use adapter::{Error, FileClass, classify, measure};
+pub use adapter::{Error, FileClass, classify, classify_in, measure, measure_in};
 pub use core::{Affected, Delta, FileMeasure, FunctionMetric, Lang, Ratio, Report};

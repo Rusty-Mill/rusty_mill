@@ -3,7 +3,9 @@
 //! ```text
 //! bbp mcp                                   per-turn MCP server; env BBP_DIR, BBP_TASK, BBP_PRINCIPAL, BBP_TURN or BBP_SESSION=yes (with BBP_MCP_RELAY: relay to the broker)
 //! bbp mcp-broker --pipes DIR --harness PID  serves a confined harness's relay; env as bbp mcp
-//! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven]
+//! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven] [--gates scratch|owned]
+//!                                          --gates scratch (#447): human gates take an --as answer; refused unless R is on the scratch list. Owned (default): approve-plan/approve-merge need --approval
+//! bbp gates   --dir D scratch-add --repo R --source REF [--as WHO] | scratch-list   D195: the repos whose tasks may open --gates scratch; REF names where Nano approved it
 //! bbp open    --mode claims --dir D --task T --repo R --brief FILE --roster FILE --profiles FILE [--claims FILE] [--human ID] [--confine sandbox|none]
 //!                                          claims mode: the profile set names test_paths and an erosion profile or "erosion":"off"; a host that cannot sandbox refuses (bad_claims_config)
 //!                                          [--base REF --repo-path PATH --work DIR] brownfield (#598): runs the suite on REF sandboxed first; red refuses (baseline_red), green pins REF as the baseline
@@ -19,7 +21,8 @@
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
-//! bbp human   --dir D --task T [--rev N] [--as WHO] [--fence N] [--decision ID (needs --fence)] [--dry-run yes] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
+//! bbp human   --dir D --task T [--rev N] [--as WHO] [--fence N] [--decision ID (needs --fence)] [--approval FILE] [--dry-run yes] VERB ARGS...
+//!                                          --approval FILE: the board-signed receipt an owned task's approve-plan/approve-merge needs, fenced on its revision; the answer is labelled by its approver. --op may not start with by:  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
 //!                                          claims mode: claim MSG accept|drop|reopen | choose Q C | extend-claim MSG | withdraw-rerun ART | action-result MARK done|aborted | refine MSG|task BRIEF TEXT | close | holdout-updated DIGEST | takeover MSG SESSION CLIENT MINUTES REASON | takeover-release N
 //!                                          | intent FILE [claims=msg:1,msg:2] [domains=a,b] (#598: new brief; no list = every claim)
 //!                                          reject, rerun, resume, cancel and close need --rev, the card revision you saw; --dry-run prints the events without committing
@@ -31,6 +34,7 @@
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
 //! bbp why     --dir D (--task T | T) [--turn N]            why each turn was granted (wake reason, or Explicit), replayed from the log, as JSON
+//! bbp canary  --dir D --task T --repo-path P --work W --ref REF --profile NAME [--budget-secs N]   one frozen profile re-run on REF in the sandbox, as a report (JSON); writes nothing to the task (#599, D217)
 //! bbp why     --dir D (--task T | T) --claim ID [--at REV] how one claim moved: each evidence and status change with the rule that fired, replayed from the log, as JSON
 //! bbp verify  --dir D --task T [--expect H]               check the log's hash chain without changing it; prints lines, unchained, head; H must be the hash of one of its lines
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
@@ -50,9 +54,9 @@
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, admission, args::Args, baseline, broker, decision, dry_run, golden, grade, holdout,
-    human, inbox, mcp, moderator, pairs, pins, profiles, report, response_json, runner, shadow,
-    slots, tokens, verify, why,
+    admin, admission, args::Args, baseline, broker, canary, decision, dry_run, golden, grade,
+    holdout, human, inbox, mcp, moderator, pairs, pins, profiles, report, response_json, runner,
+    shadow, slots, tokens, verify, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -139,7 +143,7 @@ fn dry_run(argv: &[String]) -> Result<String, String> {
 fn run() -> Result<String, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let sub = argv.first().cloned().ok_or(
-        "usage: bbp <mcp|open|assign|card|tick|human|erosion|runner|metrics|tokens|pairs|agents-check|grade|why|verify|shadow|mod> ...",
+        "usage: bbp <mcp|open|assign|card|tick|human|erosion|runner|metrics|tokens|pairs|agents-check|grade|why|verify|shadow|canary|mod> ...",
     )?;
     if sub == "__sandbox" {
         let rest: Vec<OsString> = std::env::args_os().skip(2).collect();
@@ -249,6 +253,9 @@ fn run() -> Result<String, String> {
     if sub == "erosion" {
         return erosion(&a, &dir);
     }
+    if sub == "gates" {
+        return gates(&a, &dir);
+    }
     // `bbp why TASK` names the task positionally too.
     let task = match (sub.as_str(), a.positional.first()) {
         ("why", Some(t)) => TaskId(t.clone()),
@@ -297,6 +304,9 @@ fn run() -> Result<String, String> {
             };
             let roster = admin::read_roster(&PathBuf::from(a.flag("roster")?))?;
             if a.flags.get("mode").is_some_and(|m| m == "claims") {
+                if a.flags.contains_key("gates") {
+                    return Err("--gates: claims mode has no scratch gates yet (D190)".into());
+                }
                 let cfg = match a.flags.get("claims") {
                     Some(file) => admin::read_claims_config(&PathBuf::from(file))?,
                     None => ClaimsConfig::default(),
@@ -358,7 +368,7 @@ fn run() -> Result<String, String> {
                 Some(v) => admin::parse_policy(v)?,
                 None => admin::default_policy(live),
             };
-            admin::open_task_live(
+            admin::open_task_gated(
                 &dir,
                 &task,
                 a.flag("repo")?,
@@ -366,8 +376,8 @@ fn run() -> Result<String, String> {
                 &human,
                 &set,
                 roster,
-                live,
-                policy,
+                (live, policy),
+                open_gates(&a)?,
             )?
         }
         "pause" => admin::pause(
@@ -542,6 +552,31 @@ fn run() -> Result<String, String> {
         }
         "verify" => return verify::json(&dir, &task, a.flags.get("expect").map(String::as_str)),
         "shadow" => return shadow::json(&dir, &task),
+        "canary" => {
+            let budget = a
+                .flags
+                .get("budget-secs")
+                .map(|v| v.parse::<u64>())
+                .transpose()
+                .map_err(|_| "--budget-secs must be a number of seconds")?
+                .map(|n| canary::Budget {
+                    started: std::time::Instant::now(),
+                    total: std::time::Duration::from_secs(n),
+                });
+            let (repo, work) = (
+                PathBuf::from(a.flag("repo-path")?),
+                PathBuf::from(a.flag("work")?),
+            );
+            return canary::json(&canary::Request {
+                dir: &dir,
+                task: &task,
+                repo: &repo,
+                work_root: &work,
+                reference: a.flag("ref")?,
+                profile: a.flag("profile")?,
+                budget,
+            });
+        }
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
             let work = PathBuf::from(a.flag("work")?);
@@ -618,6 +653,7 @@ fn run() -> Result<String, String> {
                 a.flags.get("decision").map(String::as_str),
                 a.flags.contains_key("fence"),
             )?;
+            let approval = receipt(&a)?;
             if a.flags.get("dry-run").is_some_and(|v| v != "no") {
                 let preview = human::preview_fenced(
                     &dir,
@@ -635,6 +671,7 @@ fn run() -> Result<String, String> {
                         })
                         .transpose()?,
                     op,
+                    approval.as_ref(),
                 )?;
                 return rusty_serde::json::to_string(&preview).map_err(|e| e.to_string());
             }
@@ -654,11 +691,26 @@ fn run() -> Result<String, String> {
                     })
                     .transpose()?,
                 op,
+                approval.as_ref(),
             )?
         }
         other => return Err(format!("unknown subcommand {other}")),
     };
     Ok(response_json(&resp))
+}
+
+/// `bbp human --approval FILE`: the board receipt, verified against the key compiled into
+/// `bbp` (D194). It names its own op, so it is exclusive with `--op` and `--decision` (D192).
+fn receipt(a: &Args) -> Result<Option<rusty_bbp_host::approval::Verified>, String> {
+    use rusty_bbp_host::approval;
+    let Some(file) = a.flags.get("approval") else {
+        return Ok(None);
+    };
+    if a.flags.contains_key("op") || a.flags.contains_key("decision") {
+        return Err("--approval names its own op: drop --op and --decision".into());
+    }
+    let bytes = std::fs::read(file).map_err(|e| format!("--approval {file}: {e}"))?;
+    approval::verify(&approval::key(approval::BOARD_KEY)?, &bytes).map(Some)
 }
 
 fn main() -> ExitCode {
@@ -762,6 +814,39 @@ fn cgroup_open(_: &std::path::Path, _: &TaskId, _: &std::path::Path) -> Result<S
 
 #[cfg(not(target_os = "linux"))]
 const CGROUPS_LINUX_ONLY: &str = "session cgroups are Linux only";
+
+/// `bbp open --gates scratch|owned` (#447): owned, the default, writes nothing.
+fn open_gates(a: &Args) -> Result<Option<Gates>, String> {
+    match a.flags.get("gates").map(String::as_str) {
+        None | Some("owned") => Ok(None),
+        Some("scratch") => Ok(Some(Gates::Scratch)),
+        Some(other) => Err(format!("unknown --gates {other}: scratch or owned")),
+    }
+}
+
+/// `bbp gates scratch-add|scratch-list` (D195): list a repo whose tasks may open with scratch
+/// gates, naming where Nano approved it, or print the list.
+fn gates(a: &Args, dir: &std::path::Path) -> Result<String, String> {
+    use rusty_bbp_host::scratch_repos;
+    match a.pos(0)? {
+        "scratch-list" => {
+            rusty_serde::json::to_string(&scratch_repos::list(dir)?).map_err(|e| e.to_string())
+        }
+        "scratch-add" => {
+            let record = scratch_repos::Record::new(
+                a.flag("repo")?,
+                a.flags.get("as").map_or("human", String::as_str),
+                a.flag("source")?,
+                rusty_bbp_host::now(),
+            );
+            rusty_serde::json::to_string(&scratch_repos::add(dir, record)?)
+                .map_err(|e| e.to_string())
+        }
+        other => Err(format!(
+            "unknown gates action {other} (scratch-add --repo R --source REF [--as WHO] | scratch-list)"
+        )),
+    }
+}
 
 /// `bbp erosion approve|limits` (D115, D118): record Nano's approved
 /// erosion limits, or print the newest record (`null` if none).

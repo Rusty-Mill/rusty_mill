@@ -45,7 +45,7 @@ pub use event::{
 pub use fs_store::{log_path_for, FsError, FsStore};
 pub use history::claim_history;
 pub use ids::*;
-pub use policy::SchedulingPolicy;
+pub use policy::{Gates, SchedulingPolicy};
 pub use record::*;
 pub use role::*;
 pub use shadow::{Comparison, Shadow, ShadowKind};

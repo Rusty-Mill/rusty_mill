@@ -1669,6 +1669,19 @@ fn agent_meta_round_trips_in_a_launch_and_an_entry() {
 }
 
 #[test]
+fn a_launch_in_a_blocks_workspace_round_trips() {
+    round_trip(Message::Split {
+        req: 1,
+        block: BlockId::from_uuid(Uuid::from_bytes([7; 16])),
+        side: Side::Right,
+        launch: Launch {
+            workspace_of: Some(BlockId::from_uuid(Uuid::from_bytes([6; 16]))),
+            ..Launch::default()
+        },
+    });
+}
+
+#[test]
 fn agent_meta_is_all_three_texts_and_printable_or_malformed() {
     let create = |body: &dyn Fn(&mut Out)| {
         raw_frame(0x04, |out| {

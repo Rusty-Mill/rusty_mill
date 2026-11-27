@@ -1298,6 +1298,7 @@ impl Settings {
             projects: a.projects.clone(),
             connector: false,
             provider: a.provider.clone(),
+            view: crate::api::ViewProfile::default(),
         };
         let token = self.change_creds(|c| c.add(identity.clone()))?;
         Ok(json!({ "token": token, "agent": identity }))

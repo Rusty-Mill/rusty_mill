@@ -4,6 +4,31 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Canary on the released ref
+**2026-11-27**
+
+- `rusty_orch watch` now re-runs each app's test profile on the commit it
+  shipped from. A red run becomes one claim on the app's maintenance task;
+  a newer red release replaces it. A green run posts nothing.
+- It calls no model, so it costs nothing.
+
+## `lens why`: which lens posted what
+**2026-11-27**
+
+- `rusty_orch lens why` prints one claim's history from `bbp why`, and marks
+  each evidence post a lens made with the job behind it: the lens, the
+  epoch, whether it was a look-harder pass, and whether its post is unsure.
+- It doesn't show the model or the cost yet: neither is stored per job
+  (open question Q67).
+
+## Owned BBP gates
+**2026-11-25**
+
+- A BBP config can set `gates: scratch` for a sandbox or evidence goal. Its
+  tasks then take plain gate answers, provided the operator has listed the
+  repo. Every other goal opens owned tasks, which need a signed approval
+  from Mill Board.
+
 ## Builders tested end to end in CI
 **2026-11-25**
 

@@ -45,6 +45,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, 
 use super::blocks::{self, BodyState};
 use super::chrome::{Chrome, Marks};
 use super::confirm::{self, Answer, Confirm, ConfirmKey, Subject};
+use super::explorer_view::ExplorerUi;
 use super::floats::{self, Dir4, Grab};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
@@ -60,7 +61,8 @@ use super::render::{CpuRenderer, FloatLayer, PaneFrame, Renderer, Scene, SearchC
 use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use super::source::{
-    Act, Feed, Float, FloatAt, Forwarded, Listed, PaneIo, Remote, Show, Source, Tree, Uploaded,
+    Act, Downloaded, Explore, Explored, Feed, Float, FloatAt, Forwarded, Listed, PaneIo, Remote,
+    Show, Source, Tree, Uploaded,
 };
 use super::strip::{self, Spot, StripState};
 use super::{link_policy, link_trust};
@@ -207,6 +209,8 @@ pub(crate) enum UserEvent {
     /// What the source says of the shown blocks, for their headers
     /// ([`Remote::blocks`]).
     Blocks(Vec<(u64, super::source::BlockInfo)>),
+    /// What the explorer panel shows for a block ([`Remote::explorer`]).
+    Explorer(u64, super::explorer::Snapshot),
     /// How the source reaches its server ([`Remote::link`]).
     Link(super::source::Link),
     /// The shown session ended while the source was away
@@ -222,6 +226,9 @@ pub(crate) enum UserEvent {
     /// A pane's program reads the clipboard, or with `true` the primary
     /// selection, and its source asks this window to answer (C54).
     ClipboardRead(u64, bool),
+    /// The server ended a forward of pane `id` with a reason: the port and
+    /// the reason ([`super::source::Feed::ForwardRefused`]).
+    ForwardRefused(u64, u16, String),
     /// A folder listing the palette's browse asked for finished, under
     /// the number the palette gave it (gui-design D78).
     Listed(u64, Listed),
@@ -231,6 +238,12 @@ pub(crate) enum UserEvent {
     /// A file dropped or pasted on a pane was sent to its host (C82): the
     /// pane and the file's path there, or why not.
     Uploaded(u64, Uploaded),
+    /// A file the palette's "Download file…" fetched from a pane's host
+    /// (C83): the pane, and where it was saved here or why not.
+    Downloaded(u64, Downloaded),
+    /// An upload for a pane went on: the banner text saying how far.
+    UploadProgress(u64, super::source::Notice),
+    DownloadProgress(super::source::Notice),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -242,6 +255,7 @@ fn attached_scene<'a>(
     confirm: Option<&'a Confirm>,
     palette: &'a PaletteUi,
     overview: &'a OverviewUi,
+    explorer: &'a ExplorerUi,
 ) -> Scene<'a> {
     let body = body.painted();
     Scene {
@@ -254,7 +268,8 @@ fn attached_scene<'a>(
             .painted()
             .or_else(|| confirm.and_then(Confirm::painted))
             .or_else(|| palette.painted())
-            .or_else(|| overview.painted()),
+            .or_else(|| overview.painted())
+            .or_else(|| explorer.painted()),
     }
 }
 
@@ -678,6 +693,12 @@ fn reader_loop(
             }
             continue;
         }
+        if let Feed::ForwardRefused { port, reason } = step {
+            if !send(UserEvent::ForwardRefused(id, port, reason)) {
+                break; // loop gone
+            }
+            continue;
+        }
         let response = apply(step, &grid, &parser, &mut themed);
         if let Some(replies) = replies.as_mut().filter(|_| !response.is_empty()) {
             let _ = replies.write(&response);
@@ -742,7 +763,7 @@ fn apply(
             Vec::new()
         }
         // The reader loop tells the window instead.
-        Feed::Take(_) | Feed::ClipboardRead { .. } => Vec::new(),
+        Feed::Take(_) | Feed::ClipboardRead { .. } | Feed::ForwardRefused { .. } => Vec::new(),
     }
 }
 
@@ -789,13 +810,17 @@ struct WindowState<'a> {
     palette: PaletteUi,
     /// The block that had the focus when the palette opened.
     palette_origin: Option<u64>,
+    /// The workspace explorer panel's view state (gui-design D99).
+    explorer: ExplorerUi,
     /// The session overview (gui-design D97).
     overview: OverviewUi,
     /// The trusted link origins (C63, D69-D72).
     links: link_policy::Policy,
     /// The (pane, remote port) forwards the user agreed to, for this
     /// window's life (C81, D341).
-    forward_trust: std::collections::HashSet<(u64, u16)>,
+    /// Forwarded ports the user trusts, as [`link_trust::forward_entry`]
+    /// entries: the saved ones, and this window's own.
+    forward_trust: std::collections::HashSet<String>,
     /// The forwards asked for and not yet answered.
     forward_asks: ForwardAsks,
     /// Files waiting to be sent to a pane's host, one at a time so their
@@ -1407,6 +1432,11 @@ impl WindowState<'_> {
         }
         self.palette.repaint(tokens, scale, view);
         self.overview.repaint(tokens, scale, view);
+        let band = (
+            strip::height(scale) as f32,
+            view.1 - ribbon::height(scale) as f32,
+        );
+        self.explorer.repaint(tokens, scale, view, band);
         let oy = self.grid_oy();
         // The command dock renders as one more (synthetic, unfocused) pane
         // right of the pane area. Built before the renderer is borrowed and
@@ -1439,6 +1469,7 @@ impl WindowState<'_> {
                 self.confirm.as_ref(),
                 &self.palette,
                 &self.overview,
+                &self.explorer,
             );
             renderer.render(
                 &[],
@@ -1621,6 +1652,7 @@ impl WindowState<'_> {
             self.confirm.as_ref(),
             &self.palette,
             &self.overview,
+            &self.explorer,
         );
         // Each float's frame, pane and veil, back to front (gui-design D89).
         let mut float_frames: Vec<(u64, PaneFrame)> = float_snaps
@@ -3158,7 +3190,7 @@ impl WindowState<'_> {
                     .to_owned(),
             }));
         }
-        if self.forward_trust.contains(&(key, target.port)) {
+        if self.forward_trusted(key, target.port) {
             return self.start_forward(key, target);
         }
         let s = self.scale_factor as f32;
@@ -3182,6 +3214,41 @@ impl WindowState<'_> {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    /// The trust entry for `port` of pane `key`'s host, and whether it may be
+    /// saved. A host with no usable name trusts the pane itself, for this
+    /// window only.
+    fn forward_entry(&self, key: u64, port: u16) -> Option<(String, bool)> {
+        self.source
+            .host_id(key)
+            .and_then(|host| link_trust::forward_entry(&host, port))
+            .map(|entry| (entry, true))
+            .or_else(|| {
+                // No name, or one that cannot be written down: this window only.
+                link_trust::forward_entry(&format!("pane {key}"), port).map(|e| (e, false))
+            })
+    }
+
+    fn forward_trusted(&self, key: u64, port: u16) -> bool {
+        self.forward_entry(key, port)
+            .is_some_and(|(entry, _)| self.forward_trust.contains(&entry))
+    }
+
+    /// Trust `port` of pane `key`'s host, and save it when the host has a
+    /// name. A failed save leaves the trust to this window, and says so.
+    fn trust_forward(&mut self, key: u64, port: u16) {
+        let Some((entry, saved)) = self.forward_entry(key, port) else {
+            return;
+        };
+        if saved && let Err(e) = save_forward_trust(&entry) {
+            eprintln!("rusty-term: saving a trusted forward: {e}");
+            self.show_notice(Some(super::source::Notice {
+                title: "Could not save trusted forwards".to_owned(),
+                detail: "This port is trusted until the window closes.".to_owned(),
+            }));
+        }
+        self.forward_trust.insert(entry);
     }
 
     /// Ask the source to forward `target`'s port; the answer comes back as
@@ -3214,7 +3281,7 @@ impl WindowState<'_> {
         if !self.forward_asks.answer(key, target.port, op) {
             return;
         }
-        if !self.forward_trust.contains(&(key, target.port)) {
+        if !self.forward_trusted(key, target.port) {
             return;
         }
         // The forward may have ended since it answered (the pane's connection
@@ -5293,6 +5360,7 @@ impl WindowState<'_> {
         });
         self.active = 0;
         self.layout_panes(0);
+        self.retire_explorer_if_gone();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -5342,6 +5410,7 @@ impl WindowState<'_> {
             tab.focus = first;
         }
         self.layout_panes(self.active);
+        self.retire_explorer_if_gone();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -5433,6 +5502,111 @@ impl WindowState<'_> {
         }
     }
 
+    /// The explorer panel's newest snapshot arrived.
+    fn show_explorer(&mut self, key: u64, snapshot: super::explorer::Snapshot) {
+        if !self.explorer.set(key, snapshot) {
+            return;
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Close the explorer and retire its workspace, if open: what opening
+    /// the palette, a popover or the overview does first (D99).
+    fn close_explorer(&mut self) {
+        if let Some(key) = self.explorer.block() {
+            self.explorer.close();
+            self.source.explore(key, Explored::Close);
+        }
+    }
+
+    /// Close the explorer if the block it was opened on is gone from the
+    /// window: its connection ends with the pane. Changing focus leaves it.
+    fn retire_explorer_if_gone(&mut self) {
+        let Some(key) = self.explorer.block() else {
+            return;
+        };
+        if !self
+            .tabs
+            .iter()
+            .any(|t| t.panes.iter().any(|p| p.id == key))
+        {
+            self.close_explorer();
+        }
+    }
+
+    /// Open the workspace explorer on the focused block, or close it
+    /// (gui-design D99). Opening closes the other popovers.
+    fn toggle_explorer(&mut self) {
+        self.set_armed(false);
+        if self.explorer.is_open() {
+            self.close_explorer();
+        } else if let Some(key) = self
+            .focused()
+            .filter(|&k| self.source.explores(k) != Explore::No && !self.offline())
+        {
+            self.popover.close();
+            self.confirm = None;
+            self.palette.close();
+            self.overview.close();
+            self.explorer.open(key);
+            self.source.explore(key, Explored::Open);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// A key while the explorer is open: it owns the keyboard (D99).
+    fn explorer_key(&mut self, key: &Key) {
+        use super::explorer::Key as E;
+        use winit::keyboard::NamedKey;
+        let mapped = match key {
+            Key::Named(NamedKey::ArrowUp) => E::Up,
+            Key::Named(NamedKey::ArrowDown) => E::Down,
+            Key::Named(NamedKey::ArrowLeft) => E::Left,
+            Key::Named(NamedKey::ArrowRight) => E::Right,
+            Key::Named(NamedKey::Enter) => E::Enter,
+            Key::Named(NamedKey::PageUp) => E::PageUp,
+            Key::Named(NamedKey::PageDown) => E::PageDown,
+            Key::Named(NamedKey::Escape) => E::Close,
+            Key::Character(c) if c.as_str() == "y" => E::Copy,
+            _ => return,
+        };
+        let out = self.explorer.key(mapped);
+        self.explorer_out(out);
+    }
+
+    /// A click on the explorer: whether it was on the panel (a click on a
+    /// block goes on to the block).
+    fn explorer_click(&mut self, x: f64, y: f64) -> bool {
+        let (out, on) = self.explorer.click(x, y);
+        self.explorer_out(out);
+        on
+    }
+
+    /// Carry out what the explorer panel asked for.
+    fn explorer_out(&mut self, out: Option<super::explorer::Out>) {
+        use super::explorer::Out;
+        let key = self.explorer.block();
+        match (out, key) {
+            (Some(Out::Ask(intent)), Some(key)) => self.source.explore(key, Explored::Do(intent)),
+            (Some(Out::Copy(path)), _) => {
+                if let Some(cb) = self.clipboard.as_mut()
+                    && let Err(e) = cb.set_text(path)
+                {
+                    eprintln!("rusty_term: copy path: {e}");
+                }
+            }
+            (Some(Out::Close), _) => self.toggle_explorer(),
+            _ => {}
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// Show what the source says of its blocks in their headers.
     fn show_blocks(&mut self, blocks: Vec<(u64, super::source::BlockInfo)>) {
         let body = &mut self.body;
@@ -5500,6 +5674,7 @@ impl WindowState<'_> {
             self.popover.close();
             self.confirm = None;
             self.palette.close();
+            self.close_explorer();
             let online = !self.offline();
             self.overview.open(cards, online);
         }
@@ -5712,6 +5887,7 @@ impl WindowState<'_> {
             Command::Float => self.float_focused(),
             Command::Stack { top } => self.stack_focused(top),
             Command::Overview => self.toggle_overview(),
+            Command::Explorer => self.toggle_explorer(),
             Command::Next => self.focus_next_shown(),
             Command::MoveMode => {
                 // Only a source that floats has a float to move.
@@ -5903,6 +6079,7 @@ impl WindowState<'_> {
         let open = self.popover_kind();
         self.popover.close();
         if open != Some(kind) {
+            self.close_explorer();
             self.open_popover(kind);
         }
         if let Some(window) = &self.window {
@@ -6253,7 +6430,7 @@ impl WindowState<'_> {
         match subject {
             Subject::Block(key) => self.source.act(Act::TakeOver(key)),
             Subject::Forward(key, target) => {
-                self.forward_trust.insert((key, target.port));
+                self.trust_forward(key, target.port);
                 self.start_forward(key, target);
             }
             Subject::Link(link) => {
@@ -6308,6 +6485,7 @@ impl WindowState<'_> {
         let changed = self.popover.hover(x, y)
             || self.palette.hover(x, y)
             || self.overview.hover(x, y)
+            || self.explorer.hover(x, y)
             || self.confirm.as_mut().is_some_and(|c| c.hover(x, y));
         if let (true, Some(window)) = (changed, &self.window) {
             window.request_redraw();
@@ -6359,6 +6537,7 @@ impl WindowState<'_> {
                 self.popover.close();
                 self.confirm = None;
                 self.overview.close();
+                self.close_explorer();
                 let entries = self.palette_entries();
                 self.palette_origin = self.focused();
                 self.palette.open(entries);
@@ -6421,6 +6600,14 @@ impl WindowState<'_> {
                 .map_or(out.len(), |i| i + 1);
             out.insert(at, act(Cmd::Overview, label, true));
         }
+        if focus.is_some_and(|k| self.source.explores(k) != Explore::No) {
+            let at = out
+                .iter()
+                .position(|e| e.id == Id::Cmd(Cmd::Overview))
+                .or_else(|| out.iter().position(|e| e.id == Id::Cmd(Cmd::Switcher)))
+                .map_or(out.len(), |i| i + 1);
+            out.insert(at, act(Cmd::Explorer, "Workspace explorer", online));
+        }
         match take {
             Some(super::source::Take::Held) => {
                 out.push(act(Cmd::GiveBack, "Give back", online));
@@ -6458,6 +6645,12 @@ impl WindowState<'_> {
                 out.push(Entry {
                     detail: detail.to_owned(),
                     ..entry(id, label, can)
+                });
+            }
+            if self.source.downloads(key) {
+                out.push(Entry {
+                    detail: detail.to_owned(),
+                    ..entry(Id::Download, "Download file…", can)
                 });
             }
         }
@@ -6514,6 +6707,10 @@ impl WindowState<'_> {
                 self.palette.close();
                 self.type_text(&text);
             }
+            Some(Out::Download(path)) => {
+                self.palette.close();
+                self.start_download(path);
+            }
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -6535,6 +6732,7 @@ impl WindowState<'_> {
             Id::Cmd(Cmd::NewWindow) => self.source.new_window(),
             Id::Cmd(Cmd::Switcher) => self.toggle_popover(Kind::Switcher),
             Id::Cmd(Cmd::Overview) => self.toggle_overview(),
+            Id::Cmd(Cmd::Explorer) => self.toggle_explorer(),
             Id::Cmd(Cmd::Settings) => self.open_settings(),
             Id::Cmd(Cmd::ReloadConfig) => self.reload_config(),
             Id::Cmd(Cmd::TakeOver) => {
@@ -6546,8 +6744,44 @@ impl WindowState<'_> {
             Id::Session(key) => self.source.switch(key),
             Id::Window(key) => self.source.select(key),
             // Browse stays in the palette; it never runs.
-            Id::GoTo | Id::Insert => {}
+            Id::GoTo | Id::Insert | Id::Download => {}
         }
+    }
+
+    /// Fetch `path` of the palette's block's host into the Downloads folder
+    /// (D100); the answer comes back as [`UserEvent::Downloaded`].
+    fn start_download(&mut self, path: String) {
+        let Some(key) = self.palette_origin else {
+            return;
+        };
+        let proxy = self.proxy.clone();
+        let tell = self.proxy.clone();
+        let name = file_label(std::path::Path::new(&path));
+        self.source.download_with_progress(
+            key,
+            path,
+            Box::new(move |got, total| {
+                let notice = progress_notice("Receiving file", &name, got, total);
+                let _ = tell.send_event(UserEvent::DownloadProgress(notice));
+            }),
+            Box::new(move |downloaded| {
+                let _ = proxy.send_event(UserEvent::Downloaded(key, downloaded));
+            }),
+        );
+    }
+
+    /// A download finished: the notice says where the file is, or why not.
+    fn downloaded(&mut self, downloaded: Downloaded) {
+        self.show_notice(Some(match downloaded {
+            Ok(path) => super::source::Notice {
+                title: "File saved".to_owned(),
+                detail: path,
+            },
+            Err(why) => super::source::Notice {
+                title: "File not sent".to_owned(),
+                detail: why,
+            },
+        }));
     }
 
     /// Read a folder for the palette's browse, on the focused block's
@@ -6583,7 +6817,8 @@ impl WindowState<'_> {
     /// A file dropped on the window: typed as a path, or, on a pane whose
     /// host is elsewhere, sent there first (C82).
     fn drop_file(&mut self, path: std::path::PathBuf) {
-        if self.overview.is_open() {
+        // The explorer is read-only: a drop on it is discarded (D99).
+        if self.overview.is_open() || self.explorer.is_open() {
             return;
         }
         if self.start_upload(path.clone()) {
@@ -6622,9 +6857,15 @@ impl WindowState<'_> {
             .collect();
         while let Some((key, path)) = self.uploads.next(|k| open.contains(&k)) {
             let proxy = self.proxy.clone();
+            let name = file_label(&path);
+            let tell = self.proxy.clone();
             self.source.upload(
                 key,
                 path,
+                Box::new(move |sent, total| {
+                    let notice = progress_notice("Sending file", &name, sent, total);
+                    let _ = tell.send_event(UserEvent::UploadProgress(key, notice));
+                }),
                 Box::new(move |uploaded| {
                     let _ = proxy.send_event(UserEvent::Uploaded(key, uploaded));
                 }),
@@ -6636,14 +6877,26 @@ impl WindowState<'_> {
     /// pane as a drop of a local file would be, or the notice says why not.
     fn uploaded(&mut self, key: u64, uploaded: Uploaded) {
         self.uploads.finish(key);
+        let shown = std::mem::take(&mut self.uploads.shown);
         match uploaded {
-            Ok(path) => self.type_remote_path(key, &path),
+            Ok(path) => {
+                if shown {
+                    self.show_notice(None);
+                }
+                self.type_remote_path(key, &path);
+            }
             Err(why) => self.show_notice(Some(super::source::Notice {
                 title: "File not sent".to_owned(),
                 detail: why,
             })),
         }
         self.next_upload();
+    }
+
+    /// An upload for pane `key` went on: its notice shows how far.
+    fn upload_progress(&mut self, notice: super::source::Notice) {
+        self.uploads.shown = true;
+        self.show_notice(Some(notice));
     }
 
     /// Types `path`, a file's place on pane `key`'s host, quoted for that
@@ -6804,6 +7057,17 @@ impl WindowState<'_> {
                 // The overview still hears the chord that toggles it and the
                 // palette's shortcut, which leaves it (gui-design D97, D98).
                 if self.overview.is_open() && self.overview_passes(&event) {
+                    self.consumed_keys.consume(event.physical_key);
+                    return;
+                }
+                // The explorer owns the keys while open, but the prefix and
+                // its command (which toggle it) still reach their handler.
+                if self.explorer.owns_keys()
+                    && !self.popover_open()
+                    && !self.armed
+                    && !prefix::is_prefix(&event.logical_key, event.physical_key, self.mods)
+                {
+                    self.explorer_key(&event.logical_key);
                     self.consumed_keys.consume(event.physical_key);
                     return;
                 }
@@ -6996,7 +7260,7 @@ impl WindowState<'_> {
                         self.palette_out(out);
                         return;
                     }
-                    if self.popover_open() {
+                    if self.popover_open() || self.explorer.owns_keys() {
                         return;
                     }
                     // The find bar owns composed text while it's open — mirror
@@ -7188,6 +7452,10 @@ impl WindowState<'_> {
                 match state {
                     // An open popover takes the click: a row picks, any
                     // other place closes it (gui-design D60).
+                    ElementState::Pressed
+                        if !self.popover_open()
+                            && self.explorer.is_open()
+                            && self.explorer_click(self.mouse_pos.0, self.mouse_pos.1) => {}
                     ElementState::Pressed if self.popover_open() => {
                         self.popover_click(self.mouse_pos.0, self.mouse_pos.1);
                     }
@@ -7284,6 +7552,20 @@ impl WindowState<'_> {
                 let (lines, remainder) = accumulate_scroll_lines(self.scroll_accum, raw_lines);
                 self.scroll_accum = remainder;
                 if lines == 0 {
+                    return;
+                }
+                // Over the explorer the wheel moves its cursor a row a
+                // line, and never reaches the panes under it (D99).
+                if self.explorer.over(self.mouse_pos.0, self.mouse_pos.1) {
+                    let step = if lines > 0 {
+                        super::explorer::Key::Up
+                    } else {
+                        super::explorer::Key::Down
+                    };
+                    for _ in 0..lines.unsigned_abs() {
+                        let out = self.explorer.key(step);
+                        self.explorer_out(out);
+                    }
                     return;
                 }
                 // The overview covers the body: the wheel moves its
@@ -7427,9 +7709,10 @@ impl<'a> App<'a> {
             shown_wait: None,
             palette: PaletteUi::new().ok_or("the interface font failed to parse")?,
             palette_origin: None,
+            explorer: ExplorerUi::new().ok_or("the interface font failed to parse")?,
             overview: OverviewUi::new().ok_or("the interface font failed to parse")?,
             links: load_trust(),
-            forward_trust: std::collections::HashSet::new(),
+            forward_trust: load_forward_trust(),
             forward_asks: ForwardAsks::default(),
             uploads: UploadQueue::default(),
             config: self.config.clone(),
@@ -7575,6 +7858,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                     w.show_blocks(blocks);
                 }
             }
+            UserEvent::Explorer(key, snapshot) => {
+                if let Some(w) = self.windows.first_mut() {
+                    w.show_explorer(key, snapshot);
+                }
+            }
             UserEvent::Link(link) => {
                 if let Some(w) = self.windows.first_mut() {
                     w.show_link(link);
@@ -7590,6 +7878,14 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                     w.answer_clipboard_read(id, primary);
                 }
             }
+            UserEvent::ForwardRefused(id, port, reason) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(id)) {
+                    w.show_notice(Some(super::source::Notice {
+                        title: "Port forward closed".to_owned(),
+                        detail: format!("Port {port}: {reason}."),
+                    }));
+                }
+            }
             UserEvent::Forwarded(key, op, target, forwarded) => {
                 // Only the window that still holds the pane takes the answer.
                 if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(key)) {
@@ -7601,6 +7897,25 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                 // answer still frees its queue.
                 if let Some(w) = self.windows.iter_mut().find(|w| w.uploads.busy_with(key)) {
                     w.uploaded(key, uploaded);
+                }
+            }
+            UserEvent::Downloaded(key, downloaded) => {
+                // The window that asked; the notice is for the person, so a
+                // pane that has gone since still gets one.
+                let at = self.windows.iter().position(|w| w.has_pane(key));
+                if let Some(w) = self.windows.get_mut(at.unwrap_or(0)) {
+                    w.downloaded(downloaded);
+                }
+            }
+            UserEvent::UploadProgress(key, notice) => {
+                // Only the window whose upload it is shows it.
+                if let Some(w) = self.windows.iter_mut().find(|w| w.uploads.busy_with(key)) {
+                    w.upload_progress(notice);
+                }
+            }
+            UserEvent::DownloadProgress(notice) => {
+                if let Some(w) = self.windows.first_mut() {
+                    w.show_notice(Some(notice));
                 }
             }
             UserEvent::Listed(ask, listed) => {
@@ -8108,6 +8423,8 @@ struct UploadQueue {
     waiting: std::collections::VecDeque<(u64, std::path::PathBuf)>,
     /// The pane whose file is on its way.
     active: Option<u64>,
+    /// Whether the banner shows an upload's progress, to be cleared after.
+    shown: bool,
 }
 
 impl UploadQueue {
@@ -8140,6 +8457,23 @@ impl UploadQueue {
         if self.busy_with(key) {
             self.active = None;
         }
+    }
+}
+
+/// A file's name for the banner, or its whole path when it has none.
+fn file_label(path: &std::path::Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The banner text of an upload `sent` bytes into `total`.
+fn progress_notice(title: &str, name: &str, sent: u64, total: u64) -> super::source::Notice {
+    let percent = (sent.min(total) * 100).checked_div(total).unwrap_or(100);
+    super::source::Notice {
+        title: title.to_owned(),
+        detail: format!("{name}: {percent}%"),
     }
 }
 
@@ -8186,6 +8520,22 @@ fn load_trust() -> link_policy::Policy {
     link_trust::default_dir()
         .and_then(|d| link_trust::read(&d).ok())
         .unwrap_or_default()
+}
+
+/// The forwards trusted on disk; none if the directory cannot be read.
+fn load_forward_trust() -> std::collections::HashSet<String> {
+    link_trust::forwards_dir()
+        .and_then(|d| link_trust::read_forwards(&d).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
+/// Remember forward `entry` on disk (see [`link_trust::add_forward`]).
+fn save_forward_trust(entry: &str) -> std::io::Result<()> {
+    let dir =
+        link_trust::forwards_dir().ok_or_else(|| std::io::Error::other("no config directory"))?;
+    link_trust::add_forward(&dir, entry)
 }
 
 /// Remember `origin` on disk (see [`link_trust::add`]).
@@ -9349,6 +9699,24 @@ mod tests {
         assert!(q.busy_with(2), "an answer for another pane frees nothing");
         q.finish(2);
         assert_eq!(q.next(|_| true), None);
+    }
+
+    #[test]
+    fn an_upload_notice_names_the_file_and_how_far_it_is() {
+        let notice = super::progress_notice("Sending file", "a.png", 1, 4);
+        assert_eq!(notice.detail, "a.png: 25%");
+        assert_eq!(
+            super::progress_notice("Sending file", "a", 9, 4).detail,
+            "a: 100%",
+            "capped"
+        );
+        assert_eq!(
+            super::progress_notice("Sending file", "e", 0, 0).detail,
+            "e: 100%",
+            "empty"
+        );
+        let path = std::path::Path::new("/tmp/dir/b.txt");
+        assert_eq!(super::file_label(path), "b.txt");
     }
 
     #[test]

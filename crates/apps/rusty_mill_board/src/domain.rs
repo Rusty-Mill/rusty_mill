@@ -326,6 +326,8 @@ pub struct Edit<'a> {
     pub why: Option<&'a str>,
     /// New one-paragraph summary; `""` clears it. At most [`MAX_SUMMARY_BYTES`].
     pub summary: Option<&'a str>,
+    /// New one-line state; `""` clears it. See [`check_state`].
+    pub state: Option<&'a str>,
 }
 
 /// The longest `acceptance`, `scope`, `why` and `summary`, in bytes (#1568).
@@ -337,9 +339,40 @@ pub const MAX_WHY_BYTES: usize = 600;
 /// See [`MAX_ACCEPTANCE_BYTES`].
 pub const MAX_SUMMARY_BYTES: usize = 320;
 
-/// The longest prompt, in bytes. It is stored in the card's rusty_tick board document,
-/// which rusty_tick caps at 64 KiB, beside the links.
-pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
+/// The longest prompt, in bytes (8 KiB; it was 32 KiB, lean cards #1435). A write that
+/// leaves a longer existing prompt as it is is never refused ([`Card::with_prompt`]).
+pub const MAX_PROMPT_BYTES: usize = 8 * 1024;
+/// The longest title, in characters (#1435).
+pub const MAX_TITLE_CHARS: usize = 200;
+/// The longest body, in bytes (#1435).
+pub const MAX_BODY_BYTES: usize = 8 * 1024;
+/// The longest comment, in bytes (#1435).
+pub const MAX_COMMENT_BYTES: usize = 2 * 1024;
+/// The longest `state` line, in bytes (#1435).
+pub const MAX_STATE_BYTES: usize = 200;
+
+/// A write refused for being over a content budget: names the field, the limit and the size
+/// sent, and says where the detail belongs.
+fn over_budget(field: &str, limit: usize, sent: usize, unit: &str) -> BoardError {
+    BoardError::Refused(format!(
+        "{field} is {sent} {unit}, over the {limit} {unit} limit; move the detail to remind-me, \
+         the repo or GitHub and link it"
+    ))
+}
+
+/// Check a `state` line: at most [`MAX_STATE_BYTES`], one line.
+///
+/// # Errors
+/// [`BoardError::Refused`] over the limit, [`BoardError::Invalid`] with a line break.
+pub fn check_state(state: &str) -> Result<(), BoardError> {
+    if state.contains(['\n', '\r']) {
+        return Err(BoardError::Invalid("state is one line: no line break"));
+    }
+    if state.len() > MAX_STATE_BYTES {
+        return Err(over_budget("state", MAX_STATE_BYTES, state.len(), "bytes"));
+    }
+    Ok(())
+}
 
 /// A planning change (`card_plan`): each `None` field is left as it is, and a list replaces
 /// the card's current one (an empty list clears it).
@@ -419,8 +452,57 @@ pub fn text_hash(title: &str, body: &str) -> u64 {
     hash
 }
 
+/// What a comment is for (#1436). Old comments, and any written without a kind, are notes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentKind {
+    /// A plain status note.
+    #[default]
+    Note,
+    /// Who holds the work.
+    Claim,
+    /// Done, next, and where the details are: three short lines.
+    Handoff,
+    /// Something stops the work; open until a comment `resolves` it.
+    Blocker,
+    /// A question for someone; open until a comment `resolves` it.
+    Question,
+    /// A choice made, and why.
+    Decision,
+}
+
+impl CommentKind {
+    /// Parse the `kind` argument of `card_comment`.
+    ///
+    /// # Errors
+    /// An unknown kind, naming the valid ones.
+    pub fn parse(s: &str) -> Result<Self, BoardError> {
+        match s {
+            "note" => Ok(Self::Note),
+            "claim" => Ok(Self::Claim),
+            "handoff" => Ok(Self::Handoff),
+            "blocker" => Ok(Self::Blocker),
+            "question" => Ok(Self::Question),
+            "decision" => Ok(Self::Decision),
+            _ => Err(BoardError::Invalid(
+                "kind is one of note, claim, handoff, blocker, question, decision",
+            )),
+        }
+    }
+
+    /// A blocker or a question: the kinds that stay open until resolved.
+    #[must_use]
+    pub fn is_open_kind(self) -> bool {
+        matches!(self, Self::Blocker | Self::Question)
+    }
+
+    fn is_note(&self) -> bool {
+        *self == Self::Note
+    }
+}
+
 /// A note on a card.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
     /// Author.
     pub by: String,
@@ -428,6 +510,49 @@ pub struct Comment {
     pub at_ms: i64,
     /// Text.
     pub text: String,
+    /// What the comment is for; absent (a note) on every comment written before #1436.
+    #[serde(default, skip_serializing_if = "CommentKind::is_note")]
+    pub kind: CommentKind,
+    /// Assigned on write, so a later comment can `resolves` it; absent on older comments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
+    /// The blocker or question this comment resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolves: Option<Uuid>,
+}
+
+/// A comment to add: [`Card::comment_with`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NewComment<'a> {
+    /// Text, at most [`MAX_COMMENT_BYTES`].
+    pub text: &'a str,
+    /// New `state` line, as on [`Edit`].
+    pub state: Option<&'a str>,
+    /// What the comment is for.
+    pub kind: CommentKind,
+    /// An open blocker or question on this card that this comment resolves.
+    pub resolves: Option<Uuid>,
+}
+
+/// Most lines, and bytes, of a handoff comment.
+pub const MAX_HANDOFF_LINES: usize = 3;
+/// See [`MAX_HANDOFF_LINES`].
+pub const MAX_HANDOFF_BYTES: usize = 400;
+/// Newest comments the recent read keeps (#1436).
+pub const RECENT_COMMENTS: usize = 5;
+
+/// A handoff is three short lines: done, next, where the details are.
+fn check_handoff(text: &str) -> Result<(), BoardError> {
+    let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+    if lines > MAX_HANDOFF_LINES || text.len() > MAX_HANDOFF_BYTES {
+        return Err(BoardError::Refused(format!(
+            "a handoff is at most {MAX_HANDOFF_LINES} non-empty lines and {MAX_HANDOFF_BYTES} bytes \
+             (got {lines} lines, {} bytes): line 1 what is done, line 2 what is next, \
+             line 3 where the details are",
+            text.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Most evidence links a card keeps.
@@ -631,6 +756,10 @@ pub struct Card {
     /// One short paragraph for a card face. Empty when unset.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub summary: String,
+    /// Where the work stands now, in the last writer's words: one line, at most
+    /// [`MAX_STATE_BYTES`]. Changes as work moves; `summary` rarely does. Empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
     /// Current column.
     pub column: Column,
     /// Who holds the work, if anyone.
@@ -764,6 +893,9 @@ pub struct CardSummary {
     pub claim: Option<String>,
     /// Labels.
     pub tags: Vec<String>,
+    /// Where the work stands; left out when empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub state: String,
     /// Creation time, Unix ms.
     pub created_ms: i64,
     /// Last change, Unix ms.
@@ -789,6 +921,7 @@ impl From<&Card> for CardSummary {
             priority: c.priority,
             claim: c.claim.clone(),
             tags: c.tags.clone(),
+            state: c.state.clone(),
             created_ms: c.created_ms,
             updated_ms: c.updated_ms,
             done_ms: c.done_ms,
@@ -1039,6 +1172,21 @@ fn check_transition(t: &Transition, by: &Actor) -> Result<(), BoardError> {
     Ok(())
 }
 
+fn check_title(title: &str) -> Result<(), BoardError> {
+    let chars = title.chars().count();
+    if chars > MAX_TITLE_CHARS {
+        return Err(over_budget("title", MAX_TITLE_CHARS, chars, "characters"));
+    }
+    Ok(())
+}
+
+fn check_body(body: &str) -> Result<(), BoardError> {
+    if body.len() > MAX_BODY_BYTES {
+        return Err(over_budget("body", MAX_BODY_BYTES, body.len(), "bytes"));
+    }
+    Ok(())
+}
+
 impl Card {
     /// A new Backlog card.
     ///
@@ -1055,6 +1203,8 @@ impl Card {
             return Err(BoardError::Invalid("title is empty"));
         }
         check_tags(&tags)?;
+        check_title(title)?;
+        check_body(body)?;
         Ok(Self {
             id: Uuid::new_v4(),
             number: None,
@@ -1066,6 +1216,7 @@ impl Card {
             scope: String::new(),
             why: String::new(),
             summary: String::new(),
+            state: String::new(),
             column: Column::BACKLOG,
             claim: None,
             tags,
@@ -1342,6 +1493,7 @@ impl Card {
                 "{MERGED_PREFIX} {pr} merged (was in {}).",
                 self.column.as_str()
             ),
+            ..Comment::default()
         });
         Ok(Self {
             column: Column::DONE,
@@ -1404,6 +1556,7 @@ impl Card {
                 "{UNCLOSED_PREFIX} the merge watch's close{pr} is undone, back to {}.",
                 was.as_str()
             ),
+            ..Comment::default()
         });
         Ok(Self {
             column: was,
@@ -1576,9 +1729,17 @@ impl Card {
             if t.trim().is_empty() {
                 return Err(BoardError::Invalid("title is empty"));
             }
+            // A limit applies only to a write that changes the field: an oversized card from
+            // before the limits can still be edited elsewhere (#1435).
+            if t.trim() != self.title {
+                check_title(t.trim())?;
+            }
             next.title = t.trim().to_owned();
         }
         if let Some(b) = body {
+            if b != self.body {
+                check_body(b)?;
+            }
             next.body = b.to_owned();
         }
         if let Some(t) = tags {
@@ -1593,8 +1754,13 @@ impl Card {
     /// # Errors
     /// A prompt over [`MAX_PROMPT_BYTES`].
     pub fn with_prompt(mut self, prompt: &str) -> Result<Self, BoardError> {
-        if prompt.len() > MAX_PROMPT_BYTES {
-            return Err(BoardError::Invalid("prompt is longer than 32 KiB"));
+        if prompt != self.prompt && prompt.len() > MAX_PROMPT_BYTES {
+            return Err(over_budget(
+                "prompt",
+                MAX_PROMPT_BYTES,
+                prompt.len(),
+                "bytes",
+            ));
         }
         self.prompt = prompt.to_owned();
         Ok(self)
@@ -1637,6 +1803,10 @@ impl Card {
                 return Err(BoardError::Invalid(refusal));
             }
             *slot = (*text).to_owned();
+        }
+        if let Some(state) = edit.state {
+            check_state(state)?;
+            self.state = state.to_owned();
         }
         Ok(self)
     }
@@ -1782,14 +1952,120 @@ impl Card {
     /// # Errors
     /// If `text` is blank.
     pub fn comment(&self, by: &Actor, text: &str, now_ms: i64) -> Result<Self, BoardError> {
+        self.comment_with_state(by, text, None, now_ms)
+    }
+
+    /// [`Card::comment`], also setting the card's `state` line when one is given.
+    ///
+    /// # Errors
+    /// If `text` is blank or over [`MAX_COMMENT_BYTES`], or the state fails [`check_state`].
+    pub fn comment_with_state(
+        &self,
+        by: &Actor,
+        text: &str,
+        state: Option<&str>,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
+        let new = NewComment {
+            text,
+            state,
+            ..NewComment::default()
+        };
+        self.comment_with(by, &new, now_ms)
+    }
+
+    /// The card with only its recent comments: the last [`RECENT_COMMENTS`], the latest
+    /// handoff and every open blocker or question, so a newer chatty comment never hides
+    /// them; and how many comments were left out. Nothing is rewritten.
+    #[must_use]
+    pub fn recent(&self) -> (Self, usize) {
+        let total = self.comments.len();
+        let latest_handoff = self
+            .comments
+            .iter()
+            .rposition(|c| c.kind == CommentKind::Handoff);
+        let kept: Vec<Comment> = self
+            .comments
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                *i + RECENT_COMMENTS >= total
+                    || Some(*i) == latest_handoff
+                    || c.id.is_some_and(|id| self.is_open(id))
+            })
+            .map(|(_, c)| c.clone())
+            .collect();
+        let omitted = total - kept.len();
+        (
+            Self {
+                comments: kept,
+                ..self.clone()
+            },
+            omitted,
+        )
+    }
+
+    /// Whether `id` is a blocker or question on this card that no comment resolves.
+    #[must_use]
+    pub fn is_open(&self, id: Uuid) -> bool {
+        self.comments
+            .iter()
+            .any(|c| c.id == Some(id) && c.kind.is_open_kind())
+            && !self.comments.iter().any(|c| c.resolves == Some(id))
+    }
+
+    /// Append a comment of a `kind`, optionally resolving a blocker or question and setting
+    /// the `state` line. A comment gets an id, so a later one can resolve it.
+    ///
+    /// # Errors
+    /// Text blank or over [`MAX_COMMENT_BYTES`], a handoff that is not three short lines, a
+    /// `resolves` that is not an open blocker or question on this card, or a bad state.
+    pub fn comment_with(
+        &self,
+        by: &Actor,
+        new: &NewComment<'_>,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
+        let NewComment {
+            text,
+            state,
+            kind,
+            resolves,
+        } = *new;
         if text.trim().is_empty() {
             return Err(BoardError::Invalid("comment is empty"));
         }
+        if text.len() > MAX_COMMENT_BYTES {
+            return Err(over_budget(
+                "comment",
+                MAX_COMMENT_BYTES,
+                text.len(),
+                "bytes",
+            ));
+        }
+        if kind == CommentKind::Handoff {
+            check_handoff(text)?;
+        }
+        if let Some(target) = resolves
+            && !self.is_open(target)
+        {
+            return Err(BoardError::Refused(
+                "resolves must name an open blocker or question on this card (a resolved one is never reopened)"
+                    .into(),
+            ));
+        }
         let mut next = self.next(now_ms);
+        if let Some(state) = state {
+            check_state(state)?;
+            next.state = state.to_owned();
+        }
         next.comments.push(Comment {
             by: by.name.clone(),
             at_ms: now_ms,
             text: text.to_owned(),
+            kind,
+            id: Some(Uuid::now_v7()),
+            resolves,
         });
         Ok(next)
     }
@@ -1838,6 +2114,7 @@ mod tests {
             by: "nano".into(),
             at_ms: 4,
             text: format!("Unclosed: the merge watch's close of {seven} is undone, back to ready."),
+            ..Comment::default()
         });
         assert!(!noted.unclosed_from(seven));
     }

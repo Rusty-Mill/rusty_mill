@@ -13,6 +13,7 @@ pub const BP: u64 = 10_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Lang {
     Rust,
+    Python,
 }
 
 /// One normalized token. Adapters map identifiers and literals to fixed

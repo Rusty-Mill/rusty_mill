@@ -12,7 +12,7 @@
 //! | `{` or `}` | swap the focused block with the previous or next block |
 //! | `D` | detach the focused block from the layout; it keeps running |
 //! | `/` | find in the focused block's scrollback (Enter or Ctrl-N next, Ctrl-P previous, Esc leaves) |
-//! | `e` | open the focused block's workspace tree, read-only (j/k or arrows move, Enter or l opens, h up, q or Esc leaves); needs the lease and a server with `workspace explorer` |
+//! | `e` | open the focused block's workspace tree, read-only (j/k or arrows move, Enter or l opens, h up, y copies the path, q or Esc leaves); needs the lease and a server with `workspace explorer` |
 //! | `r` | re-run the focused block's command once its program has ended (D338); needs the lease and a server with `terminal.rerun` |
 //! | `[` or `]` | scroll the focused block to the previous or next prompt (OSC 133) |
 //! | Ctrl-] | type a Ctrl-] |

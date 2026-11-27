@@ -1,6 +1,6 @@
 # Workspace explorer (card #1573)
 
-Status: design; slices 1 (list), 2 (stat, touched-by calls) and 3 (TUI tree shows them) built; server call accepted (handoff D337, Nano 2026-11-18). The wire slice still passes the owner gate when its PR is opened. Source: Nano, voice, 2026-11-18 (remind-me mem_797b5707, card #1573).
+Status: design; slices 1 (list), 2 (stat, touched-by calls) 3 (TUI tree shows them) and the copy-path action built; server call accepted (handoff D337, Nano 2026-11-18). The wire slice still passes the owner gate when its PR is opened. Source: Nano, voice, 2026-11-18 (remind-me mem_797b5707, card #1573).
 
 ## What
 
@@ -29,8 +29,27 @@ A server call limited to list, stat and touched-by, scoped to the session worksp
 ## Order
 
 1. Server call and ctl form (cloud-buildable, owner gate).
-2. TUI text tree (cloud-buildable): lists, then shows the size and age of the row under the cursor and a letter beside each changed file (`*` on a directory with a change below it). Tree actions (copy path, cd, open in an editor) follow, each with its own gate.
+2. TUI text tree (cloud-buildable): lists, then shows the size and age of the row under the cursor and a letter beside each changed file (`*` on a directory with a change below it). Tree actions follow, each with its own gate: copy path is built (`y`, OSC 52, D374); `c` cd is built with a confirm step (D375/D376, needs Nano's confirmation on its PR, Q107); `o` open in editor is built over `Launch.workspace_of` (D378): a new block in the same window, started in the tree's block's workspace, running the server account's `$EDITOR`; it needs the lease and the new bit, and says only where the block starts, not that it opens the picked file (file identity is unresolved, D377).
 3. GUI panel on the D60 panel tokens (needs a Windows GUI build; not cloud-buildable).
+
+## Open in editor needs the block's own workspace (D377)
+
+The action is not built. The tree names a file relative to the block's workspace root, which the server holds as a directory handle (D342) and no call returns. A new block starts in the server's configured directory, which can be another directory with a same-named file. The client cannot prove the root, so a launch from the client would be a guess: PR #1929 tried a size and modification-time check, the review rejected it (neither is file identity), and its code was reverted. Nano chose to scope a server-side root first (D377, decision card 2026-11-27): this is that scope, with no wire, code or Feature bit until a later go and the owner gate on its own PR (D337, D375).
+
+**Candidates**
+
+- **A (recommended): `Launch.workspace_of: Option<BlockId>`**, a new optional launch field behind a new Feature bit (implies `WORKSPACE`). The new block starts in the held workspace of that block: the server takes that block's workspace handle where `create_block` now opens `config.cwd`, and `spawn_cwd` gives the directory. It excludes `cwd` (both is a bad launch). Nothing from the client names a path, so there is nothing to traverse.
+  - Gates, as the list call: the input lease on the source block (D316) and on the new block's window; refused for an agent block (D372), after a server restart (D347), and off Linux (D346). The client must send the field only to a peer that negotiated the new bit, and the server refuses it without the bit: an old server would drop an unknown field and start in the wrong directory, so there is no fallback to `cwd` or to the default directory.
+  - **Two guarantees, kept apart.** (1) *The workspace:* the new block starts in the held root of the named block, by handle, so a rename or swap of the path changes nothing (the D342 contract). That is the whole of what this design establishes. (2) *The file:* resolving the relative path under that root with the `O_NOFOLLOW` walk and refusing a link or a missing file validates the path at one moment. It does not prove that the separately launched editor then opens the same file: the file can be replaced or renamed between the check and the editor's own open, and the program resolves the name itself. File identity is therefore **unresolved**, not solved by (1) or by any check; a design that needs it (for example handing the program an already-open descriptor, or a launch the server performs on the resolved file) must be scoped on its own and is not part of this candidate.
+  - The file name goes to the program as argv, never shell text.
+  - The TUI hides `o` and says why when the bit is absent. The GUI panel uses the same call (its look is the design expert's).
+- **B: a block call `terminal.workspace-edit <path>`** that launches the editor itself beside the block. Old peers get a refusal, but a launch inside a block call returns a new block id, an odd shape, and the server would pick the program.
+- **C (rejected): a call returning an absolute path.** The held handle's `/proc` path means nothing to a client, and a real path can be renamed or swapped after it is read, which is the race D342 exists to prevent.
+- **D (rejected): expose the configured directory.** Not authoritative once a shell has moved or the directory was renamed.
+
+**First slice (Nano's go, D378; built: the bit, the field and the server resolution with the tests below; the `rusty-mux-ctl` form is not):** the Feature bit and `Launch.workspace_of` in `rusty_mux_proto`, the server resolution with a test per refusal (no lease, agent block, unknown root, both `cwd` and `workspace_of`, bit not negotiated). It establishes the workspace only (guarantee 1). The TUI `o` follows and may claim no more than that, so it does not call the opened file the one picked while file identity is unresolved; the GUI last.
+
+**For Nano:** which program runs. (a) the client names the program and arguments in `Launch` (recommended: it already travels there, no server policy; a remote mux needs the editor installed, and `sh -c 'exec ${EDITOR:-vi} "$1"'` uses the server account's `$EDITOR`); (b) a server-side rule picks the editor; (c) drop the editor and keep copy path (D374). Also the wire itself: the bit and field are an owner gate, with Nano's words on the PR that builds them.
 
 ## Decided
 

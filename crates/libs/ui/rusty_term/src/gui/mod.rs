@@ -29,6 +29,8 @@ mod chrome;
 mod confirm;
 mod cpu;
 mod damage;
+pub mod explorer;
+mod explorer_view;
 mod floats;
 mod font;
 #[cfg(feature = "gui-gpu")]
@@ -37,6 +39,10 @@ pub(crate) mod input;
 mod layout;
 #[expect(dead_code)] // wired by the tab in a later slice (#1416)
 mod lel;
+#[expect(dead_code)] // wired by the tab in a later slice (#1416)
+mod lel_act;
+#[expect(dead_code)] // wired by the tab in a later slice (#1416)
+mod lel_inbox;
 #[expect(dead_code)] // wired by the tab in a later slice (#1416)
 mod lel_map;
 mod link_policy;

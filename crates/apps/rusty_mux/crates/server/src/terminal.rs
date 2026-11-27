@@ -722,11 +722,17 @@ mod tests {
     #[test]
     fn a_reported_directory_must_be_local_and_exist() {
         let mut grid = Grid::new(10, 2);
-        let here = std::env::temp_dir();
+        // As an OSC 7 report writes it: `/tmp`, or `/C:/Users/x` on Windows.
+        let here = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+        let here = if here.starts_with('/') {
+            here
+        } else {
+            format!("/{here}")
+        };
         for (uri, ok) in [
-            (format!("file://{}", here.display()), true),
-            (format!("file://localhost{}", here.display()), true),
-            (format!("file://elsewhere.invalid{}", here.display()), false),
+            (format!("file://{here}"), true),
+            (format!("file://localhost{here}"), true),
+            (format!("file://elsewhere.invalid{here}"), false),
             ("file:///no/such/dir".to_owned(), false),
             (String::new(), false),
         ] {

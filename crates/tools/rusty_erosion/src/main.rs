@@ -323,11 +323,11 @@ fn base_snapshot(base: &str) -> Result<Snapshot, String> {
             FileClass::Unmeasured => {
                 snap.other.insert(path);
             }
-            FileClass::Rust if mode == "160000" => {}
-            FileClass::Rust if exact && matches!(mode, "100644" | "100755") => {
+            FileClass::Measured(_) if mode == "160000" => {}
+            FileClass::Measured(_) if exact && matches!(mode, "100644" | "100755") => {
                 wanted.push((path, oid.to_owned()));
             }
-            FileClass::Rust => {
+            FileClass::Measured(_) => {
                 snap.unreadable.insert(path);
             }
         }
@@ -362,8 +362,8 @@ fn worktree(changed: &BTreeSet<String>, mangled: &Mangled) -> Result<Snapshot, S
             FileClass::Unmeasured => {
                 snap.other.insert(name.clone());
             }
-            FileClass::Rust if !tree.holds(raw) => {}
-            FileClass::Rust => {
+            FileClass::Measured(_) if !tree.holds(raw) => {}
+            FileClass::Measured(_) => {
                 snap.unreadable.insert(name.clone());
             }
         }
@@ -375,8 +375,8 @@ fn worktree(changed: &BTreeSet<String>, mangled: &Mangled) -> Result<Snapshot, S
             FileClass::Unmeasured => {
                 snap.other.insert(path.clone());
             }
-            FileClass::Rust if !tree.holds(path.as_bytes()) => {}
-            FileClass::Rust => match entry(path)? {
+            FileClass::Measured(_) if !tree.holds(path.as_bytes()) => {}
+            FileClass::Measured(_) => match entry(path)? {
                 Entry::Absent => {}
                 Entry::Special => {
                     snap.unreadable.insert(path.clone());

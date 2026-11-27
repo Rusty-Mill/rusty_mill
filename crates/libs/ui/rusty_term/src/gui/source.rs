@@ -39,6 +39,9 @@ pub enum Feed {
     /// [`BackendHandle::clipboard_reply`]; only a pane whose
     /// [`PaneIo::serves_clipboard`] is set gets these.
     ClipboardRead { primary: bool },
+    /// The server ended a forward of the pane with a reason, such as a dial
+    /// nothing answered (C81): shown as a notice.
+    ForwardRefused { port: u16, reason: String },
 }
 
 /// Where this window stands on typing into an owner-only block, whose
@@ -343,6 +346,16 @@ pub trait Source {
     fn list_dir(&self, _key: u64, _path: Option<String>, done: ListDone) {
         done(Err("this source lists no folders".into()));
     }
+    /// What the source can show of pane `key`'s workspace tree in the
+    /// explorer panel (gui-design D99, card #1573). A source that can't
+    /// hides the panel's entry points.
+    fn explores(&self, _key: u64) -> Explore {
+        Explore::No
+    }
+    /// The user opened, used or closed the explorer on pane `key`. The
+    /// source owns the tree and answers with [`Remote::explorer`]. Not
+    /// called when [`Source::explores`] is [`Explore::No`].
+    fn explore(&self, _key: u64, _ask: Explored) {}
     /// Whether the source can tunnel a loopback port of pane `key`'s host
     /// to this machine (mux C81), so a `localhost` link in that pane opens
     /// here. A source that can't leaves such links to the ordinary link
@@ -363,6 +376,12 @@ pub trait Source {
     fn forwarded_port(&self, _key: u64, _port: u16) -> Option<Bound> {
         None
     }
+    /// A stable, opaque name for pane `key`'s host, one line, the same on
+    /// every connection to it (such as the server's socket): what a saved
+    /// forward trust is kept under. `None` keeps trust for the window only.
+    fn host_id(&self, _key: u64) -> Option<String> {
+        None
+    }
     /// Whether the source can send a file to pane `key`'s host (mux C82),
     /// so a file dropped or pasted on that pane is uploaded and its path
     /// there typed. A source that can't leaves the file's own path to be
@@ -371,11 +390,66 @@ pub trait Source {
         false
     }
     /// Sends the file at `path` to pane `key`'s host and calls `done` once,
-    /// from any thread, with its path there or why not. Not called when
-    /// [`Source::uploads`] is `false`.
-    fn upload(&self, _key: u64, _path: std::path::PathBuf, done: UploadDone) {
+    /// from any thread, with its path there or why not. `progress` is called
+    /// with the bytes sent and the file's size as chunks are answered, from
+    /// any thread, before `done`. Not called when [`Source::uploads`] is
+    /// `false`.
+    fn upload(
+        &self,
+        _key: u64,
+        _path: std::path::PathBuf,
+        _progress: UploadProgress,
+        done: UploadDone,
+    ) {
         done(Err("this source uploads no files".into()));
     }
+    /// Whether the source can fetch a file of pane `key`'s host (mux C83).
+    fn downloads(&self, _key: u64) -> bool {
+        false
+    }
+    /// Fetches the file at `path` (absolute, or relative to the pane's
+    /// folder) of pane `key`'s host into this machine's Downloads folder and
+    /// calls `done` once, from any thread, with where it was saved or why
+    /// not. Not called when [`Source::downloads`] is `false`.
+    fn download(&self, _key: u64, _path: String, done: DownloadDone) {
+        done(Err("this source downloads no files".into()));
+    }
+    /// [`Source::download`] that also calls `progress` with the bytes
+    /// received and the file's size as chunks arrive, from any thread, before
+    /// `done`. A source that can't report progress keeps this default, which
+    /// downloads without it.
+    fn download_with_progress(
+        &self,
+        key: u64,
+        path: String,
+        _progress: DownloadProgress,
+        done: DownloadDone,
+    ) {
+        self.download(key, path, done);
+    }
+}
+
+/// How much of a block's workspace the source can show (gui-design D99).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Explore {
+    /// Nothing: the server has no workspace call, or the block is not open.
+    #[default]
+    No,
+    /// The tree and copy path.
+    Tree,
+    /// The tree, and the change marks and size/age footer too.
+    Marked,
+}
+
+/// What the panel asks of the source's tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Explored {
+    /// The panel opened: read the workspace root.
+    Open,
+    /// The panel closed: drop the tree.
+    Close,
+    /// A key or click in the panel.
+    Do(super::explorer::Intent),
 }
 
 /// A forward that listens: the local port, and which run of the pane's
@@ -398,6 +472,18 @@ pub type Uploaded = Result<String, String>;
 
 /// What a source calls once with an upload's outcome.
 pub type UploadDone = Box<dyn FnOnce(Uploaded) + Send>;
+
+/// Where a downloaded file was saved, or why it was not.
+pub type Downloaded = Result<String, String>;
+
+/// What a source calls once with a download's outcome.
+pub type DownloadDone = Box<dyn FnOnce(Downloaded) + Send>;
+
+/// What a source calls with a download's bytes received and the file's size.
+pub type DownloadProgress = Box<dyn Fn(u64, u64) + Send>;
+
+/// What a source calls with an upload's bytes sent and the file's size.
+pub type UploadProgress = Box<dyn Fn(u64, u64) + Send>;
 
 /// A folder listing's text, or why the host refused it.
 pub type Listed = Result<String, String>;
@@ -542,5 +628,13 @@ impl Remote {
     /// header.
     pub fn blocks(&self, blocks: Vec<(u64, BlockInfo)>) -> bool {
         self.0.send_event(UserEvent::Blocks(blocks)).is_ok()
+    }
+
+    /// What the explorer panel shows now for pane `key`'s tree (gui-design
+    /// D99); one for a pane the panel is not open on is dropped.
+    pub fn explorer(&self, key: u64, snapshot: super::explorer::Snapshot) -> bool {
+        self.0
+            .send_event(UserEvent::Explorer(key, snapshot))
+            .is_ok()
     }
 }

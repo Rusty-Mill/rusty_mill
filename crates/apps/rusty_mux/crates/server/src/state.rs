@@ -159,7 +159,8 @@ const UNIX_ONLY: Features = Features::SIGNAL_RELEASE
     // Downloads are read through the kernel's own account of the opened file.
     .union(Features::DOWNLOAD)
     .union(Features::WORKSPACE)
-    .union(Features::WORKSPACE_STATUS);
+    .union(Features::WORKSPACE_STATUS)
+    .union(Features::LAUNCH_IN_WORKSPACE);
 #[cfg(not(target_os = "linux"))]
 const UNIX_ONLY: Features = Features::NONE;
 
@@ -2096,6 +2097,19 @@ impl State {
         if launch.agent.is_some() {
             self.require(client, Features::AGENT_META, "a launch naming an agent")?;
         }
+        if launch.workspace_of.is_some() {
+            self.require(
+                client,
+                Features::LAUNCH_IN_WORKSPACE,
+                "a launch in a block's workspace",
+            )?;
+            if launch.cwd.is_some() {
+                return Err(
+                    "bad_launch(workspace_of): a launch names a cwd or a workspace, not both"
+                        .into(),
+                );
+            }
+        }
         if launch.input == InputMode::OwnerOnly {
             self.require(client, Features::INPUT_GATE, "an owner-only launch")?;
             if !launch.own {
@@ -2632,12 +2646,28 @@ impl State {
         // spawn changes into the held descriptor, not the configured path, so
         // the two cannot name different directories. Where it can't be held,
         // the program starts at the path and the workspace stays unknown.
-        let mut workspace = listing::Workspace::open(std::path::Path::new(&config.cwd));
         let mut spawn = config.clone();
-        match workspace.spawn_cwd() {
-            Some(held) => spawn.cwd = held.into(),
-            None => workspace = listing::Workspace::default(),
-        }
+        let (workspace, cwd) = match launch.workspace_of {
+            // Another block's held directory, by handle (D378): never the
+            // configured path, so where it can't be entered the launch is
+            // refused, not started somewhere else.
+            Some(source) => {
+                let (workspace, cwd) = self.workspace_of(client, source)?;
+                spawn.cwd = workspace
+                    .spawn_cwd()
+                    .ok_or("the workspace cannot be entered here")?
+                    .into();
+                (workspace, cwd)
+            }
+            None => {
+                let mut workspace = listing::Workspace::open(std::path::Path::new(&config.cwd));
+                match workspace.spawn_cwd() {
+                    Some(held) => spawn.cwd = held.into(),
+                    None => workspace = listing::Workspace::default(),
+                }
+                (workspace, config.cwd.to_string_lossy().into_owned())
+            }
+        };
         let started = Started {
             shell: launch.program.is_none(),
             read_only: false,
@@ -2647,7 +2677,7 @@ impl State {
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect(),
-            cwd: config.cwd.to_string_lossy().into_owned(),
+            cwd,
             workspace,
         };
         let rt = self.start(Start {
@@ -2679,6 +2709,30 @@ impl State {
         rt.agent = launch.agent.clone();
         self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
+    }
+
+    /// The held workspace of `source` and its last known directory, for a
+    /// launch that starts there (D378). As `terminal.workspace-list`: the
+    /// input lease on `source`, and a root that is known. Refused on an
+    /// agent's block, whose jail does not hold the server (D372).
+    fn workspace_of(
+        &self,
+        client: ClientId,
+        source: BlockId,
+    ) -> Result<(listing::Workspace, String), Refusal> {
+        self.mux
+            .authorize_input(client, source)
+            .map_err(Refusal::from)?;
+        let rt = self
+            .blocks
+            .get(&source)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(source))?;
+        rt.refuse_agent("a launch in a block's workspace")?;
+        let workspace = rt
+            .started
+            .workspace()
+            .ok_or("the workspace root is unknown after a server restart")?;
+        Ok((workspace.clone(), rt.started.cwd.clone()))
     }
 
     /// Holds `rt` as `block`'s, spooling the history its grid evicts

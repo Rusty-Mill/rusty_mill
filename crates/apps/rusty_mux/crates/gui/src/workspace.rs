@@ -1,0 +1,716 @@
+//! The explorer panel's tree, kept on the source side (gui-design D99, card
+//! #1573): the calls on the block's own connection, the shared
+//! [`Explorer`] model, and the flat [`Snapshot`] the window draws.
+//!
+//! `rusty_term` cannot link this crate's client, so it holds view state
+//! only; every key it takes arrives here as an [`Intent`].
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use rusty_mux_client::workspace::{self, Call, Explorer, Kind, Tree, Want};
+use rusty_mux_proto::schema::Value;
+use rusty_term::gui::explorer::{Intent, Row, Snapshot, State};
+use rusty_term::gui::source::ListDone;
+
+/// Where the tree's calls go and where its snapshots land.
+pub trait Port: Send + Sync {
+    /// Sends `method` on the block's connection; `done` gets the reply
+    /// text, or why there is none. `false` when it could not be sent.
+    fn call(&self, method: &str, args: Vec<(String, Value)>, done: ListDone) -> bool;
+    /// Shows `snapshot`.
+    fn show(&self, snapshot: Snapshot);
+    /// Seconds since the epoch, for ages.
+    fn now(&self) -> u64;
+}
+
+/// One open tree.
+pub struct Workspace {
+    port: Arc<dyn Port>,
+    inner: Mutex<Inner>,
+    /// Cleared by [`Self::close`]: a reply or key for a closed or replaced
+    /// tree does nothing, so it cannot show over its replacement.
+    live: AtomicBool,
+}
+
+struct Inner {
+    explorer: Explorer,
+    /// This client holds the block's input lease, which every call needs.
+    held: bool,
+    /// Counts the times the lease was lost. A marks or stat reply from an
+    /// earlier count was cut off with it and is ignored: the status is read
+    /// again once the lease is back, under the new count.
+    epoch: u64,
+    /// The lease's loss count last seen: more than this means it was lost
+    /// and regained between two looks.
+    lost: u64,
+}
+
+/// Which call a reply answers.
+#[derive(Clone, Copy)]
+enum Which {
+    /// The workspace root; retired by a lease change.
+    Root,
+    /// A directory of a loaded tree; still fills it after one.
+    Dir,
+    Touched,
+    Stat,
+}
+
+impl Workspace {
+    /// Opens the tree: asks for the workspace root. `status`: the server
+    /// answers the marks and stat calls. `held`: this client holds the
+    /// block's input lease, which every call needs.
+    pub fn open(port: Arc<dyn Port>, status: bool, held: bool, lost: u64) -> Arc<Self> {
+        let this = Arc::new(Self {
+            port,
+            inner: Mutex::new(Inner {
+                explorer: Explorer::opened(status),
+                held,
+                epoch: 0,
+                lost,
+            }),
+            live: AtomicBool::new(true),
+        });
+        if held {
+            this.ask(Which::Root, "terminal.workspace-list", Vec::new(), 0);
+        } else {
+            // Nothing is on its way until the lease comes.
+            this.lock().explorer.set_waiting(false);
+        }
+        this.show();
+        this
+    }
+
+    /// Ends this tree: nothing it has in flight shows, and it asks no more.
+    pub fn close(&self) {
+        self.live.store(false, Ordering::SeqCst);
+    }
+
+    fn live(&self) -> bool {
+        self.live.load(Ordering::SeqCst)
+    }
+
+    /// The block's lease changed (also after a reconnect). Gaining it
+    /// reads the root when none is loaded and none is on its way; losing
+    /// it keeps the rows, and the next read says why it is refused (D99).
+    pub fn lease(self: &Arc<Self>, held: bool, lost: u64) {
+        if !self.live() {
+            return;
+        }
+        let (root, epoch) = {
+            let mut inner = self.lock();
+            let was = std::mem::replace(&mut inner.held, held);
+            let cut = lost != std::mem::replace(&mut inner.lost, lost);
+            // Lost, even if regained before this look: what was in flight
+            // under the old lease is retired.
+            if cut || (was && !held) {
+                inner.epoch += 1;
+            }
+            let regained = held && (cut || !was);
+            if regained {
+                inner.explorer.retry_status();
+            }
+            // A root asked before the loss is retired (its reply is
+            // dropped in `reply`), so regaining asks again even while the
+            // old one still looks pending.
+            let root = held
+                && inner.explorer.tree().is_none()
+                && (regained || (inner.explorer.note().is_some() && !inner.explorer.waiting()));
+            (root, inner.epoch)
+        };
+        if root {
+            self.lock().explorer.set_waiting(true);
+            self.ask(Which::Root, "terminal.workspace-list", Vec::new(), epoch);
+        }
+        self.pump();
+    }
+
+    /// Carries out what the user asked of the tree.
+    pub fn intent(self: &Arc<Self>, intent: Intent) {
+        if !self.live() {
+            return;
+        }
+        let fetch = {
+            let mut inner = self.lock();
+            let ex = &mut inner.explorer;
+            let mut fetch = None;
+            match intent {
+                Intent::Step(by) => ex.tree_mut().into_iter().for_each(|t| t.step(by)),
+                Intent::Leave => ex.tree_mut().into_iter().for_each(Tree::leave),
+                Intent::Enter if !ex.waiting() => fetch = enter(ex),
+                Intent::Enter => {}
+                Intent::Select(at) => {
+                    if let Some(t) = ex.tree_mut() {
+                        select(t, at);
+                    }
+                }
+            }
+            fetch
+        };
+        if let Some(path) = fetch {
+            self.list(&path);
+        }
+        self.pump();
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn list(self: &Arc<Self>, path: &str) {
+        let args = vec![("path".to_owned(), Value::Text(path.to_owned()))];
+        // A directory reply is never retired, so its epoch is not enforced.
+        let epoch = self.lock().epoch;
+        self.ask(Which::Dir, "terminal.workspace-list", args, epoch);
+    }
+
+    /// Sends one call; its reply comes back through [`Self::reply`].
+    /// `epoch` is the lease count the caller decided to ask under, read in
+    /// the same step as the decision: a call a lease loss has overtaken
+    /// since is not sent (its asked flag was cleared with it).
+    fn ask(self: &Arc<Self>, which: Which, method: &str, args: Vec<(String, Value)>, epoch: u64) {
+        let held = {
+            let inner = self.lock();
+            if epoch != inner.epoch && !matches!(which, Which::Dir) {
+                return;
+            }
+            inner.held
+        };
+        if !held {
+            return self.reply(which, epoch, Err("Take over this block first.".into()));
+        }
+        let me = Arc::clone(self);
+        let sent = self.port.call(
+            method,
+            args,
+            Box::new(move |reply| me.reply(which, epoch, reply)),
+        );
+        if !sent {
+            self.reply(which, epoch, Err("the block is not open".into()));
+        }
+    }
+
+    fn reply(self: &Arc<Self>, which: Which, epoch: u64, reply: Result<String, String>) {
+        if !self.live() {
+            return;
+        }
+        {
+            let mut inner = self.lock();
+            // Old status and root replies never apply: the lease change
+            // cut them off and asked afresh. An old directory reply still
+            // fills the tree it was asked for.
+            if epoch != inner.epoch && !matches!(which, Which::Dir) {
+                return;
+            }
+            let ex = &mut inner.explorer;
+            match (which, reply) {
+                (Which::Root | Which::Dir, Ok(text)) => ex.load(&text),
+                (Which::Root | Which::Dir, Err(why)) => ex.refuse(&why),
+                (Which::Touched, Ok(text)) => ex.load_touched(&text),
+                (Which::Touched, Err(_)) => {}
+                (Which::Stat, Ok(text)) => ex.load_stat(Some(&text)),
+                (Which::Stat, Err(_)) => ex.load_stat(None),
+            }
+        }
+        self.pump();
+    }
+
+    /// Makes the calls the tree wants besides listings, then shows it.
+    fn pump(self: &Arc<Self>) {
+        loop {
+            // Marks and stats wait for the lease: asking without it would
+            // spend the one ask each gets on a refusal. The epoch is taken
+            // with the reservation, so a loss in between retires it.
+            let (call, epoch) = {
+                let mut inner = self.lock();
+                let epoch = inner.epoch;
+                match inner.held {
+                    true => (inner.explorer.wants(), epoch),
+                    false => (None, epoch),
+                }
+            };
+            let Some(call) = call else { break };
+            match call {
+                Call::Touched => {
+                    self.ask(
+                        Which::Touched,
+                        "terminal.workspace-touched",
+                        Vec::new(),
+                        epoch,
+                    );
+                }
+                Call::Stat(path) => {
+                    let args = vec![("path".to_owned(), Value::Text(path))];
+                    self.ask(Which::Stat, "terminal.workspace-stat", args, epoch);
+                }
+            }
+        }
+        self.show();
+    }
+
+    fn show(&self) {
+        if !self.live() {
+            return;
+        }
+        let snapshot = snapshot(&self.lock(), self.port.now());
+        self.port.show(snapshot);
+    }
+}
+
+/// Opens the directory under the cursor: a listing to ask for, if any.
+fn enter(ex: &mut Explorer) -> Option<String> {
+    match ex.tree_mut().map(Tree::enter) {
+        Some(Want::Fetch(path)) => {
+            ex.set_waiting(true);
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+/// Moves the cursor to row `at` of the flat rows (summaries are skipped
+/// by the panel, so it is a selectable row).
+fn select(tree: &mut Tree, at: usize) {
+    let before = tree.rows().iter().take(at).filter(|r| !r.summary).count();
+    let by = isize::try_from(before).unwrap_or(0) - isize::try_from(tree.cursor()).unwrap_or(0);
+    tree.step(by);
+}
+
+/// What the panel draws for `inner` at time `now`.
+fn snapshot(inner: &Inner, now: u64) -> Snapshot {
+    let ex = &inner.explorer;
+    let Some(tree) = ex.tree() else {
+        let state = match (inner.held, ex.note()) {
+            (false, _) => State::TakeOver,
+            (_, Some(why)) => State::Refused(why.to_owned()),
+            _ => State::Loading(".".into()),
+        };
+        return Snapshot {
+            state,
+            ..Snapshot::default()
+        };
+    };
+    let rows = tree.rows();
+    let cursor = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| !r.summary)
+        .nth(tree.cursor())
+        .map_or(0, |(i, _)| i);
+    let state = match (rows.is_empty(), ex.note(), ex.waiting()) {
+        (true, ..) => State::Empty,
+        (_, Some(why), _) => State::Refused(why.to_owned()),
+        _ => State::Tree,
+    };
+    Snapshot {
+        state,
+        rows: rows.iter().map(flat).collect(),
+        cursor,
+        path: match tree.selected_path() {
+            p if p.is_empty() => ".".to_owned(),
+            p => p,
+        },
+        footer: ex.stat_line(now),
+    }
+}
+
+fn flat(row: &workspace::Row) -> Row {
+    Row {
+        depth: u16::try_from(row.depth).unwrap_or(u16::MAX),
+        name: match row.summary {
+            true => row.text.trim_start_matches(['.', ' ']).to_owned(),
+            false => workspace::unescape(&row.name),
+        },
+        dir: row.kind == Kind::Dir,
+        open: row.open,
+        mark: row.mark,
+        summary: row.summary,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Sent = (String, Vec<(String, Value)>);
+
+    /// A port that records its calls and shows, and answers on demand.
+    #[derive(Default)]
+    struct Fake {
+        sent: Mutex<Vec<Sent>>,
+        waiting: Mutex<Vec<ListDone>>,
+        shown: Mutex<Vec<Snapshot>>,
+    }
+
+    impl Port for Fake {
+        fn call(&self, method: &str, args: Vec<(String, Value)>, done: ListDone) -> bool {
+            self.sent.lock().unwrap().push((method.into(), args));
+            self.waiting.lock().unwrap().push(done);
+            true
+        }
+        fn show(&self, snapshot: Snapshot) {
+            self.shown.lock().unwrap().push(snapshot);
+        }
+        fn now(&self) -> u64 {
+            0
+        }
+    }
+
+    impl Fake {
+        fn answer(&self, reply: Result<String, String>) {
+            let done = self.waiting.lock().unwrap().remove(0);
+            done(reply);
+        }
+        fn last(&self) -> Snapshot {
+            self.shown.lock().unwrap().last().cloned().expect("shown")
+        }
+        fn methods(&self) -> Vec<String> {
+            self.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c.0.clone())
+                .collect()
+        }
+    }
+
+    const ROOT: &str = ".\nd\tsrc\nf\tREADME.md\n";
+
+    fn open(held: bool, status: bool) -> (Arc<Fake>, Arc<Workspace>) {
+        let fake = Arc::new(Fake::default());
+        let ws = Workspace::open(fake.clone(), status, held, 0);
+        (fake, ws)
+    }
+
+    #[test]
+    fn opens_with_a_root_listing_and_shows_it() {
+        let (fake, _ws) = open(true, false);
+        assert_eq!(fake.methods(), ["terminal.workspace-list"]);
+        assert!(matches!(fake.last().state, State::Loading(_)));
+        fake.answer(Ok(ROOT.into()));
+        let s = fake.last();
+        assert_eq!(s.state, State::Tree);
+        assert_eq!(s.rows.len(), 3, "the workspace root, then its entries");
+        assert_eq!((s.rows[0].depth, s.cursor), (0, 0));
+        assert!(s.rows[1].dir && s.rows[1].name == "src");
+    }
+
+    #[test]
+    fn without_the_lease_it_asks_nothing_and_says_take_over() {
+        let (fake, ws) = open(false, true);
+        assert!(fake.methods().is_empty());
+        assert_eq!(fake.last().state, State::TakeOver);
+        ws.intent(Intent::Step(1));
+        assert!(fake.methods().is_empty());
+    }
+
+    #[test]
+    fn a_refused_root_is_one_line() {
+        let (fake, _ws) = open(true, false);
+        fake.answer(Err("no workspace".into()));
+        assert_eq!(fake.last().state, State::Refused("no workspace".into()));
+    }
+
+    #[test]
+    fn enter_on_a_directory_asks_for_its_listing() {
+        let (fake, ws) = open(true, false);
+        fake.answer(Ok(ROOT.into()));
+        ws.intent(Intent::Step(1));
+        ws.intent(Intent::Enter);
+        let sent = fake.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            sent[1].1,
+            vec![("path".to_owned(), Value::Text("src".into()))]
+        );
+        drop(sent);
+        fake.answer(Ok("src\nf\tmain.rs\n".into()));
+        let s = fake.last();
+        assert_eq!(s.rows.len(), 4);
+        assert!(s.rows[1].open);
+        assert_eq!(s.rows[2].depth, 2);
+    }
+
+    #[test]
+    fn cursor_and_path_follow_the_steps() {
+        let (fake, ws) = open(true, false);
+        fake.answer(Ok(ROOT.into()));
+        assert_eq!(fake.last().path, ".");
+        ws.intent(Intent::Step(2));
+        let s = fake.last();
+        assert_eq!((s.cursor, s.path.as_str()), (2, "README.md"));
+        ws.intent(Intent::Select(1));
+        assert_eq!(fake.last().path, "src");
+    }
+
+    #[test]
+    fn marks_and_stat_are_asked_only_with_status() {
+        let (fake, _ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        assert_eq!(
+            fake.methods(),
+            [
+                "terminal.workspace-list",
+                "terminal.workspace-touched",
+                "terminal.workspace-stat"
+            ]
+        );
+        let (plain, _ws) = open(true, false);
+        plain.answer(Ok(ROOT.into()));
+        assert_eq!(plain.methods(), ["terminal.workspace-list"]);
+    }
+
+    #[test]
+    fn a_second_enter_while_waiting_asks_nothing() {
+        let (fake, ws) = open(true, false);
+        fake.answer(Ok(ROOT.into()));
+        ws.intent(Intent::Step(1));
+        ws.intent(Intent::Enter);
+        ws.intent(Intent::Enter);
+        assert_eq!(fake.methods().len(), 2);
+    }
+
+    #[test]
+    fn a_closed_tree_shows_nothing_more() {
+        let (fake, ws) = open(true, false);
+        let shown = fake.shown.lock().unwrap().len();
+        ws.close();
+        fake.answer(Ok(ROOT.into()));
+        ws.intent(Intent::Step(1));
+        assert_eq!(fake.shown.lock().unwrap().len(), shown, "no late snapshot");
+    }
+
+    #[test]
+    fn gaining_the_lease_reads_the_root_once() {
+        let (fake, ws) = open(false, false);
+        assert!(fake.methods().is_empty());
+        ws.lease(true, 0);
+        ws.lease(true, 0);
+        assert_eq!(fake.methods(), ["terminal.workspace-list"]);
+        fake.answer(Ok(ROOT.into()));
+        assert_eq!(fake.last().state, State::Tree);
+    }
+
+    #[test]
+    fn losing_the_lease_keeps_the_rows_and_refuses_the_next_read() {
+        let (fake, ws) = open(true, false);
+        fake.answer(Ok(ROOT.into()));
+        ws.lease(false, 1);
+        assert_eq!(fake.last().rows.len(), 3, "rows stay");
+        ws.intent(Intent::Step(1));
+        ws.intent(Intent::Enter);
+        assert_eq!(fake.methods().len(), 1, "no call without the lease");
+        assert_eq!(
+            fake.last().state,
+            State::Refused("Take over this block first.".into())
+        );
+        assert_eq!(fake.last().path, "src", "copy path still works");
+    }
+
+    #[test]
+    fn a_root_lost_with_the_connection_is_read_again_when_the_lease_returns() {
+        let (fake, ws) = open(true, false);
+        fake.answer(Err("the connection to the server was lost".into()));
+        assert!(matches!(fake.last().state, State::Refused(_)));
+        ws.lease(false, 1);
+        ws.lease(true, 1);
+        assert_eq!(fake.methods().len(), 2);
+        fake.answer(Ok(ROOT.into()));
+        assert_eq!(fake.last().state, State::Tree);
+    }
+
+    #[test]
+    fn an_old_root_reply_after_the_lease_returned_is_retired_and_the_root_asked_again() {
+        let (fake, ws) = open(true, false);
+        ws.lease(false, 1);
+        ws.lease(true, 1);
+        assert_eq!(fake.methods().len(), 2, "the root is asked again");
+        // The first request fails late, after the lease came back.
+        fake.answer(Err("the connection to the server was lost".into()));
+        assert!(
+            matches!(fake.last().state, State::Loading(_)),
+            "the old refusal is dropped, the new root is still on its way"
+        );
+        fake.answer(Ok(ROOT.into()));
+        assert_eq!(fake.last().state, State::Tree);
+    }
+
+    #[test]
+    fn a_loss_and_regain_seen_as_held_twice_still_retires_the_old_calls() {
+        let (fake, ws) = open(true, false);
+        // The lease was lost and regained before the workspace looked:
+        // held both times, but the loss count moved.
+        ws.lease(true, 1);
+        assert_eq!(fake.methods().len(), 2, "the root is asked again");
+        fake.answer(Err("the connection to the server was lost".into()));
+        assert!(
+            matches!(fake.last().state, State::Loading(_)),
+            "the old root's refusal is retired"
+        );
+        fake.answer(Ok(ROOT.into()));
+        assert_eq!(fake.last().state, State::Tree);
+    }
+
+    #[test]
+    fn a_status_reply_from_before_a_collapsed_loss_is_ignored() {
+        let (fake, ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        assert!(
+            fake.methods()
+                .iter()
+                .any(|m| m == "terminal.workspace-touched")
+        );
+        ws.lease(true, 1);
+        // The marks call from the old lease answers late.
+        fake.answer(Ok("M\tREADME.md\n".into()));
+        assert_eq!(
+            fake.methods()
+                .iter()
+                .filter(|m| *m == "terminal.workspace-touched")
+                .count(),
+            2,
+            "the marks are asked again under the new lease"
+        );
+        assert!(
+            fake.last().rows.iter().all(|r| r.mark.is_none()),
+            "the old marks are not taken"
+        );
+    }
+
+    #[test]
+    fn a_status_call_reserved_before_a_lease_loss_is_not_sent_after_it() {
+        let (fake, ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        ws.lease(false, 1);
+        ws.lease(true, 1);
+        let sent = fake.methods().len();
+        // The old reservation reaches `ask` after the new lease count.
+        ws.ask(Which::Stat, "terminal.workspace-stat", Vec::new(), 0);
+        ws.ask(Which::Touched, "terminal.workspace-touched", Vec::new(), 0);
+        assert_eq!(fake.methods().len(), sent, "neither old call is sent");
+    }
+
+    #[test]
+    fn a_late_old_root_reply_does_not_touch_the_fresh_tree() {
+        let (fake, ws) = open(true, false);
+        ws.lease(false, 1);
+        ws.lease(true, 1);
+        // The replacement root answers first, then the old one fails late.
+        let old = fake.waiting.lock().unwrap().remove(0);
+        fake.answer(Ok(ROOT.into()));
+        old(Err("the connection to the server was lost".into()));
+        let s = fake.last();
+        assert_eq!(s.state, State::Tree, "no refusal over the fresh tree");
+        assert_eq!(s.rows.len(), 3);
+    }
+
+    #[test]
+    fn a_late_old_root_reply_does_not_clear_a_pending_directory() {
+        let (fake, ws) = open(true, false);
+        let old = fake.waiting.lock().unwrap().remove(0);
+        ws.lease(false, 1);
+        ws.lease(true, 1);
+        fake.answer(Ok(ROOT.into()));
+        ws.intent(Intent::Step(1));
+        ws.intent(Intent::Enter);
+        old(Err("lost".into()));
+        ws.intent(Intent::Enter);
+        assert_eq!(
+            fake.methods().len(),
+            3,
+            "the directory is still pending, no second ask"
+        );
+    }
+
+    #[test]
+    fn an_old_directory_reply_still_fills_a_populated_tree() {
+        let (fake, ws) = open(true, false);
+        fake.answer(Ok(ROOT.into()));
+        ws.intent(Intent::Step(1));
+        ws.intent(Intent::Enter);
+        ws.lease(false, 1);
+        ws.lease(true, 1);
+        fake.answer(Ok("src\nf\tmain.rs\n".into()));
+        assert!(fake.last().rows.iter().any(|r| r.name == "main.rs"));
+    }
+
+    const STAT: &str = "f\t4300\t0";
+
+    #[test]
+    fn status_waits_for_the_lease_and_a_cut_off_stat_is_asked_again() {
+        let (fake, ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        fake.answer(Ok("".into())); // touched
+        fake.answer(Ok(STAT.into())); // stat of the root
+        ws.lease(false, 1);
+        ws.intent(Intent::Step(1));
+        let sent = fake.methods();
+        assert_eq!(sent.len(), 3, "no stat while the lease is absent: {sent:?}");
+        assert_eq!(
+            fake.last().footer,
+            None,
+            "an uncached row has no footer yet"
+        );
+        ws.lease(true, 1);
+        assert_eq!(
+            fake.methods().last().map(String::as_str),
+            Some("terminal.workspace-stat")
+        );
+        fake.answer(Ok("".into())); // the marks, read again with it
+        fake.answer(Ok(STAT.into()));
+        assert_eq!(fake.last().footer.as_deref(), Some("4.2 KiB"));
+    }
+
+    #[test]
+    fn a_stat_that_failed_is_asked_again_after_the_lease_returns() {
+        let (fake, ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        fake.answer(Ok("".into()));
+        fake.answer(Err("the connection to the server was lost".into()));
+        assert_eq!(fake.last().footer, None);
+        ws.lease(false, 1);
+        ws.lease(true, 1);
+        let methods = fake.methods();
+        assert_eq!(
+            &methods[3..],
+            ["terminal.workspace-touched", "terminal.workspace-stat"]
+        );
+        fake.answer(Ok("".into()));
+        fake.answer(Ok(STAT.into()));
+        assert_eq!(fake.last().footer.as_deref(), Some("4.2 KiB"));
+    }
+
+    #[test]
+    fn a_status_failure_that_arrives_after_the_lease_returned_is_ignored() {
+        let (fake, ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        fake.answer(Ok("".into())); // touched; the stat is left outstanding
+        ws.lease(false, 1);
+        ws.lease(true, 1);
+        // Waiting now: the old stat, then the marks and stat asked again.
+        fake.answer(Err("the connection to the server was lost".into()));
+        fake.answer(Ok("".into()));
+        fake.answer(Ok(STAT.into()));
+        assert_eq!(fake.last().footer.as_deref(), Some("4.2 KiB"));
+    }
+
+    #[test]
+    fn a_stat_reply_from_before_the_lease_loss_is_not_taken_for_the_row_now_under_the_cursor() {
+        let (fake, ws) = open(true, true);
+        fake.answer(Ok(ROOT.into()));
+        fake.answer(Ok("".into())); // touched; the root's stat is outstanding
+        ws.lease(false, 1);
+        ws.intent(Intent::Step(1));
+        ws.lease(true, 1);
+        // The old stat arrives first, for the root, and is dropped.
+        fake.answer(Ok("f\t1\t0".into()));
+        fake.answer(Ok("".into()));
+        fake.answer(Ok(STAT.into()));
+        let last = fake.last();
+        assert_eq!(
+            (last.path.as_str(), last.footer.as_deref()),
+            ("src", Some("4.2 KiB"))
+        );
+    }
+}
