@@ -257,12 +257,19 @@ mod tests {
         let f = factory("dir");
         std::fs::remove_file(f.join("standards/rust.md")).expect("rm");
         std::fs::create_dir_all(f.join("standards/rust.md")).expect("dir");
+        // Refused at open on every platform; Windows says so while opening
+        // ("Access is denied"), others when checking the opened handle.
+        let refused = |err: &str, rel: &str| {
+            assert!(err.contains(rel) && err.contains("cannot open"), "{err}");
+            #[cfg(unix)]
+            assert!(err.contains("not a regular file"), "{err}");
+        };
         let err = Catalog::open(&f, &scratch("dir-repo"), Limits::default()).unwrap_err();
-        assert!(err.contains("not a regular file"), "{err}");
+        refused(&err, "standards/rust.md");
         let repo = scratch("dir-pack");
         std::fs::create_dir_all(repo.join(DOMAIN_PACK)).expect("dir");
         let err = Catalog::open(&scratch("dir-empty"), &repo, Limits::default()).unwrap_err();
-        assert!(err.contains("not a regular file"), "{err}");
+        refused(&err, DOMAIN_PACK);
     }
 
     #[cfg(unix)]
