@@ -1377,6 +1377,10 @@ mod client {
         origin: BlockId,
         /// Waiting for the lease on `block` before the first listing.
         lease_wait: bool,
+        /// A peer block, read under a lease taken only for listing (D380):
+        /// `c` and `o` act on a block's shell or workspace, so they are
+        /// refused here. Copying a path is the client's own.
+        view_only: bool,
         /// A `cd` waiting for the user's `y`: the directory and the line to
         /// type, shown first so the user sees what goes into the shell.
         cd: Option<(String, Vec<u8>)>,
@@ -2670,6 +2674,7 @@ mod client {
                 stat_req: None,
                 origin: block,
                 lease_wait: false,
+                view_only: false,
                 cd: None,
             });
             self.list_workspace(None);
@@ -2785,6 +2790,7 @@ mod client {
                 stat_req: None,
                 origin,
                 lease_wait: true,
+                view_only: true,
                 cd: None,
             });
             self.focus_on(peer);
@@ -2873,6 +2879,11 @@ mod client {
             }
             match explorer::press(&mut open.explorer, bytes) {
                 Explored::Leave => self.live(),
+                Explored::Edit(_) | Explored::Cd(_) if open.view_only => {
+                    open.explorer
+                        .say("view only: this block is leased for listing; go back to act");
+                    self.draw();
+                }
                 Explored::Edit(file) => self.edit(file),
                 Explored::Card(forward) => self.card_peer(forward),
                 Explored::Cd(dir) => {
@@ -5201,6 +5212,60 @@ mod client {
             assert_eq!(workspace_calls(&sent(&far[2])).len(), 1, "now listed");
             app.take(Input::Keys(b"q".to_vec()));
             assert_eq!(app.focus, a, "the first block has the focus back");
+        }
+
+        /// A peer is read under a lease taken for listing (D380): it lists and
+        /// opens directories, but `c` and `o` send no input and launch nothing,
+        /// and the origin block keeps both.
+        #[cfg(unix)]
+        #[test]
+        fn a_peer_tree_lists_but_grants_no_edit_or_input() {
+            let (mut app, _inbox, far) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.window = Some(WindowId::from_uuid(rusty_uuid::Uuid::from_bytes([3; 16])));
+            app.cards = [(a, "#1573".to_owned()), (b, "#1573".to_owned())].into();
+            app.act(Action::Explorer);
+            assert!(!app.exploring.as_ref().expect("open").view_only, "origin");
+            app.take(Input::Keys(b"]".to_vec()));
+            assert!(app.exploring.as_ref().expect("open").view_only);
+            let asked = sent(&far[2])
+                .into_iter()
+                .find_map(|m| match m {
+                    Message::AcquireLease { req, .. } => Some(req),
+                    _ => None,
+                })
+                .expect("asked");
+            pane_says(
+                &mut app,
+                b,
+                Message::Done {
+                    req: asked,
+                    created: None,
+                },
+            );
+            let list = workspace_calls(&sent(&far[2]))[0].0;
+            pane_says(
+                &mut app,
+                b,
+                Message::Text {
+                    req: list,
+                    text: ".\nd\tsrc\nf\ta.rs".into(),
+                },
+            );
+            // Listing still works: a directory is fetched.
+            app.take(Input::Keys(b"j\r".to_vec()));
+            assert_eq!(workspace_calls(&sent(&far[2])).len(), 1, "listed src");
+            // Edit and cd are refused, and `y` after `c` types nothing.
+            app.take(Input::Keys(b"jjo".to_vec()));
+            app.take(Input::Keys(b"ky".to_vec()));
+            app.take(Input::Keys(b"c".to_vec()));
+            app.take(Input::Keys(b"y".to_vec()));
+            let acted = sent(&far[2])
+                .into_iter()
+                .filter(|m| matches!(m, Message::CreateBlock { .. } | Message::Input { .. }))
+                .count();
+            assert_eq!(acted, 0, "no launch, no input");
+            assert!(app.exploring.is_some(), "still open to read");
         }
 
         /// A block with no card, or alone on its card, has nowhere to go; a
