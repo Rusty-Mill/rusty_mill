@@ -82,6 +82,10 @@ another actor is ignored.
   follows, its `prev` is the hash of the whole legacy prefix (`check` in `fs_store.rs`), so the
   prefix is covered like the rest.
 - A task never linked to a card is not anchored. Orch links one when run with `--card`.
+- A stuck `verify` ends the board's call at 120 s, but under the deploy wrapper only `sudo` is
+  killed. A silent `bbp` left behind runs as `orch-runner` until it finishes or the board's unit
+  is stopped (`1092-deploy-layout.md`). A `timeout` in the guard would bound it; that host change
+  is a follow-up.
 - Anchoring is a poll. BBP coordination is meant to be event-based; this poll is the board
   watching the log, not agents coordinating, and never touches BBP's control flow.
 

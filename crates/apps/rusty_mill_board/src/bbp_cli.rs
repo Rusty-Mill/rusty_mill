@@ -53,7 +53,10 @@ impl BbpCli {
     /// [`InboxError::Host`] when stdout passes `max` or the deadline passes first, as
     /// when a descendant (such as the guard's `sudo` target) keeps a stream open. The
     /// child is then killed and the streams dropped, so a descendant's next write fails
-    /// and nothing stays behind to block the next task's run.
+    /// and nothing stays behind to block the next task's run. Only the direct child is
+    /// killed: a silent descendant it leaves (under the deploy wrapper, the guard's `bbp`
+    /// as `orch-runner`) runs until it ends by itself or its service cgroup is stopped
+    /// (`1092-deploy-layout.md`).
     #[cfg(unix)]
     fn run_deadline(
         &self,
