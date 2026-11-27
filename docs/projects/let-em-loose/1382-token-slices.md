@@ -7,10 +7,10 @@ gateway digests post on the claim.
 Status: **draft, 2026-11-27.** No new design. The behaviour is approved in `726-sandbox-design.md`
 (PR #1873, D180; O3 default = D183): §2 token, §9.4 gateway-only egress, §9.6 witness, §10 build order,
 §11 ask-first. That approval satisfies D25 for #1382, so this file only cuts the work into slices and
-lists the deltas. Crate placement is D209. The plan takes no D or Q number of its own.
+lists the deltas. Crate placement is D209; build order is D212. The plan takes no D or Q number of its own.
 
-**Build order.** §10 puts #1382 last, and the card waits on #1318, #1378 and #1379. Starting slice 1
-early is an open question for Nano (see the end); until he answers, nothing here is built.
+**Build order.** §10 puts #1382 last, and the card waits on #1318, #1378 and #1379. Nano confirmed it
+(D212, 2026-11-27): only this plan merges now; code starts when #1375–#1379 land.
 
 ## 1. What exists
 
@@ -69,9 +69,3 @@ security-sensitive (tokens, keys, egress) and get independent review (CONTRIBUTI
 - **Version drift.** The workspace table declares `jsonwebtoken = "9"` while the vendored copy is
   11.0.0; the path patch makes it work. Changing the declared version is a dependency bump, so it is
   left alone here.
-
-## 4. Open for Nano
-
-Start slice 1 now, ahead of §10's "#1382 last"? Options: (a) wait until #1375–#1379 land, as approved;
-(b) build only the inert `orch-token` library now, with nothing writing a token until slice 2;
-(c) also wire orch-bbp now (changes builder launches against D187 item 5). The expert recommends (a).
