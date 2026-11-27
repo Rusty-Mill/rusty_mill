@@ -468,8 +468,8 @@ fn a_call_admitted_before_its_session_ended_opens_nothing_after() {
     target.call(&call("t"), &none, &stateless).unwrap();
     assert_eq!(
         target.sessions(),
-        2,
-        "other sessions and stateless calls go on"
+        1,
+        "other sessions go on; a stateless call keeps no upstream"
     );
 }
 

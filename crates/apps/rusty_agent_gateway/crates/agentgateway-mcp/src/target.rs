@@ -23,7 +23,8 @@
 //! - `per_session`, the default: one connection (or child) per downstream
 //!   session and principal, so two agents never share a stateful server. It is
 //!   closed when the session ends ([`Target::end_session`]) or after
-//!   [`SESSION_IDLE`] unused.
+//!   [`SESSION_IDLE`] unused. A call with no session gets an upstream for that
+//!   call alone.
 //!
 //! Only calls, prompt gets and resource reads are keyed. Listings and the
 //! startup warm-up have no caller and use the first connection.
@@ -220,12 +221,12 @@ impl SessionKey {
     /// `session` is the classic session the MCP server validated for the
     /// request ([`rusty_mcp_server::Caller::session`]), never the raw
     /// `Mcp-Session-Id` header. Once it ends, no pool is opened for it, however
-    /// long the call took to get here. A stateless (2026-07-28) request has none: it
-    /// is keyed on its principal alone, and that upstream closes only when it
-    /// sits idle. The principal is `iss` and `sub`, or the whole claims when
-    /// there is no `sub`, the same rule session binding uses. Calls with
-    /// neither a session nor a token share one key: there is no identity to
-    /// keep apart.
+    /// long the call took to get here. On a `per_session` target, a call with
+    /// no session (a stateless 2026-07-28 request, or a classic one that names
+    /// none) gets an upstream of its own for that call alone, opened with it
+    /// and closed after it, so no state outlives it or reaches another call.
+    /// The principal is `iss` and `sub`, or the whole claims
+    /// when there is no `sub`, the same rule session binding uses.
     pub fn new(session: Option<&ClassicSession>, claims: Option<&serde_json::Value>) -> Self {
         let principal = match claims {
             None => String::new(),
@@ -289,8 +290,8 @@ impl Pools {
     /// The pool for an operation by `who` with `headers` going upstream.
     ///
     /// # Errors
-    /// `who`'s session has ended: a call admitted before the end opens
-    /// nothing after it. The server marks the session ended before it asks
+    /// On a `per_session` target, `who`'s session has ended: a call admitted
+    /// before the end opens nothing after it. The server marks the session ended before it asks
     /// for teardown, and both sides look under the same lock, so a pool is
     /// either refused here or closed by [`Pools::end_session`].
     fn for_call(
@@ -306,6 +307,12 @@ impl Pools {
                 who.session_id().to_owned(),
             ),
         };
+        if self.mode == UpstreamMode::PerSession && who.session.is_none() {
+            // No session to keep state for: this call gets an upstream of its
+            // own, closed when the call drops it.
+            let dial = Arc::clone(&self.shared.dial);
+            return Ok(Some(Arc::new(Pool::new(dial, 1, None))));
+        }
         let now = Instant::now();
         let mut keys = lock(&self.by_key);
         if self.mode == UpstreamMode::PerSession && who.session_ended() {
