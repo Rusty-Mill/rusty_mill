@@ -29,7 +29,7 @@ A server call limited to list, stat and touched-by, scoped to the session worksp
 ## Order
 
 1. Server call and ctl form (cloud-buildable, owner gate).
-2. TUI text tree (cloud-buildable): lists, then shows the size and age of the row under the cursor and a letter beside each changed file (`*` on a directory with a change below it). Tree actions follow, each with its own gate: copy path is built (`y`, OSC 52, D374); `c` cd is built with a confirm step (D375/D376, needs Nano's confirmation on its PR, Q107); open in an editor is not.
+2. TUI text tree (cloud-buildable): lists, then shows the size and age of the row under the cursor and a letter beside each changed file (`*` on a directory with a change below it). Tree actions follow, each with its own gate: copy path is built (`y`, OSC 52, D374); `c` cd is built with a confirm step (D375/D376, needs Nano's confirmation on its PR, Q107); `o` open in editor is built over `Launch.workspace_of` (D378): a new block in the same window, started in the tree's block's workspace, running the server account's `$EDITOR`; it needs the lease and the new bit, and says only where the block starts, not that it opens the picked file (file identity is unresolved, D377).
 3. GUI panel on the D60 panel tokens (needs a Windows GUI build; not cloud-buildable).
 
 ## Open in editor needs the block's own workspace (D377)

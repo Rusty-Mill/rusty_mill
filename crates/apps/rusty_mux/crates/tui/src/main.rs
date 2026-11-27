@@ -1346,6 +1346,11 @@ mod client {
         workspace: bool,
         /// Whether it also tells what is in it: [`Features::WORKSPACE_STATUS`].
         status: bool,
+        /// Whether it starts a block in this block's workspace:
+        /// [`Features::LAUNCH_IN_WORKSPACE`] over [`Features::LAUNCH`] (D378).
+        opening: bool,
+        /// The request that started a block there, until it is answered.
+        opened_req: Option<u64>,
         /// The workspace listings asked for and not yet answered: a tree
         /// closed and opened again leaves its first one outstanding, and its
         /// refusal is not the lease's. No more than [`LISTINGS`] are asked
@@ -1512,6 +1517,18 @@ mod client {
                     self.listings.retain(|r| *r != req);
                     return Ok(Change::Listed(req, Err(reason)));
                 }
+                Message::Done {
+                    req,
+                    created: Some(id),
+                } if self.opened_req == Some(req) => {
+                    self.opened_req = None;
+                    return Ok(Change::Started(BlockId::from_uuid(id)));
+                }
+                // Refused by its own reason, which says nothing of the lease.
+                Message::Failed { req, reason, .. } if self.opened_req == Some(req) => {
+                    self.opened_req = None;
+                    return Ok(Change::StartRefused(reason));
+                }
                 Message::Failed { req, .. } => {
                     // A refused lease, or input after losing it.
                     if self.asking == Some(req) {
@@ -1557,6 +1574,10 @@ mod client {
         Refused(String),
         /// The workspace listing asked for was answered, or refused.
         Listed(u64, Result<String, String>),
+        /// The block started in this block's workspace, which now exists.
+        Started(BlockId),
+        /// The server refused to start it.
+        StartRefused(String),
         /// The lease was lost.
         Unleased,
     }
@@ -2703,6 +2724,43 @@ mod client {
             }
         }
 
+        /// Opens `file` of the tree in an editor, in a new block that starts in
+        /// the tree's block's own workspace (D378). The request goes on that
+        /// block's connection, which holds the lease the server asks for. This
+        /// says where the new block starts, not that its editor opens that very
+        /// file: the file is named relative to it and resolved there.
+        fn edit(&mut self, file: String) {
+            let Some(open) = self.exploring.as_mut() else {
+                return;
+            };
+            let block = open.block;
+            let Some(program) = explorer::edit_program(&file) else {
+                open.explorer.say("open refused: unsafe name");
+                return self.draw();
+            };
+            let pane = self.panes.get_mut(&block).filter(|p| p.opening && p.leased);
+            let Some((window, pane)) = self.window.zip(pane) else {
+                open.explorer
+                    .say("open needs a server that starts blocks in a workspace");
+                return self.draw();
+            };
+            let size = pane
+                .size()
+                .unwrap_or_else(|| Size::new(80, 24).expect("size"));
+            let req = pane.send(|req| Message::CreateBlock {
+                req,
+                window,
+                size,
+                launch: Launch {
+                    program: Some(program),
+                    workspace_of: Some(block),
+                    ..Launch::default()
+                },
+            });
+            pane.opened_req = Some(req);
+            self.live();
+        }
+
         /// Takes keyboard `bytes` for the open workspace tree.
         fn explored(&mut self, bytes: &[u8]) {
             let Some(open) = self.exploring.as_mut() else {
@@ -2723,6 +2781,7 @@ mod client {
             }
             match explorer::press(&mut open.explorer, bytes) {
                 Explored::Leave => self.live(),
+                Explored::Edit(file) => self.edit(file),
                 Explored::Cd(dir) => {
                     match explorer::cd_command(&dir) {
                         Some(line) => {
@@ -3088,6 +3147,18 @@ mod client {
                     let answer = answer.as_ref().map(String::as_str).map_err(String::as_str);
                     self.listed_workspace(block, req, answer);
                 }
+                Ok(Change::Started(id)) => {
+                    self.arriving = Some(id);
+                    self.sync();
+                }
+                Ok(Change::StartRefused(why)) => {
+                    if let Some(open) = self.exploring.as_mut().filter(|o| o.block == block) {
+                        open.explorer.say(&format!("open refused: {why}"));
+                        self.draw();
+                    } else {
+                        bell();
+                    }
+                }
                 // The tree reads the block's workspace by its lease.
                 Ok(Change::Unleased) => {
                     if self.exploring.as_ref().is_some_and(|o| o.block == block) {
@@ -3295,6 +3366,10 @@ mod client {
                     .features
                     .contains(Features::BLOCK_CALL.union(Features::WORKSPACE)),
                 status: opened.features.contains(Features::WORKSPACE_STATUS),
+                opening: opened
+                    .features
+                    .contains(Features::LAUNCH.union(Features::LAUNCH_IN_WORKSPACE)),
+                opened_req: None,
                 listings: Vec::new(),
             };
             if opened.resumed.is_none() {
@@ -4846,6 +4921,104 @@ mod client {
                 app.take(Input::Keys(b"y".to_vec()));
                 assert!(typed_in(&sent(&far[1])).is_empty(), "nothing typed");
             }
+        }
+
+        /// `o` on a file asks the block's own connection to start the editor
+        /// in that block's workspace, as a program and argument (no shell
+        /// text), and closes the tree.
+        #[cfg(unix)]
+        #[test]
+        fn o_starts_the_editor_in_the_blocks_workspace_over_its_own_connection() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.window = Some(WindowId::from_uuid(rusty_uuid::Uuid::from_bytes([3; 16])));
+            app.act(Action::Explorer);
+            let list = workspace_calls(&sent(&far[1]))[0].0;
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: list,
+                    text: ".\nf\ta b.rs".into(),
+                },
+            );
+            app.take(Input::Keys(b"jo".to_vec()));
+            assert!(app.exploring.is_none(), "closed");
+            let launch = sent(&far[1])
+                .into_iter()
+                .find_map(|m| match m {
+                    Message::CreateBlock { launch, .. } => Some(launch),
+                    _ => None,
+                })
+                .expect("a launch on the block's connection");
+            assert!(sent(&far[0]).is_empty(), "nothing on the control one");
+            assert_eq!(launch.workspace_of, Some(a));
+            assert_eq!(launch.cwd, None);
+            let program = launch.program.expect("a program");
+            assert_eq!(program.command, "sh");
+            assert_eq!(program.args.last().map(String::as_str), Some("./a b.rs"));
+        }
+
+        /// Without the bit, or the lease, nothing is sent and the tree says why.
+        #[cfg(unix)]
+        #[test]
+        fn o_needs_the_bit_and_the_lease() {
+            for (opening, leased) in [(false, true), (true, false)] {
+                let (mut app, _inbox, far) = app(None);
+                let a = block(1);
+                app.window = Some(WindowId::from_uuid(rusty_uuid::Uuid::from_bytes([3; 16])));
+                app.act(Action::Explorer);
+                let list = workspace_calls(&sent(&far[1]))[0].0;
+                pane_says(
+                    &mut app,
+                    a,
+                    Message::Text {
+                        req: list,
+                        text: ".\nf\ta.rs".into(),
+                    },
+                );
+                let pane = app.panes.get_mut(&a).expect("A");
+                pane.opening = opening;
+                pane.leased = leased;
+                app.take(Input::Keys(b"jo".to_vec()));
+                let launches = sent(&far[1])
+                    .into_iter()
+                    .filter(|m| matches!(m, Message::CreateBlock { .. }))
+                    .count();
+                assert_eq!(launches, 0, "bit {opening}, lease {leased}");
+            }
+        }
+
+        /// A refusal of the launch is the launch's: the lease stands.
+        #[cfg(unix)]
+        #[test]
+        fn a_refused_editor_launch_leaves_the_lease() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.window = Some(WindowId::from_uuid(rusty_uuid::Uuid::from_bytes([3; 16])));
+            app.act(Action::Explorer);
+            let list = workspace_calls(&sent(&far[1]))[0].0;
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: list,
+                    text: ".\nf\ta.rs".into(),
+                },
+            );
+            app.take(Input::Keys(b"jo".to_vec()));
+            let req = app.panes[&a].opened_req.expect("asked");
+            pane_says(
+                &mut app,
+                a,
+                Message::Failed {
+                    req,
+                    reason: "the workspace root is unknown after a server restart".into(),
+                    code: None,
+                },
+            );
+            assert!(app.panes[&a].leased, "the lease stands");
+            assert!(app.panes[&a].opened_req.is_none());
         }
 
         /// The server refuses the change marks on an agent's block (D372): the
