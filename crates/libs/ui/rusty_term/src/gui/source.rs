@@ -427,6 +427,18 @@ pub trait Source {
     ) {
         self.download(key, path, done);
     }
+    /// Whether the source can start again the command of pane `key`'s ended
+    /// block (mux C45, D338).
+    fn reruns(&self, _key: u64) -> bool {
+        false
+    }
+    /// Asks pane `key`'s host to start its ended command again and calls
+    /// `done` once, from any thread, with why not when the host refuses (the
+    /// program still runs, say). Not called when [`Source::reruns`] is
+    /// `false`.
+    fn rerun(&self, _key: u64, done: RerunDone) {
+        done(Err("this source re-runs no commands".into()));
+    }
 }
 
 /// How much of a block's workspace the source can show (gui-design D99).
@@ -478,6 +490,9 @@ pub type Downloaded = Result<String, String>;
 
 /// What a source calls once with a download's outcome.
 pub type DownloadDone = Box<dyn FnOnce(Downloaded) + Send>;
+
+/// What a source calls once with a re-run's outcome: why the host refused.
+pub type RerunDone = Box<dyn FnOnce(Result<(), String>) + Send>;
 
 /// What a source calls with a download's bytes received and the file's size.
 pub type DownloadProgress = Box<dyn Fn(u64, u64) + Send>;

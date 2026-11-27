@@ -244,6 +244,8 @@ pub(crate) enum UserEvent {
     /// An upload for a pane went on: the banner text saying how far.
     UploadProgress(u64, super::source::Notice),
     DownloadProgress(super::source::Notice),
+    /// A host refused to re-run a pane's command (D101): why.
+    RerunRefused(String),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -5888,6 +5890,7 @@ impl WindowState<'_> {
             Command::Stack { top } => self.stack_focused(top),
             Command::Overview => self.toggle_overview(),
             Command::Explorer => self.toggle_explorer(),
+            Command::Rerun => self.rerun_focused(),
             Command::Next => self.focus_next_shown(),
             Command::MoveMode => {
                 // Only a source that floats has a float to move.
@@ -5898,6 +5901,24 @@ impl WindowState<'_> {
             Command::Resize(dir) => self.step_focused(floats::resized, dir),
         }
         false
+    }
+
+    /// Ask the host to start the focused block's ended command again
+    /// (gui-design D101): a source that can't, or a refusal, says so in a
+    /// notice and the lease stays.
+    fn rerun_focused(&mut self) {
+        let Some(key) = self.focused().filter(|&k| self.source.reruns(k)) else {
+            return;
+        };
+        let proxy = self.proxy.clone();
+        self.source.rerun(
+            key,
+            Box::new(move |done| {
+                if let Err(why) = done {
+                    let _ = proxy.send_event(UserEvent::RerunRefused(why));
+                }
+            }),
+        );
     }
 
     /// Float the focused block, if it is a tile (mux C42): the source chooses
@@ -7911,6 +7932,14 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                 // Only the window whose upload it is shows it.
                 if let Some(w) = self.windows.iter_mut().find(|w| w.uploads.busy_with(key)) {
                     w.upload_progress(notice);
+                }
+            }
+            UserEvent::RerunRefused(why) => {
+                if let Some(w) = self.windows.first_mut() {
+                    w.show_notice(Some(super::source::Notice {
+                        title: "Not re-run".to_owned(),
+                        detail: why,
+                    }));
                 }
             }
             UserEvent::DownloadProgress(notice) => {

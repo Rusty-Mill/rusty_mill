@@ -500,6 +500,18 @@ pub trait Escalations: Send + Sync {
     /// [`InboxError::Host`] if the host cannot be read, including a host that
     /// predates `bbp decision`.
     fn applied(&self, task: &str, decision: &str) -> Result<Option<u64>, InboxError>;
+
+    /// Every claim of `task` as BBP's claim views (a JSON array), read-only: the
+    /// LEL tab's map and spend. A host that predates `bbp claims` answers
+    /// [`InboxError::Host`]; an adapter without the read says so.
+    ///
+    /// # Errors
+    /// [`InboxError::Unsupported`] by default, or [`InboxError::Host`].
+    fn claims(&self, _task: &str) -> Result<Value, InboxError> {
+        Err(InboxError::Unsupported(
+            "this host adapter cannot read claims",
+        ))
+    }
 }
 
 /// The id command `n` of a send carries: `<decision>.<n>`.
