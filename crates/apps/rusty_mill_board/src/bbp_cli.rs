@@ -66,8 +66,8 @@ impl BbpCli {
         let host = |e: std::io::Error| InboxError::Host(format!("{}: {e}", self.bin.display()));
         let (out_r, out_w) = UnixStream::pair().map_err(host)?;
         let (err_r, err_w) = UnixStream::pair().map_err(host)?;
-        let mut out = Capture::new(out_r, max).map_err(host)?;
-        let mut err = Capture::new(err_r, MAX_ERR).map_err(host)?;
+        let mut out = Capture::new(out_r, max, false).map_err(host)?;
+        let mut err = Capture::new(err_r, MAX_ERR, true).map_err(host)?;
         let mut child = Command::new(&self.bin)
             .args(args)
             .stdin(Stdio::null())
@@ -75,39 +75,27 @@ impl BbpCli {
             .stderr(Stdio::from(OwnedFd::from(err_w)))
             .spawn()
             .map_err(host)?;
-        let until = Instant::now() + deadline;
-        let mut status = None;
-        let fail = |child: &mut std::process::Child, why: String| {
-            let _ = child.kill();
-            let _ = child.wait();
-            Err(InboxError::Host(why))
+        let status = match collect(&mut child, &mut out, &mut err, Instant::now() + deadline) {
+            Ok(status) => status,
+            Err(stop) => {
+                // Every way out after spawn but success kills and reaps the child.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(match stop {
+                    Stop::Io(e) => host(e),
+                    Stop::Over => {
+                        InboxError::Host(format!("the host's answer is over {max} bytes; refused"))
+                    }
+                    Stop::Late => InboxError::Host(format!(
+                        "`bbp {}` timed out after {}s",
+                        args.first().map_or("", String::as_str),
+                        deadline.as_secs_f32()
+                    )),
+                });
+            }
         };
-        loop {
-            out.drain().map_err(host)?;
-            err.drain().map_err(host)?;
-            if out.over() {
-                return fail(
-                    &mut child,
-                    format!("the host's answer is over {max} bytes; refused"),
-                );
-            }
-            if status.is_none() {
-                status = child.try_wait().map_err(host)?;
-            }
-            if let Some(status) = status
-                && out.closed
-                && err.closed
-            {
-                let stderr = String::from_utf8_lossy(&err.buf).into_owned();
-                return Ok((status, out.buf, stderr));
-            }
-            if Instant::now() >= until {
-                let verb = args.first().map_or("", String::as_str);
-                let secs = deadline.as_secs_f32();
-                return fail(&mut child, format!("`bbp {verb}` timed out after {secs}s"));
-            }
-            std::thread::sleep(POLL);
-        }
+        let stderr = String::from_utf8_lossy(&err.buf).into_owned();
+        Ok((status, out.buf, stderr))
     }
 
     /// Bounded host runs need Unix socket pairs; elsewhere `verify` is a host error.
@@ -259,6 +247,10 @@ const MAX_VERIFY: u64 = 64 << 10;
 /// The default deadline for one `bbp verify`. Verify reads one task's log
 /// once; minutes means the host is stuck, not busy.
 pub const VERIFY_DEADLINE: Duration = Duration::from_secs(120);
+
+/// The most reads one stream gets per turn of a deadline-bound run (64 KiB).
+#[cfg(unix)]
+const TURN: usize = 8;
 
 /// How often a deadline-bound run checks whether its child has exited.
 #[cfg(unix)]
@@ -437,6 +429,48 @@ impl Escalations for BbpCli {
     }
 }
 
+/// Why a deadline-bound run stopped before a clean finish.
+#[cfg(unix)]
+enum Stop {
+    Io(std::io::Error),
+    Over,
+    Late,
+}
+
+/// Drain `out` and `err` in bounded turns until `child` has exited and both are closed.
+/// Between turns it checks stdout's cap and the deadline, so neither a stream that
+/// never runs dry nor one that never closes can hold the call past `until`.
+#[cfg(unix)]
+fn collect(
+    child: &mut std::process::Child,
+    out: &mut Capture,
+    err: &mut Capture,
+    until: Instant,
+) -> Result<ExitStatus, Stop> {
+    let mut status = None;
+    loop {
+        let busy = out.drain().map_err(Stop::Io)? | err.drain().map_err(Stop::Io)?;
+        if out.over() {
+            return Err(Stop::Over);
+        }
+        if status.is_none() {
+            status = child.try_wait().map_err(Stop::Io)?;
+        }
+        if let Some(status) = status
+            && out.closed
+            && err.closed
+        {
+            return Ok(status);
+        }
+        if Instant::now() >= until {
+            return Err(Stop::Late);
+        }
+        if !busy {
+            std::thread::sleep(POLL);
+        }
+    }
+}
+
 /// One output stream of a deadline-bound run, read without blocking. It keeps the
 /// first `cap` bytes and counts the rest, so a chatty child never fills the buffer
 /// and stalls, and never grows the board's memory.
@@ -447,11 +481,13 @@ struct Capture {
     cap: u64,
     seen: u64,
     closed: bool,
+    /// Past `cap`, keep reading and drop the excess (stderr) rather than stop (stdout).
+    discard: bool,
 }
 
 #[cfg(unix)]
 impl Capture {
-    fn new(src: std::os::unix::net::UnixStream, cap: u64) -> std::io::Result<Self> {
+    fn new(src: std::os::unix::net::UnixStream, cap: u64, discard: bool) -> std::io::Result<Self> {
         src.set_nonblocking(true)?;
         Ok(Self {
             src,
@@ -459,13 +495,18 @@ impl Capture {
             cap,
             seen: 0,
             closed: false,
+            discard,
         })
     }
 
-    /// Read whatever is waiting, up to EOF.
-    fn drain(&mut self) -> std::io::Result<()> {
+    /// One turn: read what is waiting, up to EOF, at most [`TURN`] reads, and stop once
+    /// past the cap is known. True when the turn ended with data possibly still waiting.
+    fn drain(&mut self) -> std::io::Result<bool> {
         let mut chunk = [0_u8; 8192];
-        while !self.closed {
+        for _ in 0..TURN {
+            if self.closed || (self.over() && !self.discard) {
+                return Ok(false);
+            }
             match self.src.read(&mut chunk) {
                 Ok(0) => self.closed = true,
                 Ok(n) => {
@@ -473,12 +514,12 @@ impl Capture {
                     self.buf.extend_from_slice(&chunk[..n.min(room)]);
                     self.seen = self.seen.saturating_add(n as u64);
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Whether more than `cap` bytes arrived.

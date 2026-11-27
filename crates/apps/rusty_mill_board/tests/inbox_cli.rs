@@ -375,3 +375,15 @@ echo '{"lines":3,"unchained":0,"head":"ab","partial":false,"expect_found":null}'
         .unwrap_err();
     assert_eq!(refused, "expected head not found");
 }
+
+#[test]
+fn a_stderr_stream_that_never_runs_dry_still_meets_the_deadline() {
+    let (cli, _serial) = stuck_on_c1("errendless", "exec yes >&2");
+    assert_bounded_then_next_task_runs(&cli, "timed out");
+}
+
+#[test]
+fn endless_stdout_beside_endless_stderr_is_refused_at_the_cap() {
+    let (cli, _serial) = stuck_on_c1("bothendless", "yes >&2 & exec yes");
+    assert_bounded_then_next_task_runs(&cli, "over");
+}
