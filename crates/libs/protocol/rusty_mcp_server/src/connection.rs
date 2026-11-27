@@ -342,6 +342,7 @@ impl Connection {
     /// This connection runs in the validated classic `session`; handlers see
     /// it as [`CallContext::session`].
     #[must_use]
+    #[cfg(feature = "http")]
     pub(crate) fn with_session(mut self, session: Option<ClassicSession>) -> Self {
         self.session = session;
         self
