@@ -10,7 +10,7 @@ mod common;
 use common::{Client, shell, start_server_with, window_for};
 use rusty_mux_core::{BlockId, Size, WindowId};
 use rusty_mux_proto::{Features, Launch, Message, Program};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const BASE: Features = Features::CHECKPOINT_V6
     .union(Features::LAUNCH)
@@ -64,13 +64,9 @@ fn lease(client: &mut Client, block: BlockId) {
 
 /// A server whose configured directory is `home`, a client with `features`,
 /// and a leased block launched in `work`.
-fn setup(
-    features: Features,
-    home: &PathBuf,
-    work: &PathBuf,
-) -> (PathBuf, Client, WindowId, BlockId) {
+fn setup(features: Features, home: &Path, work: &Path) -> (PathBuf, Client, WindowId, BlockId) {
     let socket = start_server_with(rusty_mux_server::Config {
-        cwd: home.clone().into_os_string(),
+        cwd: home.as_os_str().to_owned(),
         ..shell()
     });
     let mut client = Client::connect_with(&socket, features, None);
