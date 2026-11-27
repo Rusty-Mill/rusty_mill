@@ -17,6 +17,9 @@ TimeoutStartSec=1h
 ExecStart=/usr/local/bin/mill-board-backup
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/baileyrd/.mill-board
+# The local copies, and the off-host mount (the leading - skips a mount that is absent; backup.sh
+# then refuses to ship, see MILL_BOARD_BACKUP_REQUIRE_MOUNT). A destination elsewhere needs its
+# own ReadWritePaths= in a drop-in: `systemctl edit mill-board-backup.service`.
+ReadWritePaths=/home/baileyrd/.mill-board -/mnt/beast/mill-board
 NoNewPrivileges=true
 PrivateTmp=true

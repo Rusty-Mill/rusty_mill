@@ -44,10 +44,24 @@ if n == 0:
 PY
 }
 
+# A copy counts only as a pair: the gzip and its checksum, published checksum last. The names of
+# the complete pairs here, oldest first.
+pairs() {
+    local f
+    for f in "$dir"/mill-board-*.sqlite3.gz; do
+        if [[ -f $f && -f $f.sha256 ]]; then basename "$f"; fi
+    done | sort
+}
+
 snapshot() {
     [[ -f $db ]] || die "no database at $db"
     mkdir -p "$dir"
-    rm -f -- "$dir"/.mill-board-*.partial*
+    # Leftovers of a failed run: partials, and a gzip whose checksum never landed.
+    rm -f -- "$dir"/.mill-board-*.partial* "$dir"/.mill-board-*.sha256.tmp
+    local f
+    for f in "$dir"/mill-board-*.sqlite3.gz; do
+        if [[ -f $f && ! -f $f.sha256 ]]; then rm -f -- "$f"; fi
+    done
     local name partial
     name="mill-board-$(date -u +%Y%m%dT%H%M%SZ).sqlite3"
     partial="$dir/.$name.partial"
@@ -55,44 +69,67 @@ snapshot() {
         rm -f -- "$partial"*
         die "could not write a verified copy of $db"
     fi
-    gzip -n -- "$partial"
+    # The checksum is written under its temporary name first; the gzip takes its final name, then
+    # the checksum: until that last rename the gzip is not a pair and nothing counts it.
+    local sum
+    if ! gzip -n -- "$partial" || ! sum=$(sha256sum <"$partial.gz"); then
+        rm -f -- "$partial"*
+        die "could not write the copy or its checksum"
+    fi
+    printf '%s  %s\n' "${sum%% *}" "$name.gz" >"$dir/.$name.sha256.tmp"
     mv "$partial.gz" "$dir/$name.gz"
-    (cd "$dir" && sha256sum "$name.gz" >"$name.gz.sha256")
-    # Keep the newest N; names sort by time.
+    mv "$dir/.$name.sha256.tmp" "$dir/$name.gz.sha256"
+    # Keep the newest N complete pairs; names sort by time.
     local old
     while IFS= read -r old; do
-        rm -f -- "$dir/$old" "$dir/$old.sha256"
-    done < <(cd "$dir" && printf '%s\n' mill-board-*.sqlite3.gz | sort | head -n "-$keep")
+        rm -f -- "$dir/$old.sha256" "$dir/$old"
+    done < <(pairs | head -n "-$keep")
     echo "mill-board-backup: wrote $dir/$name.gz ($(du -h "$dir/$name.gz" | cut -f1)), integrity ok"
 }
 
-# How many copies a listing holds.
+# How many copies a listing holds (each is counted once, by its checksum).
 copies_in() {
-    grep -c 'mill-board-.*\.sqlite3\.gz$' || true
+    grep -c 'mill-board-.*\.sqlite3\.gz\.sha256$' || true
 }
 
 ship() {
     local base=${MILL_BOARD_BACKUP_DEST:?set MILL_BOARD_BACKUP_DEST: an rsync target off this host}
+    # A mounted destination that is not mounted would fill the local disk under the mount point.
+    local mnt=${MILL_BOARD_BACKUP_REQUIRE_MOUNT:-}
+    [[ -z $mnt ]] || mountpoint -q -- "$mnt" || die "$mnt is not mounted: not shipping"
     # One subdirectory per host, so hosts sharing a destination never prune each other.
-    local dest here there
+    local dest here there stage names listing
     dest="$base/$(hostname -s)"
-    here=$({ compgen -G "$dir/mill-board-*.sqlite3.gz" || true; } | copies_in)
-    ((here > 0)) || die "no copy in $dir to ship"
-    # Mirror the newest N, unless this host has fewer than it should and fewer than the
-    # destination (a wiped local directory), or the destination cannot be listed (down, or
-    # not made yet): then add without pruning, and say so.
-    local prune=(--delete) listing
-    if ! listing=$(rsync --list-only --timeout=60 "$dest/" 2>/dev/null); then
-        prune=()
-        echo "mill-board-backup: could not list $dest (normal on the first run); not pruning it" >&2
+    names=$(pairs)
+    here=$(copies_in <<<"$(sed 's/$/.sha256/' <<<"$names")")
+    [[ -n $names ]] || die "no complete copy in $dir to ship"
+    # Stage links to the complete pairs only, so a stray gzip is never sent.
+    stage="$dir/.ship"
+    rm -rf -- "$stage"
+    mkdir -p "$stage"
+    local n
+    while IFS= read -r n; do
+        ln -s -- "$dir/$n" "$stage/$n"
+        ln -s -- "$dir/$n.sha256" "$stage/$n.sha256"
+    done <<<"$names"
+    trap 'rm -rf -- "$stage"' RETURN
+    # Pass 1 only adds (checksum last, rsync renames a file into place when it is whole).
+    local filter=(--include='mill-board-*' --exclude='*')
+    rsync -aL --timeout=600 "${filter[@]}" "$stage/" "$dest/" || die "shipping to $dest failed: nothing pruned"
+    # Prune only once the destination lists every pair just sent, and unless this host holds fewer
+    # than it should and fewer than the destination (a wiped local directory).
+    listing=$(rsync --list-only --timeout=60 "$dest/" 2>/dev/null) || die "cannot list $dest: nothing pruned"
+    local missing=0
+    while IFS= read -r n; do
+        grep -q -- " $n\$" <<<"$listing" && grep -q -- " $n.sha256\$" <<<"$listing" || missing=1
+    done <<<"$names"
+    ((missing == 0)) || die "destination lacks some shipped copies: nothing pruned"
+    there=$(copies_in <<<"$listing")
+    if ((here < keep && here < there)); then
+        echo "mill-board-backup: only $here copies here, $there at the destination; not pruning it" >&2
     else
-        there=$(copies_in <<<"$listing")
-        if ((here < keep && here < there)); then
-            prune=()
-            echo "mill-board-backup: only $here copies here, $there at the destination; not pruning it" >&2
-        fi
+        rsync -aL --delete --timeout=600 "${filter[@]}" "$stage/" "$dest/"
     fi
-    rsync -a "${prune[@]}" --timeout=600 --include='mill-board-*' --exclude='*' "$dir/" "$dest/"
     echo "mill-board-backup: shipped to $dest"
 }
 
