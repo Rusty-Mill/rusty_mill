@@ -704,10 +704,11 @@ impl Federation {
         // Identity is stamped last, after every rewrite, so the upstream sees
         // whom the token names and never what the call or a processor said.
         // A call that can't be stamped is refused, not sent anonymous.
-        if let Err(err) =
-            target
-                .identity
-                .apply(&tool, &mut params, &mut upstream_headers, who.claims())
+        // `strip` matches the final upstream name, so a processor that
+        // redirects the call to another tool can't dodge that tool's rule.
+        if let Err(err) = target
+            .identity
+            .apply(&mut params, &mut upstream_headers, who.claims())
         {
             rusty_log::warn!(target = %target.name, tool = %federated, %err, "identity refused the call");
             return Err(error(ErrorCode::INVALID_REQUEST, err.to_string()));
