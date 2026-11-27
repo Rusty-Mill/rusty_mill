@@ -184,6 +184,12 @@ Precise contracts used by this guide:
 | D174 | #1416: the LEL tab view model and parsing live in rusty_term, fixtures from `bbp inbox --json` plus a drift test; no shared crate | [default] 2026-11-24 (1416) |
 | D175 | #1092: the inbox runs on a second Mill Board on BaileyAi with its own SQLite file; rusty_tick retired, live board untouched | [stated] 2026-11-25 (1092) |
 | D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
+| D180 | #726/#1407 umbrella sandbox and gateway design approved; satisfies D25 for #1375–#1382 and #1412 (not #723); approves no §11 ask-first item | [stated] 2026-11-25 (726, 1407) |
+| D181 | #726 tool authority (O1 a): reviewed Factory policy PRs grant in-scope tools, Nano's inbox approve per token for widening, no model in the grant path | [stated] 2026-11-25 (726, 1407) |
+| D182 | #726 sccache (O2 a): jailed builders write per session only; orch's trusted build of `main` refills the shared cache; rewords D101 | [stated] 2026-11-25 (726, 1380) |
+| D183 | #726 witness output posts as non-scoring messages; only a witness/ACP mismatch posts as `cited` `counter` evidence; no BBP schema change (O3) | [default] 2026-11-25 (726, 1412) |
+| D184 | #726 remind-me through the gateway is read-only for jailed agents; writes fail closed until rusty-remind-me takes a trusted identity (O4) | [default] 2026-11-25 (726, 1376) |
+| D179 | #1234: the dedup-manager experiment repo setup is approved | [stated] 2026-11-25 (1234, 600) |
 | D177 | #1404 build defaults from the recovered #600 design: builders_per_claim 1, max_live_builders 3; budget admission as approved; `builder_session` fields | [default] 2026-11-25 (1404) |
 | D178 | #1405: Windows-only intent lines are recognised by a frozen-input mapping file keyed by line; the check is orch's, no BBP change | [default] 2026-11-25 (1405) |
 | D190 | #447 step 6: no claims-mode `bbp human` verb needs a signed receipt for now; claims-mode verbs unchanged | [stated] 2026-11-25 (447) |
@@ -203,6 +209,8 @@ Precise contracts used by this guide:
 | D202 | #705: `tree-sitter-python` 0.25 added to `rusty_erosion` (new `Cargo.lock` entry) | [stated] 2026-11-26 (705) |
 | D203 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
 | D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
+| D208 | #705: Phase B paid run approved, 11 checkpoints, factory vs bare Claude CLI control, D44 cleanups off, $170 shadow ceiling, after #1320; supersedes D134 and D201's "not approved" for this run only | [stated] 2026-11-26 (705, 1320) |
+| D211 | #432: S1 may open as a draft PR before the S0 live Codex check; it leaves draft only with S0's result | [default] 2026-11-27 (432) |
 | D185 | #723: Nano confirms "Work cards ... 723" means start the #723 design now (supersedes D164's hold for #723 only); build waits for design approval | [stated] 2026-11-25 (723) |
 | D186 | #723: the composition's project layer is DOMAIN.md + the Ai Env Manager manifest, not `.factory/overlay.md` | [stated] 2026-11-17, recorded 2026-11-25 (723) |
 | D205 | #723: the lens composition design (PR #1871, `723-lens-composition-design.md`) is approved as written; build may start | [stated] 2026-11-26 (723) |
@@ -210,6 +218,9 @@ Precise contracts used by this guide:
 | D207 | #723 / Q46: knowledge and standards stay in Factory `knowledge/` and `standards/`, read through a catalog adapter | [stated] 2026-11-26 (723) |
 | D209 | #1382: the token mint lives in a new sans-IO crate `orch-token`; orch-bbp writes the token file and `jail.json` slot | [default] 2026-11-27 (1382) |
 | D212 | #1382: code waits for the gateway cards #1375-#1379; only the slice plan merges now | [stated] 2026-11-27 (1382) |
+| D213 | #1551: the D132 guard admits `verify` beside `inbox` and `human`, same `--dir` rules | [default] 2026-11-27 (1551) |
+| D214 | #1551: the anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off unless set; BaileyAi sets 900 only after design approval and host authorisation | [default] 2026-11-27 (1551) |
+| D215 | #1551: the claim-log anchor lives on the BaileyAi inbox board only; an off-machine copy waits for outside agents | [stated] 2026-11-27 (1551) |
 | D216 | #1414: `rusty_orch lens why` output joins `bbp why --claim` steps to lens_record jobs; model and cost not reported yet (Q67) | [default] 2026-11-27 (1414) |
 | D217 | #1415: `bbp canary` prints a profile report on a resolved ref; orch `Canary` adapter keys failures `canary:<sha>:<profile>`; $0, runs under any `watch_usd` | [default] 2026-11-27 (1415) |
 | D218 | bbp_factory Backlog cards released to be worked; supersedes D164's "later" and D201's "D164 stands" | [stated] 2026-11-27 (general, 1414, 1415) |
@@ -1023,6 +1034,7 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [stated] · remind-me: mem_b37d92b6e738462b95873adb4d4250ea
 **Key.** lel:726:gateway-and-jailed-agent
 **Source.** Mill Board card #726, comment by claude-cloud at 1793816610843 ms, "Decisions, Nano, 2026-11-04 (after spike #727)", D-a. Nano asked for it to be in this file in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z). Numbered D79 on PR #1496's branch; moved to D101 on 2026-11-05 because main assigned D78–D88 first.
+**Amended 2026-11-25 by D182.** The sccache clause now reads: shared sccache is read-only to every agent; builders write per session only, and orch's trusted build of `main` refills the shared cache.
 
 ## D102. orch and the gateway stay separate
 
@@ -1800,6 +1812,58 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:430:coedit-fold-on-rusty-crdt
 **Source.** Nano, project thread "Update Mill Board card statuses", message cmsg_014AqbZs58L565hMV2pFkCX5HGJTsB1QUY7avVobhzUMnP, 2026-11-25T01:15:31Z: "1", answering the three options in cmsg_014AqbZs58L565hMV2pFkCX5C5P4veGi9BERQNHB1fH2T3. Relayed by the caller; the message was not read.
 
+## D180. #726/#1407: the umbrella sandbox and gateway design is approved
+
+**Decision.** `726-sandbox-design.md` (PR #1873) is approved as a whole, as recommended. It satisfies D25 for #1375, #1376, #1377, #1378, #1379, #1380, #1381, #1382 and #1412: those cards go straight to code against it, and a step card that departs from the design posts a delta for approval first. It does not cover #723 (lens composition), which keeps its own D25 step; whether #723's design is released is recorded in #723's own row, not here. It approves no §11 ask-first item (public API and config fields, the `per_session` default change, any BBP schema change, BaileyAi host writes, deployment, credentials); each needs its own yes. Review, CI and merge rules still apply.
+**Why.** One contract (token, policy, layout) for the M3 step cards, so each builds against the same design.
+**Rejected.** Approving the step cards one by one.
+**Tag.** [stated] · remind-me: mem_a48bea21749345abab71a1bc6a25aa04
+**Key.** lel:726:sandbox-design-approved
+**Source.** Nano tapped option A "Approve as recommended" on hearthbot decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4UmRMyg6TsaZCy6uWjcZ6eV` ("Approve the #726 sandbox design with O1 a and O2 a?"), 2026-11-25T15:55:52Z, in thread `cmsg_01WgyiM31RsSnZTgNuPX2VE47DLYRSRrL6WScMCmXFcSyV`. The option read: "Design approved for #1375-#1382 and #1412; Factory policy PRs grant tools, inbox for widening; builders write sccache per session only." The card's reason: "This keeps a model out of the grant path, and a jailed builder can't poison the shared compile cache." Relayed by the caller; the card was not read here. Numbered from D180 because D177 to D179 are taken on open branches (PR #1871, PR #1874, #1234).
+
+## D181. #726: tool authority keeps a model out of the grant path (O1 a)
+
+**Decision.** Grants inside a role's scope are what the Factory lens policy lists, and a policy changes only by a reviewed PR to Factory. Anything that widens what can go wrong (a `[grants]` entry: egress host, push, a secret) is a board escalation before orch mints; Nano's approve in the inbox adds it to that one token's `lel.grants`, for that session only. This replaces #726's card-body wording that names the project expert as tool authority.
+**Why.** Deterministic and auditable; no model in the grant path.
+**Rejected.** b) The project expert (later the domain pack) approves in-scope grants. c) Only Nano, for every grant.
+**Tag.** [stated] · remind-me: mem_722eadbce1cd448fa0ad4829b28f7f75
+**Key.** lel:726:tool-authority
+**Source.** Nano tapped option A "Approve as recommended" on hearthbot decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4UmRMyg6TsaZCy6uWjcZ6eV` ("Approve the #726 sandbox design with O1 a and O2 a?"), 2026-11-25T15:55:52Z, in thread `cmsg_01WgyiM31RsSnZTgNuPX2VE47DLYRSRrL6WScMCmXFcSyV`. The option read: "Design approved for #1375-#1382 and #1412; Factory policy PRs grant tools, inbox for widening; builders write sccache per session only." The card's reason: "This keeps a model out of the grant path, and a jailed builder can't poison the shared compile cache." Relayed by the caller; the card was not read here. Design §5.3 and §12 O1.
+
+## D182. #726: jailed builders write sccache per session only (O2 a)
+
+**Decision.** The shared compile cache (`/srv/lel/<project>/base/sccache/`) is read-only to every agent, builders included. A jailed builder writes only to its own per-session cache; the shared cache is refilled only by orch's trusted build of `main` outside any jail. This rewords D101's "shared sccache (read-only for critics, content-keyed writes for builders)"; the rest of D101 stands.
+**Why.** sccache keys are input hashes, not content hashes, so a jailed builder could write a poisoned object under a valid key that every later build reads.
+**Rejected.** b) Shared writes verified by a reproducible rebuild. c) No sccache in the jail.
+**Tag.** [stated] · remind-me: mem_257f45d703f342129f835a177ac364c2
+**Key.** lel:726:sccache-writes
+**Source.** Nano tapped option A "Approve as recommended" on hearthbot decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4UmRMyg6TsaZCy6uWjcZ6eV` ("Approve the #726 sandbox design with O1 a and O2 a?"), 2026-11-25T15:55:52Z, in thread `cmsg_01WgyiM31RsSnZTgNuPX2VE47DLYRSRrL6WScMCmXFcSyV`. The option read: "Design approved for #1375-#1382 and #1412; Factory policy PRs grant tools, inbox for widening; builders write sccache per session only." The card's reason: "This keeps a model out of the grant path, and a jailed builder can't poison the shared compile cache." Relayed by the caller; the card was not read here. Design §7 and §12 O2. Amends D101 (sccache clause only).
+
+## D183. #726: witness output posts as non-scoring messages; only a mismatch is evidence (O3)
+
+**Decision.** The witness's digests (upper-layer diff hash, hash-chained gateway call log, exec log), denials and out-of-scope writes post on the claim as non-scoring messages. Only a witness/ACP mismatch posts as `cited` evidence in the `counter` direction, citing the gateway call-log artifact (addendum C-R4). No BBP schema change; a new evidence kind or field would be ask-first.
+**Why.** Every BBP evidence kind scores, and a clean digest is not support; D101 already settles that a mismatch counts against the claim. This fits the existing schema and is reversible.
+**Rejected.** Posting every digest as evidence; a new evidence kind (schema bump).
+**Tag.** [default] · remind-me: mem_405c70aeb80348f19d90032f92292c11
+**Key.** lel:726:witness-digests-as-messages
+**Source.** let-em-loose-expert, 2026-11-25: the design's proposed default (§9.6, §12 O3), within D101 and addendum C-R4. The decision card did not ask about it.
+
+## D184. #726: remind-me is read-only for jailed agents until it takes a trusted identity (O4)
+
+**Decision.** Through the gateway, jailed agents get remind-me read tools only. Writes fail closed until rusty-remind-me accepts scoped tokens or a trusted `written_by` header; that is a rusty-remind-me card, and ask-first as a public API change. D102's target (the gateway sets `written_by` from the token) stands; this departs from #1407's prompt only as an interim.
+**Why.** Until rusty-remind-me can take a trusted identity, a write would carry a missing or agent-supplied `written_by`, which D102 forbids. Failing closed is the reversible interim.
+**Rejected.** Letting writes through with the gateway's own identity only (loses the agent attribution D102 requires).
+**Tag.** [default] · remind-me: mem_a876641a5b4149d5bd2ff3a6f2167631
+**Key.** lel:726:remind-me-writes-fail-closed
+**Source.** let-em-loose-expert, 2026-11-25: the design's proposed default (§3, §12 O4), within D102. The decision card did not ask about it.
+## D179. #1234: the dedup-manager experiment repo setup is approved
+
+**Decision.** The dedup experiment repo is `dedup-manager`, local-only on BaileyAi (D66 §8/§10), at `/srv/lel/dedup-manager`, owned by `orch-runner`. `/srv/lel/experiment` (lel-codex's mount) is not touched. It has one commit on `main` holding only `INTENT.md`: the bytes between the ```yaml fences of the "Intent v0.1 stage 1" comment on #600 (frozen 2026-11-02), fence lines left out, LF endings, one trailing newline; 1872 bytes, sha256 `79f66e7dca90a08ced8db1140d3a96ce52ab2c6f44fd0aa2b2ac186f8f4ec209`. No licence, .gitignore or README. This INTENT.md is the frozen experiment input (D18), not the agent-stack layer-3 INTENT.md that mem_749600d25c4449ee9b617faa1476181c retires. Nano creates the repo by running `let-em-loose/1234/create-repo-prompt.md` on BaileyAi. Approving this is also #1234's design approval (D25).
+**Why.** Builders get the intent only (D18). `bbp open --mode claims` takes brief, roster and profiles from outside the repo, so the host needs nothing else in it. An `orch-runner`-owned path under `/srv/lel` lets `bbp` and orch read it (D132, D142), the same pattern as `/srv/lel/toy/repo`. Stripping the fences keeps exactly the bytes Nano froze.
+**Rejected.** `~/repos/dedup-manager` (`orch-runner` may not be able to read it). Reusing `/srv/lel/experiment`. Adding a licence, .gitignore or README. Committing the fenced block.
+**Tag.** [stated] · remind-me: mem_422d9f277cd5480abbf0af36166202aa
+**Key.** lel:1234:experiment-repo-setup
+**Source.** Nano tapped "Approve as proposed" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE43HJnfjiZdhexUAAkyR3gfC, 2026-11-25T15:51:36Z; proposal in the #1234 card comment of 2026-11-25.
 ## D177. #1404 build defaults from the recovered #600 design
 
 **Decision.** The approved #600 design (`600-builder-session-design.md`, D66) survived in `/mnt/project-files/let-em-loose/` and is now in this folder (PR #1874), so OPEN_QUESTIONS Q44 was wrong that it was gone. It settles what `600-build-plan.md` marked **[filled]** for #1404:
@@ -2000,6 +2064,32 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:432:design-approved-build-after-600
 **Source.** Nano tapped "Approve, build after #600" ("Design and BBP_PROVIDER_SESSION approved; code waits until the #600 builder work lands (D164 order).") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE45mV9XoArWETD2NMavEjbEy` in the Let Em Loose project thread "Build BBP Codex session resume" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4KGZwc1M3KXuPWKygNkYSfd`), 2026-11-26 13:56Z. The coordinator relayed the tap; the card and its options were read. Resolves OPEN_QUESTIONS Q66. Numbered D204 (was D200) for the same reason. D203 and D204 were checked free on main and in every open PR on 2026-11-26.
 
+## D208. #705: Phase B paid run approved, 11 checkpoints, factory vs bare Claude CLI control, D44 cleanups off, $170 shadow ceiling, after #1320; supersedes D134 and D201's "not approved" for this run only
+
+**Decision.** Nano approves ONE #705 Phase B paid run as `705-slopcodebench-spike-design.md` §3 Phase B describes it: the 11-checkpoint subset (`dag_execution` 3, `file_backup` 4, `dynamic_buffer` 4), a factory arm against a bare Claude CLI control arm (O2 a restated), and D44 scheduled cleanups off in the factory arm (O3 a restated). The run starts once #1320 has landed and stops at $170 shadow dollars, the design §4 expected total. This supersedes D134, and D201's "Phase B spend not approved", for this one run only; D134 stands for everything else. A rerun, another arm (O3 c included), a different subset or a higher ceiling is ask-first again.
+**Why.** Design §5.7 and §7 brought Phase B back as its own ask after #1320 and the Phase A report, restating O2 and O3. Phase A has reported (PR #1908: concentration ρ 0.950, duplication ρ 0.636, both rules pass). The option Nano tapped names the subset, both arms, cleanups off, the #1320 wait and the ceiling.
+**Rejected.** The card's other options (not read here). Factory only (O2 b). Cleanups on or as a third arm (O3 b/c).
+**Tag.** [stated] · remind-me: mem_5d920b043455499ca146c2e1d9b1b330
+**Key.** lel:705:phase-b-paid-run-approved
+**Source.** Nano tapped "Phase B, ceiling $170" ("11 checkpoints, factory vs bare Claude CLI control, D44 cleanups off. It runs once #1320 lands and stops at $170.") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE47dVhwYiCKtxbkHZhePLhrL` ("Approve the Phase B paid run, and with which spend ceiling?") in the Let Em Loose project thread, 2026-11-26 22:29Z, just after typing "Approved" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4JDNWTtBZdVx9yscSBNTwGV`). Relayed by the #705 thread with the card text. Relates to D37, D38, D44, D64, D134, D140, D167, D188, D201, ADR-0021. Numbered D208 because D205 to D207 are taken on branch `claude/project-thread-82lhr1` (#723).
+
+**Notes.** What the approval does not change:
+- The $170 is shadow dollars against subscription quota, not a bill (ADR-0021). Dollar caps (`experiment_usd`, `task_usd`) do not enforce in v0 because the meter charges 0 per call (D140), so the operator stops the run at $170 by tracking shadow dollars.
+- The design §4 guards still apply: `task_calls` 60 per checkpoint task, and pause and report to Nano if the first problem uses more than 150 calls or $60 shadow.
+- Both arms need the Claude `no_overage` assertion in `/etc/let-em-loose/assertions.json` so the run fails closed (D140, D167).
+- SCB's API-key harness is not used (D38, D167).
+- The pre-registered rules stay as D201 approved them.
+- Review, merge and the other ask-first gates still apply.
+
+## D211. #432: S1 may open as a draft PR before the S0 live Codex check; it leaves draft only with S0's result
+
+**Decision.** D204's wait is met: the #600 builder code on D66's §8 list has merged on main (2053a9b9): #1404 (PR #1874), #1405 (PR #1875), and #1318 S1 to S6 (S5 PR #1889, S6 PR #1890, the sessions reader PRs #1901 and #1903). The D167 toy run and #1320 are runs, not builder work, so #432 doesn't wait for them. S1 may be built and opened as a **draft** PR before S0 has run. It stays draft, with no review requested, until Nano's S0 result is in the PR description: the `thread_id` round-trips into `codex exec resume`, and `-c` is accepted after `resume`. If S0 contradicts either point, S1 is revised before it leaves draft. Parse-level facts from a Codex CLI installed in the cloud container (no login, no API key, no model call), such as `codex exec resume --help` and whether `-c` and `--json` parse after `resume`, may go in the description early, labelled as not the live check.
+**Why.** A draft is reversible and gets no review, so the review and merge gate still waits on S0, as the design orders. S0 needs Nano's machine, so drafting first keeps the thread from idling.
+**Rejected.** Build nothing until S0 has run (slower, same merged result). Request review before S0 (the card asks for the check before building and for its result in the PR).
+**Tag.** [default] · remind-me: mem_9b11499bcae344258d5156e48eb86bf0
+**Key.** lel:432:s1-draft-before-s0
+**Source.** Caller question from the #432 build thread, 2026-11-27; `432-codex-session-resume-design.md` § Slices; D204; D164; `600-build-plan.md` §7 and §9; `1318-builder-launch-slices.md` §3 and §4; card #432's prompt. Numbered D211 (was D209) because open PRs #1871 (D205 to D207), #1927 (D208), #1930 (D209) and #1931 (D209, D210) hold the numbers before it.
+
 ## D185. #723: Nano's "Work cards ... 723" starts the #723 design now
 
 **Decision.** Nano's 2026-11-25 request "Work cards 600, 723, 724, 726, 732, and 1234" means start #723's design now. PR #1871 stays as the #723 design for his review. This supersedes D164's "the packs design (#723, D133, Q46 to Q48) ... stay for later" for #723 only; D164's other holds (#1456 and the other Backlog cards) stand. Building still waits for Nano's approval of the design on the card (D25), and ask-first gates and review/merge rules still apply.
@@ -2062,6 +2152,35 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_a9952c1bcd964445b645426c843bac3a
 **Key.** lel:1382:build-after-gateway-cards
 **Source.** Nano tapped option a "Wait for #1375-#1379" ("Only the slice plan merges now. Code starts when the gateway cards land, as the approved order says.") on decision card `cmsg_014AqbZs58L565hMV2pFkCX546kxWjy74njHksp6qNKnci` in the Rusty BBP_SWF thread "Route jailed agent tools through gateway" (`cmsg_014AqbZs58L565hMV2pFkCX5UApVszPE7rf26gn9xJeNYk`), 2026-11-27T02:00:47Z. Confirms D180 §10; reverses nothing. Numbered D212 because D205 to D211 are taken on open PRs.
+
+## D213. #1551: the D132 guard admits `verify` beside `inbox` and `human`, same `--dir` rules
+
+**Decision.** For the #1551 claim-log anchor, `mill-board-bbp-guard` admits `verify` as a third verb. The rules D132 sets for the other two apply unchanged: `--dir /srv/lel/bbp` exactly as `bbp_cli.rs` gives it, and any further `--dir` refused. `--task` is checked as for `inbox`, and `--expect` is accepted only as 64 lowercase hex characters. Changing the guard on BaileyAi needs both of two separate approvals from Nano: his approval of the #1551 design (D25), and his own authorisation of this host change. D131's M1 authorisation does not cover it, and deploying on BaileyAi stays ask-first (D128), so design approval alone does not allow it.
+**Why.** `bbp verify` never modifies the log (D70) and stays on the one directory. The verb list is the `[default]` half of D132 (mechanism), so widening it reverses no `[stated]` entry, and narrowing it back is one line.
+**Rejected.** A second guard script for `verify` (two doors to keep in step). Letting the board read the log itself (D35, ADR-0003).
+**Tag.** [default] · remind-me: mem_6027e64884264d3db58c9f1fc98b9039
+**Key.** lel:1551:guard-admits-verify
+**Source.** let-em-loose-expert, 2026-11-27, open question 2 of the #1551 design draft (`1551-claim-log-anchor-design.md`). Numbered D213 because D205-D212 are taken in open PRs #1871, #1927, #1930 and #1932.
+**Correction.** 2026-11-27: the first text let the deploy wait on design approval only. PR #1931 review comment 4722964069 found that D131 does not cover this host change and D128 keeps BaileyAi deployment ask-first, so the Decision now requires a separate host-change authorisation as well. Amended in place because D213 has not merged.
+
+## D214. #1551: the anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off unless set; BaileyAi sets 900 only after design approval and host authorisation
+
+**Decision.** The board's anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off when it is unset or 0. The BaileyAi inbox board's `board.env` sets it to 900 only when Nano has given both of two separate approvals: approval of the #1551 design (D25), and his own authorisation of this host change. D131's M1 authorisation does not cover it, and deploying on BaileyAi stays ask-first (D128). A task is anchored only when its head has changed since the last trusted anchor.
+**Why.** Off by default leaves every other board (the live board, tests) unchanged. 900 s bounds the rewrite window to 15 minutes, at a cost of one read-only `bbp verify` per linked task per tick and at most one comment. The value is a config line.
+**Rejected.** On by default (changes boards that serve no BBP inbox). Anchoring only on task close (leaves a whole running task unpinned).
+**Tag.** [default] · remind-me: mem_90b3b02e5e0c449faedeaf360e14fb7a
+**Key.** lel:1551:anchor-timer-default
+**Source.** let-em-loose-expert, 2026-11-27, open question 3 of the #1551 design draft.
+**Correction.** 2026-11-27: the first text set 900 once the design was approved. PR #1931 review comment 4722964069 found that D131 does not cover this host change and D128 keeps BaileyAi deployment ask-first, so setting the timer now also needs Nano's separate host-change authorisation. Title amended to match. Amended in place because D214 has not merged.
+
+## D215. #1551: the claim-log anchor lives on the BaileyAi inbox board only; an off-machine copy waits for outside agents
+
+**Decision.** The #1551 claim-log anchors live on the BaileyAi inbox board only. They cover the harness running as `orch-runner`; root on BaileyAi is out of reach of this anchor for now. An off-machine copy (remind-me or the live board) is added when outside or untrusted agents join, the same trigger D67 set for signing. This answers open question 1 of the design only; the #1551 design itself still waits for Nano's approval (D25).
+**Why.** Board only needs no new service, credential or network path on BaileyAi. Mirroring off the machine now would put an outside-service write credential on BaileyAi before any agent it guards against exists.
+**Rejected.** Board only with root permanently out of scope. Mirroring every anchor off the machine now.
+**Tag.** [stated] · remind-me: mem_6414975e1d8b47ebaa44896a24e06b11
+**Key.** lel:1551:anchor-scope-board-only
+**Source.** Nano tapped option A "Board only now, off-machine later" ("Anchors live on the BaileyAi inbox board; an off-machine copy is added when outside or untrusted agents join (same trigger as signing, D67).") on decision card `cmsg_014AqbZs58L565hMV2pFkCX5VRL4NsvujwKGSGMfNRddCq` ("Should the claim-log anchor also cover root on BaileyAi?") in thread `cmsg_014AqbZs58L565hMV2pFkCX5Sbwcxao75k9mf44RJQgK4Z` (project Rusty BBP_SWF), 2026-11-27T02:00:38Z. Relayed by the #1551 design thread. Option c of the design's open question 1. Numbered D215 because D205-D212 are taken in open PRs #1871, #1927, #1930 and #1932.
 
 ## D216. #1414: `rusty_orch lens why` output joins `bbp why --claim` steps to lens_record jobs; model and cost not reported yet (Q67)
 

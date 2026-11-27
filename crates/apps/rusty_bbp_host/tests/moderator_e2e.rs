@@ -2674,9 +2674,11 @@ fn a_quiet_run_stops_at_its_wall_limit_under_a_long_poll() {
 }
 
 /// A session launcher: each turn is its own `sh` harness that records
-/// `start TURN SESSION_ID RESUME ARG` and `end TURN` in `session-log`, passes
-/// its first three turns (lingering a second after each, within the grace)
-/// and asks for the plan gate on the fourth.
+/// `start TURN SESSION_ID RESUME ARG PROVIDER_SESSION` and `end TURN` in
+/// `session-log`, passes its first three turns (lingering a second after
+/// each, within the grace) and asks for the plan gate on the fourth. Like
+/// Codex, every turn first prints its thread id: [`THREAD`], except turn 3,
+/// which names another.
 fn session_launcher(dir: &Path) -> Launcher {
     let bin = dir.join("agents-bin");
     std::fs::create_dir_all(&bin).expect("mkdir");
@@ -2684,7 +2686,10 @@ fn session_launcher(dir: &Path) -> Launcher {
     let script = r##"#!/bin/sh
 set -e
 log="$BBP_DIR/session-log"
-echo "start $BBP_TURN $BBP_SESSION_ID $BBP_SESSION_RESUME $1" >> "$log"
+echo "start $BBP_TURN $BBP_SESSION_ID $BBP_SESSION_RESUME $1 ${BBP_PROVIDER_SESSION:--}" >> "$log"
+thread=01a21ab4-d922-7602-801b-328d139e9aa7
+[ "$BBP_TURN" = 3 ] && thread=0123abcd-0123-4567-89ab-0123456789ab
+echo '{"type":"thread.started","thread_id":"'"$thread"'"}'
 init='{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"sh","version":"0"}}}'
 call() { printf '{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":%s}\n' "$1" "$2"; }
 if [ "$(grep -c '^start' "$log")" -le 3 ]; then
@@ -2709,9 +2714,12 @@ echo "end $BBP_TURN" >> "$log"
     }
 }
 
+const THREAD: &str = "01a21ab4-d922-7602-801b-328d139e9aa7";
+
 /// Every turn of a session launcher is its own process, killed or exited
 /// before the next starts, and all of them share the role's session id;
-/// all but the first are told to resume it.
+/// all but the first are told to resume it, with the provider's id the first
+/// turn's log named (a later turn naming another changes nothing).
 #[test]
 fn a_session_launchers_turns_share_one_session_one_process_at_a_time() {
     let dir = tempdir("session-turns");
@@ -2745,8 +2753,11 @@ fn a_session_launchers_turns_share_one_session_one_process_at_a_time() {
     let log = std::fs::read_to_string(dir.join("session-log")).expect("log");
     let expected: Vec<String> = (1..=4)
         .flat_map(|t| {
-            let resume = if t == 1 { "no" } else { "yes" };
-            [format!("start {t} {id} {resume} {id}"), format!("end {t}")]
+            let (resume, provider) = if t == 1 { ("no", "-") } else { ("yes", THREAD) };
+            [
+                format!("start {t} {id} {resume} {id} {provider}"),
+                format!("end {t}"),
+            ]
         })
         .collect();
     assert_eq!(
@@ -2761,6 +2772,8 @@ fn a_session_launchers_turns_share_one_session_one_process_at_a_time() {
             "turn {t} is recorded as resumed only if it resumed"
         );
     }
+    let stored = moderator::provider_session_path(&dir, &task, &id);
+    assert_eq!(std::fs::read_to_string(stored).expect("provider"), THREAD);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
