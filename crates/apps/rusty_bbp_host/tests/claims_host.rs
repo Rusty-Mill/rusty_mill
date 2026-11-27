@@ -3389,40 +3389,6 @@ fn an_empty_task_id_does_not_poison_the_ledger() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-<<<<<<< HEAD
-#[test]
-fn bbp_claims_lists_every_claim_read_only() {
-    let dir = tempdir("claims-read");
-    claims_task(&dir);
-    assert!(inbox::claims(&dir, &task()).unwrap().is_empty());
-    let a = claim(&dir, "a", "ship it", true);
-    let b = claim(&dir, "b", "and this", false);
-    let before = state(&dir).rev;
-    let views = inbox::claims(&dir, &task()).unwrap();
-    assert_eq!(views.iter().map(|v| v.id.0).collect::<Vec<_>>(), [a, b]);
-    assert_eq!(state(&dir).rev, before, "a read appends no events");
-    let json = inbox::claims_json(&dir, &task()).unwrap();
-    // The fields the LEL tab's `lel_map::parse` requires (drift guard).
-    assert!(json.starts_with('['));
-    for key in [
-        "id",
-        "text",
-        "domains",
-        "status",
-        "score",
-        "confidence",
-        "spent",
-        "budget",
-        "deps",
-        "candidates",
-    ] {
-        assert!(
-            json.contains(&format!("\"{key}\":")),
-            "{key} missing: {json}"
-        );
-    }
-    assert!(inbox::claims(&dir, &TaskId("nope".into())).is_err());
-=======
 /// #599 canary (D217): the task's frozen profile re-run on a released ref,
 /// red on a red ref and green on a green one, with nothing written to the
 /// task; an unknown profile or ref is an error naming it.
@@ -3512,6 +3478,40 @@ fn a_gate_that_refuses_after_checkout_runs_nothing() {
     assert!(b.profiles.is_empty());
     assert_eq!(b.error.as_deref(), Some("budget: 10s left"));
     assert!(b.tree.is_some(), "the checkout was prepared first");
->>>>>>> origin/main
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bbp_claims_lists_every_claim_read_only() {
+    let dir = tempdir("claims-read");
+    claims_task(&dir);
+    assert!(inbox::claims(&dir, &task()).unwrap().is_empty());
+    let a = claim(&dir, "a", "ship it", true);
+    let b = claim(&dir, "b", "and this", false);
+    let before = state(&dir).rev;
+    let views = inbox::claims(&dir, &task()).unwrap();
+    assert_eq!(views.iter().map(|v| v.id.0).collect::<Vec<_>>(), [a, b]);
+    assert_eq!(state(&dir).rev, before, "a read appends no events");
+    let json = inbox::claims_json(&dir, &task()).unwrap();
+    // The fields the LEL tab's `lel_map::parse` requires (drift guard).
+    assert!(json.starts_with('['));
+    for key in [
+        "id",
+        "text",
+        "domains",
+        "status",
+        "score",
+        "confidence",
+        "spent",
+        "budget",
+        "deps",
+        "candidates",
+    ] {
+        assert!(
+            json.contains(&format!("\"{key}\":")),
+            "{key} missing: {json}"
+        );
+    }
+    assert!(inbox::claims(&dir, &TaskId("nope".into())).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
