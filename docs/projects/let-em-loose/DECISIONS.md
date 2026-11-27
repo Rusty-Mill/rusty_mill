@@ -184,6 +184,7 @@ Precise contracts used by this guide:
 | D174 | #1416: the LEL tab view model and parsing live in rusty_term, fixtures from `bbp inbox --json` plus a drift test; no shared crate | [default] 2026-11-24 (1416) |
 | D175 | #1092: the inbox runs on a second Mill Board on BaileyAi with its own SQLite file; rusty_tick retired, live board untouched | [stated] 2026-11-25 (1092) |
 | D176 | #430: rusty_bbp's co-edit fold moves onto rusty_crdt's Rga as a pure swap; admission (overlap/stale refusal) unchanged, golden logs byte-identical | [stated] 2026-11-25 (430) |
+| D179 | #1234: the dedup-manager experiment repo setup is approved | [stated] 2026-11-25 (1234, 600) |
 | D177 | #1404 build defaults from the recovered #600 design: builders_per_claim 1, max_live_builders 3; budget admission as approved; `builder_session` fields | [default] 2026-11-25 (1404) |
 | D178 | #1405: Windows-only intent lines are recognised by a frozen-input mapping file keyed by line; the check is orch's, no BBP change | [default] 2026-11-25 (1405) |
 | D190 | #447 step 6: no claims-mode `bbp human` verb needs a signed receipt for now; claims-mode verbs unchanged | [stated] 2026-11-25 (447) |
@@ -203,6 +204,7 @@ Precise contracts used by this guide:
 | D202 | #705: `tree-sitter-python` 0.25 added to `rusty_erosion` (new `Cargo.lock` entry) | [stated] 2026-11-26 (705) |
 | D203 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
 | D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
+| D208 | #705: Phase B paid run approved, 11 checkpoints, factory vs bare Claude CLI control, D44 cleanups off, $170 shadow ceiling, after #1320; supersedes D134 and D201's "not approved" for this run only | [stated] 2026-11-26 (705, 1320) |
 | D211 | #432: S1 may open as a draft PR before the S0 live Codex check; it leaves draft only with S0's result | [default] 2026-11-27 (432) |
 | D185 | #723: Nano confirms "Work cards ... 723" means start the #723 design now (supersedes D164's hold for #723 only); build waits for design approval | [stated] 2026-11-25 (723) |
 | D186 | #723: the composition's project layer is DOMAIN.md + the Ai Env Manager manifest, not `.factory/overlay.md` | [stated] 2026-11-17, recorded 2026-11-25 (723) |
@@ -1803,6 +1805,14 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:430:coedit-fold-on-rusty-crdt
 **Source.** Nano, project thread "Update Mill Board card statuses", message cmsg_014AqbZs58L565hMV2pFkCX5HGJTsB1QUY7avVobhzUMnP, 2026-11-25T01:15:31Z: "1", answering the three options in cmsg_014AqbZs58L565hMV2pFkCX5C5P4veGi9BERQNHB1fH2T3. Relayed by the caller; the message was not read.
 
+## D179. #1234: the dedup-manager experiment repo setup is approved
+
+**Decision.** The dedup experiment repo is `dedup-manager`, local-only on BaileyAi (D66 §8/§10), at `/srv/lel/dedup-manager`, owned by `orch-runner`. `/srv/lel/experiment` (lel-codex's mount) is not touched. It has one commit on `main` holding only `INTENT.md`: the bytes between the ```yaml fences of the "Intent v0.1 stage 1" comment on #600 (frozen 2026-11-02), fence lines left out, LF endings, one trailing newline; 1872 bytes, sha256 `79f66e7dca90a08ced8db1140d3a96ce52ab2c6f44fd0aa2b2ac186f8f4ec209`. No licence, .gitignore or README. This INTENT.md is the frozen experiment input (D18), not the agent-stack layer-3 INTENT.md that mem_749600d25c4449ee9b617faa1476181c retires. Nano creates the repo by running `let-em-loose/1234/create-repo-prompt.md` on BaileyAi. Approving this is also #1234's design approval (D25).
+**Why.** Builders get the intent only (D18). `bbp open --mode claims` takes brief, roster and profiles from outside the repo, so the host needs nothing else in it. An `orch-runner`-owned path under `/srv/lel` lets `bbp` and orch read it (D132, D142), the same pattern as `/srv/lel/toy/repo`. Stripping the fences keeps exactly the bytes Nano froze.
+**Rejected.** `~/repos/dedup-manager` (`orch-runner` may not be able to read it). Reusing `/srv/lel/experiment`. Adding a licence, .gitignore or README. Committing the fenced block.
+**Tag.** [stated] · remind-me: mem_422d9f277cd5480abbf0af36166202aa
+**Key.** lel:1234:experiment-repo-setup
+**Source.** Nano tapped "Approve as proposed" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE43HJnfjiZdhexUAAkyR3gfC, 2026-11-25T15:51:36Z; proposal in the #1234 card comment of 2026-11-25.
 ## D177. #1404 build defaults from the recovered #600 design
 
 **Decision.** The approved #600 design (`600-builder-session-design.md`, D66) survived in `/mnt/project-files/let-em-loose/` and is now in this folder (PR #1874), so OPEN_QUESTIONS Q44 was wrong that it was gone. It settles what `600-build-plan.md` marked **[filled]** for #1404:
@@ -2002,6 +2012,23 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_489a43a7e3194f5198c1fbc59032e132
 **Key.** lel:432:design-approved-build-after-600
 **Source.** Nano tapped "Approve, build after #600" ("Design and BBP_PROVIDER_SESSION approved; code waits until the #600 builder work lands (D164 order).") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE45mV9XoArWETD2NMavEjbEy` in the Let Em Loose project thread "Build BBP Codex session resume" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4KGZwc1M3KXuPWKygNkYSfd`), 2026-11-26 13:56Z. The coordinator relayed the tap; the card and its options were read. Resolves OPEN_QUESTIONS Q66. Numbered D204 (was D200) for the same reason. D203 and D204 were checked free on main and in every open PR on 2026-11-26.
+
+## D208. #705: Phase B paid run approved, 11 checkpoints, factory vs bare Claude CLI control, D44 cleanups off, $170 shadow ceiling, after #1320; supersedes D134 and D201's "not approved" for this run only
+
+**Decision.** Nano approves ONE #705 Phase B paid run as `705-slopcodebench-spike-design.md` §3 Phase B describes it: the 11-checkpoint subset (`dag_execution` 3, `file_backup` 4, `dynamic_buffer` 4), a factory arm against a bare Claude CLI control arm (O2 a restated), and D44 scheduled cleanups off in the factory arm (O3 a restated). The run starts once #1320 has landed and stops at $170 shadow dollars, the design §4 expected total. This supersedes D134, and D201's "Phase B spend not approved", for this one run only; D134 stands for everything else. A rerun, another arm (O3 c included), a different subset or a higher ceiling is ask-first again.
+**Why.** Design §5.7 and §7 brought Phase B back as its own ask after #1320 and the Phase A report, restating O2 and O3. Phase A has reported (PR #1908: concentration ρ 0.950, duplication ρ 0.636, both rules pass). The option Nano tapped names the subset, both arms, cleanups off, the #1320 wait and the ceiling.
+**Rejected.** The card's other options (not read here). Factory only (O2 b). Cleanups on or as a third arm (O3 b/c).
+**Tag.** [stated] · remind-me: mem_5d920b043455499ca146c2e1d9b1b330
+**Key.** lel:705:phase-b-paid-run-approved
+**Source.** Nano tapped "Phase B, ceiling $170" ("11 checkpoints, factory vs bare Claude CLI control, D44 cleanups off. It runs once #1320 lands and stops at $170.") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE47dVhwYiCKtxbkHZhePLhrL` ("Approve the Phase B paid run, and with which spend ceiling?") in the Let Em Loose project thread, 2026-11-26 22:29Z, just after typing "Approved" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4JDNWTtBZdVx9yscSBNTwGV`). Relayed by the #705 thread with the card text. Relates to D37, D38, D44, D64, D134, D140, D167, D188, D201, ADR-0021. Numbered D208 because D205 to D207 are taken on branch `claude/project-thread-82lhr1` (#723).
+
+**Notes.** What the approval does not change:
+- The $170 is shadow dollars against subscription quota, not a bill (ADR-0021). Dollar caps (`experiment_usd`, `task_usd`) do not enforce in v0 because the meter charges 0 per call (D140), so the operator stops the run at $170 by tracking shadow dollars.
+- The design §4 guards still apply: `task_calls` 60 per checkpoint task, and pause and report to Nano if the first problem uses more than 150 calls or $60 shadow.
+- Both arms need the Claude `no_overage` assertion in `/etc/let-em-loose/assertions.json` so the run fails closed (D140, D167).
+- SCB's API-key harness is not used (D38, D167).
+- The pre-registered rules stay as D201 approved them.
+- Review, merge and the other ask-first gates still apply.
 
 ## D211. #432: S1 may open as a draft PR before the S0 live Codex check; it leaves draft only with S0's result
 

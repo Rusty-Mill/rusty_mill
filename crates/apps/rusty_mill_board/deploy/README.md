@@ -72,6 +72,47 @@ Back up rusty_tick's data directory, and `settings/` here (owner-only: it holds 
 OAuth, the connectors' grants). Copy both
 off the host so a lost disk does not take them all.
 
+### SQLite store (`--db`)
+
+With `MILL_BOARD_DB` the cards are one WAL file. `backup.sh` takes a consistent copy with SQLite's
+online backup (the board keeps running; never `cp` the live file), requires `PRAGMA integrity_check`
+= `ok` on the copy, gzips it, keeps the newest `MILL_BOARD_BACKUP_KEEP`, and mirrors them with
+rsync to `MILL_BOARD_BACKUP_DEST/<host>/`. A copy counts only as a verified pair (gzip plus its `.sha256`,
+published last, and the gzip must match it): retention, shipping and pruning ignore a lone gzip, and the next snapshot removes
+it. The destination is pruned only after a checksum comparison shows its copies equal the verified local pairs, and never when this host
+holds fewer copies than it should and fewer than the destination (a wiped local directory). A
+failed shipment prunes nothing. Set `MILL_BOARD_BACKUP_REQUIRE_MOUNT` to refuse to ship when the
+destination's mount is absent. The unit is sandboxed (`ProtectSystem=strict`): it may write
+`~/.mill-board` and `/mnt/beast/mill-board`; for any other destination add a `ReadWritePaths=`
+drop-in. The destination directory must already exist (rsync makes only the `<host>/` level).
+
+```sh
+sudo install -m 755 crates/apps/rusty_mill_board/deploy/backup.sh /usr/local/bin/mill-board-backup
+install -m 600 crates/apps/rusty_mill_board/deploy/backup.env.example ~/.mill-board/backup.env
+$EDITOR ~/.mill-board/backup.env
+sudo install -m 644 crates/apps/rusty_mill_board/deploy/mill-board-backup.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now mill-board-backup.timer
+sudo systemctl start mill-board-backup.service && journalctl -u mill-board-backup -n 20   # try once
+```
+
+`settings/` (tokens, OAuth grants) is not in the SQLite file: copy it off the host too.
+
+**Restore** (try it on a copy first; the live file and its `-wal`/`-shm` are kept together, never deleted):
+
+```sh
+f=mill-board-<stamp>.sqlite3.gz
+sha256sum -c $f.sha256 && gunzip -k $f
+sqlite3 mill-board-<stamp>.sqlite3 'pragma integrity_check'      # ok (or python3 -c, no sqlite3 CLI needed)
+# trial: serve the copy on a spare port, count the cards in the UI
+rusty_mill_board --db mill-board-<stamp>.sqlite3 --http 127.0.0.1:8799
+# real restore: stop the board, move the old file and its sidecars aside as one set, put the copy in place
+sudo systemctl stop mill-board
+d=~/.mill-board; keep=$d/restore-aside-$(date -u +%Y%m%dT%H%M%SZ); mkdir "$keep"
+mv "$d"/mill-board.sqlite3* "$keep"/        # the .sqlite3, -wal and -shm together
+cp mill-board-<stamp>.sqlite3 $d/mill-board.sqlite3
+sudo systemctl start mill-board             # roll back: stop, move the copy out, move $keep/* back
+```
+
 ## Upgrade and rollback
 
 Upgrading from a board file (`MILL_BOARD_STORE`): move the cards into rusty_tick first

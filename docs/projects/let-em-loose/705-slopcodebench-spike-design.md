@@ -107,3 +107,6 @@ Nano, 2026-11-26T14:08:07Z, LEL thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4UTN
 5. O3 a: D44 cleanups off (D201).
 6. The §3 pre-registered rules are approved as written (D201).
 7. Phase B paid run and ceiling: not approved. D134 stands. It comes back as its own ask after #1320 and the Phase A report; that ask restates O2 and O3 for confirmation.
+
+Nano, 2026-11-26 22:29Z, LEL thread: he typed "Approved" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4JDNWTtBZdVx9yscSBNTwGV`), then tapped "Phase B, ceiling $170" on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE47dVhwYiCKtxbkHZhePLhrL`.
+8. Phase B paid run approved once: 11 checkpoints, factory vs bare Claude CLI control (O2 a restated), D44 cleanups off (O3 a restated). It runs once #1320 lands and stops at $170 shadow. The §4 guards still apply. This supersedes item 7 and D134 for this run only (D208).
