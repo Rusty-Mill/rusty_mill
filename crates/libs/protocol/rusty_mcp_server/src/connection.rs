@@ -46,8 +46,53 @@ pub struct Caller {
     /// session and for a stateless (2026-07-28 `_meta`) request, whose
     /// `Mcp-Session-Id` header the server ignores. Key per-session state on
     /// this, never on the raw header.
-    pub session: Option<String>,
+    pub session: Option<ClassicSession>,
 }
+
+/// A classic HTTP session as a handler sees it: its id, and whether it has
+/// ended since the request was admitted. Every copy shares one flag, so a
+/// handler still working when the session ends can tell before it builds
+/// anything more for it. Equal when the ids are.
+#[derive(Clone, Debug)]
+pub struct ClassicSession {
+    id: String,
+    ended: Arc<AtomicBool>,
+}
+
+impl ClassicSession {
+    /// A live session called `id`. The HTTP layer makes these; a host or a
+    /// test may make one to build a [`Caller`].
+    pub fn new(id: &str) -> Self {
+        ClassicSession {
+            id: id.to_owned(),
+            ended: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Its `Mcp-Session-Id`.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Whether the session has ended (`DELETE`, or idle too long).
+    pub fn has_ended(&self) -> bool {
+        self.ended.load(Ordering::SeqCst)
+    }
+
+    /// Mark it ended, for every copy. The HTTP layer does this before it
+    /// tells the server ([`crate::ToolSource::session_ended`]).
+    pub fn end(&self) {
+        self.ended.store(true, Ordering::SeqCst);
+    }
+}
+
+impl PartialEq for ClassicSession {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for ClassicSession {}
 
 impl Caller {
     /// The first header called `name` (case-insensitive).

@@ -45,7 +45,7 @@
 //! announces no changes.
 
 use crate::changes::ChangeKinds;
-use crate::connection::{Caller, CancelToken, Connection, Notifier, Started};
+use crate::connection::{Caller, CancelToken, ClassicSession, Connection, Notifier, Started};
 use crate::push::Push;
 use crate::replay::{Replay, Shared};
 use crate::server::Server;
@@ -322,6 +322,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// What a classic session remembers: its revision and the cancel flags of
 /// the requests running under it.
 struct Session {
+    /// Its id, and the flag handlers see turn when it ends.
+    handle: ClassicSession,
     /// Who opened it ([`owner_of`]); only the same owner may use it.
     owner: Option<String>,
     version: ProtocolVersion,
@@ -406,9 +408,10 @@ impl Sessions {
 
     /// Tell the server these sessions are over. Called with no lock held: a
     /// source may take a while to close what it held for them.
-    fn ended(&self, ids: Vec<String>) {
-        for id in ids {
-            self.server.session_ended(&id);
+    fn ended(&self, gone: Vec<Arc<Session>>) {
+        for session in gone {
+            session.handle.end();
+            self.server.session_ended(session.handle.id());
         }
     }
 
@@ -422,9 +425,9 @@ impl Sessions {
             return None;
         }
         if session.idle_for() > idle {
-            map.remove(id);
+            let gone = map.remove(id);
             drop(map);
-            self.ended(vec![id.to_owned()]);
+            self.ended(gone.into_iter().collect());
             return None;
         }
         session.touch();
@@ -447,11 +450,9 @@ impl Sessions {
                 .filter(|(_, s)| s.idle_for() > idle)
                 .map(|(id, _)| id.clone())
                 .collect();
-            for id in &expired {
-                map.remove(id);
-            }
+            let gone = expired.iter().filter_map(|id| map.remove(id)).collect();
             drop(map);
-            self.ended(expired);
+            self.ended(gone);
             map = lock(&self.map);
         }
         if map.len() >= max {
@@ -465,6 +466,7 @@ impl Sessions {
             None => (None, None),
         };
         let session = Arc::new(Session {
+            handle: ClassicSession::new(&id),
             owner,
             version,
             client_info,
@@ -485,7 +487,7 @@ impl Sessions {
         }
         let session = map.remove(id)?;
         drop(map);
-        self.ended(vec![id.to_owned()]);
+        self.ended(vec![Arc::clone(&session)]);
         Some(session)
     }
 }
@@ -612,10 +614,7 @@ impl HttpHandler {
         let session = if modern { None } else { looked_up? };
         // Only a session the store just validated reaches handlers.
         let caller = Caller {
-            session: session
-                .as_ref()
-                .and_then(|_| headers.get("mcp-session-id"))
-                .map(str::to_owned),
+            session: session.as_ref().map(|s| s.handle.clone()),
             ..caller
         };
         self.dispatch(message, header_version, modern, session, caller)

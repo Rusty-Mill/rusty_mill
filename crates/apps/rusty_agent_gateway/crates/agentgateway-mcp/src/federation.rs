@@ -399,7 +399,7 @@ struct Who {
     headers: http::HeaderMap,
     claims: Option<serde_json::Value>,
     /// The classic session the MCP server validated; `None` when stateless.
-    session: Option<String>,
+    session: Option<rusty_mcp_server::ClassicSession>,
 }
 
 impl Who {
@@ -434,7 +434,7 @@ impl Who {
     /// token's principal. Session binding (#1375) keeps a session to the
     /// principal that opened it, so the pair can't be borrowed.
     fn key(&self) -> SessionKey {
-        SessionKey::new(self.session.as_deref(), self.claims())
+        SessionKey::new(self.session.as_ref(), self.claims())
     }
 }
 

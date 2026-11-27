@@ -1487,12 +1487,19 @@ fn the_tool_source_hears_of_idle_sessions_swept_to_make_room() {
     assert_eq!(*ended.lock().unwrap(), [first]);
 }
 
+/// The session the last `whoami` call ran in.
+type Seen = Arc<std::sync::Mutex<Option<rusty_mcp_server::ClassicSession>>>;
+
 /// Answers `whoami` with the session the server validated for the call.
-fn start_whoami() -> Fixture {
+fn start_whoami() -> (Fixture, Seen) {
+    let seen = Seen::default();
+    let keep = Arc::clone(&seen);
     let server = Arc::new(
         Server::builder("whoami-fixture", "1")
-            .tool(Tool::new("whoami", schema()), |ctx, _c| {
-                Ok(text(ctx.caller().session.as_deref().unwrap_or("none")))
+            .tool(Tool::new("whoami", schema()), move |ctx, _c| {
+                (*keep.lock().unwrap()).clone_from(&ctx.caller().session);
+                let session = ctx.caller().session.as_ref();
+                Ok(text(session.map_or("none", |s| s.id())))
             })
             .build()
             .unwrap(),
@@ -1507,11 +1514,12 @@ fn start_whoami() -> Fixture {
     let addr = http.local_addr().unwrap();
     let stop = http.shutdown_handle().unwrap();
     std::thread::spawn(move || http.run().unwrap());
-    Fixture {
+    let fixture = Fixture {
         addr,
         stop,
         cancelled: Arc::new(AtomicBool::new(false)),
-    }
+    };
+    (fixture, seen)
 }
 
 fn answer(r: &Reply) -> String {
@@ -1528,11 +1536,13 @@ fn answer(r: &Reply) -> String {
 
 #[test]
 fn handlers_see_only_the_session_the_server_validated() {
-    let f = start_whoami();
+    let (f, seen) = start_whoami();
     let id = open_session(&f);
     let classic = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"whoami"}}"#;
     let in_session = post(f.addr, &[CLASSIC, ("Mcp-Session-Id", &id)], classic);
     assert_eq!(answer(&in_session), id);
+    let handle = seen.lock().unwrap().clone().unwrap();
+    assert!(!handle.has_ended());
     assert_eq!(answer(&post(f.addr, &[CLASSIC], classic)), "none");
 
     // A stateless request's session header is ignored, so handlers never see it.
@@ -1541,4 +1551,8 @@ fn handlers_see_only_the_session_the_server_validated() {
     let stateless = post(f.addr, &headers, &modern_call(3, "whoami", ""));
     assert_eq!(stateless.status, 200);
     assert_eq!(answer(&stateless), "none");
+
+    // A handler still holding the session sees it end.
+    request(f.addr, "DELETE", "/mcp", &[("Mcp-Session-Id", &id)], "");
+    assert!(handle.has_ended(), "every copy shares the flag");
 }

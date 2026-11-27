@@ -46,6 +46,7 @@ use rusty_mcp_client_native::{
     Client, ClientConfig, ClientError, HttpConfig, HttpTransport, NoHandler, Recv, StdioTransport,
     Transport,
 };
+use rusty_mcp_server::ClassicSession;
 
 use crate::{
     gate::{GateError, TargetFilter},
@@ -209,7 +210,7 @@ impl Pool {
 /// verified token names. Built by the federation from the call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionKey {
-    session: String,
+    session: Option<ClassicSession>,
     principal: String,
 }
 
@@ -218,13 +219,14 @@ impl SessionKey {
     ///
     /// `session` is the classic session the MCP server validated for the
     /// request ([`rusty_mcp_server::Caller::session`]), never the raw
-    /// `Mcp-Session-Id` header. A stateless (2026-07-28) request has none: it
+    /// `Mcp-Session-Id` header. Once it ends, no pool is opened for it, however
+    /// long the call took to get here. A stateless (2026-07-28) request has none: it
     /// is keyed on its principal alone, and that upstream closes only when it
     /// sits idle. The principal is `iss` and `sub`, or the whole claims when
     /// there is no `sub`, the same rule session binding uses. Calls with
     /// neither a session nor a token share one key: there is no identity to
     /// keep apart.
-    pub fn new(session: Option<&str>, claims: Option<&serde_json::Value>) -> Self {
+    pub fn new(session: Option<&ClassicSession>, claims: Option<&serde_json::Value>) -> Self {
         let principal = match claims {
             None => String::new(),
             Some(claims) => match (claims.get("iss"), claims.get("sub")) {
@@ -233,9 +235,17 @@ impl SessionKey {
             },
         };
         SessionKey {
-            session: session.unwrap_or_default().to_owned(),
+            session: session.cloned(),
             principal,
         }
+    }
+
+    fn session_id(&self) -> &str {
+        self.session.as_ref().map_or("", ClassicSession::id)
+    }
+
+    fn session_ended(&self) -> bool {
+        self.session.as_ref().is_some_and(ClassicSession::has_ended)
     }
 }
 
@@ -255,22 +265,12 @@ impl Keyed {
     }
 }
 
-/// The keyed pools of one target, and the sessions that ended lately.
+/// The keyed pools of one target.
 #[derive(Default)]
 struct Keys {
     pools: HashMap<Vec<u8>, Keyed>,
-    /// Ended sessions, kept for one idle period, so a call admitted just
-    /// before its session ended can't open a pool for it afterwards.
-    /// Session ids are random and never reused.
-    ended: HashMap<String, Instant>,
     /// Whether a reaper thread is sweeping these pools.
     reaping: bool,
-}
-
-impl Keys {
-    fn forget_old_ends(&mut self, now: Instant, idle: Duration) {
-        self.ended.retain(|_, at| now.duration_since(*at) <= idle);
-    }
 }
 
 /// The pools of one target.
@@ -290,7 +290,9 @@ impl Pools {
     ///
     /// # Errors
     /// `who`'s session has ended: a call admitted before the end opens
-    /// nothing after it.
+    /// nothing after it. The server marks the session ended before it asks
+    /// for teardown, and both sides look under the same lock, so a pool is
+    /// either refused here or closed by [`Pools::end_session`].
     fn for_call(
         self: &Arc<Self>,
         who: &SessionKey,
@@ -300,14 +302,13 @@ impl Pools {
             UpstreamMode::Pooled => return Ok(None),
             UpstreamMode::PerCredential => (credential_key(headers), String::new()),
             UpstreamMode::PerSession => (
-                format!("{}\u{0}{}", who.session, who.principal).into_bytes(),
-                who.session.clone(),
+                format!("{}\u{0}{}", who.session_id(), who.principal).into_bytes(),
+                who.session_id().to_owned(),
             ),
         };
         let now = Instant::now();
         let mut keys = lock(&self.by_key);
-        keys.forget_old_ends(now, self.idle);
-        if !session.is_empty() && keys.ended.contains_key(&session) {
+        if self.mode == UpstreamMode::PerSession && who.session_ended() {
             return Err(ClientError::Io(io::Error::new(
                 io::ErrorKind::NotConnected,
                 "the session has ended",
@@ -334,9 +335,8 @@ impl Pools {
     fn sweep(&self) -> bool {
         let now = Instant::now();
         let mut keys = lock(&self.by_key);
-        keys.forget_old_ends(now, self.idle);
         let expired = take(&mut keys.pools, |k| k.expired(now, self.idle));
-        let more = !keys.pools.is_empty() || !keys.ended.is_empty();
+        let more = !keys.pools.is_empty();
         keys.reaping = more;
         drop(keys);
         close(expired);
@@ -345,15 +345,10 @@ impl Pools {
 
     /// Close every keyed pool serving `session`.
     fn end_session(&self, session: &str) -> usize {
-        let now = Instant::now();
         let mut keys = lock(&self.by_key);
-        keys.forget_old_ends(now, self.idle);
         let ended = take(&mut keys.pools, |k| {
             !k.session.is_empty() && k.session == session
         });
-        if !session.is_empty() {
-            keys.ended.insert(session.to_owned(), now);
-        }
         drop(keys);
         let count = ended.len();
         close(ended);
@@ -515,10 +510,21 @@ impl Pool {
                     return Err(ClientError::Timeout);
                 }
                 return match (self.dial)(left) {
-                    Ok(conn) => Ok(Lease {
-                        pool: self,
-                        conn: Some(conn),
-                    }),
+                    Ok(conn) => {
+                        // Teardown may have closed the pool while it dialled.
+                        let mut slots = lock(&self.state);
+                        if slots.closed {
+                            slots.open -= 1;
+                            drop(slots);
+                            drop(conn);
+                            return Err(ClientError::Closed);
+                        }
+                        drop(slots);
+                        Ok(Lease {
+                            pool: self,
+                            conn: Some(conn),
+                        })
+                    }
                     Err(e) => {
                         lock(&self.state).open -= 1;
                         self.freed.notify_one();

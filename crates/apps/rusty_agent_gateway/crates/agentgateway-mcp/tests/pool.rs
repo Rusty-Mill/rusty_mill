@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use agentgateway_config::{McpTarget, McpTargetKind, StreamableHttpTarget, UpstreamMode};
 use agentgateway_mcp::{HeaderOverride, Override, SessionKey, Target};
+use rusty_mcp_server::ClassicSession;
 use rusty_mcp_server::json::Value;
 use rusty_mcp_server::proto::{
     CallToolParams, CallToolResult, ContentBlock, ErrorData, ProtocolVersion, Tool,
@@ -376,6 +377,10 @@ fn a_lazily_opened_connection_handshakes_within_the_operation_budget() {
 }
 
 fn as_session(session: &str, sub: &str) -> SessionKey {
+    in_session(&ClassicSession::new(session), sub)
+}
+
+fn in_session(session: &ClassicSession, sub: &str) -> SessionKey {
     SessionKey::new(
         Some(session),
         Some(&serde_json::json!({"iss": "lel-orch@test", "sub": sub})),
@@ -446,9 +451,13 @@ fn a_call_admitted_before_its_session_ended_opens_nothing_after() {
     let up = plain();
     let target = target_in(&up, UpstreamMode::PerSession, 8, Duration::from_secs(5));
     let none = HeaderOverride::default();
+    // Admitted while live; the session ends before the call reaches a pool.
+    let s1 = ClassicSession::new("s1");
+    let admitted = in_session(&s1, "a");
+    s1.end();
     assert_eq!(target.end_session("s1"), 0, "nothing was open yet");
 
-    let late = target.call(&call("t"), &none, &as_session("s1", "a"));
+    let late = target.call(&call("t"), &none, &admitted);
     assert!(late.is_err(), "an ended session gets no new upstream");
     assert_eq!(target.sessions(), 0);
 
@@ -552,6 +561,32 @@ fn ending_a_session_refuses_the_calls_queued_on_it() {
         "the running call finishes within its timeout"
     );
     assert_eq!(target.sessions(), 0);
+}
+
+#[test]
+fn a_connection_dialled_after_teardown_is_not_used() {
+    // The first handshake is quick; every later one takes 1.2 s, so s1's
+    // connection is still dialling when its session ends.
+    let up = sluggish_classic_upstream(10);
+    let target = Arc::new(target_in(
+        &up,
+        UpstreamMode::PerSession,
+        8,
+        Duration::from_secs(5),
+    ));
+    let s1 = ClassicSession::new("s1");
+    let dialling = {
+        let target = Arc::clone(&target);
+        let key = in_session(&s1, "a");
+        std::thread::spawn(move || target.call(&call("t"), &HeaderOverride::default(), &key))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    s1.end();
+    assert_eq!(target.end_session("s1"), 1);
+    assert!(
+        dialling.join().unwrap().is_err(),
+        "the call is refused once its dial lands"
+    );
 }
 
 #[test]
