@@ -1346,6 +1346,12 @@ mod client {
         workspace: bool,
         /// Whether it also tells what is in it: [`Features::WORKSPACE_STATUS`].
         status: bool,
+        /// Whether the server re-runs this block's command: `terminal.rerun`
+        /// needs [`Features::BLOCK_CALL`] over [`Features::HOLD`].
+        rerun: bool,
+        /// The re-run asked for and not yet answered: its refusal (the
+        /// program still runs, say) is not the lease's.
+        rerunning: Option<u64>,
         /// Whether it starts a block in this block's workspace:
         /// [`Features::LAUNCH_IN_WORKSPACE`] over [`Features::LAUNCH`] (D378).
         opening: bool,
@@ -1496,6 +1502,14 @@ mod client {
                 Message::Done { req, .. } if self.gate.awaits(req) => {
                     self.gate.answered(Instant::now());
                 }
+                Message::Done { req, .. } if self.rerunning == Some(req) => {
+                    self.rerunning = None;
+                    return Ok(Change::Reran(Ok(())));
+                }
+                Message::Failed { req, reason, .. } if self.rerunning == Some(req) => {
+                    self.rerunning = None;
+                    return Ok(Change::Reran(Err(reason)));
+                }
                 Message::Done { req, .. } if self.asking == Some(req) => {
                     self.asking = None;
                     self.leased = true;
@@ -1574,6 +1588,8 @@ mod client {
         Refused(String),
         /// The workspace listing asked for was answered, or refused.
         Listed(u64, Result<String, String>),
+        /// The re-run asked for was done, or refused.
+        Reran(Result<(), String>),
         /// The block started in this block's workspace, which now exists.
         Started(BlockId),
         /// The server refused to start it.
@@ -2515,6 +2531,7 @@ mod client {
                 Action::Prompt { next } => self.prompt(next),
                 Action::Find => self.find(),
                 Action::Explorer => self.explore(),
+                Action::Rerun => self.rerun(),
                 Action::Input(data) => {
                     if let Some(pane) = self.panes.get_mut(&focus) {
                         pane.typed(data);
@@ -2631,6 +2648,26 @@ mod client {
                 Step::Leave => self.live(),
                 Step::Open => self.draw(),
             }
+        }
+
+        /// Asks the server to start the focused block's ended command
+        /// again (D338): it needs the call and the lease, and the server
+        /// refuses a block still running, which rings the bell.
+        fn rerun(&mut self) {
+            let block = self.focus;
+            let Some(pane) = self
+                .panes
+                .get_mut(&block)
+                .filter(|p| p.rerun && p.leased && p.rerunning.is_none())
+            else {
+                return bell();
+            };
+            pane.rerunning = Some(pane.send(|req| Message::BlockCall {
+                req,
+                block,
+                method: "terminal.rerun".into(),
+                args: Vec::new(),
+            }));
         }
 
         /// Opens the workspace tree over the focused block: it asks for the
@@ -3153,6 +3190,8 @@ mod client {
                     let answer = answer.as_ref().map(String::as_str).map_err(String::as_str);
                     self.listed_workspace(block, req, answer);
                 }
+                Ok(Change::Reran(Err(_))) => bell(),
+                Ok(Change::Reran(Ok(()))) => {}
                 Ok(Change::Started(id)) => {
                     if self.exploring.as_ref().is_some_and(|o| o.block == block) {
                         self.exploring = None;
@@ -3380,6 +3419,10 @@ mod client {
                     .features
                     .contains(Features::BLOCK_CALL.union(Features::WORKSPACE)),
                 status: opened.features.contains(Features::WORKSPACE_STATUS),
+                rerun: opened
+                    .features
+                    .contains(Features::BLOCK_CALL.union(Features::HOLD)),
+                rerunning: None,
                 opening: opened
                     .features
                     .contains(Features::LAUNCH.union(Features::LAUNCH_IN_WORKSPACE)),
@@ -5176,6 +5219,44 @@ mod client {
                     .as_ref()
                     .is_some_and(|o| !o.explorer.waiting())
             );
+        }
+
+        /// A re-run is asked under the lease, once at a time, and a refusal
+        /// of it (the program still runs) is not the lease's.
+        #[cfg(unix)]
+        #[test]
+        fn a_rerun_is_asked_once_and_its_refusal_leaves_the_lease() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            let rerun = |far: &UnixStream| {
+                sent(far)
+                    .into_iter()
+                    .filter_map(|m| match m {
+                        Message::BlockCall { req, method, .. } if method == "terminal.rerun" => {
+                            Some(req)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            app.act(Action::Rerun);
+            let asked = rerun(&far[1]);
+            assert_eq!(asked.len(), 1);
+            app.act(Action::Rerun);
+            assert!(rerun(&far[1]).is_empty(), "one at a time");
+            pane_says(
+                &mut app,
+                a,
+                Message::Failed {
+                    req: asked[0],
+                    reason: "the block's program is still running".into(),
+                    code: None,
+                },
+            );
+            assert!(app.panes[&a].leased, "the lease stands");
+            assert!(app.panes[&a].rerunning.is_none());
+            app.act(Action::Rerun);
+            assert_eq!(rerun(&far[1]).len(), 1, "asked again once answered");
         }
 
         /// At the bound on unanswered listings no more are asked, so none is
