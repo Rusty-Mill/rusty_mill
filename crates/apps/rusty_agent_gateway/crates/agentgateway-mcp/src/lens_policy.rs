@@ -29,7 +29,6 @@
 use std::collections::BTreeMap;
 
 use rusty_codec::toml::TomlValue;
-use rusty_sha2::{Hash, Sha256};
 
 use crate::glob::glob;
 use crate::rules::Subject;
@@ -136,7 +135,7 @@ impl LensPolicies {
 /// The sha256 of a policy file's bytes, lowercase hex: what orch puts in the
 /// token's `lel.policy` claim.
 pub fn policy_digest(bytes: &[u8]) -> String {
-    rusty_hex::encode(&Sha256::digest(bytes))
+    rusty_hex::encode(&rusty_rsa::sha256(bytes))
 }
 
 fn fail(file: &str, reason: impl Into<String>) -> LensPolicyError {

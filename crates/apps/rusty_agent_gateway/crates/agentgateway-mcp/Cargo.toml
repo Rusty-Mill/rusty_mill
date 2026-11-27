@@ -45,9 +45,10 @@ rusty_mcp_middleware = { workspace = true, default-features = false, features = 
 thiserror = "2"
 rusty_log = { workspace = true }
 # Lens policies (LEL #1378): first-party TOML, sha256 and hex, no new
-# third-party code.
+# third-party code. sha256 comes from rusty_rsa (already in the gateway's
+# tree, rust-version 1.70); rusty_sha2 needs 1.98.1, above this crate's 1.88.
 rusty_codec = { workspace = true }
-rusty_sha2 = { workspace = true }
+rusty_rsa = { workspace = true }
 rusty_hex = { workspace = true }
 
 [dev-dependencies]
