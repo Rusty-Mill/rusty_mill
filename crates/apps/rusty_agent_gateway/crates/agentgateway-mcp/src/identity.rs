@@ -54,6 +54,13 @@ pub enum IdentityError {
         claim: String,
     },
 
+    /// A claim rendered into a header is not visible ASCII.
+    #[error("the token's claims can't be sent as header `{name}` (visible ASCII only)")]
+    Header {
+        /// The header name.
+        name: String,
+    },
+
     /// The call's arguments are not a JSON object, so nothing can be set.
     #[error("tool arguments must be a JSON object")]
     Arguments,
@@ -201,16 +208,16 @@ impl Identity {
         !self.headers.is_empty()
     }
 
-    /// Stamp one call to `tool` (the upstream's own name) with the caller's
-    /// identity: strip, then set, then add headers. Nothing is changed unless
+    /// Stamp one call with the caller's identity: strip, then set, then add
+    /// headers. `strip` matches `params.name`, the name the upstream will
+    /// receive, so call this after every rewrite. Nothing is changed unless
     /// every template resolves.
     ///
     /// # Errors
-    /// [`IdentityError::Unresolved`] or [`IdentityError::Arguments`]; the call
-    /// must then be refused.
+    /// [`IdentityError::Unresolved`], [`IdentityError::Header`] or
+    /// [`IdentityError::Arguments`]; the call must then be refused.
     pub fn apply(
         &self,
-        tool: &str,
         params: &mut CallToolParams,
         headers: &mut HeaderOverride,
         claims: Option<&serde_json::Value>,
@@ -225,15 +232,21 @@ impl Identity {
             .iter()
             .map(|(name, t)| {
                 let value = t.resolve(claims)?;
-                let value =
-                    HeaderValue::try_from(value).map_err(|_| IdentityError::Unresolved {
-                        claim: name.as_str().to_owned(),
+                // Only visible ASCII survives every transport (the native
+                // client drops a value `to_str` refuses), so anything else is
+                // refused rather than sent without the header.
+                let value = HeaderValue::try_from(value)
+                    .ok()
+                    .filter(|v| v.to_str().is_ok())
+                    .ok_or_else(|| IdentityError::Header {
+                        name: name.as_str().to_owned(),
                     })?;
                 Ok((name, value))
             })
             .collect::<Result<Vec<_>, IdentityError>>()?;
 
-        self.stamp_arguments(tool, params, set)?;
+        let tool = params.name.clone();
+        self.stamp_arguments(&tool, params, set)?;
         for (name, value) in stamped {
             headers.remove.retain(|dropped| dropped != name);
             headers.set.retain(|(existing, _)| existing != name);

@@ -54,7 +54,7 @@ fn a_forged_actor_is_replaced_by_the_tokens() {
     let mut params = call(r#"{"id":"42","text":"hi","actor":"nano","agent_key":"k"}"#);
     let mut headers = HeaderOverride::default();
     board()
-        .apply("card_comment", &mut params, &mut headers, Some(&claims()))
+        .apply(&mut params, &mut headers, Some(&claims()))
         .unwrap();
 
     assert_eq!(
@@ -72,9 +72,7 @@ fn a_forged_actor_is_replaced_by_the_tokens() {
 fn no_token_refuses_the_call_and_changes_nothing() {
     let mut params = call(r#"{"actor":"nano"}"#);
     let mut headers = HeaderOverride::default();
-    let err = board()
-        .apply("card_comment", &mut params, &mut headers, None)
-        .unwrap_err();
+    let err = board().apply(&mut params, &mut headers, None).unwrap_err();
     assert!(matches!(err, IdentityError::Unresolved { .. }));
     assert_eq!(arg(&params, "actor"), Some("nano"));
     assert!(headers.is_empty());
@@ -90,7 +88,6 @@ fn a_missing_empty_or_structured_claim_refuses() {
     ] {
         let err = identity
             .apply(
-                "t",
                 &mut call("{}"),
                 &mut HeaderOverride::default(),
                 Some(&claims),
@@ -111,7 +108,6 @@ fn a_number_claim_renders_as_text() {
     let mut params = call("{}");
     identity
         .apply(
-            "t",
             &mut params,
             &mut HeaderOverride::default(),
             Some(&serde_json::json!({"uid": 7})),
@@ -124,19 +120,16 @@ fn a_number_claim_renders_as_text() {
 fn strip_follows_the_tool_glob() {
     let identity = config(&[("board_*", &["actor"])], &[], &[]);
     let mut kept = call(r#"{"actor":"a"}"#);
+    kept.name = "search".to_owned();
     identity
-        .apply("search", &mut kept, &mut HeaderOverride::default(), None)
+        .apply(&mut kept, &mut HeaderOverride::default(), None)
         .unwrap();
     assert_eq!(arg(&kept, "actor"), Some("a"));
 
     let mut dropped = call(r#"{"actor":"a"}"#);
+    dropped.name = "board_card_get".to_owned();
     identity
-        .apply(
-            "board_card_get",
-            &mut dropped,
-            &mut HeaderOverride::default(),
-            None,
-        )
+        .apply(&mut dropped, &mut HeaderOverride::default(), None)
         .unwrap();
     assert_eq!(arg(&dropped, "actor"), None);
 }
@@ -146,12 +139,7 @@ fn set_creates_arguments_when_the_call_has_none() {
     let identity = config(&[], &[("actor", "{{jwt.sub}}")], &[]);
     let mut params = CallToolParams::new("t");
     identity
-        .apply(
-            "t",
-            &mut params,
-            &mut HeaderOverride::default(),
-            Some(&claims()),
-        )
+        .apply(&mut params, &mut HeaderOverride::default(), Some(&claims()))
         .unwrap();
     assert_eq!(
         arg(&params, "actor"),
@@ -164,7 +152,6 @@ fn non_object_arguments_are_refused() {
     let identity = config(&[], &[("actor", "{{jwt.sub}}")], &[]);
     let err = identity
         .apply(
-            "t",
             &mut call("[1]"),
             &mut HeaderOverride::default(),
             Some(&claims()),
@@ -183,7 +170,7 @@ fn the_identity_header_wins_over_an_earlier_change() {
         remove: vec![HeaderName::from_static("x-lel-sub")],
     };
     board()
-        .apply("t", &mut call("{}"), &mut headers, Some(&claims()))
+        .apply(&mut call("{}"), &mut headers, Some(&claims()))
         .unwrap();
     assert_eq!(headers.set.len(), 1);
     assert_ne!(headers.set[0].1, "forged");
@@ -224,4 +211,24 @@ fn a_bad_header_name_is_refused_at_startup() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("header name"), "{err}");
+}
+
+#[test]
+fn a_header_value_that_is_not_visible_ascii_refuses() {
+    let identity = config(&[], &[], &[("x-lel-sub", "{{jwt.sub}}")]);
+    let mut headers = HeaderOverride::default();
+    let err = identity
+        .apply(
+            &mut call("{}"),
+            &mut headers,
+            Some(&serde_json::json!({"sub": "caf\u{e9}"})),
+        )
+        .unwrap_err();
+    assert_eq!(
+        err,
+        IdentityError::Header {
+            name: "x-lel-sub".to_owned()
+        }
+    );
+    assert!(headers.is_empty(), "nothing is stamped");
 }
