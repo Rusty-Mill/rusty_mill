@@ -6,7 +6,6 @@
 //! ending a session (`DELETE`) kills that child.
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
 
 use agentgateway_config::Config;
 use rusty_tokio::sync::CancellationToken;
@@ -107,6 +106,8 @@ async fn a_target_without_mode_gives_each_session_its_own_child() {
 
     #[cfg(target_os = "linux")]
     {
+        use std::time::{Duration, Instant};
+
         assert!(alive(first));
         let _ = a.close().await; // sends DELETE
         let deadline = Instant::now() + Duration::from_secs(5);
