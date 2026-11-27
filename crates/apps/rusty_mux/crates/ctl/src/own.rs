@@ -525,7 +525,10 @@ fn open(
         loop {
             match conn.recv() {
                 Ok(message) => {
-                    if tx.send(Inbound::Frame(generation, Box::new(message))).is_err() {
+                    if tx
+                        .send(Inbound::Frame(generation, Box::new(message)))
+                        .is_err()
+                    {
                         return;
                     }
                 }
