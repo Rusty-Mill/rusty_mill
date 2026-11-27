@@ -173,7 +173,18 @@ pub(crate) fn answer(req: &Request, ok: bool, body: &str) -> Answer {
     {
         return a;
     }
-    let done = outcome.and_then(Value::as_str) == Some("Done") || v.get("recorded").is_some();
+    // `recorded` is the answer to a retry: done only when BBP's log confirms the
+    // send applied (`settled.applied`); `settled: "unknown"` is not a success.
+    if let Some(r) = v.get("recorded") {
+        let applied = r.get("settled").and_then(|s| s.get("applied")).is_some();
+        return match (req.dry_run, applied) {
+            (false, true) => Answer::Done,
+            _ => Answer::Refused(
+                "the decision is not confirmed applied; re-read the inbox".to_owned(),
+            ),
+        };
+    }
+    let done = outcome.and_then(Value::as_str) == Some("Done");
     match (req.dry_run, v.get("dry_run").is_some(), done) {
         (true, true, _) => Answer::Previewed,
         (false, _, true) => Answer::Done,
@@ -336,10 +347,13 @@ mod tests {
         ));
         let applied = r#"{"remediated":{"outcome":"Done","card":{}}}"#;
         assert_eq!(answer(&p.apply(), true, applied), Answer::Done);
-        assert_eq!(
-            answer(&p.apply(), true, r#"{"recorded":{"card":{}}}"#),
-            Answer::Done
-        );
+        let settled = r#"{"recorded":{"card":{},"settled":{"applied":{"rev":9}}}}"#;
+        assert_eq!(answer(&p.apply(), true, settled), Answer::Done);
+        let unknown = r#"{"recorded":{"card":{},"settled":"unknown"}}"#;
+        assert!(matches!(
+            answer(&p.apply(), true, unknown),
+            Answer::Refused(_)
+        ));
     }
 
     #[test]
