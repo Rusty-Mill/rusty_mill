@@ -4,12 +4,12 @@
 //! only writer of the BBP log, behind its lock and revision fence. Mill Board
 //! never reads BBP files.
 
-use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -47,53 +47,80 @@ impl BbpCli {
     }
 
     /// Run `bbp <args>` within `deadline`: its exit status, up to `max` bytes of stdout
-    /// and a bounded stderr. Past the deadline the child is killed and this is
-    /// [`InboxError::Host`]. Output goes to unlinked capture files, not pipes, and is
-    /// read once the child has exited: a descendant that keeps the output open (such as
-    /// the guard's `sudo` target) cannot block this call or leave a reader behind, so
-    /// one stuck run never holds up the next task's.
+    /// and a bounded stderr. The output comes over socket pairs that this thread drains
+    /// without blocking, so nothing is written to disk and memory stays within the caps.
+    /// The call ends when the child has exited and both streams are closed. It is
+    /// [`InboxError::Host`] when stdout passes `max` or the deadline passes first, as
+    /// when a descendant (such as the guard's `sudo` target) keeps a stream open. The
+    /// child is then killed and the streams dropped, so a descendant's next write fails
+    /// and nothing stays behind to block the next task's run.
+    #[cfg(unix)]
     fn run_deadline(
         &self,
         args: &[String],
         max: u64,
         deadline: Duration,
     ) -> Result<(ExitStatus, Vec<u8>, String), InboxError> {
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
         let host = |e: std::io::Error| InboxError::Host(format!("{}: {e}", self.bin.display()));
-        let (out_w, out_r) = capture().map_err(host)?;
-        let (err_w, err_r) = capture().map_err(host)?;
+        let (out_r, out_w) = UnixStream::pair().map_err(host)?;
+        let (err_r, err_w) = UnixStream::pair().map_err(host)?;
+        let mut out = Capture::new(out_r, max).map_err(host)?;
+        let mut err = Capture::new(err_r, MAX_ERR).map_err(host)?;
         let mut child = Command::new(&self.bin)
             .args(args)
             .stdin(Stdio::null())
-            .stdout(out_w)
-            .stderr(err_w)
+            .stdout(Stdio::from(OwnedFd::from(out_w)))
+            .stderr(Stdio::from(OwnedFd::from(err_w)))
             .spawn()
             .map_err(host)?;
         let until = Instant::now() + deadline;
-        let status = loop {
-            if let Some(status) = child.try_wait().map_err(host)? {
-                break status;
+        let mut status = None;
+        let fail = |child: &mut std::process::Child, why: String| {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(InboxError::Host(why))
+        };
+        loop {
+            out.drain().map_err(host)?;
+            err.drain().map_err(host)?;
+            if out.over() {
+                return fail(
+                    &mut child,
+                    format!("the host's answer is over {max} bytes; refused"),
+                );
+            }
+            if status.is_none() {
+                status = child.try_wait().map_err(host)?;
+            }
+            if let Some(status) = status
+                && out.closed
+                && err.closed
+            {
+                let stderr = String::from_utf8_lossy(&err.buf).into_owned();
+                return Ok((status, out.buf, stderr));
             }
             if Instant::now() >= until {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(InboxError::Host(format!(
-                    "`bbp {}` timed out after {}s",
-                    args.first().map_or("", String::as_str),
-                    deadline.as_secs_f32()
-                )));
+                let verb = args.first().map_or("", String::as_str);
+                let secs = deadline.as_secs_f32();
+                return fail(&mut child, format!("`bbp {verb}` timed out after {secs}s"));
             }
             std::thread::sleep(POLL);
-        };
-        let mut body = Vec::new();
-        out_r.take(max + 1).read_to_end(&mut body).map_err(host)?;
-        if body.len() as u64 > max {
-            return Err(InboxError::Host(format!(
-                "the host's answer is over {max} bytes; refused"
-            )));
         }
-        let mut stderr = Vec::new();
-        err_r.take(MAX_ERR).read_to_end(&mut stderr).map_err(host)?;
-        Ok((status, body, String::from_utf8_lossy(&stderr).into_owned()))
+    }
+
+    /// Bounded host runs need Unix socket pairs; elsewhere `verify` is a host error.
+    #[cfg(not(unix))]
+    fn run_deadline(
+        &self,
+        _args: &[String],
+        _max: u64,
+        _deadline: Duration,
+    ) -> Result<(ExitStatus, Vec<u8>, String), InboxError> {
+        Err(InboxError::Host(
+            "bounded `bbp` runs need a Unix host".into(),
+        ))
     }
 
     /// Run `bbp <args>` and parse what it prints on success.
@@ -234,6 +261,7 @@ const MAX_VERIFY: u64 = 64 << 10;
 pub const VERIFY_DEADLINE: Duration = Duration::from_secs(120);
 
 /// How often a deadline-bound run checks whether its child has exited.
+#[cfg(unix)]
 const POLL: Duration = Duration::from_millis(20);
 
 fn valid_task(t: &str) -> bool {
@@ -409,23 +437,54 @@ impl Escalations for BbpCli {
     }
 }
 
-/// A fresh capture file for a child's output: a write handle for the child and a read
-/// handle for the board. The file is unlinked at once, so nothing is left to clean up.
-fn capture() -> std::io::Result<(File, File)> {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "mill-board-bbp-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let write = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
-    let read = File::open(&path);
-    // Best effort: where an open file cannot be unlinked, it stays in the temp dir.
-    let _ = std::fs::remove_file(&path);
-    Ok((write, read?))
+/// One output stream of a deadline-bound run, read without blocking. It keeps the
+/// first `cap` bytes and counts the rest, so a chatty child never fills the buffer
+/// and stalls, and never grows the board's memory.
+#[cfg(unix)]
+struct Capture {
+    src: std::os::unix::net::UnixStream,
+    buf: Vec<u8>,
+    cap: u64,
+    seen: u64,
+    closed: bool,
+}
+
+#[cfg(unix)]
+impl Capture {
+    fn new(src: std::os::unix::net::UnixStream, cap: u64) -> std::io::Result<Self> {
+        src.set_nonblocking(true)?;
+        Ok(Self {
+            src,
+            buf: Vec::new(),
+            cap,
+            seen: 0,
+            closed: false,
+        })
+    }
+
+    /// Read whatever is waiting, up to EOF.
+    fn drain(&mut self) -> std::io::Result<()> {
+        let mut chunk = [0_u8; 8192];
+        while !self.closed {
+            match self.src.read(&mut chunk) {
+                Ok(0) => self.closed = true,
+                Ok(n) => {
+                    let room = usize::try_from(self.cap.saturating_sub(self.seen)).unwrap_or(n);
+                    self.buf.extend_from_slice(&chunk[..n.min(room)]);
+                    self.seen = self.seen.saturating_add(n as u64);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether more than `cap` bytes arrived.
+    const fn over(&self) -> bool {
+        self.seen > self.cap
+    }
 }
 
 /// What `bbp verify` prints on success.

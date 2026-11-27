@@ -336,10 +336,27 @@ fn a_grandchild_holding_the_output_past_the_deadline_blocks_nothing() {
 }
 
 #[test]
-fn a_wrapper_that_exits_while_a_grandchild_holds_stdout_returns_at_once() {
-    // A clean exit is not EOF: the background `sleep` keeps stdout open. It is never waited on.
+fn a_wrapper_that_exits_while_a_grandchild_holds_stdout_is_bounded_by_the_deadline() {
+    // A clean exit is not EOF: the background `sleep` keeps stdout open past the deadline.
     let (cli, _serial) = stuck_on_c1("held", "sleep 3 & exit 0");
-    assert_bounded_then_next_task_runs(&cli, "unreadable verify");
+    assert_bounded_then_next_task_runs(&cli, "timed out");
+}
+
+#[test]
+fn endless_output_is_refused_at_the_cap_without_storing_it() {
+    let (cli, _serial) = stuck_on_c1("flood", "exec yes");
+    assert_bounded_then_next_task_runs(&cli, "over");
+}
+
+#[test]
+fn a_flood_on_stderr_is_drained_and_capped_and_never_stalls_the_answer() {
+    let (bin, _serial) = verifier(
+        "errflood",
+        &format!("head -c 1000000 /dev/zero >&2\n{HEAD}"),
+    );
+    let cli =
+        BbpCli::new(bin, "/srv/bbp".into()).with_verify_deadline(std::time::Duration::from_secs(5));
+    assert_eq!(cli.verify("C2", None).unwrap().unwrap().head, "ab");
 }
 
 #[test]
