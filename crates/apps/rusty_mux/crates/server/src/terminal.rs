@@ -1,6 +1,6 @@
 //! The methods of the terminal block type, `terminal.*`, over a block's grid.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use rusty_mux_core::{Progress, Selection};
@@ -433,6 +433,43 @@ fn update(seen: &mut String, now: &str) -> bool {
     true
 }
 
+/// The directory the program last reported with OSC 7 (D375), if it names
+/// this machine and is a directory now. A report for another host, a path
+/// that is gone and a file all give `None`.
+pub(crate) fn reported_dir(grid: &Grid) -> Option<PathBuf> {
+    let rest = grid.cwd.strip_prefix("file://")?;
+    let host = &rest[..rest.find('/')?];
+    if !(host.is_empty() || host == "localhost" || is_local_host(host)) {
+        return None;
+    }
+    let path = reported_path(&grid.cwd)?;
+    // `file:///C:/work` carries `/C:/work`; Windows wants `C:/work`.
+    let path = if cfg!(windows) {
+        drive_path(&path).unwrap_or(&path)
+    } else {
+        &path
+    };
+    let dir = PathBuf::from(path);
+    dir.is_dir().then_some(dir)
+}
+
+/// `/C:/work` as `C:/work`: a URI path that starts with a drive letter.
+fn drive_path(path: &str) -> Option<&str> {
+    let b = path.as_bytes();
+    (b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':').then(|| &path[1..])
+}
+
+/// Whether `host` names this machine: the kernel's hostname on Linux, the
+/// computer name on Windows (compared without case).
+fn is_local_host(host: &str) -> bool {
+    let own = if cfg!(windows) {
+        std::env::var("COMPUTERNAME").ok()
+    } else {
+        std::fs::read_to_string("/proc/sys/kernel/hostname").ok()
+    };
+    own.is_some_and(|own| own.trim().eq_ignore_ascii_case(host))
+}
+
 /// The path of an OSC 7 `file://HOST/PATH` URI, percent-decoded.
 fn reported_path(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
@@ -671,6 +708,37 @@ mod tests {
         assert!(grid.bracketed_paste);
         assert_eq!(grid.title, "kept");
         assert!(parser.take_responses().is_empty());
+    }
+
+    #[test]
+    fn a_drive_letter_path_loses_its_leading_slash() {
+        assert_eq!(drive_path("/C:/work/sub"), Some("C:/work/sub"));
+        assert_eq!(drive_path("/c:"), Some("c:"));
+        assert_eq!(drive_path("/tmp/x"), None);
+        assert_eq!(drive_path("/1:/x"), None);
+        assert_eq!(drive_path("C:/x"), None);
+    }
+
+    #[test]
+    fn a_reported_directory_must_be_local_and_exist() {
+        let mut grid = Grid::new(10, 2);
+        // As an OSC 7 report writes it: `/tmp`, or `/C:/Users/x` on Windows.
+        let here = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+        let here = if here.starts_with('/') {
+            here
+        } else {
+            format!("/{here}")
+        };
+        for (uri, ok) in [
+            (format!("file://{here}"), true),
+            (format!("file://localhost{here}"), true),
+            (format!("file://elsewhere.invalid{here}"), false),
+            ("file:///no/such/dir".to_owned(), false),
+            (String::new(), false),
+        ] {
+            grid.cwd = uri.clone();
+            assert_eq!(reported_dir(&grid).is_some(), ok, "{uri}");
+        }
     }
 
     #[test]

@@ -620,6 +620,9 @@ const TERMINAL_HISTORY: Features = Features::BLOCK_CALL.union(Features::TERMINAL
 /// What `terminal.prompts` and `terminal.find` need.
 const TERMINAL_FIND: Features = Features::BLOCK_CALL.union(Features::TERMINAL_FIND);
 
+/// What `terminal.rerun` needs: held blocks (C78), which it re-runs.
+const TERMINAL_RERUN: Features = Features::BLOCK_CALL.union(Features::HOLD);
+
 /// What `terminal.ports` needs.
 const TERMINAL_PORTS: Features = Features::BLOCK_CALL.union(Features::PORTS);
 
@@ -1850,6 +1853,18 @@ pub static CATALOG: &[Method] = &[
         needs: TERMINAL_PORTS,
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.ports"),
+    },
+    Method {
+        name: "terminal.rerun",
+        doc: "Start again the command a held block's program was started \
+              with (its program and arguments, in the directory the shell last reported with OSC 7 while that is still a local directory, else the one it was launched in), in the block, \
+              under the lease; the screen stays and a line says when. Only once the \
+              program is gone, and never for an agent's block, which is re-run through \
+              its orchestrator. Nothing runs again on its own after a restart.",
+        params: &[BLOCK],
+        needs: TERMINAL_RERUN,
+        returns: Returns::Nothing,
+        build: |req, a| block_call(req, a, "terminal.rerun"),
     },
     Method {
         name: "close-block",
