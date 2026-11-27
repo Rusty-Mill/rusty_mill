@@ -3465,7 +3465,12 @@ fn a_gate_that_refuses_after_checkout_runs_nothing() {
         &repo,
         &dir.join("work"),
         &base,
-        &|| Err("budget: 10s left".into()),
+        // Asked after all setup: the scratch directory beside the checkout
+        // already exists, so slow setup is counted before the launch.
+        &|| match dir.join("work/baseline.tmp").is_dir() {
+            true => Err("budget: 10s left".into()),
+            false => Err("asked before the scratch directory".into()),
+        },
     )
     .expect("prepared");
     assert_eq!(counting.0.get(), 0, "no sandbox started");

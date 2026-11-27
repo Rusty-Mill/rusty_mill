@@ -317,7 +317,8 @@ where
     baseline_gated(exec, set, repo, work, base, &|| Ok(()))
 }
 
-/// [`baseline`], asking `ready` after the checkout and before execution.
+/// [`baseline`], asking `ready` once setup is done (checkout, test listing,
+/// scratch directory), immediately before the first sandbox launch.
 fn baseline_gated<E: Executor>(
     exec: &E,
     set: &ProfileSet,
@@ -335,17 +336,19 @@ where
     });
     match checked_out {
         Ok((tree, tests)) => {
-            if let Err(e) = ready() {
-                return crate::baseline::Baseline {
-                    base: base.to_owned(),
-                    tree: Some(Sha256::of(tree.as_bytes())),
-                    status: RunStatus::Error,
-                    profiles: vec![],
-                    tests,
-                    error: Some(e),
-                };
-            }
-            let o = execute(exec, set, work);
+            let o = match execute(exec, set, work, ready) {
+                Ok(o) => o,
+                Err(refused) => {
+                    return crate::baseline::Baseline {
+                        base: base.to_owned(),
+                        tree: Some(Sha256::of(tree.as_bytes())),
+                        status: RunStatus::Error,
+                        profiles: vec![],
+                        tests,
+                        error: Some(refused),
+                    };
+                }
+            };
             // No profile ran: the run's own short reason is the explanation.
             let error = (o.status == RunStatus::Error && o.profiles.is_empty())
                 .then(|| format!("execute: {}", o.log.trim()));
@@ -492,16 +495,23 @@ fn scratch_dir(work: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn execute<E: Executor>(exec: &E, set: &ProfileSet, work: &Path) -> Outcome
+/// Run `set` in the sandbox. `ready` is asked after all setup, just before
+/// the first launch; its `Err` is returned as is and nothing is launched.
+fn execute<E: Executor>(
+    exec: &E,
+    set: &ProfileSet,
+    work: &Path,
+    ready: &dyn Fn() -> Result<(), String>,
+) -> Result<Outcome, String>
 where
     E::Error: std::fmt::Display,
 {
     if set.profiles.is_empty() {
-        return Outcome {
+        return Ok(Outcome {
             status: RunStatus::Error,
             profiles: vec![],
             log: "profile set has no profiles\n".into(),
-        };
+        });
     }
     let mut log = String::new();
     let mut results = Vec::new();
@@ -517,11 +527,11 @@ where
     let limits = match limits {
         Ok(l) => l,
         Err(e) => {
-            return Outcome {
+            return Ok(Outcome {
                 status: RunStatus::Error,
                 profiles: vec![],
                 log: format!("invalid limits: {e}"),
-            }
+            })
         }
     };
     let mut read_roots: Vec<PathBuf> = set.read_roots.iter().map(PathBuf::from).collect();
@@ -535,11 +545,11 @@ where
     let tmp = match scratch_dir(work) {
         Ok(t) => t,
         Err(e) => {
-            return Outcome {
+            return Ok(Outcome {
                 status: RunStatus::Error,
                 profiles: vec![],
                 log: format!("scratch directory: {e}\n"),
-            }
+            })
         }
     };
     let mut env = set.env.clone();
@@ -555,13 +565,14 @@ where
     ) {
         Ok(s) => s,
         Err(e) => {
-            return Outcome {
+            return Ok(Outcome {
                 status: RunStatus::Error,
                 profiles: vec![],
                 log: format!("invalid sandbox spec: {e}"),
-            }
+            })
         }
     };
+    ready()?;
     for p in &set.profiles {
         log.push_str(&format!(
             "=== {} : {} {}\n",
@@ -606,11 +617,11 @@ where
             }
         }
     }
-    Outcome {
+    Ok(Outcome {
         status,
         profiles: results,
         log,
-    }
+    })
 }
 
 fn worst(a: RunStatus, b: RunStatus) -> RunStatus {
@@ -812,7 +823,11 @@ where
                 tests = changed;
                 (
                     Some(Sha256::of(tree.as_bytes())),
-                    execute(exec, &set, &work),
+                    execute(exec, &set, &work, &|| Ok(())).unwrap_or_else(|refused| Outcome {
+                        status: RunStatus::Error,
+                        profiles: vec![],
+                        log: refused,
+                    }),
                 )
             }
             Err(e) => (
