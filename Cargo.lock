@@ -11081,6 +11081,7 @@ dependencies = [
  "rusty_tls",
  "rusty_tokio",
  "rusty_uuid",
+ "rusty_win32",
  "serde",
  "serde_json",
  "ts-hub",
