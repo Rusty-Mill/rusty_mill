@@ -462,6 +462,28 @@ pub fn pidfd_send_signal(pidfd: i32, sig: i32) -> Result<(), Errno> {
     from_ret(ret).map(|_| ())
 }
 
+/// Duplicate descriptor `targetfd` of the process referred to by `pidfd`
+/// into this process (`pidfd_getfd(2)`, Linux 5.6+, Track P). The new fd
+/// shares the target's open file description, so offsets, status flags
+/// and `flock` locks are shared with it, exactly as with `dup`.
+///
+/// The caller needs `PTRACE_MODE_ATTACH_REALCREDS` over the target (its
+/// own children qualify under Yama's default scope); otherwise `EPERM`.
+/// `flags` must be `0`. The returned fd is `O_CLOEXEC` and must be closed
+/// with [`crate::fd::close`] like any other fd.
+pub fn pidfd_getfd(pidfd: i32, targetfd: i32, flags: u32) -> Result<i32, Errno> {
+    // SAFETY: plain integer arguments, no memory referenced.
+    let ret = unsafe {
+        syscall3(
+            nr::PIDFD_GETFD,
+            pidfd as usize,
+            targetfd as usize,
+            flags as usize,
+        )
+    };
+    from_ret_i32(ret)
+}
+
 /// One `{ base, len }` range in another process's address space, for
 /// [`process_vm_readv`]/[`process_vm_writev`]. Kernel `struct iovec` layout
 /// (`void *iov_base; size_t iov_len;`), but `base` is a plain [`usize`]
@@ -1720,6 +1742,40 @@ mod tests {
     #[test]
     fn pidfd_send_signal_bad_fd_is_ebadf() {
         assert_eq!(pidfd_send_signal(-1, 0), Err(Errno::EBADF));
+    }
+
+    #[test]
+    fn pidfd_getfd_duplicates_a_descriptor_of_the_target() {
+        use crate::fd;
+
+        // Our own process is a valid target: the copy reads what the
+        // original pipe's write end sends.
+        let (read, write) = fd::pipe2(fd::O_CLOEXEC).expect("pipe2");
+        let pidfd = pidfd_open(getpid(), 0).expect("pidfd_open");
+        let copy = pidfd_getfd(pidfd, read, 0).expect("pidfd_getfd");
+        assert_ne!(copy, read);
+
+        assert_eq!(fd::write(write, b"ok").expect("write"), 2);
+        let mut buf = [0u8; 2];
+        assert_eq!(fd::read(copy, &mut buf).expect("read"), 2);
+        assert_eq!(&buf, b"ok");
+
+        for f in [copy, pidfd, read, write] {
+            fd::close(f).expect("close");
+        }
+    }
+
+    #[test]
+    fn pidfd_getfd_refusals_return_their_errno() {
+        use crate::fd;
+
+        assert_eq!(pidfd_getfd(-1, 0, 0), Err(Errno::EBADF));
+        let pidfd = pidfd_open(getpid(), 0).expect("pidfd_open");
+        // A descriptor the target does not have.
+        assert_eq!(pidfd_getfd(pidfd, 1_000_000, 0), Err(Errno::EBADF));
+        // No flags are defined.
+        assert_eq!(pidfd_getfd(pidfd, 0, 1), Err(Errno::EINVAL));
+        fd::close(pidfd).expect("close pidfd");
     }
 
     #[test]

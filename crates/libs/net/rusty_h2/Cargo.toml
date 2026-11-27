@@ -10,7 +10,7 @@ license = "MIT"
 layer = "libs"
 
 [dependencies]
-rusty_tokio = { workspace = true, version = "0.2.0", optional = true }
+rusty_tokio = { workspace = true, optional = true }
 
 [features]
 # The async connection driver (`driver`). Off by default so the sans-IO core

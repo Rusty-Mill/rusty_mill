@@ -23,6 +23,18 @@ fn main() -> ExitCode {
         Some("maintain") => return maintain(argv),
         Some("lens") => return lens(argv),
         Some("watch") => return watch(argv),
+        Some("builder") => {
+            use rusty_orch::builder;
+            let argv: Vec<String> = argv.collect();
+            if argv.first().map(String::as_str) == Some("sessions") {
+                return lens_command(
+                    builder::SESSIONS_USAGE,
+                    builder::sessions_options(argv),
+                    builder::sessions,
+                );
+            }
+            return lens_command(builder::USAGE, builder::options(argv), builder::run);
+        }
         Some("dry-run") => {
             use rusty_orch::dry_run;
             let argv = std::iter::once("dry-run".to_owned()).chain(argv);
@@ -159,7 +171,7 @@ fn maintain(argv: impl IntoIterator<Item = String>) -> ExitCode {
 }
 
 fn lens(argv: impl IntoIterator<Item = String>) -> ExitCode {
-    use rusty_orch::lens::{alien, breaker, check, record, run};
+    use rusty_orch::lens::{alien, breaker, check, record, run, untested, why};
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(error) => {
@@ -173,6 +185,8 @@ fn lens(argv: impl IntoIterator<Item = String>) -> ExitCode {
         Some("alien") => lens_command(alien::USAGE, alien::options(argv), alien::run),
         Some("record") => lens_command(record::USAGE, record::options(argv), record::run),
         Some("breaker") => lens_command(breaker::USAGE, breaker::options(argv), breaker::run),
+        Some("untested") => lens_command(untested::USAGE, untested::options(argv), untested::run),
+        Some("why") => lens_command(why::USAGE, why::options(argv), why::run),
         _ => lens_command(check::USAGE, check::options(argv, cwd), check::run),
     }
 }

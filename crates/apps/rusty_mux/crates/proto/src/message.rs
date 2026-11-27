@@ -307,6 +307,19 @@ impl Features {
     /// [`Message::BlockCall`], so the bit only says the server knows it.
     pub const DOWNLOAD: Self = Self(1 << 56);
 
+    /// The block methods `terminal.workspace-stat` and
+    /// `terminal.workspace-touched` (card #1573, slice 2): what one entry
+    /// under the block's launch directory is, and what `git status` says
+    /// changed there. They travel as [`Message::BlockCall`], so the bit only
+    /// says the server knows them. A server that grants it grants
+    /// [`Features::WORKSPACE`] too.
+    pub const WORKSPACE_STATUS: Self = Self(1 << 57);
+
+    /// [`Launch::workspace_of`] (card #1573, D377/D378): a new block starts in
+    /// the held workspace of an existing block, not in a path the client
+    /// names. A server that grants it grants [`Features::WORKSPACE`] too.
+    pub const LAUNCH_IN_WORKSPACE: Self = Self(1 << 58);
+
     /// The block methods `terminal.prompts` and `terminal.find` (C55): the
     /// rows where the shell's prompts started (OSC 133/633 `A`) and the rows
     /// holding a text, over the block's scrollback and screen. They travel as
@@ -417,6 +430,14 @@ const NAMES: &[(Features, &str)] = &[
     (Features::ARCHIVE, "archive of dismissed blocks"),
     (Features::UPLOAD, "file upload to a block"),
     (Features::DOWNLOAD, "file download from a server"),
+    (
+        Features::WORKSPACE_STATUS,
+        "file status in the workspace explorer",
+    ),
+    (
+        Features::LAUNCH_IN_WORKSPACE,
+        "launch in a block's workspace",
+    ),
 ];
 
 /// A position in one server run's event stream: the run's `epoch` and the
@@ -499,6 +520,12 @@ pub struct Launch {
     pub hold: bool,
     /// Who works the block (D336). Negotiated with [`Features::AGENT_META`].
     pub agent: Option<AgentMeta>,
+    /// Start in the held workspace of this block (D378): the directory the
+    /// server holds for it, by handle, so a rename of its path changes
+    /// nothing. Excludes `cwd`. Negotiated with
+    /// [`Features::LAUNCH_IN_WORKSPACE`]; the server needs the input lease
+    /// on that block and refuses an agent's block.
+    pub workspace_of: Option<BlockId>,
 }
 
 /// Who works a block, as the launcher names them (D336): the server keeps
@@ -1334,12 +1361,14 @@ const FORWARD: u32 = 75;
 const CREDIT: u32 = 76;
 /// An archive record's id (C84).
 const ARCHIVE: u32 = 77;
+/// A launch's block whose workspace it starts in (D378).
+const WORKSPACE_OF: u32 = 78;
 /// Floating blocks (C42) in the text form of [`rusty_mux_core::floats_text`].
 const FLOATS: u32 = 67;
 /// A [`Message::StackFloat`]'s end: 1 top, 0 bottom.
 const TOP: u32 = 68;
 // IDs 1..=ARCHIVE are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = ARCHIVE as usize;
+pub(crate) const FIELD_COUNT: usize = WORKSPACE_OF as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -2235,6 +2264,9 @@ fn put_launch(out: &mut Out, launch: &Launch) {
     if let Some(meta) = &launch.agent {
         put_meta(out, meta);
     }
+    if let Some(block) = launch.workspace_of {
+        out.uuid(WORKSPACE_OF, block.uuid());
+    }
     put_input(out, launch.input);
     if let Some(env) = &launch.env {
         out.bytes(ENV, &strings(env.iter().flat_map(|(k, v)| [k, v])));
@@ -2295,6 +2327,7 @@ fn get_launch(f: &In<'_>) -> Result<Launch, Error> {
         },
         hold: f.opt(HOLD, In::varint)? == Some(1),
         agent: get_meta(f)?,
+        workspace_of: f.opt(WORKSPACE_OF, In::uuid)?.map(BlockId::from_uuid),
     })
 }
 

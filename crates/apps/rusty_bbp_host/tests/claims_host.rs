@@ -500,6 +500,7 @@ fn an_irreversible_claim_reaches_the_inbox_and_a_dry_run_commits_nothing() {
         "owner",
         Some(e.rev),
         None,
+        None,
     )
     .unwrap();
     assert_eq!(preview.response, Response::Ok);
@@ -518,6 +519,7 @@ fn an_irreversible_claim_reaches_the_inbox_and_a_dry_run_commits_nothing() {
         "owner",
         Some(e.rev),
         None,
+        None,
     )
     .unwrap();
     assert_eq!(r, Response::Ok);
@@ -532,6 +534,7 @@ fn an_irreversible_claim_reaches_the_inbox_and_a_dry_run_commits_nothing() {
             None,
             "owner",
             Some(e.rev),
+            None,
             None,
         )
         .unwrap(),
@@ -746,6 +749,7 @@ fn human_ok(dir: &Path, verb: &str, args: &[&str]) {
         "owner",
         Some(rev),
         None,
+        None,
     )
     .expect(verb);
     assert!(
@@ -790,6 +794,7 @@ fn extend_claim_is_refused_on_an_evidence_task_and_applies_elsewhere() {
         "owner",
         Some(rev),
         None,
+        None,
     )
     .expect("fenced");
     let (code, detail) = rejected(fenced);
@@ -805,6 +810,7 @@ fn extend_claim_is_refused_on_an_evidence_task_and_applies_elsewhere() {
         Some(rev),
         "owner",
         Some(rev),
+        None,
         None,
     )
     .expect("preview");
@@ -826,6 +832,8 @@ fn an_acted_on_escalation_names_its_marks_and_refine_answers_it() {
     claims_task(&dir);
     let d = claim(&dir, "a", "foundation", true);
     let x = post_dep(&dir, "built-on-it", d);
+    let (stored, _) = put_candidate(&mut server(&dir, "a"), "kx", &"a".repeat(40), FLAG_ONLY, x);
+    assert!(stored.contains("Stored"), "{stored}");
     for c in [d, x] {
         human_ok(&dir, "claim", &[&format!("msg:{c}"), "accept"]);
     }
@@ -853,7 +861,18 @@ fn an_acted_on_escalation_names_its_marks_and_refine_answers_it() {
         rows[0].acted,
         [inbox::Acted {
             claim: MsgId(x),
-            marks: vec!["pr-7".into()]
+            marks: vec!["pr-7".into()],
+            diffstat: Some(rusty_bbp_host::diffstat::Diffstat {
+                files: 1,
+                added: 1,
+                removed: 1,
+                top: vec![rusty_bbp_host::diffstat::FileStat {
+                    path: "flag.txt".into(),
+                    added: 1,
+                    removed: 1
+                }],
+                more: 0,
+            }),
         }]
     );
 
@@ -982,6 +1001,7 @@ fn intent_stores_the_new_brief_and_reopens_or_escalates_what_it_affects() {
         Some(rev),
         "owner",
         Some(rev),
+        None,
         None,
     );
     assert!(matches!(twice, Ok(Response::Rejected(r)) if r.code == Code::BadHumanInput));
@@ -1347,6 +1367,7 @@ fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
             "owner",
             Some(fence),
             op(),
+            None,
         )
         .unwrap()
     };
@@ -1375,6 +1396,7 @@ fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
         "owner",
         Some(rev),
         op(),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1408,6 +1430,7 @@ fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
             "owner",
             Some(fence),
             Some(OpId(op.into())),
+            None,
         )
         .unwrap();
         (r, Sha256::of(format!("brief {name}").as_bytes()))
@@ -1445,6 +1468,7 @@ fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
         "owner",
         Some(Rev(rev.0 - fresh.events.len() as u64)),
         op(),
+        None,
     )
     .unwrap();
     assert_eq!(again, applied, "an idempotent retry replays");
@@ -2308,6 +2332,90 @@ fn the_cgroup_holder_kills_the_cgroup_at_the_deadline() {
         rusty_bbp_host::moderator::quiesce(&dir, &task()) == Ok(true)
     });
     assert!(quiet && !cgroup.exists());
+}
+
+/// D108 item 2 (#1318 S2): with `--slots` the holder takes an agent slot
+/// itself, names the descriptor on stdout's first line, keeps the slot
+/// while the cgroup is populated and frees it once it is empty.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_cgroup_holder_takes_its_own_slot_and_names_its_descriptor() {
+    use std::io::BufRead;
+    use std::time::Duration;
+    let cgroup = match session_cgroup("own-slot") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-own-slot");
+    let (cgroup, _scope) = scoped(&dir, &cgroup);
+    claims_task(&dir);
+    rusty_bbp_host::cgroups::open(&dir, &task(), &cgroup).expect("open");
+    let slots = dir.join("slots");
+    let caps = rusty_bbp_host::slots::Capacity {
+        agents: 1,
+        validators: 1,
+    };
+    rusty_bbp_host::slots::Slots::open(&slots, caps).expect("slots");
+    let mut agent = sleeper_in(&cgroup);
+    let mut holder = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(["slot-hold", "--cgroup"])
+        .arg(&cgroup)
+        .arg("--slots")
+        .arg(&slots)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("slot-hold");
+    let mut line = String::new();
+    std::io::BufReader::new(holder.stdout.take().expect("stdout"))
+        .read_line(&mut line)
+        .expect("ready line");
+    let fd: u32 = line.trim().parse().expect("a descriptor number");
+    let target = std::fs::read_link(format!("/proc/{}/fd/{fd}", holder.id())).expect("its fd");
+    assert_eq!(target, slots.join("agent-0.lock"));
+    let slot = slots.join("agent-0.lock");
+    drop(holder.stdin.take()); // the caller (orch) is gone
+    assert!(!exits_within(&mut holder, Duration::from_millis(500)));
+    assert!(slot_held(&slot), "slot freed while the agent runs");
+    agent.kill().expect("kill");
+    agent.wait().expect("reap");
+    assert!(exits_within(&mut holder, Duration::from_secs(5)));
+    assert!(holder.wait().expect("status").success());
+    assert!(
+        !slot_held(&slot),
+        "slot still held after the cgroup emptied"
+    );
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+}
+
+/// `--slots` is refused without `--cgroup`, and a directory with no recorded
+/// capacity is refused before the holder waits on anything.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_cgroup_holder_refuses_slots_it_cannot_take() {
+    let dir = tempdir("cgroup-slots-refused");
+    let run = |args: &[&std::ffi::OsStr]| {
+        let out = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+            .arg("slot-hold")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("bbp");
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty(), "no ready line");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let err = run(&["--slots".as_ref(), dir.as_os_str()]);
+    assert!(err.contains("--slots needs --cgroup"), "{err}");
+    let err = run(&[
+        "--cgroup".as_ref(),
+        "/sys/fs/cgroup/lel-test-never-made-0".as_ref(),
+        "--slots".as_ref(),
+        dir.as_os_str(),
+    ]);
+    assert!(err.contains("capacity"), "{err}");
 }
 
 /// D108 (#1507 review): an open paused between its record and its cgroup
@@ -3278,5 +3386,97 @@ fn an_empty_task_id_does_not_poison_the_ledger() {
         open_as(&dir, &t, &report_only, Ok(())),
         Response::Stored(_)
     ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #599 canary (D217): the task's frozen profile re-run on a released ref,
+/// red on a red ref and green on a green one, with nothing written to the
+/// task; an unknown profile or ref is an error naming it.
+#[test]
+fn a_canary_reruns_one_frozen_profile_on_a_ref() {
+    let dir = tempdir("canary");
+    let (repo, red) = repo(&dir);
+    claims_task(&dir);
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    git(&repo, &["tag", "v1"]);
+    let rev = state(&dir).rev;
+    let work = dir.join("canary-work");
+    let t = task();
+    let run = |r: &str, p: &str| {
+        let req = rusty_bbp_host::canary::Request {
+            dir: &dir,
+            task: &t,
+            repo: &repo,
+            work_root: &work,
+            reference: r,
+            profile: p,
+            budget: Some(rusty_bbp_host::canary::Budget {
+                started: std::time::Instant::now(),
+                total: std::time::Duration::from_secs(3600),
+            }),
+        };
+        rusty_bbp_host::canary::run(&Unconfined, &req)
+    };
+    let bad = run(&red, "test").expect("ran");
+    assert_eq!(bad.status, RunStatus::Failed, "{bad:?}");
+    assert_eq!(bad.base, red);
+    let good = run("v1", "test").expect("ran");
+    assert!(good.green(), "{good:?}");
+    assert_eq!(good.profiles.len(), 1);
+    let err = run("v1", "e2e").expect_err("no such profile");
+    assert!(err.contains("\"e2e\""), "{err}");
+    assert!(run("nope", "test").is_err());
+    // A budget already spent is refused before anything is checked out.
+    let spent = rusty_bbp_host::canary::Request {
+        dir: &dir,
+        task: &t,
+        repo: &repo,
+        work_root: &dir.join("spent-work"),
+        reference: "v1",
+        profile: "test",
+        budget: Some(rusty_bbp_host::canary::Budget {
+            started: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(3590))
+                .unwrap(),
+            total: std::time::Duration::from_secs(3600),
+        }),
+    };
+    let counting = Counting::default();
+    let err = rusty_bbp_host::canary::run(&counting, &spent).expect_err("budget spent");
+    assert!(err.starts_with("budget:"), "{err}");
+    assert_eq!(counting.0.get(), 0, "no sandbox started");
+    assert!(!dir.join("spent-work").exists(), "nothing checked out");
+    assert_eq!(state(&dir).rev, rev, "nothing written to the task");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A baseline whose gate refuses after the checkout runs nothing, and says
+/// why in the report: the #599 canary's elapsed-budget check (D217).
+#[test]
+fn a_gate_that_refuses_after_checkout_runs_nothing() {
+    let dir = tempdir("gate");
+    let (repo, base) = repo(&dir);
+    let counting = Counting::default();
+    let b = runner::isolated_baseline_gated(
+        &counting,
+        &profiles(),
+        None,
+        &repo,
+        &dir.join("work"),
+        &base,
+        // Asked after all setup: the scratch directory beside the checkout
+        // already exists, so slow setup is counted before the launch.
+        &|| match dir.join("work/baseline.tmp").is_dir() {
+            true => Err("budget: 10s left".into()),
+            false => Err("asked before the scratch directory".into()),
+        },
+    )
+    .expect("prepared");
+    assert_eq!(counting.0.get(), 0, "no sandbox started");
+    assert_eq!(b.status, RunStatus::Error);
+    assert!(b.profiles.is_empty());
+    assert_eq!(b.error.as_deref(), Some("budget: 10s left"));
+    assert!(b.tree.is_some(), "the checkout was prepared first");
     let _ = std::fs::remove_dir_all(&dir);
 }

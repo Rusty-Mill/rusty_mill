@@ -189,6 +189,32 @@ Precise contracts used by this guide:
 | D182 | #726 sccache (O2 a): jailed builders write per session only; orch's trusted build of `main` refills the shared cache; rewords D101 | [stated] 2026-11-25 (726, 1380) |
 | D183 | #726 witness output posts as non-scoring messages; only a witness/ACP mismatch posts as `cited` `counter` evidence; no BBP schema change (O3) | [default] 2026-11-25 (726, 1412) |
 | D184 | #726 remind-me through the gateway is read-only for jailed agents; writes fail closed until rusty-remind-me takes a trusted identity (O4) | [default] 2026-11-25 (726, 1376) |
+| D177 | #1404 build defaults from the recovered #600 design: builders_per_claim 1, max_live_builders 3; budget admission as approved; `builder_session` fields | [default] 2026-11-25 (1404) |
+| D178 | #1405: Windows-only intent lines are recognised by a frozen-input mapping file keyed by line; the check is orch's, no BBP change | [default] 2026-11-25 (1405) |
+| D190 | #447 step 6: no claims-mode `bbp human` verb needs a signed receipt for now; claims-mode verbs unchanged | [stated] 2026-11-25 (447) |
+| D191 | #447 step 6: BBP human-gate schema/API items approved as a set (`task_opened.gates`, `bbp open --gates scratch`, `bbp human --approval`, `--op by:` refusal) | [stated] 2026-11-25 (447) |
+| D192 | #447 step 6: a receipted answer's op is `by:<approver>/rcpt:<sha>`; `--approval` excludes `--op` and `--decision` | [default] 2026-11-25 (447) |
+| D193 | #447 step 6: only `approve-plan`/`approve-merge` need a receipt on an owned task; other verbs keep today's labels | [default] 2026-11-25 (447) |
+| D194 | #447 step 6: board approval public key committed at `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub`, compiled in | [default] 2026-11-25 (447) |
+| D195 | #447 step 6: the scratch-repo list is a host file in the BBP directory, changed by a bbp operator command that records each approval | [stated] 2026-11-25 (447) |
+| D187 | #1318 v0 builder launch defaults: ACP permission allow_once + logged; usage 0 when unreported; `tail -F acp.log` viewer; mirror from frozen inputs; no jail token before #1382 | [default] 2026-11-25 (1318) |
+| D188 | #1318 slice design approved; a builder's candidate reaches BBP only on `end_turn` with the `.lel/submit` marker and a non-empty diff, else the session ends Failed | [stated] 2026-11-25 (1318, 600) |
+| D189 | #1318 S5 `builder run` defaults: explicit launcher flags, holder deadline past orch's grace, `sh` fd-4 wrapper, no recover in `builder run`, built-in prompt, `claude-builder` seat and op ids, store opened per step | [default] 2026-11-25 (1318) |
+| D196 | #724: the redrawn `factory-map.svg` is accepted as the Factory map for now | [stated] 2026-11-25 (724) |
+| D197 | #1318 D167 toy-run runbook: BaileyAi as baileyrd from merged main, own BBP dir in ~, fresh toy repo, two concurrent `builder run`s, fail-closed checks, run record by PR | [default] 2026-11-25 (1318) |
+| D198 | #1416 slice 2: claim field bindings, stage strip derivation rule, brief text as a plain input | [default] 2026-11-25 (#1416) |
+| D199 | #1318: read-only `rusty_orch builder sessions` command for the toy-run verdict is approved | [stated] 2026-11-26 (1318) |
+| D201 | #705: SlopCodeBench spike design approved; Phase A starts now, options O1–O3 a, pre-registered rules; Phase B spend not approved | [stated] 2026-11-26 (705) |
+| D202 | #705: `tree-sitter-python` 0.25 added to `rusty_erosion` (new `Cargo.lock` entry) | [stated] 2026-11-26 (705) |
+| D203 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
+| D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
+| D209 | #1382: the token mint lives in a new sans-IO crate `orch-token`; orch-bbp writes the token file and `jail.json` slot | [default] 2026-11-27 (1382) |
+| D212 | #1382: code waits for the gateway cards #1375-#1379; only the slice plan merges now | [stated] 2026-11-27 (1382) |
+| D216 | #1414: `rusty_orch lens why` output joins `bbp why --claim` steps to lens_record jobs; model and cost not reported yet (Q67) | [default] 2026-11-27 (1414) |
+| D217 | #1415: `bbp canary` prints a profile report on a resolved ref; orch `Canary` adapter keys failures `canary:<sha>:<profile>`; $0, runs under any `watch_usd` | [default] 2026-11-27 (1415) |
+| D218 | bbp_factory Backlog cards released to be worked; supersedes D164's "later" and D201's "D164 stands" | [stated] 2026-11-27 (general, 1414, 1415) |
+| D219 | #1414: additive `project` and `memory_type` on remind-me's POST /api/memories approved; built on a rusty-remind-me card; lessons wait for it | [stated] 2026-11-27 (1414) |
+| D222 | #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR | [default] 2026-11-27 (1416) |
 
 ## D1. Lenses, not stages
 
@@ -1680,7 +1706,7 @@ The first three were approved first. The last three were added to Q35 after that
 ## D167. One paid run approved: the #1318 toy-claim acceptance run (2 builders, 45 min, one claim) after the Claude `no_overage` assertion is added; #1320 not approved
 
 **Decision.** Nano approves ONE paid run: the toy-claim acceptance run for #1318, with `builders_per_claim` 2, `builder_wall_secs` 2700 (45 minutes each) and one claim. This supersedes D134 for that run only, as D140 did for its run. Before it, the Claude `no_overage` assertion must be added to `/etc/let-em-loose/assertions.json` so the run fails closed. The dedup run (#1320) is NOT approved; it waits on M1 and the toy-run result, and any further paid call stays ask-first. The subscription is flat-rate, so the cost is usage limit, not dollars.
-**Open action for Nano (not done).** Adding the `no_overage` assertion is a host write on BaileyAi. Nano hasn't done it and hasn't authorised an agent to. Entry shape (from `mem_fe5132a19f51456190c6017e94955e0a`): `{provider: claude, account: <email as `claude auth status` reports it for the running account>, checked: YYYY-MM-DD}`. The run does not start until it is in place.
+**Open action for Nano (done 2026-11-25).** Adding the `no_overage` assertion is a host write on BaileyAi; Nano did it himself. Nano: "Done", #732 project thread, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4XwVns9yHdxFK1rGRYvyaUf`, 2026-11-25T19:02:38Z (usage credits off, account matches; remind-me `mem_5e7dc428234b4b71be3504e17bc8f228`). The entry is dated 2026-11-25 and lapses 2026-12-25: the toy run happens before then or Nano re-dates it. Entry shape (from `mem_fe5132a19f51456190c6017e94955e0a`): `{provider: claude, account: <email as `claude auth status` reports it for the running account>, checked: YYYY-MM-DD}`. The run did not start until it was in place.
 **Why.** The smallest paid run that tests builder launch; the assertion makes it fail closed; the dedup run needs evidence from the first.
 **Rejected.** Approving #1320 as well.
 **Tag.** [stated] · remind-me: mem_77c0be9609544059ae911c7e2ccdb2f9
@@ -1816,3 +1842,265 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_a876641a5b4149d5bd2ff3a6f2167631
 **Key.** lel:726:remind-me-writes-fail-closed
 **Source.** let-em-loose-expert, 2026-11-25: the design's proposed default (§3, §12 O4), within D102. The decision card did not ask about it.
+## D177. #1404 build defaults from the recovered #600 design
+
+**Decision.** The approved #600 design (`600-builder-session-design.md`, D66) survived in `/mnt/project-files/let-em-loose/` and is now in this folder (PR #1874), so OPEN_QUESTIONS Q44 was wrong that it was gone. It settles what `600-build-plan.md` marked **[filled]** for #1404:
+1. **Config defaults** are the approved ones (design §5): `builders_per_claim` = 1, `max_live_builders` = 3, `builder_wall_secs` = 2700. The plan's [filled] 2 and 2 are withdrawn. D167's two builders is run config for the #1318 toy run only, not a default.
+2. **Admission** (design §4.1): an open design claim with no live candidate, or whose latest candidate failed, and `spent(c) < budget(c)` read from the task. A spent budget gets the existing budget refusal; no new budget rule.
+3. **`builder_session` record**, a new orch-store record type with its own schema tag (D66 cleared the ask-first gate for this table, and no existing data is migrated): `claim`, `n`, `candidate` (set when stored), `state` (`admitted`, `running`, `stored`, `failed`, `aborted`), `started`, `ended`, `tokens_in`, `tokens_out`, plus optional per-profile run results and erosion delta, filled when the run report lands (design §6). Wall time is derived as `ended - started`, not stored, so it has one source. `human_touched` (D106) and the claim's later outcome (accepted, reversed, reopened) are derived from the claim fold, not stored. (Amended 2026-11-25: `wall_secs` dropped as a stored column to match the built row, coordinator report from the #600 thread.)
+**Why.** Everything here sits inside D66's approved design. The column layout of an approved orch-internal record is implementation detail, and the derived flags follow D106.
+**Rejected.** The build plan's [filled] 2/2 defaults (they contradict approved §5). Taking D167's run values as defaults. A stored `human_touched` column.
+**Tag.** [default] · remind-me: mem_0a48ad5089f14c64aebb63790a976736
+**Key.** lel:1404:builder-session-build-defaults
+**Source.** Caller question from the #600 thread, 2026-11-25; `600-builder-session-design.md` §4.1, §5, §6, §8 (approved, D66); D106; D167.
+
+## D178. #1405: how Windows-only intent lines are recognised
+
+**Decision.** The open-time `untested` check is an orch check (approved design §2, §8 item 1), and BBP needs no change (§8 item 4), so there is no new event field. A line is Windows-specific when it is listed in a mapping file in the task's frozen inputs, keyed by intent line; each entry names a `golden:<case>`, `shadow`, or nothing. At open, orch lists every listed line with neither a golden case nor a shadow run as `untested` for the Linux runs. There is no marker in `INTENT.md` (frozen; any change is a new version) and no text heuristic. Which lines go in the file is experiment data that goes to Nano with the golden-set sign-off (Q4); the check is tested with fixtures.
+**Why.** The approved design already requires each Windows line to map to a golden case or the shadow run; a frozen-input mapping file is the most reversible way to recognise those lines without touching the frozen intent or the BBP schema.
+**Rejected.** A marker in `INTENT.md`. Matching on the line's text. A BBP host check with a new event field (ask-first, and §8 says BBP: none).
+**Tag.** [default] · remind-me: mem_8515601b9f5d426e973dcad3c0524df4
+**Key.** lel:1405:windows-line-recognition
+**Source.** Caller question from the #600 thread, 2026-11-25; `600-builder-session-design.md` §2, §8 (approved, D66); D56, D63.
+
+## D190. #447 step 6: no claims-mode `bbp human` verb needs a signed receipt for now
+
+**Decision.** For card #447 step 6 (BBP human gates, folded in from #22), no claims-mode `bbp human` verb needs a board-signed approval receipt for now. Claims-mode human verbs (`claim accept`, `choose`, `holdout-updated`, `extend`, `extend-claim`, `close`, `rerun`, `receipt`) are unchanged. Nano: "D3. None for now". This answers the expert's 2026-11-04 escalation. Build consequence recorded in the design (§12, the author's reading, not Nano's words): `bbp open --gates scratch` is refused together with claims mode until a receipt rule exists for claims mode.
+**Why.** Claims mode has no plan or merge gates (addendum lines 10, 250); Nano deferred receipts for its accept verbs.
+**Rejected.** (b) Receipts on the accepting verbs (`claim accept`, `choose`, `holdout-updated`, `extend`, `extend-claim`), the design's recommendation; (c) b plus `close`, `rerun`, `receipt`. Either can be reopened later as a new ask-first change.
+**Tag.** [stated] · remind-me: mem_9c788b1153304af490cde8cc982f2277
+**Key.** lel:447:claims-verbs-no-receipt
+**Source.** Nano, project thread message `cmsg_014AqbZs58L565hMV2pFkCX5CZatgThTCScc6TZfje7dmZ`, 2026-11-25T19:23:05Z, answering §10 of `docs/design/factory-roles/design.md` (PR #1881). Relayed verbatim by the caller; the message was not read. Design §10 D3.
+
+## D191. #447 step 6: BBP human-gate schema/API items approved as a set
+
+**Decision.** Nano approved as a set the ask-first items of `docs/design/factory-roles/design.md` §7 and §10 D4. The BBP and host parts recorded here: (1) optional `task_opened.gates` field, value `scratch`; absent means owned and is not serialized, so there is no `LOG_SCHEMA` bump and N=1 goldens stay byte-identical; (2) `bbp open --gates scratch`, refused at open (before any turn or cost) unless the repo is on orch's scratch-repo list; (3) `bbp human --approval FILE`: on an owned task `approve-plan` and `approve-merge` need an Ed25519 receipt signed by the board (`rusty_pk`), bound to the human-view fence, artifact and (merge) run, verified against the board public key committed in the repo, stored as a task blob, op labelled `by:<approver>/rcpt:<sha>`, and re-verified by `bbp metrics`; (4) the host refuses a caller `--op` with a `by:` prefix; labels come only from `--as` (scratch) or a receipt (owned). Nano: "D4. I Approve them as a set." The board items in the same set (`card_review`, `card_approve`, `approval_issue`, `provider` on board credentials) are Mill Board's, outside this pack, and are not recorded here. This clears the ask-first gate only; CI, review by `dottiusmaximus` and the merge rules still apply.
+**Why.** A new event field and new public CLI flags are ask-first (D59, D62 precedent); Nano approved them so the build can proceed.
+**Rejected.** None offered; the alternative was not approving.
+**Tag.** [stated] · remind-me: mem_8381b8074e314ea9a2eab66800286a48
+**Key.** lel:447:bbp-human-gates-api-approved
+**Source.** Nano, project thread message `cmsg_014AqbZs58L565hMV2pFkCX5CZatgThTCScc6TZfje7dmZ`, 2026-11-25T19:23:05Z, answering §10 of `docs/design/factory-roles/design.md` (PR #1881). Relayed verbatim by the caller; the message was not read. Design §7, §10 D4. Compatible with D168: `bbp human --decision` builds its `by:<as>/dec:ID` label from `--as`, not from a caller `--op`, but on owned tasks a label without a receipt now counts as self-approved in metrics; the build should check the #703 Remediate path against that.
+
+## D192. #447 step 6: a receipted answer's op is `by:<approver>/rcpt:<sha>`; `--approval` excludes `--op` and `--decision`
+
+**Decision.** A `bbp human --approval FILE` answer runs under op `by:<approver>/rcpt:<sha>`, where `<sha>` is the full 64-hex SHA-256 of the stored receipt blob, so `bbp metrics` fetches the receipt straight from the op. `--approval` together with `--op` or `--decision` is refused. A resend of the same receipt yields the same op and replays by R15, so retry stays idempotent; Orch drops its `orch-<sha>` `--op` when it passes a receipt. `bbp decision` does not look up receipted ops; no caller needs it, because the inbox sends only claims verbs (D190).
+**Why.** Keeps D191's label and D168's `by:<as>/dec:ID` format both unchanged; a receipt-derived op already gives the idempotent retry that `--decision` and Orch's stable `--op` exist for. Refusing the combination is the most reversible choice.
+**Rejected.** `by:<approver>/rcpt:<sha12>.dec:<id>` or `.../rcpt:<sha>/dec:<id>` (changes `decision_of` parsing and D168's documented op for no current caller); `by:<approver>/dec:<id>` with the receipt keyed by op (needs a blob index; drops D191's `rcpt:` label).
+**Tag.** [default] · remind-me: mem_10f69853db034ec8b4863f717c08d641
+**Key.** lel:447:receipt-op-shape
+**Source.** Let Em Loose expert, 2026-11-25, answering the #447 step 6 builder's implementation questions. `docs/design/factory-roles/design.md` §7 (PR #1881), D191, D168; `rusty_bbp_host/src/human.rs` `op_for`/`decision_of`; `orch-bbp/src/lib.rs` stable answer op.
+
+## D193. #447 step 6: only `approve-plan`/`approve-merge` need a receipt on an owned task; other verbs keep today's labels
+
+**Decision.** On an owned task only `approve-plan` and `approve-merge` need a receipt (D191). Every other `bbp human` verb keeps today's `--as`/`--decision` labelling: `reject`, `cancel`, `resume`, `rerun`, `receipt`, `decision`, `ask`, `answer`, `takeover`, `takeover-release`, `intent`, `holdout-updated` and the claims verbs, including the #703 Remediate/inbox sends (D190, D168). On a receipted answer the label is the receipt's approver and `--as` is ignored. `bbp metrics` re-verifies only plan and merge approval rows; rejection rows keep today's label logic. Enforcement sits in `rusty_bbp_host`'s library (`human::perform_as` and `perform_fenced`), not only in the binary; the `rusty_bbp` engine is unchanged.
+**Why.** Only `human_approval` and `human_rejection` feed `metrics::gate_answers`, so `self_approved` reads just those three verbs; a rejection is a refusal and needs no receipt (design §7); the board inbox passes `--as` on every claims verb (D190 keeps them unchanged); enforcing in the library stops library callers going around the CLI.
+**Rejected.** Refusing `--as` on owned tasks (breaks the inbox's claims verbs, against D190); receipts on `reject` (design §7 says refusals need none).
+**Tag.** [default] · remind-me: mem_e0c314c0ac2e4d35bf0a38a6a66eb8b9
+**Key.** lel:447:owned-task-labels
+**Source.** Let Em Loose expert, 2026-11-25, answering the #447 step 6 builder's implementation questions. Design §7, D190, D191; `rusty_bbp/src/metrics.rs` `gate_answers`; `rusty_mill_board/src/inbox.rs` step verbs; `rusty_bbp_host/src/report.rs`.
+
+## D194. #447 step 6: board approval public key committed at `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub`, compiled in
+
+**Decision.** The board's approval public key lives at `crates/apps/rusty_bbp_host/keys/board-approval.ed25519.pub` (one line, 64 hex characters), is compiled into `bbp` with `include_str!` and is checked with `rusty_pk::ed25519::verify`. No env var or flag overrides it in the binary; tests sign with their own key through a library verify function that takes the key as a parameter. Until the board's key exists (build step 2) the file is empty and owned plan and merge answers are refused (fail closed; no owned tasks are live, design §7). The private key stays with the board and is never committed.
+**Why.** D191 requires the key committed in the repo and changed only by a reviewed PR; compiling it in leaves no runtime override. The host already compiles in assets this way (`launchers/author.txt`).
+**Rejected.** A runtime keyring file like nexus-plugins' `~/.nexus/keys/` (editable outside review); an env override (an agent could set it).
+**Tag.** [default] · remind-me: mem_c0b772bd5156447ba9f97c60696eb0e3
+**Key.** lel:447:board-key-path
+**Source.** Let Em Loose expert, 2026-11-25, answering the #447 step 6 builder's implementation questions. Design §7, D191; `rusty_pk/src/ed25519.rs` `verify`; `rusty_bbp_host/src/launchers.rs`.
+
+## D195. #447 step 6: the scratch-repo list is a host file in the BBP directory, changed by a bbp operator command that records each approval
+
+**Decision.** The list that `bbp open --gates scratch` checks lives in the BBP directory on the host, not in Orch's config. Only a `bbp` operator command changes it, and that command records where Nano approved each repo, like the erosion limits (`<dir>/erosion/limits.log`, D115). The host refuses `--gates scratch` at open unless the repo is on the list. Orch's per-goal config only asks for scratch. Tests use their own temp list. Nano chose option a, "Host file, operator command"; the card's option text: "A list in the BBP directory, changed by a bbp operator command that records where you approved each repo, like the erosion limits. Tests use their own temp list." This refines D191's wording "orch's scratch-repo list"; the rest of D191 stands.
+**Why.** Orch has no machine-wide hosting config: `orch-bbp` `Config` is per goal, so a list there could be written by the goal's own author, and the host could not enforce a list it never sees.
+**Rejected.** (b) a list committed in the repo and compiled into `bbp` (doesn't fit tests' temp repos without a test hook); (c) a `scratch_repos` field in orch-bbp `Config` that Orch checks, with the host trusting the flag.
+**Tag.** [stated] · remind-me: mem_432e3566a5d04536a8db87ffed67790f
+**Key.** lel:447:scratch-repo-list
+**Source.** Nano, decision card in the #447 project thread, message `cmsg_014AqbZs58L565hMV2pFkCX5718KhbE8PUKcJ6AkWm8GFb`, 2026-11-25T19:50:24Z, answering the expert's escalation on where the list lives (relayed by the coordinator; the card was not read). Refines D191.
+## D187. #1318 v0 builder launch defaults
+
+**Decision.** Implementation choices for `1318-builder-launch-slices.md` (draft, awaiting Nano's approval), inside the approved designs (D66, D104, D107, D108):
+1. **Permission.** orch answers every ACP `session/request_permission` with the offered `allow_once` option (`allow_always` only when no `allow_once` is offered) and writes the request and the answer to `acp.log`.
+2. **Usage.** `tokens_in`/`tokens_out` come from the adapter's reported usage; when it reports none they are 0 and `acp.log` says "usage not reported". Before #596 compares token numbers, an unreported run must be told apart from 0 (a later change to the `builder_session` row, D177).
+3. **Viewer.** The display-only session block runs `tail -F <dir>/builders/<claim>/<n>/acp.log`, outside the jail, held after exit. No new viewer binary.
+4. **Mirror.** Its contents are fixed by the task's frozen inputs (600 design §4.3). The toy claim needs no external dependencies, so its mirror is an empty read-only root. For #1320: a read-only vendored directory made from the experiment repo's lock file at task open.
+5. **Token.** v0 `jail.json` has no `token` (optional, D107) until orch mints one in #1382; nothing inside the jail consumes one before the gateway.
+**Why.** A permission prompt is not a boundary; the jail confines and built-in tools stay on (D101, spike #727); `allow_once` keeps every request in the log. Zero usage is reversible. D104 item 4 says a viewer program is enough. The #726 design builds the minter last (726-sandbox-design.md §10, D180).
+**Rejected.** Denying or escalating permission requests; `allow_always` (the adapter stops asking and the log loses entries); an optional token column now (changes the #1404 row in the queue); a new viewer binary; a minted token with no consumer.
+**Tag.** [default] · remind-me: mem_98aa01df7ad849d2b9643cb5f5137207
+**Key.** lel:1318:builder-launch-v0-defaults
+**Source.** Caller question from the #600 thread on `1318-builder-launch-slices.md` §5, 2026-11-25; D66, D101, D104, D107, D177, D180; `600-builder-session-design.md` §4.3; `mux-hosted-agents-design.md` §6. Numbered D187 because D179 to D186 are taken on open PRs (#1871, #1872, #1873, #1877).
+
+## D188. #1318: slice design approved; a candidate reaches BBP on `end_turn` + `.lel/submit` + non-empty diff
+
+**Decision.** Nano approves `1318-builder-launch-slices.md` (S1 to S6, with D187's defaults) and picks option a for how a builder's candidate reaches BBP. After the turn, orch posts the diff and candidate under the builder's seat only when all three hold: the stop reason is `end_turn`, the builder wrote the submit marker `.lel/submit` in its worktree, and the diff is non-empty. Otherwise orch posts nothing, nothing is debited, and the session ends `failed`. This closes the §5 point that blocked S5.
+**Why.** The marker tells a deliberate submission apart from a builder that gave up, so half-done work never becomes a debited candidate (600 design §4 step 7). orch already decides what reaches the board (D104), and option a adds no tool surface before the #726 gateway.
+**Rejected.** b: post on any `end_turn` with a non-empty diff, even when the builder gave up. c: a BBP submit tool offered to the agent over ACP (an MCP server in `session/new`), which means more surface to build and test in v0. "Not yet, I have changes".
+**Tag.** [stated] · remind-me: mem_22f4ae32277a47aeb0ba09fa4deed541
+**Key.** lel:1318:design-approved-candidate-submit-marker
+**Source.** Nano, decision card in the #600 project thread, message `cmsg_01WgyiM31RsSnZTgNuPX2VE48sBVZYhJPE5kniVhcHSwk1`, tapped 2026-11-25T17:26:33Z: "Approve, marker + diff (a)". The question was "Approve the #1318 design, and how should a builder's candidate reach BBP?" This satisfies D25 for #1318. Review, merge and ask-first gates (the new public surface in §5) still apply per PR. Relates to D66, D104, D177, D187. Numbered D188 because D179 to D187 are taken on open PRs (#1871, #1872, #1873, #1877, #1880).
+
+## D189. #1318 S5 `rusty_orch builder run` implementation defaults
+
+**Decision.** Inside the approved S5 (D188, `1318-builder-launch-slices.md` §S5):
+1. **Flags.** Beyond `<config> --bbp --dir --task --claim --state`: `--repo`, `--base`, `--cgroup-parent` (a delegated cgroup dir holding the `lel-store-<scope>` name), `--slots`, `--mux-ctl`, optional `--mux-socket`. No orch config schema change. `--base` is the caller-passed task baseline (the protected set's `baseline`) until 600 §4 step 2's claim-base rule is coded, then it becomes optional. The flags ride the command's existing ask-first note in the PR.
+2. **Holder deadline.** `--deadline-ms` = now + `builder_wall_secs` + 60 s grace + 30 s margin, so orch's end path (term, grace, `cgroup.kill`, `release`) always runs first and the holder's kill stays the backstop for a dead orch (§S5 step 6).
+3. **fd 4 to stdio.** Jail program `/bin/sh` with `-c 'exec claude-code-acp <&4 >&4 4>&-'`; stderr stays on the pty; `/bin` and `/usr` in read roots. Closing fd 4 keeps the agent's tool subprocesses off the ACP channel. `lel-jail` is unchanged.
+4. **Recover.** `builder run` does not call `orch_lens::builder::recover`; #1320's loop owns it, since a sibling `builder run` (D167, `builders_per_claim` 2) would be aborted. A crashed run's row stays `running` and counts toward `max_live_builders` until then.
+5. **Prompt.** A short built-in prompt: claim id and text, the worktree, "build it; run the visible tests as often as you like; when it is ready write `.lel/submit` and end your turn; to give up, end your turn without it". `.lel/` is excluded from the posted diff. Failing-profile names (600 §4 Retries) are added when the card carries them.
+6. **Seat and posts.** Through `bbp mcp` with `BBP_PRINCIPAL=claude-builder` (the agent file's id; it must be the task's assigned builder seat, addendum C-R1) and `BBP_SESSION`, as lenses do. Diff then candidate, op ids `builder-<claim>-<n>-diff` and `builder-<claim>-<n>-candidate` (`n` is unique per claim from `admit`), so a lost answer replays. Diff: `git add -A` excluding `.lel`, then `git diff --cached --binary <base>`.
+7. **Store.** Each step opens the store briefly (load, replace this row, save), retrying briefly on `DirLock` `Held`; admission is one such step. Rows saved at admitted, running and ended.
+**Why.** Each is implementation detail inside the approved design and the most reversible choice: no config schema, BBP or merged-crate change, and the holder deadline keeps the design's stated order.
+**Rejected.** Deadline at exactly the wall (the holder kill would always beat orch's end path). Teaching `lel-jail` to dup fd 4 onto 0/1 (a change to merged `orch-jail` for what a wrapper does). Calling `recover` at startup (aborts a live sibling). New orch config fields for the launcher paths.
+**Tag.** [default] · remind-me: mem_f09b470e92384f13befd1e1adce9a0ed
+**Key.** lel:1318:s5-builder-run-defaults
+**Source.** Caller question from the #1318 S5 implementation, 2026-11-25; `1318-builder-launch-slices.md` §S5; D104, D167, D177, D187, D188; addendum C-R1. Numbered D189 because D179 to D188 are taken on open PRs (#1871, #1872, #1873, #1877, #1880).
+
+## D196. #724: the redrawn `factory-map.svg` is accepted as the Factory map for now
+
+**Decision.** `docs/projects/let-em-loose/factory-map.svg`, redrawn from card #724's description of what changed (Q45's interim choice) in PR #1876, is accepted as #724's Factory map for now. The original Factory map stays untouched. "For now": a later redraw, or the 2026-11-04 voice-chat source SVG if it is recovered, may replace it without a new decision on intent. This settles the drawing only; CI, review by `dottiusmaximus` and the merge rules still apply to PR #1876.
+**Why.** The source SVG from the 2026-11-04 voice chat was not reachable from a repo session; Nano reviewed the redraw on the PR and found it good enough.
+**Rejected.** Waiting for the source SVG before landing #724's map.
+**Tag.** [stated] · remind-me: mem_b5e76a2c6dde43489fec5e501929dd57
+**Key.** lel:724:factory-map-redraw-accepted
+**Source.** Nano, project thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4YM1e34fpJeXfgbUJqq3Mf5`, 2026-11-25T20:13:53Z: "Goood enough for now", after reviewing the drawing on PR #1876. Relayed by the caller; the message was not read. Resolves OPEN_QUESTIONS Q45. Numbered D196 because D177 to D195 are taken on `main` and open branches.
+
+## D197. #1318: runbook defaults for the D167 toy-claim run
+
+**Decision.** Inside the approved design (`1318-builder-launch-slices.md` §4, D188) and D167's approved run:
+1. **Host and code.** BaileyAi (D53; LXC 107 was dropped there), as `baileyrd` (`same_user` v0, D161, D166). Only from merged `main` at a recorded sha: S1 to S6 merge first. `bbp`, `rusty_orch`, `lel-jail` and `rusty-mux-ctl` from that sha go to `/opt/lel/<sha>/bin` without flipping `/opt/lel/current`, so the inbox board's `bbp` and the 1092 drain rule are untouched; the script passes full paths.
+2. **Directories.** Its own BBP dir, orch state, slots dir and toy repo under `~baileyrd` (for example `~/toy-1318/`). `/srv/lel/bbp` is `orch-runner` 0700 and refused to `baileyrd` (`1092-deploy.sh`), so nothing under `/srv/lel` changes and the Mill Board inbox is not involved.
+3. **Repo, claim, task.** A fresh throwaway local git repo, not `dedup-manager` (#1234 serves #1320, which is not approved). Shell only, no external dependencies (empty mirror, D187 item 4), erosion off (D45 opt-out). Brief, roster (`architect`, `claude-builder` assigned as the builder seat, C-R1) and profiles are written inline as `1166-smoke-run.sh` does. The claim is a small fixture (D146), for example a `sweep --dry-run DIR DAYS` that lists and deletes nothing, posted by the script as `architect` through `bbp mcp` as `1166-seed-inbox.sh` does. No lens run.
+4. **Two builders.** Two concurrent `builder run` invocations on the one claim. `admit` refuses a new builder once the claim has a live candidate, so run one after the other only the first would build. Config `builders_per_claim` 2, `max_live_builders` at least 2, slot capacity 2.
+5. **Fail closed before any paid call.** The assertion entry (`provider` claude, `account` equal to what `claude auth status` reports, `checked` within the 30 days, D167); `claude` logged in; `claude-code-acp` resolvable from the jail's read roots (the script never installs it: Nano installs the pinned npm package for his user, and the script records the version); Nano's mux server running under his systemd user manager (`user@<uid>.service`), so `lel-store-<scope>` can be made there with `Delegate=yes` and no root write; `lel-jail` and Landlock present; `bbp verify` clean. Any `sudo` step is printed for Nano, never run by the script.
+6. **Result.** Both printed session rows, both `acp.log`s, `bbp card`, `bbp why --claim` and `bbp verify` kept under the run dir. The run record goes into a committed doc by PR, plus a remind-me fact and a comment on card #1318. Launch pass: both rows ended `stored` or `failed` by D188's rule (none left `running` or `aborted`), `acp.log` renders, cgroups empty, slots released, verify clean. A stored candidate is reported, not required. Whether #1320 then proceeds stays Nano's call (D167).
+7. **Docs.** No separate design note: script, prompt and run doc in one PR, as 1092 did. Committing them in the repo satisfies D94; a copy in `/mnt/project-files/` is optional.
+**Why.** Each is the most reversible choice inside an approved design and an approved run: no `current` flip, no `/srv/lel` change, no persistent root write, no repo for an unapproved card, and the one paid run spent on reviewed code.
+**Rejected.** Running from an unmerged branch (spends the one run on unreviewed code). Opening `/srv/lel/bbp` to `baileyrd` (undoes the 1092 separation). Using `dedup-manager`. Sequential builders. A `sudo` cgroup step baked into the script.
+**Drift.** `1318-builder-launch-slices.md` §4 says the `orch-runner` account isn't created in v0; `1092-deploy.sh` created it. Harmless here (the run is as `baileyrd`). `1092-deploy-layout.md`'s "mux runs as `orch-runner`" is superseded for v0 by D161.
+**Tag.** [default] · remind-me: mem_9fffb39370e843afbe00fb627cf7cd0c
+**Key.** lel:1318:toy-run-runbook-defaults
+**Source.** Caller question from the #1318 thread, 2026-11-25; D53, D161, D166, D167, D177, D187, D188, D189; `1318-builder-launch-slices.md` §4–§5; `1092-deploy.sh`; `1166-smoke-run.sh`; `orch-lens` `builder::admit`. Numbered D197 because D190 to D196 are taken on open PRs.
+
+## D198. #1416 slice 2: claim field bindings, stage strip derivation rule, brief text as a plain input
+
+**Decision.** (1) The LEL tab binds to the merged `rusty_bbp::claims::ClaimView` names (`id, text, domains, status, score, accept_at, confidence, epoch, spent, budget, deps, candidates, sole_candidate, human_touched, holdout_due, failing, intent{current,proven_at}`). Ids are plain integers on the wire, `status` is PascalCase, and `intent` is absent until the intent is first revised. Parsing ignores unknown fields (`evidence`, `tests_changed`, `endorsement`) and defaults `accept_at`, `human_touched`, `holdout_due` and `intent` when absent. `evidence` is parsed in the slice that shows it (D58 top-two items). (2) Stage strip, derived per snapshot with no stored state. A claim is live when its status is Open, Accepted or Escalated. Intent is done as soon as the task has any claim (the brief text is not needed: it has no source until D173). Skeletons is done when a live claim has a candidate (`current` set: the builder's stored candidate; `candidates` lists a question's answer claims, not skeletons, and only feeds the stuck-question display). Under attack is done when at least one claim is Accepted and none is Open or Escalated. The strip never contradicts itself: a later stage done marks the earlier ones done, and exactly one of the first four stages is current (the first not done). Shadow run is the current stage once Under attack is done and is never shown done: the human's real-drive reality check leaves no BBP fact. Living app is always pending, labelled "not built" (same as the Q41 undo log). With no claims, Intent is current (a task with only dropped or void claims has Skeletons current) and the tab shows "new, gathering". Each stage shows text plus glyph, no animation (gui D55). (3) Slice 2 takes the brief text as a plain input (`Option<String>`). The Mill Board read endpoint that serves brief text is part of the gated API PR (D173, Q64) and its shape waits.
+**Why.** The names come from the merged struct; the stage rule uses only claim facts D116 allows and cannot claim a shadow run happened. A plain-text input keeps slice 2 testable on fixtures.
+**Rejected.** A stage field in BBP or orch (D116). Marking Shadow run done from a claim domain name nobody defined. Reading `candidates` as skeletons and Intent pending without a brief (both corrected on review of PR #1896). Fetching the brief artifact from rusty_term (no read path exists on the desktop).
+**Tag.** [default] · remind-me: mem_0d5e5a974ebd43479d6d75fcf6faeed8
+**Key.** lel:1416:lel-tab-slice2-bindings-stage-rule-brief-input
+**Source.** Caller question on #1416 slice 2 (Q9 of `1416-lel-tab-slice-plan.md`), 2026-11-25; `rusty_bbp` `src/claims.rs` `ClaimView`, `IntentView`, `EvidenceView`; `rusty_mill_board` `src/inbox.rs` (`brief` is an artifact id, claim JSON sample); D116, D173, D174; README Phases 2 to 5. Note: "D57" in the plan is gui-design D57, not this log's D57.
+
+## D199. #1318: read-only `rusty_orch builder sessions` command for the toy-run verdict is approved
+
+**Decision.** A small PR adds `rusty_orch builder sessions <config> --dir <bbp> --task <t> --state <dir> [--claim <id>]`. It is read-only: it takes the orch store dir lock and prints the saved builder session rows as JSON, one row per session in the `builder::row` shape without notes. It exits nonzero if the store can't be opened or read. #1894 (the D167 toy-run runbook, D197) stacks on it, and its verdict checks those rows. The approval covers this one command only. Any other new `rusty_orch` command or flag is still a public API change to ask Nano about first.
+**Why.** The toy-run verdict has to check the stored builder_session rows (D177, D188). A read-only printer is the smallest surface that lets the runbook script check them without opening the store itself. Because it adds a public command, it is on the ask-first list and needed Nano's approval.
+**Rejected.** Having the #1894 script read `builder-sessions.mmap` directly. A wider query or admin command.
+**Tag.** [stated] · remind-me: mem_bf939a8321774a30a361cab316004035
+**Key.** lel:1318:builder-sessions-reader
+**Source.** Nano tapped option a "Approve it as proposed" on the decision card in the #600 project thread, message `cmsg_01WgyiM31RsSnZTgNuPX2VE4Gttb7wZhFF2cKQc3F6PYHg`, 2026-11-26T12:38:59Z. The card asked "Approve a read-only `rusty_orch builder sessions` command for the toy-run check?" Option a read: "A small PR adds a command that prints the saved builder session rows as JSON. #1894 stacks on it and its verdict checks those rows." The command shape comes from the let-em-loose-expert escalation in the #1318 thread. Related: D167, D177, D188, D197.
+
+## D201. #705: SlopCodeBench spike design approved; Phase A starts now, options O1–O3 a, pre-registered rules; Phase B spend not approved
+
+**Decision.** Nano approved `705-slopcodebench-spike-design.md` as written at PR #1905 head `eee52856`. Approval covers:
+- **Phase A starts now, ahead of #1320.** That means the `rusty_erosion` Python adapter, then scoring and Spearman cross-validation on SCB's 196 reference-solution checkpoints. It costs $0 and makes no model calls. This lifts D164's "other bbp_factory Backlog cards later" for #705 only; D164 stands for every other card.
+- **O1 a:** the Phase A sample is SCB reference solutions only. The ~30 public Python repo histories are not in scope.
+- **O2 a:** Phase B, when it runs, has a factory arm and a bare-Claude control arm.
+- **O3 a:** D44 scheduled cleanups are off in the factory arm, matching the paper.
+- **The pre-registered rules in design §3.** In A.4 these are: ρ ≥ 0.6 on levels and ≥ 75% delta sign agreement for concentration against erosion, and ρ ≥ 0.5 for duplication against clone share. In Phase B they are the evidence rule, the tie margins (−0.005 erosion, −0.003 verbosity), the functional gate, and the first-match verdict order.
+
+**Not approved:** the Phase B paid run and its ceiling. D134 stands, and design §5.7 brings Phase B back as its own ask after #1320 has run and Phase A has reported. That ask may revisit O2, O3 and the Phase B subset.
+**Why.** Phase A is free and checks the erosion metric (D43, D45) against an outside benchmark before the factory relies on it. Nano's "Approve" answered a message whose asks 1, 3 and 4 were: approve the plan (which starts Phase A now); three choices, each with a stated recommendation of a; and the §3 rules. The design he approved recommends a for all three.
+**Rejected.** O1 b (also public repo histories), O2 b (factory only, against the paper's aggregates), O3 b/c (cleanups on, or as a third arm).
+**Tag.** [stated] · remind-me: mem_675eac0e01a44aa3a03acd900077d6ca
+**Key.** lel:705:spike-design-approved
+**Source.** Nano, Let Em Loose project thread "Spike SlopCodeBench against the factory", message `cmsg_01WgyiM31RsSnZTgNuPX2VE4UTNJasKiZJj1PzCwBg4Jqp`, 2026-11-26T14:08:07Z: "Approve and ok", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE4Vx1ji78992yPg2feUNXe9c`. Design revised after Nano's PR #1905 review comments 7193376881 and 7193529801 (exhaustive verdict, evidence rule, functional gate). The O1–O3 choices are read from his approval of a design and a message that both recommend a; nothing he wrote names the options one by one. Relates to D37, D44, D45, D52, D64, D134, D164, D188. Numbered D201 because D200 is taken on branch `claude/project-thread-o7o32u` (#432).
+
+## D202. #705: `tree-sitter-python` 0.25 added to `rusty_erosion` (new `Cargo.lock` entry)
+
+**Decision.** `rusty_erosion` may depend on `tree-sitter-python` 0.25, the version already pinned in the workspace `Cargo.toml`, for the #705 Phase A Python adapter (`adapter/python.rs`). This adds a new entry to the root `Cargo.lock`. The approval covers this one crate in this one crate's manifest. Any other dependency, or any version bump, is still ask-first.
+**Why.** Dependency additions are on Nano's ask-first list. D45 and D52 anticipated a Python adapter "when a real task needs it", and #705 is that task.
+**Rejected.** Porting SCB problems to Rust, which would lose comparability with the paper (card default, remind-me `mem_fe2e758185bb4ce69509d5b2a258da11`).
+**Tag.** [stated] · remind-me: mem_44ae546553c64bafb824e3255b9c8d5b
+**Key.** lel:705:tree-sitter-python-dep
+**Source.** Nano, Let Em Loose project thread "Spike SlopCodeBench against the factory", message `cmsg_01WgyiM31RsSnZTgNuPX2VE4UTNJasKiZJj1PzCwBg4Jqp`, 2026-11-26T14:08:07Z: "Approve and ok", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE4Vx1ji78992yPg2feUNXe9c`; "ok" answers ask 2. Relates to D45, D52, D201. Numbered D202 after D201.
+
+## D203. #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured
+
+**Decision.** These defaults hold until Nano approves the #432 design. (1) The provider-blind moderator captures Codex's session id by scanning each session launcher's `turn-N.log`. No `Launcher` field names the provider. The parser accepts the first JSON line whose top-level `type` is `thread.started` (UUID `thread_id`), and only if it comes before any `item.*` or `turn.*` event. It does not require line 1, because `turn-N.log` also takes the harness's stderr and the broker log (`moderator.rs` `spawn`). (2) If the first turn exits before an id is captured, the `.started` marker stays and the next (resume) turn is refused.
+**Why.** There is no launcher config schema change, and Claude's stream never emits `thread.started`. A literal line-1 rule would miss the id behind a stderr or broker line. Refusing never silently forgets a conversation that may exist. Each choice can be reversed in one PR.
+**Rejected.** A `Launcher` provider field (a config schema change). A strict line-1 rule. Deleting the marker so the turn starts fresh.
+**Tag.** [default] · remind-me: mem_30f145c0fb2e4e10b0e89e7a86f79031
+**Key.** lel:432:codex-session-capture-defaults
+**Source.** Caller question from the #432 design thread, 2026-11-26; `432-codex-session-resume-design.md` §2; `rusty_bbp_host` `src/moderator.rs` `spawn`, `src/launchers.rs` `run`; Nano's deferral, remind-me `mem_489a8411814648ab95c7e9661c7f70ad`. Numbered D203 (was D199): main took D199 for #1318, and open PR #1905 holds D201 and D202. Renumbered at Nano's request (baileyrd GitHub comment 7195028868 on PR #1904, 2026-11-26).
+
+## D204. #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands
+
+**Decision.** Nano approves the #432 Codex session resume design (`432-codex-session-resume-design.md`, PR #1904). The approval includes the new launcher env var `BBP_PROVIDER_SESSION`, the additive public launcher contract that Q66 flagged as ask-first. Code waits until the #600 builder work lands, following D164's order. This satisfies D25 for #432. The capture defaults stay in D203. Review, merge and the other ask-first gates still apply to the build PR.
+**Why.** No Let Em Loose v0 path uses a Codex session (D8, D64), and D164 released builder sessions (#1402, #600) first.
+**Rejected.** Approve and build now. Park the card. Change the design.
+**Tag.** [stated] · remind-me: mem_489a43a7e3194f5198c1fbc59032e132
+**Key.** lel:432:design-approved-build-after-600
+**Source.** Nano tapped "Approve, build after #600" ("Design and BBP_PROVIDER_SESSION approved; code waits until the #600 builder work lands (D164 order).") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE45mV9XoArWETD2NMavEjbEy` in the Let Em Loose project thread "Build BBP Codex session resume" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4KGZwc1M3KXuPWKygNkYSfd`), 2026-11-26 13:56Z. The coordinator relayed the tap; the card and its options were read. Resolves OPEN_QUESTIONS Q66. Numbered D204 (was D200) for the same reason. D203 and D204 were checked free on main and in every open PR on 2026-11-26.
+
+## D209. #1382: the token mint lives in a new sans-IO crate `orch-token`; orch-bbp writes the token file and `jail.json` slot
+
+**Decision.** Inside the approved #726 design (726-sandbox-design.md §2, D180), #1382's minter is a new sans-IO crate `crates/apps/rusty_orch/crates/orch-token`: it turns the §2 claims and a signing key into an ES256 JWT (`kid`, `jti`, `exp`) and gives the JWKS entry for the public key, using the workspace's vendored `jsonwebtoken` (no new workspace dependency). orch-bbp, which launches builders, calls it and writes the token file and the existing `jail.json` `token` {`file`, `var`} slot (D107). This settles placement only; build order still follows §10 ("#1382 last") and the card's "Waits on" unless Nano says otherwise. Nano confirmed that order in D212.
+**Why.** orch-jail builds `lel-jail`, the binary that runs inside the sandbox, so it must not link signing code; a separate sans-IO crate is the most reversible split and can be tested alone against the gateway's `FileJwks`.
+**Rejected.** A module in orch-jail (signing code in the jailed binary). A module inside orch-bbp's lib (mixes I/O and the pure mint).
+**Tag.** [default] · remind-me: mem_23e81baeef6e4ed4a733c14c0cc365a1
+**Key.** lel:1382:mint-crate-layout
+**Source.** Let Em Loose expert, 2026-11-27, answering the #1382 thread's crate question; 726-sandbox-design.md §2 and §10 (PR #1873, D180); `orch-jail/src/lib.rs`, `orch-jail/src/launch.rs`. Numbered D209 because D205 to D208 are taken on open PRs (#1871, #1927).
+
+## D212. #1382: code waits for the gateway cards #1375-#1379; only the slice plan merges now
+
+**Decision.** #1382's token mint is not built ahead of the approved order. Only the slice plan (PR #1930) merges now; #1382 code starts when the gateway cards #1375-#1379 land, as 726-sandbox-design.md §10 ("#1382 last", D180) says. D209's crate placement is unchanged.
+**Why.** Nano kept the approved order: nothing consumes a token before the gateway, so building the minter early buys nothing.
+**Rejected.** Building the mint now, ahead of §10.
+**Tag.** [stated] · remind-me: mem_a9952c1bcd964445b645426c843bac3a
+**Key.** lel:1382:build-after-gateway-cards
+**Source.** Nano tapped option a "Wait for #1375-#1379" ("Only the slice plan merges now. Code starts when the gateway cards land, as the approved order says.") on decision card `cmsg_014AqbZs58L565hMV2pFkCX546kxWjy74njHksp6qNKnci` in the Rusty BBP_SWF thread "Route jailed agent tools through gateway" (`cmsg_014AqbZs58L565hMV2pFkCX5UApVszPE7rf26gn9xJeNYk`), 2026-11-27T02:00:47Z. Confirms D180 §10; reverses nothing. Numbered D212 because D205 to D211 are taken on open PRs.
+
+## D216. #1414: `rusty_orch lens why` output joins `bbp why --claim` steps to lens_record jobs; model and cost not reported yet (Q67)
+
+**Decision.** `rusty_orch lens why --bbp B --dir D --task T --claim N --state S [--at REV]` prints one JSON line: the `bbp why --claim` History object, where each step whose msg is in the items of an orch-store `lens_record` row gains `"job": {"lens", "epoch", "look_harder", "unsure"}`; a step no orch job posted has no `job` key. Model and cost are not reported: `LensRecordRecord::v1` stores neither, and the meter is per-task spend only. Adding them is an orch-store schema change, open as OPEN_QUESTIONS Q67. The command is in D58's approved list (`rusty_orch lens why`), so it needs no new-command approval, unlike D111 or D117, which D58 did not list. Flags and output shape are build detail.
+**Why.** It uses only data orch already stores. An absent `job` key leaves nothing to remove later, and model and cost can be added to the object once Q67 is decided.
+**Rejected.** A `lens_record` v2 with model and cost now (schema change, ask-first: Q67). Reading the model from the current lens config binding (wrong once the binding changes).
+**Tag.** [default] · remind-me: mem_6cb63b0c9e5e4a1b8e9848a019d451ee
+**Key.** lel:1414:lens-why-shape
+**Source.** let-em-loose-expert, 2026-11-27, answering the #1414/#1415 build thread; D58, D92, 599-build-plan.md §5, `crates/apps/rusty_orch/crates/orch-store/src/lens_records.rs`, `meters.rs`. Numbered D216 from the D216-D219 range the coordinator reserved for this thread on 2026-11-27 (D205-D215 are in open PRs #1871, #1927, #1930, #1931 and #1932).
+
+## D217. #1415: `bbp canary` prints a profile report on a resolved ref; orch `Canary` adapter keys failures `canary:<sha>:<profile>`; $0, runs under any `watch_usd`
+
+**Decision.** Host: `bbp canary --dir D --task T --repo-path P --work W --ref REF --profile NAME` resolves REF to a sha, runs only the named profile from the task's frozen profile set on a clean sandboxed checkout through `runner::isolated_baseline` (the #598 baseline runner), prints a Baseline-shaped JSON report, and writes nothing to the task. The task must be open; D80 says the human opens the maintenance task. orch: a `Canary` adapter on the `Watch` port calls it. A failing profile is a finding with key `canary:<resolved sha>:<profile>`, slot `canary:<profile>` and domain `regression`, posted through `watch_finding` under D83. So a new failing sha supersedes the previous claim. A green run posts nothing. A host error is an adapter error (reported, the other adapters still run, exit 1). Profiles are test commands with no model calls, so a canary costs $0 and runs whatever `watch_usd` is: the adapter never refuses because of the cap's value. It doesn't read `watch_usd` yet, and its doc comment says so. The card's gate (spend above a zero cap needs Nano's go) is never reached. Deadline: the adapter's process deadline is 3600s and it passes `--budget-secs 3540`; `bbp canary` refuses, starting nothing, when the budget left can't cover the profile's wall limit plus 60s cleanup, checked once up front and again after all setup (baseline lock wait, checkout, test listing, scratch directory), immediately before the sandbox launches (review on PR #1933). On the supported Linux path under normal scheduling, the group `SIGKILL` is sent at least 60s before the budget ends; it can't be caught and the sandbox denies `setsid`/`setpgid`, so no workload survives it even if orch then kills bbp. Reaping and the report are outside that guarantee; the 60s is a reserve for them, not a bound: if they outlast it, orch records a timeout and loses the report, but nothing is orphaned. The sandbox has its own process group and only bbp's wall timer kills it, so orch's deadline must not fire before that kill; after it, it orphans nothing. D58 lists both the host `canary` run on a released ref and the `canary` adapter, so neither needs a new-command approval.
+**Why.** A print-only run adds no log or schema change and reuses the existing runner. The key and slot follow D83, and the domain names what the finding is, as `security`, `dependencies` and `platform` do for the other adapters.
+**Rejected.** Writing the canary report into the task's log (a log change, and the finding already posts through `watch_finding`). Refusing to run when `watch_usd > 0` (a cap isn't spend). Running a profile from outside the frozen set.
+**Tag.** [default] · remind-me: mem_889e191d298a4dfdbddacb84ba2ff139
+**Key.** lel:1415:canary-adapter
+**Source.** let-em-loose-expert, 2026-11-27, answering the #1414/#1415 build thread; D58, D80, D83, 599-build-plan.md §4 and PR order 4, card #1415, `crates/apps/rusty_orch/crates/rusty_orch/src/watch.rs`, `crates/apps/rusty_bbp_host/src/runner.rs` `isolated_baseline`.
+
+## D218. bbp_factory Backlog cards released to be worked; supersedes D164's "later" and D201's "D164 stands"
+
+**Decision.** Nano: "spin up multiple threads to work cards for bbp_factory cards in backlog". The bbp_factory Backlog cards are released to be worked now. This supersedes D164's "the other `bbp_factory` Backlog cards stay for later" and D201's "D164 stands for every other card". #1414 and #1415, both inside D58's approved #599 design, can move to building. Each card still needs an approved design (D25), and ask-first gates, spending, deployment and review/merge rules still apply. Card-specific decisions stand: D204 (#432 builds after #600) is unchanged, because the message names no cards. #1414's lessons part stays stopped by D58's remind-me gate until Nano answers the additive route fix.
+**Why.** This is the newest attributable Nano instruction on the bbp_factory Backlog. The freeze lifted with D164 and the first run has happened, so D164's "later" was the only remaining hold.
+**Rejected.** Reading it as overriding card-specific orderings (D204). Reading it as waiving design approval or ask-first gates.
+**Tag.** [stated] · remind-me: mem_974c71002f284fdc931e610a011b6bfd
+**Key.** lel:general:bbp-factory-backlog-released
+**Source.** Nano, project "Rusty BBP_SWF" timeline, message `cmsg_014AqbZs58L565hMV2pFkCX5HkQt8BJtDyHJXBtmvHiQTP`, 2026-11-27T01:51:13Z, read by the expert. Relayed by the coordinator to the #1414/#1415 build thread. Supersedes parts of D164 and D201; relates to D58, D204 and millwright `lel-bbp-backlog-first-run-only`. Numbered D218 from this thread's reserved range D216-D219.
+
+## D219. #1414: additive `project` and `memory_type` on remind-me's POST /api/memories approved; built on a rusty-remind-me card; lessons wait for it
+
+**Decision.** Nano approves an additive public API change in rusty-remind-me. POST /api/memories (`api_add` in `crates/remind_me_api/src/routes.rs`) gains two optional fields, `project` and `memory_type`, which it drops today even though `MemoryAddInput` has `project`. The change is built on a rusty-remind-me board card (Mill Board #1632), in that repo. #1414's lessons (599-build-plan.md §3) are built once it ships. Until then they stay stopped by D58's gate, and #1414's `lens why` (D216) and #1415's canary (D217) go ahead. Review and merge rules in rusty-remind-me apply to the change.
+**Why.** The fix is small and additive, and D58 anticipated it when it approved lessons. Lessons need `project` to be scoped to Let Em Loose and `memory_type` to be stored as a `learning`.
+**Rejected.** b) Writing lessons with tags only and no `project` (would change plan §3). c) Deferring lessons with no fix.
+**Tag.** [stated] · remind-me: mem_599fc0b478d04efd95c7b56a6adb51fe
+**Key.** lel:1414:remind-me-add-route-project
+**Source.** Nano tapped option A, "Approve, card in remind-me" ("A rusty-remind-me card adds the two optional fields to POST /api/memories; lessons get built once it ships."), on decision card `cmsg_014AqbZs58L565hMV2pFkCX534TuNPPe8jEACb5bJecqGf` in thread `cmsg_014AqbZs58L565hMV2pFkCX5PE69AJuM8XMccee5BsJiwR`, 2026-11-27T02:00:28Z. The coordinator relayed the tap; the expert read the card and its options. The gap was found by the #1414 build thread on rusty-remind-me main (routes.rs lines 308–358). Settles D58's "an additive fix there is flagged then"; relates to D216, D217, D218. Numbered D219 from this thread's reserved range D216-D219.
+
+## D222. #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR
+
+**Decision.** `gui/lel_act.rs` builds the `inbox_act` arguments from the displayed row: `id`, the displayed `rev` as the fence, and `dry_run: true` first, then the same call with `dry_run: false`. A stale rev is shown and the inbox re-read, never resent. Reject on a whole-task stop needs a reason; Choose must name a candidate; Approve on a taste call is refused ("choose instead"). Approve on an irreversible claim opens the D58 confirm (Cancel focus first, Reject, "Accept claim"; no execution wording). "Try both builds" lays the candidates side by side and launches nothing (Q43 interim). Slice 4 needs only the existing `inbox_list` and `inbox_act`. The new read-only claims, intent and spend endpoints (D173 public API change) stay out of this PR and go in their own, as the slice plan says.
+**Why.** The slice plan orders one small PR per slice, and the rusty_term crate has no dependency on the Mill Board. Keeping the action model free of I/O makes the fence rules testable.
+**Rejected.** Retrying on a stale rev; bundling the endpoints with the view model.
+**Tag.** [default]
+**Key.** lel:1416:slice4-actions
+**Source.** `1416-lel-tab-slice-plan.md` slices 3-4; D58, D173, D174; `rusty_mill_board` `inbox_act` and `Board::inbox_act` (`stale_rev:` refusal); let-em-loose-expert, 2026-11-27. Nano's 2026-11-27 "1 & 2" (cmsg_014f6o52E2iAAAgMm9v8hh1w7JrZ4XyJ3ufQT3qe7ayEWb) approved the read endpoints; what it answered is not restated in the thread, so no `[stated]` row is written for it. D220 and D221 are left free for the endpoint PR. Numbered D222 because open PRs hold D179-D219.

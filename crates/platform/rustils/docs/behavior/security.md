@@ -73,6 +73,9 @@ via Landlock (ABI v1, raw syscalls — no libc wrapper exists);
 `AF_PACKET` sockets via a hand-written seccomp-BPF filter (`x86_64`
 only for now). Both mirror nexus's own two-independently-degradable-
 calls shape exactly, not an invented combined API.
+`Sandbox::confine_filesystem_and_signals` (rusty_mill #1126) is the one
+combined call: the signal scope is a field of the same Landlock ruleset
+as the filesystem rules, so one call applies both in one domain.
 
 ## Specified
 
@@ -168,6 +171,30 @@ calls shape exactly, not an invented combined API.
   `PermissionDenied`) — never silently dropped from the ruleset, which
   would create a false sense of confinement for a root the caller
   thought was included.
+
+### `Sandbox::confine_filesystem_and_signals`
+
+- Everything `confine_filesystem` specifies, and also denies sending a
+  signal (`kill`, `tgkill`, `pidfd_send_signal`, ...) to any process
+  outside the confinement the call creates. Processes the caller starts
+  afterwards stay inside, so a job can still signal its own children;
+  signals sent *to* the caller are unaffected.
+- Returns two statuses, filesystem then signals. The filesystem status
+  means exactly what `confine_filesystem`'s does. The signal status is
+  `Enforced` only when the kernel applied the scope with the ruleset.
+- Linux: one Landlock ruleset carries both, with `LANDLOCK_SCOPE_SIGNAL`
+  in its `scoped` field (ABI v6, Linux 6.12). On ABI v1 to v5 the
+  filesystem is still confined and the signal status is `NotEnforced`;
+  with no Landlock at all both are `NotEnforced`. The scope is
+  per-domain, so a seccomp fallback was rejected: seccomp cannot tell a
+  job's own child from any other process of the user.
+- The trait's default delegates to `confine_filesystem`, returns its
+  status unchanged, and reports signals `Unsupported`. Every backend
+  except Linux uses it, so Windows and the mock return
+  `(Unsupported, Unsupported)` and confine nothing.
+- Live-verified in `crates/platform-linux/tests/security_sandbox.rs`: a
+  confined process cannot signal a process outside its domain but can
+  signal a child it started.
 
 ### `Sandbox::block_inet_sockets`
 

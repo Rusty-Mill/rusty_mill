@@ -131,7 +131,7 @@ pub fn record(
     }
 }
 
-fn open_locked(p: &Path) -> std::io::Result<File> {
+pub(crate) fn open_locked(p: &Path) -> std::io::Result<File> {
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }

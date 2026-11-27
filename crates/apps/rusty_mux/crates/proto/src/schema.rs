@@ -453,6 +453,7 @@ impl Args<'_> {
             fds: 0,
             hold: false,
             agent: None,
+            workspace_of: None,
         })
     }
 
@@ -618,6 +619,9 @@ const TERMINAL_HISTORY: Features = Features::BLOCK_CALL.union(Features::TERMINAL
 
 /// What `terminal.prompts` and `terminal.find` need.
 const TERMINAL_FIND: Features = Features::BLOCK_CALL.union(Features::TERMINAL_FIND);
+
+/// What `terminal.rerun` needs: held blocks (C78), which it re-runs.
+const TERMINAL_RERUN: Features = Features::BLOCK_CALL.union(Features::HOLD);
 
 /// What `terminal.ports` needs.
 const TERMINAL_PORTS: Features = Features::BLOCK_CALL.union(Features::PORTS);
@@ -1600,6 +1604,43 @@ pub static CATALOG: &[Method] = &[
         build: |req, a| block_call(req, a, "terminal.workspace-list"),
     },
     Method {
+        name: "terminal.workspace-stat",
+        doc: "What one entry under the block's workspace is, for the workspace explorer, \
+              as `KIND<TAB>SIZE<TAB>MTIME`: the kind as `terminal.workspace-list` gives \
+              it (a link is `l` and is not followed), the size in bytes and the \
+              modification time in seconds since the epoch. The path is confined as there; \
+              a refusal names nothing outside the workspace. Needs the lease; Linux only.",
+        params: &[
+            BLOCK,
+            Param {
+                name: "path",
+                ty: Ty::Text,
+                doc: "The entry, relative to the workspace; `.` is the workspace.",
+                presence: Presence::Required,
+            },
+        ],
+        needs: Features::BLOCK_CALL.union(Features::WORKSPACE_STATUS),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.workspace-stat"),
+    },
+    Method {
+        name: "terminal.workspace-touched",
+        doc: "What `git status` says changed under the block's workspace, for the \
+              workspace explorer's overlay of who is changing what. The first line is `.`; \
+              each other is `XY<TAB>PATH`: git's two status letters with a space as `.` \
+              (`M.` staged, `.M` in the work tree, `??` untracked) and the path relative \
+              to the workspace; an untracked directory is one line ending in `/`, and paths that \
+              are not UTF-8 are counted in a last `!<TAB>N` line. Renames show as a delete \
+              and an add. Refused on agent blocks, and when `.git` is not the work tree's own. `git` runs with its \
+              hooks, fsmonitor, pager and prompts off and is killed after a few seconds. \
+              Refused when the workspace is not in a git work tree, when git is missing or \
+              when there are too many changes to list. Needs the lease; Linux only.",
+        params: &[BLOCK],
+        needs: Features::BLOCK_CALL.union(Features::WORKSPACE_STATUS),
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.workspace-touched"),
+    },
+    Method {
         name: "terminal.reset",
         doc: "Reset the terminal as its program sending RIS would, ending any sequence it \
               left unfinished: the screen and its scrollback are cleared, and modes, \
@@ -1812,6 +1853,18 @@ pub static CATALOG: &[Method] = &[
         needs: TERMINAL_PORTS,
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.ports"),
+    },
+    Method {
+        name: "terminal.rerun",
+        doc: "Start again the command a held block's program was started \
+              with (its program and arguments, in the directory the shell last reported with OSC 7 while that is still a local directory, else the one it was launched in), in the block, \
+              under the lease; the screen stays and a line says when. Only once the \
+              program is gone, and never for an agent's block, which is re-run through \
+              its orchestrator. Nothing runs again on its own after a restart.",
+        params: &[BLOCK],
+        needs: TERMINAL_RERUN,
+        returns: Returns::Nothing,
+        build: |req, a| block_call(req, a, "terminal.rerun"),
     },
     Method {
         name: "close-block",

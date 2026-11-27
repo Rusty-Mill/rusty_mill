@@ -109,7 +109,8 @@ pub(crate) fn forward_copy(target: &Loopback) -> (String, String) {
         format!("Forward port {} from this pane's host?", target.port),
         format!(
             "{}://localhost:{} is on the machine this pane runs on. This opens a tunnel to it \
-             on this computer and opens it in your browser. It asks once per port.",
+             on this computer and opens it in your browser. It asks once per host and port, then \
+             remembers.",
             target.scheme, target.port
         ),
     )

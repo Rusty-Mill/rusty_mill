@@ -464,7 +464,8 @@ fn roles_are_edited_live_and_written_to_their_file() {
             "record",
             "project",
             "admin",
-            "enrol"
+            "enrol",
+            "approve"
         ])
     );
     let mut roles = out["roles"].clone();
@@ -1024,6 +1025,8 @@ fn without_files_settings_can_be_read_but_not_changed() {
         role: "human".into(),
         projects: None,
         connector: false,
+        provider: None,
+        view: Default::default(),
     };
     let get = settings
         .call("settings_get", Some(&human), json!({}))
@@ -1730,4 +1733,69 @@ fn refusal_records_stop_at_the_size_cap() {
         before,
         "nothing appended past the cap"
     );
+}
+
+fn history(f: &Fixture, body: &Value) -> Vec<Value> {
+    let (status, out, text) = f.admin("settings_history", body);
+    assert_eq!(status, 200, "{text}");
+    out["entries"].as_array().expect(&text).clone()
+}
+
+#[test]
+fn a_settings_change_is_recorded_with_its_old_and_new_value() {
+    let f = start("history_rules");
+    assert!(history(&f, &json!({})).is_empty());
+    let (status, _, text) = f.admin("settings_rules_set", &json!({"movement": "open"}));
+    assert_eq!(status, 200, "{text}");
+    let h = history(&f, &json!({}));
+    assert_eq!(h.len(), 1, "{h:?}");
+    assert_eq!(h[0]["actor"], "admin");
+    assert_eq!(h[0]["op"], "settings_rules_set");
+    assert_eq!(h[0]["section"], "rules");
+    assert_ne!(h[0]["old"], h[0]["new"]);
+    assert!(h[0]["at_ms"].as_i64().is_some_and(|t| t > 0));
+}
+
+#[test]
+fn a_refused_or_unchanged_write_leaves_no_history() {
+    let f = start("history_none");
+    f.admin("settings_rules_set", &json!({"movement": "open"}));
+    // The same value again changes nothing.
+    f.admin("settings_rules_set", &json!({"movement": "open"}));
+    // A bad role name is refused.
+    let (status, _, _) = f.admin("settings_roles_set", &json!({"roles": {}}));
+    assert_ne!(status, 200);
+    assert_eq!(history(&f, &json!({})).len(), 1);
+}
+
+#[test]
+fn history_filters_by_section_and_never_holds_a_secret() {
+    let f = start("history_secrets");
+    let token = f.add_agent("watcher", "reviewer");
+    let (status, _, text) = f.admin(
+        "settings_github_set",
+        &json!({"repo": "o/r", "api": "https://api.github.com", "interval_secs": 60, "token": "ghp_SECRET-MARKER"}),
+    );
+    assert_eq!(status, 200, "{text}");
+    f.admin("settings_rules_set", &json!({"movement": "open"}));
+
+    let (_, _, all) = f.admin("settings_history", &json!({}));
+    assert!(
+        !all.contains(&token) && !all.contains("SECRET-MARKER"),
+        "{all}"
+    );
+    let agents = history(&f, &json!({"section": "agents"}));
+    assert_eq!(agents.len(), 1, "{agents:?}");
+    assert!(agents[0]["new"].to_string().contains("watcher"));
+    let github = history(&f, &json!({"section": "github"}));
+    assert_eq!(github[0]["new"]["has_token"], true);
+    assert_eq!(history(&f, &json!({"limit": 1})).len(), 1);
+}
+
+#[test]
+fn history_needs_admin() {
+    let f = start("history_admin");
+    let token = f.add_agent("watcher", "reviewer");
+    let (status, _, _) = call(f.addr, &token, "settings_history", &json!({}));
+    assert_eq!(status, 403);
 }

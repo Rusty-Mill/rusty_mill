@@ -66,6 +66,11 @@ pub use libc::{tcsetpgrp, SIGTTOU, SIG_DFL, SIG_IGN};
 // staged copies and anything else above the targets in the child.
 pub use libc::posix_spawn_file_actions_addclosefrom_np;
 
+// #1318 S1: `pidfd_getfd(2)` copies a descriptor out of a child (the
+// builder's slot holder) by number. No libc wrapper at the MSRV baseline,
+// the same raw-syscall situation as `SYS_pidfd_open`.
+pub use libc::SYS_pidfd_getfd;
+
 // `test`'s file-mode predicates (faccessat slice's sibling, D11):
 // S_ISUID/S_ISGID/S_ISVTX decode `st_mode` for `-u/-g/-k`; `st_uid`/
 // `st_gid` (already reachable off `stat`, no separate admission needed)

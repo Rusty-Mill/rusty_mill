@@ -728,3 +728,99 @@ fn forward_refuses_what_is_not_a_port() {
         assert!(parse(&args(line)).is_err(), "{line}");
     }
 }
+
+#[test]
+fn upload_names_a_file_and_prepares_an_attach_and_a_lease() {
+    let upload = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Upload(upload)) => Ok(upload),
+        Ok(other) => panic!("expected upload, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    let parsed = upload(&format!("upload --block {ID} /tmp/a/pic.png")).unwrap();
+    assert_eq!(parsed.name, "pic.png");
+    assert_eq!(parsed.file, std::path::PathBuf::from("/tmp/a/pic.png"));
+    let names: Vec<&str> = parsed.prepare.iter().map(|c| c.method.name).collect();
+    assert_eq!(names, ["attach", "acquire-lease"]);
+    let named = upload(&format!("upload --block {ID} --name x.png pic.png")).unwrap();
+    assert_eq!(named.name, "x.png");
+    // `--` lets a file start with a dash.
+    let dashed = upload(&format!("upload --block {ID} -- -x")).unwrap();
+    assert_eq!(dashed.name, "-x");
+    for bad in [
+        "upload",
+        "upload --",
+        "upload a b",
+        "upload --name",
+        "upload --out f a",
+        "upload ..",
+    ] {
+        assert!(parse(&args(bad)).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn download_names_a_path_and_where_it_goes() {
+    let download = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Download(download)) => Ok(download),
+        Ok(other) => panic!("expected download, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    let parsed = download(&format!("download --block {ID} notes.txt")).unwrap();
+    assert_eq!(parsed.path, "notes.txt");
+    assert_eq!(parsed.out, None);
+    let out = download(&format!("download --block {ID} --out here.txt /etc/x")).unwrap();
+    assert_eq!(out.out, Some(std::path::PathBuf::from("here.txt")));
+    for bad in [
+        "download",
+        "download a b",
+        "download --out",
+        "download --name n a",
+    ] {
+        assert!(parse(&args(bad)).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn copy_names_two_hosts_and_a_block_on_each() {
+    let copy = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Copy(copy)) => Ok(copy),
+        Ok(other) => panic!("expected copy, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    let parsed = copy(&format!(
+        "copy --block {ID} --to-block {ID} a:/srv/x/pic.png b"
+    ))
+    .unwrap();
+    assert_eq!(
+        (parsed.from_host.as_str(), parsed.to_host.as_str()),
+        ("a", "b")
+    );
+    assert_eq!(
+        (parsed.path.as_str(), parsed.name.as_str()),
+        ("/srv/x/pic.png", "pic.png")
+    );
+    let names: Vec<&str> = parsed.to_prepare.iter().map(|c| c.method.name).collect();
+    assert_eq!(names, ["attach", "acquire-lease"]);
+    // A Windows path keeps its drive colon and yields its file name.
+    let win = copy(&format!(
+        "copy --block {ID} --to-block {ID} a:C:\\d\\n.txt b"
+    ))
+    .unwrap();
+    assert_eq!(
+        (win.path.as_str(), win.name.as_str()),
+        ("C:\\d\\n.txt", "n.txt")
+    );
+    let named = copy(&format!("copy --block {ID} --to-block {ID} --name n a:p b")).unwrap();
+    assert_eq!(named.name, "n");
+    for bad in [
+        "copy a:p b".to_owned(),
+        format!("copy --block {ID} a:p b"),
+        format!("copy --block {ID} --to-block {ID} p b"),
+        format!("copy --block {ID} --to-block {ID} :p b"),
+        format!("copy --block {ID} --to-block {ID} a:p"),
+        format!("copy --block {ID} --to-block {ID} a:dir/ b"),
+        format!("copy --block {ID} --to-block {ID} --out f a:p b"),
+    ] {
+        assert!(parse(&args(&bad)).is_err(), "{bad}");
+    }
+}

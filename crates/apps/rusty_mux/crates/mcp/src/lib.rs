@@ -12,8 +12,8 @@
 //! Because each call has its own connection, the methods that only make
 //! sense within one (attaching, taking or giving back the lease, `sync`) are
 //! not tools. The methods that need the lease (`input`, `resize`,
-//! `terminal.send-keys`, `terminal.reset`, `terminal.set-theme` and
-//! `terminal.clear`) attach
+//! `terminal.send-keys`, `terminal.reset`, `terminal.set-theme`,
+//! `terminal.clear` and `terminal.rerun`) attach
 //! and take it first in the same call, so they fail while someone else
 //! holds it.
 //!
@@ -56,7 +56,10 @@ fn shape(method: &Method) -> Shape {
         | "terminal.reset"
         | "terminal.set-theme"
         | "terminal.clear"
-        | "terminal.workspace-list" => Shape::Leased,
+        | "terminal.rerun"
+        | "terminal.workspace-list"
+        | "terminal.workspace-stat"
+        | "terminal.workspace-touched" => Shape::Leased,
         _ => Shape::Plain,
     }
 }
@@ -101,12 +104,17 @@ fn tool(method: &Method) -> Tool {
 /// client, which ends its connection and frees its lease, archiving a block, which
 /// closes it, and resetting a
 /// or clearing a terminal, which drops its scrollback, are destructive.
-/// `input` types into a shell, and `create-block` and `split-block` run
-/// any program they are given; each can delete data and reach any system,
+/// `input` types into a shell, `create-block` and `split-block` run any
+/// program they are given, and `terminal.rerun` starts a block's old command; each can delete data and reach any system,
 /// so all are destructive and open-world. The rest stays on the local server.
 fn annotations(method: &Method) -> Value {
-    let read_only = matches!(method.returns, Returns::Text | Returns::Entries);
-    let runs = matches!(method.name, "input" | "create-block" | "split-block");
+    // `workspace-touched` runs `git`, and a repository's own filters with it.
+    let read_only = matches!(method.returns, Returns::Text | Returns::Entries)
+        && method.name != "terminal.workspace-touched";
+    let runs = matches!(
+        method.name,
+        "input" | "create-block" | "split-block" | "terminal.rerun"
+    );
     let destructive = runs
         || method.name.starts_with("close-")
         || method.name.starts_with("disconnect-")

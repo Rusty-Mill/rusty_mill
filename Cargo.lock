@@ -7137,8 +7137,12 @@ dependencies = [
  "orch-cli",
  "orch-core",
  "orch-dispatch",
+ "orch-lens",
+ "platform",
+ "platform-linux",
  "rusty_atomic_file",
  "rusty_bbp",
+ "rusty_json",
  "rusty_serde",
 ]
 
@@ -7233,6 +7237,7 @@ dependencies = [
  "orch-core",
  "orch-dispatch",
  "orch-lens",
+ "rusty_bbp",
  "rusty_multimodal_db_engine",
  "serde",
 ]
@@ -7740,7 +7745,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "platform"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "thiserror 1.0.69",
 ]
@@ -7774,7 +7779,7 @@ dependencies = [
 
 [[package]]
 name = "platform-bsd"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "libc",
  "platform",
@@ -7784,7 +7789,7 @@ dependencies = [
 
 [[package]]
 name = "platform-linux"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "libc",
  "platform",
@@ -7797,7 +7802,7 @@ dependencies = [
 
 [[package]]
 name = "platform-mock"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "platform",
  "platform-parity",
@@ -7805,14 +7810,14 @@ dependencies = [
 
 [[package]]
 name = "platform-parity"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "platform",
 ]
 
 [[package]]
 name = "platform-windows"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "platform",
  "platform-mock",
@@ -10403,6 +10408,7 @@ dependencies = [
  "rusty_bbp",
  "rusty_codec",
  "rusty_libc",
+ "rusty_pk",
  "rusty_rand",
  "rusty_sandbox",
  "rusty_serde",
@@ -10524,6 +10530,7 @@ name = "rusty_erosion"
 version = "0.1.0"
 dependencies = [
  "tree-sitter",
+ "tree-sitter-python",
  "tree-sitter-rust",
 ]
 
@@ -10608,6 +10615,25 @@ version = "0.1.0"
 [[package]]
 name = "rusty_font"
 version = "0.1.0"
+
+[[package]]
+name = "rusty_fuse"
+version = "0.1.0"
+
+[[package]]
+name = "rusty_fuse_conformance"
+version = "0.1.0"
+dependencies = [
+ "rusty_fuse",
+]
+
+[[package]]
+name = "rusty_fuse_passthrough"
+version = "0.1.0"
+dependencies = [
+ "rusty_fuse",
+ "rusty_fuse_conformance",
+]
 
 [[package]]
 name = "rusty_git"
@@ -10883,6 +10909,7 @@ dependencies = [
  "rusty_mcp_server",
  "rusty_oauth",
  "rusty_oauth_server",
+ "rusty_pk",
  "rusty_rand",
  "rusty_request",
  "rusty_serve",
@@ -11054,6 +11081,7 @@ dependencies = [
  "rusty_tls",
  "rusty_tokio",
  "rusty_uuid",
+ "rusty_win32",
  "serde",
  "serde_json",
  "ts-hub",
@@ -11141,12 +11169,16 @@ dependencies = [
  "orch-codex",
  "orch-core",
  "orch-dispatch",
+ "orch-jail",
  "orch-lens",
  "orch-ollama",
  "orch-openai",
  "orch-store",
+ "platform",
+ "platform-linux",
  "rusty_atomic_file",
  "rusty_bbp",
+ "rusty_confined_fs",
  "rusty_http",
  "rusty_json",
  "rusty_rand",
@@ -14330,6 +14362,16 @@ name = "tree-sitter-language"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0af592be68c579aa78a16846bd19422978c3c52e438523d45ff5d1bff1f9d4a"
+
+[[package]]
+name = "tree-sitter-python"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bf85fd39652e740bf60f46f4cda9492c3a9ad75880575bf14960f775cb74a1c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
 
 [[package]]
 name = "tree-sitter-rust"

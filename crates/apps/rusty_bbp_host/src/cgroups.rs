@@ -594,6 +594,33 @@ impl Watched for Session {
     }
 }
 
+/// `bbp slot-hold --cgroup --slots`: take a free agent slot from `slots`,
+/// write the descriptor it is held on as one line to `ready`, then
+/// [`hold`] it for `cgroup` and free it when the hold ends. The line is the
+/// caller's signal to copy the descriptor (`pidfd_getfd`, D108 item 2).
+///
+/// # Errors
+/// When every agent slot is held (nothing is taken and the cgroup is never
+/// looked at), a slot cannot be taken, or the line cannot be written.
+pub fn hold_slot<C: Watched + ?Sized>(
+    cgroup: &C,
+    slots: &crate::slots::Slots,
+    deadline: Option<SystemTime>,
+    stdin: impl std::io::Read + Send + 'static,
+    ready: &mut dyn std::io::Write,
+    report: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    let slot = slots
+        .try_acquire(crate::slots::Class::Agent)?
+        .ok_or("every agent slot is held")?;
+    writeln!(ready, "{}", slot.fd())
+        .and_then(|()| ready.flush())
+        .map_err(|e| format!("ready line: {e}"))?;
+    hold(cgroup, deadline, stdin, report);
+    drop(slot);
+    Ok(())
+}
+
 /// `bbp slot-hold --cgroup`: return once `stdin` is at end of file and
 /// `cgroup` is known to be empty; the slot lock, the caller's stdout, stays
 /// open until then. From `deadline` on the cgroup is killed at every look
@@ -1067,5 +1094,87 @@ mod tests {
         assert_eq!(undo("boom".into(), &[&owner, &record]), "boom");
         assert!(!owner.exists() && !record.exists());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn slot_dir(tag: &str, agents: u32) -> crate::slots::Slots {
+        let dir = std::env::temp_dir().join(format!("bbp-cg-slots-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let caps = crate::slots::Capacity {
+            agents,
+            validators: 1,
+        };
+        crate::slots::Slots::open(&dir, caps).expect("slots");
+        crate::slots::Slots::recorded(&dir).expect("recorded")
+    }
+
+    /// A `Write` whose bytes the test can read while the hold runs.
+    #[derive(Clone, Default)]
+    struct Shared(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Shared {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock").extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Shared {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().expect("lock").clone()).expect("utf8")
+        }
+    }
+
+    #[test]
+    fn the_holder_takes_its_own_slot_and_keeps_it_while_the_cgroup_is_populated() {
+        let slots = slot_dir("own", 1);
+        let cg = Arc::new(Flaky::default());
+        let ready = Shared::default();
+        let holder = {
+            let (cg, slots, mut ready) = (cg.clone(), slots.clone(), ready.clone());
+            std::thread::spawn(move || {
+                // The caller is already gone: stdin at end of file.
+                hold_slot(
+                    &*cg,
+                    &slots,
+                    None,
+                    std::io::empty(),
+                    &mut ready,
+                    &mut |_| {},
+                )
+            })
+        };
+        wait_for("the ready line", || ready.text().ends_with('\n'));
+        let fd: i32 = ready.text().trim().parse().expect("a descriptor number");
+        assert!(fd > 2, "{fd}");
+        wait_for("a few looks", || cg.looks.load(Ordering::SeqCst) >= 3);
+        assert_eq!(slots.held(crate::slots::Class::Agent), Ok(vec![0]));
+        assert!(!holder.is_finished(), "freed while the cgroup is populated");
+        cg.empty.store(true, Ordering::SeqCst);
+        assert_eq!(holder.join().expect("holder"), Ok(()));
+        // A parallel test's fork may hold a copy of the lock until it execs.
+        wait_for("the slot to be freed", || {
+            slots.held(crate::slots::Class::Agent) == Ok(vec![])
+        });
+        let _ = std::fs::remove_dir_all(slots.dir());
+    }
+
+    #[test]
+    fn at_capacity_the_holder_takes_nothing_and_never_looks() {
+        let slots = slot_dir("full", 1);
+        let taken = slots
+            .try_acquire(crate::slots::Class::Agent)
+            .expect("acquire")
+            .expect("the only slot");
+        let cg = Flaky::default();
+        let mut ready = Shared::default();
+        let refused = hold_slot(&cg, &slots, None, std::io::empty(), &mut ready, &mut |_| {});
+        assert_eq!(refused, Err("every agent slot is held".to_owned()));
+        assert_eq!(ready.text(), "", "no ready line");
+        assert_eq!(cg.looks.load(Ordering::SeqCst), 0);
+        drop(taken);
+        let _ = std::fs::remove_dir_all(slots.dir());
     }
 }

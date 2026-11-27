@@ -410,6 +410,9 @@ mod tests {
                 by: "dev".into(),
                 at_ms: 3,
                 text: (*t).to_owned(),
+                kind: crate::domain::CommentKind::Note,
+                id: None,
+                resolves: None,
             })
             .collect();
         c

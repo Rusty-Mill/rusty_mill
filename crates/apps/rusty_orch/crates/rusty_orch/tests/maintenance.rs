@@ -184,6 +184,7 @@ fn shipped_author_policy_checks_linked_tasks_before_opening_and_skips_deleted_te
             &task,
             Rev(0),
             &[Event::TaskOpened {
+                gates: None,
                 claims: None,
                 mode: rusty_bbp::Mode::Stages,
                 schema: LOG_SCHEMA,

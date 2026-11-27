@@ -201,6 +201,22 @@ fn sandboxed_maintenance_recovers_and_prepares_reviewed_pr_without_merging() {
     config.work = root.join("work");
     config.profiles = input_profiles;
     config.max_wall_secs = 120;
+    // #447 (D195): a scratch fixture, listed as the operator would, so its gate takes `--op`.
+    config.gates = Some(rusty_bbp::Gates::Scratch);
+    process(
+        &repo,
+        binary.to_str().unwrap(),
+        &[
+            "gates",
+            "scratch-add",
+            "--dir",
+            config.dir.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--source",
+            "test fixture",
+        ],
+    );
     for (name, script) in [("builder", &maker), ("judge", &auditor)] {
         let agent = config.pool.get_mut(name).unwrap();
         agent.program = "/bin/sh".into();
