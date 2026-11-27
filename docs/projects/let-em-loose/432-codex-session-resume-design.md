@@ -31,6 +31,15 @@ Two gaps the docs leave, which S0 settles on BaileyAi:
 2. that `-c key=value` overrides (our MCP server, shell policy, trust) are honoured after
    `resume` (Codex documents them as shared options, not as resume options).
 
+Local check, 2026-11-27 (Codex CLI 0.172.0 in the cloud container with no login, so
+the model request failed 401 and nothing was billed; not the live S0): a first
+`exec --json` printed `thread.started` and wrote `sessions/.../rollout-...-<thread_id>.jsonl`;
+`exec ... resume <thread_id>` found that rollout and printed `thread.started` with
+the same id, while an unknown id failed with `no rollout found`. A
+`-c mcp_servers={probe={command="/bin/false",required=true}}` placed before `resume`
+made the resume fail on that server, so `-c` overrides are honoured on resume. S0
+still confirms both with a real conversation.
+
 ## Design
 
 ### 1. The launcher (`launchers.rs`)
