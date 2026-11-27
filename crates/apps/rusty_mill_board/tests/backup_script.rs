@@ -128,8 +128,8 @@ fn snapshot_is_a_verified_pair_and_retention_keeps_the_newest() {
     assert_eq!(kept.len(), 2, "{:?}", names(&rig.local()));
     assert_eq!(
         names(&rig.local()).len(),
-        4,
-        "gzip + checksum each, nothing else"
+        5,
+        "gzip + checksum each, and the lock file"
     );
     let check = Command::new("sha256sum")
         .arg("-c")

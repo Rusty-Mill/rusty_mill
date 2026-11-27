@@ -81,7 +81,7 @@ rsync to `MILL_BOARD_BACKUP_DEST/<host>/`. A copy counts only as a verified pair
 published last, and the gzip must match it): retention, shipping and pruning ignore a lone gzip, and the next snapshot removes
 it. The destination is pruned only after a checksum comparison shows its copies equal the verified local pairs, and never when this host
 holds fewer copies than it should and fewer than the destination (a wiped local directory). A
-failed shipment prunes nothing. Set `MILL_BOARD_BACKUP_REQUIRE_MOUNT` to refuse to ship when the
+failed shipment prunes nothing, and runs are serialized by a lock in the backup directory. Set `MILL_BOARD_BACKUP_REQUIRE_MOUNT` to refuse to ship when the
 destination's mount is absent. The unit is sandboxed (`ProtectSystem=strict`): it may write
 `~/.mill-board` and `/mnt/beast/mill-board`; for any other destination add a `ReadWritePaths=`
 drop-in. The destination directory must already exist (rsync makes only the `<host>/` level).
