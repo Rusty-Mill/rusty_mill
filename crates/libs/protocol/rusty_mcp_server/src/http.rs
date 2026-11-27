@@ -187,6 +187,7 @@ impl HttpHandler {
                 .map(|(n, v)| (n.to_ascii_lowercase(), v.to_owned()))
                 .collect(),
             principal,
+            session: None,
         };
         self.respond(request, caller)
             .unwrap_or_else(|rejection| rejection)
@@ -609,6 +610,14 @@ impl HttpHandler {
             self.check_version_rules(headers, header_version.as_ref(), &message, has_session)?;
         // 2026-07-28 `_meta` requests are stateless: any session id is ignored.
         let session = if modern { None } else { looked_up? };
+        // Only a session the store just validated reaches handlers.
+        let caller = Caller {
+            session: session
+                .as_ref()
+                .and_then(|_| headers.get("mcp-session-id"))
+                .map(str::to_owned),
+            ..caller
+        };
         self.dispatch(message, header_version, modern, session, caller)
     }
 

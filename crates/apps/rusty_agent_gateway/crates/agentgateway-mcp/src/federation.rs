@@ -398,6 +398,8 @@ fn error(code: ErrorCode, message: impl Into<String>) -> ErrorData {
 struct Who {
     headers: http::HeaderMap,
     claims: Option<serde_json::Value>,
+    /// The classic session the MCP server validated; `None` when stateless.
+    session: Option<String>,
 }
 
 impl Who {
@@ -417,7 +419,11 @@ impl Who {
             .principal
             .as_ref()
             .and_then(|p| serde_json::from_str(&p.to_json_string()).ok());
-        Who { headers, claims }
+        Who {
+            headers,
+            claims,
+            session: caller.session.clone(),
+        }
     }
 
     fn claims(&self) -> Option<&serde_json::Value> {
@@ -428,11 +434,7 @@ impl Who {
     /// token's principal. Session binding (#1375) keeps a session to the
     /// principal that opened it, so the pair can't be borrowed.
     fn key(&self) -> SessionKey {
-        let session = self
-            .headers
-            .get("mcp-session-id")
-            .and_then(|v| v.to_str().ok());
-        SessionKey::new(session, self.claims())
+        SessionKey::new(self.session.as_deref(), self.claims())
     }
 }
 

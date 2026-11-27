@@ -253,6 +253,7 @@ fn a_source_can_refuse_a_listing_and_sees_who_asks() {
     let caller = rusty_mcp_server::Caller {
         headers: vec![("x-pass".to_owned(), "1".to_owned())],
         principal: None,
+        session: None,
     };
     let c = Arc::new(Connection::new(Arc::new(server()), Arc::new(Mute)).with_caller(caller));
     let allowed = send(&c, "prompts/list", &meta());

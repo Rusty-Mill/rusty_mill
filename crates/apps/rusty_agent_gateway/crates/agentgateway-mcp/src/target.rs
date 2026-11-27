@@ -194,6 +194,7 @@ impl Pool {
             state: Mutex::new(Slots {
                 idle: first.into_iter().collect(),
                 open,
+                last_used: Instant::now(),
             }),
             freed: Condvar::new(),
             dial,
@@ -212,11 +213,16 @@ pub struct SessionKey {
 }
 
 impl SessionKey {
-    /// The key for a call under `session` (its `Mcp-Session-Id`, if any) by
-    /// the holder of `claims`. The principal is `iss` and `sub`, or the whole
-    /// claims when there is no `sub`, the same rule session binding uses.
-    /// Calls with neither a session nor a token share one key: there is no
-    /// identity to keep apart.
+    /// The key for a call under `session` by the holder of `claims`.
+    ///
+    /// `session` is the classic session the MCP server validated for the
+    /// request ([`rusty_mcp_server::Caller::session`]), never the raw
+    /// `Mcp-Session-Id` header. A stateless (2026-07-28) request has none: it
+    /// is keyed on its principal alone, and that upstream closes only when it
+    /// sits idle. The principal is `iss` and `sub`, or the whole claims when
+    /// there is no `sub`, the same rule session binding uses. Calls with
+    /// neither a session nor a token share one key: there is no identity to
+    /// keep apart.
     pub fn new(session: Option<&str>, claims: Option<&serde_json::Value>) -> Self {
         let principal = match claims {
             None => String::new(),
@@ -232,12 +238,36 @@ impl SessionKey {
     }
 }
 
-/// One keyed pool and when it was last used.
+/// One keyed pool.
 struct Keyed {
     pool: Arc<Pool>,
     /// The downstream session it serves, for [`Target::end_session`].
     session: String,
-    last_used: Instant,
+}
+
+impl Keyed {
+    /// Unused for longer than `idle` and held by no call. A pool a call still
+    /// holds is never closed under it, however long the call runs.
+    fn expired(&self, now: Instant, idle: Duration) -> bool {
+        Arc::strong_count(&self.pool) == 1
+            && now.duration_since(lock(&self.pool.state).last_used) > idle
+    }
+}
+
+/// The keyed pools of one target, and the sessions that ended lately.
+#[derive(Default)]
+struct Keys {
+    pools: HashMap<String, Keyed>,
+    /// Ended sessions, kept for one idle period, so a call admitted just
+    /// before its session ended can't open a pool for it afterwards.
+    /// Session ids are random and never reused.
+    ended: HashMap<String, Instant>,
+}
+
+impl Keys {
+    fn forget_old_ends(&mut self, now: Instant, idle: Duration) {
+        self.ended.retain(|_, at| now.duration_since(*at) <= idle);
+    }
 }
 
 /// The pools of one target.
@@ -246,7 +276,7 @@ struct Pools {
     /// The first connection's pool: every operation under `pooled`, and
     /// listings under the other modes.
     shared: Pool,
-    by_key: Mutex<HashMap<String, Keyed>>,
+    by_key: Mutex<Keys>,
     /// Connections per keyed pool.
     per_key: usize,
     idle: Duration,
@@ -254,9 +284,17 @@ struct Pools {
 
 impl Pools {
     /// The pool for an operation by `who` with `headers` going upstream.
-    fn for_call(&self, who: &SessionKey, headers: &HeaderOverride) -> Option<Arc<Pool>> {
+    ///
+    /// # Errors
+    /// `who`'s session has ended: a call admitted before the end opens
+    /// nothing after it.
+    fn for_call(
+        &self,
+        who: &SessionKey,
+        headers: &HeaderOverride,
+    ) -> Result<Option<Arc<Pool>>, ClientError> {
         let (key, session) = match self.mode {
-            UpstreamMode::Pooled => return None,
+            UpstreamMode::Pooled => return Ok(None),
             UpstreamMode::PerCredential => {
                 let credential = headers
                     .set
@@ -272,25 +310,37 @@ impl Pools {
             ),
         };
         let now = Instant::now();
-        let mut map = lock(&self.by_key);
-        let expired = take(&mut map, |k| now.duration_since(k.last_used) > self.idle);
-        let entry = map.entry(key).or_insert_with(|| Keyed {
+        let mut keys = lock(&self.by_key);
+        keys.forget_old_ends(now, self.idle);
+        if !session.is_empty() && keys.ended.contains_key(&session) {
+            return Err(ClientError::Io(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "the session has ended",
+            )));
+        }
+        let expired = take(&mut keys.pools, |k| k.expired(now, self.idle));
+        let entry = keys.pools.entry(key).or_insert_with(|| Keyed {
             pool: Arc::new(Pool::new(Arc::clone(&self.shared.dial), self.per_key, None)),
             session,
-            last_used: now,
         });
-        entry.last_used = now;
         let pool = Arc::clone(&entry.pool);
-        drop(map);
+        drop(keys);
         drop(expired);
-        Some(pool)
+        Ok(Some(pool))
     }
 
     /// Close every keyed pool serving `session`.
     fn end_session(&self, session: &str) -> usize {
-        let mut map = lock(&self.by_key);
-        let ended = take(&mut map, |k| !k.session.is_empty() && k.session == session);
-        drop(map);
+        let now = Instant::now();
+        let mut keys = lock(&self.by_key);
+        keys.forget_old_ends(now, self.idle);
+        let ended = take(&mut keys.pools, |k| {
+            !k.session.is_empty() && k.session == session
+        });
+        if !session.is_empty() {
+            keys.ended.insert(session.to_owned(), now);
+        }
+        drop(keys);
         // Dropped here, without the lock: closing a child can take a moment.
         ended.len()
     }
@@ -310,6 +360,8 @@ struct Slots {
     idle: Vec<Conn>,
     /// Connections that exist: idle, leased, or being dialled.
     open: usize,
+    /// When a connection was last taken or given back.
+    last_used: Instant,
 }
 
 /// A connection on loan; it goes back to the pool when dropped.
@@ -352,7 +404,10 @@ impl Lease<'_> {
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
-            lock(&self.pool.state).idle.push(conn);
+            let mut slots = lock(&self.pool.state);
+            slots.idle.push(conn);
+            slots.last_used = Instant::now();
+            drop(slots);
             self.pool.freed.notify_one();
         }
     }
@@ -364,6 +419,7 @@ impl Pool {
         self.leases
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut slots = lock(&self.state);
+        slots.last_used = Instant::now();
         loop {
             if let Some(conn) = slots.idle.pop() {
                 return Ok(Lease {
@@ -544,7 +600,7 @@ impl Target {
             pools: Pools {
                 mode: config.mode(),
                 shared: Pool::new(dial, max, Some(first)),
-                by_key: Mutex::new(HashMap::new()),
+                by_key: Mutex::new(Keys::default()),
                 // A stateful server gets one connection per session: two
                 // concurrent calls on one session queue, as they would on a
                 // client of its own.
@@ -574,7 +630,7 @@ impl Target {
 
     /// How many keyed pools are open now. For metrics and tests.
     pub fn sessions(&self) -> usize {
-        lock(&self.pools.by_key).len()
+        lock(&self.pools.by_key).pools.len()
     }
 
     /// The headers for one request: `headers` (a guardrail's changes to the
@@ -602,7 +658,7 @@ impl Target {
         who: &SessionKey,
     ) -> Result<Value, ClientError> {
         let deadline = Instant::now() + self.timeout;
-        let keyed = self.pools.for_call(who, headers);
+        let keyed = self.pools.for_call(who, headers)?;
         let pool = keyed.as_deref().unwrap_or(&self.pools.shared);
         pool.lease(deadline)?
             .call(deadline, method, params, &self.native(headers))
@@ -678,6 +734,7 @@ impl Target {
     /// call, and one per whole paged listing. For metrics and tests.
     pub fn leases(&self) -> usize {
         let keyed: usize = lock(&self.pools.by_key)
+            .pools
             .values()
             .map(|k| k.pool.leases.load(std::sync::atomic::Ordering::Relaxed))
             .sum();

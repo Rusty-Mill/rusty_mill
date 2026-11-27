@@ -41,6 +41,12 @@ pub struct Caller {
     /// What the host's own authentication established about the caller
     /// (token claims), as JSON; `None` when it ran none.
     pub principal: Option<Value>,
+    /// The classic session the request runs in, as the server validated it:
+    /// known, live and opened by this principal. `None` for a request with no
+    /// session and for a stateless (2026-07-28 `_meta`) request, whose
+    /// `Mcp-Session-Id` header the server ignores. Key per-session state on
+    /// this, never on the raw header.
+    pub session: Option<String>,
 }
 
 impl Caller {

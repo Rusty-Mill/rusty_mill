@@ -382,8 +382,12 @@ fn as_session(session: &str, sub: &str) -> SessionKey {
     )
 }
 
+fn plain_builder() -> ServerBuilder {
+    Server::builder("plain", "1").tool(Tool::new("t", schema()), |_c, _p| Ok(text("ok")))
+}
+
 fn plain() -> Up {
-    serve(Server::builder("plain", "1").tool(Tool::new("t", schema()), |_c, _p| Ok(text("ok"))))
+    serve(plain_builder())
 }
 
 #[test]
@@ -435,6 +439,58 @@ fn per_session_upstreams_close_when_idle() {
         .call(&call("t"), &none, &as_session("s2", "a"))
         .unwrap();
     assert_eq!(target.sessions(), 1, "s1 went idle and was closed");
+}
+
+#[test]
+fn a_call_admitted_before_its_session_ended_opens_nothing_after() {
+    let up = plain();
+    let target = target_in(&up, UpstreamMode::PerSession, 8, Duration::from_secs(5));
+    let none = HeaderOverride::default();
+    assert_eq!(target.end_session("s1"), 0, "nothing was open yet");
+
+    let late = target.call(&call("t"), &none, &as_session("s1", "a"));
+    assert!(late.is_err(), "an ended session gets no new upstream");
+    assert_eq!(target.sessions(), 0);
+
+    target
+        .call(&call("t"), &none, &as_session("s2", "a"))
+        .unwrap();
+    let stateless = SessionKey::new(None, Some(&serde_json::json!({"sub": "a"})));
+    target.call(&call("t"), &none, &stateless).unwrap();
+    assert_eq!(
+        target.sessions(),
+        2,
+        "other sessions and stateless calls go on"
+    );
+}
+
+#[test]
+fn a_pool_in_use_is_not_closed_for_being_idle() {
+    let up = serve(slow_tool(plain_builder(), 500));
+    let target = Arc::new(
+        target_in(&up, UpstreamMode::PerSession, 8, Duration::from_secs(5))
+            .with_session_idle(Duration::from_millis(100)),
+    );
+    let busy = {
+        let target = Arc::clone(&target);
+        std::thread::spawn(move || {
+            target.call(
+                &call("slow"),
+                &HeaderOverride::default(),
+                &as_session("s1", "a"),
+            )
+        })
+    };
+    std::thread::sleep(Duration::from_millis(250)); // past idle, s1 still busy
+    target
+        .call(
+            &call("t"),
+            &HeaderOverride::default(),
+            &as_session("s2", "a"),
+        )
+        .unwrap();
+    assert_eq!(target.sessions(), 2, "s1's call still holds its upstream");
+    assert!(busy.join().unwrap().is_ok());
 }
 
 #[test]

@@ -1486,3 +1486,59 @@ fn the_tool_source_hears_of_idle_sessions_swept_to_make_room() {
     assert_eq!(post(f.addr, &[], INIT).status, 200, "room again");
     assert_eq!(*ended.lock().unwrap(), [first]);
 }
+
+/// Answers `whoami` with the session the server validated for the call.
+fn start_whoami() -> Fixture {
+    let server = Arc::new(
+        Server::builder("whoami-fixture", "1")
+            .tool(Tool::new("whoami", schema()), |ctx, _c| {
+                Ok(text(ctx.caller().session.as_deref().unwrap_or("none")))
+            })
+            .build()
+            .unwrap(),
+    );
+    let http = bind_http(
+        server,
+        "127.0.0.1:0".parse().unwrap(),
+        fast(),
+        Limits::default(),
+    )
+    .unwrap();
+    let addr = http.local_addr().unwrap();
+    let stop = http.shutdown_handle().unwrap();
+    std::thread::spawn(move || http.run().unwrap());
+    Fixture {
+        addr,
+        stop,
+        cancelled: Arc::new(AtomicBool::new(false)),
+    }
+}
+
+fn answer(r: &Reply) -> String {
+    r.json()
+        .get("result")
+        .and_then(|r| r.get("content"))
+        .and_then(Value::as_array)
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn handlers_see_only_the_session_the_server_validated() {
+    let f = start_whoami();
+    let id = open_session(&f);
+    let classic = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"whoami"}}"#;
+    let in_session = post(f.addr, &[CLASSIC, ("Mcp-Session-Id", &id)], classic);
+    assert_eq!(answer(&in_session), id);
+    assert_eq!(answer(&post(f.addr, &[CLASSIC], classic)), "none");
+
+    // A stateless request's session header is ignored, so handlers never see it.
+    let mut headers = modern_headers("tools/call", "whoami");
+    headers.push(("Mcp-Session-Id", "chosen-by-the-client"));
+    let stateless = post(f.addr, &headers, &modern_call(3, "whoami", ""));
+    assert_eq!(stateless.status, 200);
+    assert_eq!(answer(&stateless), "none");
+}
