@@ -39,6 +39,9 @@ pub enum Feed {
     /// [`BackendHandle::clipboard_reply`]; only a pane whose
     /// [`PaneIo::serves_clipboard`] is set gets these.
     ClipboardRead { primary: bool },
+    /// The server ended a forward of the pane with a reason, such as a dial
+    /// nothing answered (C81): shown as a notice.
+    ForwardRefused { port: u16, reason: String },
 }
 
 /// Where this window stands on typing into an owner-only block, whose
@@ -371,6 +374,12 @@ pub trait Source {
     /// forward is still the one running: how a late answer is told from a
     /// live one.
     fn forwarded_port(&self, _key: u64, _port: u16) -> Option<Bound> {
+        None
+    }
+    /// A stable, opaque name for pane `key`'s host, one line, the same on
+    /// every connection to it (such as the server's socket): what a saved
+    /// forward trust is kept under. `None` keeps trust for the window only.
+    fn host_id(&self, _key: u64) -> Option<String> {
         None
     }
     /// Whether the source can send a file to pane `key`'s host (mux C82),

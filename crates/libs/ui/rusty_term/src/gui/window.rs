@@ -226,6 +226,9 @@ pub(crate) enum UserEvent {
     /// A pane's program reads the clipboard, or with `true` the primary
     /// selection, and its source asks this window to answer (C54).
     ClipboardRead(u64, bool),
+    /// The server ended a forward of pane `id` with a reason: the port and
+    /// the reason ([`super::source::Feed::ForwardRefused`]).
+    ForwardRefused(u64, u16, String),
     /// A folder listing the palette's browse asked for finished, under
     /// the number the palette gave it (gui-design D78).
     Listed(u64, Listed),
@@ -689,6 +692,12 @@ fn reader_loop(
             }
             continue;
         }
+        if let Feed::ForwardRefused { port, reason } = step {
+            if !send(UserEvent::ForwardRefused(id, port, reason)) {
+                break; // loop gone
+            }
+            continue;
+        }
         let response = apply(step, &grid, &parser, &mut themed);
         if let Some(replies) = replies.as_mut().filter(|_| !response.is_empty()) {
             let _ = replies.write(&response);
@@ -753,7 +762,7 @@ fn apply(
             Vec::new()
         }
         // The reader loop tells the window instead.
-        Feed::Take(_) | Feed::ClipboardRead { .. } => Vec::new(),
+        Feed::Take(_) | Feed::ClipboardRead { .. } | Feed::ForwardRefused { .. } => Vec::new(),
     }
 }
 
@@ -808,7 +817,9 @@ struct WindowState<'a> {
     links: link_policy::Policy,
     /// The (pane, remote port) forwards the user agreed to, for this
     /// window's life (C81, D341).
-    forward_trust: std::collections::HashSet<(u64, u16)>,
+    /// Forwarded ports the user trusts, as [`link_trust::forward_entry`]
+    /// entries: the saved ones, and this window's own.
+    forward_trust: std::collections::HashSet<String>,
     /// The forwards asked for and not yet answered.
     forward_asks: ForwardAsks,
     /// Files waiting to be sent to a pane's host, one at a time so their
@@ -3178,7 +3189,7 @@ impl WindowState<'_> {
                     .to_owned(),
             }));
         }
-        if self.forward_trust.contains(&(key, target.port)) {
+        if self.forward_trusted(key, target.port) {
             return self.start_forward(key, target);
         }
         let s = self.scale_factor as f32;
@@ -3202,6 +3213,41 @@ impl WindowState<'_> {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    /// The trust entry for `port` of pane `key`'s host, and whether it may be
+    /// saved. A host with no usable name trusts the pane itself, for this
+    /// window only.
+    fn forward_entry(&self, key: u64, port: u16) -> Option<(String, bool)> {
+        self.source
+            .host_id(key)
+            .and_then(|host| link_trust::forward_entry(&host, port))
+            .map(|entry| (entry, true))
+            .or_else(|| {
+                // No name, or one that cannot be written down: this window only.
+                link_trust::forward_entry(&format!("pane {key}"), port).map(|e| (e, false))
+            })
+    }
+
+    fn forward_trusted(&self, key: u64, port: u16) -> bool {
+        self.forward_entry(key, port)
+            .is_some_and(|(entry, _)| self.forward_trust.contains(&entry))
+    }
+
+    /// Trust `port` of pane `key`'s host, and save it when the host has a
+    /// name. A failed save leaves the trust to this window, and says so.
+    fn trust_forward(&mut self, key: u64, port: u16) {
+        let Some((entry, saved)) = self.forward_entry(key, port) else {
+            return;
+        };
+        if saved && let Err(e) = save_forward_trust(&entry) {
+            eprintln!("rusty-term: saving a trusted forward: {e}");
+            self.show_notice(Some(super::source::Notice {
+                title: "Could not save trusted forwards".to_owned(),
+                detail: "This port is trusted until the window closes.".to_owned(),
+            }));
+        }
+        self.forward_trust.insert(entry);
     }
 
     /// Ask the source to forward `target`'s port; the answer comes back as
@@ -3234,7 +3280,7 @@ impl WindowState<'_> {
         if !self.forward_asks.answer(key, target.port, op) {
             return;
         }
-        if !self.forward_trust.contains(&(key, target.port)) {
+        if !self.forward_trusted(key, target.port) {
             return;
         }
         // The forward may have ended since it answered (the pane's connection
@@ -6383,7 +6429,7 @@ impl WindowState<'_> {
         match subject {
             Subject::Block(key) => self.source.act(Act::TakeOver(key)),
             Subject::Forward(key, target) => {
-                self.forward_trust.insert((key, target.port));
+                self.trust_forward(key, target.port);
                 self.start_forward(key, target);
             }
             Subject::Link(link) => {
@@ -7659,7 +7705,7 @@ impl<'a> App<'a> {
             explorer: ExplorerUi::new().ok_or("the interface font failed to parse")?,
             overview: OverviewUi::new().ok_or("the interface font failed to parse")?,
             links: load_trust(),
-            forward_trust: std::collections::HashSet::new(),
+            forward_trust: load_forward_trust(),
             forward_asks: ForwardAsks::default(),
             uploads: UploadQueue::default(),
             config: self.config.clone(),
@@ -7823,6 +7869,14 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::ClipboardRead(id, primary) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(id)) {
                     w.answer_clipboard_read(id, primary);
+                }
+            }
+            UserEvent::ForwardRefused(id, port, reason) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(id)) {
+                    w.show_notice(Some(super::source::Notice {
+                        title: "Port forward closed".to_owned(),
+                        detail: format!("Port {port}: {reason}."),
+                    }));
                 }
             }
             UserEvent::Forwarded(key, op, target, forwarded) => {
@@ -8454,6 +8508,22 @@ fn load_trust() -> link_policy::Policy {
     link_trust::default_dir()
         .and_then(|d| link_trust::read(&d).ok())
         .unwrap_or_default()
+}
+
+/// The forwards trusted on disk; none if the directory cannot be read.
+fn load_forward_trust() -> std::collections::HashSet<String> {
+    link_trust::forwards_dir()
+        .and_then(|d| link_trust::read_forwards(&d).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
+/// Remember forward `entry` on disk (see [`link_trust::add_forward`]).
+fn save_forward_trust(entry: &str) -> std::io::Result<()> {
+    let dir =
+        link_trust::forwards_dir().ok_or_else(|| std::io::Error::other("no config directory"))?;
+    link_trust::add_forward(&dir, entry)
 }
 
 /// Remember `origin` on disk (see [`link_trust::add`]).

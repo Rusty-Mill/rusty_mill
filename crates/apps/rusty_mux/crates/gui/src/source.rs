@@ -148,6 +148,9 @@ pub fn attach_with(
     start: Start,
 ) -> Result<Attached, String> {
     let start_cwd = start.first.cwd.clone();
+    let host = host_id(socket);
+    // Pinned: this and every later connection of the client go to one place.
+    let socket = host.as_deref().map_or(socket, Path::new);
     let (stream, mut conn) = hello(socket)?;
     let mut req = Requests {
         conn: &mut conn,
@@ -180,6 +183,7 @@ pub fn attach_with(
     let (asks, inbox) = std::sync::mpsc::channel();
     let state = Arc::new(State {
         socket: socket.to_owned(),
+        host,
         control: Mutex::new(Conn::new(clone(&stream)?)),
         next: AtomicU64::new(next),
         tells_focus: welcomed.features.contains(Features::FOCUS),
@@ -231,6 +235,22 @@ pub fn attach_with(
     })
 }
 
+/// The server's pinned destination: `socket` with every link resolved, as an
+/// absolute UTF-8 path. Every connection of the client goes to this path and
+/// persisted consent is named by it, so the name is the destination reached,
+/// not a path that can be pointed elsewhere later. `None` where it cannot be
+/// pinned (no such path, not UTF-8, too long to connect to, not Unix): consent
+/// then stays with the window and the path given is used as it was.
+fn host_id(socket: &Path) -> Option<String> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let path = socket.canonicalize().ok()?;
+    // A name the connection could not use is no pin: keep the path given.
+    rusty_mux_proto::endpoint::check_socket_path(&path).ok()?;
+    path.to_str().map(str::to_owned)
+}
+
 /// Connects to `socket` and says the GUI's Hello, asking for no takeover.
 fn hello(socket: &Path) -> Result<(UnixStream, Conn<UnixStream>), String> {
     let stream = connect(socket)?;
@@ -257,6 +277,8 @@ enum Ask {
 /// What the client and the window share.
 struct State {
     socket: PathBuf,
+    /// [`host_id`] of the socket, pinned at attach: `socket` is that same path.
+    host: Option<String>,
     control: Mutex<Conn<UnixStream>>,
     next: AtomicU64,
     /// The server takes `FocusBlock` (C41).
@@ -611,6 +633,15 @@ impl Source for MuxSource {
 
     fn forwards(&self, key: u64) -> bool {
         self.pane(key).is_some_and(|b| b.forwards)
+    }
+
+    /// The server's socket as an absolute path, pinned when this
+    /// client attached (every connection goes to it), so a socket later
+    /// retargeted never renames the host an open pane reaches: what a saved
+    /// forward trust belongs to.
+    fn host_id(&self, key: u64) -> Option<String> {
+        self.pane(key)?;
+        self.0.host.clone()
     }
 
     fn uploads(&self, key: u64) -> bool {
@@ -2112,6 +2143,7 @@ impl Block {
         let (wants_tx, wants) = sync_channel(FORWARD_WANTS);
         let stop = Arc::new(AtomicBool::new(false));
         let (block, flag) = (Arc::clone(self), Arc::clone(&stop));
+        let told = Arc::clone(self);
         let id = RUNS.fetch_add(1, Ordering::Relaxed);
         let conn = self.conn_gen.load(Ordering::SeqCst);
         let spawned = std::thread::Builder::new()
@@ -2126,6 +2158,7 @@ impl Block {
                     &wants,
                     ConnWriter(Arc::clone(&block), Arc::clone(&flag), conn),
                     &|| flag.load(Ordering::SeqCst),
+                    Box::new(move |refused| told.refused(refused)),
                 );
                 if let forward::Ended::Lost(e) = ended {
                     eprintln!("rusty-mux-gui: block {}: forwards ended: {e}", block.block);
@@ -2152,6 +2185,18 @@ impl Block {
             wants: wants_tx,
             stop,
             ports: HashMap::new(),
+        }
+    }
+
+    /// Tells the window a forward ended with a reason, such as a dial
+    /// nothing answered.
+    fn refused(&self, refused: forward::Refused) {
+        if let Some(tell) = &*lock(&self.to_window) {
+            // A full feed drops the notice rather than stall the forwards.
+            let _ = tell.try_send(Feed::ForwardRefused {
+                port: refused.remote,
+                reason: refused.reason,
+            });
         }
     }
 
@@ -2525,6 +2570,36 @@ impl Drop for PaneWriter {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn a_host_is_the_resolved_destination_and_none_where_it_cannot_be_pinned() {
+        use super::host_id;
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!("rusty-mux-gui-host-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = dir.canonicalize().expect("canonical dir");
+        let (real, alias) = (dir.join("real.sock"), dir.join("alias.sock"));
+        std::fs::write(&real, b"").expect("file");
+        std::os::unix::fs::symlink(&real, &alias).expect("link");
+        let named = host_id(&alias).expect("a name");
+        assert_eq!(Some(named.as_str()), real.to_str(), "links are resolved");
+        assert_eq!(host_id(&real), Some(named));
+        assert_eq!(host_id(&dir.join("missing.sock")), None);
+        let raw = dir.join(std::ffi::OsStr::from_bytes(b"\xff.sock"));
+        std::fs::write(&raw, b"").expect("file");
+        assert_eq!(host_id(&raw), None, "no lossy name");
+        let deep = (0..8).fold(dir.clone(), |p, _| p.join("d".repeat(20)));
+        std::fs::create_dir_all(&deep).expect("deep");
+        std::fs::write(deep.join("s.sock"), b"").expect("file");
+        assert_eq!(
+            host_id(&deep.join("s.sock")),
+            None,
+            "too long to connect to"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
     use std::ffi::OsString;
 
     use rusty_mux_core::{BlockId, InputMode, SessionId, Size, WindowId};
