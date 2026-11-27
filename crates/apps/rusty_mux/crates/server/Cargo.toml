@@ -62,6 +62,9 @@ rusty_libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 platform-windows = { workspace = true }
+# `terminal.download`: the opened handle's final path and file index (the one
+# `unsafe` of the download path, in src/download_win.rs; owner-approved, #1586).
+rusty_win32 = { workspace = true }
 # `RUSTY_CONSOLE_HOST=own`: our own console host instead of ConPTY. Links
 # rusty_term_core without `l13`, as the line above for the server's grids.
 rusty_conhost = { workspace = true }
