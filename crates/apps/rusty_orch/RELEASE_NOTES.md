@@ -4,6 +4,14 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Canary on the released ref
+**2026-11-27**
+
+- `rusty_orch watch` now re-runs each app's test profile on the commit it
+  shipped from. A red run becomes one claim on the app's maintenance task;
+  a newer red release replaces it. A green run posts nothing.
+- It calls no model, so it costs nothing.
+
 ## `lens why`: which lens posted what
 **2026-11-27**
 

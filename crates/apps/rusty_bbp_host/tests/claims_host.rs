@@ -3388,3 +3388,32 @@ fn an_empty_task_id_does_not_poison_the_ledger() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #599 canary (D210): the task's frozen profile re-run on a released ref,
+/// red on a red ref and green on a green one, with nothing written to the
+/// task; an unknown profile or ref is an error naming it.
+#[test]
+fn a_canary_reruns_one_frozen_profile_on_a_ref() {
+    let dir = tempdir("canary");
+    let (repo, red) = repo(&dir);
+    claims_task(&dir);
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    git(&repo, &["tag", "v1"]);
+    let rev = state(&dir).rev;
+    let work = dir.join("canary-work");
+    let run = |r: &str, p: &str| {
+        rusty_bbp_host::canary::run(&Unconfined, &dir, &task(), &repo, &work, r, p)
+    };
+    let bad = run(&red, "test").expect("ran");
+    assert_eq!(bad.status, RunStatus::Failed, "{bad:?}");
+    assert_eq!(bad.base, red);
+    let good = run("v1", "test").expect("ran");
+    assert!(good.green(), "{good:?}");
+    assert_eq!(good.profiles.len(), 1);
+    let err = run("v1", "e2e").expect_err("no such profile");
+    assert!(err.contains("\"e2e\""), "{err}");
+    assert!(run("nope", "test").is_err());
+    assert_eq!(state(&dir).rev, rev, "nothing written to the task");
+    let _ = std::fs::remove_dir_all(&dir);
+}

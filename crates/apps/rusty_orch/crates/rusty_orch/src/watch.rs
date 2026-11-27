@@ -5,8 +5,9 @@
 //!   opens each maintenance task with `bbp open --mode claims`; `watch` never
 //!   opens a task.
 //! - Each [`Watch`] adapter is a CLI call (D58): `cargo deny` advisories,
-//!   `cargo update --dry-run`, and the toolchain against the watched-versions
-//!   file. The canary re-run on the released ref is a later step.
+//!   `cargo update --dry-run`, the toolchain against the watched-versions
+//!   file, and the canary: `bbp canary` re-runs the app's `profile` on its
+//!   `released_ref` (D210).
 //! - Findings are posted by the task's `watcher` role (D79) through its
 //!   `bbp mcp` session. A claim never accepts on the watcher's word alone
 //!   (`min_authors`), and a human still merges.
@@ -53,6 +54,9 @@ pub const WATCHER: &str = "watcher";
 
 /// How long one adapter command may run.
 const ADAPTER_DEADLINE: Duration = Duration::from_secs(600);
+/// How long a canary may run: a whole test profile, bounded again by the
+/// profile's own limits inside the sandbox.
+const CANARY_DEADLINE: Duration = Duration::from_secs(3600);
 
 /// One shipped app (`factory/apps/<app>.json`, D80).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -66,7 +70,8 @@ pub struct App {
     pub released_ref: String,
     /// The test profile the canary runs.
     pub profile: String,
-    /// The most the app's watch may spend per run, in dollars (canary).
+    /// The most the app's watch may spend per run, in dollars. Not read yet:
+    /// no adapter calls a model, so a run costs nothing (D210).
     pub watch_usd: f64,
 }
 
@@ -164,6 +169,96 @@ impl Watch for Toolchain {
         };
         Ok(toolchain(&text, watched).into_iter().collect())
     }
+}
+
+/// `bbp canary`: the app's `profile` from its maintenance task's frozen set,
+/// re-run on `released_ref` in the BBP host's sandbox (D210). A red run is a
+/// finding; a green one is none; a run that couldn't happen is an error.
+/// It makes no model call, so `watch_usd` isn't read.
+pub struct Canary {
+    /// The `bbp` binary.
+    pub bbp: PathBuf,
+    /// The BBP directory holding the maintenance tasks.
+    pub bbp_dir: PathBuf,
+    /// The work root; each app checks out under `<work>/<app>`.
+    pub work: PathBuf,
+}
+
+impl Watch for Canary {
+    fn name(&self) -> &'static str {
+        "canary"
+    }
+    fn findings(&self, app: &App, run: &dyn CommandRunner) -> Result<Vec<Finding>, String> {
+        let argv: Vec<String> = [
+            self.bbp.as_os_str(),
+            "canary".as_ref(),
+            "--dir".as_ref(),
+            self.bbp_dir.as_os_str(),
+            "--task".as_ref(),
+            app.task.as_ref(),
+            "--repo-path".as_ref(),
+            app.repo.as_ref(),
+            "--work".as_ref(),
+            self.work.join(&app.app).as_os_str(),
+            "--ref".as_ref(),
+            app.released_ref.as_ref(),
+            "--profile".as_ref(),
+            app.profile.as_ref(),
+        ]
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+        let exit = run
+            .run_in(None, &argv, &[], CANARY_DEADLINE, &[])
+            .map_err(|e| format!("bbp canary: {e}"))?;
+        if exit.status != 0 {
+            let err = String::from_utf8_lossy(&exit.stderr);
+            return Err(format!("bbp canary exited {}: {}", exit.status, tail(&err)));
+        }
+        canary(&String::from_utf8_lossy(&exit.stdout), &app.profile)
+            .map(|f| f.into_iter().collect())
+    }
+}
+
+/// The finding in a `bbp canary` report, if its run was red. The key is the
+/// resolved commit and the profile, so a newer red release supersedes the
+/// older claim in the profile's slot.
+///
+/// # Errors
+///
+/// A message when the report isn't one, or the run couldn't happen.
+pub fn canary(report: &str, profile: &str) -> Result<Option<Finding>, String> {
+    let v: Value =
+        rusty_serde::json::from_str(report.trim()).map_err(|e| format!("bbp canary: {e}"))?;
+    if let Some(e) = v["error"].as_str() {
+        return Err(format!("bbp canary: {e}"));
+    }
+    let base = v["base"].as_str().ok_or("bbp canary: no base")?;
+    match v["status"].as_str() {
+        Some("Passed") => return Ok(None),
+        Some("Failed") => {}
+        other => return Err(format!("bbp canary: status {other:?}")),
+    }
+    let red: Vec<String> = v["profiles"]
+        .as_seq()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|p| p["failed"].as_u64().is_some_and(|n| n > 0))
+        .map(|p| {
+            let name = p["name"].as_str().unwrap_or("?");
+            format!("{name} exit {}", p["exit_code"].as_i64().unwrap_or(-1))
+        })
+        .collect();
+    let short = base.get(..12).unwrap_or(base);
+    Ok(Some(Finding {
+        key: format!("canary:{base}:{profile}"),
+        slot: format!("canary:{profile}"),
+        domain: "regression",
+        text: format!(
+            "The released commit {short} fails test profile {profile} today; find what changed under it and fix it."
+        ),
+        detail: red.join(", "),
+    }))
 }
 
 /// Run `argv` in `repo`; its status and stderr (cargo reports there).
@@ -703,7 +798,12 @@ pub fn watched(factory: &Path) -> Result<Watched, String> {
 pub fn run(options: &Options, runner: &dyn CommandRunner) -> Result<(String, bool), String> {
     let apps = apps(&options.factory, options.app.as_deref())?;
     let toolchain = Toolchain(watched(&options.factory)?);
-    let adapters: [&dyn Watch; 3] = [&Advisories, &Updates, &toolchain];
+    let canary = Canary {
+        bbp: options.bbp.clone(),
+        bbp_dir: options.bbp_dir.clone(),
+        work: options.state.join("canary"),
+    };
+    let adapters: [&dyn Watch; 4] = [&Advisories, &Updates, &toolchain, &canary];
     let mut store = match options.dry_run {
         true => None,
         false => Some(Store::open(&options.state).map_err(|e| e.to_string())?),
@@ -1194,5 +1294,66 @@ mod tests {
         );
         assert!(matches!(o(&["--app"]), Err(ArgsError::Usage(_))));
         assert!(matches!(o(&["--help"]), Err(ArgsError::Help)));
+    }
+
+    const RED: &str = r#"{"base":"0123456789abcdef0123","tree":null,"status":"Failed","profiles":[{"name":"unit","exit_code":101,"failed":1}],"tests":[]}"#;
+
+    #[test]
+    fn a_red_canary_is_keyed_by_commit_and_profile() {
+        let f = canary(RED, "unit").unwrap().expect("red");
+        assert_eq!(f.key, "canary:0123456789abcdef0123:unit");
+        assert_eq!(f.slot, "canary:unit");
+        assert_eq!(f.domain, "regression");
+        assert!(
+            f.text.contains("0123456789ab ") && f.text.contains("unit"),
+            "{}",
+            f.text
+        );
+        assert_eq!(f.detail, "unit exit 101");
+        let other = RED.replace("0123456789abcdef0123", "fedcba");
+        let g = canary(&other, "unit").unwrap().expect("red");
+        assert_eq!(g.slot, f.slot, "a newer red release supersedes in the slot");
+        assert_ne!(g.key, f.key);
+    }
+
+    #[test]
+    fn a_green_canary_is_no_finding_and_a_broken_one_is_an_error() {
+        let green = RED
+            .replace("Failed", "Passed")
+            .replace("\"failed\":1", "\"failed\":0");
+        assert_eq!(canary(&green, "unit"), Ok(None));
+        let unrun = r#"{"base":"ab","status":"Error","profiles":[],"tests":[],"error":"prepare: no such ref"}"#;
+        assert_eq!(
+            canary(unrun, "unit"),
+            Err("bbp canary: prepare: no such ref".into())
+        );
+        assert!(canary(&RED.replace("Failed", "Error"), "unit").is_err());
+        assert!(canary("not json", "unit").is_err());
+        assert!(canary(r#"{"status":"Failed"}"#, "unit").is_err(), "no base");
+    }
+
+    #[test]
+    fn the_canary_adapter_runs_bbp_canary_on_the_released_ref() {
+        let dir = Path::new("/srv/demo");
+        let c = Canary {
+            bbp: "/bin/bbp".into(),
+            bbp_dir: "/var/bbp".into(),
+            work: "/var/state/canary".into(),
+        };
+        let run = FakeCommand::new(Ok(exit(0, RED, "")));
+        let found = c.findings(&app(dir), &run).unwrap();
+        assert_eq!(found.len(), 1);
+        let calls = run.calls.lock().unwrap();
+        assert_eq!(
+            calls[0].0.join(" "),
+            "/bin/bbp canary --dir /var/bbp --task maint-demo --repo-path /srv/demo --work /var/state/canary/demo --ref v1.0.0 --profile unit"
+        );
+        assert_eq!(calls[0].2, CANARY_DEADLINE);
+        let refused = FakeCommand::new(Ok(exit(1, "", "bbp: no profile \"unit\"\n")));
+        let e = c.findings(&app(dir), &refused).unwrap_err();
+        assert!(
+            e.starts_with("bbp canary exited 1") && e.contains("no profile"),
+            "{e}"
+        );
     }
 }

@@ -195,8 +195,13 @@ daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
     crate would post hundreds of claims.
   - `toolchain`: the app's `rust-toolchain.toml` channel against the watched
     Rust version.
-  - `canary`: a re-run of `profile` on `released_ref`, capped by `watch_usd`.
-    This is a later step, since it needs the BBP host's canary run.
+  - `canary`: a re-run of `profile` on `released_ref`. As built (D210):
+    `bbp canary --dir --task --repo-path --work --ref --profile` runs the
+    named profile from the task's frozen set on a clean sandboxed checkout
+    (the #598 baseline runner) and prints the report, writing nothing to the
+    task. A red run is a finding keyed `canary:<sha>:<profile>` in slot
+    `canary:<profile>`, domain `regression`; green posts nothing. No model is
+    called, so it costs $0 and `watch_usd` isn't read yet.
 - Findings are posted by the task's `watcher` role (D79) as low-stakes,
   reversible claims citing the brief. A claim needs a second author to
   accept, and a human still merges.

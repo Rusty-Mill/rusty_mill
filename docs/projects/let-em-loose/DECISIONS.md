@@ -206,6 +206,7 @@ Precise contracts used by this guide:
 | D209 | #1414: `rusty_orch lens why` output joins `bbp why --claim` steps to lens_record jobs; model and cost not reported yet (Q67) | [default] 2026-11-27 (1414) |
 | D210 | #1415: `bbp canary` prints a profile report on a resolved ref; orch `Canary` adapter keys failures `canary:<sha>:<profile>`; $0, runs under any `watch_usd` | [default] 2026-11-27 (1415) |
 | D211 | bbp_factory Backlog cards released to be worked; supersedes D164's "later" and D201's "D164 stands" | [stated] 2026-11-27 (general, 1414, 1415) |
+| D212 | #1414: additive `project` and `memory_type` on remind-me's POST /api/memories approved; built on a rusty-remind-me card; lessons wait for it | [stated] 2026-11-27 (1414) |
 
 ## D1. Lenses, not stages
 
@@ -2014,3 +2015,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_974c71002f284fdc931e610a011b6bfd
 **Key.** lel:general:bbp-factory-backlog-released
 **Source.** Nano, project "Rusty BBP_SWF" timeline, message `cmsg_014AqbZs58L565hMV2pFkCX5HkQt8BJtDyHJXBtmvHiQTP`, 2026-11-27T01:51:13Z, read by the expert. Relayed by the coordinator to the #1414/#1415 build thread. Supersedes parts of D164 and D201; relates to D58, D204 and millwright `lel-bbp-backlog-first-run-only`. Numbered D211 after D209 and D210 (D205 to D208 are in open PRs #1871 and #1927).
+
+## D212. #1414: additive `project` and `memory_type` on remind-me's POST /api/memories approved; built on a rusty-remind-me card; lessons wait for it
+
+**Decision.** Nano approves an additive public API change in rusty-remind-me. POST /api/memories (`api_add` in `crates/remind_me_api/src/routes.rs`) gains two optional fields, `project` and `memory_type`, which it drops today even though `MemoryAddInput` has `project`. The change is built on a rusty-remind-me board card (Mill Board #1632), in that repo. #1414's lessons (599-build-plan.md §3) are built once it ships. Until then they stay stopped by D58's gate, and #1414's `lens why` (D209) and #1415's canary (D210) go ahead. Review and merge rules in rusty-remind-me apply to the change.
+**Why.** The fix is small and additive, and D58 anticipated it when it approved lessons. Lessons need `project` to be scoped to Let Em Loose and `memory_type` to be stored as a `learning`.
+**Rejected.** b) Writing lessons with tags only and no `project` (would change plan §3). c) Deferring lessons with no fix.
+**Tag.** [stated] · remind-me: mem_599fc0b478d04efd95c7b56a6adb51fe
+**Key.** lel:1414:remind-me-add-route-project
+**Source.** Nano tapped option A, "Approve, card in remind-me" ("A rusty-remind-me card adds the two optional fields to POST /api/memories; lessons get built once it ships."), on decision card `cmsg_014AqbZs58L565hMV2pFkCX534TuNPPe8jEACb5bJecqGf` in thread `cmsg_014AqbZs58L565hMV2pFkCX5PE69AJuM8XMccee5BsJiwR`, 2026-11-27T02:00:28Z. The coordinator relayed the tap; the expert read the card and its options. The gap was found by the #1414 build thread on rusty-remind-me main (routes.rs lines 308–358). Settles D58's "an additive fix there is flagged then"; relates to D209, D210, D211. Numbered D212 after D211.
