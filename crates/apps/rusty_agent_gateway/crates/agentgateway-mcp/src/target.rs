@@ -258,7 +258,7 @@ impl Keyed {
 /// The keyed pools of one target, and the sessions that ended lately.
 #[derive(Default)]
 struct Keys {
-    pools: HashMap<String, Keyed>,
+    pools: HashMap<Vec<u8>, Keyed>,
     /// Ended sessions, kept for one idle period, so a call admitted just
     /// before its session ended can't open a pool for it afterwards.
     /// Session ids are random and never reused.
@@ -298,17 +298,9 @@ impl Pools {
     ) -> Result<Option<Arc<Pool>>, ClientError> {
         let (key, session) = match self.mode {
             UpstreamMode::Pooled => return Ok(None),
-            UpstreamMode::PerCredential => {
-                let credential = headers
-                    .set
-                    .iter()
-                    .find(|(name, _)| *name == http::header::AUTHORIZATION)
-                    .map(|(_, value)| String::from_utf8_lossy(value.as_bytes()).into_owned())
-                    .unwrap_or_default();
-                (credential, String::new())
-            }
+            UpstreamMode::PerCredential => (credential_key(headers), String::new()),
             UpstreamMode::PerSession => (
-                format!("{}\u{0}{}", who.session, who.principal),
+                format!("{}\u{0}{}", who.session, who.principal).into_bytes(),
                 who.session.clone(),
             ),
         };
@@ -395,9 +387,24 @@ fn reap(pools: &Weak<Pools>) {
     }
 }
 
+/// The `per_credential` key: the outgoing `authorization` value's exact
+/// bytes, so two credentials never share a pool. No header and an empty one
+/// are kept apart by the leading tag.
+fn credential_key(headers: &HeaderOverride) -> Vec<u8> {
+    let value = headers
+        .set
+        .iter()
+        .find(|(name, _)| *name == http::header::AUTHORIZATION)
+        .map(|(_, value)| value.as_bytes());
+    match value {
+        None => vec![0],
+        Some(bytes) => [&[1], bytes].concat(),
+    }
+}
+
 /// Remove and return the entries `pick` chooses.
-fn take(map: &mut HashMap<String, Keyed>, pick: impl Fn(&Keyed) -> bool) -> Vec<Keyed> {
-    let keys: Vec<String> = map
+fn take(map: &mut HashMap<Vec<u8>, Keyed>, pick: impl Fn(&Keyed) -> bool) -> Vec<Keyed> {
+    let keys: Vec<Vec<u8>> = map
         .iter()
         .filter(|(_, k)| pick(k))
         .map(|(key, _)| key.clone())
@@ -897,4 +904,34 @@ fn handshake(link: Link, handshake: Duration, call_timeout: Duration) -> Result<
     let mut config = ClientConfig::new("rusty-agent-gateway", env!("CARGO_PKG_VERSION"));
     config.call_timeout = call_timeout;
     Client::connect(link, config, NoHandler, handshake)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_authorization(value: Option<&[u8]>) -> HeaderOverride {
+        let set = value
+            .map(|v| {
+                let value = http::HeaderValue::from_bytes(v).expect("header value");
+                vec![(http::header::AUTHORIZATION, value)]
+            })
+            .unwrap_or_default();
+        HeaderOverride {
+            set,
+            remove: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn credential_keys_are_the_exact_bytes() {
+        let key = |v: Option<&[u8]>| credential_key(&with_authorization(v));
+        assert_ne!(
+            key(Some(b"Bearer \xff")),
+            key(Some(b"Bearer \xfe")),
+            "values that are not UTF-8 stay apart"
+        );
+        assert_ne!(key(None), key(Some(b"")), "no header is not an empty one");
+        assert_eq!(key(Some(b"Bearer a")), key(Some(b"Bearer a")));
+    }
 }
