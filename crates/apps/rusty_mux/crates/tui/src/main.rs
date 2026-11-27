@@ -3412,6 +3412,13 @@ mod client {
         /// clients and agents may type into the blocks not in focus.
         fn lease(&mut self) {
             let focus = self.focus;
+            // The block a card tree was opened over keeps the lease it held
+            // while the tree reads a peer (D380 (5)); a peer's is given back.
+            let keep = self
+                .exploring
+                .as_ref()
+                .filter(|o| o.view_only)
+                .map(|o| o.origin);
             for (block, pane) in &mut self.panes {
                 match *block == focus {
                     true if !pane.leased && pane.asking.is_none() => {
@@ -3419,6 +3426,7 @@ mod client {
                         pane.asking = Some(pane.send(|req| Message::AcquireLease { req, block }));
                         pane.retained = false;
                     }
+                    false if Some(*block) == keep => {}
                     // The server refuses a release of a lease that is not
                     // this client's, so another holder keeps it.
                     false if pane.leased || pane.retained => {
@@ -3437,6 +3445,14 @@ mod client {
         /// and is a different size.
         fn fit(&mut self) {
             let focus = self.focus;
+            // A peer is read under a lease for listing: it is not resized.
+            if self
+                .exploring
+                .as_ref()
+                .is_some_and(|o| o.view_only && o.block == focus)
+            {
+                return;
+            }
             let Some((_, rect)) = self.visible().into_iter().find(|(b, _)| *b == focus) else {
                 return;
             };
@@ -5295,6 +5311,47 @@ mod client {
                 "only listings: {methods:?}"
             );
             assert!(app.exploring.is_some(), "still open to read");
+        }
+
+        /// Reading a peer resizes nothing and gives up no lease the user held:
+        /// the origin keeps its own while the tree is on the peer and after it
+        /// closes (D380 (5)); the peer's lease, taken for listing, is given back.
+        #[cfg(unix)]
+        #[test]
+        fn a_peer_tree_neither_resizes_it_nor_gives_up_the_origins_lease() {
+            let (mut app, _inbox, far) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.cards = [(a, "#1573".to_owned()), (b, "#1573".to_owned())].into();
+            app.act(Action::Explorer);
+            sent(&far[1]);
+            // The peer is not the size its place gives it, so a fit would resize it.
+            app.panes.get_mut(&b).expect("B").term = Some(term(b""));
+            app.panes.get_mut(&b).expect("B").sizing = None;
+            app.take(Input::Keys(b"]".to_vec()));
+            let asked = lease_asked(&sent(&far[2])).expect("asked");
+            pane_says(
+                &mut app,
+                b,
+                Message::Done {
+                    req: asked,
+                    created: None,
+                },
+            );
+            let at_b = sent(&far[2]);
+            assert!(
+                !at_b.iter().any(|m| matches!(m, Message::Resize { .. })),
+                "the peer is not resized: {at_b:?}"
+            );
+            let at_a = sent(&far[1]);
+            assert!(!released(&at_a), "the origin's lease stands: {at_a:?}");
+            assert!(app.panes[&a].leased);
+            app.take(Input::Keys(b"q".to_vec()));
+            assert_eq!(app.focus, a);
+            assert!(released(&sent(&far[2])), "the peer's lease is given back");
+            let at_a = sent(&far[1]);
+            assert!(!released(&at_a), "nor on leaving: {at_a:?}");
+            assert!(lease_asked(&at_a).is_none(), "and not asked again");
+            assert!(app.panes[&a].leased);
         }
 
         /// A block with no card, or alone on its card, has nowhere to go; a
