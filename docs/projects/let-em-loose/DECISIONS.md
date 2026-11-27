@@ -203,6 +203,9 @@ Precise contracts used by this guide:
 | D202 | #705: `tree-sitter-python` 0.25 added to `rusty_erosion` (new `Cargo.lock` entry) | [stated] 2026-11-26 (705) |
 | D203 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
 | D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
+| D209 | #1414: `rusty_orch lens why` output joins `bbp why --claim` steps to lens_record jobs; model and cost not reported yet (Q67) | [default] 2026-11-27 (1414) |
+| D210 | #1415: `bbp canary` prints a profile report on a resolved ref; orch `Canary` adapter keys failures `canary:<sha>:<profile>`; $0, runs under any `watch_usd` | [default] 2026-11-27 (1415) |
+| D211 | bbp_factory Backlog cards released to be worked; supersedes D164's "later" and D201's "D164 stands" | [stated] 2026-11-27 (general, 1414, 1415) |
 
 ## D1. Lenses, not stages
 
@@ -1984,3 +1987,30 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_489a43a7e3194f5198c1fbc59032e132
 **Key.** lel:432:design-approved-build-after-600
 **Source.** Nano tapped "Approve, build after #600" ("Design and BBP_PROVIDER_SESSION approved; code waits until the #600 builder work lands (D164 order).") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE45mV9XoArWETD2NMavEjbEy` in the Let Em Loose project thread "Build BBP Codex session resume" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4KGZwc1M3KXuPWKygNkYSfd`), 2026-11-26 13:56Z. The coordinator relayed the tap; the card and its options were read. Resolves OPEN_QUESTIONS Q66. Numbered D204 (was D200) for the same reason. D203 and D204 were checked free on main and in every open PR on 2026-11-26.
+
+## D209. #1414: `rusty_orch lens why` output joins `bbp why --claim` steps to lens_record jobs; model and cost not reported yet (Q67)
+
+**Decision.** `rusty_orch lens why --bbp B --dir D --task T --claim N --state S [--at REV]` prints one JSON line: the `bbp why --claim` History object, where each step whose msg is in the items of an orch-store `lens_record` row gains `"job": {"lens", "epoch", "look_harder", "unsure"}`; a step no orch job posted has no `job` key. Model and cost are not reported: `LensRecordRecord::v1` stores neither, and the meter is per-task spend only. Adding them is an orch-store schema change, open as OPEN_QUESTIONS Q67. The command is in D58's approved list (`rusty_orch lens why`), so it needs no new-command approval, unlike D111 or D117, which D58 did not list. Flags and output shape are build detail.
+**Why.** It uses only data orch already stores. An absent `job` key leaves nothing to remove later, and model and cost can be added to the object once Q67 is decided.
+**Rejected.** A `lens_record` v2 with model and cost now (schema change, ask-first: Q67). Reading the model from the current lens config binding (wrong once the binding changes).
+**Tag.** [default] · remind-me: mem_6cb63b0c9e5e4a1b8e9848a019d451ee
+**Key.** lel:1414:lens-why-shape
+**Source.** let-em-loose-expert, 2026-11-27, answering the #1414/#1415 build thread; D58, D92, 599-build-plan.md §5, `crates/apps/rusty_orch/crates/orch-store/src/lens_records.rs`, `meters.rs`. Numbered D209 because D205 to D208 are taken in open PRs #1871 and #1927 (checked 2026-11-27).
+
+## D210. #1415: `bbp canary` prints a profile report on a resolved ref; orch `Canary` adapter keys failures `canary:<sha>:<profile>`; $0, runs under any `watch_usd`
+
+**Decision.** Host: `bbp canary --dir D --task T --repo-path P --work W --ref REF --profile NAME` resolves REF to a sha, runs only the named profile from the task's frozen profile set on a clean sandboxed checkout through `runner::isolated_baseline` (the #598 baseline runner), prints a Baseline-shaped JSON report, and writes nothing to the task. The task must be open; D80 says the human opens the maintenance task. orch: a `Canary` adapter on the `Watch` port calls it. A failing profile is a finding with key `canary:<resolved sha>:<profile>`, slot `canary:<profile>` and domain `regression`, posted through `watch_finding` under D83. So a new failing sha supersedes the previous claim. A green run posts nothing. A host error is an adapter error (reported, the other adapters still run, exit 1). Profiles are test commands with no model calls, so a canary costs $0 and runs whatever `watch_usd` is: the adapter never refuses because of the cap's value. It doesn't read `watch_usd` yet, and its doc comment says so. The card's gate (spend above a zero cap needs Nano's go) is never reached. D58 lists both the host `canary` run on a released ref and the `canary` adapter, so neither needs a new-command approval.
+**Why.** A print-only run adds no log or schema change and reuses the existing runner. The key and slot follow D83, and the domain names what the finding is, as `security`, `dependencies` and `platform` do for the other adapters.
+**Rejected.** Writing the canary report into the task's log (a log change, and the finding already posts through `watch_finding`). Refusing to run when `watch_usd > 0` (a cap isn't spend). Running a profile from outside the frozen set.
+**Tag.** [default] · remind-me: mem_889e191d298a4dfdbddacb84ba2ff139
+**Key.** lel:1415:canary-adapter
+**Source.** let-em-loose-expert, 2026-11-27, answering the #1414/#1415 build thread; D58, D80, D83, 599-build-plan.md §4 and PR order 4, card #1415, `crates/apps/rusty_orch/crates/rusty_orch/src/watch.rs`, `crates/apps/rusty_bbp_host/src/runner.rs` `isolated_baseline`.
+
+## D211. bbp_factory Backlog cards released to be worked; supersedes D164's "later" and D201's "D164 stands"
+
+**Decision.** Nano: "spin up multiple threads to work cards for bbp_factory cards in backlog". The bbp_factory Backlog cards are released to be worked now. This supersedes D164's "the other `bbp_factory` Backlog cards stay for later" and D201's "D164 stands for every other card". #1414 and #1415, both inside D58's approved #599 design, can move to building. Each card still needs an approved design (D25), and ask-first gates, spending, deployment and review/merge rules still apply. Card-specific decisions stand: D204 (#432 builds after #600) is unchanged, because the message names no cards. #1414's lessons part stays stopped by D58's remind-me gate until Nano answers the additive route fix.
+**Why.** This is the newest attributable Nano instruction on the bbp_factory Backlog. The freeze lifted with D164 and the first run has happened, so D164's "later" was the only remaining hold.
+**Rejected.** Reading it as overriding card-specific orderings (D204). Reading it as waiving design approval or ask-first gates.
+**Tag.** [stated] · remind-me: mem_974c71002f284fdc931e610a011b6bfd
+**Key.** lel:general:bbp-factory-backlog-released
+**Source.** Nano, project "Rusty BBP_SWF" timeline, message `cmsg_014AqbZs58L565hMV2pFkCX5HkQt8BJtDyHJXBtmvHiQTP`, 2026-11-27T01:51:13Z, read by the expert. Relayed by the coordinator to the #1414/#1415 build thread. Supersedes parts of D164 and D201; relates to D58, D204 and millwright `lel-bbp-backlog-first-run-only`. Numbered D211 after D209 and D210 (D205 to D208 are in open PRs #1871 and #1927).

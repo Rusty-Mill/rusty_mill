@@ -15,6 +15,8 @@
 //! - [`alien`]: `rusty_orch lens alien report`, the #708 alien lens's shadow numbers.
 //! - [`record`]: each lens's track record, from its stored blind reviews and
 //!   `bbp why` (#599).
+//! - [`why`]: `rusty_orch lens why`, one claim's `bbp why` history with the
+//!   lens job behind each evidence post (#599 §5, D209).
 //! - [`probes`]: the #708 alien lens's sandboxed probe runner (D96).
 //! - [`hunts`]: the #708 alien lens's pass in `lens run --alien` (D99).
 
@@ -30,3 +32,4 @@ pub mod record;
 pub mod registry;
 pub mod run;
 pub mod untested;
+pub mod why;

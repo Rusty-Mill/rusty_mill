@@ -249,6 +249,11 @@ daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
 For one claim: the `bbp why --claim` history joined with orch's job records:
 the job, lens, model and cost behind each evidence post.
 
+As built (D209): `rusty_orch lens why --bbp --dir --task --claim --state
+[--at]` prints the history as one JSON line; each evidence step a saved
+`lens_record` job posted gains `job: {lens, epoch, look_harder, unsure}`.
+Model and cost wait on Q67, since `lens_record` stores neither.
+
 ## PR order
 
 1. BBP: `history` module + `bbp why --claim/--at`. Merged as #1483.

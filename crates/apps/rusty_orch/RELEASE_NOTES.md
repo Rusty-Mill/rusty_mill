@@ -4,6 +4,15 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## `lens why`: which lens posted what
+**2026-11-27**
+
+- `rusty_orch lens why` prints one claim's history from `bbp why`, and marks
+  each evidence post a lens made with the job behind it: the lens, the
+  epoch, whether it was a look-harder pass, and whether its post is unsure.
+- It doesn't show the model or the cost yet: neither is stored per job
+  (open question Q67).
+
 ## Owned BBP gates
 **2026-11-25**
 

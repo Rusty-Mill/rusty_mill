@@ -121,20 +121,30 @@ pub fn read(
     let claims: BTreeSet<MsgId> = reviews.iter().map(|r| r.claim).collect();
     let mut trails = BTreeMap::new();
     for claim in claims {
-        let json = why(bbp, dir, task, claim)?;
+        let json = why(bbp, dir, task, claim, None)?;
         let trail = trail(&json).map_err(|e| format!("{claim}: {e}"))?;
         trails.insert(claim, trail);
     }
     Ok(tallies(reviews, &trails))
 }
 
-/// `bbp why --claim`'s one line of JSON.
-fn why(bbp: &Path, dir: &Path, task: &str, claim: MsgId) -> Result<String, String> {
-    let out = Command::new(bbp)
-        .arg("why")
+/// `bbp why --claim`'s one line of JSON, as the claim stood at `at` if given.
+pub(super) fn why(
+    bbp: &Path,
+    dir: &Path,
+    task: &str,
+    claim: MsgId,
+    at: Option<u64>,
+) -> Result<String, String> {
+    let mut cmd = Command::new(bbp);
+    cmd.arg("why")
         .arg("--dir")
         .arg(dir)
-        .args(["--task", task, "--claim", &claim.0.to_string()])
+        .args(["--task", task, "--claim", &claim.0.to_string()]);
+    if let Some(rev) = at {
+        cmd.args(["--at", &rev.to_string()]);
+    }
+    let out = cmd
         .output()
         .map_err(|e| format!("cannot run {}: {e}", bbp.display()))?;
     if !out.status.success() {
@@ -285,7 +295,7 @@ fn id(v: &Value) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use orch_lens::record::Scored;
 
@@ -412,7 +422,9 @@ mod tests {
     /// Retries `f` while the store is locked: another test's child process
     /// can briefly inherit a store lock.
     #[cfg(unix)]
-    fn retry_locked<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    pub(in crate::lens) fn retry_locked<T>(
+        mut f: impl FnMut() -> Result<T, String>,
+    ) -> Result<T, String> {
         for _ in 0..100 {
             match f() {
                 Err(e) if e.ends_with("is in use by another process") => {
