@@ -422,7 +422,7 @@ impl Who {
         Who {
             headers,
             claims,
-            session: caller.session.clone(),
+            session: ctx.session().cloned(),
         }
     }
 

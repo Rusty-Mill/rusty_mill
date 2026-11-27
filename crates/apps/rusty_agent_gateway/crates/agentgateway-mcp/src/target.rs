@@ -219,7 +219,7 @@ impl SessionKey {
     /// The key for a call under `session` by the holder of `claims`.
     ///
     /// `session` is the classic session the MCP server validated for the
-    /// request ([`rusty_mcp_server::Caller::session`]), never the raw
+    /// request ([`rusty_mcp_server::CallContext::session`]), never the raw
     /// `Mcp-Session-Id` header. Once it ends, no pool is opened for it, however
     /// long the call took to get here. On a `per_session` target, a call with
     /// no session (a stateless 2026-07-28 request, or a classic one that names

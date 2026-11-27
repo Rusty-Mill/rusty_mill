@@ -263,7 +263,6 @@ fn a_source_can_list_per_caller_and_refuse() {
     let caller = rusty_mcp_server::Caller {
         headers: vec![("X-Pass".to_owned(), "1".to_owned())],
         principal: None,
-        session: None,
     };
     let c = Arc::new(Connection::new(Arc::new(server()), Arc::new(Mute)).with_caller(caller));
     assert_eq!(list(&c), ["shown"]);

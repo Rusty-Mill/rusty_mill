@@ -497,7 +497,6 @@ fn a_caller_the_source_knows_is_granted_its_resource_on_listen() {
     let caller = rusty_mcp_server::Caller {
         headers: vec![("X-Pass".to_owned(), "1".to_owned())],
         principal: None,
-        session: None,
     };
     let conn = Arc::new(
         rusty_mcp_server::Connection::new(sourced(&changes), Arc::clone(&sink) as _)

@@ -187,7 +187,6 @@ impl HttpHandler {
                 .map(|(n, v)| (n.to_ascii_lowercase(), v.to_owned()))
                 .collect(),
             principal,
-            session: None,
         };
         self.respond(request, caller)
             .unwrap_or_else(|rejection| rejection)
@@ -614,11 +613,6 @@ impl HttpHandler {
             self.check_version_rules(headers, header_version.as_ref(), &message, has_session)?;
         // 2026-07-28 `_meta` requests are stateless: any session id is ignored.
         let session = if modern { None } else { looked_up? };
-        // Only a session the store just validated reaches handlers.
-        let caller = Caller {
-            session: session.as_ref().map(|s| s.handle.clone()),
-            ..caller
-        };
         self.dispatch(message, header_version, modern, session, caller, owner)
     }
 
@@ -1095,7 +1089,9 @@ impl HttpHandler {
                 info,
                 caps,
             )
-            .with_caller(caller),
+            .with_caller(caller)
+            // Only a session the store just validated reaches handlers.
+            .with_session(session.as_ref().map(|s| s.handle.clone())),
         );
         match conn.start(message) {
             Started::Done(None) => Ok(Response::json(StatusCode::ACCEPTED, Vec::new())),

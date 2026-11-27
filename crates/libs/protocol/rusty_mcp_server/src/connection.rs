@@ -41,15 +41,9 @@ pub struct Caller {
     /// What the host's own authentication established about the caller
     /// (token claims), as JSON; `None` when it ran none.
     pub principal: Option<Value>,
-    /// The classic session the request runs in, as the server validated it:
-    /// known, live and opened by this principal. `None` for a request with no
-    /// session and for a stateless (2026-07-28 `_meta`) request, whose
-    /// `Mcp-Session-Id` header the server ignores. Key per-session state on
-    /// this, never on the raw header.
-    pub session: Option<ClassicSession>,
 }
 
-/// A classic HTTP session as a handler sees it: its id, and whether it has
+/// A classic HTTP session as a handler sees it ([`CallContext::session`]): its id, and whether it has
 /// ended since the request was admitted. Every copy shares one flag, so a
 /// handler still working when the session ends can tell before it builds
 /// anything more for it. Equal when the ids are.
@@ -143,6 +137,7 @@ pub struct CallContext {
     cancel: CancelToken,
     notifier: Arc<dyn Notifier>,
     caller: Arc<Caller>,
+    session: Option<ClassicSession>,
     #[cfg(feature = "request-state")]
     pub(crate) state: Option<Vec<u8>>,
     /// How many times this request has already been sent back for input.
@@ -181,6 +176,15 @@ impl CallContext {
     /// The HTTP request this call arrived in (empty over stdio).
     pub fn caller(&self) -> &Caller {
         &self.caller
+    }
+
+    /// The classic session the call runs in, as the server validated it:
+    /// known, live and opened by this principal. `None` for a call with no
+    /// session, for a stateless (2026-07-28 `_meta`) request, whose
+    /// `Mcp-Session-Id` header the server ignores, and over stdio. Key
+    /// per-session state on this, never on the raw header.
+    pub fn session(&self) -> Option<&ClassicSession> {
+        self.session.as_ref()
     }
 
     /// The id of the `tools/call` request.
@@ -259,6 +263,8 @@ pub struct Connection {
     /// Raised by [`Connection::close_streams`]: long-lived requests wind down.
     closing: AtomicBool,
     pub(crate) caller: Arc<Caller>,
+    /// The validated classic session, set by the HTTP layer.
+    session: Option<ClassicSession>,
 }
 
 /// What [`Connection::start`] decided about a message.
@@ -321,6 +327,7 @@ impl Connection {
             inflight: Mutex::new(HashMap::new()),
             closing: AtomicBool::new(false),
             caller: Arc::new(Caller::default()),
+            session: None,
         }
     }
 
@@ -329,6 +336,14 @@ impl Connection {
     #[must_use]
     pub fn with_caller(mut self, caller: Caller) -> Self {
         self.caller = Arc::new(caller);
+        self
+    }
+
+    /// This connection runs in the validated classic `session`; handlers see
+    /// it as [`CallContext::session`].
+    #[must_use]
+    pub(crate) fn with_session(mut self, session: Option<ClassicSession>) -> Self {
+        self.session = session;
         self
     }
 
@@ -527,6 +542,7 @@ impl Connection {
             cancel: token.clone(),
             notifier: Arc::clone(&self.notifier),
             caller: Arc::clone(&self.caller),
+            session: self.session.clone(),
             #[cfg(feature = "request-state")]
             state: None,
             #[cfg(feature = "request-state")]

@@ -1497,8 +1497,8 @@ fn start_whoami() -> (Fixture, Seen) {
     let server = Arc::new(
         Server::builder("whoami-fixture", "1")
             .tool(Tool::new("whoami", schema()), move |ctx, _c| {
-                (*keep.lock().unwrap()).clone_from(&ctx.caller().session);
-                let session = ctx.caller().session.as_ref();
+                (*keep.lock().unwrap()) = ctx.session().cloned();
+                let session = ctx.session();
                 Ok(text(session.map_or("none", |s| s.id())))
             })
             .build()
