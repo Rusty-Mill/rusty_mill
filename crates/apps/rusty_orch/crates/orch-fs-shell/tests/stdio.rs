@@ -53,6 +53,7 @@ fn critic_reads_but_is_not_offered_write() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)] // runs `cat`
 #[test]
 fn builder_writes_and_runs() {
     let dir = root("builder");

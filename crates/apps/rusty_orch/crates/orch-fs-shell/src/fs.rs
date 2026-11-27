@@ -266,5 +266,6 @@ fn pump(mut stream: impl Read, kept: &Mutex<(Vec<u8>, bool)>) {
     }
 }
 
-#[cfg(test)]
+// The tests drive Unix programs (`sh`, `cat`, `sleep`) and symlinks.
+#[cfg(all(test, unix))]
 mod tests;

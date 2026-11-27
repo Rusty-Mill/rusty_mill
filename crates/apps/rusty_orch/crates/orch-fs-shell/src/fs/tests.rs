@@ -77,7 +77,6 @@ fn write_read_list_stat_round_trip() {
     assert!(ws.write(&p("nodir/x"), b"x").is_err(), "parent must exist");
 }
 
-#[cfg(unix)]
 #[test]
 fn symlinks_out_of_the_root_are_refused() {
     use std::os::unix::fs::symlink;
@@ -125,7 +124,6 @@ fn symlinks_out_of_the_root_are_refused() {
     assert!(kinds.contains(&("inner".to_owned(), Kind::Symlink)));
 }
 
-#[cfg(unix)]
 #[test]
 fn exec_runs_in_the_root_with_stdin() {
     let s = Scratch::new();
@@ -159,7 +157,6 @@ fn exec_runs_in_the_root_with_stdin() {
     assert!(err.contains("could not start"));
 }
 
-#[cfg(unix)]
 #[test]
 fn exec_is_killed_at_its_timeout() {
     let s = Scratch::new();
@@ -173,7 +170,6 @@ fn exec_is_killed_at_its_timeout() {
     assert!(started.elapsed() < Duration::from_secs(10));
 }
 
-#[cfg(unix)]
 #[test]
 fn exec_output_is_capped() {
     let s = Scratch::new();
