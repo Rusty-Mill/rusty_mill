@@ -2790,16 +2790,19 @@ mod client {
                 }
                 return self.draw();
             };
+            // Back on the origin the tree is the origin's own, with its status
+            // and actions; any other block is read for listing only.
+            let view_only = peer != origin;
+            let status = !view_only && self.panes.get(&peer).is_some_and(|p| p.status);
             self.exploring = Some(Exploring {
                 block: peer,
-                // Not the block's status: a peer asks for listings only.
-                explorer: Explorer::opened(false),
+                explorer: Explorer::opened(status),
                 req: None,
                 touched_req: None,
                 stat_req: None,
                 origin,
                 lease_wait: true,
-                view_only: true,
+                view_only,
                 cd: None,
             });
             self.focus_on(peer);
@@ -5352,6 +5355,44 @@ mod client {
             assert!(!released(&at_a), "nor on leaving: {at_a:?}");
             assert!(lease_asked(&at_a).is_none(), "and not asked again");
             assert!(app.panes[&a].leased);
+        }
+
+        /// Cycling through the card's blocks back to the origin gives its own
+        /// tree again: status asked for, and its actions allowed.
+        #[cfg(unix)]
+        #[test]
+        fn cycling_back_to_the_origin_restores_its_status_and_actions() {
+            let (mut app, _inbox, far) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.cards = [(a, "#1573".to_owned()), (b, "#1573".to_owned())].into();
+            app.panes.get_mut(&a).expect("A").status = true;
+            app.act(Action::Explorer);
+            app.take(Input::Keys(b"]".to_vec()));
+            assert!(app.exploring.as_ref().expect("open").view_only);
+            sent(&far[1]);
+            app.take(Input::Keys(b"]".to_vec()));
+            let open = app.exploring.as_ref().expect("open");
+            assert_eq!((open.block, open.view_only), (a, false));
+            let list = workspace_calls(&sent(&far[1]))[0].0;
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: list,
+                    text: ".\nf\ta.rs".into(),
+                },
+            );
+            let methods: Vec<String> = sent(&far[1])
+                .into_iter()
+                .filter_map(|m| match m {
+                    Message::BlockCall { method, .. } => Some(method),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                methods.iter().any(|m| m == "terminal.workspace-touched"),
+                "status is asked for again: {methods:?}"
+            );
         }
 
         /// A block with no card, or alone on its card, has nowhere to go; a
