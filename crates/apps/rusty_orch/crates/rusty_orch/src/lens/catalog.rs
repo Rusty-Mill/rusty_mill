@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
 use std::path::Path;
 
-use orch_lens::compose::{self, Composed, DomainMap, Limits, Selection, Text};
+use orch_lens::compose::{self, Composed, DomainMap, Limits, Plan, Selection, Text};
 
 /// The domain map's file name, at the catalog root.
 pub const MAP: &str = "domains.json";
@@ -90,6 +90,21 @@ impl Catalog {
             selection,
             unknown,
         })
+    }
+
+    /// The unrendered composition for `domains` ([`compose::Plan`]), so a
+    /// caller can fit each provider's window without cutting the card and
+    /// render only the prefix it picks.
+    pub fn plan(&self, lens_prompt: &str, domains: &[String]) -> Result<Plan, String> {
+        let (selection, _) = compose::select(&self.map, domains);
+        Plan::new(
+            lens_prompt,
+            self.domain_pack.as_ref(),
+            &selection,
+            &self.texts,
+            self.limits,
+        )
+        .map_err(|e| e.to_string())
     }
 }
 
