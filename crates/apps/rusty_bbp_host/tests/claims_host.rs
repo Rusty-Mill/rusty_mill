@@ -3515,3 +3515,24 @@ fn bbp_claims_lists_every_claim_read_only() {
     assert!(inbox::claims(&dir, &TaskId("nope".into())).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An interrupted append leaves a partial last line. `bbp claims` must read
+/// the complete prefix and leave the log's bytes exactly as they were.
+#[test]
+fn bbp_claims_leaves_a_torn_log_tail_untouched() {
+    let dir = tempdir("claims-torn");
+    claims_task(&dir);
+    let a = claim(&dir, "a", "ship it", true);
+    let log = rusty_bbp::log_path_for(&dir, &task());
+    let mut bytes = std::fs::read(&log).unwrap();
+    bytes.extend_from_slice(b"{\"prev\":\"torn");
+    std::fs::write(&log, &bytes).unwrap();
+    let views = inbox::claims(&dir, &task()).unwrap();
+    assert_eq!(views.iter().map(|v| v.id.0).collect::<Vec<_>>(), [a]);
+    assert_eq!(
+        std::fs::read(&log).unwrap(),
+        bytes,
+        "the log is not repaired"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

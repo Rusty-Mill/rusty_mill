@@ -153,13 +153,22 @@ pub fn json(dir: &Path, tasks: &[TaskId]) -> Result<String, String> {
 
 /// Every claim of a claims task as the LEL tab reads it (`bbp claims`): the same
 /// `ClaimView` the inbox shows for an escalated claim, for all of them, in id
-/// order. Read-only in that it appends no events and takes no session credential;
-/// like every host verb it opens the store, which truncates a torn log tail.
+/// order. Read-only: it reads a private copy of the task's log, so the store's
+/// torn-tail repair (which truncates) can only touch the copy. It appends no
+/// events, takes no session credential and never reads the master secret.
 pub fn claims(dir: &Path, task: &TaskId) -> Result<Vec<ClaimView>, String> {
-    if !crate::log_path_for(dir, task).exists() {
+    let log = crate::log_path_for(dir, task);
+    if !log.exists() {
         return Err(format!("no such task: {}", task.0));
     }
-    let d = open_driver(dir, task)?;
+    let scratch = Scratch::new()?;
+    let tasks = scratch.0.join("tasks");
+    std::fs::create_dir(&tasks).map_err(|e| e.to_string())?;
+    let name = log.file_name().ok_or("log path has no name")?;
+    std::fs::copy(&log, tasks.join(name)).map_err(|e| format!("{}: {e}", log.display()))?;
+    let store = FsStore::open(&scratch.0).map_err(|e| e.to_string())?;
+    let mut d = Driver::new(store, task.clone());
+    d.reload().map_err(|e| format!("{e:?}"))?;
     if d.state.mode != Mode::Claims {
         return Err(format!("{} is not a claims task", task.0));
     }
@@ -169,6 +178,29 @@ pub fn claims(dir: &Path, task: &TaskId) -> Result<Vec<ClaimView>, String> {
         .values()
         .map(|r| card(&d.state, r, &Sight::all()))
         .collect())
+}
+
+/// A private scratch directory under the system temp dir, removed on drop.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new() -> Result<Scratch, String> {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("bbp-claims-{}-{n}", std::process::id()));
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+        b.create(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Scratch(path))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// The JSON `bbp claims` prints: an array of claim views.
