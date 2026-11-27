@@ -23,6 +23,12 @@ keep=${MILL_BOARD_BACKUP_KEEP:-14}
 [[ $keep =~ ^[1-9][0-9]*$ ]] || die "MILL_BOARD_BACKUP_KEEP must be a positive whole number, not '$keep'"
 umask 077
 
+# One run at a time (the timer, or a hand-run snapshot or ship): both rebuild the staging
+# directory, and a prune from a staging directory another run emptied would delete the copies.
+mkdir -p "$dir"
+exec {lock_fd}>"$dir/.lock"
+flock -n "$lock_fd" || die "another mill-board-backup is running"
+
 # Copy $1 to $2 with the online backup API, then open the copy and require integrity_check ok.
 copy_and_check() {
     python3 -I - "$1" "$2" <<'PY'
@@ -133,6 +139,9 @@ ship() {
     if ((here < keep && here < there)); then
         echo "mill-board-backup: only $here copies here, $there at the destination; not pruning it" >&2
     else
+        # The staging directory must still hold exactly the verified pairs: never prune from less.
+        [[ $(find "$stage" -maxdepth 1 -type l | wc -l) -eq $((2 * $(grep -c . <<<"$names"))) ]] ||
+            die "staging changed under this run: nothing pruned"
         rsync -aL --delete --timeout=600 "${filter[@]}" "$stage/" "$dest/"
     fi
     echo "mill-board-backup: shipped to $dest"
