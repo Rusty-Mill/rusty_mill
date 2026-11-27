@@ -1366,6 +1366,9 @@ mod client {
         /// The change marks and the stat of the cursor's row, asked for.
         touched_req: Option<u64>,
         stat_req: Option<u64>,
+        /// A `cd` waiting for the user's `y`: the directory and the line to
+        /// type, shown first so the user sees what goes into the shell.
+        cd: Option<(String, Vec<u8>)>,
     }
 
     impl Pane {
@@ -2630,6 +2633,7 @@ mod client {
                 req: None,
                 touched_req: None,
                 stat_req: None,
+                cd: None,
             });
             self.list_workspace(None);
             self.browsing = true;
@@ -2704,8 +2708,32 @@ mod client {
             let Some(open) = self.exploring.as_mut() else {
                 return;
             };
+            // A `cd` asked for waits on one key: `y` types it, any other
+            // cancels and is not acted on.
+            if let Some((_, line)) = open.cd.take() {
+                if bytes == b"y" {
+                    let block = open.block;
+                    if let Some(pane) = self.panes.get_mut(&block) {
+                        pane.typed(line);
+                    }
+                    return self.live();
+                }
+                open.explorer.say("cd cancelled");
+                return self.draw();
+            }
             match explorer::press(&mut open.explorer, bytes) {
                 Explored::Leave => self.live(),
+                Explored::Cd(dir) => {
+                    match explorer::cd_command(&dir) {
+                        Some(line) => {
+                            open.explorer
+                                .say(&format!("type `cd -- '{dir}'` in the shell? y = yes"));
+                            open.cd = Some((dir, line));
+                        }
+                        None => open.explorer.say("cd refused: unsafe name"),
+                    }
+                    self.draw();
+                }
                 Explored::Open => {
                     self.ask_workspace();
                     self.draw();
@@ -2742,6 +2770,15 @@ mod client {
             let Some(open) = self.exploring.as_mut().filter(|o| o.block == block) else {
                 return;
             };
+            // A reply may replace the notice that asked for a `cd`'s yes, so
+            // the question is dropped with it: a `y` must never type what the
+            // screen no longer asks.
+            if [open.req, open.touched_req, open.stat_req].contains(&Some(req))
+                && open.cd.take().is_some()
+            {
+                // Its question goes too, before the reply may set a note.
+                open.explorer.clear_note();
+            }
             if open.req == Some(req) {
                 open.req = None;
                 match answer {
@@ -4691,6 +4728,124 @@ mod client {
                     .count(),
                 1
             );
+        }
+
+        /// `c` on a directory asks first: only `y` types the quoted `cd` into
+        /// the block and closes the tree; any other key cancels.
+        #[cfg(unix)]
+        #[test]
+        fn cd_types_into_the_block_only_after_a_yes() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.act(Action::Explorer);
+            let list = workspace_calls(&sent(&far[1]))[0].0;
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: list,
+                    text: ".\nd\tmy dir\nf\ta".into(),
+                },
+            );
+            app.take(Input::Keys(b"jc".to_vec()));
+            assert!(typed_in(&sent(&far[1])).is_empty(), "asked, not typed");
+            // Anything but `y` cancels, and is not read as a command.
+            app.take(Input::Keys(b"n".to_vec()));
+            assert!(app.exploring.is_some() && typed_in(&sent(&far[1])).is_empty());
+            app.take(Input::Keys(b"c".to_vec()));
+            app.take(Input::Keys(b"y".to_vec()));
+            assert_eq!(typed_in(&sent(&far[1])), [b"cd -- 'my dir'\r".to_vec()]);
+            assert!(app.exploring.is_none(), "closed");
+        }
+
+        /// A reply that replaces the question drops the pending `cd`: the `y`
+        /// that follows types nothing.
+        #[cfg(unix)]
+        #[test]
+        fn a_reply_cancels_a_pending_cd() {
+            let (mut app, _inbox, far) = app(None);
+            let a = block(1);
+            app.act(Action::Explorer);
+            let list = workspace_calls(&sent(&far[1]))[0].0;
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: list,
+                    text: ".\nd\tsrc".into(),
+                },
+            );
+            // Open `src`: its listing is in flight when `c` asks.
+            app.take(Input::Keys(b"j\r".to_vec()));
+            let src = workspace_calls(&sent(&far[1])).remove(0);
+            assert_eq!(src.1.as_deref(), Some("src"));
+            app.take(Input::Keys(b"c".to_vec()));
+            assert!(app.exploring.as_ref().is_some_and(|o| o.cd.is_some()));
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: src.0,
+                    text: "src\nf\tx".into(),
+                },
+            );
+            assert!(app.exploring.as_ref().is_some_and(|o| o.cd.is_none()));
+            app.take(Input::Keys(b"y".to_vec()));
+            assert!(typed_in(&sent(&far[1])).is_empty(), "nothing typed");
+        }
+
+        /// A stat or change-marks reply that cancels a pending `cd` takes its
+        /// question off the screen too, so a `y` is never offered for it.
+        #[cfg(unix)]
+        #[test]
+        fn a_stat_or_marks_reply_removes_the_cd_question() {
+            for method in ["terminal.workspace-stat", "terminal.workspace-touched"] {
+                let (mut app, _inbox, far) = app(None);
+                let a = block(1);
+                app.panes.get_mut(&a).expect("A").status = true;
+                app.act(Action::Explorer);
+                let list = workspace_calls(&sent(&far[1]))[0].0;
+                pane_says(
+                    &mut app,
+                    a,
+                    Message::Text {
+                        req: list,
+                        text: ".\nd\tsrc".into(),
+                    },
+                );
+                let req = sent(&far[1])
+                    .iter()
+                    .find_map(|m| match m {
+                        Message::BlockCall { req, method: m, .. } if m == method => Some(*req),
+                        _ => None,
+                    })
+                    .expect("asked for");
+                app.take(Input::Keys(b"c".to_vec()));
+                let asking = |app: &App| {
+                    let open = app.exploring.as_ref().expect("open");
+                    explorer::render(&open.explorer, 60, 8)
+                        .iter()
+                        .any(|l| l.contains("y = yes"))
+                };
+                assert!(asking(&app), "{method}: asked");
+                let text = if method.ends_with("stat") {
+                    "d\t0\t60"
+                } else {
+                    ".\n"
+                };
+                pane_says(
+                    &mut app,
+                    a,
+                    Message::Text {
+                        req,
+                        text: text.into(),
+                    },
+                );
+                assert!(app.exploring.as_ref().is_some_and(|o| o.cd.is_none()));
+                assert!(!asking(&app), "{method}: question gone");
+                app.take(Input::Keys(b"y".to_vec()));
+                assert!(typed_in(&sent(&far[1])).is_empty(), "nothing typed");
+            }
         }
 
         /// The server refuses the change marks on an agent's block (D372): the
