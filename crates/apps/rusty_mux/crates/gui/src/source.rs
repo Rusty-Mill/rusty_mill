@@ -50,8 +50,7 @@ use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
     Act, BlockInfo, Bound, Detached, Dir, DownloadDone, DownloadProgress, Explore, Explored, Feed,
     Float as Pane, ForwardDone, Link, ListDone, Listed, Notice, PaneIo, Remote, RerunDone, Session,
-    Show,
-    Source, Take, Tree, UploadDone, UploadProgress,
+    Show, Source, Take, Tree, UploadDone, UploadProgress,
 };
 
 use crate::floats;
