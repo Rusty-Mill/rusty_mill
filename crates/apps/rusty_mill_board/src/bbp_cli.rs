@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
+use crate::anchor::Verified;
 use crate::inbox::{
     Action, DryRun, Escalation, Escalations, InboxError, Outcome, Response, Step, plan,
     step_decision,
@@ -264,6 +265,50 @@ impl Escalations for BbpCli {
         }
     }
 
+    /// `bbp` prints `bbp: <reason>` and exits 1 when it refuses; that is the answer, recorded
+    /// by the caller. Anything else (no binary, the guard's exit 64, a signal) is
+    /// [`InboxError::Host`], so a broken deploy never reads as a rewritten log.
+    fn verify(
+        &self,
+        task: &str,
+        expect: Option<&str>,
+    ) -> Result<Result<Verified, String>, InboxError> {
+        if !valid_task(task) || !crate::anchor::anchorable(task) {
+            return Err(InboxError::Invalid(format!("bad BBP task id {task:?}")));
+        }
+        let mut argv = vec![
+            "verify".to_owned(),
+            "--dir".to_owned(),
+            self.root_str(),
+            "--task".to_owned(),
+            task.to_owned(),
+        ];
+        if let Some(h) = expect {
+            argv.extend(["--expect".to_owned(), h.to_owned()]);
+        }
+        let out = Command::new(&self.bin)
+            .args(&argv)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| InboxError::Host(format!("{}: {e}", self.bin.display())))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if out.status.code() == Some(1)
+            && let Some(reason) = stderr.trim().strip_prefix("bbp: ")
+        {
+            return Ok(Err(reason.to_owned()));
+        }
+        if !out.status.success() {
+            return Err(InboxError::Host(stderr.trim().to_owned()));
+        }
+        let v: VerifyOut = serde_json::from_slice(&out.stdout)
+            .map_err(|e| InboxError::Host(format!("unreadable verify: {e}")))?;
+        Ok(Ok(Verified {
+            lines: v.lines,
+            unchained: v.unchained,
+            head: v.head,
+        }))
+    }
+
     fn applied(&self, task: &str, decision: &str) -> Result<Option<u64>, InboxError> {
         if !valid_task(task) {
             return Err(InboxError::Invalid(format!("bad BBP task id {task:?}")));
@@ -289,6 +334,14 @@ impl Escalations for BbpCli {
             ))),
         }
     }
+}
+
+/// What `bbp verify` prints on success.
+#[derive(serde::Deserialize)]
+struct VerifyOut {
+    lines: u64,
+    unchained: u64,
+    head: String,
 }
 
 /// One row of `bbp decision`.
