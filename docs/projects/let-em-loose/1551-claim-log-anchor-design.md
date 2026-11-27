@@ -1,6 +1,6 @@
 # #1551 Anchor the BBP claim-log head outside the host
 
-Status: approved by Nano 2026-11-27 (D223); the board side is built (`rusty_mill_board` `anchor.rs`). Installing the guard line and setting the timer on BaileyAi wait for his separate host-change authorisation (D213, D214).
+Status: design draft for the let-em-loose-expert, then Nano. Nothing is built.
 Follows #722 (PR #1485; D67-D70). Card: Mill Board #1551 (`bbp_factory`).
 
 ## Gap
@@ -92,7 +92,7 @@ another actor is ignored.
    `orch-runner`. An off-machine copy (remind-me or the live board) is added when outside or
    untrusted agents join, the trigger D67 set for signing. Rejected: a) board only with root out
    of scope for good; b) mirror off the machine now, which would put an outside-service write
-   credential on BaileyAi. This settled Q1 only; the design was approved later (D223).
+   credential on BaileyAi. This settles Q1 only; the design still waits for approval.
 
 Settled as defaults by the let-em-loose-expert:
 - The guard admits `verify` with D132's `--dir` rules, `--task` checked as for `inbox`, and

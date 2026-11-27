@@ -220,7 +220,6 @@ Precise contracts used by this guide:
 | D220 | #1416: the LEL tab reads claims through a new read-only `bbp claims` verb and Mill Board `lel_claims`/`lel_spend` | [stated] 2026-11-27 (1416) |
 | D221 | #1416: `bbp claims` prints a plain array of claim views; brief text is not served yet | [default] 2026-11-27 (1416) |
 | D222 | #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR | [default] 2026-11-27 (1416) |
-| D223 | #1551: the claim-log anchor design (PR #1931) is approved; board-side code may start; the BaileyAi host change still waits | [stated] 2026-11-27 (1551) |
 
 ## D1. Lenses, not stages
 
@@ -2157,12 +2156,3 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default]
 **Key.** lel:1416:slice4-actions
 **Source.** `1416-lel-tab-slice-plan.md` slices 3-4; D58, D173, D174; `rusty_mill_board` `inbox_act` and `Board::inbox_act` (`stale_rev:` refusal); let-em-loose-expert, 2026-11-27. Nano's 2026-11-27 "1 & 2" (cmsg_014f6o52E2iAAAgMm9v8hh1w7JrZ4XyJ3ufQT3qe7ayEWb) approved the read endpoints; what it answered is not restated in the thread, so no `[stated]` row is written for it. D220 and D221 are left free for the endpoint PR. Numbered D222 because open PRs hold D179-D219.
-
-## D223. #1551: the claim-log anchor design (PR #1931) is approved; board-side code may start; the BaileyAi host change still waits
-
-**Decision.** The #1551 design `1551-claim-log-anchor-design.md` (PR #1931, head ac3e22a) is approved as written, which satisfies D25 for #1551. The board-side code may be built: `rusty_mill_board` `anchor.rs`, `BbpCli::verify`, and the timer thread with `MILL_BOARD_BBP_ANCHOR_SECS` off by default (D214). The guard change may also be written in the repo's `1092-deploy-board.sh` and `1092-deploy-layout.md` (D213). This is not the separate host-change authorisation that D213 and D214 require. Changing `mill-board-bbp-guard` on BaileyAi and setting `MILL_BOARD_BBP_ANCHOR_SECS=900` in its `board.env` wait for Nano to authorise that host change by name (D128 ask-first; D131 does not cover it). Review and merge rules are unchanged.
-**Why.** "Go ahead" answered a message whose open asks were his design approval and, separately, code and any host change. It is a go-ahead, and the board-side build passes no ask-first gate: it has no schema migration, no BBP or API change, and no new dependency. It does not name the host, and D213 and D214 ask for an explicit authorisation of the host change.
-**Rejected.** Reading "Go ahead" as design approval only, with code still held. Reading it as authorising the BaileyAi guard and timer change too.
-**Tag.** [stated] · remind-me: mem_127619cc5d154dacafa0007af7ff78d3
-**Key.** lel:1551:design-approved
-**Source.** Nano, "Go ahead", message `cmsg_014AqbZs58L565hMV2pFkCX5QUKhGDbiyRvn36AKAVqd3R` in thread `cmsg_014AqbZs58L565hMV2pFkCX5Sbwcxao75k9mf44RJQgK4Z` (project Rusty BBP_SWF), 2026-11-27T20:23:29Z. It answered the thread's message: "Codex re-reviewed #1931 at head ac3e22a and found nothing new, and CI is green. It's now waiting on review from dottiusmaximus and on your approval of the design. Code and any host change wait for your separate go-ahead." The reading that it does not cover the host is the #1551 thread's, and let-em-loose-expert agrees with it. Numbered D223 because main's latest is D222 and open PRs hold D208 and D211.

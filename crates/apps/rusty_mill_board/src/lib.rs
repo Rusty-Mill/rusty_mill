@@ -24,7 +24,6 @@
 //! - [`inbox`]: the decision inbox, open BBP escalations and the actions on them (#595); [`bbp_cli`] reads them from the host's `bbp`.
 
 pub mod agents;
-pub mod anchor;
 pub mod api;
 pub mod backfill;
 pub mod bbp_cli;

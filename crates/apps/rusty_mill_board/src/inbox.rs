@@ -512,22 +512,6 @@ pub trait Escalations: Send + Sync {
             "this host adapter cannot read claims",
         ))
     }
-
-    /// `bbp verify` on `task`'s log, read-only, passing `expect` as `--expect` (#1551). The
-    /// inner `Err` is the host's refusal (broken chain, partial line, `expect` missing), which
-    /// the caller records; the outer error means the host could not be asked at all.
-    ///
-    /// # Errors
-    /// [`InboxError::Unsupported`] by default, or [`InboxError::Host`].
-    fn verify(
-        &self,
-        _task: &str,
-        _expect: Option<&str>,
-    ) -> Result<Result<crate::anchor::Verified, String>, InboxError> {
-        Err(InboxError::Unsupported(
-            "this host adapter cannot verify logs",
-        ))
-    }
 }
 
 /// The id command `n` of a send carries: `<decision>.<n>`.

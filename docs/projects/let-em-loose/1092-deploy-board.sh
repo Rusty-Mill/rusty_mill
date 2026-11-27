@@ -129,29 +129,17 @@ echo "db: $STATE/board.db   board: $HTTP"
 echo "=== 4. guard and sudoers"
 cat >"$TMP/guard" <<'EOF'
 #!/bin/sh
-# Runs as orch-runner via sudo. Allows: bbp inbox|human|claims|verify --dir /srv/lel/bbp <args without another --dir>;
-# verify takes only --task and --expect <64 lowercase hex> (#1551, D213).
+# Runs as orch-runner via sudo. Allows: bbp inbox|human --dir /srv/lel/bbp <args without another --dir>.
 set -eu
-no() { echo "mill-board-bbp-guard: $1" >&2; exit 64; }
-case "${1-}" in inbox|human|claims|verify) ;; *) no "verb refused" ;; esac
-if [ "${2-}" != --dir ] || [ "${3-}" != /srv/lel/bbp ]; then no "--dir refused"; fi
+case "${1-}" in inbox|human) ;; *) echo "mill-board-bbp-guard: verb refused" >&2; exit 64 ;; esac
+if [ "${2-}" != --dir ] || [ "${3-}" != /srv/lel/bbp ]; then echo "mill-board-bbp-guard: --dir refused" >&2; exit 64; fi
 verb=$1; shift 3
-key=
+skip=0
 for a in "$@"; do   # walks the args the way bbp's parser does: every --key takes the next token as its value
-  if [ -n "$key" ]; then
-    if [ "$verb" = verify ]; then
-      case "$key" in
-        --task) ;;
-        --expect) case "$a" in *[!0-9a-f]*) no "--expect refused" ;; esac; [ "${#a}" -eq 64 ] || no "--expect refused" ;;
-        *) no "$key refused for verify" ;;
-      esac
-    fi
-    key=; continue
-  fi
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
   case "$a" in
-    --dir) no "second --dir refused" ;;
-    --*) key=$a ;;
-    *) [ "$verb" != verify ] || no "argument refused for verify" ;;
+    --dir) echo "mill-board-bbp-guard: second --dir refused" >&2; exit 64 ;;
+    --*) skip=1 ;;
   esac
 done
 exec /opt/lel/current/bin/bbp "$verb" --dir /srv/lel/bbp "$@"
