@@ -1350,9 +1350,14 @@ mod tests {
         let found = c.findings(&app(dir), &run).unwrap();
         assert_eq!(found.len(), 1);
         let calls = run.calls.lock().unwrap();
+        // The work root is joined with the platform separator.
+        let work = Path::new("/var/state/canary").join("demo");
         assert_eq!(
             calls[0].0.join(" "),
-            "/bin/bbp canary --dir /var/bbp --task maint-demo --repo-path /srv/demo --work /var/state/canary/demo --ref v1.0.0 --profile unit --budget-secs 3540"
+            format!(
+                "/bin/bbp canary --dir /var/bbp --task maint-demo --repo-path /srv/demo --work {} --ref v1.0.0 --profile unit --budget-secs 3540",
+                work.display()
+            )
         );
         assert_eq!(calls[0].2, CANARY_DEADLINE);
         let refused = FakeCommand::new(Ok(exit(1, "", "bbp: no profile \"unit\"\n")));
