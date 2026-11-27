@@ -2738,7 +2738,10 @@ mod client {
                 open.explorer.say("open refused: unsafe name");
                 return self.draw();
             };
-            let pane = self.panes.get_mut(&block).filter(|p| p.opening && p.leased);
+            let pane = self
+                .panes
+                .get_mut(&block)
+                .filter(|p| p.opening && p.leased && p.opened_req.is_none());
             let Some((window, pane)) = self.window.zip(pane) else {
                 open.explorer
                     .say("open needs a server that starts blocks in a workspace");
@@ -2758,7 +2761,10 @@ mod client {
                 },
             });
             pane.opened_req = Some(req);
-            self.live();
+            // The tree stays up until the block exists, so a refusal has
+            // somewhere to be said.
+            open.explorer.say("opening in the editor...");
+            self.draw();
         }
 
         /// Takes keyboard `bytes` for the open workspace tree.
@@ -3148,6 +3154,14 @@ mod client {
                     self.listed_workspace(block, req, answer);
                 }
                 Ok(Change::Started(id)) => {
+                    if self.exploring.as_ref().is_some_and(|o| o.block == block) {
+                        self.exploring = None;
+                    }
+                    // A zoom stays over a new block: leave it, or the editor
+                    // would start hidden and the keys go on to the old pane.
+                    if let (Some(_), Some(window)) = (self.zoomed, self.window) {
+                        self.request(|req| Message::Unzoom { req, window });
+                    }
                     self.arriving = Some(id);
                     self.sync();
                 }
@@ -4943,7 +4957,7 @@ mod client {
                 },
             );
             app.take(Input::Keys(b"jo".to_vec()));
-            assert!(app.exploring.is_none(), "closed");
+            assert!(app.exploring.is_some(), "open until the block exists");
             let launch = sent(&far[1])
                 .into_iter()
                 .find_map(|m| match m {
@@ -4957,6 +4971,26 @@ mod client {
             let program = launch.program.expect("a program");
             assert_eq!(program.command, "sh");
             assert_eq!(program.args.last().map(String::as_str), Some("./a b.rs"));
+            // The block exists: the tree closes, a zoom is left so it shows.
+            app.zoomed = Some(a);
+            let req = app.panes[&a].opened_req.expect("asked");
+            let created = rusty_uuid::Uuid::from_bytes([9; 16]);
+            pane_says(
+                &mut app,
+                a,
+                Message::Done {
+                    req,
+                    created: Some(created),
+                },
+            );
+            assert!(app.exploring.is_none(), "closed");
+            assert_eq!(app.arriving, Some(BlockId::from_uuid(created)));
+            assert!(
+                sent(&far[0])
+                    .iter()
+                    .any(|m| matches!(m, Message::Unzoom { .. })),
+                "the zoom is left"
+            );
         }
 
         /// Without the bit, or the lease, nothing is sent and the tree says why.
@@ -5019,6 +5053,11 @@ mod client {
             );
             assert!(app.panes[&a].leased, "the lease stands");
             assert!(app.panes[&a].opened_req.is_none());
+            let note = app.exploring.as_ref().and_then(|o| o.explorer.note());
+            assert!(
+                note.is_some_and(|n| n.starts_with("open refused: the workspace root")),
+                "{note:?}"
+            );
         }
 
         /// The server refuses the change marks on an agent's block (D372): the
