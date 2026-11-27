@@ -203,6 +203,8 @@ Precise contracts used by this guide:
 | D202 | #705: `tree-sitter-python` 0.25 added to `rusty_erosion` (new `Cargo.lock` entry) | [stated] 2026-11-26 (705) |
 | D203 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
 | D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
+| D209 | #1382: the token mint lives in a new sans-IO crate `orch-token`; orch-bbp writes the token file and `jail.json` slot | [default] 2026-11-27 (1382) |
+| D212 | #1382: code waits for the gateway cards #1375-#1379; only the slice plan merges now | [stated] 2026-11-27 (1382) |
 
 ## D1. Lenses, not stages
 
@@ -1984,3 +1986,21 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_489a43a7e3194f5198c1fbc59032e132
 **Key.** lel:432:design-approved-build-after-600
 **Source.** Nano tapped "Approve, build after #600" ("Design and BBP_PROVIDER_SESSION approved; code waits until the #600 builder work lands (D164 order).") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE45mV9XoArWETD2NMavEjbEy` in the Let Em Loose project thread "Build BBP Codex session resume" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4KGZwc1M3KXuPWKygNkYSfd`), 2026-11-26 13:56Z. The coordinator relayed the tap; the card and its options were read. Resolves OPEN_QUESTIONS Q66. Numbered D204 (was D200) for the same reason. D203 and D204 were checked free on main and in every open PR on 2026-11-26.
+
+## D209. #1382: the token mint lives in a new sans-IO crate `orch-token`; orch-bbp writes the token file and `jail.json` slot
+
+**Decision.** Inside the approved #726 design (726-sandbox-design.md §2, D180), #1382's minter is a new sans-IO crate `crates/apps/rusty_orch/crates/orch-token`: it turns the §2 claims and a signing key into an ES256 JWT (`kid`, `jti`, `exp`) and gives the JWKS entry for the public key, using the workspace's vendored `jsonwebtoken` (no new workspace dependency). orch-bbp, which launches builders, calls it and writes the token file and the existing `jail.json` `token` {`file`, `var`} slot (D107). This settles placement only; build order still follows §10 ("#1382 last") and the card's "Waits on" unless Nano says otherwise. Nano confirmed that order in D212.
+**Why.** orch-jail builds `lel-jail`, the binary that runs inside the sandbox, so it must not link signing code; a separate sans-IO crate is the most reversible split and can be tested alone against the gateway's `FileJwks`.
+**Rejected.** A module in orch-jail (signing code in the jailed binary). A module inside orch-bbp's lib (mixes I/O and the pure mint).
+**Tag.** [default] · remind-me: mem_23e81baeef6e4ed4a733c14c0cc365a1
+**Key.** lel:1382:mint-crate-layout
+**Source.** Let Em Loose expert, 2026-11-27, answering the #1382 thread's crate question; 726-sandbox-design.md §2 and §10 (PR #1873, D180); `orch-jail/src/lib.rs`, `orch-jail/src/launch.rs`. Numbered D209 because D205 to D208 are taken on open PRs (#1871, #1927).
+
+## D212. #1382: code waits for the gateway cards #1375-#1379; only the slice plan merges now
+
+**Decision.** #1382's token mint is not built ahead of the approved order. Only the slice plan (PR #1930) merges now; #1382 code starts when the gateway cards #1375-#1379 land, as 726-sandbox-design.md §10 ("#1382 last", D180) says. D209's crate placement is unchanged.
+**Why.** Nano kept the approved order: nothing consumes a token before the gateway, so building the minter early buys nothing.
+**Rejected.** Building the mint now, ahead of §10.
+**Tag.** [stated] · remind-me: mem_a9952c1bcd964445b645426c843bac3a
+**Key.** lel:1382:build-after-gateway-cards
+**Source.** Nano tapped option a "Wait for #1375-#1379" ("Only the slice plan merges now. Code starts when the gateway cards land, as the approved order says.") on decision card `cmsg_014AqbZs58L565hMV2pFkCX546kxWjy74njHksp6qNKnci` in the Rusty BBP_SWF thread "Route jailed agent tools through gateway" (`cmsg_014AqbZs58L565hMV2pFkCX5UApVszPE7rf26gn9xJeNYk`), 2026-11-27T02:00:47Z. Confirms D180 §10; reverses nothing. Numbered D212 because D205 to D211 are taken on open PRs.
