@@ -494,6 +494,67 @@ fn a_pool_in_use_is_not_closed_for_being_idle() {
 }
 
 #[test]
+fn an_idle_upstream_closes_with_no_further_calls() {
+    let up = plain();
+    let target = target_in(&up, UpstreamMode::PerSession, 8, Duration::from_secs(5))
+        .with_session_idle(Duration::from_millis(100));
+    target
+        .call(
+            &call("t"),
+            &HeaderOverride::default(),
+            &as_session("s1", "a"),
+        )
+        .unwrap();
+    assert_eq!(target.sessions(), 1);
+    let until = Instant::now() + Duration::from_secs(3);
+    while target.sessions() > 0 && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(target.sessions(), 0, "the reaper closed it on its own");
+}
+
+#[test]
+fn ending_a_session_refuses_the_calls_queued_on_it() {
+    let up = serve(slow_tool(plain_builder(), 600));
+    let target = Arc::new(target_in(
+        &up,
+        UpstreamMode::PerSession,
+        8,
+        Duration::from_secs(5),
+    ));
+    let on_s1 = |tool: &'static str| {
+        let target = Arc::clone(&target);
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = target.call(
+                &call(tool),
+                &HeaderOverride::default(),
+                &as_session("s1", "a"),
+            );
+            (result, started.elapsed())
+        })
+    };
+    let running = on_s1("slow");
+    std::thread::sleep(Duration::from_millis(150)); // it holds s1's one connection
+    let queued = on_s1("t");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(target.end_session("s1"), 1);
+
+    let (result, took) = queued.join().unwrap();
+    assert!(result.is_err(), "a queued call is refused at teardown");
+    assert!(
+        took < Duration::from_millis(400),
+        "refused at once: {took:?}"
+    );
+    let (result, _) = running.join().unwrap();
+    assert!(
+        result.is_ok(),
+        "the running call finishes within its timeout"
+    );
+    assert_eq!(target.sessions(), 0);
+}
+
+#[test]
 fn pooled_targets_keep_one_shared_pool() {
     let up = plain();
     let target = target_in(&up, UpstreamMode::Pooled, 8, Duration::from_secs(5));

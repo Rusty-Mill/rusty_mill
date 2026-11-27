@@ -172,8 +172,11 @@ The session is the one the MCP server validated for the request (known, live,
 opened by the same principal), never the raw `Mcp-Session-Id` header. A
 stateless (2026-07-28) request has no session, so it is keyed on its principal
 alone, and that upstream closes only when it goes idle. Once a session ends, a
-call admitted just before the end opens no new upstream for it. An upstream a
-call is still using is never closed for being idle.
+call admitted just before the end opens no new upstream for it, and calls
+queued on its upstream are refused; a call already running finishes within its
+timeout, and its connection is then closed. An upstream a call is still using
+is never closed for being idle, and an idle one closes on a timer, whether or
+not anyone calls the target again.
 
 ### Degraded operation
 

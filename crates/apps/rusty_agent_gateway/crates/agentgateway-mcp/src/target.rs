@@ -31,7 +31,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::process::Command;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use agentgateway_config::{McpTarget, McpTargetKind, UpstreamMode};
@@ -195,6 +195,7 @@ impl Pool {
                 idle: first.into_iter().collect(),
                 open,
                 last_used: Instant::now(),
+                closed: false,
             }),
             freed: Condvar::new(),
             dial,
@@ -262,6 +263,8 @@ struct Keys {
     /// before its session ended can't open a pool for it afterwards.
     /// Session ids are random and never reused.
     ended: HashMap<String, Instant>,
+    /// Whether a reaper thread is sweeping these pools.
+    reaping: bool,
 }
 
 impl Keys {
@@ -289,7 +292,7 @@ impl Pools {
     /// `who`'s session has ended: a call admitted before the end opens
     /// nothing after it.
     fn for_call(
-        &self,
+        self: &Arc<Self>,
         who: &SessionKey,
         headers: &HeaderOverride,
     ) -> Result<Option<Arc<Pool>>, ClientError> {
@@ -324,9 +327,28 @@ impl Pools {
             session,
         });
         let pool = Arc::clone(&entry.pool);
+        if !keys.reaping {
+            keys.reaping = true;
+            let pools = Arc::downgrade(self);
+            std::thread::spawn(move || reap(&pools));
+        }
         drop(keys);
-        drop(expired);
+        close(expired);
         Ok(Some(pool))
+    }
+
+    /// Close the pools gone idle. Answers whether there is still anything to
+    /// sweep; when there is not, the reaper stops until the next keyed pool.
+    fn sweep(&self) -> bool {
+        let now = Instant::now();
+        let mut keys = lock(&self.by_key);
+        keys.forget_old_ends(now, self.idle);
+        let expired = take(&mut keys.pools, |k| k.expired(now, self.idle));
+        let more = !keys.pools.is_empty() || !keys.ended.is_empty();
+        keys.reaping = more;
+        drop(keys);
+        close(expired);
+        more
     }
 
     /// Close every keyed pool serving `session`.
@@ -341,8 +363,35 @@ impl Pools {
             keys.ended.insert(session.to_owned(), now);
         }
         drop(keys);
-        // Dropped here, without the lock: closing a child can take a moment.
-        ended.len()
+        let count = ended.len();
+        close(ended);
+        count
+    }
+}
+
+/// Close `pools` (without the lock: closing a child can take a moment).
+/// Callers waiting on one are refused; a call running on one finishes,
+/// within its timeout, and its connection is then dropped, not reused.
+fn close(pools: Vec<Keyed>) {
+    for keyed in pools {
+        keyed.pool.close();
+    }
+}
+
+/// Sweep `pools` for idle upstreams until there are none, or the target is
+/// gone, so an upstream nobody calls again still closes.
+fn reap(pools: &Weak<Pools>) {
+    loop {
+        let Some(tick) = pools.upgrade().map(|p| p.idle / 2) else {
+            return;
+        };
+        std::thread::sleep(tick.clamp(Duration::from_millis(10), Duration::from_secs(60)));
+        let Some(live) = pools.upgrade() else {
+            return;
+        };
+        if !live.sweep() {
+            return;
+        }
     }
 }
 
@@ -362,6 +411,8 @@ struct Slots {
     open: usize,
     /// When a connection was last taken or given back.
     last_used: Instant,
+    /// Closed by teardown: no more leases, and returned connections drop.
+    closed: bool,
 }
 
 /// A connection on loan; it goes back to the pool when dropped.
@@ -405,8 +456,14 @@ impl Drop for Lease<'_> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
             let mut slots = lock(&self.pool.state);
-            slots.idle.push(conn);
             slots.last_used = Instant::now();
+            if slots.closed {
+                slots.open -= 1;
+                drop(slots);
+                drop(conn);
+                return;
+            }
+            slots.idle.push(conn);
             drop(slots);
             self.pool.freed.notify_one();
         }
@@ -414,6 +471,17 @@ impl Drop for Lease<'_> {
 }
 
 impl Pool {
+    /// Refuse new leases, wake every waiter, and drop the idle connections.
+    fn close(&self) {
+        let mut slots = lock(&self.state);
+        slots.closed = true;
+        let idle = std::mem::take(&mut slots.idle);
+        slots.open -= idle.len();
+        drop(slots);
+        self.freed.notify_all();
+        drop(idle);
+    }
+
     /// A connection, waiting for one (or dialling one) until `deadline`.
     fn lease(&self, deadline: Instant) -> Result<Lease<'_>, ClientError> {
         self.leases
@@ -421,6 +489,9 @@ impl Pool {
         let mut slots = lock(&self.state);
         slots.last_used = Instant::now();
         loop {
+            if slots.closed {
+                return Err(ClientError::Closed);
+            }
             if let Some(conn) = slots.idle.pop() {
                 return Ok(Lease {
                     pool: self,
@@ -476,7 +547,7 @@ pub struct Target {
     /// Who the gateway says it acts for on each call, from the token.
     pub identity: Identity,
     capabilities: ServerCapabilities,
-    pools: Pools,
+    pools: Arc<Pools>,
     /// What one operation (a call, or a whole paged listing) may take, from
     /// asking for a connection to the last answer.
     timeout: Duration,
@@ -597,7 +668,7 @@ impl Target {
             http,
             identity,
             capabilities,
-            pools: Pools {
+            pools: Arc::new(Pools {
                 mode: config.mode(),
                 shared: Pool::new(dial, max, Some(first)),
                 by_key: Mutex::new(Keys::default()),
@@ -609,16 +680,23 @@ impl Target {
                     _ => max,
                 },
                 idle: SESSION_IDLE,
-            },
+            }),
             timeout,
         })
     }
 
     /// How long a `per_session` upstream may sit unused before it is closed
-    /// (default [`SESSION_IDLE`]).
+    /// (default [`SESSION_IDLE`]). Set it before the target serves a call.
     #[must_use]
     pub fn with_session_idle(mut self, idle: Duration) -> Self {
-        self.pools.idle = idle;
+        // Unshared until the first keyed call starts the reaper.
+        match Arc::get_mut(&mut self.pools) {
+            Some(pools) => pools.idle = idle,
+            None => rusty_log::warn!(
+                target = %self.name,
+                "session idle set after the target was in use; ignored"
+            ),
+        }
         self
     }
 
