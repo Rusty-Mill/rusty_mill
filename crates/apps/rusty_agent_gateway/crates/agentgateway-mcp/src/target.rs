@@ -51,7 +51,7 @@ pub enum TargetError {
     #[error(transparent)]
     Gate(#[from] GateError),
 
-    /// The target's identity block did not compile.
+    /// The target's `identity` did not compile.
     #[error(transparent)]
     Identity(#[from] IdentityError),
 
@@ -278,7 +278,7 @@ pub struct Target {
     /// aimed at one has nowhere to land, and is dropped rather than quietly
     /// appearing somewhere else.
     pub http: bool,
-    /// Who each call says it comes from, stamped from the caller's token.
+    /// Who the gateway says it acts for on each call, from the token.
     pub identity: Identity,
     capabilities: ServerCapabilities,
     pool: Pool,
@@ -323,8 +323,20 @@ impl Target {
         at: &str,
     ) -> Result<Self, TargetError> {
         let filter = TargetFilter::new(&config.filters, at)?;
+        let identity = match &config.identity {
+            Some(identity) => Identity::new(identity, at)?,
+            None => Identity::default(),
+        };
         let http = matches!(config.kind, McpTargetKind::Mcp(_));
-        let identity = Identity::new(config.identity.as_ref(), http, at)?;
+        if identity.has_headers() && !http {
+            // Dropping them would send the call with no identity at all.
+            return Err(IdentityError::Config {
+                at: format!("{at}.identity.headers"),
+                value: config.name.clone(),
+                kind: "target for headers: only an `mcp:` target has any",
+            }
+            .into());
+        }
         let name = config.name.clone();
         let timeout = call_timeout.unwrap_or(DEFAULT_CALL_TIMEOUT);
 

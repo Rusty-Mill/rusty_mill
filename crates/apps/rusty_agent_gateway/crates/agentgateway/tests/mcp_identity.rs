@@ -1,37 +1,41 @@
-//! End-to-end tests for a target's `identity` block (Let Em Loose #1376).
+//! End-to-end tests for a target's `identity` (Let Em Loose #1376, D223).
 //!
-//! The unit tests in `agentgateway-mcp` cover how a call is stamped. These
-//! cover the wiring: that the claims come from a token this gateway verified,
-//! that a forged actor in the call never reaches the upstream, and that a call
-//! without a token is refused rather than sent unstamped.
+//! The unit tests in `agentgateway-mcp` cover the templates. These cover the
+//! wiring: claims come from a token this gateway verified, a forged actor in
+//! the call is replaced before the upstream sees it, and a call with no usable
+//! token is refused rather than sent anonymous.
 
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentgateway_config::Config;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use rusty_mcp_server::json::Value as Args;
 use rusty_tokio::sync::CancellationToken;
 use serde_json::{Value, json};
 
+mod common;
+use common::mcp;
+use common::{free_port, yaml_path};
+
 const ISSUER: &str = "https://auth.example.com";
-const KID: &str = "gateway-test-key";
+const KID: &str = "identity-test-key";
 const RESOURCE: &str = "https://gateway.example.com/mcp";
 
-static PRIMARY: std::sync::OnceLock<(Vec<u8>, Value)> = std::sync::OnceLock::new();
+static KEY: std::sync::OnceLock<(Vec<u8>, Value)> = std::sync::OnceLock::new();
 
 fn keys() -> (EncodingKey, Value) {
-    let (der, jwks) = PRIMARY.get_or_init(|| {
+    let (der, jwks) = KEY.get_or_init(|| {
         use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, traits::PublicKeyParts};
 
-        let mut rng = rand::thread_rng();
-        let private = RsaPrivateKey::new(&mut rng, 2048).expect("should generate a key");
+        let private =
+            RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("should generate a key");
         let der = private
             .to_pkcs1_der()
             .expect("should encode")
             .as_bytes()
             .to_vec();
         let b64 = |bytes: Vec<u8>| rusty_base64::encode_url_safe_no_pad(&bytes);
-
         let jwks = json!({
             "keys": [{
                 "kty": "RSA", "use": "sig", "alg": "RS256", "kid": KID,
@@ -44,7 +48,6 @@ fn keys() -> (EncodingKey, Value) {
     (EncodingKey::from_rsa_der(der), jwks.clone())
 }
 
-/// A token carrying `extra` on top of the claims the route requires.
 fn token(extra: Value) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -54,33 +57,21 @@ fn token(extra: Value) -> String {
     if let (Some(claims), Value::Object(extra)) = (claims.as_object_mut(), extra) {
         claims.extend(extra);
     }
-
-    let (encoding, _) = keys();
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(KID.into());
-    encode(&header, &claims, &encoding).expect("should sign")
+    encode(&header, &claims, &keys().0).expect("should sign")
 }
 
 fn mock_server() -> String {
     let mut path = std::env::current_exe().expect("test binary should have a path");
-    path.pop(); // deps/
-    path.pop(); // <profile>/
+    path.pop();
+    path.pop();
     path.push("examples");
-    // Windows names the built example `mock_mcp_server.exe`; `EXE_SUFFIX` is
-    // empty everywhere else.
     path.push(format!("mock_mcp_server{}", std::env::consts::EXE_SUFFIX));
     assert!(path.exists(), "fixture not built at {}", path.display());
-    // The caller splices this into a double-quoted YAML scalar (`cmd:
-    // "{server}"`), so it goes through `yaml_path`.
     yaml_path(&path)
 }
 
-mod common;
-use common::mcp;
-use common::{free_port, yaml_path};
-
-/// A gateway whose one target strips `actor` and `role` and sets `actor` from
-/// the token; the mock upstream echoes the arguments it received.
 struct Harness {
     client: mcp::Client,
     shutdown: CancellationToken,
@@ -88,26 +79,14 @@ struct Harness {
 }
 
 impl Harness {
-    /// With `bearer`, the route verifies it (`jwtAuth`); without, the route
-    /// runs no auth at all, so calls arrive with no claims.
-    async fn start(bearer: Option<&str>) -> Harness {
+    /// A gateway whose `board` target stamps `actor` from the token, with
+    /// `jwtAuth` required, and a client presenting `bearer`.
+    async fn start(bearer: &str) -> Harness {
         let port = free_port();
-        let (_, jwks) = keys();
         let dir = tempfile::tempdir().expect("should create a temp dir");
-        let path = dir.path().join("jwks.json");
-        std::fs::write(&path, jwks.to_string()).expect("should write the JWKS");
-        let auth = match bearer {
-            Some(_) => format!(
-                "            policies:\n\
-                 \x20             jwtAuth:\n\
-                 \x20               issuer: {ISSUER}\n\
-                 \x20               audiences: [\"{RESOURCE}\"]\n\
-                 \x20               jwks:\n\
-                 \x20                 file: \"{}\"\n",
-                yaml_path(&path)
-            ),
-            None => String::new(),
-        };
+        let jwks = dir.path().join("jwks.json");
+        std::fs::write(&jwks, keys().1.to_string()).expect("should write the JWKS");
+
         let yaml = format!(
             r#"
 binds:
@@ -118,7 +97,13 @@ binds:
             matches:
               - path:
                   pathPrefix: /mcp
-{auth}            backends:
+            policies:
+              jwtAuth:
+                issuer: {ISSUER}
+                audiences: ["{RESOURCE}"]
+                jwks:
+                  file: "{jwks}"
+            backends:
               - mcp:
                   targets:
                     - name: board
@@ -126,13 +111,13 @@ binds:
                         cmd: "{server}"
                         env:
                           MOCK_LABEL: board
-                          MOCK_TOOLS: "comment"
+                          MOCK_TOOLS: "card_comment"
                           MOCK_ECHO_ARGS: "1"
                       identity:
-                        strip: [actor, role]
-                        set:
-                          actor: "lel-gateway/{{{{jwt.lel.lens}}}}"
+                        strip: {{ "*": [actor, agent_key] }}
+                        set: {{ actor: "lel-gateway/{{{{jwt.lel.lens}}}}-{{{{jwt.lel.claim:4}}}}" }}
 "#,
+            jwks = yaml_path(&jwks),
             server = mock_server()
         );
 
@@ -148,7 +133,7 @@ binds:
             .expect("gateway should bind");
 
         let mut config = mcp::HttpConfig::new(format!("http://127.0.0.1:{port}/mcp"));
-        config.bearer_token = bearer.map(str::to_owned);
+        config.bearer_token = Some(bearer.to_owned());
         let client = mcp::connect_with(config)
             .await
             .expect("client should complete the MCP handshake");
@@ -159,13 +144,14 @@ binds:
         }
     }
 
-    async fn call(&self, args: &str) -> Result<String, String> {
-        let args = rusty_mcp_client_native::json::Value::from_json_str(args).expect("valid JSON");
-        self.client
-            .call_tool("board_comment", Some(args))
+    async fn comment(&self, args: &str) -> Result<String, String> {
+        let args = Args::from_json_str(args).expect("test arguments are JSON");
+        let result = self
+            .client
+            .call_tool("board_card_comment", Some(args))
             .await
-            .map(|r| mcp::text(&r.content))
-            .map_err(|err| err.to_string())
+            .map_err(|err| err.to_string())?;
+        Ok(mcp::text(&result.content))
     }
 
     async fn stop(self) {
@@ -174,46 +160,44 @@ binds:
     }
 }
 
-#[rusty_tokio::test]
-async fn the_upstream_sees_the_tokens_identity_not_the_callers() {
-    let bearer = token(json!({ "sub": "p/c9/adversary/1", "lel.lens": "adversary" }));
-    let harness = Harness::start(Some(&bearer)).await;
+/// The arguments the mock saw, parsed from its echo.
+fn seen(echo: &str) -> Value {
+    let json = echo
+        .strip_prefix("board:card_comment ")
+        .expect("the mock echoes its label first");
+    serde_json::from_str(json).expect("the mock echoes JSON")
+}
 
-    let reply = harness
-        .call(r#"{"id":"42","text":"hi","actor":"nano","role":"admin"}"#)
+#[rusty_tokio::test]
+async fn the_upstream_sees_the_tokens_actor_not_the_forged_one() {
+    let harness = Harness::start(&token(json!({
+        "sub": "rusty_mill/c-77/builder-rust/1",
+        "lel.lens": "builder-rust",
+        "lel.claim": "c-77xyz",
+    })))
+    .await;
+
+    let echo = harness
+        .comment(r#"{"id":"42","text":"hi","actor":"nano","agent_key":"stolen"}"#)
         .await
-        .expect("the call should go through");
-    let sent: Value = serde_json::from_str(
-        reply
-            .strip_prefix("board:comment ")
-            .expect("the mock echoes its arguments"),
-    )
-    .expect("echoed arguments are JSON");
-    assert_eq!(
-        sent["actor"], "lel-gateway/adversary",
-        "stamped from the token"
-    );
-    assert!(sent.get("role").is_none(), "stripped");
-    assert_eq!(sent["text"], "hi", "everything else passes through");
+        .expect("the call should succeed");
+    let args = seen(&echo);
+    assert_eq!(args["actor"], "lel-gateway/builder-rust-c-77");
+    assert_eq!(args["text"], "hi");
+    assert!(args.get("agent_key").is_none(), "got: {args}");
 
     harness.stop().await;
 }
 
 #[rusty_tokio::test]
-async fn a_call_without_a_token_is_refused_not_sent_unstamped() {
-    let harness = Harness::start(None).await;
-    let refused = harness.call(r#"{"text":"hi","actor":"nano"}"#).await;
-    let message = refused.expect_err("no token, no identity, no call");
-    assert!(message.contains("verified token"), "says why: {message}");
-    harness.stop().await;
-}
+async fn a_token_without_the_lens_claim_is_refused() {
+    let harness = Harness::start(&token(json!({ "sub": "someone" }))).await;
 
-#[rusty_tokio::test]
-async fn a_token_missing_the_claim_is_refused() {
-    let bearer = token(json!({ "sub": "p/c9/adversary/1" }));
-    let harness = Harness::start(Some(&bearer)).await;
-    let refused = harness.call(r#"{"text":"hi"}"#).await;
-    let message = refused.expect_err("the template needs lel.lens");
-    assert!(message.contains("lel.lens"), "names the claim: {message}");
+    let err = harness
+        .comment(r#"{"actor":"nano"}"#)
+        .await
+        .expect_err("a call that can't be stamped must not reach the upstream");
+    assert!(err.contains("lel.lens"), "got: {err}");
+
     harness.stop().await;
 }

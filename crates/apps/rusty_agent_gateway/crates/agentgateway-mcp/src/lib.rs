@@ -29,7 +29,7 @@ pub use guardrails::{
     authorization_error, request_result, response_result, to_proto_value,
 };
 pub use header_override::HeaderOverride;
-pub use identity::{Identity, IdentityError, StampError};
+pub use identity::{Identity, IdentityError};
 pub use naming::{Resolution, ToolNamer};
 pub use rules::{Call, RuleError, RuleSet, Subject};
 pub use target::{Override, Target, TargetError};

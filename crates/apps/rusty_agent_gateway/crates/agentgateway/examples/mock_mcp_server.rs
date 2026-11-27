@@ -9,8 +9,8 @@
 //! and `tools/list` prompt, and it ends early when the caller cancels, so a
 //! timed-out call does not keep this process (and the test's stderr) alive.
 //!
-//! `MOCK_ECHO_ARGS=1` appends the call's arguments, as JSON, to each tool's
-//! reply, so a test can see exactly what the gateway sent upstream.
+//! `MOCK_ECHO_ARGS` set makes each tool append its arguments as JSON, so a
+//! test can see exactly what the gateway sent upstream.
 //!
 //! `MOCK_PROMPTS` and `MOCK_RESOURCES` add prompts and resources. Both default
 //! to empty, and a server with neither advertises neither capability — which
@@ -69,10 +69,11 @@ fn main() -> std::io::Result<()> {
             .unwrap_or(0),
     );
 
+    let echo_args = std::env::var_os("MOCK_ECHO_ARGS").is_some();
+
     // Only what this instance actually has is registered, and the server
     // advertises a capability only for what is registered, so a test can
     // check the gateway's own advertisement follows its targets.
-    let echo_args = std::env::var("MOCK_ECHO_ARGS").is_ok_and(|v| v == "1");
     let mut builder = Server::builder("mock-mcp-server", "0.1.0");
     for name in list("MOCK_TOOLS", "echo,ping") {
         let mut tool = Tool::new(name.clone(), object_schema());
@@ -83,13 +84,13 @@ fn main() -> std::io::Result<()> {
             // Each call runs on a thread of its own, so a sleep here is slow
             // only for this call; startup and `tools/list` stay prompt.
             nap(delay, &ctx.cancel_token());
-            let reply = match (&call.arguments, echo_args) {
-                (Some(args), true) => format!("{text} {}", args.to_json_string()),
-                (None, true) => format!("{text} null"),
-                _ => text.clone(),
+            let text = match (echo_args, &call.arguments) {
+                (true, Some(args)) => format!("{text} {}", args.to_json_string()),
+                (true, None) => format!("{text} null"),
+                (false, _) => text.clone(),
             };
             Ok(CallToolResult {
-                content: vec![ContentBlock::text(reply)],
+                content: vec![ContentBlock::text(text)],
                 ..CallToolResult::default()
             })
         });
