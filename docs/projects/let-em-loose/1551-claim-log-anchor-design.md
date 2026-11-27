@@ -40,7 +40,7 @@ and comments the printed `head` and `lines`. A pull means a rewritten log cannot
 fresh anchor first: the board checks the old head before it records a new one.
 
 **When.** On a timer, every `MILL_BOARD_BBP_ANCHOR_SECS` (off when unset or 0; BaileyAi sets 900
-after approval, D210), for every task the inbox serves (cards with `execution.bbp_task`) and every
+after approval, D214), for every task the inbox serves (cards with `execution.bbp_task`) and every
 task that already has a trusted anchor, whatever its card's link or archive state now. Otherwise
 `orch-runner`'s Build token could stop anchoring by unlinking or archiving the card. A task is
 anchored only when its head changed since the last anchor, so an idle task adds no comments. The window an
@@ -82,13 +82,14 @@ another actor is ignored.
 
 ## Open questions
 
-1. **Same machine or off it?** For Nano. a) The BaileyAi inbox board only: no new service,
-   credential or network path; covers the harness running as `orch-runner`. b) Also mirror each
-   anchor off the machine (remind-me or the live board), which covers root but puts an
-   outside-service write credential on BaileyAi. c) a now, b when outside or untrusted agents join,
-   the trigger D67 set for signing. Recommended: c.
+1. **Same machine or off it?** Decided by Nano, 2026-11-27 (D215): option c, "board only now,
+   off-machine later". Anchors live on the BaileyAi inbox board, covering the harness running as
+   `orch-runner`. An off-machine copy (remind-me or the live board) is added when outside or
+   untrusted agents join, the trigger D67 set for signing. Rejected: a) board only with root out
+   of scope for good; b) mirror off the machine now, which would put an outside-service write
+   credential on BaileyAi. This settles Q1 only; the design still waits for approval.
 
 Settled as defaults by the let-em-loose-expert:
 - The guard admits `verify` with D132's `--dir` rules, `--task` checked as for `inbox`, and
-  `--expect` only as 64 lowercase hex (D209). Deploying it waits for design approval.
-- The timer env var is off unless set; BaileyAi sets 900 (D210).
+  `--expect` only as 64 lowercase hex (D213). Deploying it waits for design approval.
+- The timer env var is off unless set; BaileyAi sets 900 (D214).

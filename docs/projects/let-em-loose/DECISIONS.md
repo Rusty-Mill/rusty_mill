@@ -203,8 +203,9 @@ Precise contracts used by this guide:
 | D202 | #705: `tree-sitter-python` 0.25 added to `rusty_erosion` (new `Cargo.lock` entry) | [stated] 2026-11-26 (705) |
 | D203 | #432 Codex session capture: provider-blind log scan, refuse the resume turn when no id was captured | [default] 2026-11-26 (432) |
 | D204 | #432 design and `BBP_PROVIDER_SESSION` approved; build waits until #600 lands | [stated] 2026-11-26 (432) |
-| D209 | #1551: the D132 guard admits `verify` beside `inbox` and `human`, same `--dir` rules | [default] 2026-11-27 (1551) |
-| D210 | #1551: the anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off unless set; BaileyAi sets 900 | [default] 2026-11-27 (1551) |
+| D213 | #1551: the D132 guard admits `verify` beside `inbox` and `human`, same `--dir` rules | [default] 2026-11-27 (1551) |
+| D214 | #1551: the anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off unless set; BaileyAi sets 900 | [default] 2026-11-27 (1551) |
+| D215 | #1551: the claim-log anchor lives on the BaileyAi inbox board only; an off-machine copy waits for outside agents | [stated] 2026-11-27 (1551) |
 
 ## D1. Lenses, not stages
 
@@ -1987,16 +1988,16 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:432:design-approved-build-after-600
 **Source.** Nano tapped "Approve, build after #600" ("Design and BBP_PROVIDER_SESSION approved; code waits until the #600 builder work lands (D164 order).") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE45mV9XoArWETD2NMavEjbEy` in the Let Em Loose project thread "Build BBP Codex session resume" (`cmsg_01WgyiM31RsSnZTgNuPX2VE4KGZwc1M3KXuPWKygNkYSfd`), 2026-11-26 13:56Z. The coordinator relayed the tap; the card and its options were read. Resolves OPEN_QUESTIONS Q66. Numbered D204 (was D200) for the same reason. D203 and D204 were checked free on main and in every open PR on 2026-11-26.
 
-## D209. #1551: the D132 guard admits `verify` beside `inbox` and `human`, same `--dir` rules
+## D213. #1551: the D132 guard admits `verify` beside `inbox` and `human`, same `--dir` rules
 
 **Decision.** For the #1551 claim-log anchor, `mill-board-bbp-guard` admits `verify` as a third verb. The rules D132 sets for the other two apply unchanged: `--dir /srv/lel/bbp` exactly as `bbp_cli.rs` gives it, and any further `--dir` refused. `--task` is checked as for `inbox`, and `--expect` is accepted only as 64 lowercase hex characters. Deploying the change on BaileyAi waits for Nano's approval of the #1551 design (D25). It is a host change that D131's M1 authorisation does not cover.
 **Why.** `bbp verify` never modifies the log (D70) and stays on the one directory. The verb list is the `[default]` half of D132 (mechanism), so widening it reverses no `[stated]` entry, and narrowing it back is one line.
 **Rejected.** A second guard script for `verify` (two doors to keep in step). Letting the board read the log itself (D35, ADR-0003).
 **Tag.** [default] · remind-me: mem_6027e64884264d3db58c9f1fc98b9039
 **Key.** lel:1551:guard-admits-verify
-**Source.** let-em-loose-expert, 2026-11-27, open question 2 of the #1551 design draft (`1551-claim-log-anchor-design.md`). Numbered D209 because D205-D208 are taken in open PRs #1871 and #1927.
+**Source.** let-em-loose-expert, 2026-11-27, open question 2 of the #1551 design draft (`1551-claim-log-anchor-design.md`). Numbered D213 because D205-D212 are taken in open PRs #1871, #1927, #1930 and #1932.
 
-## D210. #1551: the anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off unless set; BaileyAi sets 900
+## D214. #1551: the anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off unless set; BaileyAi sets 900
 
 **Decision.** The board's anchor timer `MILL_BOARD_BBP_ANCHOR_SECS` is off when it is unset or 0. The BaileyAi inbox board's `board.env` sets it to 900 once the #1551 design is approved. A task is anchored only when its head has changed since the last trusted anchor.
 **Why.** Off by default leaves every other board (the live board, tests) unchanged. 900 s bounds the rewrite window to 15 minutes, at a cost of one read-only `bbp verify` per linked task per tick and at most one comment. The value is a config line.
@@ -2004,3 +2005,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_90b3b02e5e0c449faedeaf360e14fb7a
 **Key.** lel:1551:anchor-timer-default
 **Source.** let-em-loose-expert, 2026-11-27, open question 3 of the #1551 design draft.
+
+## D215. #1551: the claim-log anchor lives on the BaileyAi inbox board only; an off-machine copy waits for outside agents
+
+**Decision.** The #1551 claim-log anchors live on the BaileyAi inbox board only. They cover the harness running as `orch-runner`; root on BaileyAi is out of reach of this anchor for now. An off-machine copy (remind-me or the live board) is added when outside or untrusted agents join, the same trigger D67 set for signing. This answers open question 1 of the design only; the #1551 design itself still waits for Nano's approval (D25).
+**Why.** Board only needs no new service, credential or network path on BaileyAi. Mirroring off the machine now would put an outside-service write credential on BaileyAi before any agent it guards against exists.
+**Rejected.** Board only with root permanently out of scope. Mirroring every anchor off the machine now.
+**Tag.** [stated] · remind-me: mem_6414975e1d8b47ebaa44896a24e06b11
+**Key.** lel:1551:anchor-scope-board-only
+**Source.** Nano tapped option A "Board only now, off-machine later" ("Anchors live on the BaileyAi inbox board; an off-machine copy is added when outside or untrusted agents join (same trigger as signing, D67).") on decision card `cmsg_014AqbZs58L565hMV2pFkCX5VRL4NsvujwKGSGMfNRddCq` ("Should the claim-log anchor also cover root on BaileyAi?") in thread `cmsg_014AqbZs58L565hMV2pFkCX5Sbwcxao75k9mf44RJQgK4Z` (project Rusty BBP_SWF), 2026-11-27T02:00:38Z. Relayed by the #1551 design thread. Option c of the design's open question 1. Numbered D215 because D205-D212 are taken in open PRs #1871, #1927, #1930 and #1932.
