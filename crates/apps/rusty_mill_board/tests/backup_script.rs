@@ -128,8 +128,8 @@ fn snapshot_is_a_verified_pair_and_retention_keeps_the_newest() {
     assert_eq!(kept.len(), 2, "{:?}", names(&rig.local()));
     assert_eq!(
         names(&rig.local()).len(),
-        4,
-        "gzip + checksum each, nothing else"
+        5,
+        "gzip + checksum each, and the lock file"
     );
     let check = Command::new("sha256sum")
         .arg("-c")
@@ -344,5 +344,87 @@ fn a_damaged_copy_at_the_receiver_stops_pruning() {
     assert!(
         pairs(&dest_host(&rig)).contains(&there[0]),
         "the oldest off-host copy survives"
+    );
+}
+
+#[test]
+fn a_second_run_is_refused_while_one_holds_the_lock() {
+    let rig = Rig::new();
+    snap(&rig, 2);
+    let before = names(&rig.local());
+    let mut holder = Command::new("flock")
+        .arg(rig.local().join(".lock"))
+        .args(["sleep", "30"])
+        .spawn()
+        .expect("flock");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let snapshot = rig.run("snapshot", 2, None, &[]);
+    let ship = rig.run("ship", 2, None, &[]);
+    holder.kill().ok();
+    holder.wait().ok();
+    for out in [snapshot, ship] {
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("another mill-board-backup"));
+    }
+    let after: Vec<String> = names(&rig.local())
+        .into_iter()
+        .filter(|n| n != ".lock")
+        .collect();
+    assert_eq!(
+        after,
+        before
+            .into_iter()
+            .filter(|n| n != ".lock")
+            .collect::<Vec<_>>()
+    );
+    assert!(!dest_host(&rig).exists(), "nothing shipped");
+}
+
+#[test]
+fn an_emptied_staging_directory_never_prunes() {
+    let rig = Rig::new();
+    for _ in 0..2 {
+        snap(&rig, 3);
+    }
+    ok(&rig.run("ship", 3, None, &[]));
+    let there = names(&dest_host(&rig));
+    // Stands in for another run that rebuilt the staging directory mid-flight: it is emptied
+    // during the verification pass, which then sees nothing to differ.
+    let body = format!(
+        "case \"$*\" in *--itemize-changes*) rm -f '{}'/.ship/* ;; esac; exec /usr/bin/rsync \"$@\"",
+        rig.local().display()
+    );
+    let bin = rig.fake("rsync", &body);
+    let out = rig.run("ship", 3, Some(&bin), &[]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("staging changed"));
+    assert_eq!(
+        names(&dest_host(&rig)),
+        there,
+        "every off-host copy survives"
+    );
+}
+
+#[test]
+fn a_staging_directory_with_the_right_count_but_the_wrong_names_never_prunes() {
+    let rig = Rig::new();
+    for _ in 0..2 {
+        snap(&rig, 3);
+    }
+    ok(&rig.run("ship", 3, None, &[]));
+    let there = names(&dest_host(&rig));
+    // Swaps one expected link for a stray one during verification: the entry count still matches.
+    let body = format!(
+        "case \"$*\" in *--itemize-changes*) cd '{}'/.ship && rm -f \"$(ls | head -n1)\" && ln -s /nonexistent stray ;; esac; exec /usr/bin/rsync \"$@\"",
+        rig.local().display()
+    );
+    let bin = rig.fake("rsync", &body);
+    let out = rig.run("ship", 3, Some(&bin), &[]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("staging changed"));
+    assert_eq!(
+        names(&dest_host(&rig)),
+        there,
+        "every off-host copy survives"
     );
 }

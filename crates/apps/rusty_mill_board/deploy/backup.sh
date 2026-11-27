@@ -23,6 +23,12 @@ keep=${MILL_BOARD_BACKUP_KEEP:-14}
 [[ $keep =~ ^[1-9][0-9]*$ ]] || die "MILL_BOARD_BACKUP_KEEP must be a positive whole number, not '$keep'"
 umask 077
 
+# One run at a time (the timer, or a hand-run snapshot or ship): both rebuild the staging
+# directory, and a prune from a staging directory another run emptied would delete the copies.
+mkdir -p "$dir"
+exec {lock_fd}>"$dir/.lock"
+flock -n "$lock_fd" || die "another mill-board-backup is running"
+
 # Copy $1 to $2 with the online backup API, then open the copy and require integrity_check ok.
 copy_and_check() {
     python3 -I - "$1" "$2" <<'PY'
@@ -98,6 +104,19 @@ copies_in() {
     grep -c 'mill-board-.*\.sqlite3\.gz\.sha256$' || true
 }
 
+# True when $1 holds, for each name in $2, links to $dir's copy and its checksum, the gzip matching
+# that checksum, and no other entry.
+stage_intact() {
+    local stage=$1 names=$2 n total=0
+    while IFS= read -r n; do
+        [[ -L $stage/$n && $(readlink -- "$stage/$n") == "$dir/$n" ]] || return 1
+        [[ -L $stage/$n.sha256 && $(readlink -- "$stage/$n.sha256") == "$dir/$n.sha256" ]] || return 1
+        (cd "$stage" && sha256sum -c --status -- "$n.sha256" 2>/dev/null) || return 1
+        total=$((total + 2))
+    done <<<"$names"
+    [[ $(find "$stage" -mindepth 1 -maxdepth 1 | wc -l) -eq $total ]]
+}
+
 ship() {
     local base=${MILL_BOARD_BACKUP_DEST:?set MILL_BOARD_BACKUP_DEST: an rsync target off this host}
     # A mounted destination that is not mounted would fill the local disk under the mount point.
@@ -133,6 +152,9 @@ ship() {
     if ((here < keep && here < there)); then
         echo "mill-board-backup: only $here copies here, $there at the destination; not pruning it" >&2
     else
+        # The staging directory must still hold exactly the verified pairs: every expected name is
+        # there, links to this host's own file, and still matches its checksum; nothing else is.
+        stage_intact "$stage" "$names" || die "staging changed under this run: nothing pruned"
         rsync -aL --delete --timeout=600 "${filter[@]}" "$stage/" "$dest/"
     fi
     echo "mill-board-backup: shipped to $dest"
