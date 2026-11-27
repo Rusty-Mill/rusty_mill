@@ -1,4 +1,4 @@
-//! `rusty_orch lens why` (#599 §5, D209): one claim's `bbp why --claim`
+//! `rusty_orch lens why` (#599 §5, D216): one claim's `bbp why --claim`
 //! history with the orch lens job behind each evidence post.
 //!
 //! A step whose evidence message is one a saved blind review posted (the

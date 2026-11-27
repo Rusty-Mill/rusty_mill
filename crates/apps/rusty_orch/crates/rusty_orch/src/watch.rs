@@ -7,7 +7,7 @@
 //! - Each [`Watch`] adapter is a CLI call (D58): `cargo deny` advisories,
 //!   `cargo update --dry-run`, the toolchain against the watched-versions
 //!   file, and the canary: `bbp canary` re-runs the app's `profile` on its
-//!   `released_ref` (D210).
+//!   `released_ref` (D217).
 //! - Findings are posted by the task's `watcher` role (D79) through its
 //!   `bbp mcp` session. A claim never accepts on the watcher's word alone
 //!   (`min_authors`), and a human still merges.
@@ -71,7 +71,7 @@ pub struct App {
     /// The test profile the canary runs.
     pub profile: String,
     /// The most the app's watch may spend per run, in dollars. Not read yet:
-    /// no adapter calls a model, so a run costs nothing (D210).
+    /// no adapter calls a model, so a run costs nothing (D217).
     pub watch_usd: f64,
 }
 
@@ -172,7 +172,7 @@ impl Watch for Toolchain {
 }
 
 /// `bbp canary`: the app's `profile` from its maintenance task's frozen set,
-/// re-run on `released_ref` in the BBP host's sandbox (D210). A red run is a
+/// re-run on `released_ref` in the BBP host's sandbox (D217). A red run is a
 /// finding; a green one is none; a run that couldn't happen is an error.
 /// It makes no model call, so `watch_usd` isn't read.
 pub struct Canary {

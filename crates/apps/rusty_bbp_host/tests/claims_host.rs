@@ -3389,7 +3389,7 @@ fn an_empty_task_id_does_not_poison_the_ledger() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// #599 canary (D210): the task's frozen profile re-run on a released ref,
+/// #599 canary (D217): the task's frozen profile re-run on a released ref,
 /// red on a red ref and green on a green one, with nothing written to the
 /// task; an unknown profile or ref is an error naming it.
 #[test]

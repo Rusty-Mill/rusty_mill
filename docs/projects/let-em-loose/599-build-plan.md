@@ -195,7 +195,7 @@ daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
     crate would post hundreds of claims.
   - `toolchain`: the app's `rust-toolchain.toml` channel against the watched
     Rust version.
-  - `canary`: a re-run of `profile` on `released_ref`. As built (D210):
+  - `canary`: a re-run of `profile` on `released_ref`. As built (D217):
     `bbp canary --dir --task --repo-path --work --ref --profile` runs the
     named profile from the task's frozen set on a clean sandboxed checkout
     (the #598 baseline runner) and prints the report, writing nothing to the
@@ -254,7 +254,7 @@ daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
 For one claim: the `bbp why --claim` history joined with orch's job records:
 the job, lens, model and cost behind each evidence post.
 
-As built (D209): `rusty_orch lens why --bbp --dir --task --claim --state
+As built (D216): `rusty_orch lens why --bbp --dir --task --claim --state
 [--at]` prints the history as one JSON line; each evidence step a saved
 `lens_record` job posted gains `job: {lens, epoch, look_harder, unsure}`.
 Model and cost wait on Q67, since `lens_record` stores neither.

@@ -16,7 +16,7 @@
 //! - [`record`]: each lens's track record, from its stored blind reviews and
 //!   `bbp why` (#599).
 //! - [`why`]: `rusty_orch lens why`, one claim's `bbp why` history with the
-//!   lens job behind each evidence post (#599 §5, D209).
+//!   lens job behind each evidence post (#599 §5, D216).
 //! - [`probes`]: the #708 alien lens's sandboxed probe runner (D96).
 //! - [`hunts`]: the #708 alien lens's pass in `lens run --alien` (D99).
 

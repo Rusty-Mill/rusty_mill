@@ -1,4 +1,4 @@
-//! `bbp canary` (#599 PR 4, D210): one profile of a task's frozen profile set
+//! `bbp canary` (#599 PR 4, D217): one profile of a task's frozen profile set
 //! re-run on a released ref, as a report and nothing more.
 //!
 //! The maintenance watcher (`rusty_orch watch`) calls it for each app: REF is
