@@ -746,6 +746,16 @@ impl Explorer {
             .map(|s| s.line(now))
     }
 
+    /// The size and modification time of the row under the cursor, once read.
+    #[must_use]
+    pub fn selected_stat(&self) -> Option<Stat> {
+        let path = match self.tree.as_ref()?.selected_path() {
+            p if p.is_empty() => ".".to_owned(),
+            p => p,
+        };
+        self.stats.get(&path).copied().flatten()
+    }
+
     /// Shows `text` on the status line until the next reply or key that
     /// asks for something. Callers pass fixed text, never a name.
     pub fn say(&mut self, text: &str) {

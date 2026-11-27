@@ -61,24 +61,33 @@ pub fn render_tree(tree: &Tree, width: usize, height: usize) -> Vec<String> {
         .collect()
 }
 
-/// The program that opens `path` (relative to the workspace root) in the
-/// server's `$EDITOR`, or `vi`: a shell that is handed the path as an
-/// argument, never as text, so no name can end a quote. A path that is not a
-/// file there is said and waits for Enter. `None` for an empty or overlong
-/// path or one with a control character, as for [`cd_command`].
+/// The program that opens `path` in the server's `$EDITOR`, or `vi`, only
+/// if the file there is the one picked: a shell script handed the path and
+/// the `size` and `mtime` the tree read for it, as arguments and never as
+/// text, which refuses (says so, waits for Enter) when there is no such
+/// file or its size or time differ. The new block starts in the server's
+/// default directory, not necessarily the workspace root the path is
+/// relative to, which the client cannot tell: the check stops a same-named
+/// file in another directory from opening instead. `None` for an empty or
+/// overlong path or one with a control character, as for [`cd_command`].
 #[must_use]
-pub fn edit_program(path: &str) -> Option<Program> {
+pub fn edit_program(path: &str, size: u64, mtime: u64) -> Option<Program> {
     if path.is_empty() || path.len() > CD_MAX || path.chars().any(char::is_control) {
         return None;
     }
-    let script =
-        r#"test -f "$1" || { echo "no such file: $1"; read x; exit 1; }; exec ${EDITOR:-vi} "$1""#;
+    let script = r#"test -f "$1" && [ "$(stat -c '%s %Y' "$1")" = "$2" ] || { echo "not the file picked (none there, or its size or time differ): $1"; read x; exit 1; }; exec ${EDITOR:-vi} "$1""#;
     Some(Program {
         command: "sh".into(),
         // `./` keeps a name that starts with `-` from reading as an option.
-        args: ["-c", script, "editor", &format!("./{path}")]
-            .map(Into::into)
-            .into(),
+        args: [
+            "-c",
+            script,
+            "editor",
+            &format!("./{path}"),
+            &format!("{size} {mtime}"),
+        ]
+        .map(Into::into)
+        .into(),
     })
 }
 
@@ -100,8 +109,9 @@ pub enum Step {
     /// before it types [`cd_command`] into the block.
     Cd(String),
     /// Still open; the user asked to open this file (relative to the
-    /// workspace, real names) in an editor: see [`edit_program`].
-    Edit(String),
+    /// workspace, real names; its size and modification time as read) in an
+    /// editor: see [`edit_program`].
+    Edit { path: String, size: u64, mtime: u64 },
 }
 
 /// Longest path [`cd_command`] types.
@@ -185,9 +195,17 @@ pub fn press(explorer: &mut Explorer, bytes: &[u8]) -> Step {
                     explorer.say("open needs a file");
                     continue;
                 }
+                let Some(stat) = explorer.selected_stat() else {
+                    explorer.say("wait for the size to show, then press o");
+                    continue;
+                };
                 if let Some(path) = explorer.tree().map(Tree::selected_path) {
                     explorer.clear_note();
-                    return Step::Edit(path);
+                    return Step::Edit {
+                        path,
+                        size: stat.size,
+                        mtime: stat.mtime,
+                    };
                 }
             }
             b'l' | b'C' | b'\r' | b'\n' if !explorer.waiting() => {
@@ -552,26 +570,83 @@ mod tests {
 
     #[test]
     fn the_editor_gets_the_path_as_an_argument_and_never_as_shell_text() {
-        let p = edit_program("a b/-x'; rm").expect("a program");
+        let p = edit_program("a b/-x'; rm", 12, 60).expect("a program");
         assert_eq!(p.command, "sh");
         assert_eq!(p.args[0], "-c");
         assert!(!p.args[1].contains("rm"), "the script is fixed");
         assert_eq!(p.args[3], "./a b/-x'; rm");
-        assert!(edit_program("a\nb").is_none());
-        assert!(edit_program("").is_none());
-        assert!(edit_program(&"a".repeat(CD_MAX + 1)).is_none());
+        assert_eq!(p.args[4], "12 60");
+        assert!(edit_program("a\nb", 1, 1).is_none());
+        assert!(edit_program("", 1, 1).is_none());
+        assert!(edit_program(&"a".repeat(CD_MAX + 1), 1, 1).is_none());
+    }
+
+    /// Runs the editor script where it would, with `EDITOR=echo EDIT`:
+    /// whether it got as far as the editor, and what it said.
+    #[cfg(unix)]
+    fn run_editor_in(dir: &std::path::Path, path: &str, size: u64, mtime: u64) -> (bool, String) {
+        let p = edit_program(path, size, mtime).expect("a program");
+        let out = std::process::Command::new(&p.command)
+            .args(&p.args)
+            .current_dir(dir)
+            .env("EDITOR", "echo EDIT")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("sh runs");
+        let said = String::from_utf8_lossy(&out.stdout).into_owned();
+        (said.starts_with("EDIT "), said)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_editor_script_opens_only_the_file_that_was_picked() {
+        use std::os::unix::fs::MetadataExt;
+        let base = std::env::temp_dir().join(format!("mux-edit-{}", std::process::id()));
+        let (workspace, default) = (base.join("workspace"), base.join("default"));
+        std::fs::create_dir_all(workspace.join("src")).expect("dirs");
+        std::fs::create_dir_all(default.join("src")).expect("dirs");
+        std::fs::write(workspace.join("src/a b.rs"), "the picked file").expect("file");
+        std::fs::write(default.join("src/a b.rs"), "another one").expect("file");
+        let picked = std::fs::metadata(workspace.join("src/a b.rs")).expect("stat");
+        let (size, mtime) = (picked.len(), picked.mtime() as u64);
+        let (ran, said) = run_editor_in(&workspace, "src/a b.rs", size, mtime);
+        assert!(ran, "{said}");
+        assert_eq!(said.trim_end(), "EDIT ./src/a b.rs");
+        // The server's default directory holds a file of the same name.
+        let (ran, said) = run_editor_in(&default, "src/a b.rs", size, mtime);
+        assert!(!ran && said.contains("not the file picked"), "{said}");
+        // And nothing at all there.
+        let (ran, said) = run_editor_in(&base, "src/a b.rs", size, mtime);
+        assert!(!ran && said.contains("not the file picked"), "{said}");
+        std::fs::remove_dir_all(&base).expect("clean up");
     }
 
     #[test]
-    fn o_asks_to_open_only_a_file() {
-        let mut e = Explorer::opened(false);
+    fn o_asks_to_open_only_a_file_whose_stat_is_read() {
+        let mut e = Explorer::opened(true);
         e.load(".\nd\tsrc\nf\ta.rs");
         assert_eq!(press(&mut e, b"o"), Step::Open, "the root is not a file");
         assert!(render(&e, 40, 4).iter().any(|l| l == "open needs a file"));
         press(&mut e, b"j");
         assert_eq!(press(&mut e, b"o"), Step::Open, "nor a directory");
         press(&mut e, b"j");
-        assert_eq!(press(&mut e, b"o"), Step::Edit("a.rs".into()));
+        assert_eq!(press(&mut e, b"o"), Step::Open, "its stat is not read");
+        assert!(
+            render(&e, 60, 4)
+                .iter()
+                .any(|l| l.contains("wait for the size"))
+        );
+        assert_eq!(e.wants(), Some(Call::Touched));
+        assert_eq!(e.wants(), Some(Call::Stat("a.rs".into())));
+        e.load_stat(Some("f\t12\t60"));
+        assert_eq!(
+            press(&mut e, b"o"),
+            Step::Edit {
+                path: "a.rs".into(),
+                size: 12,
+                mtime: 60
+            }
+        );
     }
 
     #[test]

@@ -2727,9 +2727,9 @@ mod client {
             }
             match explorer::press(&mut open.explorer, bytes) {
                 Explored::Leave => self.live(),
-                Explored::Edit(file) => {
+                Explored::Edit { path, size, mtime } => {
                     let block = open.block;
-                    let program = explorer::edit_program(&file);
+                    let program = explorer::edit_program(&path, size, mtime);
                     match program {
                         None => open.explorer.say("open refused: unsafe name"),
                         Some(_) if !(self.layouts && self.launching) => open
@@ -4878,13 +4878,15 @@ mod client {
             }
         }
 
-        /// `o` on a file splits its block with the editor program, as a
-        /// program and argument (no shell text), and closes the tree.
+        /// `o` on a file whose size and time were read splits its block with
+        /// the editor program, as a program and arguments (no shell text), and
+        /// closes the tree.
         #[cfg(unix)]
         #[test]
         fn o_opens_the_file_in_a_new_block_with_the_editor_program() {
             let (mut app, _inbox, far) = app(None);
             let a = block(1);
+            app.panes.get_mut(&a).expect("A").status = true;
             app.act(Action::Explorer);
             let list = workspace_calls(&sent(&far[1]))[0].0;
             pane_says(
@@ -4895,7 +4897,43 @@ mod client {
                     text: ".\nf\ta b.rs".into(),
                 },
             );
-            app.take(Input::Keys(b"jo".to_vec()));
+            let stat_of = |path: &str| {
+                sent(&far[1]).iter().find_map(|m| match m {
+                    Message::BlockCall {
+                        req, method, args, ..
+                    } if method == "terminal.workspace-stat"
+                        && args
+                            .iter()
+                            .any(|(_, v)| matches!(v, Value::Text(p) if p == path)) =>
+                    {
+                        Some(*req)
+                    }
+                    _ => None,
+                })
+            };
+            let root = stat_of(".").expect("the root's stat is asked for");
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: root,
+                    text: "d\t0\t60".into(),
+                },
+            );
+            app.take(Input::Keys(b"j".to_vec()));
+            // Not read yet: the tree stays and says so.
+            app.take(Input::Keys(b"o".to_vec()));
+            assert!(app.exploring.is_some(), "still open");
+            let file = stat_of("a b.rs").expect("the file's stat is asked for");
+            pane_says(
+                &mut app,
+                a,
+                Message::Text {
+                    req: file,
+                    text: "f\t12\t60".into(),
+                },
+            );
+            app.take(Input::Keys(b"o".to_vec()));
             assert!(app.exploring.is_none(), "closed");
             let split = sent(&far[0])
                 .into_iter()
@@ -4907,7 +4945,8 @@ mod client {
             assert_eq!(split.0, a);
             let program = split.1.program.expect("a program");
             assert_eq!(program.command, "sh");
-            assert_eq!(program.args.last().map(String::as_str), Some("./a b.rs"));
+            assert_eq!(program.args[3], "./a b.rs");
+            assert_eq!(program.args[4], "12 60");
         }
 
         /// The server refuses the change marks on an agent's block (D372): the
