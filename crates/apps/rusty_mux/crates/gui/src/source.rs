@@ -49,7 +49,8 @@ use rusty_mux_proto::{Entry, Features, Launch, Message, Program, ShowTo, Takeove
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
     Act, BlockInfo, Bound, Detached, Dir, DownloadDone, DownloadProgress, Explore, Explored, Feed,
-    Float as Pane, ForwardDone, Link, ListDone, Listed, Notice, PaneIo, Remote, Session, Show,
+    Float as Pane, ForwardDone, Link, ListDone, Listed, Notice, PaneIo, Remote, RerunDone, Session,
+    Show,
     Source, Take, Tree, UploadDone, UploadProgress,
 };
 
@@ -659,6 +660,28 @@ impl Source for MuxSource {
             Some(block) => block.upload(path, progress, done),
             None => done(Err("the block is not open".into())),
         }
+    }
+
+    fn reruns(&self, key: u64) -> bool {
+        self.pane(key).is_some_and(|b| b.reruns)
+    }
+
+    /// Needs the lease, as the server does; the server refuses a block
+    /// whose program still runs. A refusal leaves the lease as it was.
+    fn rerun(&self, key: u64, done: RerunDone) {
+        let Some(block) = self.pane(key) else {
+            return done(Err("the block is gone".into()));
+        };
+        if !block.lease().held {
+            return done(Err(
+                "Another client holds this block's input; take it over to re-run.".into(),
+            ));
+        }
+        block.call(
+            "terminal.rerun",
+            Vec::new(),
+            Box::new(move |answer| done(answer.map(drop))),
+        );
     }
 
     fn downloads(&self, key: u64) -> bool {
@@ -1647,6 +1670,8 @@ struct Block {
     uploads: bool,
     /// The server gives files on this connection (C83).
     downloads: bool,
+    /// The server re-runs an ended command on this connection (C45, D338).
+    reruns: bool,
     /// Who waits for an upload or download chunk's answer, by request number.
     uploading: Mutex<HashMap<u64, Sender<Result<String, String>>>>,
     /// The server tunnels ports on this connection (C81).
@@ -1844,6 +1869,9 @@ impl Block {
             downloads: opened
                 .features
                 .contains(Features::BLOCK_CALL.union(Features::DOWNLOAD)),
+            reruns: opened
+                .features
+                .contains(Features::BLOCK_CALL.union(Features::HOLD)),
             uploading: Mutex::new(HashMap::new()),
             forwards: opened.features.contains(Features::PORT_FORWARD),
             forwarder: Mutex::new(None),
@@ -2469,6 +2497,7 @@ impl Block {
                 {
                     continue;
                 }
+                Message::Done { req, .. } if self.listed(req, Ok(String::new())) => continue,
                 Message::Done { req, .. } => {
                     self.update(|lease, send| lease.answered(req, None, send));
                     continue;
