@@ -67,6 +67,9 @@ security-sensitive (tokens, keys, egress) and get independent review (CONTRIBUTI
 - **No keygen code.** The key is a P-256 PKCS#8 PEM made with `openssl genpkey -algorithm EC
   -pkeyopt ec_paramgen_curve:P-256`; orch derives the JWKS entry with `jwk()`. Writing the key file on
   BaileyAi is a §11 host write and needs Nano's yes, given as a paste-ready prompt.
-- **Version drift.** The workspace table declares `jsonwebtoken = "9"` while the vendored copy is
-  11.0.0; the path patch makes it work. Changing the declared version is a dependency bump, so it is
-  left alone here.
+- **Dependency line.** The workspace table declares `jsonwebtoken = "9"`, which resolves to 9.3.1, not
+  the vendored 11.0.0 (`Cargo.lock` holds 9.3.1, 10.4.0 and 11.0.0). So `orch-token` must not inherit
+  the workspace entry; it declares `jsonwebtoken = { version = "11", default-features = false,
+  features = ["rust_crypto", "use_pem"] }`, exactly as `agentgateway-auth` and `rusty_mcp_middleware`
+  do. That adds no new package to the lock file. Changing the workspace entry is a dependency bump, so
+  it is left alone here.
