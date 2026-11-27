@@ -1,0 +1,11 @@
+# Daily Mill Board backup at 03:45 local time; a missed run (host off) runs at next boot.
+[Unit]
+Description=Daily Mill Board backup
+
+[Timer]
+OnCalendar=*-*-* 03:45:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -73,6 +73,7 @@ fn target(up: &Up, connections: usize, timeout: Duration) -> Target {
             path: "/mcp".to_owned(),
         }),
         filters: Vec::new(),
+        identity: None,
     };
     Target::connect_with(
         &config,
