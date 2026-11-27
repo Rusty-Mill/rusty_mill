@@ -116,6 +116,9 @@ pub struct LensConfig {
     pub lenses: Vec<Lens>,
     /// The alien lens, when configured; `lens run --alien` needs it.
     pub alien: Option<Alien>,
+    /// #723: compose each lens prompt per claim from the Factory catalog
+    /// beside this config and the target repo's `DOMAIN.md`. Off when absent.
+    pub compose: bool,
 }
 
 impl LensConfig {
@@ -133,6 +136,7 @@ impl LensConfig {
                 "builders",
                 "lenses",
                 "alien",
+                "compose",
             ],
             "config",
         )?;
@@ -155,6 +159,10 @@ impl LensConfig {
             None => None,
             Some(a) => Some(alien(a, &providers, &lenses).map_err(|e| format!("alien.{e}"))?),
         };
+        let compose = match top.get("compose") {
+            None => false,
+            Some(c) => c.as_bool().ok_or("compose: true or false")?,
+        };
         Ok(Self {
             providers,
             domain_classes,
@@ -163,6 +171,7 @@ impl LensConfig {
             builders,
             lenses,
             alien,
+            compose,
         })
     }
 
@@ -684,6 +693,22 @@ pub(crate) mod tests {
         let arch = c.lens("architect").expect("architect");
         assert_eq!(arch.rebel, AgentId::new("codex").ok());
         assert!(arch.follows("anything"));
+    }
+
+    #[test]
+    fn compose_is_off_unless_set_true() {
+        assert!(!LensConfig::parse(STARTER).expect("loads").compose);
+        let with = |v: &str| {
+            STARTER.replacen(
+                r#""lenses": ["#,
+                &format!("\"compose\": {v},\n\"lenses\": ["),
+                1,
+            )
+        };
+        assert!(LensConfig::parse(&with("true")).expect("loads").compose);
+        assert!(!LensConfig::parse(&with("false")).expect("loads").compose);
+        let e = LensConfig::parse(&with("\"yes\"")).expect_err("refused");
+        assert_eq!(e, "compose: true or false");
     }
 
     #[test]

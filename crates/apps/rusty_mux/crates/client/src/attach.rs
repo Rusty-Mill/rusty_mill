@@ -47,7 +47,9 @@ pub const CONTROL: Features = Features::CHECKPOINT_V6
 /// [`CONTROL`] for a client that draws floating blocks (C42): the TUI. A
 /// client that does not must not ask, or the server would tell it focus is
 /// on a block it cannot show.
-pub const FLOATING: Features = CONTROL.union(Features::FLOATS);
+/// It also asks who works each block ([`Features::AGENT_META`]), for the
+/// TUI's card-wide workspace tree.
+pub const FLOATING: Features = CONTROL.union(Features::FLOATS).union(Features::AGENT_META);
 
 /// What a block's connection asks for. `TERMINAL_CONTROL` tells the
 /// server this client's copy of the terminal can be reset safely.
@@ -55,7 +57,9 @@ pub const FLOATING: Features = CONTROL.union(Features::FLOATS);
 /// reads the clipboard (C54); a client that takes no part answers none.
 /// `BLOCK_CALL`, `WORKSPACE` and `WORKSPACE_STATUS` let the connection that
 /// holds the lease list the block's workspace and read what is in it (D349): a call is authorised on the block's
-/// own connection, not on the control one.
+/// own connection, not on the control one. `LAUNCH` and `LAUNCH_IN_WORKSPACE`
+/// let that connection start a block in the block's own workspace (D378),
+/// which needs the same lease. `HOLD` lets it re-run a held block's ended command (`terminal.rerun`, D338).
 pub const PANE: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_CONTROL)
     .union(Features::CLIPBOARD)
@@ -64,7 +68,10 @@ pub const PANE: Features = Features::CHECKPOINT_V6
     .union(Features::SYNC)
     .union(Features::BLOCK_CALL)
     .union(Features::WORKSPACE)
-    .union(Features::WORKSPACE_STATUS);
+    .union(Features::WORKSPACE_STATUS)
+    .union(Features::HOLD)
+    .union(Features::LAUNCH)
+    .union(Features::LAUNCH_IN_WORKSPACE);
 
 /// How long the server may take over the answers to bring a path back,
 /// or to open a block's connection from the main loop.
@@ -288,6 +295,9 @@ pub struct Shape {
     /// The window's floating blocks, back to front, from a server with
     /// [`Features::FLOATS`].
     pub floats: Vec<Float>,
+    /// The card each block is worked for, from a server with
+    /// [`Features::AGENT_META`]: only blocks launched with one.
+    pub cards: Vec<(BlockId, String)>,
 }
 
 /// What `window` shows, from a List's `entries`; `None` when the window
@@ -339,6 +349,16 @@ pub fn window_shape(entries: &[Message], window: WindowId) -> Option<Shape> {
             _ => None,
         })
         .unwrap_or_default();
+    shape.cards = entries
+        .iter()
+        .filter_map(|m| match m {
+            Message::Entry {
+                entry: Entry::Agent { block, meta },
+                ..
+            } if !meta.card.is_empty() => Some((*block, meta.card.clone())),
+            _ => None,
+        })
+        .collect();
     Some(shape)
 }
 

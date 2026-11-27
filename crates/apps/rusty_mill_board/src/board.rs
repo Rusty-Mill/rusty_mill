@@ -802,6 +802,25 @@ impl<S: Store> Board<S> {
             .collect())
     }
 
+    /// The claims of BBP task `task` (a JSON array of claim views), for the LEL
+    /// tab's map. Read-only and admin-only like [`Board::inbox`], and only a task
+    /// linked from a card `by` may work in.
+    ///
+    /// # Errors
+    /// As [`Board::inbox`], plus [`BoardError::Refused`] for a task no card links.
+    pub fn lel_claims(&self, by: &Actor, task: &str) -> Result<serde_json::Value, BoardError> {
+        let source = self.inbox_source(by)?;
+        let linked = self.cards()?.into_iter().any(|c| {
+            by.may_work_in(&c.project) && c.execution.as_ref().is_some_and(|x| x.bbp_task == task)
+        });
+        if !linked {
+            return Err(BoardError::Refused(format!(
+                "no card you can work in links BBP task {task}"
+            )));
+        }
+        source.claims(task).map_err(inbox_error)
+    }
+
     /// Preview (`dry_run`) or take `action` on escalation `id`, read at `rev`.
     /// The escalation is re-read first: one that has closed, or moved past
     /// `rev`, is refused before anything is sent, and BBP fences the rest.
