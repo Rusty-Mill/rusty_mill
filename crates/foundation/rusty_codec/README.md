@@ -11,8 +11,8 @@ from `rusty_tls`'s `Cargo.toml` (inline table, feature array, hyphenated
 keys), not just synthetic examples.
 
 **Implemented:** comments, bare/dotted keys, tables (`[section]`, including
-nested `[a.b.c]`), basic strings (`"..."` with `\n`/`\t`/`\\`/`\"` escapes)
-and literal strings (`'...'`, no escape processing), integers and floats
+nested `[a.b.c]`), basic strings (`"..."` with TOML's escapes, including
+`\uXXXX` and `\UXXXXXXXX`) and literal strings (`'...'`, no escape processing), integers and floats
 (with `_` digit separators and exponents), booleans, arrays (including ones
 spanning multiple physical lines), and inline tables (`{ a = 1, b = 2 }`).
 
@@ -20,6 +20,11 @@ spanning multiple physical lines), and inline tables (`{ a = 1, b = 2 }`).
 multi-line basic/literal strings (`"""..."""`/`'''...'''`), no quoted/dotted
 table headers with quoted segments, no native date/time values (parsed as
 plain strings instead).
+
+**Refused, not reinterpreted:** a key defined twice, an escape TOML does not
+define, array items or inline-table entries without a `,` between them, and
+two entries on one line are parse errors, so a config can't silently mean something other
+than what it says.
 
 ```rust
 use rusty_codec::TomlValue;

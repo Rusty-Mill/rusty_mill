@@ -12,9 +12,11 @@
 
 mod federation;
 mod gate;
+mod glob;
 mod guardrails;
 mod header_override;
 mod identity;
+mod lens_policy;
 mod naming;
 mod rules;
 mod span;
@@ -30,6 +32,7 @@ pub use guardrails::{
 };
 pub use header_override::HeaderOverride;
 pub use identity::{Identity, IdentityError};
+pub use lens_policy::{LensPolicies, LensPolicyError, policy_digest};
 pub use naming::{Resolution, ToolNamer};
 pub use rules::{Call, RuleError, RuleSet, Subject};
 pub use target::{Override, SESSION_IDLE, SessionKey, Target, TargetError};

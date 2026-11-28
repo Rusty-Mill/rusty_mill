@@ -42,6 +42,7 @@ use crate::{
     gate::{Authorization, GateError},
     guardrails::{Annotations, CallContext, Guardrails, GuardrailsError, Outcome},
     header_override::HeaderOverride,
+    lens_policy::LensPolicies,
     naming::{Resolution, ToolNamer},
     rules::{Call, RuleError, RuleSet, Subject},
     span,
@@ -115,6 +116,8 @@ struct Inner {
     namer: ToolNamer,
     authorization: Authorization,
     rules: RuleSet,
+    /// The route's lens policies, when it has `lelPolicy`.
+    lens: Option<LensPolicies>,
     guardrails: Guardrails,
     /// The route's `requestHeaderModifier`, applied to upstream calls.
     transform: Transform,
@@ -180,6 +183,7 @@ impl Federation {
         request_headers: Option<&HeaderModifier>,
         overrides: Vec<Override>,
         backend_timeout: Option<Duration>,
+        lens: Option<LensPolicies>,
         at: &str,
     ) -> Result<Self, FederationError> {
         let transform = match request_headers {
@@ -257,6 +261,7 @@ impl Federation {
                 namer,
                 authorization,
                 rules,
+                lens,
                 guardrails,
                 transform,
                 backend_timeout,
@@ -552,11 +557,14 @@ impl ToolSource for Federation {
                 // in it -- `call_tool` re-checks every gate.
                 index.insert(federated.clone(), target.name.clone());
 
-                if !self.inner.rules.permits(Call {
-                    target: &target.name,
-                    subject: Subject::Tool(&tool.name),
-                    claims,
-                }) {
+                if !self.permits(
+                    Call {
+                        target: &target.name,
+                        subject: Subject::Tool(&tool.name),
+                        claims,
+                    },
+                    &federated,
+                ) {
                     continue;
                 }
 
@@ -628,11 +636,14 @@ impl Federation {
         // they are written against the tool's own name and its target -- see
         // the module docs on `rules`. Like every other gate this runs on the
         // call, not only on the listing.
-        if !self.inner.rules.permits(Call {
-            target: &target.name,
-            subject: Subject::Tool(&tool),
-            claims: who.claims(),
-        }) {
+        if !self.permits(
+            Call {
+                target: &target.name,
+                subject: Subject::Tool(&tool),
+                claims: who.claims(),
+            },
+            &federated,
+        ) {
             return Err(error(
                 ErrorCode::INVALID_REQUEST,
                 format!("tool `{federated}` is not permitted on this route"),
@@ -795,11 +806,14 @@ impl PromptSource for Federation {
                 // routing another caller needs.
                 index.insert(federated.clone(), target.name.clone());
 
-                if !self.inner.rules.permits(Call {
-                    target: &target.name,
-                    subject: Subject::Prompt(&prompt.name),
-                    claims,
-                }) {
+                if !self.permits(
+                    Call {
+                        target: &target.name,
+                        subject: Subject::Prompt(&prompt.name),
+                        claims,
+                    },
+                    &federated,
+                ) {
                     continue;
                 }
 
@@ -919,11 +933,14 @@ impl ResourceSource for Federation {
                 let federated = self.inner.namer.qualify_uri(&target.name, &resource.uri);
                 index.insert(federated.clone(), target.name.clone());
 
-                if !self.inner.rules.permits(Call {
-                    target: &target.name,
-                    subject: Subject::Resource(&resource.uri),
-                    claims,
-                }) {
+                if !self.permits(
+                    Call {
+                        target: &target.name,
+                        subject: Subject::Resource(&resource.uri),
+                        claims,
+                    },
+                    &federated,
+                ) {
                     continue;
                 }
 
@@ -973,11 +990,14 @@ impl ResourceSource for Federation {
                 // upstream matches too -- a rule that permits a template
                 // permits the shape, and each concrete read is gated again on
                 // its own URI when it arrives.
-                if !self.inner.rules.permits(Call {
-                    target: &target.name,
-                    subject: Subject::Resource(&template.uri_template),
-                    claims,
-                }) {
+                if !self.permits(
+                    Call {
+                        target: &target.name,
+                        subject: Subject::Resource(&template.uri_template),
+                        claims,
+                    },
+                    &template.uri_template,
+                ) {
                     continue;
                 }
 
@@ -1131,6 +1151,17 @@ impl Federation {
     }
 
     /// Apply the route's rules to one subject, or produce the refusal.
+    /// The caller-dependent gates on one subject: the route's `rules`, then
+    /// its lens policy, which sees the `federated` name the client uses.
+    fn permits(&self, call: Call<'_>, federated: &str) -> bool {
+        self.inner.rules.permits(call)
+            && self
+                .inner
+                .lens
+                .as_ref()
+                .is_none_or(|lens| lens.permits(call.subject, federated, call.claims))
+    }
+
     fn permit(
         &self,
         target: &str,
@@ -1138,11 +1169,14 @@ impl Federation {
         federated: &str,
         who: &Who,
     ) -> Result<(), ErrorData> {
-        if self.inner.rules.permits(Call {
-            target,
-            subject,
-            claims: who.claims(),
-        }) {
+        if self.permits(
+            Call {
+                target,
+                subject,
+                claims: who.claims(),
+            },
+            federated,
+        ) {
             return Ok(());
         }
         Err(error(

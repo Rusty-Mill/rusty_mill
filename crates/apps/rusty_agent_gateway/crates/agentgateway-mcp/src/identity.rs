@@ -27,6 +27,7 @@ use http::{HeaderName, HeaderValue};
 use rusty_mcp_server::json::Value;
 use rusty_mcp_server::proto::CallToolParams;
 
+use crate::glob::glob;
 use crate::header_override::HeaderOverride;
 
 /// The prefix a placeholder must carry: only token claims resolve.
@@ -155,26 +156,6 @@ fn claim_text(claims: Option<&serde_json::Value>, key: &str) -> Option<String> {
         serde_json::Value::Number(n) => Some(n.to_string()),
         _ => None,
     }
-}
-
-/// `*` matches any run of characters; everything else matches itself.
-fn glob(pattern: &str, name: &str) -> bool {
-    let mut pieces = pattern.split('*');
-    let first = pieces.next().unwrap_or_default();
-    let Some(mut rest) = name.strip_prefix(first) else {
-        return false;
-    };
-    let pieces: Vec<&str> = pieces.collect();
-    let Some((last, middle)) = pieces.split_last() else {
-        return rest.is_empty();
-    };
-    for piece in middle {
-        match rest.find(piece) {
-            Some(at) => rest = &rest[at + piece.len()..],
-            None => return false,
-        }
-    }
-    rest.ends_with(last)
 }
 
 /// A target's `identity`, compiled.

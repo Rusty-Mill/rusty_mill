@@ -78,10 +78,34 @@ pub struct Policies {
     /// LLM-specific request shaping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai: Option<AiPolicy>,
+
+    /// Let Em Loose lens policies: which tools a jailed agent's token may see
+    /// and call. An extension to upstream's schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lel_policy: Option<LelPolicy>,
+}
+
+/// Where a route's lens policies live (LEL D223, 726-sandbox-design §5).
+///
+/// Every `<lens>.toml` in `dir` is loaded at startup. A token picks one by its
+/// `lel.lens` claim and must carry the file's sha256 as `lel.policy`; any
+/// other token sees no tools and can call none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LelPolicy {
+    /// The policy directory.
+    pub dir: String,
 }
 
 impl Policies {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
+        if self.lel_policy.is_some() && self.jwt_auth.is_none() {
+            findings.push(format!(
+                "{at}.policies.lelPolicy: without `jwtAuth` no call carries a lens, so this \
+                 route denies every tool"
+            ));
+        }
+
         if let Some(ai) = &self.ai {
             ai.lint(&format!("{at}.policies.ai"), findings);
         }

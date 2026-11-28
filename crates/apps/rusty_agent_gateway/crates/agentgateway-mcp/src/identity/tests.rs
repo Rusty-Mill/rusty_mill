@@ -214,19 +214,6 @@ fn a_bad_header_name_is_refused_at_startup() {
 }
 
 #[test]
-fn glob_matches_runs() {
-    assert!(glob("*", ""));
-    assert!(glob("*", "anything"));
-    assert!(glob("board_*", "board_card_get"));
-    assert!(glob("*_get", "board_card_get"));
-    assert!(glob("b*c*t", "board_card_get"));
-    assert!(glob("exact", "exact"));
-    assert!(!glob("exact", "exactly"));
-    assert!(!glob("board_*", "github_x"));
-    assert!(!glob("a*b*a", "aba_"));
-}
-
-#[test]
 fn a_header_value_that_is_not_visible_ascii_refuses() {
     let identity = config(&[], &[], &[("x-lel-sub", "{{jwt.sub}}")]);
     let mut headers = HeaderOverride::default();
