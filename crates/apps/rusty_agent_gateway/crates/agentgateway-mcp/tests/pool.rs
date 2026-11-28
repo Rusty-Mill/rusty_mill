@@ -635,3 +635,30 @@ fn per_credential_keys_on_the_outgoing_authorization() {
         "credential pools outlive sessions"
     );
 }
+
+#[test]
+fn a_session_launch_needs_a_per_session_target() {
+    use agentgateway_config::{StdioLaunch, StdioTarget};
+
+    let launch = StdioLaunch {
+        cmd: "lel-jail".to_owned(),
+        args: vec!["/srv/lel/{{jwt.lel.claim}}/jail.json".to_owned()],
+        env: Default::default(),
+    };
+    let config = McpTarget {
+        name: "fs".to_owned(),
+        kind: McpTargetKind::Stdio(StdioTarget {
+            cmd: "never-run".to_owned(),
+            args: Vec::new(),
+            env: Default::default(),
+            session: Some(launch),
+        }),
+        filters: Vec::new(),
+        identity: None,
+        mode: Some(UpstreamMode::Pooled),
+        connections: None,
+    };
+    // Refused before anything is spawned.
+    let err = Target::connect(&config, &Override::default(), None, "t").unwrap_err();
+    assert!(err.to_string().contains("per_session"), "{err}");
+}

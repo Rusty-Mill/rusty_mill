@@ -287,6 +287,42 @@ pub struct StdioTarget {
     /// Extra environment variables for the child.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+
+    /// How each session's own child is started, filled from the verified
+    /// token (Let Em Loose D226). `cmd`, `args` and `env` above still start
+    /// the child the gateway probes at startup and lists tools from.
+    /// `per_session` targets only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<StdioLaunch>,
+}
+
+/// A session's launch: the same fields as [`StdioTarget`], each value a
+/// template over the verified token's claims (`{{jwt.<claim>}}`, as in
+/// [`TargetIdentity`]). A claim value must be `[A-Za-z0-9._-]+` and not `.` or
+/// `..`, so it can name a path segment but never leave one; anything else
+/// refuses the call rather than start a child.
+///
+/// ```yaml
+/// stdio:
+///   cmd: orch-fs-shell
+///   args: [--root, /var/empty, --mode, critic]
+///   session:
+///     cmd: lel-jail
+///     args: ["/srv/lel/{{jwt.lel.claim}}/jail.json"]
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StdioLaunch {
+    /// Executable to run.
+    pub cmd: String,
+
+    /// Arguments passed to it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+
+    /// Extra environment variables for the child.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 /// A remote MCP server speaking Streamable HTTP.

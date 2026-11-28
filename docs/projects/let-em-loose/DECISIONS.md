@@ -231,6 +231,7 @@ Precise contracts used by this guide:
 | D223 | #1375-#1378: the gateway's §11 public API and config items approved as a set (session binding, `identity`, `mode`/`connections`, `session_ended`, `per_session` default, `lelPolicy`) | [stated] 2026-11-27 (1375, 1376, 1377, 1378) |
 | D224 | #1551: the claim-log anchor design (PR #1931) is approved; board-side code may start; the BaileyAi host change still waits | [stated] 2026-11-27 (1551) |
 | D225 | #1379: the sandbox fs/shell server is the crate `crates/apps/rusty_orch/crates/orch-fs-shell` (package and binary `orch-fs-shell`) | [default] 2026-11-27 (1379) |
+| D226 | #1379: the gateway launches each per_session stdio child from a new per-target setting that templates its command, args and env from verified token claims | [stated] 2026-11-27 (1379, 1377) |
 | D227 | #1379: orch-fs-shell confines nothing; critic mode withholds only `write`; claiming confinement needs evidence from the jail; no gateway launch in PR #1951 | review constraint (dottiusmaximus), not an owner decision, 2026-11-28 (1379) |
 
 ## D1. Lenses, not stages
@@ -2275,6 +2276,15 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1379:fs-shell-crate-name
 **Source.** let-em-loose-expert, 2026-11-27, answering the #1375-#1379 build thread; 726-sandbox-design.md §6 ("name settled on the card"), §11 (no new dependency). Numbered D225 because D223 (PR #1946) and D224 (PR #1947) are taken on open PRs.
 **Condition.** The confinement boundary for this crate is D227, a review constraint from dottiusmaximus's static review (2026-11-28), not an owner decision.
+
+## D226. #1379: per_session stdio children are launched from a template over verified token claims
+
+**Decision.** The gateway starts each `per_session` stdio child (`orch-fs-shell`, D225, inside that session's `lel-jail` and `jail.json`) from a new per-target setting: the stdio command, args and env are built from the verified token's claims with #1376's template syntax, and every claim value used in them is limited to `[A-Za-z0-9._-]`. Nothing in the launch comes from call arguments (726-sandbox-design.md §6). Build consequence, not Nano's words: a claim value outside that set refuses the launch rather than being escaped. This approves that one new gateway config field, which D223's set did not include; registering `orch-fs-shell` as a target still follows the design, and review, CI and merge rules still apply.
+**Why.** The gateway builds the launch from the token, as §6 says, so the session's jail is in place before the server starts. It reuses #1376's templates and does not wait for #1380's layout to be final, because the template carries the layout.
+**Rejected.** b) The gateway passes the verified claims to every per_session stdio child in a fixed env var, and a wrapper or the server maps them to paths. c) Leaving registration until #1380's layout is decided.
+**Tag.** [stated] · remind-me: mem_488bfc4f58b14cac8ae3af8b1ea15669
+**Key.** lel:1379:stdio-launch-from-token
+**Source.** Nano tapped "Launch templated from the token" on hearthbot decision card `cmsg_014AqbZs58L565hMV2pFkCX54tdYAhvCHGDEodQgoeiZi2` ("How should the gateway start each session's fs/shell server inside that session's jail?"), 2026-11-27T21:47:59Z, in the project thread `cmsg_014AqbZs58L565hMV2pFkCX5LGapWPvdnjCJaxHPN2rCuz`. The option read: "New per-target setting: stdio command, args and env built from verified token claims (#1376 syntax), claim values limited to [A-Za-z0-9._-]." Relayed by the coordinator; the card was not read here. Answers the expert's 2026-11-27 escalation; extends D223, reverses nothing. Numbered D226 because D224 (PR #1947) and D225 (PR #1951) are taken on open PRs.
 
 ## D227. #1379: orch-fs-shell confines nothing; confinement must be proven in the jail
 
