@@ -382,6 +382,11 @@ struct StaleRevoke {
     /// With `revoke`: only these ids (a previewed list), and only if still stale.
     #[serde(default)]
     ids: Option<Vec<String>>,
+    /// With `revoke`: release only these previewed claims (`card` and `holder` from the dry
+    /// run's `claims`), each only if still held by a revoked agent. Without it, only the
+    /// claims of the agents this call revokes.
+    #[serde(default)]
+    claims: Option<Vec<crate::board::ClaimRef>>,
 }
 
 /// The stale age the Settings view marks and its revoke-stale button uses, in hours.
@@ -514,14 +519,14 @@ pub fn tools() -> Vec<SettingsTool> {
         ),
         tool(
             "settings_registered_agent_revoke",
-            "Forget a registered agent (needs admin): its key stops working at once and every card claim it held is released with a handoff comment (`released`); it can register again, without its claims.",
+            "Forget a registered agent (needs admin): its key stops working at once and every card claim it held (in your projects) is released with a handoff comment (`released`; any that fail are in `not_released` and offered again by the revoke-stale preview). An unknown id changes nothing. It can register again, without its claims.",
             json!({"id": text}),
             &["id"],
         ),
         tool(
             "settings_registered_agent_revoke_stale",
-            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin). A dry run unless `revoke: true`: it returns `count`, the agent `ids` it would revoke and `unsaved` (a revocation that failed to write: call again with `revoke: true` to write it). After a board restart, a last use may count up to an hour late while registry writes succeed; if a last-use write failed, a recently used agent can look stale and must register again. Every card claim a revoked agent held is released with a handoff comment, including any an earlier revoke left (so a run with nothing stale retries those); a dry run lists them in `claims`, a real run returns what it released in `claims` and what it could not in `not_released`. Revoked agents can register again, without their claims.",
-            json!({"older_than_hours": {"type": "integer", "description": "2-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}, "ids": {"type": "array", "items": {"type": "string"}, "description": "With revoke: only these previewed ids, and only if still stale."}}),
+            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin), and release card claims of revoked agents. A dry run unless `revoke: true`: it returns `count`, the agent `ids` it would revoke, the `claims` it would release (the stale agents' claims and any left by agents revoked earlier, in your projects) and `unsaved` (a revocation that failed to write: call again with `revoke: true` to write it). Confirm with `revoke: true`, `ids` and `claims` (each `{card, holder}`) from the preview: only those are revoked and released, each only if still stale or still held by a revoked agent; without `claims`, only the claims of the agents revoked now. A real run returns the released `claims` and any `not_released`. After a board restart, a last use may count up to an hour late while registry writes succeed; if a last-use write failed, a recently used agent can look stale and must register again. Revoked agents can register again, without their claims.",
+            json!({"older_than_hours": {"type": "integer", "description": "2-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}, "ids": {"type": "array", "items": {"type": "string"}, "description": "With revoke: only these previewed ids, and only if still stale."}, "claims": {"type": "array", "items": {"type": "object", "properties": {"card": {"type": "string"}, "holder": {"type": "string"}}, "required": ["card", "holder"]}, "description": "With revoke: release only these previewed claims ({card, holder} from the dry run), each only if still held by a revoked agent."}}),
             &[],
         ),
         tool(
@@ -1217,9 +1222,12 @@ impl Settings {
         }
         let age_ms = a.older_than_hours * HOUR_MS;
         let (ids, claims, failed) = if a.revoke {
-            let (ids, r) = self
-                .board
-                .revoke_stale_agents(age_ms, a.ids.as_deref(), &by.actor)?;
+            let (ids, r) = self.board.revoke_stale_agents(
+                age_ms,
+                a.ids.as_deref(),
+                a.claims.as_deref(),
+                &by.actor,
+            )?;
             rusty_log::warn!(
                 count = ids.len(),
                 released = r.released.len(),

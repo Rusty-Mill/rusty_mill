@@ -176,12 +176,33 @@ impl Rig {
             .expect("a settings operation")
     }
 
-    /// Revoke-stale for real with nothing stale: the retry path for orphaned claims.
-    fn retry(&self) -> Value {
+    /// The revoke-stale preview, by an admin limited to `projects`.
+    fn preview_in(&self, projects: Option<Vec<String>>) -> Value {
+        self.try_admin_in(
+            "settings_registered_agent_revoke_stale",
+            json!({}),
+            projects,
+        )
+        .expect("dry run")
+    }
+
+    /// Confirm `preview` as the Settings button does: exactly its ids and claims.
+    fn confirm(&self, preview: &Value) -> Value {
+        let claims: Vec<Value> = preview["claims"]
+            .as_array()
+            .expect("claims")
+            .iter()
+            .map(|c| json!({"card": c["card"], "holder": c["holder"]}))
+            .collect();
         self.admin(
             "settings_registered_agent_revoke_stale",
-            json!({"revoke": true, "ids": []}),
+            json!({"revoke": true, "ids": preview["ids"], "claims": claims}),
         )
+    }
+
+    /// Preview, then confirm it: the retry path for claims left by an earlier revoke.
+    fn retry(&self) -> Value {
+        self.confirm(&self.preview_in(None))
     }
 
     fn register(&self) -> (String, String) {
@@ -314,6 +335,10 @@ fn revoking_an_agent_releases_its_claims_with_a_handoff_and_leaves_others() {
     assert_eq!((r.holder(a), r.holder(b)), (None, None));
 }
 
+fn one(card: Uuid, holder: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([(card.to_string(), holder.to_owned())])
+}
+
 #[test]
 fn the_stale_dry_run_lists_the_claims_the_real_run_releases() {
     let r = rig("stale");
@@ -324,26 +349,129 @@ fn the_stale_dry_run_lists_the_claims_the_real_run_releases() {
     at(25 * H);
     r.use_agent(&fresh);
     at(25 * H + 2);
-    let dry = r.admin("settings_registered_agent_revoke_stale", json!({}));
+    let dry = r.preview_in(None);
     assert_eq!(ids(&dry["ids"]), vec![old.0.clone()]);
-    let expected = BTreeMap::from([(a.to_string(), old.0.clone())]);
-    assert_eq!(claimed_cards(&dry["claims"]), expected);
+    assert_eq!(claimed_cards(&dry["claims"]), one(a, &old.0));
     assert_eq!(
         r.holder(a),
         Some(old.0.clone()),
         "a dry run releases nothing"
     );
-    let real = r.admin(
-        "settings_registered_agent_revoke_stale",
-        json!({"revoke": true, "ids": dry["ids"]}),
-    );
+    let real = r.confirm(&dry);
     assert_eq!(
         claimed_cards(&real["claims"]),
-        expected,
+        one(a, &old.0),
         "the real run matches the dry run"
     );
     assert_eq!(real["not_released"], json!([]));
     assert_eq!((r.holder(a), r.holder(b)), (None, Some(fresh.0.clone())));
+}
+
+#[test]
+fn a_single_revoke_touches_only_that_agent_and_an_unknown_id_changes_nothing() {
+    let r = rig("single_scope");
+    let earlier = r.register();
+    let a = r.claimed("a", &earlier.0);
+    // An orphan: revoked while its card write failed.
+    *r.faults.card.lock().expect("faults") = Some(a);
+    r.admin("settings_registered_agent_revoke", json!({"id": earlier.0}));
+    *r.faults.card.lock().expect("faults") = None;
+    assert_eq!(r.holder(a), Some(earlier.0.clone()));
+    let gone = r.register();
+    let b = r.claimed("b", &gone.0);
+    let out = r.admin("settings_registered_agent_revoke", json!({"id": gone.0}));
+    assert_eq!(claimed_cards(&out["released"]), one(b, &gone.0));
+    assert_eq!(
+        r.holder(a),
+        Some(earlier.0.clone()),
+        "another orphan is left for the preview"
+    );
+    let e = r
+        .try_admin(
+            "settings_registered_agent_revoke",
+            json!({"id": "conn#000000"}),
+        )
+        .expect_err("unknown");
+    assert!(format!("{e:?}").contains("no registered agent"), "{e:?}");
+    assert_eq!(
+        r.holder(a),
+        Some(earlier.0.clone()),
+        "an unknown id changes nothing"
+    );
+}
+
+#[test]
+fn with_no_agents_left_the_preview_offers_orphans_and_confirming_releases_only_those_shown() {
+    let r = rig("no_stale");
+    let first = r.register();
+    let second = r.register();
+    let a = r.claimed("a", &first.0);
+    let b = r.claimed("b", &second.0);
+    // Both revoked while every card write fails: both claims are orphaned, no agent is left.
+    *r.faults.card.lock().expect("faults") = Some(a);
+    r.admin("settings_registered_agent_revoke", json!({"id": first.0}));
+    let dry = r.preview_in(None);
+    assert_eq!(r.board.agent_list(), vec![second_info(&r, &second.0)]);
+    assert_eq!(
+        (dry["count"].clone(), claimed_cards(&dry["claims"])),
+        (json!(0), one(a, &first.0))
+    );
+    *r.faults.card.lock().expect("faults") = Some(b);
+    r.admin("settings_registered_agent_revoke", json!({"id": second.0}));
+    *r.faults.card.lock().expect("faults") = None;
+    assert!(r.board.agent_list().is_empty(), "zero registered agents");
+    // Confirming the earlier preview releases only what it showed, not the newer orphan.
+    let out = r.confirm(&dry);
+    assert_eq!(
+        (out["count"].clone(), claimed_cards(&out["claims"])),
+        (json!(0), one(a, &first.0))
+    );
+    assert_eq!((r.holder(a), r.holder(b)), (None, Some(second.0.clone())));
+    // A fresh preview offers it, with no stale agent and no registered agent at all.
+    let dry = r.preview_in(None);
+    assert_eq!(claimed_cards(&dry["claims"]), one(b, &second.0));
+    assert_eq!(claimed_cards(&r.confirm(&dry)["claims"]), one(b, &second.0));
+    assert_eq!(r.holder(b), None);
+}
+
+fn second_info(r: &Rig, id: &str) -> rusty_mill_board::agents::AgentInfo {
+    r.board
+        .agent_list()
+        .into_iter()
+        .find(|a| a.id == id)
+        .expect("listed")
+}
+
+#[test]
+fn a_confirmed_claim_is_rechecked_at_write_time() {
+    let r = rig("recheck");
+    let gone = r.register();
+    let a = r.claimed("a", &gone.0);
+    *r.faults.card.lock().expect("faults") = Some(a);
+    r.admin("settings_registered_agent_revoke", json!({"id": gone.0}));
+    *r.faults.card.lock().expect("faults") = None;
+    let dry = r.preview_in(None);
+    assert_eq!(claimed_cards(&dry["claims"]), one(a, &gone.0));
+    // A person takes the card back between the preview and the confirm; then someone claims it.
+    let nano = r.board.roles().actor("nano", "human").expect("nano");
+    r.board.release(a, &nano).expect("release");
+    r.board.claim(a, &nano).expect("claim");
+    let out = r.confirm(&dry);
+    assert_eq!(out["claims"], json!([]));
+    assert_eq!(
+        r.holder(a),
+        Some("nano".to_owned()),
+        "the new holder keeps it"
+    );
+    // And a confirmed claim naming a live agent is refused at write time.
+    let live = r.register();
+    let b = r.claimed("b", &live.0);
+    let forged = r.admin(
+        "settings_registered_agent_revoke_stale",
+        json!({"revoke": true, "ids": [], "claims": [{"card": b, "holder": live.0}]}),
+    );
+    assert_eq!(forged["claims"], json!([]));
+    assert_eq!(r.holder(b), Some(live.0.clone()));
 }
 
 #[test]
@@ -368,18 +496,11 @@ fn a_failed_scan_after_a_revoke_is_retried_without_a_restart_or_re_registering()
         Some(gone.0.clone()),
         "its claim is orphaned for now"
     );
-    // The dry run already shows the orphan, and a real run with nothing stale releases it.
-    let dry = r.admin("settings_registered_agent_revoke_stale", json!({}));
-    assert_eq!(
-        claimed_cards(&dry["claims"]),
-        BTreeMap::from([(a.to_string(), gone.0.clone())])
-    );
-    let out = r.retry();
+    let dry = r.preview_in(None);
+    assert_eq!(claimed_cards(&dry["claims"]), one(a, &gone.0));
+    let out = r.confirm(&dry);
     assert_eq!(ids(&out["ids"]), Vec::<String>::new());
-    assert_eq!(
-        claimed_cards(&out["claims"]),
-        BTreeMap::from([(a.to_string(), gone.0.clone())])
-    );
+    assert_eq!(claimed_cards(&out["claims"]), one(a, &gone.0));
     assert_eq!(r.holder(a), None);
     assert_eq!(
         (r.holder(b), r.holder(c)),
@@ -393,21 +514,15 @@ fn a_failed_scan_after_a_revoke_is_retried_without_a_restart_or_re_registering()
 }
 
 #[test]
-fn a_card_that_fails_to_release_is_reported_and_released_by_the_next_run() {
+fn a_card_that_fails_to_release_is_reported_and_offered_again() {
     let r = rig("card");
     let gone = r.register();
     let a = r.claimed("a", &gone.0);
     let b = r.claimed("b", &gone.0);
     *r.faults.card.lock().expect("faults") = Some(b);
     let out = r.admin("settings_registered_agent_revoke", json!({"id": gone.0}));
-    assert_eq!(
-        claimed_cards(&out["released"]),
-        BTreeMap::from([(a.to_string(), gone.0.clone())])
-    );
-    assert_eq!(
-        claimed_cards(&out["not_released"]),
-        BTreeMap::from([(b.to_string(), gone.0.clone())])
-    );
+    assert_eq!(claimed_cards(&out["released"]), one(a, &gone.0));
+    assert_eq!(claimed_cards(&out["not_released"]), one(b, &gone.0));
     assert!(
         out["not_released"][0]["reason"]
             .as_str()
@@ -415,16 +530,12 @@ fn a_card_that_fails_to_release_is_reported_and_released_by_the_next_run() {
             .contains("injected")
     );
     *r.faults.card.lock().expect("faults") = None;
-    let again = r.retry();
-    assert_eq!(
-        claimed_cards(&again["claims"]),
-        BTreeMap::from([(b.to_string(), gone.0.clone())])
-    );
+    assert_eq!(claimed_cards(&r.retry()["claims"]), one(b, &gone.0));
     assert_eq!((r.holder(a), r.holder(b)), (None, None));
 }
 
 #[test]
-fn a_failed_registry_write_still_releases_the_claims_and_a_retry_makes_it_durable() {
+fn a_failed_registry_write_releases_nothing_and_the_preview_then_saves_and_releases() {
     let r = rig("write");
     let old = r.register();
     let fresh = r.register();
@@ -433,28 +544,32 @@ fn a_failed_registry_write_still_releases_the_claims_and_a_retry_makes_it_durabl
     at(25 * H);
     r.use_agent(&fresh);
     at(25 * H + 2);
-    // The registry file cannot be written: its directory is gone.
+    let dry = r.preview_in(None);
     std::fs::remove_dir_all(&r.dir).expect("remove dir");
     let e = r
         .try_admin(
             "settings_registered_agent_revoke_stale",
-            json!({"revoke": true}),
+            json!({"revoke": true, "ids": dry["ids"]}),
         )
         .expect_err("the write fails");
     assert!(format!("{e:?}").contains("run it again"), "{e:?}");
     assert_eq!(
         r.holder(a),
-        None,
-        "revoked in memory, so its claim is released"
+        Some(old.0.clone()),
+        "nothing is released by a failed call"
     );
-    assert_eq!(r.holder(b), Some(fresh.0.clone()));
     std::fs::create_dir_all(&r.dir).expect("restore dir");
-    let out = r.retry();
+    let dry = r.preview_in(None);
     assert_eq!(
-        out["unsaved"],
-        json!(false),
-        "the retry wrote the revocation"
+        (dry["unsaved"].clone(), claimed_cards(&dry["claims"])),
+        (json!(true), one(a, &old.0))
     );
+    let out = r.confirm(&dry);
+    assert_eq!(
+        (out["unsaved"].clone(), claimed_cards(&out["claims"])),
+        (json!(false), one(a, &old.0))
+    );
+    assert_eq!((r.holder(a), r.holder(b)), (None, Some(fresh.0.clone())));
     let reopened = Registry::open(r.dir.join("agents.json"), 25 * H + 3).expect("reopen");
     assert!(!reopened.contains(&old.0) && reopened.contains(&fresh.0));
 }
@@ -476,22 +591,15 @@ fn an_admin_limited_to_other_projects_neither_sees_nor_releases_a_claim_outside_
         (out["released"].clone(), out["not_released"].clone()),
         (json!([]), json!([]))
     );
-    let dry = r
-        .try_admin_in(
-            "settings_registered_agent_revoke_stale",
-            json!({}),
-            elsewhere,
-        )
-        .expect("dry run");
     assert_eq!(
-        dry["claims"],
+        r.preview_in(elsewhere)["claims"],
         json!([]),
-        "no card outside the admin's projects is shown"
+        "not shown outside its projects"
     );
     assert_eq!(r.holder(a), Some(gone.0.clone()));
-    // An admin who may work in its project releases it.
     assert_eq!(
         claimed_cards(&r.retry()["claims"]),
-        BTreeMap::from([(a.to_string(), gone.0.clone())])
+        one(a, &gone.0),
+        "an admin who may work there releases it"
     );
 }
