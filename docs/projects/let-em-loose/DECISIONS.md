@@ -233,6 +233,8 @@ Precise contracts used by this guide:
 | D225 | #1379: the sandbox fs/shell server is the crate `crates/apps/rusty_orch/crates/orch-fs-shell` (package and binary `orch-fs-shell`) | [default] 2026-11-27 (1379) |
 | D226 | #1379: the gateway launches each per_session stdio child from a new per-target setting that templates its command, args and env from verified token claims | [stated] 2026-11-27 (1379, 1377) |
 | D227 | #1379: orch-fs-shell confines nothing; critic mode withholds only `write`; claiming confinement needs evidence from the jail; no gateway launch in PR #1951 | review constraint (dottiusmaximus), not an owner decision, 2026-11-28 (1379) |
+| D228 | #1236: the holdout leak review is by a local non-builder model other than the author; no Claude session reads holdout test bodies | [default] 2026-11-28 (1236) |
+| D229 | #1236: the stage-1 holdout suite is frozen at `bbp open`, staged at `/srv/lel/dedup-manager-holdout/`, digest proven by a scratch-dir dry open | [default] 2026-11-28 (1236) |
 
 ## D1. Lenses, not stages
 
@@ -2295,3 +2297,21 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1379:critic-confinement-boundary
 **Source.** dottiusmaximus's static review, posted as a GitHub comment under the `baileyrd` account on PR #1951, 2026-11-28T00:33:48Z, https://github.com/Rusty-Mill/rusty_mill/pull/1951#issuecomment-7231012800 ("critic mode removes the `write` tool but still exposes `exec` ... require evidence that the external jail enforces read-only critic execution and owns descendant cleanup before calling the feature confined"). Adds a condition to D225; narrows D226 (the launch waits for a later PR and needs that evidence) without reversing it. Numbered D227 because D226 is taken on branch `claude/project-thread-7bet54-1378-launch` (PR #1952).
 **Provenance correction.** First recorded as `[stated]` (Nano) in `bab10322`. The reviewer corrected that in https://github.com/Rusty-Mill/rusty_mill/pull/1951#issuecomment-7231280899 (2026-11-28T00:54:43Z): the comment was a Dottius static review finding, not owner approval. Comments under `baileyrd` may be dottiusmaximus reviews; check before tagging one `[stated]` (remind-me mem_558280bc058e4a009c456c331a6b9c78).
+
+## D228. #1236: the holdout leak review uses a local non-builder model; no Claude reads test bodies
+
+**Decision.** The stage-1 holdout suite's leak review is done by a local model that no builder uses and that did not author the suite (Qwen3.6-35B-A3B when gpt-oss-120b authors). It flags leaked implementation hints by category only. The author model regenerates, and nobody edits test bodies. No Claude session (the builders' family, D64) reads holdout test bodies: the #1236 design thread handles the files by path and hash, and sees only category counts. Every round is logged host-only, not on the card, in the repo or in remind-me. Nano's one spot-check (#596 V2) is the human check.
+**Why.** D37 and the 597 design keep holdout sources out of every lens process and have the suite written on a model no builder uses. This keeps both rules literal without asking Nano whether a Claude reader breaks the separation. Swapping the reviewer changes no frozen file.
+**Rejected.** A Claude reviewer flagging by category (the caller's proposal): it puts the test bodies in front of the builders' model family. A Claude reviewer that edits tests.
+**Tag.** [default] · remind-me: mem_a3b861b39f4749f99b647cad0c559558
+**Key.** lel:1236:leak-review-non-claude
+**Source.** let-em-loose-expert, 2026-11-28, answering the #1236 design thread (Q5); D37, D64, `597-ground-truth-design.md` (holdout isolation, V2 spot-check). The author model itself is still open (600-build-plan §10).
+
+## D229. #1236: the stage-1 holdout suite is frozen at `bbp open`
+
+**Decision.** Stage 1 has no task yet, so the suite is frozen by `bbp open --holdout-profiles --holdout-root` (PR #1419). `bbp holdout` only adopts a new version on a task that is already open, so the card's "freeze with `bbp holdout`" is drift. The suite is staged at `/srv/lel/dedup-manager-holdout/` (owned by orch-runner), and #1238's golden dir sits inside it, because `holdout.rs` refuses a golden set outside the holdout root. The digest is shown by a dry open in a scratch BBP dir that uses the same absolute root path, since the root string is part of the HoldoutSet digest. That open uses protected globs `tests/frozen/**` and `golden/**` (600 design §1), and a dry candidate that touches `tests/frozen/` must be refused `protected_path`. The real #1320 open re-freezes the same files, and the digest is recorded on #600. The host steps go to Nano as a paste-ready prompt.
+**Why.** The merged contract freezes a holdout suite at open. A scratch-dir dry open shows the digest and the refusal without opening the real task. The paths can be changed later.
+**Rejected.** Opening the real task early just to run `bbp holdout`.
+**Tag.** [default] · remind-me: mem_2a2fe84706e04f19a0d4859bba1ad30f
+**Key.** lel:1236:holdout-freeze-at-open
+**Source.** let-em-loose-expert, 2026-11-28, answering the #1236 design thread (Q6); `crates/apps/rusty_bbp_host/src/holdout.rs` (`scan`, golden-inside-root check), PR #1419, `600-builder-session-design.md` §1.
