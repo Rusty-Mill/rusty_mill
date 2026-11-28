@@ -64,8 +64,8 @@ message `cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds`).
   ADRs) beats any summary in DECISIONS.md, QUESTIONS.md or QA.md. For a row
   #1449 corrected, check the contract it links before answering from the row.
 - **Decisions:** the newest *attributable* Nano decision on the point wins:
-  a card comment recording Nano's answer, a GitHub comment by `baileyrd`, a
-  remind-me memory or RESOLVED entry that names where and when Nano said it.
+  a card comment recording Nano's answer, or a `baileyrd` GitHub comment, remind-me
+  memory or RESOLVED entry that leads to his checked original words (see Record).
   A later attributable decision supersedes an older DECISIONS.md entry; say
   so and record the supersession. "Agreed" entries are author-reported, so
   cite their card or memory evidence when you can.
@@ -106,13 +106,17 @@ duplicate memories or entries, so repeat questions are where duplicates get
 cleaned up.
 - **[stated] needs an attributable reference.** Record Nano's answer as
   `[stated]` only when the caller passes his words *and* where he said them:
-  a thread message id or link, a card comment, a GitHub comment by `baileyrd`,
-  or a remind-me id. A quote without a reference is not enough: record
+  a thread message id or link, or a card comment. A remind-me id or a `baileyrd` GitHub comment is only a pointer: follow it to Nano's
+  original words in a source that tells him apart from his agents (a `baileyrd` comment
+  counts only without a Claude Code footer and as his first-person statement).
+  A quote without a reference is not enough: record
   nothing and ask the caller for the reference. Never promote a `[default]`
   because nobody objected.
 - **Key.** Give each answer a stable key `lel:<card|general>:<kebab-slug>`,
   e.g. `lel:704:rusty-erosion-layout`.
-1. **Reconcile first.** Grep `LEL/DECISIONS.md` for the key, and search
+1. **Reconcile first.** If the caller passed a memory id, verify it first (top of this
+   file); if it holds, add `decision_key` to its metadata keeping every existing field,
+   and use it as step 2's memory instead of adding one. Then grep `LEL/DECISIONS.md` for the key, and search
    remind-me for it (the key is the first word of the memory's content and
    also sits in `metadata.decision_key`). Reuse whatever exists and add only
    the missing half. If two memories share a key, keep the earliest and mark
@@ -149,7 +153,7 @@ Recording Nano's answer (`[stated]`):
     SOURCE: <his reference> · <D# it confirms or supersedes>
     TIER: recorded [stated] (D<n>, remind-me <id|pending>, key <key>)
 A `[stated]` answer without a reference is not recorded:
-    NEED: <the reference to send: thread message id or link, card comment, baileyrd GitHub comment, or remind-me id>
+    NEED: <the reference to send: thread message id or link, or card comment, with Nano's original words>
 Escalation, kept short:
     ESCALATE: <question, one line>
     OPTIONS: a) … b) … (at most c)

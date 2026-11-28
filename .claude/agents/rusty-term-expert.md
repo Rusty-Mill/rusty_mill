@@ -91,8 +91,8 @@ Skip this when a DECISIONS.md row already answers it. Otherwise:
 - `PACK/DECISIONS.md`: re-read it, then append a row to the matching section
   with the next D# (highest + 1), its why, what was rejected, its tag and a
   Source. Record `[stated]` only when the caller gives Nano's words **and**
-  where he said them (PR comment id, thread and time, card comment, or
-  remind-me id); quote them in Source. Without a locator, record nothing and
+  where he said them (PR comment id, thread and time, or card comment; a
+  remind-me id only as a pointer to one of those); quote them in Source. Without a locator, record nothing and
   ask for it. Never edit or re-tag an existing row; supersede it.
 - `remind_me_add`: `memory_type: decision`, `metadata.rationale`,
   `metadata.tag` (default or stated), `metadata.decision` (`rusty_term D<n>`),

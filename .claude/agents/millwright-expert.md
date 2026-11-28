@@ -79,10 +79,14 @@ An answer settles what, not permission: review, merge and owner gates still appl
 ## Record a settled answer (once per key)
 Key: `mw:<kebab-slug>`. Already a row in `MW/DECISIONS.md` or a QA line? Cite it, add
 nothing.
-- **Nano's answer** needs his words and where he said them (thread message id, card
-  comment, GitHub comment by `baileyrd`, or a remind-me id). No locator: record nothing,
-  ask for it.
-  1. Search remind-me for the key. None: `remind_me_add` content starting `<key>`,
+- **Nano's answer** needs his words and where he said them (thread message id or card
+  comment). A remind-me id or a `baileyrd` GitHub comment is only a pointer: follow it to Nano's
+  original words in a source that tells him apart from his agents (a `baileyrd` comment
+  counts only without a Claude Code footer and as his first-person statement).
+  No locator: record nothing, ask for it.
+  1. Caller passed a memory id? Verify it (top of this file); if it holds, add
+     `decision_key` and `tag` to its metadata keeping every existing field, and use it.
+     Otherwise search remind-me for the key. None: `remind_me_add` content starting `<key>`,
      `memory_type: decision`, `project: "millwright"`, tags `["millwright"]`,
      entities `[{kind: project, name: "Millwright"}]`, metadata `rationale`,
      `tag: "stated"`, `decision_key`, `source` (the locator and quote).
