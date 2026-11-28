@@ -240,6 +240,7 @@ Precise contracts used by this guide:
 | D241 | #1319: perf measurement protocol (cold/warm, median of 5, crash injection at 10/50/90%, crash loss in minutes, scaled delta) | [default] 2026-11-28 (1319) |
 | D242 | #1319: same-pixels fixtures are codec-free PNG/JPEG byte assemblies; the generator is independent of the #1238 golden set | [default] 2026-11-28 (1319) |
 | D243 | #1319: the real-drive stats pass prints aggregates only; sample hashing is opt-in and only counts leave the machine | [default] 2026-11-28 (1319) |
+| D246 | #1319: BaileyAi and its data disk are the reference for the dedup speed targets; `perf` runs a 1/10 slice, calibrated by one full 500 GB run | [stated] 2026-11-28 (1319) |
 
 ## D1. Lenses, not stages
 
@@ -2371,3 +2372,12 @@ How the key, `kid` and policy path reach `builder run` was not settled here (new
 **Tag.** `[default]` · remind-me: mem_a84e1530456c437aa21d72b1e32e261b
 **Key.** lel:1319:drive-stats-outputs
 **Source.** Caller question from the #1319 design session, 2026-11-28 (Q5); card #1319 prompt; 600-build-plan.md §8; card #598 Q6.
+
+## D246. #1319: BaileyAi is the reference machine for the dedup speed targets
+
+**Decision.** BaileyAi and its data disk are the reference hardware on which the #600 intent's speed targets (first scan at most 30 min/TB, incremental rescan under 1 h after 50 GB, crash loss of a few minutes) are judged. `perf` runs a 1/10 slice from the same seed (50 GB tree, 5 GB delta), with results scaled linearly. One full 500 GB run on BaileyAi calibrates the slice and checks that linear scaling holds. Windows desktop timings from the shadow run (#1321) are information only.
+**Why.** It keeps the frozen `perf` profile ("500 GB synthetic tree, scaled | Linux sandbox", D66) and the single host (D53). The calibration run checks that scaling holds without making every run ten times longer.
+**Rejected.** b: the verdict judged on the full tree on the Windows desktop and NAS in the shadow run (would change the approved D66 design). c: the full 500 GB tree on BaileyAi for every `perf` run, no scaling (about 10x the run time per candidate).
+**Tag.** [stated] · remind-me: mem_aee96621d2004da787355f000cacadaa
+**Key.** lel:1319:reference-hardware
+**Source.** Nano tapped option a "BaileyAi, 1/10 slice" ("Perf runs use a 50 GB slice on BaileyAi, checked once against a full 500 GB run. Windows timings are for information only.") on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4X1PwJ6e1M6hpiyrWMERRd7` ("Which machine judges the dedup speed targets?") in the #1319 thread `cmsg_01WgyiM31RsSnZTgNuPX2VE4B614g1U4zVAHefWbiRXzQL`. The platform's tap record `cmsg_01WgyiM31RsSnZTgNuPX2VE4UawQGGVkcPrpP3aU97hZvA` shows a user, not an agent, chose it at 2026-11-28T13:19:47Z. The option is (a) of 1319-synthetic-tree-design.md §4, the expert's escalation from the #1319 design session. It confirms D66 and D53 and reverses nothing. It does not approve the #1319 design, which still waits for Nano on the card (D25). Numbered D246 because open PR #1964 adds D244 and D245.
