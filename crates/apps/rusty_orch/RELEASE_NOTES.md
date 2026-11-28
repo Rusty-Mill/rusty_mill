@@ -4,6 +4,18 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Token mint for jailed agents
+**2026-11-28**
+
+- `orch-token` mints the short-lived token a jailed agent will carry to
+  the gateway: scoped to one project, claim and lens, signed ES256, and
+  checked by the gateway against a JWKS file. It also gives the public
+  key entry for that file.
+- Nothing uses it yet. Writing the token into the jail comes next;
+  revoking tokens early waits on Nano's approval of a gateway setting.
+
+---
+
 ## Sandbox fs/shell server
 **2026-11-27**
 

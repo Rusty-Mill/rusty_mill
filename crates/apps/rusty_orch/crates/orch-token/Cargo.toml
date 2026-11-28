@@ -1,0 +1,30 @@
+[package]
+name = "orch-token"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Mints the short-lived ES256 token orch gives each jailed agent session (Let Em Loose #1382): scoped to one project, claim and lens, checked by the gateway against a file JWKS. Sans-IO: the caller passes the key, the clock and the random id."
+license = "MIT"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+# Signing and the JWKS entry. Not the workspace entry: that is `"9"` and
+# resolves to 9.3.1. This is the vendored 11.0.0 with the same features
+# agentgateway-auth verifies with, so it adds no package to the lock file
+# (1382-token-slices.md §3).
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
+# The claims object; already in jsonwebtoken's tree.
+serde_json = { workspace = true }
+# sha256 and hex for `lel.policy`, the same pair the gateway's lens policy
+# check uses, so both sides compute one digest.
+rusty_rsa = { workspace = true }
+rusty_hex = { workspace = true }
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "warn"

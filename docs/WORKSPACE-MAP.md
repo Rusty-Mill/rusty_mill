@@ -288,6 +288,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_orch | orch-ollama | Orchestrator adapter: Agent::Local over the Ollama CLI. Prompt on stdin, one JSON object out. |
 | apps | rusty_orch | orch-openai | Orchestrator adapter: one OpenAI-compatible chat completion over plain HTTP/1.1, to loopback and private addresses only (llama-swap in v0). |
 | apps | rusty_orch | orch-store | Orchestrator persistence: one snapshot record per goal (plan, board, ledger) in the embedded rusty_multimodal_db engine, so a blocked run resumes in a later process. |
+| apps | rusty_orch | orch-token | Mints the short-lived ES256 token orch gives each jailed agent session (Let Em Loose #1382): scoped to one project, claim and lens, checked by the gateway against a file JWKS. Sans-IO: the caller passes the key, the clock and the random id. |
 | apps | rusty_orch | rusty_orch | Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex, Claude, and Ollama adapters and prints the board. |
 | apps | rusty_provider | rp-cli |  |
 | apps | rusty_provider | rp-core |  |
