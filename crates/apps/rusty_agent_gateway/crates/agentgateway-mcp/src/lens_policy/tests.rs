@@ -166,6 +166,11 @@ fn bad_files_are_refused_naming_the_file() {
             "schema = 1\nlens = \"x\"\nrole = \"builder\"\n[tools]\nallow = [\"*\"]\n[tools.deny]\nall = true\n",
             "`tools.deny` must be a list of strings",
         ),
+        (
+            "x.toml",
+            "schema = 1\nlens = \"x\"\nrole = \"builder\"\n[tools]\nallow = [\"*\"]\ndeny = [\"sandbox_rm\"]\ndeny = []\n",
+            "duplicate key",
+        ),
     ];
     for (file, text, reason) in cases {
         let err =
@@ -173,6 +178,17 @@ fn bad_files_are_refused_naming_the_file() {
         assert_eq!(err.file, file);
         assert!(err.reason.contains(reason), "{text:?}: {err}");
     }
+}
+
+#[test]
+fn an_escaped_deny_entry_still_denies() {
+    let text = "schema = 1\nlens = \"x\"\nrole = \"builder\"\n[tools]\nallow = [\"*\"]\n\
+                deny = [\"\\u0073andbox_rm\"]\n";
+    let policies =
+        LensPolicies::from_files([("x.toml".to_owned(), text.as_bytes().to_vec())]).unwrap();
+    let claims = token("x", text);
+    assert!(!tool(&policies, "sandbox_rm", Some(&claims)));
+    assert!(tool(&policies, "sandbox_read", Some(&claims)));
 }
 
 #[test]
