@@ -107,7 +107,7 @@ fn acquire_makes_a_0600_file_in_a_0700_dir_and_drop_removes_both() {
     assert_eq!(file, state.join("tokens/42/3/token"));
     let dir = file.parent().expect("dir").to_owned();
     {
-        let held = acquire(&file).expect("acquires");
+        let mut held = acquire(&file).expect("acquires");
         held.write("secret").expect("writes");
         assert_eq!(std::fs::read_to_string(&file).expect("reads"), "secret");
         assert_eq!(mode(&file), 0o600);
@@ -156,18 +156,35 @@ fn a_failed_create_leaves_nothing_and_touches_nothing_else() {
 }
 
 #[test]
-fn a_failed_write_still_cleans_up_on_drop() {
-    let state = scratch("write-fails");
+fn the_write_goes_to_the_created_file_not_a_swapped_path() {
+    let state = scratch("swap");
+    let file = path(&state, "42", 3);
+    let mut held = acquire(&file).expect("acquires");
+    let moved = state.join("moved-token");
+    std::fs::rename(&file, &moved).expect("move the created file");
+    std::fs::write(&file, "planted").expect("plant a file at the path");
+    held.write("secret").expect("writes");
+    assert_eq!(std::fs::read_to_string(&moved).expect("ours"), "secret");
+    assert_eq!(std::fs::read_to_string(&file).expect("planted"), "planted");
+    drop(held);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("not ours, so not removed"),
+        "planted"
+    );
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+#[test]
+fn a_guard_dropped_before_or_after_a_write_cleans_up() {
+    let state = scratch("abort");
     let file = path(&state, "42", 3);
     let dir = file.parent().expect("dir").to_owned();
-    {
-        let held = acquire(&file).expect("acquires");
-        std::fs::remove_file(&file).expect("vanish under the writer");
-        std::fs::create_dir(&file).expect("a dir where the file was");
-        assert!(held.write("t").is_err(), "writing into a dir fails");
-        std::fs::remove_dir(&file).expect("undo the fixture");
-    }
-    assert!(!dir.exists(), "the guard removed its directory");
+    drop(acquire(&file).expect("acquires"));
+    assert!(!dir.exists(), "an aborted launch leaves nothing");
+    let mut held = acquire(&file).expect("the session dir is free again");
+    held.write("t").expect("writes");
+    drop(held);
+    assert!(!dir.exists(), "a finished launch leaves nothing");
     let _ = std::fs::remove_dir_all(&state);
 }
 

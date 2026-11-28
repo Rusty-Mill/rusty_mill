@@ -7,9 +7,9 @@
 //! `JailSpec::validate` checks again on the paths that are written. Only the
 //! `jti` and `sub` are ever logged.
 
-use std::fs::{DirBuilder, OpenOptions};
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -156,6 +156,9 @@ pub fn path(state: &Path, claim: &str, n: u32) -> PathBuf {
 pub struct TokenFile {
     dir: PathBuf,
     file: PathBuf,
+    /// The handle `create_new` returned: writes go to the inode this guard
+    /// created, never to whatever the path names later.
+    handle: File,
 }
 
 impl TokenFile {
@@ -164,23 +167,44 @@ impl TokenFile {
         &self.file
     }
 
-    /// Write the token into the file this guard created.
-    pub fn write(&self, token: &str) -> Result<(), String> {
-        let mut out = OpenOptions::new()
-            .write(true)
-            .open(&self.file)
-            .map_err(|e| format!("{}: {e}", self.file.display()))?;
-        out.write_all(token.as_bytes())
+    /// Write the token through the handle this guard created.
+    pub fn write(&mut self, token: &str) -> Result<(), String> {
+        self.handle
+            .write_all(token.as_bytes())
+            .and_then(|()| self.handle.sync_all())
             .map_err(|e| format!("{}: {e}", self.file.display()))
+    }
+}
+
+impl TokenFile {
+    /// Remove the file only if the path still names the inode this guard
+    /// created, then the (then empty) directory.
+    fn release(&self) -> Result<(), String> {
+        let ours = self
+            .handle
+            .metadata()
+            .map_err(|e| format!("{}: {e}", self.file.display()))?;
+        match std::fs::symlink_metadata(&self.file) {
+            Ok(now) if (now.dev(), now.ino()) == (ours.dev(), ours.ino()) => {
+                std::fs::remove_file(&self.file)
+                    .map_err(|e| format!("{}: {e}", self.file.display()))?;
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "{} no longer names the file this run created; left in place",
+                    self.file.display()
+                ))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{}: {e}", self.file.display())),
+        }
+        std::fs::remove_dir(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))
     }
 }
 
 impl Drop for TokenFile {
     fn drop(&mut self) {
-        let removed = remove_if_present(&self.file).and_then(|()| {
-            std::fs::remove_dir(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))
-        });
-        if let Err(e) = removed {
+        if let Err(e) = self.release() {
             eprintln!("rusty_orch builder: token file not removed: {e}");
         }
     }
@@ -220,27 +244,23 @@ pub fn acquire(file: &Path) -> Result<TokenFile, String> {
         .create_new(true)
         .mode(0o600)
         .open(file);
-    if let Err(e) = created {
-        // The directory is ours and empty; leave nothing behind, and say so
-        // if that fails too.
-        let cleanup = std::fs::remove_dir(dir)
-            .err()
-            .map(|c| format!("; {} not removed: {c}", dir.display()))
-            .unwrap_or_default();
-        return Err(format!("{}: {e}{cleanup}", file.display()));
-    }
+    let handle = match created {
+        Ok(handle) => handle,
+        Err(e) => {
+            // The directory is ours and empty; leave nothing behind, and say
+            // so if that fails too.
+            let cleanup = std::fs::remove_dir(dir)
+                .err()
+                .map(|c| format!("; {} not removed: {c}", dir.display()))
+                .unwrap_or_default();
+            return Err(format!("{}: {e}{cleanup}", file.display()));
+        }
+    };
     Ok(TokenFile {
         dir: dir.to_owned(),
         file: file.to_owned(),
+        handle,
     })
-}
-
-fn remove_if_present(file: &Path) -> Result<(), String> {
-    match std::fs::remove_file(file) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("{}: {e}", file.display())),
-    }
 }
 
 /// The `jail.json` slot for `file`.
