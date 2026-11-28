@@ -7253,6 +7253,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch-token"
+version = "0.1.0"
+dependencies = [
+ "jsonwebtoken 11.0.0",
+ "rusty_hex",
+ "rusty_rsa",
+ "serde_json",
+]
+
+[[package]]
 name = "ordered-float"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
