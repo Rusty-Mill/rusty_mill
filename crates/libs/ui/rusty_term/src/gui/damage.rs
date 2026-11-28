@@ -34,6 +34,11 @@ struct Layout {
     /// [`Pixmap::fingerprint`].
     strip: Option<Print>,
     body: Option<Print>,
+    /// The pixmaps over the panes and over the floats (the banner), by
+    /// fingerprint and place: opaque ones, as a banner is, leave no trace in
+    /// the rows, so a row repaint would keep the old ones on screen.
+    over: Vec<(Print, (usize, usize))>,
+    top: Vec<(Print, (usize, usize))>,
     /// The popover, by fingerprint and place.
     pop: Option<(Print, (usize, usize))>,
     status: Vec<Cell>,
@@ -114,6 +119,8 @@ impl Frame {
             chrome: chrome.to_vec(),
             strip: scene.strip.map(Pixmap::fingerprint),
             body: scene.body.map(Pixmap::fingerprint),
+            over: prints(scene.over),
+            top: prints(scene.top),
             pop: scene.pop.map(|(p, at)| (p.fingerprint(), at)),
             status: status.to_vec(),
             panes: panes.iter().map(pane_layout).collect(),
@@ -124,6 +131,13 @@ impl Frame {
             .collect();
         Frame { layout, rows }
     }
+}
+
+fn prints(layers: &[(Pixmap, (usize, usize))]) -> Vec<(Print, (usize, usize))> {
+    layers
+        .iter()
+        .map(|(p, at)| (p.fingerprint(), *at))
+        .collect()
 }
 
 fn pane_layout(p: &PaneFrame) -> PaneLayout {
