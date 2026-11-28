@@ -1,8 +1,8 @@
 //! A real (subset, honestly-documented) TOML parser.
 //!
 //! Implemented: comments, bare/dotted keys, tables (`[section]`, including
-//! nested `[a.b.c]`), basic strings (`"..."` with `\n`/`\t`/`\\`/`\"`
-//! escapes) and literal strings (`'...'`, no escape processing), integers
+//! nested `[a.b.c]`), basic strings (`"..."` with TOML's escapes, including
+//! `\uXXXX` and `\UXXXXXXXX`) and literal strings (`'...'`, no escape processing), integers
 //! and floats (with `_` digit separators), booleans, arrays (including
 //! ones spanning multiple physical lines), and inline tables (`{ a = 1,
 //! b = 2 }`).
@@ -11,6 +11,10 @@
 //! multi-line basic/literal strings (`"""..."""`/`'''...'''`), no
 //! quoted/dotted table headers with quoted segments, no native date/time
 //! values (parsed as plain strings instead).
+//!
+//! Invalid input is refused, never reinterpreted: a key defined twice and an
+//! escape TOML does not define are errors, so a config cannot silently mean
+//! something other than what it says.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -248,6 +252,9 @@ impl Parser {
                         _ => return Err("key already defined as a non-table value"),
                     }
                 }
+                if table.contains_key(last) {
+                    return Err("duplicate key");
+                }
                 table.insert(last.clone(), value);
                 Ok(())
             }
@@ -332,13 +339,30 @@ impl Parser {
                     Some('r') => s.push('\r'),
                     Some('\\') => s.push('\\'),
                     Some('"') => s.push('"'),
-                    Some(other) => s.push(other),
+                    Some('b') => s.push('\u{8}'),
+                    Some('f') => s.push('\u{c}'),
+                    Some('u') => s.push(self.parse_unicode_escape(4)?),
+                    Some('U') => s.push(self.parse_unicode_escape(8)?),
+                    Some(_) => return Err("unknown escape"),
                     None => return Err("unterminated escape"),
                 },
                 Some(c) => s.push(c),
             }
         }
         Ok(s)
+    }
+
+    /// The `digits` hex digits after `\u` or `\U`, as the scalar they name.
+    fn parse_unicode_escape(&mut self, digits: usize) -> PResult<char> {
+        let mut code: u32 = 0;
+        for _ in 0..digits {
+            let digit = self
+                .advance()
+                .and_then(|c| c.to_digit(16))
+                .ok_or("bad unicode escape")?;
+            code = code * 16 + digit;
+        }
+        char::from_u32(code).ok_or("unicode escape is not a scalar value")
     }
 
     fn parse_literal_string(&mut self) -> PResult<String> {
@@ -490,6 +514,42 @@ mod tests {
     fn basic_string_escapes_are_decoded() {
         let doc = TomlValue::parse_str(r#"greeting = "hi\nthere""#).unwrap();
         assert_eq!(doc.get("greeting").unwrap().as_str(), Some("hi\nthere"));
+    }
+
+    #[test]
+    fn unicode_and_control_escapes_are_decoded() {
+        let doc = TomlValue::parse_str(r#"a = "\u0073and\U0001F980\b\f""#).unwrap();
+        assert_eq!(
+            doc.get("a").unwrap().as_str(),
+            Some("sand\u{1F980}\u{8}\u{c}")
+        );
+    }
+
+    #[test]
+    fn bad_escapes_are_refused() {
+        for (text, want) in [
+            (r#"a = "\q""#, "unknown escape"),
+            (r#"a = "\u00""#, "bad unicode escape"),
+            (r#"a = "\uzzzz""#, "bad unicode escape"),
+            (r#"a = "\uD800""#, "not a scalar value"),
+        ] {
+            let err = TomlValue::parse_str(text).unwrap_err();
+            assert!(err.contains(want), "{text}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_key_defined_twice_is_refused() {
+        for text in [
+            "a = 1\na = 2\n",
+            "[t]\nk = [\"x\"]\nk = []\n",
+            "[t]\nk = 1\n[t]\nk = 2\n",
+            "t = { k = 1, k = 2 }\n",
+            "a.b = 1\na = 2\n",
+        ] {
+            let err = TomlValue::parse_str(text).unwrap_err();
+            assert!(err.contains("duplicate key"), "{text:?}: {err}");
+        }
     }
 
     #[test]
