@@ -12,8 +12,9 @@
 //! quoted/dotted table headers with quoted segments, no native date/time
 //! values (parsed as plain strings instead).
 //!
-//! Invalid input is refused, never reinterpreted: a key defined twice and an
-//! escape TOML does not define are errors, so a config cannot silently mean
+//! Invalid input is refused, never reinterpreted: a key defined twice, an
+//! escape TOML does not define, items without a `,` between them and two
+//! entries on one line are errors, so a config cannot silently mean
 //! something other than what it says.
 
 use alloc::collections::BTreeMap;
@@ -177,6 +178,16 @@ impl Parser {
         }
     }
 
+    /// After an entry or a table header: only a comment may follow on the
+    /// same line, then a newline or the end of input.
+    fn end_of_line(&mut self) -> PResult<()> {
+        self.skip_line_whitespace();
+        match self.peek() {
+            None | Some('\n') => Ok(()),
+            Some(_) => Err("expected a newline after an entry"),
+        }
+    }
+
     fn expect_char(&mut self, expected: char) -> PResult<()> {
         if self.peek() == Some(expected) {
             self.advance();
@@ -198,7 +209,7 @@ impl Parser {
                     self.advance();
                     let path = self.parse_key_path()?;
                     self.expect_char(']')?;
-                    self.skip_line_whitespace();
+                    self.end_of_line()?;
                     current_path = path;
                     Self::ensure_table_path(&mut root, &current_path)?;
                 }
@@ -208,7 +219,7 @@ impl Parser {
                     self.expect_char('=')?;
                     self.skip_line_whitespace();
                     let value = self.parse_value()?;
-                    self.skip_line_whitespace();
+                    self.end_of_line()?;
 
                     let mut full_path = current_path.clone();
                     full_path.extend(key_path);
@@ -432,8 +443,12 @@ impl Parser {
             }
             items.push(self.parse_value()?);
             self.skip_insignificant();
-            if self.peek() == Some(',') {
-                self.advance();
+            match self.peek() {
+                Some(',') => {
+                    self.advance();
+                }
+                Some(']') => {}
+                _ => return Err("expected `,` or `]` after an array item"),
             }
         }
         self.depth -= 1;
@@ -460,8 +475,12 @@ impl Parser {
             let value = self.parse_value()?;
             Self::insert_at_path(&mut table, &key_path, value)?;
             self.skip_line_whitespace();
-            if self.peek() == Some(',') {
-                self.advance();
+            match self.peek() {
+                Some(',') => {
+                    self.advance();
+                }
+                Some('}') => {}
+                _ => return Err("expected `,` or `}` after an inline table entry"),
             }
         }
         self.depth -= 1;
@@ -536,6 +555,22 @@ mod tests {
             let err = TomlValue::parse_str(text).unwrap_err();
             assert!(err.contains(want), "{text}: {err}");
         }
+    }
+
+    #[test]
+    fn missing_separators_are_refused() {
+        for (text, want) in [
+            ("a = [\"x\" \"y\"]\n", "`,` or `]`"),
+            ("a = [\"x\"\n \"y\"]\n", "`,` or `]`"),
+            ("t = { a = 1 b = 2 }\n", "`,` or `}`"),
+            ("a = 1 b = 2\n", "newline"),
+            ("[t] a = 1\n", "newline"),
+        ] {
+            let err = TomlValue::parse_str(text).unwrap_err();
+            assert!(err.contains(want), "{text:?}: {err}");
+        }
+        let ok = TomlValue::parse_str("a = [\n  \"x\",\n  \"y\", # note\n]\nb = 1 # end\n");
+        assert!(ok.is_ok(), "{ok:?}");
     }
 
     #[test]
