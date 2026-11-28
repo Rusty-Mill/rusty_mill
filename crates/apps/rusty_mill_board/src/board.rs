@@ -467,12 +467,102 @@ impl<S: Store> Board<S> {
         self.agents().nicknames()
     }
 
-    /// Remove registered agent `id`; whether it existed.
+    /// Remove registered agent `id` and release the claims it held (#1644); `None`, with nothing
+    /// changed, if it did not exist. `by` is the revoking admin, recorded on each released card.
+    /// Only this agent's claims are touched; one that fails stays orphaned and is offered by
+    /// the next revoke-stale preview.
     ///
     /// # Errors
-    /// If the registry file cannot be written.
-    pub fn revoke_agent(&self, id: &str) -> Result<bool, BoardError> {
-        self.agents().revoke(id).map_err(BoardError::Storage)
+    /// If the registry file cannot be written (nothing is released then) or the cards cannot be
+    /// listed; either way the agent is revoked and its claims are left for the preview.
+    pub fn revoke_agent(&self, id: &str, by: &Actor) -> Result<Option<Released>, BoardError> {
+        if !self.agents().revoke(id).map_err(BoardError::Storage)? {
+            return Ok(None);
+        }
+        let held = self.claims_held(by, |h| h == id)?;
+        Ok(Some(self.release_revoked(held, by)))
+    }
+
+    /// What a revoke-stale run that revokes `revoking` would release, in `by`'s projects only
+    /// (a card outside them is neither shown nor touched): the claims of `revoking`, and every
+    /// orphaned claim, one held by a registered agent id no longer in the registry. Orphans are
+    /// worked out from the cards, so a release that failed earlier is offered again.
+    ///
+    /// # Errors
+    /// On storage failure.
+    pub fn claims_released_by(
+        &self,
+        revoking: &[String],
+        by: &Actor,
+    ) -> Result<Vec<HeldClaim>, BoardError> {
+        let live: BTreeSet<String> = self.agent_list().into_iter().map(|a| a.id).collect();
+        self.claims_held(by, |h| {
+            crate::agents::is_registered_id(h)
+                && (!live.contains(h) || revoking.iter().any(|r| r == h))
+        })
+    }
+
+    /// The claims on cards in `by`'s projects whose holder passes `pick`.
+    fn claims_held(
+        &self,
+        by: &Actor,
+        pick: impl Fn(&str) -> bool,
+    ) -> Result<Vec<HeldClaim>, BoardError> {
+        Ok(self
+            .cards()?
+            .into_iter()
+            .filter(|c| by.may_work_in(&c.project))
+            .filter_map(|c| {
+                let holder = c.claim.clone().filter(|h| pick(h))?;
+                Some(HeldClaim {
+                    holder,
+                    card: c.id,
+                    number: c.number,
+                    title: c.title,
+                })
+            })
+            .collect())
+    }
+
+    /// Release each of `targets` whose holder is a registered agent id no longer in the
+    /// registry and still holds the card, checked on the card being committed: a live agent's
+    /// claim, a bearer holder's (no `#`) and a claim since taken by someone else are never
+    /// touched. One write each, with a handoff comment by `by`; failures are reported.
+    fn release_revoked(&self, targets: Vec<HeldClaim>, by: &Actor) -> Released {
+        let mut out = Released::default();
+        let keeps_ids = self.store.keeps_comment_ids();
+        for held in targets {
+            let freed = std::cell::Cell::new(false);
+            let result = self.apply(held.card, by, EventKind::Released, |c, now| {
+                freed.set(false);
+                if !crate::agents::is_registered_id(&held.holder)
+                    || self.agents().contains(&held.holder)
+                {
+                    return Ok(c.clone());
+                }
+                let mut next = c.release_revoked(&held.holder, by, now)?;
+                freed.set(next != *c);
+                if !keeps_ids
+                    && freed.get()
+                    && let Some(added) = next.comments.last_mut()
+                {
+                    added.id = None;
+                }
+                Ok(next)
+            });
+            match result {
+                Ok(_) if freed.get() => out.released.push(held),
+                Ok(_) => {}
+                Err(e) => out.failed.push(FailedRelease {
+                    claim: held,
+                    reason: e.to_string(),
+                }),
+            }
+        }
+        if !out.failed.is_empty() {
+            rusty_log::warn!(failed = ?out.failed, "claims of revoked agents not released; the revoke-stale preview offers them again");
+        }
+        out
     }
 
     /// Ids of registered agents unused (or, never used, uncreated) for more than `age_ms`.
@@ -485,19 +575,38 @@ impl<S: Store> Board<S> {
         self.agents().has_unsaved_revoke()
     }
 
-    /// Remove registered agents unused for more than `age_ms` (only those in `only`, if given);
-    /// the ids removed.
+    /// Remove registered agents unused for more than `age_ms` (only those in `only`, if given),
+    /// then release claims, recorded as `by`'s: with `confirmed` (a previewed list), exactly
+    /// those still held by a revoked agent, so a claim orphaned after the preview waits for the
+    /// next one; without it, only the claims of the agents this call revoked. The ids removed and
+    /// the claims released.
     ///
     /// # Errors
-    /// If the registry file cannot be written.
+    /// If the registry file cannot be written (nothing is released then: the preview offers the
+    /// claims again) or the cards cannot be listed.
     pub fn revoke_stale_agents(
         &self,
         age_ms: i64,
         only: Option<&[String]>,
-    ) -> Result<Vec<String>, BoardError> {
-        self.agents()
+        confirmed: Option<&[ClaimRef]>,
+        by: &Actor,
+    ) -> Result<(Vec<String>, Released), BoardError> {
+        let ids = self
+            .agents()
             .revoke_stale(self.now_ms(), age_ms, only)
-            .map_err(BoardError::Storage)
+            .map_err(BoardError::Storage)?;
+        let targets = match confirmed {
+            Some(list) => self
+                .claims_released_by(&[], by)?
+                .into_iter()
+                .filter(|h| {
+                    list.iter()
+                        .any(|r| r.card == h.card && r.holder == h.holder)
+                })
+                .collect(),
+            None => self.claims_held(by, |h| ids.iter().any(|i| i == h))?,
+        };
+        Ok((ids, self.release_revoked(targets, by)))
     }
 
     /// Registered agents without keys.
@@ -2775,4 +2884,46 @@ fn check_records_shipped(by: &Actor, links: &[String]) -> Result<(), BoardError>
     Err(BoardError::Invalid(
         "record adds only GitHub pull request links (https://github.com/<owner>/<repo>/pull/<n>)",
     ))
+}
+
+/// A card claim held by a registered agent (#1644).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HeldClaim {
+    /// The agent holding it.
+    pub holder: String,
+    /// The card.
+    pub card: Uuid,
+    /// Its board-wide number, once given one.
+    pub number: Option<u64>,
+    /// Its title.
+    pub title: String,
+}
+
+/// A previewed claim an admin confirmed releasing: the card and who held it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimRef {
+    /// The card.
+    pub card: Uuid,
+    /// The revoked agent that held it.
+    pub holder: String,
+}
+
+/// What releasing a revoked agent's claims did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Released {
+    /// The claims released, each with a handoff comment.
+    pub released: Vec<HeldClaim>,
+    /// The claims that could not be released.
+    pub failed: Vec<FailedRelease>,
+}
+
+/// A claim of a revoked agent that could not be released, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FailedRelease {
+    /// The claim, still held.
+    #[serde(flatten)]
+    pub claim: HeldClaim,
+    /// Why it was not released.
+    pub reason: String,
 }

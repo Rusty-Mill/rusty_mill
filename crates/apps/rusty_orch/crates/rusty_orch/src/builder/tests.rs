@@ -50,6 +50,46 @@ fn the_command_line_parses_with_defaults() {
         [PathBuf::from("/opt/node"), PathBuf::from("/home/n/.cargo")]
     );
     assert_eq!(o.cgroup_parent, PathBuf::from("/sys/fs/cgroup/x"));
+    assert_eq!(o.token, None, "no token flags, no token (D233)");
+}
+
+#[test]
+fn the_token_flags_parse_together() {
+    let o = options(argv(&[
+        "--token-key",
+        "/k/orch.pem",
+        "--token-kid",
+        "orch-1",
+        "--lens-policy",
+        "/p/builder-rust.toml",
+    ]))
+    .expect("parse");
+    assert_eq!(
+        o.token,
+        Some(TokenFlags {
+            key: PathBuf::from("/k/orch.pem"),
+            kid: "orch-1".to_owned(),
+            policy: PathBuf::from("/p/builder-rust.toml"),
+        })
+    );
+}
+
+#[test]
+fn a_partial_set_of_token_flags_is_refused() {
+    let partial = [
+        &["--token-key", "/k"][..],
+        &["--token-kid", "k"][..],
+        &["--lens-policy", "/p.toml"][..],
+        &["--token-key", "/k", "--token-kid", "k"][..],
+        &["--token-kid", "k", "--lens-policy", "/p.toml"][..],
+    ];
+    for extra in partial {
+        let err = options(argv(extra)).expect_err("partial");
+        assert!(
+            matches!(&err, ArgsError::Usage(m) if m.contains("go together")),
+            "{extra:?}: {err:?}"
+        );
+    }
 }
 
 #[test]

@@ -4,6 +4,30 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Builder sessions carry a gateway token
+**2026-11-28**
+
+- `rusty_orch builder run` takes `--token-key`, `--token-kid` and
+  `--lens-policy` together. orch then signs a token scoped to the
+  session's board, claim and lens, and the jail hands it to the agent.
+  Without the flags, nothing changes.
+- The agent doesn't use the token yet: that needs the gateway route
+  (#1412) and revocation, which waits on Nano.
+
+---
+
+## Token mint for jailed agents
+**2026-11-28**
+
+- `orch-token` mints the short-lived token a jailed agent will carry to
+  the gateway: scoped to one project, claim and lens, signed ES256, and
+  checked by the gateway against a JWKS file. It also gives the public
+  key entry for that file.
+- Nothing uses it yet. Writing the token into the jail comes next;
+  revoking tokens early waits on Nano's approval of a gateway setting.
+
+---
+
 ## Sandbox fs/shell server
 **2026-11-27**
 

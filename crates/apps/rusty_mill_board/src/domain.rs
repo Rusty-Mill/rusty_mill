@@ -1324,6 +1324,39 @@ impl Card {
         }
     }
 
+    /// Drop the claim of `holder`, a registered agent `by` revoked, with a handoff comment
+    /// saying why; the card unchanged if `holder` no longer holds it. The revoking admin
+    /// stands in for the holder, so no `Triage` is needed.
+    ///
+    /// # Errors
+    /// Never in practice: the comment is fixed and within the handoff limits.
+    pub fn release_revoked(
+        &self,
+        holder: &str,
+        by: &Actor,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
+        if self.claim.as_deref() != Some(holder) {
+            return Ok(self.clone());
+        }
+        let text = format!(
+            "Claim released: its holder {holder} was revoked by {}.\n\
+             Next: anyone may claim this card; registering again does not restore the claim.\n\
+             Details: Settings > Agents > Registered agents.",
+            by.name
+        );
+        let released = Self {
+            claim: None,
+            ..self.clone()
+        };
+        let new = NewComment {
+            text: &text,
+            kind: CommentKind::Handoff,
+            ..NewComment::default()
+        };
+        released.comment_with(by, &new, now_ms)
+    }
+
     /// Whether the card carries a GitHub pull request link as evidence.
     pub fn has_pull_evidence(&self) -> bool {
         self.evidence.iter().any(|l| is_pull_link(l))

@@ -45,6 +45,8 @@ mod lel_act;
 mod lel_inbox;
 #[expect(dead_code)] // wired by the tab in a later slice (#1416)
 mod lel_map;
+#[cfg_attr(not(test), expect(dead_code))] // wired by the tab in a later slice (#1416)
+mod lel_spend;
 mod link_policy;
 mod link_trust;
 mod motion;

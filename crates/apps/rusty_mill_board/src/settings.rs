@@ -382,11 +382,19 @@ struct StaleRevoke {
     /// With `revoke`: only these ids (a previewed list), and only if still stale.
     #[serde(default)]
     ids: Option<Vec<String>>,
+    /// With `revoke`: release only these previewed claims (`card` and `holder` from the dry
+    /// run's `claims`), each only if still held by a revoked agent. Without it, only the
+    /// claims of the agents this call revokes.
+    #[serde(default)]
+    claims: Option<Vec<crate::board::ClaimRef>>,
 }
 
+/// The stale age the Settings view marks and its revoke-stale button uses, in hours.
 fn default_stale_hours() -> i64 {
     24
 }
+
+const HOUR_MS: i64 = 3600 * 1000;
 
 #[derive(Deserialize)]
 struct AppId {
@@ -511,14 +519,14 @@ pub fn tools() -> Vec<SettingsTool> {
         ),
         tool(
             "settings_registered_agent_revoke",
-            "Forget a registered agent (needs admin): its key stops working at once; it can register again.",
+            "Forget a registered agent (needs admin): its key stops working at once and every card claim it held (in your projects) is released with a handoff comment (`released`; any that fail are in `not_released` and offered again by the revoke-stale preview). An unknown id changes nothing. It can register again, without its claims.",
             json!({"id": text}),
             &["id"],
         ),
         tool(
             "settings_registered_agent_revoke_stale",
-            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin). A dry run unless `revoke: true`: it returns `count`, the agent `ids` it would revoke and `unsaved` (a revocation that failed to write: call again with `revoke: true` to write it). After a board restart, a last use may count up to an hour late while registry writes succeed; if a last-use write failed, a recently used agent can look stale and must register again. Revoked agents can register again.",
-            json!({"older_than_hours": {"type": "integer", "description": "2-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}, "ids": {"type": "array", "items": {"type": "string"}, "description": "With revoke: only these previewed ids, and only if still stale."}}),
+            "Forget every registered agent last used (or, never used, created) more than `older_than_hours` ago (2-720), default 24 (needs admin), and release card claims of revoked agents. A dry run unless `revoke: true`: it returns `count`, the agent `ids` it would revoke, the `claims` it would release (the stale agents' claims and any left by agents revoked earlier, in your projects) and `unsaved` (a revocation that failed to write: call again with `revoke: true` to write it). Confirm with `revoke: true`, `ids` and `claims` (each `{card, holder}`) from the preview: only those are revoked and released, each only if still stale or still held by a revoked agent; without `claims`, only the claims of the agents revoked now. A real run returns the released `claims` and any `not_released`. After a board restart, a last use may count up to an hour late while registry writes succeed; if a last-use write failed, a recently used agent can look stale and must register again. Revoked agents can register again, without their claims.",
+            json!({"older_than_hours": {"type": "integer", "description": "2-720, default 24."}, "revoke": {"type": "boolean", "description": "Really revoke; default false (dry run)."}, "ids": {"type": "array", "items": {"type": "string"}, "description": "With revoke: only these previewed ids, and only if still stale."}, "claims": {"type": "array", "items": {"type": "object", "properties": {"card": {"type": "string"}, "holder": {"type": "string"}}, "required": ["card", "holder"]}, "description": "With revoke: release only these previewed claims ({card, holder} from the dry run), each only if still held by a revoked agent."}}),
             &[],
         ),
         tool(
@@ -713,9 +721,11 @@ impl Settings {
                 |s, by, a| s.workflow_set(&by.actor, parse::<WorkflowSet>(a)?.workflow)
             }
             "settings_registered_agent_set" => |s, by, a| s.registered_agent_set(by, &parse(a)?),
-            "settings_registered_agent_revoke" => |s, _, a| s.registered_agent_revoke(&parse(a)?),
+            "settings_registered_agent_revoke" => {
+                |s, by, a| s.registered_agent_revoke(by, &parse(a)?)
+            }
             "settings_registered_agent_revoke_stale" => {
-                |s, _, a| s.registered_agent_revoke_stale(&parse(a)?)
+                |s, by, a| s.registered_agent_revoke_stale(by, &parse(a)?)
             }
             "settings_app_revoke" => |s, _, a| s.app_revoke(&parse(a)?),
             _ => return None,
@@ -1133,6 +1143,9 @@ impl Settings {
             "project_status": self.board.statuses(),
             "apps": self.oauth.get().map(|p| p.store().list_clients().iter().map(client_json).collect::<Vec<_>>()),
             "registered_agents": self.board.agent_list(),
+            "registered_agent_slots": crate::agents::MAX_PER_CONNECTOR,
+            "registered_agent_stale_hours": default_stale_hours(),
+            "registered_agents_stale": self.board.stale_agents(default_stale_hours() * HOUR_MS),
             "server": self.server,
             "paths": {
                 "agents": self.files.identities,
@@ -1191,35 +1204,46 @@ impl Settings {
         Ok((i.role.clone(), i.projects.clone()))
     }
 
-    /// Forget a registered agent: its key stops working at once; it can register again.
-    fn registered_agent_revoke(&self, a: &RegisteredAgentId) -> Res {
-        if self.board.revoke_agent(&a.id)? {
-            Ok(json!({"revoked": a.id}))
-        } else {
-            Err(refused(format!("no registered agent {:?}", a.id)))
-        }
+    /// Forget a registered agent: its key stops working at once and its claims are released
+    /// (#1644); it can register again, without them.
+    fn registered_agent_revoke(&self, by: &Caller, a: &RegisteredAgentId) -> Res {
+        let Some(r) = self.board.revoke_agent(&a.id, &by.actor)? else {
+            return Err(refused(format!("no registered agent {:?}", a.id)));
+        };
+        Ok(json!({"revoked": a.id, "released": r.released, "not_released": r.failed}))
     }
 
     /// Forget registered agents unused for `older_than_hours`: a dry run unless `revoke`.
-    fn registered_agent_revoke_stale(&self, a: &StaleRevoke) -> Res {
+    /// A dry run lists the claims a real run would release (`claims`); a real run lists those it
+    /// released (`claims`) and any it could not (`not_released`).
+    fn registered_agent_revoke_stale(&self, by: &Caller, a: &StaleRevoke) -> Res {
         if !(2..=720).contains(&a.older_than_hours) {
             return Err(refused("older_than_hours is 2 to 720".to_owned()));
         }
-        let age_ms = a.older_than_hours * 3600 * 1000;
-        let ids = if a.revoke {
-            let ids = self.board.revoke_stale_agents(age_ms, a.ids.as_deref())?;
+        let age_ms = a.older_than_hours * HOUR_MS;
+        let (ids, claims, failed) = if a.revoke {
+            let (ids, r) = self.board.revoke_stale_agents(
+                age_ms,
+                a.ids.as_deref(),
+                a.claims.as_deref(),
+                &by.actor,
+            )?;
             rusty_log::warn!(
                 count = ids.len(),
+                released = r.released.len(),
                 hours = a.older_than_hours,
                 "stale registered agents revoked"
             );
-            ids
+            (ids, r.released, r.failed)
         } else {
-            self.board.stale_agents(age_ms)
+            let ids = self.board.stale_agents(age_ms);
+            let claims = self.board.claims_released_by(&ids, &by.actor)?;
+            (ids, claims, Vec::new())
         };
-        Ok(
-            json!({"dry_run": !a.revoke, "older_than_hours": a.older_than_hours, "count": ids.len(), "ids": ids, "unsaved": self.board.agents_unsaved()}),
-        )
+        Ok(json!({
+            "dry_run": !a.revoke, "older_than_hours": a.older_than_hours, "count": ids.len(), "ids": ids,
+            "claims": claims, "not_released": failed, "unsaved": self.board.agents_unsaved(),
+        }))
     }
 
     /// Sign an app out: drop its registration and every token it holds. It can sign in again.

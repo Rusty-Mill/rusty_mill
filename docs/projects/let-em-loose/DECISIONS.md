@@ -233,6 +233,13 @@ Precise contracts used by this guide:
 | D225 | #1379: the sandbox fs/shell server is the crate `crates/apps/rusty_orch/crates/orch-fs-shell` (package and binary `orch-fs-shell`) | [default] 2026-11-27 (1379) |
 | D226 | #1379: the gateway launches each per_session stdio child from a new per-target setting that templates its command, args and env from verified token claims | [stated] 2026-11-27 (1379, 1377) |
 | D227 | #1379: orch-fs-shell confines nothing; critic mode withholds only `write`; claiming confinement needs evidence from the jail; no gateway launch in PR #1951 | review constraint (dottiusmaximus), not an owner decision, 2026-11-28 (1379) |
+| D230 | #1381: gateway skill source implementation defaults (startup snapshot, pack digest, file cap, strict `[skills]`, `skills.rs` core) | [default] 2026-11-28 (1381) |
+| D232 | #1382 slice 2: the token is written in rusty_orch's builder launch (`builder/live.rs`), not orch-bbp; token file, claim and logging defaults | [default] 2026-11-28 (1382) |
+| D233 | #1382 slice 2: `builder run` gains `--token-key`, `--token-kid`, `--lens-policy`, optional and all-or-nothing; none keeps token-less launches | [stated] 2026-11-28 (1382) |
+| D240 | #1319: the synthetic-tree generator is the rusty_mill crate `crates/tools/lel_treegen`; its answer manifest stays outside the tree and every sandbox | [default] 2026-11-28 (1319) |
+| D241 | #1319: perf measurement protocol (cold/warm, median of 5, crash injection at 10/50/90%, crash loss in minutes, scaled delta) | [default] 2026-11-28 (1319) |
+| D242 | #1319: same-pixels fixtures are codec-free PNG/JPEG byte assemblies; the generator is independent of the #1238 golden set | [default] 2026-11-28 (1319) |
+| D243 | #1319: the real-drive stats pass prints aggregates only; sample hashing is opt-in and only counts leave the machine | [default] 2026-11-28 (1319) |
 | D244 | #1380 B2: jailed builders get a reflink-seeded `target/` per session from orch's build of `main`, not sccache; amends D182's mechanism and D101's sccache clause | [stated] 2026-11-28 (1380, 726) |
 | D245 | #1380: the typed workspace layout is a module `orch_bbp::workspace`, not a new crate | [default] 2026-11-28 (1380) |
 | D246 | #1380: session admission refuses under a free-space floor; provisional default 40 GiB until BaileyAi's /srv is measured (field is ask-first) | [default] 2026-11-28 (1380) |
@@ -2148,7 +2155,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Source.** Nano, thread "Design lens composition for orch", message `cmsg_01WgyiM31RsSnZTgNuPX2VE49wxaDgTxaYrjqV9GwJfJeE`, 2026-11-26T22:19:47Z, verbatim: "Concur with recommendations", answering `cmsg_01WgyiM31RsSnZTgNuPX2VE41WimMRPL5nxi6QqDxiBivo` (2026-11-25), which asked his OK on the #723 design in PR #1871 and his answers to Q48 and Q46 with the recommendations recorded here. Numbered D207 after D206.
 ## D209. #1382: the token mint lives in a new sans-IO crate `orch-token`; orch-bbp writes the token file and `jail.json` slot
 
-**Decision.** Inside the approved #726 design (726-sandbox-design.md §2, D180), #1382's minter is a new sans-IO crate `crates/apps/rusty_orch/crates/orch-token`: it turns the §2 claims and a signing key into an ES256 JWT (`kid`, `jti`, `exp`) and gives the JWKS entry for the public key, using the workspace's vendored `jsonwebtoken` (no new workspace dependency). orch-bbp, which launches builders, calls it and writes the token file and the existing `jail.json` `token` {`file`, `var`} slot (D107). This settles placement only; build order still follows §10 ("#1382 last") and the card's "Waits on" unless Nano says otherwise. Nano confirmed that order in D212.
+**Decision.** Inside the approved #726 design (726-sandbox-design.md §2, D180), #1382's minter is a new sans-IO crate `crates/apps/rusty_orch/crates/orch-token`: it turns the §2 claims and a signing key into an ES256 JWT (`kid`, `jti`, `exp`) and gives the JWKS entry for the public key, using the workspace's vendored `jsonwebtoken` (no new workspace dependency). orch-bbp, which launches builders, calls it and writes the token file and the existing `jail.json` `token` {`file`, `var`} slot (D107). This settles placement only; build order still follows §10 ("#1382 last") and the card's "Waits on" unless Nano says otherwise. Nano confirmed that order in D212. D232 corrects where the token is written: builders launch from rusty_orch's `builder/live.rs`, not orch-bbp.
 **Why.** orch-jail builds `lel-jail`, the binary that runs inside the sandbox, so it must not link signing code; a separate sans-IO crate is the most reversible split and can be tested alone against the gateway's `FileJwks`.
 **Rejected.** A module in orch-jail (signing code in the jailed binary). A module inside orch-bbp's lib (mixes I/O and the pure mint).
 **Tag.** [default] · remind-me: mem_23e81baeef6e4ed4a733c14c0cc365a1
@@ -2302,6 +2309,75 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1379:critic-confinement-boundary
 **Source.** dottiusmaximus's static review, posted as a GitHub comment under the `baileyrd` account on PR #1951, 2026-11-28T00:33:48Z, https://github.com/Rusty-Mill/rusty_mill/pull/1951#issuecomment-7231012800 ("critic mode removes the `write` tool but still exposes `exec` ... require evidence that the external jail enforces read-only critic execution and owns descendant cleanup before calling the feature confined"). Adds a condition to D225; narrows D226 (the launch waits for a later PR and needs that evidence) without reversing it. Numbered D227 because D226 is taken on branch `claude/project-thread-7bet54-1378-launch` (PR #1952).
 **Provenance correction.** First recorded as `[stated]` (Nano) in `bab10322`. The reviewer corrected that in https://github.com/Rusty-Mill/rusty_mill/pull/1951#issuecomment-7231280899 (2026-11-28T00:54:43Z): the comment was a Dottius static review finding, not owner approval. Comments under `baileyrd` may be dottiusmaximus reviews; check before tagging one `[stated]` (remind-me mem_558280bc058e4a009c456c331a6b9c78).
+
+## D230. #1381: gateway skill source implementation defaults
+
+**Decision.** Inside `726-sandbox-design.md` §8 (D180), the gateway's skill source: (1) loads the catalog once at start into an immutable snapshot; a reload is a restart. (2) A pack's digest is sha256 over its sorted (relative path, sha256(file)) pairs, reported in each Resource's `_meta` as `lel.pack_digest` and on the list. (3) Each file is capped (64 KiB); an oversize file fails gateway start, not the read. (4) A pack named in `skills.packs` but absent from the catalog serves nothing and is logged once, as #723 treats unknown domain tokens. (5) `[skills]` is validated strictly (`packs` only, a list of non-empty strings) and fails closed like `[tools]`. (6) Code: a pure core `agentgateway-mcp/src/skills.rs` over (path, bytes) pairs plus a thin fs adapter; federation serves it next to the targets. Resources only, no prompts or templates, and visibility only through the token's verified lens policy are §8 as written, not defaults. Not covered: what a pack is on disk and where the gateway is told the catalog lives; both were escalated to Nano.
+**Why.** Implementation detail inside an approved design; each choice is reversible and changes no approved behaviour.
+**Rejected.** Hot reload (a moving digest under live tokens); checking file size at read time (fails late).
+**Tag.** [default] · remind-me: mem_f2a1a38c44154bfba467bb334ec69325
+**Key.** lel:1381:skill-source-defaults
+**Source.** let-em-loose-expert, 2026-11-28, answering the #1381 build thread; 726-sandbox-design.md §5.1, §8, §10; `agentgateway-mcp/src/lens_policy.rs` (PR #1949). Numbered D230: main ends at D227 and branch `claude/project-thread-80iya5-slice2` (#1382) holds D228 and D229.
+
+## D232. #1382 slice 2: the token is written in rusty_orch's builder launch; token file, claim and logging defaults
+
+**Decision.** Inside the approved token design (726-sandbox-design.md §2, D180) and the slice plan (`1382-token-slices.md` §2 slice 2):
+1. **Placement.** Slice 2's code lives in rusty_orch's builder launch (`crates/apps/rusty_orch/crates/rusty_orch/src/builder/live.rs`, `Live::prepare` and `jail_file`, where `jail.json` is written today) and calls `orch-token`. This corrects D209's and the slice plan's "orch-bbp writes the token": builders launch from rusty_orch, not orch-bbp. D209's crate split (sans-IO `orch-token`, no signing code in orch-jail) stands.
+2. **Token file.** `<state>/tokens/<claim>/<n>/token`, mode 0600 in a 0700 directory; slot `{file, var: "LEL_TOKEN"}`. Launch is refused unless the file lies outside every `jail.json` root, caller `--read` roots included (D107); the slice's test also passes the written file through `JailSpec::resolve`. **Acquisition** (review constraint from dottiusmaximus, not an owner decision, https://github.com/Rusty-Mill/rusty_mill/pull/1963#issuecomment-7234959769): the session directory `<state>/tokens/<claim>/<n>` is created by an exclusive mkdir (0700) and the token file with create-new (0600). If the session directory already exists, launch is refused naming its path; an existing directory or file is never removed, reused or overwritten, so a stale one from a crashed run is cleared by hand, not by orch. Cleanup belongs only to an attempt that acquired the directory: the guard exists only after acquisition succeeds, and on session end it removes just its own file and directory. A create or write failure after the mkdir removes only what that attempt made. Tests cover both failures with disposable fixtures. Early revocation stays slice 3.
+3. **Claims.** `iss` = `lel-orch@<host>`, host from `rusty_libc::uname` nodename (no flag); `jti` = 16 bytes from `rusty_rand` (already a rusty_orch dependency); budget = `builders.wall_secs`; role `builder`, refused if the policy file's `role` is not `builder`; grants empty; project = board name; task = `--task`; claim = the claim id; n = the session's n; lens = the policy file's `lens`, refused unless it equals the file name without `.toml` (the gateway's own rule, `agentgateway-mcp/src/lens_policy.rs`); `lel.policy` = `policy_digest` of the file's bytes.
+4. **Logging.** Log `jti` and `sub` only; never the token or the key.
+How the key, `kid` and policy path reach `builder run` was not settled here (new `rusty_orch` flags are ask-first, D199); Nano settled it in D233.
+**Why.** Implementation detail inside approved designs. Each choice reuses existing paths and dependencies and is reversible; checking the lens against the file name makes a misnamed policy fail at launch rather than deny every tool at the gateway.
+**Rejected.** Writing the token in orch-bbp (it doesn't launch builders); a `--token-issuer-host` flag (more ask-first surface for no gain); the `getrandom` crate or reading `/dev/urandom` directly (`rusty_rand` already wraps both); a token under the run dir or worktree.
+**Tag.** [default] · remind-me: mem_c65179a76f97408b964f8adcc15b8e73
+**Key.** lel:1382:token-write-defaults
+**Source.** Let Em Loose expert, 2026-11-28, answering the #1382 build thread on slice 2 (PR #1960 is slice 1); 726-sandbox-design.md §2 (D180); D107, D187 item 5, D199, D209; `builder/live.rs` `jail_file`; `agentgateway-mcp/src/lens_policy.rs`. Numbered D232 (first drafted as D228) because open PRs #1964-#1968 take D228-D231.
+
+## D233. #1382 slice 2: `builder run` token flags approved, optional and all-or-nothing
+
+**Decision.** `rusty_orch builder run` gains three flags: `--token-key PATH` (P-256 PKCS#8 PEM), `--token-kid KID` and `--lens-policy PATH`. They are given together or not at all: with none, the launch stays token-less as today (D187 item 5 stays as the fallback); a partial set is refused. With all three, the launch mints and writes the token as D232 sets out. This approval covers these three flags only; any other new `rusty_orch` command or flag is still ask-first (D199).
+**Why.** Existing runs and the S6 e2e keep working until the gateway is deployed; requiring the flags later is a small change.
+**Rejected.** b: required on every launch (the existing toy run breaks until the gateway is deployed). c: key, kid and policy path in orch's config file (config schema change).
+**Tag.** [stated] · remind-me: mem_c77a650c94354d049340dfb2941c84f2
+**Key.** lel:1382:builder-run-token-flags
+**Source.** Nano tapped option a "Optional, all-or-nothing" ("--token-key, --token-kid and --lens-policy are added together or not at all. Without them, launches stay token-less as today; a partial set is refused.") on decision card `cmsg_014AqbZs58L565hMV2pFkCX5DX76zgHdK5fk8xihspJZVw` in the #1382 build thread `cmsg_014AqbZs58L565hMV2pFkCX57R3gYoTVeeXhtbHkCNdLh1`. The card asked "Approve new builder run flags for token launch (slice 2)?". The platform's tap record `cmsg_014AqbZs58L565hMV2pFkCX5ADwY1aUYDvTxWTGPCepKh4` shows a user, not an agent, chose it at 2026-11-28T04:49:50Z. This clears D199's ask-first gate for the three flags; it amends D232 and reverses nothing. Review: dottiusmaximus accepts owner decisions only in Nano's own words on GitHub, so slice 2's PR also needs Nano to repeat this choice as a PR comment. Numbered D233 (first drafted as D229) for the same reason as D232.
+
+## D240. #1319: the synthetic-tree generator is the rusty_mill crate `crates/tools/lel_treegen`
+
+**Decision.** The seeded generator for the #1319 test tree is a small rusty_mill crate, `crates/tools/lel_treegen`, using only existing workspace dependencies (`rand`, `sha2`, `serde_json`, `clap`). Its expected-answer manifest is written to a harness-only directory outside the generated tree root and outside every sandbox and builder mount, never into `dedup-manager`. Only the manifest digest is posted on #600. The tree is mounted read-only into `perf` runs.
+**Why.** 600-build-plan.md § Ownership gives the test tree to the experiment harness, outside builders' reach; builders never see rusty_mill (600-build-plan §1, #1234, D18), and Factory holds no code (D19). A manifest beside the tree would be readable by the candidate under test. A crate can be moved later.
+**Rejected.** Factory (D19: no code). Inside `dedup-manager` (builders see it). Manifest inside the tree root.
+**Tag.** `[default]` · remind-me: mem_dcdd4b3544ce424dbe785da923bd72f1
+**Key.** lel:1319:treegen-location
+**Source.** Caller question from the #1319 design session, 2026-11-28 (Q2); 600-build-plan.md § Ownership and §1; D18, D19.
+**Numbering.** D240–D243 were first drafted as D228–D231; renumbered on 2026-11-28 because open PRs #1963, #1964, #1966, #1967 and #1968 also add D228–D231 with other meanings. D232–D239 are left free for those PRs.
+
+## D241. #1319: perf measurement protocol
+
+**Decision.** Warm: a repeat run after one discarded run. Cold: the harness drops caches on the host (not inside the sandbox) before each run. Five runs each; the median is reported. Crash injection: SIGKILL (`taskkill /F` on Windows) at 10%, 50% and 90% of files scanned. The crash-loss verdict is the wall time from relaunch until progress regains the pre-kill point, since the intent states loss in minutes; re-hashed bytes are reported beside it. Incremental: apply the seeded delta tree (50 GB at full scale, scaled by the same factor as the tree on scaled runs), then rescan.
+**Why.** Reuses the approved #596 measurement style (warm, median of 5; remind-me mem_864bd999d4ef406893aba1d1a3164367). Measuring loss in time matches the intent's target. Dropping caches needs host root.
+**Rejected.** Loss measured only in bytes; an unscaled 50 GB delta on a scaled tree.
+**Tag.** `[default]` · remind-me: mem_ae0337151b1b4770a02cc6fd6b93d31e
+**Key.** lel:1319:measurement-protocol
+**Source.** Caller question from the #1319 design session, 2026-11-28 (Q4); #600 intent v0.1-stage1 targets; #596 perf style.
+
+## D242. #1319: same-pixels fixtures are codec-free byte assemblies
+
+**Decision.** Same-pixels-different-metadata groups are generated without a codec dependency: PNGs (stored deflate) sharing identical IDAT and differing only in tEXt/eXIf chunks, and JPEGs assembled from a small fixed set of pre-encoded scan bodies with different APP1/EXIF segments. The generator is independent of the #1238 golden set, which holds real, Nano-signed cases in Factory `golden/dedup-manager/` (D37); nothing settled requires the golden set to reuse the generator.
+**Why.** No new dependency (ask-first avoided); deterministic bytes; no alignment constraint exists.
+**Rejected.** An image codec dependency.
+**Tag.** `[default]` · remind-me: mem_4dcfef45aab644aaacc4d56233e91119
+**Key.** lel:1319:same-pixels-fixtures
+**Source.** Caller question from the #1319 design session, 2026-11-28 (Q3); D37; card #1238.
+
+## D243. #1319: the real-drive stats pass prints aggregates only
+
+**Decision.** The PowerShell stats pass over Nano's drive prints only aggregates: size-bucket histogram, file and directory counts, depth and fan-out histograms, hardlink, symlink and reparse-point counts, top-N extension counts with the rest folded into `other`, and duplicate rate by size class. No paths, names or hashes appear in the output. Hashing a content sample is an opt-in switch, off by default, shown in the design Nano approves; the hashes stay on his machine and only counts leave.
+**Why.** Card #1319 and 600-build-plan §8 allow aggregate stats only, with no file names unless Nano agrees; real names and paths are `sensitive` (card #598 Q6). Rare extensions and file hashes fingerprint real data, so they are folded or kept local. The switch lets Nano choose the extra disk read.
+**Rejected.** Emitting names, paths, hashes or every distinct extension.
+**Tag.** `[default]` · remind-me: mem_a84e1530456c437aa21d72b1e32e261b
+**Key.** lel:1319:drive-stats-outputs
+**Source.** Caller question from the #1319 design session, 2026-11-28 (Q5); card #1319 prompt; 600-build-plan.md §8; card #598 Q6.
 
 ## D244. #1380 B2: builders get a reflink-seeded `target/`, not sccache
 

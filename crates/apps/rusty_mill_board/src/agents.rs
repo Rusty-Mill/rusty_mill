@@ -25,6 +25,12 @@ pub const MAX_NICKNAME: usize = 40;
 /// cleanup allows for this lag after a restart; it is below the 2-hour minimum stale age.
 const SEEN_WRITE_MS: i64 = 3600 * 1000;
 
+/// Whether claim holder `name` is a registered agent id (`<connector>#<6 hex>`): no bearer actor
+/// or label may hold a `#`, so this tells a revoked agent's claim from anyone else's.
+pub fn is_registered_id(name: &str) -> bool {
+    name.contains('#')
+}
+
 /// What one registered agent may do instead of its connector's role and projects. A field left
 /// `None` falls back to the connector's.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +245,11 @@ impl Registry {
             self.save()?;
         }
         Ok(found)
+    }
+
+    /// Whether `id` is a registered agent here.
+    pub fn contains(&self, id: &str) -> bool {
+        self.agents.contains_key(id)
     }
 
     /// Ids of agents last used (or, if never used, created) more than `age_ms` before `now`.
