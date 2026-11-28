@@ -282,6 +282,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_orch | orch-codex | Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out. |
 | apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. |
 | apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. |
+| apps | rusty_orch | orch-fs-shell | The fs/shell MCP server for one agent session's root (Let Em Loose #1379): read, list, stat, write and exec over stdio. It confines nothing; running it inside lel-jail as a gateway target is future work. |
 | apps | rusty_orch | orch-jail | The jail spec (jail.json) and \`lel-jail\`, the launcher a mux block runs: it joins the session's cgroup, keeps only fds 0-4, then confines itself with rusty_sandbox and execs the agent. |
 | apps | rusty_orch | orch-lens | Orchestrator lens runner core: critic lenses over a BBP claims board. Reply protocol, context assembly, tiering, data classes and the money meter. Pure, no I/O. |
 | apps | rusty_orch | orch-ollama | Orchestrator adapter: Agent::Local over the Ollama CLI. Prompt on stdin, one JSON object out. |
