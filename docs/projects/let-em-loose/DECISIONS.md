@@ -235,6 +235,8 @@ Precise contracts used by this guide:
 | D227 | #1379: orch-fs-shell confines nothing; critic mode withholds only `write`; claiming confinement needs evidence from the jail; no gateway launch in PR #1951 | review constraint (dottiusmaximus), not an owner decision, 2026-11-28 (1379) |
 | D228 | #1236: the holdout leak review is by a local non-builder model other than the author; no Claude session reads holdout test bodies | [default] 2026-11-28 (1236) |
 | D229 | #1236: the stage-1 holdout suite is frozen at `bbp open`, staged at `/srv/lel/dedup-manager-holdout/`, digest proven by a scratch-dir dry open | [default] 2026-11-28 (1236) |
+| D244 | #1236: the stage-1 dedup app is Rust stable, pinned; one toolchain in the mirror and holdout profile | [stated] 2026-11-28 (1236) |
+| D245 | #1236: the stage-1 holdout suite is written by local gpt-oss-120b, Qwen3.6 fallback; the other model does the D228 leak review | [stated] 2026-11-28 (1236) |
 
 ## D1. Lenses, not stages
 
@@ -2315,3 +2317,21 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_2a2fe84706e04f19a0d4859bba1ad30f
 **Key.** lel:1236:holdout-freeze-at-open
 **Source.** let-em-loose-expert, 2026-11-28, answering the #1236 design thread (Q6); `crates/apps/rusty_bbp_host/src/holdout.rs` (`scan`, golden-inside-root check), PR #1419, `600-builder-session-design.md` §1.
+
+## D244. #1236: the stage-1 dedup app is Rust stable, pinned
+
+**Decision.** The #600 stage-1 dedup app is written in Rust, stable channel, pinned to one toolchain version. The mirror and the holdout profile mount that one toolchain. Where the requirement is written depends on #1236 Q1 (test seam), still open: if Q1 revises INTENT.md, Rust is stated in that same intent revision; if it does not, the Rust requirement goes wherever the seam contract lives.
+**Why.** Erosion is measured for Rust only (D45), and the D57 4-of-5 erosion comparison needs measured code. Rust keeps the results comparable with rusty_fclone.
+**Rejected.** Builders choose the language: several toolchains in the mirror and holdout profile, and non-Rust code is erosion-unmeasured, so the D57 comparison could be unreadable.
+**Tag.** `[stated]` · `remind-me: mem_ee78605aed244f8fb23a04d660f3724b`
+**Key.** lel:1236:stage1-rust-toolchain
+**Source.** Nano tapped option 0 "Rust stable, pinned" on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4VxNLBqgoz9xCpP8T86GMGQ` ("Fix the dedup app's language to Rust for stage 1?"), 2026-11-28T13:19:35Z (tap event `cmsg_01WgyiM31RsSnZTgNuPX2VE44hJafgRVuKcZz1i2WKvYnF`), Let Em Loose thread "Design holdout suite" `cmsg_01WgyiM31RsSnZTgNuPX2VE4AUR92myqWw4vWEMAWu4uvh`. Confirms D45 for this experiment. Numbered D244 because origin/main already holds D230 to D243.
+
+## D245. #1236: the stage-1 holdout suite is written by local gpt-oss-120b, Qwen fallback
+
+**Decision.** The #600 stage-1 holdout suite is written by gpt-oss-120b, running locally on BaileyAi ($0, no builder uses it). If the held llama.cpp build returns HTTP 500s (D145, D147), Qwen3.6-35B-A3B writes it instead. Per D228 the leak reviewer is the other model: Qwen reviews when gpt-oss writes, and gpt-oss reviews if Qwen writes. This closes the open author-model point noted in D228.
+**Why.** No builder uses either model (D37, D64), so the suite stays independent of the builders. Local runs cost nothing, which keeps D134 (no paid runs) intact.
+**Rejected.** Codex: paid under D134, so it would need a spend ceiling from Nano first. Qwen3.6 only: avoids the gpt-oss 500s, but it is the weaker model.
+**Tag.** `[stated]` · `remind-me: mem_abc841edcede424eab0cef200bead952`
+**Key.** lel:1236:holdout-author-model
+**Source.** Nano tapped option 0 "gpt-oss-120b, Qwen fallback" on decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE49ugV4ZaLEvsLSgFHJ2XaNm` ("Which model writes the dedup holdout suite?"), 2026-11-28T13:19:43Z (tap event `cmsg_01WgyiM31RsSnZTgNuPX2VE4TruXXsKrZVzJurfb9r8eDK`), Let Em Loose thread "Design holdout suite" `cmsg_01WgyiM31RsSnZTgNuPX2VE4AUR92myqWw4vWEMAWu4uvh`. Confirms D228's reviewer rule and D134.

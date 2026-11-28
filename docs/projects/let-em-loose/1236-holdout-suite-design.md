@@ -60,15 +60,15 @@ commit, which gives builders a second input beside the intent and stretches D18;
 
 Holdout profiles freeze their `read_roots` and environment at open, and the
 approved dependency mirror (D66) holds "the dependencies INTENT.md's toolchain
-needs", but no language is fixed anywhere. **Recommended (Q2 a): Rust stable,
-pinned, stated in the same intent revision as Q1.** Erosion is measured for Rust
+needs", but no language is fixed anywhere. **Decided (D244, Nano 2026-11-28): Rust stable, pinned**, stated in the same intent
+revision as Q1 if Q1 revises the intent, otherwise wherever the seam contract lives. Erosion is measured for Rust
 only (D45); other code is `unmeasured`, which would leave #596's "erosion no worse
 on 4 of 5" (D57) unreadable, and the control `rusty_fclone` is Rust (D18). The
 tests stay language-neutral regardless: they call only `seam/run`.
 
 ## 4. Who writes the suite
 
-**Recommended (Q3 a): gpt-oss-120b via llama-swap on BaileyAi, with
+**Decided (D245, Nano 2026-11-28): gpt-oss-120b via llama-swap on BaileyAi, with
 Qwen3.6-35B-A3B as fallback.** No builder uses either (builders are Claude CLI
 only, D64), and both are local and free, so D134 (no paid runs) holds. Known risk:
 the llama.cpp build returns HTTP 500 on some valid gpt-oss output (D145) while its
@@ -176,10 +176,8 @@ Three decisions, posted as decision cards in the project thread:
 
 1. **Test seam (Q1).** a) separate `SEAM.md` second commit; **b) intent v0.2-stage1
    adds a scriptable CLI line and the contract (recommended)**; c) web UI HTTP API.
-2. **Toolchain (Q2).** **a) Rust stable, pinned, in the same intent revision
-   (recommended)**; b) language free, several toolchains mounted.
-3. **Holdout model (Q3).** **a) gpt-oss-120b, Qwen fallback, local (recommended)**;
-   b) Codex (paid, needs a D134 exception); c) Qwen only.
+2. **Toolchain (Q2).** Decided: Rust stable, pinned (D244).
+3. **Holdout model (Q3).** Decided: gpt-oss-120b, Qwen fallback, local (D245).
 
 Still open elsewhere and not decided here: `taste: pending` in the intent, Q4
 (golden sign-off, #1238) and Q37 (cleanup holdouts).
