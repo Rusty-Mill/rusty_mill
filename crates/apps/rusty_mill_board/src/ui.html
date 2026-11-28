@@ -305,6 +305,15 @@ dialog h2{margin:0;font-size:18px}
 #settings button.danger{color:var(--red)}
 #settings .err{color:var(--red);min-height:1.2em;margin:6px 0}
 #settings .note{color:var(--mute);margin:10px 0;font-size:13px;max-width:75ch}
+#settings .slots{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 10px}
+#settings .slots span{border:1px solid var(--line);background:var(--card);border-radius:12px;padding:3px 10px;font-size:13px}
+#settings .slots span.full{border-color:var(--red);color:var(--red);background:var(--red-wash)}
+#settings .status{border-radius:10px;padding:2px 8px;font-size:12px;font-weight:600}
+#settings .status.active{background:var(--cyan-wash);color:var(--cyan)}
+#settings .status.stale{background:var(--yellow-wash);color:var(--mute)}
+#settings tr.stale td{color:var(--mute)}
+#settings .preview{border:1px solid var(--line2);background:var(--card);border-radius:5px;padding:0 12px;margin:10px 0}
+#settings .preview:empty{display:none}
 #settings .secret{border:1px solid var(--mag);background:var(--mag-wash);border-radius:5px;padding:12px;margin:0 0 14px;overflow-wrap:anywhere}
 #settings code{font-family:ui-monospace,monospace;font-size:12.5px}
 #settings fieldset{border:1px solid var(--line);border-radius:5px;background:var(--card);margin:0 0 10px;padding:12px 14px;display:flow-root}
@@ -1418,25 +1427,50 @@ function agentsTab(){
   return t;
 }
 
-/* Agents registered on a shared connector (agent_register): one row each; Revoke stops its key at once. */
+/* Agents registered on a shared connector (agent_register): one row each; Revoke stops its key at once and
+   frees its claims. Each connector holds at most cfg.registered_agent_slots; a row is stale by the same rule
+   revoke-stale uses (cfg.registered_agents_stale), and "Revoke all stale" previews before it revokes. */
 function registeredAgents(){
-  const box=el("div"),err=el("div",null,"err"),list=cfg.registered_agents||[];
+  const box=el("div"),err=el("div",null,"err"),list=cfg.registered_agents||[],slots=cfg.registered_agent_slots,hours=cfg.registered_agent_stale_hours;
+  const stale=new Set(cfg.registered_agents_stale||[]),nick=id=>list.find(a=>a.id===id)?.nickname;
   box.append(el("h3","Registered agents"));
   if(!list.length){box.append(el("p","None yet. A session on a shared connector (such as claude-cloud) calls agent_register once, then passes its agent_id and agent_key on every write.","note"));return box}
-  const tbl=el("table"),head=el("tr");["Agent","Nickname","Connector","Role","Projects","Last used",""].forEach(h=>head.append(el("th",h)));tbl.append(head);
+  const used={};for(const a of list)used[a.connector]=(used[a.connector]||0)+1;
+  const counts=el("p",null,"slots");
+  for(const [c,n] of Object.entries(used)){const s=el("span",c+": "+n+" of "+slots+" slots used",n>=slots?"full":"");counts.append(s)}
+  const nStale=list.filter(a=>stale.has(a.id)).length;
+  counts.append(el("span",(list.length-nStale)+" active, "+nStale+" stale (unused over "+hours+"h)"));
+  const tbl=el("table"),head=el("tr");["Agent","Nickname","Connector","Role","Projects","Last used","Status",""].forEach(h=>head.append(el("th",h)));tbl.append(head);
   for(const a of list){
-    const tr=el("tr"),role=roleSelect(a.role),pick=projectPicker(a.projects),acts=el("td"),nk=field("input",{value:a.nickname||"",placeholder:"nickname",size:14,maxlength:40});
+    const old=stale.has(a.id),tr=el("tr",null,old?"stale":""),role=roleSelect(a.role),pick=projectPicker(a.projects),acts=el("td"),nk=field("input",{value:a.nickname||"",placeholder:"nickname",size:14,maxlength:40});
     role.insertBefore(new Option("connector's role",""),role.firstChild);role.value=a.role||"";
     const save=el("button","Save"),rv=el("button","Revoke");[save,rv].forEach(b=>{b.type="button"});
     save.onclick=guard(err,()=>setting("settings_registered_agent_set",{id:a.id,agent_role:role.value||null,agent_projects:pick.value(),nickname:nk.value.trim()||null}));
-    rv.onclick=guard(err,async()=>{if(!confirm("Revoke "+a.id+"? Its key stops working; it can register again."))return;await setting("settings_registered_agent_revoke",{id:a.id})});
+    rv.onclick=guard(err,async()=>{if(!confirm("Revoke "+a.id+"? Its key stops working and its card claims are released; it can register again."))return;await setting("settings_registered_agent_revoke",{id:a.id})});
     acts.append(save," ",rv);
-    const r=el("td"),p=el("td");r.append(role);p.append(pick);
-    const nm=el("td");nm.append(nk);tr.append(el("td",a.id),nm,el("td",a.connector),r,p,el("td",new Date(a.seen_ms).toLocaleString()),acts);tbl.append(tr);
+    const r=el("td"),p=el("td"),st=el("td");r.append(role);p.append(pick);st.append(el("span",old?"stale":"active","status "+(old?"stale":"active")));
+    const nm=el("td");nm.append(nk);tr.append(el("td",a.id),nm,el("td",a.connector),r,p,el("td",new Date(a.seen_ms).toLocaleString()),st,acts);tbl.append(tr);
   }
-  const stale=el("button","Revoke stale (unused over 24h)");stale.type="button";
-  stale.onclick=guard(err,async()=>{const d=await setting("settings_registered_agent_revoke_stale",{});if(d.unsaved&&!d.count){if(!confirm("An earlier revocation was not saved. Save it now?"))return;await setting("settings_registered_agent_revoke_stale",{revoke:true,ids:[]});return}if(!d.count){err.textContent="No registered agent is unused for over 24 hours.";return}if(!confirm("Revoke "+d.count+" agent(s) unused for over 24 hours? Their keys stop working; they can register again."))return;await setting("settings_registered_agent_revoke_stale",{revoke:true,ids:d.ids})});
-  box.append(tbl,stale,err,el("p","Left at the connector's role, and all projects, an agent acts as its connector. Any role chosen here is applied at once, even a wider one.","note"));
+  const preview=el("div",null,"preview"),all=el("button","Revoke all stale…");all.type="button";
+  /* The dry run fills the preview without redrawing the sheet; only the confirm button changes anything. */
+  all.onclick=async()=>{err.textContent="";preview.replaceChildren();
+    try{
+      const d=await setting("settings_registered_agent_revoke_stale",{});
+      if(d.unsaved&&!d.count){const fix=el("button","Save the earlier revocation");fix.type="button";
+        fix.onclick=guard(err,()=>setting("settings_registered_agent_revoke_stale",{revoke:true,ids:[]}));
+        preview.append(el("p","An earlier revocation was not saved.","note"),fix);return}
+      if(!d.count){preview.append(el("p","No registered agent is unused for over "+d.older_than_hours+" hours.","note"));return}
+      const ul=el("ul");for(const id of d.ids){const n=nick(id);ul.append(el("li",n?id+" ("+n+")":id))}
+      preview.append(el("p",d.count+" agent(s) unused for over "+d.older_than_hours+" hours would be revoked. Their keys stop working; they can register again."),ul);
+      if(d.claims.length){const cl=el("ul");for(const c of d.claims)cl.append(el("li",(c.number?"#"+c.number+" ":"")+c.title+", held by "+c.holder));
+        preview.append(el("p",d.claims.length+" card claim(s) they hold would be released, each with a comment:"),cl)}
+      const go=el("button","Revoke these "+d.count),no=el("button","Cancel");[go,no].forEach(b=>{b.type="button"});go.classList.add("danger");
+      go.onclick=guard(err,async()=>{const r=await setting("settings_registered_agent_revoke_stale",{revoke:true,ids:d.ids});
+        if(r.not_released?.length)toast(r.not_released.length+" claim(s) could not be released: "+r.not_released.map(f=>(f.number?"#"+f.number:f.card)+" ("+f.reason+")").join(", "))});
+      no.onclick=()=>preview.replaceChildren();
+      preview.append(go," ",no);
+    }catch(e){err.textContent=e.message}};
+  box.append(counts,tbl,all,preview,err,el("p","Left at the connector's role, and all projects, an agent acts as its connector. Any role chosen here is applied at once, even a wider one. Revoking an agent releases every card claim it holds.","note"));
   return box;
 }
 

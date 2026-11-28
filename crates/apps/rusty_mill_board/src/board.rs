@@ -467,12 +467,71 @@ impl<S: Store> Board<S> {
         self.agents().nicknames()
     }
 
-    /// Remove registered agent `id`; whether it existed.
+    /// Remove registered agent `id` and release every claim it held (#1644); `None` if it did
+    /// not exist. `by` is the revoking admin, recorded on each released card.
     ///
     /// # Errors
-    /// If the registry file cannot be written.
-    pub fn revoke_agent(&self, id: &str) -> Result<bool, BoardError> {
-        self.agents().revoke(id).map_err(BoardError::Storage)
+    /// If the registry file cannot be written; nothing is released then.
+    pub fn revoke_agent(&self, id: &str, by: &Actor) -> Result<Option<Released>, BoardError> {
+        if !self.agents().revoke(id).map_err(BoardError::Storage)? {
+            return Ok(None);
+        }
+        Ok(Some(self.release_claims_of(&[id.to_owned()], by)?))
+    }
+
+    /// The cards claimed by any of `holders`, by holder (#1644: a revoke-stale preview).
+    ///
+    /// # Errors
+    /// On storage failure.
+    pub fn claims_of(&self, holders: &[String]) -> Result<Vec<HeldClaim>, BoardError> {
+        Ok(self
+            .cards()?
+            .into_iter()
+            .filter_map(|c| {
+                let holder = c.claim.clone().filter(|h| holders.contains(h))?;
+                Some(HeldClaim {
+                    holder,
+                    card: c.id,
+                    number: c.number,
+                    title: c.title,
+                })
+            })
+            .collect())
+    }
+
+    /// Release every claim `holders` (revoked agents) hold, each with a handoff comment by `by`.
+    /// A card that fails (out of `by`'s projects, a storage error) is reported, not fatal: the
+    /// agents are already revoked, so the rest must still be freed.
+    ///
+    /// # Errors
+    /// If the cards cannot be listed.
+    fn release_claims_of(&self, holders: &[String], by: &Actor) -> Result<Released, BoardError> {
+        let mut out = Released::default();
+        let keeps_ids = self.store.keeps_comment_ids();
+        for held in self.claims_of(holders)? {
+            let freed = std::cell::Cell::new(false);
+            let result = self.apply(held.card, by, EventKind::Released, |c, now| {
+                let mut next = c.release_revoked(&held.holder, by, now)?;
+                freed.set(next != *c);
+                if !keeps_ids && let Some(added) = next.comments.last_mut().filter(|_| freed.get())
+                {
+                    added.id = None;
+                }
+                Ok(next)
+            });
+            match result {
+                Ok(_) if freed.get() => out.released.push(held),
+                Ok(_) => {}
+                Err(e) => out.failed.push(FailedRelease {
+                    claim: held,
+                    reason: e.to_string(),
+                }),
+            }
+        }
+        if !out.failed.is_empty() {
+            rusty_log::warn!(failed = ?out.failed, "claims of revoked agents not released");
+        }
+        Ok(out)
     }
 
     /// Ids of registered agents unused (or, never used, uncreated) for more than `age_ms`.
@@ -485,8 +544,8 @@ impl<S: Store> Board<S> {
         self.agents().has_unsaved_revoke()
     }
 
-    /// Remove registered agents unused for more than `age_ms` (only those in `only`, if given);
-    /// the ids removed.
+    /// Remove registered agents unused for more than `age_ms` (only those in `only`, if given)
+    /// and release their claims, recorded as `by`'s: the ids removed and the claims released.
     ///
     /// # Errors
     /// If the registry file cannot be written.
@@ -494,10 +553,14 @@ impl<S: Store> Board<S> {
         &self,
         age_ms: i64,
         only: Option<&[String]>,
-    ) -> Result<Vec<String>, BoardError> {
-        self.agents()
+        by: &Actor,
+    ) -> Result<(Vec<String>, Released), BoardError> {
+        let ids = self
+            .agents()
             .revoke_stale(self.now_ms(), age_ms, only)
-            .map_err(BoardError::Storage)
+            .map_err(BoardError::Storage)?;
+        let released = self.release_claims_of(&ids, by)?;
+        Ok((ids, released))
     }
 
     /// Registered agents without keys.
@@ -2775,4 +2838,36 @@ fn check_records_shipped(by: &Actor, links: &[String]) -> Result<(), BoardError>
     Err(BoardError::Invalid(
         "record adds only GitHub pull request links (https://github.com/<owner>/<repo>/pull/<n>)",
     ))
+}
+
+/// A card claim held by a registered agent (#1644).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HeldClaim {
+    /// The agent holding it.
+    pub holder: String,
+    /// The card.
+    pub card: Uuid,
+    /// Its board-wide number, once given one.
+    pub number: Option<u64>,
+    /// Its title.
+    pub title: String,
+}
+
+/// What releasing a revoked agent's claims did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Released {
+    /// The claims released, each with a handoff comment.
+    pub released: Vec<HeldClaim>,
+    /// The claims that could not be released.
+    pub failed: Vec<FailedRelease>,
+}
+
+/// A claim of a revoked agent that could not be released, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FailedRelease {
+    /// The claim, still held.
+    #[serde(flatten)]
+    pub claim: HeldClaim,
+    /// Why it was not released.
+    pub reason: String,
 }
