@@ -32,15 +32,12 @@ One small PR or prompt each. Child cards under #1642.
 1. **This note** (PR #1964) with Nano's design approval.
 2. **Deploy the chosen host** (#1645), as a paste-ready prompt for Nano (D94). Under (a): HTTPS exposure, OAuth and allowed hosts for the inbox board; the guard edit that admits `claims` (D220) so `lel_claims` stops answering "verb refused"; the #1551 anchor guard line and timer only if Nano authorises them in the same step (D224). Every BaileyAi change needs his authorisation by name.
 3. **LEL tab read endpoints: finish.** Mostly done (D220). Left: #1416 slice 5 (PR #1961) and the later #1416 slices. Runs alongside 1 and 2; tracked on #1416, not duplicated here.
-4. **One end-to-end run** (#1646). No new paid run: the #1318 toy run is the only approved one (D167; `no_overage` lapses 2026-12-25). For #1642 its escalation must reach the reachable inbox and Nano approves it with `inbox_act` from claude.ai. Board seeding reuses `1166-seed-inbox.sh` and `1166-smoke-run.md`. Depends on #1318, slice 1 and slice 2; not on #1320 (not approved, D167).
+4. **One end-to-end run** (#1646). A separate $0 run in `/srv/lel/bbp` (Nano, 2026-11-28): seed an escalation with `1166-seed-inbox.sh` and the steps in `1166-smoke-run.md`, then Nano approves it with `inbox_act` from claude.ai through the #1645 connector. The #1318 runbook and the D132 guard stay unchanged; the paid toy run stays a separate check. Depends on slices 1 and 2 only.
 
-## 4. Open points
+## 4. Settled points
 
-The first two are with Nano (decision card of 2026-11-28). The expert recommends a separate $0 run in `/srv/lel/bbp` seeded with `1166-seed-inbox.sh`, leaving #1318 and the guard unchanged; the alternatives amend D167's runbook or widen D132's guard.
-
-- The toy run makes its own BBP dir and leaves `/srv/lel/bbp` and the inbox board untouched (`1318-toy-run.md` step 5), while the inbox board's guard allows only `/srv/lel/bbp`. Slice 4 needs either the toy task opened in `/srv/lel/bbp` or a read-back that points the inbox at it. Either touches an approved runbook.
-- The toy claim needs an escalation for Nano to approve; the runbook's pass rule does not require one.
-- Paid calls: only the single #1318 toy run is approved (D167); any other paid call is ask-first.
+- Escalation for the run: a separate $0 seeded run in `/srv/lel/bbp` (Nano, 2026-11-28), so the toy run's own BBP dir and its optional escalation no longer matter here.
+- Paid calls: none on this path. Only the single #1318 toy run is approved (D167); any other paid call is ask-first.
 
 ## 5. Out of scope
 
