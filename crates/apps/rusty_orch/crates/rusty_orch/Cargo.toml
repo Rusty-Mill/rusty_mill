@@ -43,7 +43,14 @@ rusty_json = { path = "../../../../foundation/rusty_json", default-features = fa
 orch-jail = { path = "../orch-jail" }
 platform = { workspace = true }
 platform-linux = { workspace = true }
+# #1382 slice 2 (D228): the session token: the mint, the lens policy's
+# `lens` and `role`, and the host for `iss`. All first-party.
+orch-token = { path = "../orch-token" }
+rusty_codec = { workspace = true }
+rusty_libc = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+# Reads a minted token's payload in the #1382 slice 2 tests.
+rusty_base64 = { workspace = true }
 orch-dispatch = { workspace = true, features = ["fake"] }
 orch-cli = { workspace = true, features = ["fake"] }
