@@ -1,8 +1,8 @@
 # Layered project workspace: step design (#1380)
 
-Let Em Loose, 2026-11-28. Status: **draft for Nano.** Fills in `726-sandbox-design.md` §7, which D180
-approved. One point departs from it and needs Nano before code (§9 B2); two small deltas are listed
-for the record (§9). Everything else is detail inside §7. Code also waits for #1318 (the launcher in use), so nothing here is built yet.
+Let Em Loose, 2026-11-28. Status: **draft for Nano's approval.** Fills in `726-sandbox-design.md` §7, which
+D180 approved. The one departure, the build cache, Nano settled as D244 (§5); two small deltas are
+listed for the record (§9). Everything else is detail inside §7. Code also waits for #1318 (the launcher in use), so nothing here is built yet.
 
 ## 0. What it builds on
 
@@ -30,12 +30,12 @@ for the record (§9). Everything else is detail inside §7. Code also waits for 
 /srv/lel/<project>/
   base/objects.git/            bare mirror of --repo; orch-runner writes, agents read
   base/toolchain/              CARGO_HOME + rustup, read-only to agents
-  base/target/  or  sccache/   the shared build cache (§5, B2)
+  base/target/                 orch's build of main: the shared build cache, read-only to agents (§5)
   layers/<name>@<digest>/      tool layers, read-only (#1381 fills it)
   views/<commit>/              read-only checkout, shared by critics
   sessions/<claim>/<n>/
     wt/                        the builder's clone: write root, cwd
-    cache/                     the session's own build cache: write root
+    cache/target/              reflinked from base/target, CARGO_TARGET_DIR: write root
     seal.git/                  orch's git dir for the candidate diff: outside every root
     run/                       jail.json, status, logs (as today)
   lock                         flock for base refresh and GC
@@ -43,7 +43,7 @@ for the record (§9). Everything else is detail inside §7. Code also waits for 
 
 `<project>` may not be one of the names already under `/srv/lel/` (`bbp`, `work`, `orch-state`,
 `slots`) or end in `.json`; the layout refuses them. One pure module, `orch_bbp::workspace` next to
-`builder` (D228), owns this as typed paths: `Workspace::session(claim, n)`, `view(commit)`, and the two jail-root sets below. It does no
+`builder` (D245), owns this as typed paths: `Workspace::session(claim, n)`, `view(commit)`, and the two jail-root sets below. It does no
 I/O; the git and filesystem calls stay in `builder/live.rs`'s adapter.
 
 ## 2. Base: who builds and refreshes it
@@ -93,9 +93,11 @@ git clone --bare --shared --no-checkout base/objects.git sessions/<claim>/<n>/se
   directories are bind-mounted read-only. The view then holds the checkout once per commit and each
   session's upper holds only what it changed.
 
-## 5. Build cache (B2)
+## 5. Build cache (D244)
 
-The umbrella names sccache. Two facts found while detailing it:
+**Settled 2026-11-28 (D244, Nano):** a reflink-seeded `target/` per session, not sccache. This replaces
+umbrella §7's sccache lines ("builders read the shared cache and write to a per-session cache") and makes
+its "reflink forks are a later optimisation" v1. D182's rule stands. Why sccache lost:
 
 1. sccache does not cache incremental rustc builds (sccache README, Rust section), and dev builds are
    incremental by default, so a jailed builder would need `CARGO_INCREMENTAL=0`. (Our CI trial also saw
@@ -106,7 +108,7 @@ The umbrella names sccache. Two facts found while detailing it:
    sccache server at a time. So D182 with sccache needs a second backend on the host (redis or webdav)
    plus the sccache binary. To be rechecked against the version we would install.
 
-**Recommended instead:** a reflink-seeded target dir. orch's trusted build of `main` keeps
+**Chosen:** a reflink-seeded target dir. orch's trusted build of `main` keeps
 `base/target/`; each builder session gets `cache/target` = `cp -a --reflink=always base/target`, set as
 `CARGO_TARGET_DIR`. A reflink copy takes seconds (per-file metadata, no data copied) and costs disk only
 for blocks the session changes, writes
@@ -121,13 +123,13 @@ reflink (Fedora's default is btrfs; Q68 checks the box). Without reflink, orch f
 - **Session end:** after the witness hashes the diff and the candidate (if any) is posted, orch deletes
   `sessions/<claim>/<n>/`. A crashed session's dir is removed by the next GC once its cgroup is empty.
 - **Views:** created on first use per commit, removed by GC when no critic session names them and older
-  than 24 h (D230).
+  than 24 h (D247).
 - **GC** (a `rusty_orch workspace gc` verb, run by hand or at the start of each builder admission; a
   systemd timer would be a host write, ask-first): sessions with no live
   cgroup, unused views, then the base repack (§2) when no session is live.
 - **Budget:** a per-project config `free_floor_bytes`. Admission refuses a new session when the
   filesystem's free space is under the floor (`statvfs`), and the refusal is a session error, not a crash.
-  Provisional default 40 GiB (D229), to be checked against BaileyAi's real free space (Q68).
+  Provisional default 40 GiB (D246), to be checked against BaileyAi's real free space (Q68).
 - **Drift noted:** umbrella §7 says `limits.file_bytes` caps an upper layer. It is `RLIMIT_FSIZE`, a
   per-file cap. A hard per-session total needs a quota (btrfs qgroup, or the overlay upper on a sized
   filesystem) and belongs with #1412. This card has the free-space floor only.
@@ -143,7 +145,9 @@ reflink (Fedora's default is btrfs; Q68 checks the box). Without reflink, orch f
    this may need a read-only registry plus a session-local home); two concurrent toy sessions on one base produce two separate staged diffs.
 3. **S3 critic view.** `views/<commit>` and the critic's jail file. Tests: a write anywhere in the view
    fails; nothing launches a critic (D104 item 8).
-4. **S4 build cache** as Nano picks in B2.
+4. **S4 build cache** (D244): orch's trusted `base/target` build, the per-session reflink copy, the cold
+   fallback. Tests: the session's writes never reach `base/target`; a non-reflink filesystem gives a
+   cold, logged start, not a full copy.
 5. **S5 cleanup + budget.** `workspace gc`, the admission floor. Tests: a live session is never collected;
    the base is not repacked while a session is live; admission under the floor is refused.
 
@@ -152,23 +156,23 @@ Done-when witness (card): S2's concurrent-session test plus, on BaileyAi, two to
 
 ## 8. Ask first (not approved by approving this design)
 
-- **Host writes on BaileyAi:** creating `/srv/lel/<project>/`, the toolchain install, and (if B2 a) a
+- **Host writes on BaileyAi:** creating `/srv/lel/<project>/`, the toolchain install, and a
   check that `/srv` supports reflink. A paste-ready prompt goes to project files when it is time.
 - **Public surface:** new orch verb `workspace gc`, builder flag `--workspace <dir>` and config field
   `free_floor_bytes` (additive);
   `--repo` keeps working as the fetch source. No `jail.json`, BBP or Mill Board change.
-- **Dependencies:** none (git CLI and `cp --reflink` only). B2 b would add sccache plus a cache server.
+- **Dependencies:** none (git CLI and `cp --reflink` only).
 
-## 9. Open points for Nano
+## 9. Deltas and settled points
 
 - **Note: scope split with #1412.** This card isolates with Landlock roots on a plain session directory
   and records the overlay recipe; #1412 builds the overlay. The card prompt asks for the recipe here, but
   the approved umbrella already puts overlay mounts and the `mounts` field in #1412 (§9.2, §10, §11), so
   the expert answered it (D180); no question for Nano.
-- **Delta: critic scratch dir (D231).** Umbrella §7 gives critics "no upper layer". They get a small
+- **Delta: critic scratch dir (D248).** Umbrella §7 gives critics "no upper layer". They get a small
   writable `scratch/` as cwd because `jail.json` requires one; the view itself stays read-only.
-- **B2. Build cache.** (a) reflink-seeded `target/` per session, no sccache; (b) sccache per D182, with
-  `CARGO_INCREMENTAL=0`, a redis/webdav shared level and the sccache install; (c) no shared cache in v1,
-  cold builds, decide after the toy run. (a) keeps D182's rule (agents never write shared; only orch's
-  build of `main` refreshes it) but swaps the mechanism, and D182 rejected "no sccache in the jail" when
-  only sccache options were on the table. Recommendation: (a).
+- **Delta: build cache (D244, settled).** Reflink-seeded `target/` per session, chosen by Nano
+  2026-11-28. Rejected: sccache per D182 with `CARGO_INCREMENTAL=0`, a redis/webdav level and an install;
+  no shared cache in v1. Amends D182's mechanism and umbrella §7; still depends on Q68 for the filesystem.
+- **Still open for Nano:** approving this design as a whole (D25 delta under D180). Approval clears no
+  §8 ask-first item, and nothing is built before #1318's toy run.

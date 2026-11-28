@@ -233,10 +233,11 @@ Precise contracts used by this guide:
 | D225 | #1379: the sandbox fs/shell server is the crate `crates/apps/rusty_orch/crates/orch-fs-shell` (package and binary `orch-fs-shell`) | [default] 2026-11-27 (1379) |
 | D226 | #1379: the gateway launches each per_session stdio child from a new per-target setting that templates its command, args and env from verified token claims | [stated] 2026-11-27 (1379, 1377) |
 | D227 | #1379: orch-fs-shell confines nothing; critic mode withholds only `write`; claiming confinement needs evidence from the jail; no gateway launch in PR #1951 | review constraint (dottiusmaximus), not an owner decision, 2026-11-28 (1379) |
-| D228 | #1380: the typed workspace layout is a module `orch_bbp::workspace`, not a new crate | [default] 2026-11-28 (1380) |
-| D229 | #1380: session admission refuses under a free-space floor; provisional default 40 GiB until BaileyAi's /srv is measured (field is ask-first) | [default] 2026-11-28 (1380) |
-| D230 | #1380: `workspace gc` removes a view when no live session names it and it is older than 24 h | [default] 2026-11-28 (1380) |
-| D231 | #1380: a critic's cwd is a per-session scratch write root; the view stays a read root; no JailSpec change | [default] 2026-11-28 (1380) |
+| D244 | #1380 B2: jailed builders get a reflink-seeded `target/` per session from orch's build of `main`, not sccache; amends D182's mechanism and D101's sccache clause | [stated] 2026-11-28 (1380, 726) |
+| D245 | #1380: the typed workspace layout is a module `orch_bbp::workspace`, not a new crate | [default] 2026-11-28 (1380) |
+| D246 | #1380: session admission refuses under a free-space floor; provisional default 40 GiB until BaileyAi's /srv is measured (field is ask-first) | [default] 2026-11-28 (1380) |
+| D247 | #1380: `workspace gc` removes a view when no live session names it and it is older than 24 h | [default] 2026-11-28 (1380) |
+| D248 | #1380: a critic's cwd is a per-session scratch write root; the view stays a read root; no JailSpec change | [default] 2026-11-28 (1380) |
 
 ## D1. Lenses, not stages
 
@@ -1043,6 +1044,7 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Key.** lel:726:gateway-and-jailed-agent
 **Source.** Mill Board card #726, comment by claude-cloud at 1793816610843 ms, "Decisions, Nano, 2026-11-04 (after spike #727)", D-a. Nano asked for it to be in this file in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z). Numbered D79 on PR #1496's branch; moved to D101 on 2026-11-05 because main assigned D78–D88 first.
 **Amended 2026-11-25 by D182.** The sccache clause now reads: shared sccache is read-only to every agent; builders write per session only, and orch's trusted build of `main` refills the shared cache.
+**Amended 2026-11-28 by D244.** The shared cache is now orch's `target/` built from `main`, reflinked per builder session, not sccache; the read-only rule from D182 stands.
 
 ## D102. orch and the gateway stay separate
 
@@ -1846,6 +1848,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_257f45d703f342129f835a177ac364c2
 **Key.** lel:726:sccache-writes
 **Source.** Nano tapped option A "Approve as recommended" on hearthbot decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4UmRMyg6TsaZCy6uWjcZ6eV` ("Approve the #726 sandbox design with O1 a and O2 a?"), 2026-11-25T15:55:52Z, in thread `cmsg_01WgyiM31RsSnZTgNuPX2VE47DLYRSRrL6WScMCmXFcSyV`. The option read: "Design approved for #1375-#1382 and #1412; Factory policy PRs grant tools, inbox for widening; builders write sccache per session only." The card's reason: "This keeps a model out of the grant path, and a jailed builder can't poison the shared compile cache." Relayed by the caller; the card was not read here. Design §7 and §12 O2. Amends D101 (sccache clause only).
+**Amended 2026-11-28 by D244.** The mechanism changes: no sccache. Each builder session gets its own copy-on-write `target/` reflinked from orch's trusted build of `main`; the rule stands (agents never write the shared cache; only orch's build of `main` refreshes it).
 
 ## D183. #726: witness output posts as non-scoring messages; only a mismatch is evidence (O3)
 
@@ -2300,7 +2303,16 @@ The first three were approved first. The last three were added to Q35 after that
 **Source.** dottiusmaximus's static review, posted as a GitHub comment under the `baileyrd` account on PR #1951, 2026-11-28T00:33:48Z, https://github.com/Rusty-Mill/rusty_mill/pull/1951#issuecomment-7231012800 ("critic mode removes the `write` tool but still exposes `exec` ... require evidence that the external jail enforces read-only critic execution and owns descendant cleanup before calling the feature confined"). Adds a condition to D225; narrows D226 (the launch waits for a later PR and needs that evidence) without reversing it. Numbered D227 because D226 is taken on branch `claude/project-thread-7bet54-1378-launch` (PR #1952).
 **Provenance correction.** First recorded as `[stated]` (Nano) in `bab10322`. The reviewer corrected that in https://github.com/Rusty-Mill/rusty_mill/pull/1951#issuecomment-7231280899 (2026-11-28T00:54:43Z): the comment was a Dottius static review finding, not owner approval. Comments under `baileyrd` may be dottiusmaximus reviews; check before tagging one `[stated]` (remind-me mem_558280bc058e4a009c456c331a6b9c78).
 
-## D228. #1380: the workspace layout is a module in orch-bbp
+## D244. #1380 B2: builders get a reflink-seeded `target/`, not sccache
+
+**Decision.** Each jailed builder session gets its own copy-on-write `target/` (set as `CARGO_TARGET_DIR`), reflinked from orch's trusted `target/` built from `main` outside any jail. No sccache, nothing installed on the host. If `/srv` can't reflink (not btrfs or XFS with reflink), the session starts with a cold `target/` and orch logs it. D182's rule stands: no agent writes the shared cache, and only orch's build of `main` refreshes it. This replaces D182's mechanism (shared sccache plus a per-session sccache) and D101's sccache clause as D182 amended it; the rest of both stands.
+**Why.** The card's reason: "Agents still never write the shared cache, incremental builds keep working, nothing new is installed, and it is easy to undo." sccache doesn't cache incremental builds, and read-shared/write-per-session sccache needs a second cache level and an install.
+**Rejected.** b) sccache as D182 says (`CARGO_INCREMENTAL=0`, sccache plus a redis or webdav shared level on BaileyAi). c) No shared cache in v1.
+**Tag.** [stated] · remind-me: mem_4791bc59aae043dfab082bceebc68fbb
+**Key.** lel:1380:reflink-build-cache
+**Source.** Nano tapped option A "Reflink-seeded target/" ("Each session gets a copy-on-write target/ from orch's build of main. No sccache, nothing installed. Needs btrfs or XFS on /srv, else cold builds.") on hearthbot decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4UbmkqzdiF1ZwHppyag59pr` ("Which build cache should jailed builder sessions use?") in the #1380 thread `cmsg_01WgyiM31RsSnZTgNuPX2VE49NZyky6ZPgNJC4zeF9p1MD`. The platform's tap record `cmsg_01WgyiM31RsSnZTgNuPX2VE4GkuZHMeb1XF6MyRQrLdW2U` shows a user, not an agent, chose option 0 at 2026-11-28T13:19:21Z (read here). Amends D182 and D101; reverses no other row. The reflink path still depends on Q68 (BaileyAi's `/srv` filesystem). No ask-first gate is cleared. Numbered D244 because main ends at D243 and D232–D239 are held for open PRs.
+
+## D245. #1380: the workspace layout is a module in orch-bbp
 
 **Decision.** The pure typed layout (`Workspace::session(claim, n)`, `view(commit)`, the builder and critic jail-root sets; no I/O) is the module `orch_bbp::workspace`, beside `orch_bbp::builder`. Git and filesystem calls stay in `rusty_orch`'s `builder/live.rs` adapter. It becomes its own crate only when a consumer outside orch-bbp (the critic launch, orch-lens) needs it.
 **Why.** Most reversible: no new workspace member, and the builder sequence in orch-bbp is its only consumer today.
@@ -2309,7 +2321,9 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1380:workspace-module
 **Source.** let-em-loose-expert, 2026-11-28, for the #1380 thread on `1380-layered-workspace-design.md` (draft, uncommitted on branch `claude/project-thread-apbzsw`); inside D180 (`726-sandbox-design.md` §7). Design §1.
 
-## D229. #1380: a free-space floor on session admission
+**Numbering.** D245–D248 were first drafted as D228–D231; renumbered 2026-11-28 because main and other open PRs use D228–D231 and D234–D239 are held for those PRs.
+
+## D246. #1380: a free-space floor on session admission
 
 **Decision.** Admission refuses a new session, as a session error, when `statvfs` free space on the workspace filesystem is under the project's floor. Provisional default 40 GiB, replaced by a value checked against BaileyAi's measured `/srv` free space before the first run (Q68). The new config field (`free_floor_bytes`) is public config and stays ask-first (726 §11); this entry sets only its default.
 **Why.** A config value, reversible without code; the host's real free space is unrecorded, so a conservative placeholder plus a host check is the interim. A per-session total cap needs a quota and belongs with #1412 (`limits.file_bytes` is `RLIMIT_FSIZE`, per file).
@@ -2318,7 +2332,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1380:free-floor-default
 **Source.** let-em-loose-expert, 2026-11-28, for the #1380 thread on `1380-layered-workspace-design.md` (draft, uncommitted on branch `claude/project-thread-apbzsw`); inside D180 (`726-sandbox-design.md` §7). Design §6.
 
-## D230. #1380: views are collected after 24 h unused
+## D247. #1380: views are collected after 24 h unused
 
 **Decision.** `views/<commit>` is created on first use and removed by `workspace gc` only when no live session names it and it is older than 24 h.
 **Why.** A retention constant; a view can be rebuilt from the base at any time, so the value only trades disk for checkout time.
@@ -2327,7 +2341,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1380:view-gc-24h
 **Source.** let-em-loose-expert, 2026-11-28, for the #1380 thread on `1380-layered-workspace-design.md` (draft, uncommitted on branch `claude/project-thread-apbzsw`); inside D180 (`726-sandbox-design.md` §7). Design §6.
 
-## D231. #1380: a critic's cwd is a scratch write root
+## D248. #1380: a critic's cwd is a scratch write root
 
 **Decision.** A critic's `jail.json` names `views/<commit>` as a read root and one write root, `sessions/<claim>/<n>/scratch`, as its cwd; the view path goes in its prompt. No `JailSpec` change. The design lists the scratch dir in its delta, since 726 §7 says critics get "no upper layer".
 **Why.** `jail.json` requires `cwd` inside a write root (orch-jail `spec.rs`, `a_cwd_outside_the_write_roots_is_refused`); the view stays unwritable, which is §7's point. Nothing launches a critic yet (D104 item 8).
