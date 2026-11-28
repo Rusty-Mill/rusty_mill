@@ -204,10 +204,57 @@ fn an_escaped_deny_entry_still_denies() {
 #[test]
 fn opaque_sections_may_hold_any_keys() {
     let text = "schema = 1\nlens = \"x\"\nrole = \"builder\"\n[tools]\nallow = [\"a\"]\n\
-                [workspace]\nview = \"worktree\"\nanything = 1\n[skills]\nx = [\"y\"]\n\
+                [workspace]\nview = \"worktree\"\nanything = 1\n\
                 [grants]\nz = { w = 1 }\n";
     let loaded = LensPolicies::from_files([("x.toml".to_owned(), text.as_bytes().to_vec())]);
     assert!(loaded.is_ok(), "{loaded:?}");
+}
+
+#[test]
+fn the_tokens_lens_decides_which_skill_packs_it_reads() {
+    let p = loaded();
+    assert_eq!(
+        p.skill_packs(Some(&token("builder-rust", BUILDER))),
+        ["rust"]
+    );
+    assert!(
+        p.skill_packs(Some(&token("critic", CRITIC))).is_empty(),
+        "no [skills], no packs"
+    );
+    assert!(
+        p.skill_packs(Some(&token("builder-rust", CRITIC)))
+            .is_empty(),
+        "wrong digest"
+    );
+    assert!(
+        p.skill_packs(Some(&token("nobody", BUILDER))).is_empty(),
+        "unknown lens"
+    );
+    assert!(p.skill_packs(None).is_empty(), "no token");
+}
+
+#[test]
+fn skills_takes_only_a_list_of_pack_names() {
+    let with = |skills: &str| {
+        let text = format!("schema = 1\nlens = \"x\"\nrole = \"builder\"\n[skills]\n{skills}\n");
+        LensPolicies::from_files([("x.toml".to_owned(), text.into_bytes())])
+    };
+    assert!(with("packs = [\"rust\", \"terminal\"]").is_ok());
+    assert!(with("").is_ok(), "an empty table serves no packs");
+    let refused = |skills: &str| with(skills).unwrap_err().reason;
+    assert_eq!(refused("pack = [\"rust\"]"), "unknown key `skills.pack`");
+    assert_eq!(
+        refused("packs = \"rust\""),
+        "`skills.packs` must be a list of strings"
+    );
+    assert_eq!(
+        refused("packs = [\"\"]"),
+        "`skills.packs` must be a list of strings"
+    );
+    assert_eq!(
+        refused("packs = [1]"),
+        "`skills.packs` must be a list of strings"
+    );
 }
 
 #[test]
