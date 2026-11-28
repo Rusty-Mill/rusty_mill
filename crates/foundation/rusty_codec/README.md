@@ -21,8 +21,9 @@ multi-line basic/literal strings (`"""..."""`/`'''...'''`), no quoted/dotted
 table headers with quoted segments, no native date/time values (parsed as
 plain strings instead).
 
-**Refused, not reinterpreted:** a key defined twice and an escape TOML does
-not define are parse errors, so a config can't silently mean something other
+**Refused, not reinterpreted:** a key defined twice, an escape TOML does not
+define, array items or inline-table entries without a `,` between them, and
+two entries on one line are parse errors, so a config can't silently mean something other
 than what it says.
 
 ```rust

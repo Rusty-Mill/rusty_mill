@@ -171,6 +171,16 @@ fn bad_files_are_refused_naming_the_file() {
             "schema = 1\nlens = \"x\"\nrole = \"builder\"\n[tools]\nallow = [\"*\"]\ndeny = [\"sandbox_rm\"]\ndeny = []\n",
             "duplicate key",
         ),
+        (
+            "x.toml",
+            "schema = 1\nlens = \"x\"\nrole = \"builder\"\n[tools]\nallow = [\"*\"]\ndeny = [\"sandbox_rm\" \"github_merge_*\"]\n",
+            "`,` or `]`",
+        ),
+        (
+            "x.toml",
+            "schema = 1\nlens = \"x\"\nrole = \"builder\"\n[tools]\nallow = [\"*\"] deny = [\"sandbox_rm\"]\n",
+            "newline",
+        ),
     ];
     for (file, text, reason) in cases {
         let err =
