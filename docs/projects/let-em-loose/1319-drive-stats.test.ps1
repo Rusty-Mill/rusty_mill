@@ -177,6 +177,7 @@ try {
     Assert-Equal $json.Contains($root) $false 'no paths in the output'
     Assert-Equal $json.Contains((ConvertTo-Json $root).Trim('"')) $false 'no JSON-escaped paths in the output'
 
+    Remove-Item -LiteralPath $out
     Invoke-DriveStats -Roots $root -Out $out -TopExtensions 25 -MinExtensionCount 1 -SampleGroups 10 `
         -SampleHash -MaxHashBytes 1500 -Rng ([System.Random]::new(1))
     $report = Get-Content -LiteralPath $out -Raw | ConvertFrom-Json
@@ -188,6 +189,25 @@ try {
     try { Invoke-DriveStats -Roots $root -Out $out -TopExtensions 25 -MinExtensionCount 1 -SampleGroups 10 -SampleHash -MaxHashBytes 0 }
     catch { $threw = $true }
     Assert-Equal $threw $true '-SampleHash without a byte budget is refused'
+
+    # --- The report never overwrites a file and never lands inside a scanned root -----------
+    $sentinelPath = Join-Path ([System.IO.Path]::GetTempPath()) ("lel-1319-sentinel-" + [guid]::NewGuid() + '.json')
+    Set-Content -LiteralPath $sentinelPath -Value 'SENTINEL' -NoNewline
+    $threw = $false
+    try { Invoke-DriveStats -Roots $root -Out $sentinelPath -TopExtensions 25 -MinExtensionCount 1 -SampleGroups 10 } catch { $threw = $true }
+    Assert-Equal $threw $true 'an existing output file is refused'
+    Assert-Equal (Get-Content -LiteralPath $sentinelPath -Raw) 'SENTINEL' 'the existing file is left untouched'
+    $threw = $false
+    try { Write-NewFile $sentinelPath 'clobbered' } catch { $threw = $true }
+    Assert-Equal $threw $true 'exclusive creation refuses a file that appeared after the check'
+    Assert-Equal (Get-Content -LiteralPath $sentinelPath -Raw) 'SENTINEL' 'exclusive creation does not truncate it'
+    Remove-Item -LiteralPath $sentinelPath
+
+    $inside = Join-Path $root 'report.json'
+    $threw = $false
+    try { Invoke-DriveStats -Roots $root -Out $inside -TopExtensions 25 -MinExtensionCount 1 -SampleGroups 10 } catch { $threw = $true }
+    Assert-Equal $threw $true 'an output path inside a scanned root is refused'
+    Assert-Equal (Test-Path -LiteralPath $inside) $false 'nothing is written inside the root'
 } finally {
     Remove-Item -LiteralPath $root -Recurse -Force
 }

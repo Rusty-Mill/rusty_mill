@@ -39,7 +39,8 @@ Nano runs it in PowerShell 7 on the Windows desktop:
 pwsh -File .\1319-drive-stats.ps1 -Roots 'D:\','\\nas\share' -Out "$HOME\lel-drive-stats.json"
 ```
 
-He reads the JSON before sending it; it is small enough to check by eye. `1319-drive-stats.test.ps1` tests the
+The report must be a new file outside every scanned root: an existing file or a path inside a
+root is refused, and the file is created exclusively, so nothing on the roots is written. He reads the JSON before sending it; it is small enough to check by eye. `1319-drive-stats.test.ps1` tests the
 budget, the in-loop cap, grown, short and failing reads, the hardlink case and the no-names rule on a temporary fixture tree
 only.
 

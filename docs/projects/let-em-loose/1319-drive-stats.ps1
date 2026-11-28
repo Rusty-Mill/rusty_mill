@@ -14,7 +14,8 @@
   charged in full before it is issued and never refunded, including short, probe and failed reads, and a file that grows, ends early or fails is counted
   apart and never matched. The cap counts bytes the script requests; files are opened unbuffered so
   .NET adds no read-ahead, but the operating system may still prefetch beyond a read. Hashes stay in memory; only counts are written. Nothing on the
-  scanned roots is modified.
+  scanned roots is modified: the report must be a new file outside every root (an existing file or
+  a path inside a root is refused, and the file is created exclusively, never overwritten).
 
   The duplicate figures are path-based: two hardlinks to one file count as two duplicate paths though
   they share storage, so they are not reclaimable space.
@@ -78,6 +79,26 @@ function Assert-DisjointRoots([string[]]$Roots) {
     $cmp = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
     $pair = Find-RootOverlap $full $cmp
     if ($null -ne $pair) { throw "Roots overlap: $($pair[0]) contains $($pair[1]). Give disjoint roots." }
+}
+
+function Assert-OutputOutsideRoots([string]$Out, [string[]]$Roots, [System.StringComparison]$Comparison) {
+    # The scanned roots are never written: the report must land outside every root, in a new file.
+    $outKey = Get-RootBoundary ([System.IO.Path]::GetFullPath($Out))
+    foreach ($root in $Roots) {
+        if ($outKey.StartsWith((Get-RootBoundary ([System.IO.Path]::GetFullPath($root))), $Comparison)) {
+            throw "-Out $Out is inside scanned root $root. Write the report outside every root."
+        }
+    }
+    if (Test-Path -LiteralPath $Out) { throw "-Out $Out already exists. Give a new file name; nothing is overwritten." }
+}
+
+function Write-NewFile([string]$Path, [string]$Text) {
+    # CreateNew fails if the file appeared since the check, so an existing file is never truncated.
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try {
+        $writer = [System.IO.StreamWriter]::new($stream, [System.Text.UTF8Encoding]::new($false))
+        try { $writer.Write($Text) } finally { $writer.Dispose() }
+    } finally { $stream.Dispose() }
 }
 
 function Select-HashBudget {
@@ -230,6 +251,8 @@ function Invoke-DriveStats {
     if (-not $Roots) { throw 'Give -Roots, e.g. -Roots D:\,\\nas\share' }
     if ($SampleHash -and $MaxHashBytes -le 0) { throw '-SampleHash needs -MaxHashBytes, a read budget such as 20GB' }
     Assert-DisjointRoots $Roots
+    $cmp = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+    Assert-OutputOutsideRoots $Out $Roots $cmp
 
     $reparse = [System.IO.FileAttributes]::ReparsePoint
     $sizeFiles = @{}; $sizeBytes = @{}; $depthHist = @{}; $fanHist = @{}; $extCount = @{}
@@ -322,7 +345,7 @@ function Invoke-DriveStats {
         shared_size = [ordered]@{ files = $sharedFiles; bytes = $sharedBytes; note = $PathDuplicateNote }
         sample_hash = $sample
     }
-    $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Out -Encoding utf8
+    Write-NewFile $Out ($report | ConvertTo-Json -Depth 6)
     Write-Host "Wrote $Out ($($totals.files) files, $([math]::Round($totals.bytes / 1TB, 2)) TB). Check it before sending."
 }
 
