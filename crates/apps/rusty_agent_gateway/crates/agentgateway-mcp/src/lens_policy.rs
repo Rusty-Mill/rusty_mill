@@ -15,9 +15,12 @@
 //! deny  = ["github_merge_*"]
 //! ```
 //!
-//! `[workspace]`, `[skills]` and `[grants]` belong to the design too. They
-//! must be tables when present, but they configure the sandbox and the token,
-//! not this gate, so their contents are not read here.
+//! `[skills]` names the skill packs (#1381) the lens may read:
+//! `packs = ["rust"]`, nothing else.
+//!
+//! `[workspace]` and `[grants]` belong to the design too. They must be
+//! tables when present, but they configure the sandbox and the token, not
+//! this gate, so their contents are not read here.
 //!
 //! # Fails closed
 //!
@@ -37,9 +40,12 @@ use crate::rules::Subject;
 const SCHEMA: i64 = 1;
 
 /// Top-level keys a policy may carry; anything else is a typo, refused.
-/// The keys `[tools]` may hold. `workspace`, `skills` and `grants` stay
-/// opaque here: other readers own them.
+/// The keys `[tools]` may hold. `workspace` and `grants` stay opaque here:
+/// other readers own them.
 const TOOL_KEYS: &[&str] = &["allow", "deny"];
+
+/// The keys `[skills]` may hold.
+const SKILL_KEYS: &[&str] = &["packs"];
 
 const KEYS: &[&str] = &[
     "schema",
@@ -67,6 +73,7 @@ struct Policy {
     digest: String,
     allow: Vec<String>,
     deny: Vec<String>,
+    packs: Vec<String>,
 }
 
 impl Policy {
@@ -124,6 +131,13 @@ impl LensPolicies {
         };
         self.policy_for(claims)
             .is_some_and(|policy| policy.permits(federated))
+    }
+
+    /// The skill packs the holder of `claims` may read: none unless its
+    /// lens is known and its digest matches, exactly as for tools.
+    pub fn skill_packs(&self, claims: Option<&serde_json::Value>) -> &[String] {
+        self.policy_for(claims)
+            .map_or(&[], |policy| policy.packs.as_slice())
     }
 
     /// The policy the token selects, if its lens is known and its digest is
@@ -186,35 +200,57 @@ fn parse(file: &str, bytes: &[u8]) -> Result<(String, Policy), LensPolicyError> 
         return Err(fail(file, "`tools` must be a table"));
     }
     // Fail closed: a misspelt `deny` would otherwise leave `allow` with no
-    // exclusions.
-    let tool_keys = tools.and_then(TomlValue::as_table);
-    if let Some(key) = tool_keys.and_then(|t| t.keys().find(|k| !TOOL_KEYS.contains(&k.as_str()))) {
-        return Err(fail(file, format!("unknown key `tools.{key}`")));
-    }
-    let list = |key: &str| -> Result<Vec<String>, LensPolicyError> {
-        let Some(value) = tools.and_then(|t| t.get(key)) else {
-            return Ok(Vec::new());
-        };
-        let items = value
-            .as_array()
-            .ok_or_else(|| fail(file, format!("`tools.{key}` must be a list of strings")))?;
-        items
-            .iter()
-            .map(|item| {
-                item.as_str()
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .ok_or_else(|| fail(file, format!("`tools.{key}` must be a list of strings")))
-            })
-            .collect()
-    };
+    // exclusions, and a misspelt `packs` would silently serve no skills.
+    let skills = doc.get("skills");
+    check_keys(file, "tools", tools, TOOL_KEYS)?;
+    check_keys(file, "skills", skills, SKILL_KEYS)?;
 
     let policy = Policy {
         digest: policy_digest(bytes),
-        allow: list("allow")?,
-        deny: list("deny")?,
+        allow: strings(file, "tools", tools, "allow")?,
+        deny: strings(file, "tools", tools, "deny")?,
+        packs: strings(file, "skills", skills, "packs")?,
     };
     Ok((lens.to_owned(), policy))
+}
+
+/// Refuses any key of `section` outside `allowed`.
+fn check_keys(
+    file: &str,
+    name: &str,
+    section: Option<&TomlValue>,
+    allowed: &[&str],
+) -> Result<(), LensPolicyError> {
+    let unknown = section
+        .and_then(TomlValue::as_table)
+        .and_then(|t| t.keys().find(|k| !allowed.contains(&k.as_str())));
+    match unknown {
+        Some(key) => Err(fail(file, format!("unknown key `{name}.{key}`"))),
+        None => Ok(()),
+    }
+}
+
+/// `section.key` as a list of non-empty strings; absent is empty.
+fn strings(
+    file: &str,
+    name: &str,
+    section: Option<&TomlValue>,
+    key: &str,
+) -> Result<Vec<String>, LensPolicyError> {
+    let Some(value) = section.and_then(|t| t.get(key)) else {
+        return Ok(Vec::new());
+    };
+    let wrong = || fail(file, format!("`{name}.{key}` must be a list of strings"));
+    let items = value.as_array().ok_or_else(wrong)?;
+    items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(wrong)
+        })
+        .collect()
 }
 
 #[cfg(test)]
