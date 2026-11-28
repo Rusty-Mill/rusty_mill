@@ -37,6 +37,10 @@ use crate::rules::Subject;
 const SCHEMA: i64 = 1;
 
 /// Top-level keys a policy may carry; anything else is a typo, refused.
+/// The keys `[tools]` may hold. `workspace`, `skills` and `grants` stay
+/// opaque here: other readers own them.
+const TOOL_KEYS: &[&str] = &["allow", "deny"];
+
 const KEYS: &[&str] = &[
     "schema",
     "lens",
@@ -180,6 +184,12 @@ fn parse(file: &str, bytes: &[u8]) -> Result<(String, Policy), LensPolicyError> 
     let tools = doc.get("tools");
     if tools.is_some_and(|v| v.as_table().is_none()) {
         return Err(fail(file, "`tools` must be a table"));
+    }
+    // Fail closed: a misspelt `deny` would otherwise leave `allow` with no
+    // exclusions.
+    let tool_keys = tools.and_then(TomlValue::as_table);
+    if let Some(key) = tool_keys.and_then(|t| t.keys().find(|k| !TOOL_KEYS.contains(&k.as_str()))) {
+        return Err(fail(file, format!("unknown key `tools.{key}`")));
     }
     let list = |key: &str| -> Result<Vec<String>, LensPolicyError> {
         let Some(value) = tools.and_then(|t| t.get(key)) else {
