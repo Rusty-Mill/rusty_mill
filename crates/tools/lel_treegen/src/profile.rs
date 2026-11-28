@@ -135,6 +135,7 @@ impl Profile {
         if self.dir_width == 0 {
             return err("dir_width must be at least 1");
         }
+        check_total("opaque_exts", self.opaque_exts.values())?;
         if self.opaque_exts.values().all(|&w| w == 0) {
             return err("opaque_exts needs a positive weight");
         }
@@ -198,12 +199,24 @@ fn is_plain_ext(e: &str) -> bool {
 }
 
 fn check_hist(name: &str, h: &BTreeMap<u32, u64>, lo: u32, hi: u32) -> Result<(), ProfileError> {
+    check_total(name, h.values())?;
     if h.values().all(|&w| w == 0) {
         return err(format!("{name} needs a positive weight"));
     }
     match h.keys().find(|k| !(lo..=hi).contains(*k)) {
         Some(k) => err(format!("{name} key {k} is outside {lo}..={hi}")),
         None => Ok(()),
+    }
+}
+
+/// Weights are summed into a `u64` cumulative table, so their total must fit.
+fn check_total<'a>(
+    name: &str,
+    mut weights: impl Iterator<Item = &'a u64>,
+) -> Result<(), ProfileError> {
+    match weights.try_fold(0u64, |acc, &w| acc.checked_add(w)) {
+        Some(_) => Ok(()),
+        None => err(format!("{name} weights sum beyond u64")),
     }
 }
 
@@ -228,10 +241,11 @@ fn hist_of(
 
 /// Width from the median entries-per-directory bucket: bucket `b` -> `2^(b-1)`.
 fn median_fanout(h: &BTreeMap<u32, u64>) -> u32 {
-    let total: u64 = h.values().sum();
-    let mut seen = 0;
+    // Widened, so neither the total nor `2 * seen` can overflow.
+    let total: u128 = h.values().map(|&n| u128::from(n)).sum();
+    let mut seen = 0u128;
     for (&b, &n) in h {
-        seen += n;
+        seen += u128::from(n);
         if seen * 2 >= total && b > 0 {
             return 1u32 << (b - 1).min(16);
         }
@@ -243,11 +257,12 @@ fn nas_share(v: &serde_json::Value) -> Result<f64, ProfileError> {
     let Some(roots) = v["roots"].as_array() else {
         return err("stats roots missing");
     };
-    let bytes = |kind: Option<&str>| -> u64 {
+    let bytes = |kind: Option<&str>| -> u128 {
         roots
             .iter()
             .filter(|r| kind.is_none_or(|k| r["kind"] == k))
             .filter_map(|r| r["bytes"].as_u64())
+            .map(u128::from)
             .sum()
     };
     let total = bytes(None);
@@ -263,11 +278,16 @@ fn image_share(exts: &serde_json::Value) -> f64 {
     let Some(obj) = exts.as_object() else {
         return Profile::default().image_share;
     };
-    let total: u64 = obj.values().filter_map(serde_json::Value::as_u64).sum();
-    let images: u64 = obj
+    let total: u128 = obj
+        .values()
+        .filter_map(serde_json::Value::as_u64)
+        .map(u128::from)
+        .sum();
+    let images: u128 = obj
         .iter()
         .filter(|(k, _)| IMAGE_EXTS.contains(&k.as_str()))
         .filter_map(|(_, n)| n.as_u64())
+        .map(u128::from)
         .sum();
     if total == 0 {
         return Profile::default().image_share;
@@ -347,6 +367,42 @@ mod tests {
         assert!((p.nas_share - 0.25).abs() < 1e-12);
         assert!((p.image_share - 0.40).abs() < 1e-12);
         assert_eq!(p.identical_rate, Profile::default().identical_rate);
+    }
+
+    #[test]
+    fn weights_at_the_u64_boundary() {
+        let half = u64::MAX / 2;
+        let fits = Profile {
+            size_log2_files: BTreeMap::from([(10, half), (11, half + 1)]),
+            ..Profile::default()
+        };
+        assert_eq!(fits.validate(), Ok(()), "a sum of exactly u64::MAX fits");
+        let over = Profile {
+            size_log2_files: BTreeMap::from([(10, half + 1), (11, half + 1)]),
+            ..Profile::default()
+        };
+        assert!(over.validate().is_err());
+        let exts = BTreeMap::from([("a".to_owned(), u64::MAX), ("b".to_owned(), 1)]);
+        assert!(
+            Profile {
+                opaque_exts: exts,
+                ..Profile::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert_eq!(
+            median_fanout(&BTreeMap::from([(3, u64::MAX), (5, u64::MAX)])),
+            4
+        );
+        let big = format!(
+            r#"{{"schema":"lel-drive-stats/2","roots":[{{"kind":"network","bytes":{m}}},{{"kind":"local","bytes":{m}}}],
+            "size_log2_hist":{{"10":{{"files":1}}}},"depth_hist":{{"1":1}},"entries_per_dir_log2_hist":{{"1":1}},
+            "extensions":{{"jpg":{m},"pdf":{m}}}}}"#,
+            m = u64::MAX
+        );
+        let p = Profile::from_stats(&big).expect("huge but valid stats");
+        assert!((p.nas_share - 0.5).abs() < 1e-12 && (p.image_share - 0.5).abs() < 1e-12);
     }
 
     #[test]

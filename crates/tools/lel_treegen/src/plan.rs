@@ -190,7 +190,8 @@ pub fn plan(seed: u64, scale: f64, profile: &Profile) -> Result<Plan, ProfileErr
     };
     let mut bytes = 0u64;
     let mut index = 0u64;
-    while bytes < target {
+    // The fixed edge-case units are always emitted, however small the scale.
+    while bytes < target || index < SPECIAL_UNITS {
         let unit = make_unit(seed, index, profile, &tables);
         bytes += unit.entries.iter().map(|e| e.size).sum::<u64>();
         out.entries.extend(unit.entries);
@@ -454,12 +455,11 @@ fn pair_unit(index: u64, ext: &str, p: &Profile, t: &Tables, rng: &mut Rng, deco
     let size = draw_size(t, rng).max(2 * BLOCK);
     let (a, b) = if decoy {
         let id = rng.next_u64();
-        let last = size - 1 - rng.below(BLOCK.min(size / 2));
         (
             Content::Opaque { id },
             Content::Variant {
                 id,
-                flips: [size / 2, last],
+                flips: decoy_flips(size, rng),
             },
         )
     } else {
@@ -485,6 +485,16 @@ fn pair_unit(index: u64, ext: &str, p: &Profile, t: &Tables, rng: &mut Rng, deco
         entries: vec![file(pa, size, a, None), file(pb, size, b, None)],
         group: None,
     }
+}
+
+/// Two distinct offsets for a decoy of `size >= 2 * BLOCK` bytes: the
+/// midpoint, and one in the last block strictly after it (at the minimum size
+/// the midpoint is the first byte of the last block, and two flips at one
+/// offset would cancel).
+fn decoy_flips(size: u64, rng: &mut Rng) -> [u64; 2] {
+    let mid = size / 2;
+    let lo = (size - BLOCK).max(mid + 1);
+    [mid, rng.range(lo, size - 1)]
 }
 
 /// A single image, or a same-pixels group of 2 or 3 differing only in metadata.
@@ -734,6 +744,43 @@ mod tests {
             assert!(
                 matches!(keeper.map(|e| &e.content), Some(Content::Image(s)) if Some(s.richness) == best)
             );
+        }
+    }
+
+    #[test]
+    fn tiny_scales_still_hold_every_fixed_unit() {
+        let tiny = small(1, 1e-12);
+        let floor = small(1, 0.0001);
+        let fixed = |p: &Plan| {
+            p.entries
+                .iter()
+                .filter(|e| {
+                    ["local/links/", "local/hard/", "local/edge/", "outside/"]
+                        .iter()
+                        .any(|d| e.path.starts_with(d))
+                })
+                .count()
+        };
+        assert_eq!(fixed(&tiny), fixed(&floor));
+        assert_eq!(
+            tiny.entries[..],
+            floor.entries[..tiny.entries.len()],
+            "still a prefix"
+        );
+    }
+
+    #[test]
+    fn decoy_flips_are_distinct_at_the_minimum_size() {
+        let mut rng = Rng::keyed(1, 99, 0);
+        for size in [2 * BLOCK, 2 * BLOCK + 1, 3 * BLOCK, 1 << 30] {
+            for _ in 0..2_000 {
+                let [mid, last] = decoy_flips(size, &mut rng);
+                assert_eq!(mid, size / 2);
+                assert!(
+                    last > mid && last < size && last >= size - BLOCK,
+                    "size {size}: {last}"
+                );
+            }
         }
     }
 
