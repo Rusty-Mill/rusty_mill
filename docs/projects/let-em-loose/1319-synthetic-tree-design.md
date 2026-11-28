@@ -67,7 +67,8 @@ I/O. File bytes are a pure function of `(seed, content_id)`, generated block by 
 speed, so `write` streams and never holds a file in memory. `write` and `verify` are the only code
 touching the filesystem.
 
-**What goes in the tree** (default profile; rates are shares of files unless stated):
+**What goes in the tree** (default profile; rates are shares of *units*, where a unit is an original
+with its copies, a decoy or same-prefix pair, an image group or a single file, unless stated):
 
 | Element | Default | Why it is there |
 |---|---|---|
@@ -85,7 +86,10 @@ touching the filesystem.
 identical IDAT bytes; metadata variants differ only in `tEXt`/`eXIf` chunks. JPEGs come from a
 DC-only baseline encoder in the crate (each 8x8 block a flat value from the PRNG), about 150 lines:
 valid files with distinct pixels per group and no codec dependency. Group variants differ only in
-their APP1/EXIF segment. Images are a small share of bytes; bulk volume comes from opaque files.
+their APP1/EXIF segment. JPEGs are grayscale. The planner fixes each image's size in advance (an
+upper bound on the encoded image plus 64 bytes per metadata step) and the writer pads to it exactly,
+in a PNG ancillary chunk or a JPEG COM segment, so the manifest is complete before any byte is
+written. Images are a small share of bytes; bulk volume comes from opaque files.
 
 **Manifest (outside the tree, D240).** Written to a harness-only directory, never under the tree root
 or any sandbox or builder mount. JSON Lines, one record per file (path, size, content id, kind,
