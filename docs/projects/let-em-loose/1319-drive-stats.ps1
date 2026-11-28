@@ -12,7 +12,8 @@
   chosen against the metadata from the first pass until the budget is used, the projected read is
   printed and reported, and the budget is enforced inside the read loop itself: every read is charged
   before it is issued, including reads that fail, and a file that grows, ends early or fails is counted
-  apart and never matched. Hashes stay in memory; only counts are written. Nothing on the
+  apart and never matched. The cap counts bytes the script requests; files are opened unbuffered so
+  .NET adds no read-ahead, but the operating system may still prefetch beyond a read. Hashes stay in memory; only counts are written. Nothing on the
   scanned roots is modified.
 
   The duplicate figures are path-based: two hardlinks to one file count as two duplicate paths though
@@ -151,7 +152,9 @@ function Measure-HashGroups {
     param(
         [hashtable]$Members,
         [long]$MaxBytes,
-        [scriptblock]$Open = { param([string]$p) [System.IO.File]::Open($p, 'Open', 'Read', 'ReadWrite') }
+        # bufferSize 1 turns off FileStream's own read-ahead buffer, so each read the loop issues is the
+        # read that reaches the OS. Operating-system readahead below that is outside the script's control.
+        [scriptblock]$Open = { param([string]$p) [System.IO.FileStream]::new($p, 'Open', 'Read', 'ReadWrite', 1) }
     )
     $budget = @{ remaining = $MaxBytes; read = 0L }
     $stats = [ordered]@{ groups_hashed = 0; groups_skipped_budget = 0; budget_exhausted = $false;
