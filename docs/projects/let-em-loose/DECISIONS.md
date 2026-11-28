@@ -222,6 +222,7 @@ Precise contracts used by this guide:
 | D221 | #1416: `bbp claims` prints a plain array of claim views; brief text is not served yet | [default] 2026-11-27 (1416) |
 | D222 | #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR | [default] 2026-11-27 (1416) |
 | D225 | #1379: the sandbox fs/shell server is the crate `crates/apps/rusty_orch/crates/orch-fs-shell` (package and binary `orch-fs-shell`) | [default] 2026-11-27 (1379) |
+| D227 | #1379: orch-fs-shell confines nothing; critic mode withholds only `write`; claiming confinement needs evidence from the jail; no gateway launch in PR #1951 | [stated] 2026-11-28 (1379) |
 
 ## D1. Lenses, not stages
 
@@ -2175,3 +2176,13 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_8fc5a5e346944528925316e6ac00f185
 **Key.** lel:1379:fs-shell-crate-name
 **Source.** let-em-loose-expert, 2026-11-27, answering the #1375-#1379 build thread; 726-sandbox-design.md §6 ("name settled on the card"), §11 (no new dependency). Numbered D225 because D223 (PR #1946) and D224 (PR #1947) are taken on open PRs.
+**Condition.** Nano's confinement boundary for this crate is D227 (2026-11-28).
+
+## D227. #1379: orch-fs-shell confines nothing; confinement must be proven in the jail
+
+**Decision.** orch-fs-shell (D225) is not a confinement boundary. Critic mode withholds only the `write` tool; `exec` stays exposed, and the server's mode and path checks do not make a child read-only or keep it inside `--root`. PR #1951 says so explicitly in the CLI (`--help` and usage errors) and the docs, and keeps gateway registration and any launch out. For the later integration (the gateway launch, D226), the feature may be called confined only with evidence that the external jail (`lel-jail`) enforces read-only critic execution and owns cleanup of descendant processes.
+**Why.** `exec` can write files and spawn children whatever the mode, so read-only execution, filesystem confinement and descendant cleanup can only come from the jail (726-sandbox-design.md §6). Nano's review was a static source review of `b0b13f01` only, with no host, sandbox or intrusion testing, so nothing yet shows the jail does this.
+**Rejected.** Treating critic mode or the path checks as confinement. Registering or launching the server from the gateway in PR #1951.
+**Tag.** [stated] · remind-me: mem_e9fa74888ebf4d30ac30e928537773c4
+**Key.** lel:1379:critic-confinement-boundary
+**Source.** GitHub comment by `baileyrd` on PR #1951, 2026-11-28T00:33:48Z, https://github.com/Rusty-Mill/rusty_mill/pull/1951#issuecomment-7231012800 ("critic mode removes the `write` tool but still exposes `exec` ... require evidence that the external jail enforces read-only critic execution and owns descendant cleanup before calling the feature confined"). Adds a condition to D225; narrows D226 (the launch waits for a later PR and needs that evidence) without reversing it. Numbered D227 because D226 is taken on branch `claude/project-thread-7bet54-1378-launch` (PR #1952).
