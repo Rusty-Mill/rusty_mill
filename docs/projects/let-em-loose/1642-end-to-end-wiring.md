@@ -1,6 +1,6 @@
 # #1642 Wire Let Em Loose end to end: scope and slices
 
-Status: draft for Nano's approval (D25). No code, no host change. Host route chosen by Nano 2026-11-28 (D228): option (a) below.
+Status: draft for Nano's approval (D25). No code, no host change. Host route chosen by Nano 2026-11-28 (D244): option (a) below.
 
 ## 1. Goal and what is already built
 
@@ -14,9 +14,9 @@ Built and merged:
 
 The gap: the live board (the claude.ai connector, on host `remindme`) has no BBP host, so its `inbox_list` answers "the inbox has no BBP host". The inbox board on BaileyAi is loopback only. That is by design (D175), so the missing piece is reach, not code.
 
-## 2. Where the inbox and BBP host live (D228: option a)
+## 2. Where the inbox and BBP host live (D244: option a)
 
-Nano picked (a) on 2026-11-28 (D228). The pick sets the route only; the BaileyAi exposure still needs his separate go-ahead naming that host change (D128, D224), asked for with slice 2. Options as put to him:
+Nano picked (a) on 2026-11-28 (D244). The pick sets the route only; the BaileyAi exposure still needs his separate go-ahead naming that host change (D128, D224), asked for with slice 2. Options as put to him:
 - **a) Expose the BaileyAi inbox board as a second claude.ai connector (chosen).** No code change. claude.ai calls connectors from Anthropic's cloud, so tailnet-only is not enough: it needs Tailscale Funnel or a reverse proxy with HTTPS, the board's OAuth sign-in and `MILL_BOARD_ALLOWED_HOSTS`. rusty_term reaches it over the tailnet. Keeps D35, D132 and D175; adds no trust path into `orch-runner`. It is a host change on Nano's machine (ask-first, D128; D131 does not cover it).
 - **b) The live board on remindme gets a remote BBP path** (proxy to the BaileyAi board's API, or a new bbp transport). New design and a public API change; close to the remote path D175 rejected.
 - **c) Move the live board to BaileyAi.** One board for cards and inbox. Reverses D175.
