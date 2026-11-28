@@ -2,8 +2,9 @@
 //!
 //! The pool tests in `agentgateway-mcp` cover the keying. These cover the
 //! wiring: two client sessions through the gateway reach two different child
-//! processes of a `per_session` target, one session keeps its own child, and
-//! ending a session (`DELETE`) kills that child.
+//! processes of a `per_session` target, one session keeps its own child,
+//! ending a session (`DELETE`) kills that child, and a stateless call gets a
+//! child for that call alone.
 
 use std::net::SocketAddr;
 
@@ -119,6 +120,33 @@ async fn a_target_without_mode_gives_each_session_its_own_child() {
     }
 
     let _ = b.close().await;
+    shutdown.cancel();
+}
+
+#[rusty_tokio::test]
+async fn a_stateless_call_gets_a_child_for_that_call_alone() {
+    let (url, shutdown) = gateway(None).await;
+    // The default client speaks the stateless revision: no session.
+    let client = mcp::connect(url.as_str())
+        .await
+        .expect("client should complete the MCP handshake");
+    let first = pid(&client).await;
+    let second = pid(&client).await;
+    assert_ne!(first, second, "no state carries from one call to the next");
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while (alive(first) || alive(second)) && Instant::now() < deadline {
+            rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !alive(first) && !alive(second),
+            "each child ends with its call"
+        );
+    }
     shutdown.cancel();
 }
 

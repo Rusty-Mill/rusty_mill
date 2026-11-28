@@ -18,7 +18,12 @@
 //! carries an `Mcp-Session-Id`; a client that echoes it can cancel with a
 //! `notifications/cancelled` POST, which is matched to the request running
 //! under that session, and can end the session with `DELETE`. An unknown or
-//! ended id is answered `404`, as the spec requires. A session holds only the
+//! ended id is answered `404`, as the spec requires. A session is bound to
+//! the principal that opened it (`iss` and `sub` of the host's verified
+//! claims, else the whole claims): any other principal, or none, naming it
+//! gets the same `404`, so a session id is useless without its owner's
+//! token. Sessions opened without auth stay usable without auth. A session
+//! holds only the
 //! negotiated revision and the cancel flags of its running requests, so
 //! nothing else is kept between POSTs, and a client that never sends the id
 //! is served exactly as before (it just cannot cancel by notification).
@@ -40,7 +45,7 @@
 //! announces no changes.
 
 use crate::changes::ChangeKinds;
-use crate::connection::{Caller, CancelToken, Connection, Notifier, Started};
+use crate::connection::{Caller, CancelToken, ClassicSession, Connection, Notifier, Started};
 use crate::push::Push;
 use crate::replay::{Replay, Shared};
 use crate::server::Server;
@@ -316,6 +321,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// What a classic session remembers: its revision and the cancel flags of
 /// the requests running under it.
 struct Session {
+    /// Its id, and the flag handlers see turn when it ends.
+    handle: ClassicSession,
+    /// Who opened it ([`owner_of`]); only the same owner may use it.
+    owner: Option<String>,
     version: ProtocolVersion,
     client_info: Option<Implementation>,
     client_capabilities: Option<ClientCapabilities>,
@@ -358,6 +367,24 @@ impl Drop for Registered {
     }
 }
 
+/// The key a session is bound to: the principal's `iss` and `sub` when it
+/// names a subject, so a refreshed token for the same subject keeps the
+/// session; otherwise its whole claims. `None` when the host ran no auth.
+///
+/// The two forms carry different prefixes, so one can never equal the other.
+/// A token with no `iss` and one with `iss: ""` give the same key: both mean
+/// "no issuer", and a host that runs several issuers sets `iss` on each.
+fn owner_of(principal: Option<&Value>) -> Option<String> {
+    let principal = principal?;
+    match principal.get("sub").and_then(Value::as_str) {
+        Some(sub) => {
+            let iss = principal.get("iss").and_then(Value::as_str).unwrap_or("");
+            Some(format!("sub:{}:{iss}:{sub}", iss.len()))
+        }
+        None => Some(format!("claims:{}", principal.to_json_string())),
+    }
+}
+
 /// The open classic sessions. Every way a session ends (`DELETE`, going
 /// idle) tells the server, so a source holding per-session state upstream can
 /// let it go ([`crate::ToolSource::session_ended`]).
@@ -382,20 +409,26 @@ impl Sessions {
 
     /// Tell the server these sessions are over. Called with no lock held: a
     /// source may take a while to close what it held for them.
-    fn ended(&self, ids: Vec<String>) {
-        for id in ids {
-            self.server.session_ended(&id);
+    fn ended(&self, gone: Vec<Arc<Session>>) {
+        for session in gone {
+            session.handle.end();
+            self.server.session_ended(session.handle.id());
         }
     }
 
-    /// The live session `id`, refreshed; `None` if unknown or idle too long.
-    fn get(&self, id: &str, idle: Duration) -> Option<Arc<Session>> {
+    /// The live session `id`, refreshed; `None` if unknown, idle too long, or
+    /// opened by another owner. The last looks exactly like the first, so a
+    /// caller holding someone else's id learns nothing from it.
+    fn get(&self, id: &str, idle: Duration, owner: Option<&str>) -> Option<Arc<Session>> {
         let mut map = lock(&self.map);
         let session = map.get(id)?;
+        if session.owner.as_deref() != owner {
+            return None;
+        }
         if session.idle_for() > idle {
-            map.remove(id);
+            let gone = map.remove(id);
             drop(map);
-            self.ended(vec![id.to_owned()]);
+            self.ended(gone.into_iter().collect());
             return None;
         }
         session.touch();
@@ -407,6 +440,7 @@ impl Sessions {
         version: ProtocolVersion,
         client: Option<InitializeParams>,
         push: Arc<Push>,
+        owner: Option<String>,
         max: usize,
         idle: Duration,
     ) -> Result<(String, Arc<Session>), OpenError> {
@@ -417,11 +451,9 @@ impl Sessions {
                 .filter(|(_, s)| s.idle_for() > idle)
                 .map(|(id, _)| id.clone())
                 .collect();
-            for id in &expired {
-                map.remove(id);
-            }
+            let gone = expired.iter().filter_map(|id| map.remove(id)).collect();
             drop(map);
-            self.ended(expired);
+            self.ended(gone);
             map = lock(&self.map);
         }
         if map.len() >= max {
@@ -435,6 +467,8 @@ impl Sessions {
             None => (None, None),
         };
         let session = Arc::new(Session {
+            handle: ClassicSession::new(&id),
+            owner,
             version,
             client_info,
             client_capabilities,
@@ -446,9 +480,15 @@ impl Sessions {
         Ok((id, session))
     }
 
-    fn end(&self, id: &str) -> Option<Arc<Session>> {
-        let session = lock(&self.map).remove(id)?;
-        self.ended(vec![id.to_owned()]);
+    /// Remove session `id` if `owner` opened it.
+    fn end(&self, id: &str, owner: Option<&str>) -> Option<Arc<Session>> {
+        let mut map = lock(&self.map);
+        if map.get(id)?.owner.as_deref() != owner {
+            return None;
+        }
+        let session = map.remove(id)?;
+        drop(map);
+        self.ended(vec![Arc::clone(&session)]);
         Some(session)
     }
 }
@@ -526,13 +566,15 @@ impl HttpHandler {
                 "not found",
             ));
         }
+        let owner = owner_of(caller.principal.as_ref());
+        let owner = owner.as_deref();
         if request.method == &Method::Delete {
             self.check_origin(request.headers)?;
-            return self.end_session(request.headers);
+            return self.end_session(request.headers, owner);
         }
         if request.method == &Method::Get {
             self.check_origin(request.headers)?;
-            return self.open_push_stream(request.headers);
+            return self.open_push_stream(request.headers, owner);
         }
         if request.method != &Method::Post {
             let mut refusal = reject(
@@ -565,23 +607,27 @@ impl HttpHandler {
         }
         let header_version = self.header_version(headers)?;
         let message = parse_body(request.body)?;
-        let looked_up = self.session_of(headers);
+        let looked_up = self.session_of(headers, owner);
         let has_session = matches!(looked_up, Ok(Some(_)));
         let modern =
             self.check_version_rules(headers, header_version.as_ref(), &message, has_session)?;
         // 2026-07-28 `_meta` requests are stateless: any session id is ignored.
         let session = if modern { None } else { looked_up? };
-        self.dispatch(message, header_version, modern, session, caller)
+        self.dispatch(message, header_version, modern, session, caller, owner)
     }
 
-    /// The session a request names, refused with `404` when it is unknown or
-    /// ended (the spec's cue for a client to start over).
-    fn session_of(&self, headers: &HeaderMap) -> Result<Option<Arc<Session>>, Response> {
+    /// The session a request names, refused with `404` when it is unknown,
+    /// ended or another owner's (the spec's cue for a client to start over).
+    fn session_of(
+        &self,
+        headers: &HeaderMap,
+        owner: Option<&str>,
+    ) -> Result<Option<Arc<Session>>, Response> {
         let Some(id) = headers.get("mcp-session-id") else {
             return Ok(None);
         };
         self.sessions
-            .get(id, self.config.session_idle)
+            .get(id, self.config.session_idle, owner)
             .map(Some)
             .ok_or_else(|| {
                 reject(
@@ -595,7 +641,11 @@ impl HttpHandler {
     /// `GET`: the standalone stream of the session's own notifications.
     /// `405` where there is nothing to push (no sessions, or a server that
     /// announces no changes), as the spec allows.
-    fn open_push_stream(&self, headers: &HeaderMap) -> Result<Response, Response> {
+    fn open_push_stream(
+        &self,
+        headers: &HeaderMap,
+        owner: Option<&str>,
+    ) -> Result<Response, Response> {
         if let (Some(replay), Some(id)) = (&self.replay, headers.get("last-event-id")) {
             if id.starts_with('s') {
                 return self.resume(replay, headers, id);
@@ -630,7 +680,7 @@ impl HttpHandler {
                 "the stream needs an Mcp-Session-Id header",
             ));
         }
-        let Some(session) = self.session_of(headers)? else {
+        let Some(session) = self.session_of(headers, owner)? else {
             return Err(not_offered());
         };
         let last = headers
@@ -786,7 +836,7 @@ impl HttpHandler {
 
     /// `DELETE`: the client ends its session; whatever it still had running
     /// is cancelled.
-    fn end_session(&self, headers: &HeaderMap) -> Result<Response, Response> {
+    fn end_session(&self, headers: &HeaderMap, owner: Option<&str>) -> Result<Response, Response> {
         let Some(id) = headers.get("mcp-session-id") else {
             return Err(reject(
                 StatusCode::BAD_REQUEST,
@@ -794,7 +844,7 @@ impl HttpHandler {
                 "DELETE needs an Mcp-Session-Id header",
             ));
         };
-        let Some(session) = self.sessions.end(id) else {
+        let Some(session) = self.sessions.end(id, owner) else {
             return Err(reject(
                 StatusCode::NOT_FOUND,
                 ErrorCode::INVALID_REQUEST,
@@ -813,6 +863,7 @@ impl HttpHandler {
         &self,
         reply: &Message,
         client: Option<InitializeParams>,
+        owner: Option<String>,
     ) -> Result<Option<String>, Response> {
         let Message::Response { result, .. } = reply else {
             return Ok(None);
@@ -832,6 +883,7 @@ impl HttpHandler {
             ProtocolVersion::new(version),
             client,
             push,
+            owner,
             self.config.max_sessions,
             self.config.session_idle,
         );
@@ -990,6 +1042,7 @@ impl HttpHandler {
         modern: bool,
         session: Option<Arc<Session>>,
         caller: Caller,
+        owner: Option<&str>,
     ) -> Result<Response, Response> {
         // What a request without `_meta` is taken to speak: its header, else
         // its session's revision, else the oldest revision that has no header.
@@ -1036,7 +1089,9 @@ impl HttpHandler {
                 info,
                 caps,
             )
-            .with_caller(caller),
+            .with_caller(caller)
+            // Only a session the store just validated reaches handlers.
+            .with_session(session.as_ref().map(|s| s.handle.clone())),
         );
         match conn.start(message) {
             Started::Done(None) => Ok(Response::json(StatusCode::ACCEPTED, Vec::new())),
@@ -1047,7 +1102,9 @@ impl HttpHandler {
                     _ => json_reply(status, &reply),
                 };
                 if is_initialize && !modern {
-                    if let Some(id) = self.open_session(&reply, init_params)? {
+                    if let Some(id) =
+                        self.open_session(&reply, init_params, owner.map(str::to_owned))?
+                    {
                         response = response.with_header(SESSION_HEADER, &id).map_err(|_| {
                             reject(
                                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1139,4 +1196,157 @@ fn parse_body(body: &[u8]) -> Result<Message, Response> {
             e.to_string(),
         ),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod owner_tests {
+    //! Sessions are bound to the principal that opened them (#1375).
+    use super::*;
+    use rusty_mcp_proto::{CallToolResult, Tool};
+
+    const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}"#;
+    const LIST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+
+    fn handler() -> HttpHandler {
+        let mut schema = Value::object();
+        schema.insert("type", "object");
+        let server = Server::builder("owner", "1")
+            .tool(Tool::new("noop", schema), |_c, _p| {
+                Ok(CallToolResult::default())
+            })
+            // So the standalone GET stream is offered and its owner check is reached.
+            .notify_changes(
+                &crate::changes::ChangeBroadcaster::new(),
+                ChangeKinds {
+                    tools_list: true,
+                    ..ChangeKinds::default()
+                },
+            )
+            .build()
+            .unwrap();
+        HttpHandler::new(Arc::new(server), HttpConfig::default())
+    }
+
+    fn claims(json: &str) -> Option<Value> {
+        Some(Value::from_json_str(json).unwrap())
+    }
+
+    fn send(
+        h: &HttpHandler,
+        method: Method,
+        session: Option<&str>,
+        body: &str,
+        principal: Option<Value>,
+    ) -> Response {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost").unwrap();
+        headers
+            .insert("accept", "application/json, text/event-stream")
+            .unwrap();
+        headers.insert("content-type", "application/json").unwrap();
+        headers
+            .insert("mcp-protocol-version", "2025-06-18")
+            .unwrap();
+        if let Some(id) = session {
+            headers.insert("mcp-session-id", id).unwrap();
+        }
+        let request = Request {
+            method: &method,
+            target: "/mcp",
+            authorization: None,
+            if_match: None,
+            headers: &headers,
+            body: body.as_bytes(),
+        };
+        h.handle_with(&request, principal)
+    }
+
+    fn open(h: &HttpHandler, principal: Option<Value>) -> String {
+        let reply = send(h, Method::Post, None, INIT, principal);
+        reply.headers.get(SESSION_HEADER).unwrap().to_owned()
+    }
+
+    fn list(h: &HttpHandler, id: &str, principal: Option<Value>) -> u16 {
+        send(h, Method::Post, Some(id), LIST, principal)
+            .status
+            .as_u16()
+    }
+
+    const A: &str = r#"{"iss":"orch","sub":"p/c/lens/1","jti":"one"}"#;
+
+    #[test]
+    fn the_owner_can_reuse_its_session_even_with_a_refreshed_token() {
+        let h = handler();
+        let id = open(&h, claims(A));
+        assert_eq!(list(&h, &id, claims(A)), 200);
+        let refreshed = r#"{"iss":"orch","sub":"p/c/lens/1","jti":"two"}"#;
+        assert_eq!(list(&h, &id, claims(refreshed)), 200);
+    }
+
+    #[test]
+    fn another_principal_gets_the_unknown_session_404() {
+        let h = handler();
+        let id = open(&h, claims(A));
+        let other_sub = r#"{"iss":"orch","sub":"p/c/lens/2"}"#;
+        let other_iss = r#"{"iss":"elsewhere","sub":"p/c/lens/1"}"#;
+        assert_eq!(list(&h, &id, claims(other_sub)), 404);
+        assert_eq!(list(&h, &id, claims(other_iss)), 404);
+        assert_eq!(list(&h, &id, None), 404, "no token at all");
+        assert_eq!(list(&h, &id, claims(A)), 200, "the owner is unaffected");
+    }
+
+    #[test]
+    fn another_principal_cannot_end_the_session() {
+        let h = handler();
+        let id = open(&h, claims(A));
+        let b = r#"{"iss":"orch","sub":"b"}"#;
+        let refused = send(&h, Method::Delete, Some(&id), "", claims(b));
+        assert_eq!(refused.status.as_u16(), 404);
+        assert_eq!(list(&h, &id, claims(A)), 200, "still open");
+        let ended = send(&h, Method::Delete, Some(&id), "", claims(A));
+        assert_eq!(ended.status.as_u16(), 200);
+        assert_eq!(list(&h, &id, claims(A)), 404);
+    }
+
+    #[test]
+    fn another_principal_cannot_open_the_sessions_stream() {
+        let h = handler();
+        let id = open(&h, claims(A));
+        let b = r#"{"iss":"orch","sub":"b"}"#;
+        let stream = send(&h, Method::Get, Some(&id), "", claims(b));
+        assert_eq!(
+            stream.status.as_u16(),
+            404,
+            "same answer as an unknown session"
+        );
+    }
+
+    #[test]
+    fn an_unauthenticated_session_stays_unauthenticated() {
+        let h = handler();
+        let id = open(&h, None);
+        assert_eq!(list(&h, &id, None), 200);
+        assert_eq!(list(&h, &id, claims(A)), 404, "a token can't adopt it");
+    }
+
+    #[test]
+    fn claims_without_a_subject_bind_to_the_whole_claims() {
+        let h = handler();
+        let board = r#"{"actor":"claude-cli","role":"builder"}"#;
+        let id = open(&h, claims(board));
+        assert_eq!(list(&h, &id, claims(board)), 200);
+        let other = r#"{"actor":"claude-cli","role":"admin"}"#;
+        assert_eq!(list(&h, &id, claims(other)), 404);
+    }
+
+    #[test]
+    fn the_two_owner_forms_never_collide() {
+        assert_eq!(owner_of(None), None);
+        let with_sub = owner_of(claims(r#"{"iss":"a:b","sub":"c"}"#).as_ref()).unwrap();
+        let shifted = owner_of(claims(r#"{"iss":"a","sub":"b:c"}"#).as_ref()).unwrap();
+        assert_ne!(with_sub, shifted, "the issuer's length is part of the key");
+        let no_sub = owner_of(claims(r#"{"iss":"a"}"#).as_ref()).unwrap();
+        assert!(with_sub.starts_with("sub:") && no_sub.starts_with("claims:"));
+    }
 }

@@ -292,6 +292,44 @@ fn session_marker(dir: &Path, task: &TaskId, id: &str) -> PathBuf {
     task_dir(dir, "agents", task).join(format!("session-{id}.started"))
 }
 
+/// The provider's own id for session `id`, captured from the log of the
+/// session's first turn (a Codex thread id); absent when none was captured.
+pub fn provider_session_path(dir: &Path, task: &TaskId, id: &str) -> PathBuf {
+    task_dir(dir, "agents", task).join(format!("session-{id}.provider"))
+}
+
+/// Where a session harness's provider id comes from and goes: its turn's log,
+/// read once the harness has ended, and the session's `.provider` file.
+struct Capture {
+    log: PathBuf,
+    store: PathBuf,
+}
+
+impl Capture {
+    /// Store the provider id the log names, unless one is stored already.
+    /// A later log that names a different id is an error and changes nothing,
+    /// so the next turn still resumes the original conversation.
+    fn run(&self) -> Result<(), String> {
+        let at = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+        let log = std::fs::read(&self.log).map_err(|e| at(&self.log, e))?;
+        let Some(id) = crate::launchers::codex_thread_id(&String::from_utf8_lossy(&log))? else {
+            return Ok(());
+        };
+        match std::fs::read_to_string(&self.store) {
+            Ok(stored) if stored == id => Ok(()),
+            Ok(stored) => Err(format!(
+                "{} names provider session {id}, not the stored {stored}",
+                self.log.display()
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                rusty_atomic_file::write_private(&self.store, id.as_bytes())
+                    .map_err(|e| format!("{}: {e}", self.store.display()))
+            }
+            Err(e) => Err(at(&self.store, e)),
+        }
+    }
+}
+
 /// Present when `turn`'s harness was launched to resume a provider session:
 /// its output's running totals then carry the session's earlier turns.
 pub fn resumed_path(dir: &Path, task: &TaskId, turn: TurnId) -> PathBuf {
@@ -451,6 +489,8 @@ struct Harness {
     turn: TurnId,
     /// The role whose provider session this harness resumes, if it does.
     session: Option<RoleId>,
+    /// A session harness's provider id capture, run once it has ended.
+    capture: Option<Capture>,
     child: Child,
     /// A confined harness's MCP broker, in the harness's process group.
     broker: Option<Child>,
@@ -523,6 +563,11 @@ impl Harness {
         // until every member killed with it has exited too.
         let drained = self.record.is_none() || crate::groups::drained(group, DRAIN);
         let hold = self.hold.as_mut().map_or(Ok(()), |h| kill_tree(h, group));
+        // Nothing writes the log any more; a failed capture leaves the next
+        // turn to be refused, like any turn whose session cannot resume.
+        if let Some(Err(e)) = self.capture.take().map(|c| c.run()) {
+            eprintln!("bbp mod: turn {} provider session: {e}", self.turn.0);
+        }
         // Nothing runs in the worktree any more; a leftover is replaced by
         // the next turn of the same number, so failing to remove it is not fatal.
         if let Some(Err(e)) = self.confined.as_ref().map(Turn::finish) {
@@ -975,6 +1020,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             sup.harnesses.push(Harness {
                 turn,
                 session: l.session.then(|| role.clone()),
+                capture: launched.capture,
                 child: launched.child,
                 broker: launched.broker,
                 confined: launched.confined,
@@ -1328,6 +1374,7 @@ fn spawn_runner(cfg: &Config, stdout: Stdio) -> Result<Child, String> {
 /// A started harness: its process, and for a confined one the broker that
 /// serves its MCP relay and the places of its turn.
 struct Launched {
+    capture: Option<Capture>,
     child: Child,
     broker: Option<Child>,
     confined: Option<Turn>,
@@ -1353,6 +1400,9 @@ fn spawn(
         .as_deref()
         .map(|id| session_marker(&cfg.dir, &cfg.task, id));
     let resume = marker.as_ref().is_some_and(|m| m.exists());
+    let store = session
+        .as_deref()
+        .map(|id| provider_session_path(&cfg.dir, &cfg.task, id));
     let confined = l
         .sandbox
         .as_ref()
@@ -1401,6 +1451,14 @@ fn spawn(
             "BBP_SESSION_RESUME".into(),
             if resume { "yes" } else { "no" }.into(),
         ));
+    }
+    // The provider's own id, when the session's first turn named one.
+    if let Some(store) = store.as_ref().filter(|_| resume) {
+        match std::fs::read_to_string(store) {
+            Ok(id) => env.push(("BBP_PROVIDER_SESSION".into(), id)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{}: {e}", store.display())),
+        }
     }
     // An evidence run pins the cache lifetime for the main agent and for
     // subagents: they default to different lifetimes, and the price file
@@ -1475,6 +1533,10 @@ fn spawn(
         },
     };
     Ok(Launched {
+        capture: store.map(|store| Capture {
+            log: log_path,
+            store,
+        }),
         child,
         broker,
         confined,

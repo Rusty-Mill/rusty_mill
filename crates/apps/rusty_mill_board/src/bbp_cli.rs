@@ -6,10 +6,14 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use serde_json::Value;
 
+use crate::anchor::Verified;
 use crate::inbox::{
     Action, DryRun, Escalation, Escalations, InboxError, Outcome, Response, Step, plan,
     step_decision,
@@ -20,13 +24,94 @@ use crate::inbox::{
 pub struct BbpCli {
     bin: PathBuf,
     root: PathBuf,
+    verify_deadline: Duration,
 }
 
 impl BbpCli {
     /// The host's `bbp` binary and the BBP task directory it serves.
     #[must_use]
     pub const fn new(bin: PathBuf, root: PathBuf) -> Self {
-        Self { bin, root }
+        Self {
+            bin,
+            root,
+            verify_deadline: VERIFY_DEADLINE,
+        }
+    }
+
+    /// How long one `bbp verify` may run before it is killed and logged as a host
+    /// error, so a stuck verifier never stalls the anchor pass. Default: [`VERIFY_DEADLINE`].
+    #[must_use]
+    pub const fn with_verify_deadline(mut self, deadline: Duration) -> Self {
+        self.verify_deadline = deadline;
+        self
+    }
+
+    /// Run `bbp <args>` within `deadline`: its exit status, up to `max` bytes of stdout
+    /// and a bounded stderr. The output comes over socket pairs that this thread drains
+    /// without blocking, so nothing is written to disk and memory stays within the caps.
+    /// The call ends when the child has exited and both streams are closed. It is
+    /// [`InboxError::Host`] when stdout passes `max` or the deadline passes first, as
+    /// when a descendant (such as the guard's `sudo` target) keeps a stream open. The
+    /// child is then killed and the streams dropped, so a descendant's next write fails
+    /// and nothing stays behind to block the next task's run. Only the direct child is
+    /// killed: a silent descendant it leaves (under the deploy wrapper, the guard's `bbp`
+    /// as `orch-runner`) runs until it ends by itself or its service cgroup is stopped
+    /// (`1092-deploy-layout.md`).
+    #[cfg(unix)]
+    fn run_deadline(
+        &self,
+        args: &[String],
+        max: u64,
+        deadline: Duration,
+    ) -> Result<(ExitStatus, Vec<u8>, String), InboxError> {
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+        let host = |e: std::io::Error| InboxError::Host(format!("{}: {e}", self.bin.display()));
+        let (out_r, out_w) = UnixStream::pair().map_err(host)?;
+        let (err_r, err_w) = UnixStream::pair().map_err(host)?;
+        let mut out = Capture::new(out_r, max, false).map_err(host)?;
+        let mut err = Capture::new(err_r, MAX_ERR, true).map_err(host)?;
+        let mut child = Command::new(&self.bin)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(OwnedFd::from(out_w)))
+            .stderr(Stdio::from(OwnedFd::from(err_w)))
+            .spawn()
+            .map_err(host)?;
+        let status = match collect(&mut child, &mut out, &mut err, Instant::now() + deadline) {
+            Ok(status) => status,
+            Err(stop) => {
+                // Every way out after spawn but success kills and reaps the child.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(match stop {
+                    Stop::Io(e) => host(e),
+                    Stop::Over => {
+                        InboxError::Host(format!("the host's answer is over {max} bytes; refused"))
+                    }
+                    Stop::Late => InboxError::Host(format!(
+                        "`bbp {}` timed out after {}s",
+                        args.first().map_or("", String::as_str),
+                        deadline.as_secs_f32()
+                    )),
+                });
+            }
+        };
+        let stderr = String::from_utf8_lossy(&err.buf).into_owned();
+        Ok((status, out.buf, stderr))
+    }
+
+    /// Bounded host runs need Unix socket pairs; elsewhere `verify` is a host error.
+    #[cfg(not(unix))]
+    fn run_deadline(
+        &self,
+        _args: &[String],
+        _max: u64,
+        _deadline: Duration,
+    ) -> Result<(ExitStatus, Vec<u8>, String), InboxError> {
+        Err(InboxError::Host(
+            "bounded `bbp` runs need a Unix host".into(),
+        ))
     }
 
     /// Run `bbp <args>` and parse what it prints on success.
@@ -159,6 +244,21 @@ const MAX_CLAIMS: u64 = 8 << 20;
 /// The most stderr kept from a bounded run.
 const MAX_ERR: u64 = 16 << 10;
 
+/// The most `bbp verify` may print: its answer is one short JSON object.
+const MAX_VERIFY: u64 = 64 << 10;
+
+/// The default deadline for one `bbp verify`. Verify reads one task's log
+/// once; minutes means the host is stuck, not busy.
+pub const VERIFY_DEADLINE: Duration = Duration::from_secs(120);
+
+/// The most reads one stream gets per turn of a deadline-bound run (64 KiB).
+#[cfg(unix)]
+const TURN: usize = 8;
+
+/// How often a deadline-bound run checks whether its child has exited.
+#[cfg(unix)]
+const POLL: Duration = Duration::from_millis(20);
+
 fn valid_task(t: &str) -> bool {
     !t.is_empty() && !t.contains(',') && !t.starts_with("--")
 }
@@ -264,6 +364,47 @@ impl Escalations for BbpCli {
         }
     }
 
+    /// `bbp` prints `bbp: <reason>` and exits 1 when it refuses; that is the answer, recorded
+    /// by the caller. Anything else (no binary, the guard's exit 64, a signal, a run past
+    /// the deadline) is [`InboxError::Host`], so a broken or stuck deploy never reads as a
+    /// rewritten log.
+    fn verify(
+        &self,
+        task: &str,
+        expect: Option<&str>,
+    ) -> Result<Result<Verified, String>, InboxError> {
+        if !valid_task(task) || !crate::anchor::anchorable(task) {
+            return Err(InboxError::Invalid(format!("bad BBP task id {task:?}")));
+        }
+        let mut argv = vec![
+            "verify".to_owned(),
+            "--dir".to_owned(),
+            self.root_str(),
+            "--task".to_owned(),
+            task.to_owned(),
+        ];
+        if let Some(h) = expect {
+            argv.extend(["--expect".to_owned(), h.to_owned()]);
+        }
+        let (status, stdout, stderr) =
+            self.run_deadline(&argv, MAX_VERIFY, self.verify_deadline)?;
+        if status.code() == Some(1)
+            && let Some(reason) = stderr.trim().strip_prefix("bbp: ")
+        {
+            return Ok(Err(reason.to_owned()));
+        }
+        if !status.success() {
+            return Err(InboxError::Host(stderr.trim().to_owned()));
+        }
+        let v: VerifyOut = serde_json::from_slice(&stdout)
+            .map_err(|e| InboxError::Host(format!("unreadable verify: {e}")))?;
+        Ok(Ok(Verified {
+            lines: v.lines,
+            unchained: v.unchained,
+            head: v.head,
+        }))
+    }
+
     fn applied(&self, task: &str, decision: &str) -> Result<Option<u64>, InboxError> {
         if !valid_task(task) {
             return Err(InboxError::Invalid(format!("bad BBP task id {task:?}")));
@@ -289,6 +430,113 @@ impl Escalations for BbpCli {
             ))),
         }
     }
+}
+
+/// Why a deadline-bound run stopped before a clean finish.
+#[cfg(unix)]
+enum Stop {
+    Io(std::io::Error),
+    Over,
+    Late,
+}
+
+/// Drain `out` and `err` in bounded turns until `child` has exited and both are closed.
+/// Between turns it checks stdout's cap and the deadline, so neither a stream that
+/// never runs dry nor one that never closes can hold the call past `until`.
+#[cfg(unix)]
+fn collect(
+    child: &mut std::process::Child,
+    out: &mut Capture,
+    err: &mut Capture,
+    until: Instant,
+) -> Result<ExitStatus, Stop> {
+    let mut status = None;
+    loop {
+        let busy = out.drain().map_err(Stop::Io)? | err.drain().map_err(Stop::Io)?;
+        if out.over() {
+            return Err(Stop::Over);
+        }
+        if status.is_none() {
+            status = child.try_wait().map_err(Stop::Io)?;
+        }
+        if let Some(status) = status
+            && out.closed
+            && err.closed
+        {
+            return Ok(status);
+        }
+        if Instant::now() >= until {
+            return Err(Stop::Late);
+        }
+        if !busy {
+            std::thread::sleep(POLL);
+        }
+    }
+}
+
+/// One output stream of a deadline-bound run, read without blocking. It keeps the
+/// first `cap` bytes and counts the rest, so a chatty child never fills the buffer
+/// and stalls, and never grows the board's memory.
+#[cfg(unix)]
+struct Capture {
+    src: std::os::unix::net::UnixStream,
+    buf: Vec<u8>,
+    cap: u64,
+    seen: u64,
+    closed: bool,
+    /// Past `cap`, keep reading and drop the excess (stderr) rather than stop (stdout).
+    discard: bool,
+}
+
+#[cfg(unix)]
+impl Capture {
+    fn new(src: std::os::unix::net::UnixStream, cap: u64, discard: bool) -> std::io::Result<Self> {
+        src.set_nonblocking(true)?;
+        Ok(Self {
+            src,
+            buf: Vec::new(),
+            cap,
+            seen: 0,
+            closed: false,
+            discard,
+        })
+    }
+
+    /// One turn: read what is waiting, up to EOF, at most [`TURN`] reads, and stop once
+    /// past the cap is known. True when the turn ended with data possibly still waiting.
+    fn drain(&mut self) -> std::io::Result<bool> {
+        let mut chunk = [0_u8; 8192];
+        for _ in 0..TURN {
+            if self.closed || (self.over() && !self.discard) {
+                return Ok(false);
+            }
+            match self.src.read(&mut chunk) {
+                Ok(0) => self.closed = true,
+                Ok(n) => {
+                    let room = usize::try_from(self.cap.saturating_sub(self.seen)).unwrap_or(n);
+                    self.buf.extend_from_slice(&chunk[..n.min(room)]);
+                    self.seen = self.seen.saturating_add(n as u64);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether more than `cap` bytes arrived.
+    const fn over(&self) -> bool {
+        self.seen > self.cap
+    }
+}
+
+/// What `bbp verify` prints on success.
+#[derive(serde::Deserialize)]
+struct VerifyOut {
+    lines: u64,
+    unchained: u64,
+    head: String,
 }
 
 /// One row of `bbp decision`.

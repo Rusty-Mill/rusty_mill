@@ -387,17 +387,40 @@ fn reviewer_session_starts_then_resumes_in_one_emptied_directory() {
     assert!(std::fs::read_dir(later).unwrap().next().is_none());
 }
 
+const THREAD: &str = "01a21ab4-d922-7602-801b-328d139e9aa7";
+
 #[test]
-fn author_refuses_a_session_before_provider_start() {
+fn author_session_persists_then_resumes_the_captured_thread() {
+    let f = Fixture::new(false);
+    let run = |resume: &str, provider: Option<&str>| {
+        let mut cmd = f.command();
+        cmd.env("BBP_SESSION_ID", SESSION)
+            .env("BBP_SESSION_RESUME", resume);
+        if let Some(p) = provider {
+            cmd.env("BBP_PROVIDER_SESSION", p);
+        }
+        assert_eq!(cmd.status().unwrap().code(), Some(42));
+        f.captured_args()
+    };
+    let first = run("no", None);
+    assert!(!first.iter().any(|a| a == "--ephemeral" || a == "resume"));
+    let later = run("yes", Some(THREAD));
+    assert!(later.windows(3).any(|w| w == ["resume", THREAD, "--"]));
+    assert!(!later.iter().any(|a| a == SESSION));
+}
+
+#[test]
+fn author_refuses_a_resume_without_a_captured_thread_before_provider_start() {
     let f = Fixture::new(false);
     let out = f
         .command()
         .env("BBP_SESSION_ID", SESSION)
-        .env("BBP_SESSION_RESUME", "no")
+        .env("BBP_SESSION_RESUME", "yes")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot keep a session"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("captured from its first turn"), "{err}");
     assert!(!f.dir.join("args").exists());
 }
 

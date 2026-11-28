@@ -336,12 +336,13 @@ fn a_relayed_provider_gets_only_the_relay_and_keeps_its_restrictions() {
 fn a_session_is_both_variables_a_uuid_and_yes_or_no() {
     let id = "0123abcd-0123-4567-89ab-0123456789ab";
     let some = |v: &str| Some(v.to_owned());
-    assert_eq!(Session::parse(None, None), Ok(None));
+    assert_eq!(Session::parse(None, None, None), Ok(None));
     assert_eq!(
-        Session::parse(some(id), some("yes")),
+        Session::parse(some(id), some("yes"), None),
         Ok(Some(Session {
             id: id.into(),
-            resume: true
+            resume: true,
+            provider: None,
         }))
     );
     for (i, r) in [
@@ -351,7 +352,7 @@ fn a_session_is_both_variables_a_uuid_and_yes_or_no() {
         (some("../../etc/passwd"), some("no")),
         (some(id), some("maybe")),
     ] {
-        assert!(Session::parse(i, r).is_err());
+        assert!(Session::parse(i, r, None).is_err());
     }
 }
 
@@ -377,16 +378,109 @@ fn a_reviewer_session_starts_then_resumes_and_persists_only_then() {
     let first = args(Some(&Session {
         id: id.clone(),
         resume: false,
+        provider: None,
     }));
     assert!(has(&first, ["--session-id", &id]));
     let later = args(Some(&Session {
         id: id.clone(),
         resume: true,
+        provider: None,
     }));
     assert!(has(&later, ["--resume", &id]));
     for a in [&first, &later] {
         assert!(!a.iter().any(|x| x == "--no-session-persistence"));
         // The prompt still comes last, after the separator.
         assert_eq!(a[a.len() - 2], "--");
+    }
+}
+
+const THREAD: &str = "01a21ab4-d922-7602-801b-328d139e9aa7";
+
+#[test]
+fn a_provider_session_is_a_uuid_on_a_resumed_turn_only() {
+    let id = "0123abcd-0123-4567-89ab-0123456789ab";
+    let some = |v: &str| Some(v.to_owned());
+    let resumed = Session::parse(some(id), some("yes"), some(THREAD)).unwrap();
+    assert_eq!(resumed.unwrap().provider.as_deref(), Some(THREAD));
+    for (r, p) in [
+        (some("no"), some(THREAD)),
+        (some("yes"), some("01A21AB4-d922-7602-801b-328d139e9aa7")),
+        (some("yes"), some("../thread")),
+    ] {
+        assert!(Session::parse(some(id), r, p).is_err());
+    }
+    assert!(Session::parse(None, None, some(THREAD)).is_err());
+}
+
+fn codex_args(session: Option<&Session>) -> Result<Vec<String>, String> {
+    arguments(
+        Provider::Codex,
+        &direct(),
+        Path::new("/bin/bbp"),
+        Path::new("/turn/mcp.json"),
+        Path::new("/clone"),
+        Some("gpt-x"),
+        session,
+    )
+}
+
+#[test]
+fn a_codex_session_persists_its_first_turn_and_resumes_the_captured_thread() {
+    let id = "0123abcd-0123-4567-89ab-0123456789ab".to_owned();
+    let session = |resume: bool, provider: Option<&str>| Session {
+        id: id.clone(),
+        resume,
+        provider: provider.map(str::to_owned),
+    };
+    let ephemeral = |a: &[String]| a.iter().any(|x| x == "--ephemeral");
+    let resumes = |a: &[String]| a.iter().any(|x| x == "resume");
+    let none = codex_args(None).unwrap();
+    assert!(ephemeral(&none) && !resumes(&none));
+    let first = codex_args(Some(&session(false, None))).unwrap();
+    assert!(!ephemeral(&first) && !resumes(&first));
+    let later = codex_args(Some(&session(true, Some(THREAD)))).unwrap();
+    assert!(!ephemeral(&later));
+    let at = later.iter().position(|x| x == "resume").unwrap();
+    // `resume <id>` comes after every global flag and override, right before
+    // the prompt; the sandbox is set before it.
+    assert_eq!(later[at + 1], THREAD);
+    assert_eq!(later[at + 2], "--");
+    assert_eq!(at + 4, later.len());
+    let sandbox = later.iter().position(|x| x == "--sandbox").unwrap();
+    assert!(sandbox < at && later[sandbox + 1] == "workspace-write");
+    assert!(later[..at].iter().any(|x| x.starts_with("mcp_servers=")));
+    // The derived BBP id never reaches Codex.
+    assert!(!later.contains(&id));
+    let err = codex_args(Some(&session(true, None))).unwrap_err();
+    assert!(err.contains("captured from its first turn"), "{err}");
+}
+
+#[test]
+fn the_codex_thread_id_is_the_first_thread_started_before_any_turn_event() {
+    let started = format!("{{\"type\":\"thread.started\",\"thread_id\":\"{THREAD}\"}}");
+    let ok = |log: &str| codex_thread_id(log).unwrap();
+    assert_eq!(ok(&started), Some(THREAD.into()));
+    // Harness and broker lines may come first.
+    let noisy =
+        format!("bbp: relay up\nReading additional input from stdin...\n{{oops\n  {started}\n");
+    assert_eq!(ok(&noisy), Some(THREAD.into()));
+    // An id after the agent's output began is not Codex's.
+    for early in [
+        "{\"type\":\"turn.started\"}",
+        "{\"type\":\"item.completed\",\"item\":{}}",
+    ] {
+        assert_eq!(ok(&format!("{early}\n{started}")), None);
+    }
+    assert_eq!(ok(""), None);
+    // A Claude stream never starts with one.
+    assert_eq!(ok("{\"type\":\"system\",\"session_id\":\"x\"}\n"), None);
+    // Only the first counts.
+    let other = started.replace(THREAD, "0123abcd-0123-4567-89ab-0123456789ab");
+    assert_eq!(ok(&format!("{started}\n{other}")), Some(THREAD.into()));
+    for bad in [
+        "{\"type\":\"thread.started\"}".to_owned(),
+        started.replace(THREAD, "../../etc"),
+    ] {
+        assert!(codex_thread_id(&bad).is_err(), "{bad}");
     }
 }

@@ -30,7 +30,7 @@
 [hidden]{display:none!important}
 html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 var(--ui);font-feature-settings:"tnum" 1;
-  display:grid;grid-template-rows:auto auto auto minmax(0,1fr);-webkit-font-smoothing:antialiased}
+  display:flex;flex-direction:column;-webkit-font-smoothing:antialiased}
 ::selection{background:var(--cyan-wash);color:var(--ink)}
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 *{scrollbar-width:thin;scrollbar-color:var(--line2) transparent}
@@ -113,7 +113,8 @@ header.top{display:flex;align-items:center;gap:6px;padding:0 14px;min-height:52p
 [data-kind=parked]{--ink-fill:var(--done);--ink-on:var(--ink);--sw:var(--done)}
 
 /* The board. Columns scroll on their own; an empty one folds to a spine. */
-main{overflow:auto;padding:10px 14px 14px;min-height:0}
+body>header,body>nav,body>form{flex:none}
+main{overflow:auto;padding:10px 14px 14px;min-height:0;flex:1 1 0}
 main.board{display:flex;align-items:stretch;gap:0}
 .board>.col{flex:1 1 220px;min-width:210px;max-width:360px;display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line);padding:0 10px}
 .board>.col:first-child{padding-left:0}.board>.col:last-child{border-right:0;padding-right:0}

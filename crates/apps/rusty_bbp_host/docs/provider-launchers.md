@@ -33,6 +33,18 @@ TOML MCP server carries the exact task/principal/turn environment. No global
 diffs when revising and submits artifacts through MCP. The authoritative BBP
 runner still applies and validates the candidate independently under confinement.
 
+A `"session": true` Codex launcher keeps one conversation per role (#432).
+Codex picks its own thread id, so the moderator captures it from the first
+turn's log (the first `thread.started` line, before any `item.*` or `turn.*`
+event) into `agents/<task hash>/session-<id>.provider`, and passes it to later
+turns as `BBP_PROVIDER_SESSION`. The first turn runs without `--ephemeral`;
+later turns run `codex exec <flags> -c ... resume <thread id> -- <prompt>`, with
+`--sandbox workspace-write` before `resume`. A resumed turn with no captured id
+is refused before Codex starts. Unconfined, the rollout stays in the host's
+`CODEX_HOME` until Codex or the user removes it (BBP does not prune it), and
+any process of the same user could alter it: use a confined launcher, whose
+role home is private, when that matters.
+
 Claude receives an empty working directory, `--tools ""`, `--restricted`,
 `--strict-mcp-config`, empty setting sources, disabled hooks/skills, no session
 persistence and `dontAsk` permissions with no interactive permission prompts.

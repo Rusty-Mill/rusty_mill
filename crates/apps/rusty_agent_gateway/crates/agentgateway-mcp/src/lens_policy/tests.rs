@@ -156,6 +156,16 @@ fn bad_files_are_refused_naming_the_file() {
             "schema = 1\nlens = \"x\"\nrole = \"builder\"\ngrants = 1\n",
             "`grants` must be a table",
         ),
+        (
+            "x.toml",
+            "schema = 1\nlens = \"x\"\nrole = \"builder\"\n[tools]\nallow = [\"*\"]\ndney = [\"github_merge_*\"]\n",
+            "unknown key `tools.dney`",
+        ),
+        (
+            "x.toml",
+            "schema = 1\nlens = \"x\"\nrole = \"builder\"\n[tools]\nallow = [\"*\"]\n[tools.deny]\nall = true\n",
+            "`tools.deny` must be a list of strings",
+        ),
     ];
     for (file, text, reason) in cases {
         let err =
@@ -163,6 +173,15 @@ fn bad_files_are_refused_naming_the_file() {
         assert_eq!(err.file, file);
         assert!(err.reason.contains(reason), "{text:?}: {err}");
     }
+}
+
+#[test]
+fn opaque_sections_may_hold_any_keys() {
+    let text = "schema = 1\nlens = \"x\"\nrole = \"builder\"\n[tools]\nallow = [\"a\"]\n\
+                [workspace]\nview = \"worktree\"\nanything = 1\n[skills]\nx = [\"y\"]\n\
+                [grants]\nz = { w = 1 }\n";
+    let loaded = LensPolicies::from_files([("x.toml".to_owned(), text.as_bytes().to_vec())]);
+    assert!(loaded.is_ok(), "{loaded:?}");
 }
 
 #[test]
