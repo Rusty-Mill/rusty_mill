@@ -4,6 +4,19 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Sandbox fs/shell server
+**2026-11-27**
+
+- `orch-fs-shell` gives a builder with no shell of its own (an API-only
+  model) files and commands in its session's worktree, over MCP: read,
+  list, stat, write and exec. A critic gets the same minus write.
+- It sandboxes nothing itself. A critic's commands still run with full
+  rights and can write files, so a read-only critic needs the jail around
+  it, and that isn't wired yet.
+- It refuses any path that leads outside the worktree, including through a
+  symlink, and caps each output at 1 MiB and each command at 10 minutes.
+- The gateway doesn't start it yet; that wiring needs one more setting.
+
 ## Canary on the released ref
 **2026-11-27**
 

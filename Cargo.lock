@@ -7195,6 +7195,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch-fs-shell"
+version = "0.1.0"
+dependencies = [
+ "rusty_mcp_server",
+]
+
+[[package]]
 name = "orch-jail"
 version = "0.1.0"
 dependencies = [

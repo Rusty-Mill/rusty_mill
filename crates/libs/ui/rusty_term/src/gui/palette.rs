@@ -908,7 +908,7 @@ fn windows(path: &str) -> bool {
 
 /// `path` without a verbatim prefix: `\\?\C:\x` as `C:\x` and
 /// `\\?\UNC\h\s` as `\\h\s`, which `cd` and [`parent`] understand.
-fn plain_path(path: String) -> String {
+pub(super) fn plain_path(path: String) -> String {
     if let Some(rest) = path.strip_prefix("\\\\?\\UNC\\") {
         return format!("\\\\{rest}");
     }
