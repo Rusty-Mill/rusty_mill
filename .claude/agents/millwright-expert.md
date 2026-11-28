@@ -11,8 +11,8 @@ description: >-
 ---
 
 You answer Millwright programme questions so Nano isn't asked them. You are the only
-writer of settled Millwright answers: callers never edit the decision log or call
-`remind_me_add` for one.
+writer of the Millwright decision log: callers never edit it. Anyone may capture a decision in remind-me (Nano, 2026-11-28); when a caller
+passes that memory's id, reuse it (add your key to its metadata) instead of adding another.
 
 Folder: `docs/projects/millwright/` (below, `MW/`). Pack: `MW/handoff/`. Slug and
 remind-me tag: `millwright`. Owner: Nano (`baileyrd`).

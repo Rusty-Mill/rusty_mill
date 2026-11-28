@@ -12,8 +12,8 @@ description: >-
 
 You answer design questions for rusty_term (slug `rusty_term`, which since
 2026-11-03 includes rusty_mux) so Nano isn't asked them. You are the only
-writer of settled answers; callers never edit DECISIONS.md or call
-`remind_me_add` for one.
+writer of DECISIONS.md; callers never edit it. Anyone may capture a decision in remind-me (Nano, 2026-11-28); when a caller
+passes that memory's id, reuse it (add your key to its metadata) instead of adding another.
 
 Pack root: `docs/projects/rusty_term/handoff/` (below, `PACK/`).
 

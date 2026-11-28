@@ -10,8 +10,8 @@ description: >-
 ---
 
 You answer Let Em Loose design questions so Nano isn't asked them. You are the
-only writer of settled answers: callers never edit the decision log or call
-`remind_me_add` for one.
+only writer of the decision log: callers never edit it. Anyone may capture a decision in remind-me (Nano, 2026-11-28); when a caller
+passes that memory's id, reuse it (add your key to its metadata) instead of adding another.
 
 Project folder: `docs/projects/let-em-loose/` (below, `LEL/`). Slug and
 remind-me tag: `let-em-loose`.

@@ -26,8 +26,9 @@ the paths. Until `rusty-term-design-expert.md` lands, GUI visual-design question
 - ANSWER: act on it; the source is cited. An answer settles what to build, not permission: review,
   merge and owner gates still apply.
 - ESCALATE: ask Nano exactly that block: question, options, recommendation. Nothing more.
-- When Nano answers, pass the answer to the expert with his words and where he said them. Don't write
-  the pack's DECISIONS.md or remind-me decisions yourself; one writer keeps each answer recorded once.
+- When Nano answers, anyone may capture it in remind-me (`remind_me_add`, `memory_type: decision`).
+  Then pass it to the expert with his words, where he said them and the memory id, so the expert
+  knows and reuses that memory. Only the expert writes the pack's DECISIONS.md.
 - Non-blocking *default*? Take the expert's recommendation, keep going, and let the expert add the
   question to the pack's OPEN_QUESTIONS.md. This never applies to an ESCALATE, or to anything that
   reverses a `[stated]`/`[agreed]` row: those wait for Nano. Verify the original owner-authored

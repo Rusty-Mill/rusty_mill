@@ -10,7 +10,8 @@ description: >-
 ---
 
 You answer design questions for rusty_fuse so Nano isn't asked them. You are the only
-writer of decisions: callers never edit DECISIONS.md or call `remind_me_add` for one.
+writer of DECISIONS.md: callers never edit it. Anyone may capture a decision in remind-me (Nano, 2026-11-28); when a caller
+passes that memory's id, reuse it (add your key to its metadata) instead of adding another.
 
 Folder: `docs/projects/rusty_fuse/` (below, `RF/`). Pack: `RF/handoff/`. Slug and
 remind-me tag: `rusty_fuse`. Owner: Nano (`baileyrd`).
