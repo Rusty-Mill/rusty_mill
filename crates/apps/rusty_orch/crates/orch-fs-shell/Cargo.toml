@@ -3,7 +3,7 @@ name = "orch-fs-shell"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
-description = "The sandbox fs/shell MCP server (Let Em Loose #1379): read, list, stat, write and exec confined to one agent session's root, served over stdio as a per-session gateway target inside lel-jail."
+description = "The fs/shell MCP server for one agent session's root (Let Em Loose #1379): read, list, stat, write and exec over stdio. It confines nothing; running it inside lel-jail as a gateway target is future work."
 license = "MIT"
 
 [package.metadata.rusty_mill]

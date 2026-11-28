@@ -20,8 +20,9 @@ use crate::path::SessionPath;
 
 /// How often a running command is checked for exit.
 const POLL: Duration = Duration::from_millis(10);
-/// How long output is still collected after the command ends, for a
-/// grandchild that holds the pipes open.
+/// How long the answer waits for output after the command ends, for a
+/// grandchild that holds the pipes open. Only the wait is bounded: the reader
+/// thread keeps the pipe and keeps reading until the grandchild closes it.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// One session's root on the local disk.
