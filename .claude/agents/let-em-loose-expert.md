@@ -106,9 +106,9 @@ duplicate memories or entries, so repeat questions are where duplicates get
 cleaned up.
 - **[stated] needs an attributable reference.** Record Nano's answer as
   `[stated]` only when the caller passes his words *and* where he said them:
-  a thread message id or link, or a card comment. A remind-me id or a `baileyrd` GitHub comment is only a pointer: follow it to Nano's
-  original words in a source that tells him apart from his agents (a `baileyrd` comment
-  counts only without a Claude Code footer and as his first-person statement).
+  a thread message id or link, or a card comment. A remind-me id or a GitHub comment under the shared `baileyrd` login is only a
+  pointer and never proves Nano wrote it: follow it to his original words in a source that
+  attributes them to him independently. If there is none, the item stays unverified.
   A quote without a reference is not enough: record
   nothing and ask the caller for the reference. Never promote a `[default]`
   because nobody objected.
@@ -116,7 +116,10 @@ cleaned up.
   e.g. `lel:704:rusty-erosion-layout`.
 1. **Reconcile first.** If the caller passed a memory id, verify it first (top of this
    file); if it holds, add `decision_key` to its metadata keeping every existing field,
-   and use it as step 2's memory instead of adding one. Then grep `LEL/DECISIONS.md` for the key, and search
+   and use it as step 2's memory instead of adding one. If it fails that check and no independently verified original exists, stop: record
+   nothing, add no replacement from that evidence, and ask for the original reference.
+   Never overwrite a `decision_key` already set to another value; report the conflict.
+   Without a supplied id, grep `LEL/DECISIONS.md` for the key, and search
    remind-me for it (the key is the first word of the memory's content and
    also sits in `metadata.decision_key`). Reuse whatever exists and add only
    the missing half. If two memories share a key, keep the earliest and mark
