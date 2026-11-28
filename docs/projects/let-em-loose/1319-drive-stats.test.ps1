@@ -237,6 +237,20 @@ try {
         Assert-Equal $threw $true 'a root given as a link is compared by its target'
         Assert-Equal (Test-Path -LiteralPath $real) $false 'nothing is written inside the linked root'
 
+        $threw = $false
+        try { Assert-DisjointRoots @($root, $rootLink) } catch { $threw = $true }
+        Assert-Equal $threw $true 'a root and a link to the same root are refused'
+        $threw = $false
+        try { Assert-DisjointRoots @($root, $link) } catch { $threw = $true }
+        Assert-Equal $threw $true 'a root and a link to a folder inside it are refused'
+        $threw = $false
+        try { Assert-DisjointRoots @($rootLink, $sub) } catch { $threw = $true }
+        Assert-Equal $threw $true 'a linked root and a folder inside its target are refused'
+        $apart = Join-Path $aliasHome 'apart'
+        New-Item -ItemType Directory -Path $apart | Out-Null
+        Assert-DisjointRoots @($rootLink, $apart)
+        Write-Host 'ok   a linked root and an unrelated folder are accepted'
+
         $okOut = Join-Path $aliasHome 'ok.json'
         Invoke-DriveStats -Roots $root -Out $okOut -TopExtensions 25 -MinExtensionCount 1 -SampleGroups 10
         Assert-Equal (Test-Path -LiteralPath $okOut) $true 'an ordinary folder outside the root is accepted'

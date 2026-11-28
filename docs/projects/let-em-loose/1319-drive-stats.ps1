@@ -17,7 +17,8 @@
   scanned roots is modified: the report must be a new file in an existing folder outside every root
   (an existing file or a path inside a root is refused, and the file is created exclusively, never
   overwritten). "Outside" is checked both as typed and with every symlink and junction along the
-  report folder and the roots resolved, so a link pointing into a root is refused. Not resolved:
+  report folder and the roots resolved, so a link pointing into a root is refused. Roots must not
+  contain or equal one another, checked the same two ways, so no tree is counted twice. Not resolved:
   bind mounts, subst drives, a mapped share of a local folder, and 8.3 short names; give the report
   an ordinary folder path, not one of those.
 
@@ -86,6 +87,10 @@ function Assert-DisjointRoots([string[]]$Roots) {
     $cmp = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
     $pair = Find-RootOverlap $full $cmp
     if ($null -ne $pair) { throw "Roots overlap: $($pair[0]) contains $($pair[1]). Give disjoint roots." }
+    # A root given through a symlink or junction is walked at its target, so compare targets too.
+    $real = @($Roots | ForEach-Object { Get-RealDirectory $_ })
+    $pair = Find-RootOverlap $real $cmp
+    if ($null -ne $pair) { throw "Roots overlap once links are resolved: $($pair[0]) contains $($pair[1]). Give disjoint roots." }
 }
 
 function Get-RealDirectory([string]$Path, [int]$Depth = 0) {
@@ -98,6 +103,7 @@ function Get-RealDirectory([string]$Path, [int]$Depth = 0) {
     $parts = $full.Substring($real.Length).Split([char[]]@('\', '/'), [System.StringSplitOptions]::RemoveEmptyEntries)
     foreach ($part in $parts) {
         $real = Join-Path $real $part
+        if (-not (Test-Path -LiteralPath $real)) { continue }
         $target = [System.IO.DirectoryInfo]::new($real).ResolveLinkTarget($true)
         if ($null -ne $target) { $real = Get-RealDirectory $target.FullName ($Depth + 1) }
     }
