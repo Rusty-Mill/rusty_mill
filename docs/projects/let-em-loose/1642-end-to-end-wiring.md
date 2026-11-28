@@ -1,6 +1,6 @@
 # #1642 Wire Let Em Loose end to end: scope and slices
 
-Status: draft for Nano's approval (D25). No code, no host change. The host choice (section 2) is waiting on Nano's answer to the decision card of 2026-11-28; this note is updated with it.
+Status: draft for Nano's approval (D25). No code, no host change. Host route chosen by Nano 2026-11-28 (D228): option (a) below.
 
 ## 1. Goal and what is already built
 
@@ -14,10 +14,10 @@ Built and merged:
 
 The gap: the live board (the claude.ai connector, on host `remindme`) has no BBP host, so its `inbox_list` answers "the inbox has no BBP host". The inbox board on BaileyAi is loopback only. That is by design (D175), so the missing piece is reach, not code.
 
-## 2. Where the inbox and BBP host live (Nano decides)
+## 2. Where the inbox and BBP host live (D228: option a)
 
-Options put to Nano, from let-em-loose-expert's escalation:
-- **a) Expose the BaileyAi inbox board as a second claude.ai connector (recommended).** No code change. claude.ai calls connectors from Anthropic's cloud, so tailnet-only is not enough: it needs Tailscale Funnel or a reverse proxy with HTTPS, the board's OAuth sign-in and `MILL_BOARD_ALLOWED_HOSTS`. rusty_term reaches it over the tailnet. Keeps D35, D132 and D175; adds no trust path into `orch-runner`. It is a host change on Nano's machine (ask-first, D128; D131 does not cover it).
+Nano picked (a) on 2026-11-28 (D228). The pick sets the route only; the BaileyAi exposure still needs his separate go-ahead naming that host change (D128, D224), asked for with slice 2. Options as put to him:
+- **a) Expose the BaileyAi inbox board as a second claude.ai connector (chosen).** No code change. claude.ai calls connectors from Anthropic's cloud, so tailnet-only is not enough: it needs Tailscale Funnel or a reverse proxy with HTTPS, the board's OAuth sign-in and `MILL_BOARD_ALLOWED_HOSTS`. rusty_term reaches it over the tailnet. Keeps D35, D132 and D175; adds no trust path into `orch-runner`. It is a host change on Nano's machine (ask-first, D128; D131 does not cover it).
 - **b) The live board on remindme gets a remote BBP path** (proxy to the BaileyAi board's API, or a new bbp transport). New design and a public API change; close to the remote path D175 rejected.
 - **c) Move the live board to BaileyAi.** One board for cards and inbox. Reverses D175.
 
@@ -29,16 +29,18 @@ Under (a) the live board's "no BBP host" error should name the inbox connector i
 
 One small PR or prompt each. Child cards under #1642.
 
-1. **This note** with Nano's host answer and design approval.
-2. **Deploy the chosen host**, as a paste-ready prompt for Nano (D94). Under (a): HTTPS exposure, OAuth and allowed hosts for the inbox board; the guard edit that admits `claims` (D220) so `lel_claims` stops answering "verb refused"; the #1551 anchor guard line and timer only if Nano authorises them in the same step (D224). Every BaileyAi change needs his authorisation by name.
+1. **This note** (PR #1964) with Nano's design approval.
+2. **Deploy the chosen host** (#1645), as a paste-ready prompt for Nano (D94). Under (a): HTTPS exposure, OAuth and allowed hosts for the inbox board; the guard edit that admits `claims` (D220) so `lel_claims` stops answering "verb refused"; the #1551 anchor guard line and timer only if Nano authorises them in the same step (D224). Every BaileyAi change needs his authorisation by name.
 3. **LEL tab read endpoints: finish.** Mostly done (D220). Left: #1416 slice 5 (PR #1961) and the later #1416 slices. Runs alongside 1 and 2; tracked on #1416, not duplicated here.
-4. **One end-to-end run.** No new paid run: the #1318 toy run is the only approved one (D167; `no_overage` lapses 2026-12-25). For #1642 its escalation must reach the reachable inbox and Nano approves it with `inbox_act` from claude.ai. Board seeding reuses `1166-seed-inbox.sh` and `1166-smoke-run.md`. Depends on #1318, slice 1 and slice 2; not on #1320 (not approved, D167).
+4. **One end-to-end run** (#1646). No new paid run: the #1318 toy run is the only approved one (D167; `no_overage` lapses 2026-12-25). For #1642 its escalation must reach the reachable inbox and Nano approves it with `inbox_act` from claude.ai. Board seeding reuses `1166-seed-inbox.sh` and `1166-smoke-run.md`. Depends on #1318, slice 1 and slice 2; not on #1320 (not approved, D167).
 
-## 4. Open points (to let-em-loose-expert before slice 4)
+## 4. Open points
+
+The first two are with Nano (decision card of 2026-11-28). The expert recommends a separate $0 run in `/srv/lel/bbp` seeded with `1166-seed-inbox.sh`, leaving #1318 and the guard unchanged; the alternatives amend D167's runbook or widen D132's guard.
 
 - The toy run makes its own BBP dir and leaves `/srv/lel/bbp` and the inbox board untouched (`1318-toy-run.md` step 5), while the inbox board's guard allows only `/srv/lel/bbp`. Slice 4 needs either the toy task opened in `/srv/lel/bbp` or a read-back that points the inbox at it. Either touches an approved runbook.
 - The toy claim needs an escalation for Nano to approve; the runbook's pass rule does not require one.
-- Whether any lens run on the path is a paid call stays ask-first.
+- Paid calls: only the single #1318 toy run is approved (D167); any other paid call is ask-first.
 
 ## 5. Out of scope
 
