@@ -10,8 +10,8 @@
   -SampleHash opts in to hashing a random sample of same-size groups, to estimate how many paths have a
   byte-identical sibling. It needs -MaxHashBytes, a read budget the caller picks: whole groups are
   chosen against the metadata from the first pass until the budget is used, the projected read is
-  printed and reported, and the budget is enforced inside the read loop itself: every read is charged
-  before it is issued, including reads that fail, and a file that grows, ends early or fails is counted
+  printed and reported, and the budget is enforced inside the read loop itself: every read request is
+  charged in full before it is issued and never refunded, including short, probe and failed reads, and a file that grows, ends early or fails is counted
   apart and never matched. The cap counts bytes the script requests; files are opened unbuffered so
   .NET adds no read-ahead, but the operating system may still prefetch beyond a read. Hashes stay in memory; only counts are written. Nothing on the
   scanned roots is modified.
@@ -52,6 +52,17 @@ function Get-RootKind([string]$root) {
     $drive = [System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($root))
     if ($drive.DriveType -eq [System.IO.DriveType]::Network) { return 'network' }
     return 'local'
+}
+
+function Assert-DisjointRoots([string[]]$Roots) {
+    # Overlapping roots (D:\ and D:\Photos) would visit files twice and invent duplicates; refuse them.
+    $full = @($Roots | ForEach-Object { [System.IO.Path]::TrimEndingDirectorySeparator([System.IO.Path]::GetFullPath($_)) + [System.IO.Path]::DirectorySeparatorChar })
+    $cmp = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+    for ($i = 0; $i -lt $full.Count; $i++) {
+        for ($j = 0; $j -lt $full.Count; $j++) {
+            if ($i -ne $j -and $full[$j].StartsWith($full[$i], $cmp)) { throw "Roots overlap: $($Roots[$i]) contains $($Roots[$j]). Give disjoint roots." }
+        }
+    }
 }
 
 function Select-HashBudget {
@@ -111,8 +122,10 @@ function Find-GroupMembers([string[]]$Roots, [System.Collections.Generic.HashSet
 function Read-BoundedHash {
     <#
       Hashes one stream, reading at most $Expected + 1 bytes and never past the shared budget.
-      Every read is charged before it is issued (the whole request), and the unused part refunded after,
-      so a read that throws stays charged. After $Expected bytes it reads 1 more byte to detect growth.
+      Every read request is charged in full before it is issued and never refunded: a short read, an EOF
+      probe and a read that throws all stay charged, so the budget bounds the bytes the loop requests.
+      Bytes actually returned are counted apart. After $Expected bytes it requests 1 more byte to detect
+      growth.
       Status: ok (exactly $Expected bytes; Hash set), changed (more bytes), incomplete (fewer bytes),
       failed (a read threw), budget (the budget would be exceeded; nothing more is read).
     #>
@@ -125,9 +138,9 @@ function Read-BoundedHash {
             $probe = $got -ge $Expected
             $want = if ($probe) { 1 } else { [int][math]::Min($ChunkBytes, $Expected - $got) }
             if ($Budget.remaining -lt $want) { return @{ Status = 'budget' } }
-            $Budget.remaining -= $want; $Budget.read += $want
+            $Budget.remaining -= $want; $Budget.requested += $want
             $n = $Stream.Read($buf, 0, $want)
-            $Budget.remaining += $want - $n; $Budget.read -= $want - $n
+            $Budget.returned += $n
             if ($probe) {
                 if ($n -gt 0) { return @{ Status = 'changed' } }
                 return @{ Status = 'ok'; Hash = [System.Convert]::ToHexString($sha.GetHashAndReset()) }
@@ -156,10 +169,10 @@ function Measure-HashGroups {
         # read that reaches the OS. Operating-system readahead below that is outside the script's control.
         [scriptblock]$Open = { param([string]$p) [System.IO.FileStream]::new($p, 'Open', 'Read', 'ReadWrite', 1) }
     )
-    $budget = @{ remaining = $MaxBytes; read = 0L }
+    $budget = @{ remaining = $MaxBytes; requested = 0L; returned = 0L }
     $stats = [ordered]@{ groups_hashed = 0; groups_skipped_budget = 0; budget_exhausted = $false;
         files_hashed = 0L; files_changed = 0L; files_incomplete = 0L; files_failed = 0L;
-        bytes_read = 0L; path_duplicate_files = 0L; path_duplicate_bytes = 0L }
+        bytes_requested = 0L; bytes_returned = 0L; path_duplicate_files = 0L; path_duplicate_bytes = 0L }
     foreach ($size in ($Members.Keys | Sort-Object)) {
         $paths = $Members[$size]
         if ($paths.Count -lt 2) { continue }
@@ -186,7 +199,7 @@ function Measure-HashGroups {
         }
         if ($stats.budget_exhausted) { break }
     }
-    $stats.bytes_read = $budget.read
+    $stats.bytes_requested = $budget.requested; $stats.bytes_returned = $budget.returned
     return $stats
 }
 
@@ -201,6 +214,7 @@ function Invoke-DriveStats {
         [switch]$SampleHash, [long]$MaxHashBytes, [int]$SampleGroups, [System.Random]$Rng = [System.Random]::new())
     if (-not $Roots) { throw 'Give -Roots, e.g. -Roots D:\,\\nas\share' }
     if ($SampleHash -and $MaxHashBytes -le 0) { throw '-SampleHash needs -MaxHashBytes, a read budget such as 20GB' }
+    Assert-DisjointRoots $Roots
 
     $reparse = [System.IO.FileAttributes]::ReparsePoint
     $sizeFiles = @{}; $sizeBytes = @{}; $depthHist = @{}; $fanHist = @{}; $extCount = @{}
