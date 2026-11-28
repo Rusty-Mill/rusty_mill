@@ -184,6 +184,9 @@ jobs:
       - run: bash docs/projects/let-em-loose/1092-board-lib.test.sh
       # The #1318 toy-run launch verdict against fixture rows (bash and jq only).
       - run: bash docs/projects/let-em-loose/1318-toy-verdict.test.sh
+      # The #1319 drive-stats script on temporary synthetic fixtures only: no real drive or NAS
+      # (pwsh is preinstalled on GitHub-hosted Ubuntu; Windows path forms are tested as strings).
+      - run: pwsh -NoProfile -File docs/projects/let-em-loose/1319-drive-stats.test.ps1
 
   claude-hooks:
     # The remind-me cloud capture hook (.claude/hooks) is stdlib-only Python and its
