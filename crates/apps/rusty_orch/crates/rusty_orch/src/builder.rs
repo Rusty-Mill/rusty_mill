@@ -25,6 +25,8 @@ use crate::args::ArgsError;
 
 #[cfg(target_os = "linux")]
 pub mod live;
+#[cfg(target_os = "linux")]
+pub mod token;
 
 /// The builder's BBP seat and mux `agent` (#1571 §2).
 pub const AGENT: &str = "claude-builder";
@@ -35,7 +37,7 @@ pub const SUBMIT: &str = ".lel/submit";
 /// How long a save waits for another process's store lock.
 const LOCK_WAIT: Duration = Duration::from_secs(30);
 
-pub const USAGE: &str = "usage: rusty_orch builder run <config.json> --bbp <bbp binary> --dir <bbp dir> --task <task>\n           --claim <id> --state <orch state dir> --repo <git repo> --base <commit>\n           --cgroup-parent <dir> --slots <dir> --mux-ctl <rusty-mux-ctl> [--mux-socket <path>]\n           [--jail <lel-jail>] [--read <dir>]...\n\nRun one builder session on one claim (#1318): admit it, make its worktree from --base,\nopen its cgroup below --cgroup-parent, take an agent slot from --slots, launch\n`lel-jail` running `claude-code-acp` in a mux block, run one ACP turn, end it and post\nits candidate only when it wrote .lel/submit with a non-empty diff (D188). Prints the\nsession row as one JSON line. --cgroup-parent is the board's `lel-store-<scope>`\ncgroup (`bbp cgroup-scope`), delegated to this user. Each --read adds a read root to the jail. Linux only.\nCalls the Claude CLI under its own subscription login.\n\n`rusty_orch builder sessions --help` prints the read-only command that lists saved sessions.";
+pub const USAGE: &str = "usage: rusty_orch builder run <config.json> --bbp <bbp binary> --dir <bbp dir> --task <task>\n           --claim <id> --state <orch state dir> --repo <git repo> --base <commit>\n           --cgroup-parent <dir> --slots <dir> --mux-ctl <rusty-mux-ctl> [--mux-socket <path>]\n           [--jail <lel-jail>] [--read <dir>]...\n           [--token-key <pem> --token-kid <kid> --lens-policy <lens>.toml]\n\nRun one builder session on one claim (#1318): admit it, make its worktree from --base,\nopen its cgroup below --cgroup-parent, take an agent slot from --slots, launch\n`lel-jail` running `claude-code-acp` in a mux block, run one ACP turn, end it and post\nits candidate only when it wrote .lel/submit with a non-empty diff (D188). Prints the\nsession row as one JSON line. --cgroup-parent is the board's `lel-store-<scope>`\ncgroup (`bbp cgroup-scope`), delegated to this user. Each --read adds a read root to the jail. With\n--token-key, --token-kid and --lens-policy (all three or none), orch mints the session's\ngateway token, signed with the key and bound to the lens policy, and the jail hands it to\nthe agent in LEL_TOKEN; without them the session has no token. Linux only.\nCalls the Claude CLI under its own subscription login.\n\n`rusty_orch builder sessions --help` prints the read-only command that lists saved sessions.";
 
 pub const SESSIONS_USAGE: &str = "usage: rusty_orch builder sessions <config.json> --dir <bbp dir> --task <task>\n           --state <orch state dir> [--claim <id>]\n\nPrint the builder sessions the orch store holds for the board (--dir, --task), one\nJSON line each in `builder run`'s row shape without notes, ordered by claim and n;\n--claim keeps one claim's. Read-only (D199): it makes and writes no file. An empty\n--state directory (no store yet) prints nothing. It fails when --state is not a\ndirectory, or holds a store that is partial, corrupt or stays locked.";
 
@@ -67,9 +69,22 @@ pub struct Options {
     pub jail: PathBuf,
     /// Read roots beyond the system ones and `~/.claude`.
     pub read: Vec<PathBuf>,
+    /// The session token's inputs (#1382, D233); `None` launches token-less.
+    pub token: Option<TokenFlags>,
 }
 
-const FLAGS: [&str; 13] = [
+/// `--token-key`, `--token-kid` and `--lens-policy`, given together (D233).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenFlags {
+    /// orch's P-256 PKCS#8 PEM signing key.
+    pub key: PathBuf,
+    /// The key's id in the gateway's JWKS.
+    pub kid: String,
+    /// The builder lens's policy file, `<lens>.toml`.
+    pub policy: PathBuf,
+}
+
+const FLAGS: [&str; 16] = [
     "--bbp",
     "--dir",
     "--task",
@@ -83,6 +98,9 @@ const FLAGS: [&str; 13] = [
     "--mux-socket",
     "--jail",
     "--read",
+    "--token-key",
+    "--token-kid",
+    "--lens-policy",
 ];
 
 /// Parse `run <config> --bbp … --claim … --mux-ctl …`.
@@ -123,7 +141,32 @@ pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsEr
         mux_socket: take("--mux-socket").map(PathBuf::from),
         jail: take("--jail").map_or_else(|| PathBuf::from("lel-jail"), PathBuf::from),
         read,
+        token: token_flags(
+            take("--token-key"),
+            take("--token-kid"),
+            take("--lens-policy"),
+        )?,
     })
+}
+
+/// All three token flags or none (D233): a partial set is a usage error, not
+/// a silently token-less launch.
+fn token_flags(
+    key: Option<String>,
+    kid: Option<String>,
+    policy: Option<String>,
+) -> Result<Option<TokenFlags>, ArgsError> {
+    match (key, kid, policy) {
+        (None, None, None) => Ok(None),
+        (Some(key), Some(kid), Some(policy)) => Ok(Some(TokenFlags {
+            key: key.into(),
+            kid,
+            policy: policy.into(),
+        })),
+        _ => Err(ArgsError::Usage(
+            "--token-key, --token-kid and --lens-policy go together".into(),
+        )),
+    }
 }
 
 /// Parse `sessions <config> --dir … --task … --state … [--claim …]`.
