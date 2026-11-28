@@ -6,8 +6,16 @@ This page is the order to do things in and what to look at. Decisions: D167 (one
 (when a candidate is posted), D197 (runbook defaults), D199 (`builder sessions`).
 
 **Where each step runs.** BaileyAi runs Fedora, so every command below is bash on BaileyAi, as
-`baileyrd`, unless it says **PowerShell**. Windows is only used to ssh in and to copy the results
-back.
+`baileyrd`, unless it says **PowerShell**. Windows is only used to ssh in.
+
+**Checks versus host changes.** Most steps only read state. A few change the host for longer than
+the run and are marked **host change**: installing binaries under `/opt/lel/<sha>`, installing
+`claude-code-acp`, and turning on lingering. None of them is approved by this page or by the PR it
+came in: each one needs your own separate OK at the time, and if you don't give it, stop there.
+
+**What to share.** Never upload `~/toy-1318/out` whole or a raw log. When something needs a look,
+send only the excerpt asked for, after checking it holds no account names, email addresses, tokens,
+keys or private paths. Part F lists what the verdict needs.
 
 **Deadline.** The Claude `no_overage` assertion lapses on 2026-12-25. Run before then, or re-date
 it first.
@@ -23,10 +31,9 @@ it first.
    ```bash
    loginctl show-user "$USER" -p Linger
    ```
-   If it says `Linger=no`, turn it on (keeps your user units running after you log out):
-   ```bash
-   loginctl enable-linger "$USER"
-   ```
+   If it says `Linger=yes`, carry on. If it says `Linger=no`, **stop here**. Turning lingering on
+   (`loginctl enable-linger`) is a persistent **host change**, so it waits for your separate OK.
+   Without it, keep the ssh session and tmux open for the whole paid run.
 3. Go to your checkout and put it on current `main` with no local changes (adjust the path if your
    clone lives elsewhere).
    ```bash
@@ -37,24 +44,21 @@ it first.
    ```bash
    command -v claude-code-acp && npm ls -g --depth=0 | grep claude-code-acp
    ```
-   If nothing prints, install it (pin the version you want; the script records it but never
-   installs it):
-   ```bash
-   npm install -g @zed-industries/claude-code-acp
-   ```
-5. Check `claude` is logged in as the account in your assertion, and the assertion is still dated
-   within 30 days.
+   If nothing prints, **stop here**. Installing it (`npm install -g` of the pinned version you
+   choose, D197 item 5) is a **host change** that waits for your separate OK. The script records
+   the version but never installs it.
+5. Check `claude` is logged in as the account in your assertion. This prints the account on your
+   screen only; don't paste it anywhere. The script checks the assertion's date itself in step 2.
    ```bash
    claude auth status
-   sudo jq '.' /etc/let-em-loose/assertions.json
    ```
 6. **Pass 0, build.** Start the script once in tmux. On the first run for this commit it builds the
    five binaries, prints three `sudo install` lines and exits without touching anything else.
    ```bash
    tmux new -s toy 'bash docs/projects/let-em-loose/1318-toy-run.sh; exec bash'
    ```
-7. Copy the three printed `sudo` lines and run them (in the same tmux window is fine). They only
-   create `/opt/lel/<sha>/bin`; `/opt/lel/current` is not touched.
+7. The three printed `sudo` lines are a **host change**: they create `/opt/lel/<sha>/bin` (and
+   leave `/opt/lel/current` alone). With your separate OK, run them; otherwise stop here.
 8. Leave tmux: type `exit`.
 
 ## Part B. The free handshake (pass 1, no model call)
@@ -75,13 +79,13 @@ The script's step 4 starts `claude-code-acp` under `lel-jail` with the builders'
      and **`handshake ok`**
 3. At `Type RUN to make the task and start the two paid builders`, type `no` and press Enter. It
    prints `STOP: not confirmed: nothing was made and nothing paid ran`.
-4. Keep a copy of the handshake output (pass 2 starts by clearing `~/toy-1318`), and check the mux
-   unit stopped.
+4. Confirm the handshake passed and the mux unit stopped.
    ```bash
-   cp ~/toy-1318/out/handshake.txt ~/toy-1318-handshake.txt
+   grep -x 'handshake ok' ~/toy-1318/out/handshake.txt
    systemctl --user is-active lel-toy-1318-mux
    ```
-   The second command must print `inactive`.
+   The first must print `handshake ok` and the second `inactive`. Pass 2 starts by clearing
+   `~/toy-1318`, so note the result now; there is no need to keep or share the raw file.
 5. Leave tmux: type `exit`.
 
 **Pass:** `handshake ok` appeared and the unit is `inactive`. This also shows the first half of the
@@ -181,26 +185,33 @@ tmux new -s toy 'TOY_TASK=toy-1318b bash docs/projects/let-em-loose/1318-toy-run
 | `claude is not logged in as the asserted account` | Run `claude` and log in as that account, then check `claude auth status`. |
 | `the systemd user manager has an ANTHROPIC_ variable` | `systemctl --user unset-environment ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN` |
 | `lel-toy-1318-mux is already running` | `systemctl --user stop lel-toy-1318-mux` |
-| `the mux server never bound` | `journalctl --user -u lel-toy-1318-mux -n 50` and send Claude the output. |
-| `... is not delegated to baileyrd` | Your user manager isn't giving the unit a delegated cgroup. Send Claude `systemctl --user show -P ControlGroup lel-toy-1318-mux`. |
-| `the jailed handshake failed` | Read `~/toy-1318/out/handshake.txt`. If `lel-jail stderr` shows a refused write under `~/.claude`, **don't work around it**: a writable `~/.claude` root would change D166, so it comes back to you as a decision. Send Claude the file. |
-| `the claim was refused` / `bbp open was refused` / `rusty_orch builder sessions failed on the empty store` | Still unpaid. Send Claude `~/toy-1318/out`, then retry with `TOY_TASK=toy-1318b`. |
+| `the mux server never bound` | Read `journalctl --user -u lel-toy-1318-mux -n 50` yourself. Send Claude only the error line(s), checked as in "What to share". |
+| `... is not delegated to baileyrd` | Your user manager isn't giving the unit a delegated cgroup. Send Claude just the `STOP:` line. |
+| `the jailed handshake failed` | Read `~/toy-1318/out/handshake.txt` yourself. If `lel-jail stderr` shows a refused write under `~/.claude`, **don't work around it**: a writable `~/.claude` root would change D166, so it comes back to you as a decision. Send Claude only the `STOP:` line and the one error line from `lel-jail stderr` or `jail status`, with any account or private path replaced by `<redacted>`. |
+| `the claim was refused` / `bbp open was refused` / `rusty_orch builder sessions failed on the empty store` | Still unpaid. Send Claude the `STOP:` line and the error line above it, then retry with `TOY_TASK=toy-1318b`. |
 
 **After `RUN` (step 6 started): don't rerun.** D167 approved one run. A `LAUNCH FAIL` keeps
-everything, prints one `FAIL:` line per reason, and exits 1. Send the output (Part F) and Claude
-works out what happened from it. If your ssh drops, the builders keep going: reconnect and run
+everything, prints one `FAIL:` line per reason, and exits 1. Send the excerpts in Part F, plus the `FAIL:`
+lines, and Claude works out what happened; it asks for any further excerpt by name. If your ssh drops, the builders keep going: reconnect and run
 `tmux attach -t toy`.
 
 ## Part F. Send the results back
 
-1. Pack the output dir (plus the handshake copy from Part B).
+Send only these, as text pasted into the thread, after checking each as in "What to share":
+
+1. The last three lines of the script log (the `LAUNCH PASS` or `LAUNCH FAIL` line and any `FAIL:`
+   lines above it).
    ```bash
-   tar czf ~/toy-1318-out.tgz -C ~ toy-1318/out toy-1318-handshake.txt
+   tail -n 3 ~/toy-1318/out/script-*.log
    ```
-2. **PowerShell:** copy it to Windows.
-   ```powershell
-   scp baileyrd@192.168.10.104:toy-1318-out.tgz "$HOME\Downloads\"
+2. The two persisted session rows and the two stdout rows.
+   ```bash
+   cat ~/toy-1318/out/sessions.jsonl ~/toy-1318/out/row-1.json ~/toy-1318/out/row-2.json
    ```
-3. Attach `toy-1318-out.tgz` in the thread. Claude then records the result in `1318-toy-run.md`
-   by PR, in remind-me and on card #1318 (D197 item 6). Whether #1320 goes ahead stays your call
-   (D167).
+3. Your answer to criteria 1 and 3: whether you saw both `agent:` blocks, and whether both
+   `acp.log`s read as text. Don't paste the logs themselves; Claude asks for a named excerpt if one
+   is needed.
+
+Everything else stays on BaileyAi under `~/toy-1318/out`. Claude then records the result in
+`1318-toy-run.md` by PR, in remind-me and on card #1318 (D197 item 6). Whether #1320 goes ahead
+stays your call (D167).
