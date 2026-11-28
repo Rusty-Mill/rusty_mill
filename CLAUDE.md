@@ -28,7 +28,7 @@ the paths. Until `rusty-term-design-expert.md` lands, GUI visual-design question
 - ESCALATE: ask Nano exactly that block: question, options, recommendation. Nothing more.
 - When Nano answers, anyone may capture it in remind-me (`remind_me_add`, `memory_type: decision`).
   Then pass it to the expert with his words, where he said them and the memory id, so the expert
-  knows and reuses that memory. Only the expert writes the pack's DECISIONS.md.
+  can verify and reuse that memory. Only the expert writes the pack's DECISIONS.md.
 - Non-blocking *default*? Take the expert's recommendation, keep going, and let the expert add the
   question to the pack's OPEN_QUESTIONS.md. This never applies to an ESCALATE, or to anything that
   reverses a `[stated]`/`[agreed]` row: those wait for Nano. Verify the original owner-authored
