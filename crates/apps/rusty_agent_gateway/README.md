@@ -165,8 +165,23 @@ server. It closes when the client ends the session (`DELETE`), when the session
 goes idle, or after 15 minutes unused. **A target with no `mode` is
 `per_session`**: it is the safe reading for a server nobody said is stateless,
 and `--check` lists every target that took it. Calls, prompt gets and resource
-reads are keyed; listings use the target's first connection. Clients with
-neither a session nor a token have no identity to keep apart and share one key.
+reads are keyed; listings use the target's first connection.
+
+The session is the one the MCP server validated for the request (known, live,
+opened by the same principal), never the raw `Mcp-Session-Id` header. **A call
+with no session** (a stateless 2026-07-28 request, or a classic one that names
+none) gets an upstream of its own for that call alone, opened with the call and
+closed after it. Nothing it leaves behind reaches another call, the same
+principal's included. A client that needs state across calls opens a classic
+session; a server that keeps none should be `mode: pooled` (or
+`per_credential`), which share upstreams on purpose and are never chosen by
+default.
+
+Once a session ends, a call admitted just before the end opens no new upstream
+for it, and calls queued on its upstream are refused; a call already running
+finishes within its timeout, and its connection is then closed. An upstream a
+call is still using is never closed for being idle, and an idle one closes on a
+timer, whether or not anyone calls the target again.
 
 ### Lens policies
 

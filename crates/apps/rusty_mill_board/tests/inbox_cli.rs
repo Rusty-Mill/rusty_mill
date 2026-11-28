@@ -280,3 +280,110 @@ fn a_failing_claims_host_reports_its_stderr() {
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     assert!(matches!(cli.claims("C1"), Err(InboxError::Host(m)) if m.contains("claims.json")));
 }
+
+/// A stand-in `bbp` whose `verify` runs `body` (shell), in a fresh dir.
+fn verifier(tag: &str, body: &str) -> (PathBuf, MutexGuard<'static, ()>) {
+    let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let dir = std::env::temp_dir().join(format!("mill_verify_{}_{tag}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("bbp");
+    fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    (bin, serial)
+}
+
+const HEAD: &str =
+    r#"echo '{"lines":3,"unchained":0,"head":"ab","partial":false,"expect_found":null}'"#;
+
+/// A stand-in whose `verify` for task C1 runs `stuck`, and for any other task answers a head.
+fn stuck_on_c1(tag: &str, stuck: &str) -> (BbpCli, MutexGuard<'static, ()>) {
+    let (bin, serial) = verifier(
+        tag,
+        &format!("case \"$*\" in *'--task C1'*) {stuck};; esac\n{HEAD}"),
+    );
+    let cli = BbpCli::new(bin, "/srv/bbp".into())
+        .with_verify_deadline(std::time::Duration::from_millis(200));
+    (cli, serial)
+}
+
+/// `C1` fails fast as a host error, never a refusal, and `C2` still verifies right after.
+fn assert_bounded_then_next_task_runs(cli: &BbpCli, expect: &str) {
+    let started = std::time::Instant::now();
+    match cli.verify("C1", None) {
+        Err(InboxError::Host(m)) => assert!(m.contains(expect), "{m}"),
+        other => panic!("a stuck host is operational, not a refusal: {other:?}"),
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "it did not wait"
+    );
+    let next = cli.verify("C2", None).unwrap().unwrap();
+    assert_eq!(next.head, "ab");
+}
+
+#[test]
+fn a_stuck_verify_is_killed_at_its_deadline_and_the_next_task_still_verifies() {
+    let (cli, _serial) = stuck_on_c1("stuck", "exec sleep 30");
+    assert_bounded_then_next_task_runs(&cli, "timed out");
+}
+
+#[test]
+fn a_grandchild_holding_the_output_past_the_deadline_blocks_nothing() {
+    // As under the guard's sudo: killing the direct child leaves a process on the output.
+    let (cli, _serial) = stuck_on_c1("grandchild", "sleep 3 & wait");
+    assert_bounded_then_next_task_runs(&cli, "timed out");
+}
+
+#[test]
+fn a_wrapper_that_exits_while_a_grandchild_holds_stdout_is_bounded_by_the_deadline() {
+    // A clean exit is not EOF: the background `sleep` keeps stdout open past the deadline.
+    let (cli, _serial) = stuck_on_c1("held", "sleep 3 & exit 0");
+    assert_bounded_then_next_task_runs(&cli, "timed out");
+}
+
+#[test]
+fn endless_output_is_refused_at_the_cap_without_storing_it() {
+    let (cli, _serial) = stuck_on_c1("flood", "exec yes");
+    assert_bounded_then_next_task_runs(&cli, "over");
+}
+
+#[test]
+fn a_flood_on_stderr_is_drained_and_capped_and_never_stalls_the_answer() {
+    let (bin, _serial) = verifier(
+        "errflood",
+        &format!("head -c 1000000 /dev/zero >&2\n{HEAD}"),
+    );
+    let cli =
+        BbpCli::new(bin, "/srv/bbp".into()).with_verify_deadline(std::time::Duration::from_secs(5));
+    assert_eq!(cli.verify("C2", None).unwrap().unwrap().head, "ab");
+}
+
+#[test]
+fn verify_reads_a_head_and_records_a_refusal() {
+    let (bin, _serial) = verifier(
+        "answers",
+        r#"case "$*" in *--expect*) echo 'bbp: expected head not found' >&2; exit 1;; esac
+echo '{"lines":3,"unchained":0,"head":"ab","partial":false,"expect_found":null}'"#,
+    );
+    let cli = BbpCli::new(bin, "/srv/bbp".into());
+    let ok = cli.verify("C1", None).unwrap().unwrap();
+    assert_eq!((ok.lines, ok.unchained, ok.head.as_str()), (3, 0, "ab"));
+    let refused = cli
+        .verify("C1", Some(&"0".repeat(64)))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused, "expected head not found");
+}
+
+#[test]
+fn a_stderr_stream_that_never_runs_dry_still_meets_the_deadline() {
+    let (cli, _serial) = stuck_on_c1("errendless", "exec yes >&2");
+    assert_bounded_then_next_task_runs(&cli, "timed out");
+}
+
+#[test]
+fn endless_stdout_beside_endless_stderr_is_refused_at_the_cap() {
+    let (cli, _serial) = stuck_on_c1("bothendless", "yes >&2 & exec yes");
+    assert_bounded_then_next_task_runs(&cli, "over");
+}

@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use agentgateway_config::{McpTarget, McpTargetKind, StreamableHttpTarget, UpstreamMode};
 use agentgateway_mcp::{HeaderOverride, Override, SessionKey, Target};
+use rusty_mcp_server::ClassicSession;
 use rusty_mcp_server::json::Value;
 use rusty_mcp_server::proto::{
     CallToolParams, CallToolResult, ContentBlock, ErrorData, ProtocolVersion, Tool,
@@ -376,14 +377,22 @@ fn a_lazily_opened_connection_handshakes_within_the_operation_budget() {
 }
 
 fn as_session(session: &str, sub: &str) -> SessionKey {
+    in_session(&ClassicSession::new(session), sub)
+}
+
+fn in_session(session: &ClassicSession, sub: &str) -> SessionKey {
     SessionKey::new(
         Some(session),
         Some(&serde_json::json!({"iss": "lel-orch@test", "sub": sub})),
     )
 }
 
+fn plain_builder() -> ServerBuilder {
+    Server::builder("plain", "1").tool(Tool::new("t", schema()), |_c, _p| Ok(text("ok")))
+}
+
 fn plain() -> Up {
-    serve(Server::builder("plain", "1").tool(Tool::new("t", schema()), |_c, _p| Ok(text("ok"))))
+    serve(plain_builder())
 }
 
 #[test]
@@ -435,6 +444,149 @@ fn per_session_upstreams_close_when_idle() {
         .call(&call("t"), &none, &as_session("s2", "a"))
         .unwrap();
     assert_eq!(target.sessions(), 1, "s1 went idle and was closed");
+}
+
+#[test]
+fn a_call_admitted_before_its_session_ended_opens_nothing_after() {
+    let up = plain();
+    let target = target_in(&up, UpstreamMode::PerSession, 8, Duration::from_secs(5));
+    let none = HeaderOverride::default();
+    // Admitted while live; the session ends before the call reaches a pool.
+    let s1 = ClassicSession::new("s1");
+    let admitted = in_session(&s1, "a");
+    s1.end();
+    assert_eq!(target.end_session("s1"), 0, "nothing was open yet");
+
+    let late = target.call(&call("t"), &none, &admitted);
+    assert!(late.is_err(), "an ended session gets no new upstream");
+    assert_eq!(target.sessions(), 0);
+
+    target
+        .call(&call("t"), &none, &as_session("s2", "a"))
+        .unwrap();
+    let stateless = SessionKey::new(None, Some(&serde_json::json!({"sub": "a"})));
+    target.call(&call("t"), &none, &stateless).unwrap();
+    assert_eq!(
+        target.sessions(),
+        1,
+        "other sessions go on; a stateless call keeps no upstream"
+    );
+}
+
+#[test]
+fn a_pool_in_use_is_not_closed_for_being_idle() {
+    let up = serve(slow_tool(plain_builder(), 500));
+    let target = Arc::new(
+        target_in(&up, UpstreamMode::PerSession, 8, Duration::from_secs(5))
+            .with_session_idle(Duration::from_millis(100)),
+    );
+    let busy = {
+        let target = Arc::clone(&target);
+        std::thread::spawn(move || {
+            target.call(
+                &call("slow"),
+                &HeaderOverride::default(),
+                &as_session("s1", "a"),
+            )
+        })
+    };
+    std::thread::sleep(Duration::from_millis(250)); // past idle, s1 still busy
+    target
+        .call(
+            &call("t"),
+            &HeaderOverride::default(),
+            &as_session("s2", "a"),
+        )
+        .unwrap();
+    assert_eq!(target.sessions(), 2, "s1's call still holds its upstream");
+    assert!(busy.join().unwrap().is_ok());
+}
+
+#[test]
+fn an_idle_upstream_closes_with_no_further_calls() {
+    let up = plain();
+    let target = target_in(&up, UpstreamMode::PerSession, 8, Duration::from_secs(5))
+        .with_session_idle(Duration::from_millis(100));
+    target
+        .call(
+            &call("t"),
+            &HeaderOverride::default(),
+            &as_session("s1", "a"),
+        )
+        .unwrap();
+    assert_eq!(target.sessions(), 1);
+    let until = Instant::now() + Duration::from_secs(3);
+    while target.sessions() > 0 && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(target.sessions(), 0, "the reaper closed it on its own");
+}
+
+#[test]
+fn ending_a_session_refuses_the_calls_queued_on_it() {
+    let up = serve(slow_tool(plain_builder(), 600));
+    let target = Arc::new(target_in(
+        &up,
+        UpstreamMode::PerSession,
+        8,
+        Duration::from_secs(5),
+    ));
+    let on_s1 = |tool: &'static str| {
+        let target = Arc::clone(&target);
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = target.call(
+                &call(tool),
+                &HeaderOverride::default(),
+                &as_session("s1", "a"),
+            );
+            (result, started.elapsed())
+        })
+    };
+    let running = on_s1("slow");
+    std::thread::sleep(Duration::from_millis(150)); // it holds s1's one connection
+    let queued = on_s1("t");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(target.end_session("s1"), 1);
+
+    let (result, took) = queued.join().unwrap();
+    assert!(result.is_err(), "a queued call is refused at teardown");
+    assert!(
+        took < Duration::from_millis(400),
+        "refused at once: {took:?}"
+    );
+    let (result, _) = running.join().unwrap();
+    assert!(
+        result.is_ok(),
+        "the running call finishes within its timeout"
+    );
+    assert_eq!(target.sessions(), 0);
+}
+
+#[test]
+fn a_connection_dialled_after_teardown_is_not_used() {
+    // The first handshake is quick; every later one takes 1.2 s, so s1's
+    // connection is still dialling when its session ends.
+    let up = sluggish_classic_upstream(10);
+    let target = Arc::new(target_in(
+        &up,
+        UpstreamMode::PerSession,
+        8,
+        Duration::from_secs(5),
+    ));
+    let s1 = ClassicSession::new("s1");
+    let dialling = {
+        let target = Arc::clone(&target);
+        let key = in_session(&s1, "a");
+        std::thread::spawn(move || target.call(&call("t"), &HeaderOverride::default(), &key))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    s1.end();
+    assert_eq!(target.end_session("s1"), 1);
+    assert!(
+        dialling.join().unwrap().is_err(),
+        "the call is refused once its dial lands"
+    );
 }
 
 #[test]

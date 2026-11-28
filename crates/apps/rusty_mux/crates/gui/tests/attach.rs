@@ -1509,6 +1509,32 @@ fn a_file_is_sent_to_the_blocks_host_once_the_pane_holds_the_lease() {
 }
 
 #[test]
+fn a_re_run_is_asked_of_the_host_and_its_refusal_is_told() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (mut writer, feed) = feed_of(attached.source.open(key, 80, 24).expect("opened"));
+    assert!(attached.source.reruns(key), "the server re-runs commands");
+    assert!(!attached.source.reruns(key + 99), "no such pane");
+    type_until_echoed(writer.as_mut(), &feed, 1);
+
+    // The shell still runs: the server refuses, and the answer says why.
+    let (tx, rx) = channel();
+    attached
+        .source
+        .rerun(key, Box::new(move |r| drop(tx.send(r))));
+    let refused = rx
+        .recv_timeout(PATIENCE)
+        .expect("an answer")
+        .expect_err("a running block is not re-run");
+    assert!(refused.contains("still running"), "{refused}");
+    // The lease stays: the block still takes input.
+    type_until_echoed(writer.as_mut(), &feed, 1);
+}
+
+#[test]
 fn a_file_of_the_blocks_host_is_saved_in_the_downloads_folder() {
     let state = std::env::temp_dir().join(format!("rusty-mux-gui-down-{}", std::process::id()));
     std::fs::create_dir_all(&state).expect("mkdir");

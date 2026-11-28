@@ -1012,6 +1012,48 @@ impl<S: Store> Board<S> {
         Ok(Settled::Unknown)
     }
 
+    /// One anchor pass (#1551): for each task a card links or already anchors, run
+    /// `bbp verify --expect <last anchor>` and comment what [`crate::anchor::next`] says, as
+    /// [`crate::anchor::ACTOR`] scoped to the card's project. A host that cannot be asked
+    /// for one task is logged and skipped; the pass goes on. Without a BBP host this does
+    /// nothing.
+    ///
+    /// # Errors
+    /// Storage failures listing the cards.
+    pub fn anchor_tick(&self) -> Result<usize, BoardError> {
+        let Some(source) = &self.escalations else {
+            return Ok(0);
+        };
+        let mut written = 0;
+        for card in self.cards()? {
+            for task in crate::anchor::tasks(&card) {
+                let history = crate::anchor::history(&card.comments, &task);
+                let result = match source.verify(&task, crate::anchor::last_head(&history)) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        rusty_log::warn!(task = %task, error = %e, "anchor: bbp verify could not run");
+                        continue;
+                    }
+                };
+                let result = result.as_ref().map_err(String::as_str);
+                let Some(text) = crate::anchor::next(&task, &history, result) else {
+                    continue;
+                };
+                let by = Actor {
+                    name: crate::anchor::ACTOR.to_owned(),
+                    caps: BTreeSet::new(),
+                    projects: Some(BTreeSet::from([card.project.clone()])),
+                    provider: None,
+                };
+                match self.comment(card.id, &by, &text) {
+                    Ok(_) => written += 1,
+                    Err(e) => rusty_log::warn!(task = %task, error = %e, "anchor: comment refused"),
+                }
+            }
+        }
+        Ok(written)
+    }
+
     /// The project of the card linked to BBP task `task`, as `inbox` attaches it.
     fn owning_project(&self, by: &Actor, task: &str) -> Result<String, BoardError> {
         Ok(self

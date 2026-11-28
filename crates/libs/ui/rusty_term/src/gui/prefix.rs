@@ -46,6 +46,8 @@ pub(crate) enum Command {
     Overview,
     /// Open or close the workspace explorer (`e`, gui-design D99).
     Explorer,
+    /// Start the focused block's ended command again (`r`, gui-design D101).
+    Rerun,
     /// Type a Ctrl-] into the focused block.
     Type,
     /// Leave the mode without a command (Esc).
@@ -125,6 +127,7 @@ fn char_command(c: &str) -> Command {
         "U" => Command::Stack { top: false },
         "o" => Command::Overview,
         "e" => Command::Explorer,
+        "r" => Command::Rerun,
         "n" => Command::Next,
         "m" => Command::MoveMode,
         "H" => Command::Resize(Dir4::Left),
@@ -175,6 +178,7 @@ mod tests {
         assert_eq!(ch("d"), Command::Detach);
         assert_eq!(ch("o"), Command::Overview);
         assert_eq!(ch("e"), Command::Explorer);
+        assert_eq!(ch("r"), Command::Rerun);
         assert_eq!(ch("h"), Command::Focus(-1, 0));
         assert_eq!(ch("j"), Command::Focus(0, 1));
         let arrow = Key::Named(NamedKey::ArrowUp);
