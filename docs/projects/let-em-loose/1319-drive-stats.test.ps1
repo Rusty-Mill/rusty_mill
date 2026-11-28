@@ -132,6 +132,19 @@ try {
     try { Assert-DisjointRoots @($root, $sibling) } catch { $threw = $true }
     Assert-Equal $threw $false 'a sibling sharing a name prefix is not an overlap'
 
+    # Windows and UNC forms, checked as strings so they run on any OS.
+    $ci = [System.StringComparison]::OrdinalIgnoreCase
+    Assert-Equal (Get-RootBoundary 'D:\') 'D:/' 'a drive root keeps exactly one boundary separator'
+    Assert-Equal (Get-RootBoundary 'D:\Photos\') 'D:/Photos/' 'trailing separators collapse to one'
+    Assert-Equal ($null -ne (Find-RootOverlap @('D:\', 'D:\Photos') $ci)) $true 'drive root D:\ contains D:\Photos'
+    Assert-Equal ($null -ne (Find-RootOverlap @('d:\photos', 'D:\') $ci)) $true 'overlap is found in either order and any case'
+    Assert-Equal ($null -ne (Find-RootOverlap @('D:\', 'D:') $ci)) $true 'D:\ and D: are the same root'
+    Assert-Equal ($null -ne (Find-RootOverlap @('D:\', 'E:\') $ci)) $false 'different drives do not overlap'
+    Assert-Equal ($null -ne (Find-RootOverlap @('\\nas\share', '\\nas\share\Photos') $ci)) $true 'a UNC share root contains its child'
+    Assert-Equal ($null -ne (Find-RootOverlap @('\\nas\share\', '\\nas\share') $ci)) $true 'a UNC share root given twice'
+    Assert-Equal ($null -ne (Find-RootOverlap @('\\nas\share', '\\nas\share2') $ci)) $false 'UNC shares sharing a name prefix do not overlap'
+    Assert-Equal ($null -ne (Find-RootOverlap @('/', '/tmp') ([System.StringComparison]::Ordinal))) $true 'the Unix root contains everything'
+
     # --- Measure-HashGroups keeps grown, short and failed files out of the matches ----------
     $f1 = New-Fixture $root 'f1.bin' 2000 4
     $f2 = New-Fixture $root 'f2.bin' 2000 4

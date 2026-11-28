@@ -54,15 +54,30 @@ function Get-RootKind([string]$root) {
     return 'local'
 }
 
-function Assert-DisjointRoots([string[]]$Roots) {
-    # Overlapping roots (D:\ and D:\Photos) would visit files twice and invent duplicates; refuse them.
-    $full = @($Roots | ForEach-Object { [System.IO.Path]::TrimEndingDirectorySeparator([System.IO.Path]::GetFullPath($_)) + [System.IO.Path]::DirectorySeparatorChar })
-    $cmp = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
-    for ($i = 0; $i -lt $full.Count; $i++) {
-        for ($j = 0; $j -lt $full.Count; $j++) {
-            if ($i -ne $j -and $full[$j].StartsWith($full[$i], $cmp)) { throw "Roots overlap: $($Roots[$i]) contains $($Roots[$j]). Give disjoint roots." }
+function Get-RootBoundary([string]$FullPath) {
+    # One canonical form with exactly one trailing boundary: '\' becomes '/', trailing separators are
+    # trimmed, then one '/' is added. 'D:\' -> 'D:/', 'D:\Photos\' -> 'D:/Photos/', '\\nas\share' ->
+    # '//nas/share/', '/' -> '/'. Pure, so Windows forms can be tested on any OS.
+    return $FullPath.Replace('\', '/').TrimEnd('/') + '/'
+}
+
+function Find-RootOverlap([string[]]$FullPaths, [System.StringComparison]$Comparison) {
+    # Pure: returns the first pair (outer, inner) where one root contains or equals another, else $null.
+    $keys = @($FullPaths | ForEach-Object { Get-RootBoundary $_ })
+    for ($i = 0; $i -lt $keys.Count; $i++) {
+        for ($j = 0; $j -lt $keys.Count; $j++) {
+            if ($i -ne $j -and $keys[$j].StartsWith($keys[$i], $Comparison)) { return @($FullPaths[$i], $FullPaths[$j]) }
         }
     }
+    return $null
+}
+
+function Assert-DisjointRoots([string[]]$Roots) {
+    # Overlapping roots (D:\ and D:\Photos) would visit files twice and invent duplicates; refuse them.
+    $full = @($Roots | ForEach-Object { [System.IO.Path]::GetFullPath($_) })
+    $cmp = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+    $pair = Find-RootOverlap $full $cmp
+    if ($null -ne $pair) { throw "Roots overlap: $($pair[0]) contains $($pair[1]). Give disjoint roots." }
 }
 
 function Select-HashBudget {
