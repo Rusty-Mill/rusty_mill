@@ -20,7 +20,8 @@
   report folder and the roots resolved, so a link pointing into a root is refused. Roots must not
   contain or equal one another, checked the same two ways, so no tree is counted twice. Not resolved:
   bind mounts, subst drives, a mapped share of a local folder, and 8.3 short names; give the report
-  an ordinary folder path, not one of those.
+  an ordinary folder path, not one of those. Device paths (\\?\ and \\.\ forms) are refused for
+  roots and the report.
 
   The duplicate figures are path-based: two hardlinks to one file count as two duplicate paths though
   they share storage, so they are not reclaimable space.
@@ -68,6 +69,13 @@ function Get-RootBoundary([string]$FullPath) {
     # trimmed, then one '/' is added. 'D:\' -> 'D:/', 'D:\Photos\' -> 'D:/Photos/', '\\nas\share' ->
     # '//nas/share/', '/' -> '/'. Pure, so Windows forms can be tested on any OS.
     return $FullPath.Replace('\', '/').TrimEnd('/') + '/'
+}
+
+function Assert-PlainPath([string]$Path) {
+    # Pure: device-namespace forms (\\?\D:\x, \\.\D:\x, \\?\UNC\...) name the same folders as plain
+    # paths but compare differently, so the overlap and outside-roots checks could miss them. Refuse them.
+    $p = $Path.Replace('\', '/')
+    if ($p.StartsWith('//?/') -or $p.StartsWith('//./')) { throw "Device path $Path is not supported. Use the plain form, such as D:\Data or \\nas\share." }
 }
 
 function Find-RootOverlap([string[]]$FullPaths, [System.StringComparison]$Comparison) {
@@ -293,6 +301,7 @@ function Invoke-DriveStats {
         [switch]$SampleHash, [long]$MaxHashBytes, [int]$SampleGroups, [System.Random]$Rng = [System.Random]::new())
     if (-not $Roots) { throw 'Give -Roots, e.g. -Roots D:\,\\nas\share' }
     if ($SampleHash -and $MaxHashBytes -le 0) { throw '-SampleHash needs -MaxHashBytes, a read budget such as 20GB' }
+    foreach ($p in @($Roots) + $Out) { Assert-PlainPath $p }
     $missing = @($Roots | Where-Object { -not [System.IO.Directory]::Exists($_) })
     if ($missing.Count -gt 0) { throw "Root not found: $($missing[0])" }
     Assert-DisjointRoots $Roots

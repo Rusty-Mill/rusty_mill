@@ -209,6 +209,20 @@ try {
     Assert-Equal $threw $true 'an output path inside a scanned root is refused'
     Assert-Equal (Test-Path -LiteralPath $inside) $false 'nothing is written inside the root'
 
+    # --- Device paths are refused (pure, so the Windows forms are tested as strings) ----------
+    foreach ($dev in @('\\?\D:\Data', '\\.\D:\Data', '\\?\UNC\nas\share', '//?/D:/Data')) {
+        $threw = $false
+        try { Assert-PlainPath $dev } catch { $threw = $true }
+        Assert-Equal $threw $true "device path $dev is refused"
+    }
+    foreach ($plain in @('D:\Data', '\\nas\share', '/tmp/x')) { Assert-PlainPath $plain }
+    Write-Host 'ok   plain drive, UNC and Unix paths are accepted'
+    $devOut = '\\?\' + (Join-Path $root 'dev.json')
+    $threw = $false
+    try { Invoke-DriveStats -Roots $root -Out $devOut -TopExtensions 25 -MinExtensionCount 1 -SampleGroups 10 } catch { $threw = $true }
+    Assert-Equal $threw $true 'a device-path report is refused before anything is written'
+    Assert-Equal (Test-Path -LiteralPath (Join-Path $root 'dev.json')) $false 'nothing is written for a device-path report'
+
     # --- Aliases: a link outside the root that points into it is still inside -----------------
     $aliasHome = Join-Path ([System.IO.Path]::GetTempPath()) ("lel-1319-alias-" + [guid]::NewGuid())
     New-Item -ItemType Directory -Path $aliasHome | Out-Null
