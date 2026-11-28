@@ -165,11 +165,32 @@ struct Unit {
     group: Option<Group>,
 }
 
-/// Plans the tree.
+/// Most entries a plan may hold. The plan and its rendered manifest live in
+/// memory (a few hundred bytes per entry each), so a profile concentrated in
+/// tiny files is refused with an error rather than exhausting memory. The
+/// default profile needs about 80 000 entries for the 500 GB tree.
+pub const MAX_ENTRIES: usize = 5_000_000;
+
+/// Plans the tree, refusing plans over [`MAX_ENTRIES`].
 ///
 /// # Errors
-/// An invalid profile, or a scale that is not finite and in `(0, 4]`.
+/// An invalid profile, a scale that is not finite and in `(0, 4]`, or a plan
+/// that would exceed the entry limit.
 pub fn plan(seed: u64, scale: f64, profile: &Profile) -> Result<Plan, ProfileError> {
+    plan_limited(seed, scale, profile, MAX_ENTRIES)
+}
+
+/// [`plan`] with an explicit entry limit. An accepted plan does not depend on
+/// the limit, so the prefix property holds for every plan that fits.
+///
+/// # Errors
+/// As [`plan`], with `max_entries` as the limit.
+pub fn plan_limited(
+    seed: u64,
+    scale: f64,
+    profile: &Profile,
+    max_entries: usize,
+) -> Result<Plan, ProfileError> {
     profile.validate()?;
     if !(scale.is_finite() && scale > 0.0 && scale <= 4.0) {
         return Err(ProfileError(format!("scale {scale} must be in (0, 4]")));
@@ -197,6 +218,12 @@ pub fn plan(seed: u64, scale: f64, profile: &Profile) -> Result<Plan, ProfileErr
         out.entries.extend(unit.entries);
         out.groups.extend(unit.group);
         index += 1;
+        if out.entries.len() > max_entries {
+            return Err(ProfileError(format!(
+                "plan exceeds {max_entries} entries before reaching {target} bytes; \
+                 lower the scale or use a profile with larger files"
+            )));
+        }
     }
     Ok(out)
 }
@@ -782,6 +809,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_entry_limit_refuses_early_and_accepted_plans_ignore_it() {
+        let tiny_files = Profile {
+            size_log2_files: std::collections::BTreeMap::from([(1, 1)]),
+            image_share: 0.0,
+            identical_rate: 0.0,
+            decoy_rate: 0.0,
+            prefix_rate: 0.0,
+            ..Profile::default()
+        };
+        let err = plan_limited(1, 1.0, &tiny_files, 500).expect_err("limit");
+        assert!(err.0.contains("exceeds 500 entries"), "{err}");
+        let p = Profile::default();
+        assert_eq!(
+            plan_limited(2, 0.001, &p, 1_000_000).expect("fits"),
+            small(2, 0.001)
+        );
     }
 
     #[test]
