@@ -23,8 +23,10 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 pub enum Role {
     /// Reads, writes and runs in its worktree.
     Builder,
-    /// Reads and runs; its view is read-only (§7), and `write` is refused here
-    /// too so the refusal is plain rather than an I/O error.
+    /// Reads and runs, without the `write` tool. That is all this role
+    /// withholds: `exec` runs with the server's own rights, so a critic's
+    /// commands can still write. A read-only critic needs the jail to make
+    /// its view read-only (726-sandbox-design §7); this crate does not.
     Critic,
 }
 

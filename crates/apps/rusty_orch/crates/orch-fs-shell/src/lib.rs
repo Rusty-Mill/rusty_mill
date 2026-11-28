@@ -7,15 +7,24 @@
 //!
 //! # Containment
 //!
-//! The gateway runs it as a `per_session` stdio target, inside the same
-//! `lel-jail` and `jail.json` the session would get, so there is one
-//! containment path: Landlock and the mount namespace are the boundary.
-//! This crate adds two checks in front of them, as defence in depth:
+//! This crate confines nothing. Its path checks cover the paths named in
+//! tool calls, not what an `exec`'d program does:
 //!
 //! 1. [`path::SessionPath`] refuses absolute paths, `..` and NUL before any
 //!    I/O touches the disk.
 //! 2. [`FsWorkspace`] resolves every path and refuses one whose real location
 //!    is outside the root, which catches a symlink out (to `/proc`, say).
+//!
+//! [`Role::Critic`] withholds `write` and nothing else. `exec` runs any
+//! program with the server's own rights, so a critic's commands can write
+//! files, reach outside the root, and leave descendants running after a
+//! timeout. Read-only critic execution, filesystem confinement and cleanup
+//! of descendants belong to the jail around the process (`lel-jail`:
+//! Landlock and the mount namespace, 726-sandbox-design §6-§7).
+//!
+//! Nothing launches it yet: gateway registration is a later change. That
+//! change calls the feature confined only with evidence that the jail
+//! enforces read-only critic execution and owns descendant cleanup.
 //!
 //! # Shape
 //!

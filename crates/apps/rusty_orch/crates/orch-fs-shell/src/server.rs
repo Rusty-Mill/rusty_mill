@@ -66,7 +66,8 @@ fn describe(name: &str) -> Tool {
         _ => (
             format!(
                 "Run a program (no shell) and return its exit status and output, each stream \
-                 at most {OUTPUT_CAP} bytes. Killed after timeout_s (at most {}).",
+                 at most {OUTPUT_CAP} bytes. Killed after timeout_s (at most {}). It runs with \
+                 this server's rights; this server does not sandbox it.",
                 MAX_TIMEOUT.as_secs()
             ),
             &[
