@@ -1,6 +1,6 @@
 # ADR-0139: Paged record storage in log-structured segments; codec ships first
 
-- Status: **Proposed** (2026-11-01)
+- Status: **Accepted** (2026-11-28; owner go-ahead: Nano (baileyrd), "Accept as written", project thread message cmsg_019Yhhd8PZjRKnuAaFdZhUwSNJmfr3ndHwqtRcPHWPGgm5, Mill Board #1107). Proposed 2026-11-01.
 - Date: 2026-11-01
 - Deciders: baileyrd
 - Related: `ADR-0138` decision 2 (storage before features; amended here),

@@ -1,6 +1,6 @@
-# Paged Records: Record Bodies on Disk in Log-Structured Segments (Proposed)
+# Paged Records: Record Bodies on Disk in Log-Structured Segments (Accepted)
 
-- Status: **Proposed**, draft 3.1 (2026-11-01)
+- Status: **Accepted**, draft 3.1 (2026-11-28; owner go-ahead: Nano (baileyrd), "Accept as written", project thread message cmsg_019Yhhd8PZjRKnuAaFdZhUwSNJmfr3ndHwqtRcPHWPGgm5, Mill Board #1107). Proposed 2026-11-01.
 - Date: 2026-11-01
 - Deciders: baileyrd
 - Related: `ADR-0138` decision 2 (storage before features), `ADR-0139`
