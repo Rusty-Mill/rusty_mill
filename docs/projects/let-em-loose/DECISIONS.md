@@ -229,6 +229,7 @@ Precise contracts used by this guide:
 | D221 | #1416: `bbp claims` prints a plain array of claim views; brief text is not served yet | [default] 2026-11-27 (1416) |
 | D222 | #1416 slice 4: Approve, Reject and Choose are a pure view model over `inbox_act`; the claims, intent and spend endpoints are a separate PR | [default] 2026-11-27 (1416) |
 | D223 | #1375-#1378: the gateway's §11 public API and config items approved as a set (session binding, `identity`, `mode`/`connections`, `session_ended`, `per_session` default, `lelPolicy`) | [stated] 2026-11-27 (1375, 1376, 1377, 1378) |
+| D224 | #1551: the claim-log anchor design (PR #1931) is approved; board-side code may start; the BaileyAi host change still waits | [stated] 2026-11-27 (1551) |
 
 ## D1. Lenses, not stages
 
@@ -2253,3 +2254,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_1e5e8f36a56e46139db411e77ae7ba66
 **Key.** lel:726:gateway-api-set-1375-1378
 **Source.** Nano tapped option a "Approve all as a set" on hearthbot decision card `cmsg_014AqbZs58L565hMV2pFkCX5UNV6kJ3yhNuFThUg2wfiLi` ("Approve the gateway API and config changes for #1375-#1378 as one set?"), 2026-11-27T20:53:16Z, in thread "Build gateway prerequisites for jailed tools" (`cmsg_014AqbZs58L565hMV2pFkCX5LGapWPvdnjCJaxHPN2rCuz`). The option read: "I build #1376, #1377, #1378, then #1379, in order, and #1877 (#1375) can merge. Session binding, identity, mode/connections, session_ended hook, per_session default, lelPolicy." The card's reason: "It is the design you approved in D180, and the per_session default is your own D102. D180 approved no §11 item, so nothing can be built until you say yes." Relayed by the coordinator; the card was not read here. Clears part of D180's §11 gate; reverses nothing.
+
+## D224. #1551: the claim-log anchor design (PR #1931) is approved; board-side code may start; the BaileyAi host change still waits
+
+**Decision.** The #1551 design `1551-claim-log-anchor-design.md` (PR #1931, head ac3e22a) is approved as written, which satisfies D25 for #1551. The board-side code may be built: `rusty_mill_board` `anchor.rs`, `BbpCli::verify`, and the timer thread with `MILL_BOARD_BBP_ANCHOR_SECS` off by default (D214). The guard change may also be written in the repo's `1092-deploy-board.sh` and `1092-deploy-layout.md` (D213). This is not the separate host-change authorisation that D213 and D214 require. Changing `mill-board-bbp-guard` on BaileyAi and setting `MILL_BOARD_BBP_ANCHOR_SECS=900` in its `board.env` wait for Nano to authorise that host change by name (D128 ask-first; D131 does not cover it). Review and merge rules are unchanged.
+**Why.** "Go ahead" answered a message whose open asks were his design approval and, separately, code and any host change. It is a go-ahead, and the board-side build passes no ask-first gate: it has no schema migration, no BBP or API change, and no new dependency. It does not name the host, and D213 and D214 ask for an explicit authorisation of the host change.
+**Rejected.** Reading "Go ahead" as design approval only, with code still held. Reading it as authorising the BaileyAi guard and timer change too.
+**Tag.** [stated] · remind-me: mem_127619cc5d154dacafa0007af7ff78d3
+**Key.** lel:1551:design-approved
+**Source.** Nano, "Go ahead", message `cmsg_014AqbZs58L565hMV2pFkCX5QUKhGDbiyRvn36AKAVqd3R` in thread `cmsg_014AqbZs58L565hMV2pFkCX5Sbwcxao75k9mf44RJQgK4Z` (project Rusty BBP_SWF), 2026-11-27T20:23:29Z. It answered the thread's message: "Codex re-reviewed #1931 at head ac3e22a and found nothing new, and CI is green. It's now waiting on review from dottiusmaximus and on your approval of the design. Code and any host change wait for your separate go-ahead." The reading that it does not cover the host is the #1551 thread's, and let-em-loose-expert agrees with it. Numbered D224 because main's D223 is the #1375-#1378 gateway set.
