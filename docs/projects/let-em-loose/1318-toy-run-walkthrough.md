@@ -22,14 +22,28 @@ assertion is only written after you re-verify, on the account itself, that it is
 is logged in as and that its plan has no overage billing. Never change just the date to get past the
 gate.
 
-**Leftover sessions.** Before stopping a leftover `toy` tmux session or `lel-toy-1318-mux` unit,
-confirm it belongs to an earlier unpaid pass:
-```bash
-ls -d ~/toy-1318/bbp 2>/dev/null; pgrep -af 'rusty_orch builder run'
-```
-If both print nothing, no paid pass was started, and stopping it is safe. If either prints
-anything, a paid pass has started or is running. Don't stop anything: reattach with
-`tmux attach -t toy` and let it finish (Part C).
+**Leftover sessions.** Leave a leftover `toy` tmux session or `lel-toy-*-mux` unit alone unless
+you can show it is an abandoned **unpaid** pass. A missing directory or process is not enough: a
+retry may use another `TOY_TASK` (another directory), and a paid pass can sit between steps. Stop
+one only when all three of these hold:
+
+1. **You know exactly which one and which task.** List them:
+   ```bash
+   tmux ls; systemctl --user list-units --all 'lel-toy-*'
+   ```
+   A unit's name is `lel-<task>-mux`, so it names its task (`toy-1318`, `toy-1318b`, ...).
+2. **Its screen shows an unpaid stop.** Attach (`tmux attach -t toy`) and read the end of the
+   output: the last script line must be a `STOP:` line, there must be no `=== 5.` line above it,
+   and a bare shell prompt must follow. Detach with `Ctrl-b` then `d`.
+3. **That task's log agrees.** With `<task>` from step 1:
+   ```bash
+   grep -H '^=== 5\.\|^STOP:\|LAUNCH' ~/<task>/out/script-*.log
+   ```
+   Every log must show a `STOP:` and no `=== 5.` or `LAUNCH` line.
+
+If any of the three can't be shown (the task is unclear, the screen has scrolled away, the log is
+missing or shows `=== 5.`), leave everything untouched and send Claude only the `tmux ls` and unit
+list output.
 
 ## Part A. Get ready (free)
 
