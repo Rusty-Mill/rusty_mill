@@ -236,6 +236,10 @@ Precise contracts used by this guide:
 | D230 | #1381: gateway skill source implementation defaults (startup snapshot, pack digest, file cap, strict `[skills]`, `skills.rs` core) | [default] 2026-11-28 (1381) |
 | D232 | #1382 slice 2: the token is written in rusty_orch's builder launch (`builder/live.rs`), not orch-bbp; token file, claim and logging defaults | [default] 2026-11-28 (1382) |
 | D233 | #1382 slice 2: `builder run` gains `--token-key`, `--token-kid`, `--lens-policy`, optional and all-or-nothing; none keeps token-less launches | [stated] 2026-11-28 (1382) |
+| D240 | #1319: the synthetic-tree generator is the rusty_mill crate `crates/tools/lel_treegen`; its answer manifest stays outside the tree and every sandbox | [default] 2026-11-28 (1319) |
+| D241 | #1319: perf measurement protocol (cold/warm, median of 5, crash injection at 10/50/90%, crash loss in minutes, scaled delta) | [default] 2026-11-28 (1319) |
+| D242 | #1319: same-pixels fixtures are codec-free PNG/JPEG byte assemblies; the generator is independent of the #1238 golden set | [default] 2026-11-28 (1319) |
+| D243 | #1319: the real-drive stats pass prints aggregates only; sample hashing is opt-in and only counts leave the machine | [default] 2026-11-28 (1319) |
 
 ## D1. Lenses, not stages
 
@@ -2330,3 +2334,40 @@ How the key, `kid` and policy path reach `builder run` was not settled here (new
 **Tag.** [stated] · remind-me: mem_c77a650c94354d049340dfb2941c84f2
 **Key.** lel:1382:builder-run-token-flags
 **Source.** Nano tapped option a "Optional, all-or-nothing" ("--token-key, --token-kid and --lens-policy are added together or not at all. Without them, launches stay token-less as today; a partial set is refused.") on decision card `cmsg_014AqbZs58L565hMV2pFkCX5DX76zgHdK5fk8xihspJZVw` in the #1382 build thread `cmsg_014AqbZs58L565hMV2pFkCX57R3gYoTVeeXhtbHkCNdLh1`. The card asked "Approve new builder run flags for token launch (slice 2)?". The platform's tap record `cmsg_014AqbZs58L565hMV2pFkCX5ADwY1aUYDvTxWTGPCepKh4` shows a user, not an agent, chose it at 2026-11-28T04:49:50Z. This clears D199's ask-first gate for the three flags; it amends D232 and reverses nothing. Review: dottiusmaximus accepts owner decisions only in Nano's own words on GitHub, so slice 2's PR also needs Nano to repeat this choice as a PR comment. Numbered D233 (first drafted as D229) for the same reason as D232.
+
+## D240. #1319: the synthetic-tree generator is the rusty_mill crate `crates/tools/lel_treegen`
+
+**Decision.** The seeded generator for the #1319 test tree is a small rusty_mill crate, `crates/tools/lel_treegen`, using only existing workspace dependencies (`rand`, `sha2`, `serde_json`, `clap`). Its expected-answer manifest is written to a harness-only directory outside the generated tree root and outside every sandbox and builder mount, never into `dedup-manager`. Only the manifest digest is posted on #600. The tree is mounted read-only into `perf` runs.
+**Why.** 600-build-plan.md § Ownership gives the test tree to the experiment harness, outside builders' reach; builders never see rusty_mill (600-build-plan §1, #1234, D18), and Factory holds no code (D19). A manifest beside the tree would be readable by the candidate under test. A crate can be moved later.
+**Rejected.** Factory (D19: no code). Inside `dedup-manager` (builders see it). Manifest inside the tree root.
+**Tag.** `[default]` · remind-me: mem_dcdd4b3544ce424dbe785da923bd72f1
+**Key.** lel:1319:treegen-location
+**Source.** Caller question from the #1319 design session, 2026-11-28 (Q2); 600-build-plan.md § Ownership and §1; D18, D19.
+**Numbering.** D240–D243 were first drafted as D228–D231; renumbered on 2026-11-28 because open PRs #1963, #1964, #1966, #1967 and #1968 also add D228–D231 with other meanings. D232–D239 are left free for those PRs.
+
+## D241. #1319: perf measurement protocol
+
+**Decision.** Warm: a repeat run after one discarded run. Cold: the harness drops caches on the host (not inside the sandbox) before each run. Five runs each; the median is reported. Crash injection: SIGKILL (`taskkill /F` on Windows) at 10%, 50% and 90% of files scanned. The crash-loss verdict is the wall time from relaunch until progress regains the pre-kill point, since the intent states loss in minutes; re-hashed bytes are reported beside it. Incremental: apply the seeded delta tree (50 GB at full scale, scaled by the same factor as the tree on scaled runs), then rescan.
+**Why.** Reuses the approved #596 measurement style (warm, median of 5; remind-me mem_864bd999d4ef406893aba1d1a3164367). Measuring loss in time matches the intent's target. Dropping caches needs host root.
+**Rejected.** Loss measured only in bytes; an unscaled 50 GB delta on a scaled tree.
+**Tag.** `[default]` · remind-me: mem_ae0337151b1b4770a02cc6fd6b93d31e
+**Key.** lel:1319:measurement-protocol
+**Source.** Caller question from the #1319 design session, 2026-11-28 (Q4); #600 intent v0.1-stage1 targets; #596 perf style.
+
+## D242. #1319: same-pixels fixtures are codec-free byte assemblies
+
+**Decision.** Same-pixels-different-metadata groups are generated without a codec dependency: PNGs (stored deflate) sharing identical IDAT and differing only in tEXt/eXIf chunks, and JPEGs assembled from a small fixed set of pre-encoded scan bodies with different APP1/EXIF segments. The generator is independent of the #1238 golden set, which holds real, Nano-signed cases in Factory `golden/dedup-manager/` (D37); nothing settled requires the golden set to reuse the generator.
+**Why.** No new dependency (ask-first avoided); deterministic bytes; no alignment constraint exists.
+**Rejected.** An image codec dependency.
+**Tag.** `[default]` · remind-me: mem_4dcfef45aab644aaacc4d56233e91119
+**Key.** lel:1319:same-pixels-fixtures
+**Source.** Caller question from the #1319 design session, 2026-11-28 (Q3); D37; card #1238.
+
+## D243. #1319: the real-drive stats pass prints aggregates only
+
+**Decision.** The PowerShell stats pass over Nano's drive prints only aggregates: size-bucket histogram, file and directory counts, depth and fan-out histograms, hardlink, symlink and reparse-point counts, top-N extension counts with the rest folded into `other`, and duplicate rate by size class. No paths, names or hashes appear in the output. Hashing a content sample is an opt-in switch, off by default, shown in the design Nano approves; the hashes stay on his machine and only counts leave.
+**Why.** Card #1319 and 600-build-plan §8 allow aggregate stats only, with no file names unless Nano agrees; real names and paths are `sensitive` (card #598 Q6). Rare extensions and file hashes fingerprint real data, so they are folded or kept local. The switch lets Nano choose the extra disk read.
+**Rejected.** Emitting names, paths, hashes or every distinct extension.
+**Tag.** `[default]` · remind-me: mem_a84e1530456c437aa21d72b1e32e261b
+**Key.** lel:1319:drive-stats-outputs
+**Source.** Caller question from the #1319 design session, 2026-11-28 (Q5); card #1319 prompt; 600-build-plan.md §8; card #598 Q6.
