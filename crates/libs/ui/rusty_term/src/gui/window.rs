@@ -8511,11 +8511,13 @@ fn progress_notice(title: &str, name: &str, sent: u64, total: u64) -> super::sou
 /// server's POSIX one, single-quoted whatever it holds. Anything else is a
 /// Windows path, double-quoted only if cmd and PowerShell leave it alone
 /// inside quotes; with a `$`, backtick, `%`, `^`, `&` or the like, `None`.
+/// A Windows server's verbatim `\\?\C:\x` is typed as `C:\x`, which shells take.
 fn quote_remote(path: &str) -> Option<String> {
     if path.starts_with('/') {
         return Some(format!("'{}'", path.replace('\'', "'\\''")));
     }
-    let plain = |c: char| c.is_alphanumeric() || " _.-:\\/()[]".contains(c);
+    let path = super::palette::plain_path(path.to_owned());
+    let plain =|c: char| c.is_alphanumeric() || " _.-:\\/()[]".contains(c);
     (!path.is_empty() && path.chars().all(plain)).then(|| format!("\"{path}\""))
 }
 
@@ -9769,7 +9771,17 @@ mod tests {
             super::quote_remote("C:\\up\\a b.txt").as_deref(),
             Some("\"C:\\up\\a b.txt\"")
         );
+        // The server answers with a verbatim path (`\\?\`): typed without it.
+        assert_eq!(
+            super::quote_remote("\\\\?\\C:\\up\\a b.txt").as_deref(),
+            Some("\"C:\\up\\a b.txt\"")
+        );
+        assert_eq!(
+            super::quote_remote("\\\\?\\UNC\\h\\s\\a.txt").as_deref(),
+            Some("\"\\\\h\\s\\a.txt\"")
+        );
         for hostile in [
+            "\\\\?\\C:\\up\\a&b",
             "C:\\up\\a&b",
             "C:\\up\\$(x)",
             "C:\\up\\%PATH%",
