@@ -218,6 +218,24 @@ impl Drop for TokenFile {
 /// an operator can tell whether that run is still alive, so launch is refused
 /// with its path. Nothing is cleaned up unless this call created it.
 pub fn acquire(file: &Path) -> Result<TokenFile, String> {
+    acquire_with(file, create_token_file)
+}
+
+/// The 0600 `create_new` open [`acquire`] uses.
+fn create_token_file(file: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(file)
+}
+
+/// [`acquire`] with the file creation passed in, so tests can make it fail
+/// after the session directory exists.
+fn acquire_with(
+    file: &Path,
+    create: impl FnOnce(&Path) -> std::io::Result<File>,
+) -> Result<TokenFile, String> {
     let dir = file
         .parent()
         .ok_or_else(|| format!("{}: no directory", file.display()))?;
@@ -239,12 +257,7 @@ pub fn acquire(file: &Path) -> Result<TokenFile, String> {
             ),
             _ => format!("{}: {e}", dir.display()),
         })?;
-    let created = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(file);
-    let handle = match created {
+    let handle = match create(file) {
         Ok(handle) => handle,
         Err(e) => {
             // The directory is ours and empty; leave nothing behind, and say

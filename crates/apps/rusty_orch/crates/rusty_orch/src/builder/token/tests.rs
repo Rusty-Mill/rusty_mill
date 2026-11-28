@@ -156,6 +156,52 @@ fn a_failed_create_leaves_nothing_and_touches_nothing_else() {
 }
 
 #[test]
+fn a_failed_file_create_after_the_session_mkdir_removes_only_that_dir() {
+    let state = scratch("file-create-fails");
+    let file = path(&state, "42", 3);
+    let dir = file.parent().expect("dir").to_owned();
+    let sibling = state.join("tokens/42/2");
+    std::fs::create_dir_all(&sibling).expect("another session's dir");
+    std::fs::write(sibling.join("token"), "theirs").expect("another session's token");
+    let err = acquire_with(&file, |p| {
+        assert!(
+            p.parent().expect("dir").is_dir(),
+            "the session dir exists by now"
+        );
+        Err(std::io::Error::other("disk said no"))
+    })
+    .expect_err("refused");
+    assert!(err.contains("disk said no"), "{err}");
+    assert!(!dir.exists(), "the session dir this attempt made is gone");
+    assert_eq!(
+        std::fs::read_to_string(sibling.join("token")).expect("kept"),
+        "theirs"
+    );
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+#[test]
+fn a_failed_write_is_reported_and_the_guard_removes_its_file_and_dir() {
+    let state = scratch("write-fails");
+    let file = path(&state, "42", 3);
+    let dir = file.parent().expect("dir").to_owned();
+    let sibling = state.join("tokens/42/2");
+    std::fs::create_dir_all(&sibling).expect("another session's dir");
+    let mut held = acquire(&file).expect("acquires");
+    // A read-only handle on the same inode: the write fails, deterministically.
+    held.handle = std::fs::File::open(&file).expect("read-only handle");
+    let err = held.write("secret").expect_err("write fails");
+    assert!(err.contains("token"), "{err}");
+    drop(held);
+    assert!(
+        !file.exists() && !dir.exists(),
+        "the guard removed its own file and dir"
+    );
+    assert!(sibling.is_dir(), "another session's dir survives");
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+#[test]
 fn the_write_goes_to_the_created_file_not_a_swapped_path() {
     let state = scratch("swap");
     let file = path(&state, "42", 3);
