@@ -428,6 +428,57 @@ fn unknown_or_stale_buffers_repaint_fully() {
     );
 }
 
+/// The banner is an opaque `top` pixmap that leaves no trace in the pane
+/// rows: a frame whose only change is a pixmap over the panes, or its place,
+/// must repaint whole, or the old one stays on screen (card #1640).
+#[test]
+fn a_changed_top_or_over_pixmap_repaints_fully() {
+    use super::super::paint::Pixmap;
+    let g = Grid::new(4, 2);
+    let v = g.frame_view();
+    let pane = || PaneFrame {
+        grid: &v,
+        col0: 0,
+        row0: 0,
+        px: (0, 0),
+        focused: true,
+        cursor_on: true,
+        trail: Vec::new(),
+        hover_link: None,
+        marks: Vec::new(),
+        search: SearchColors::default(),
+    };
+    let banner = [(Pixmap::new(8, 4, 0xFF0000), (1, 2))];
+    let moved = [(Pixmap::new(8, 4, 0xFF0000), (1, 3))];
+    let other = [(Pixmap::new(8, 4, 0x00FF00), (1, 2))];
+    let frame = |over: &[(Pixmap, (usize, usize))], top: &[(Pixmap, (usize, usize))]| {
+        let scene = Scene {
+            over,
+            top,
+            ..Scene::default()
+        };
+        Frame::capture(&[pane()], &[], scene, &[], [1, 1], (24, 20), COLORS, 0)
+    };
+    for layer in 0..2 {
+        let with = |l: &[(Pixmap, (usize, usize))]| {
+            if layer == 0 {
+                frame(&[], l)
+            } else {
+                frame(l, &[])
+            }
+        };
+        let mut damage = Damage::default();
+        damage.presented(with(&banner));
+        assert_eq!(
+            damage.plan(&with(&banner), 1),
+            Plan::Rows(vec![vec![false; 2]])
+        );
+        assert_eq!(damage.plan(&with(&[]), 1), Plan::Full, "cleared");
+        assert_eq!(damage.plan(&with(&moved), 1), Plan::Full, "moved");
+        assert_eq!(damage.plan(&with(&other), 1), Plan::Full, "repainted");
+    }
+}
+
 /// An IME preedit whose glyphs overhang into a neighbor row survives that
 /// neighbor's repaint while its own row is unchanged.
 #[test]
