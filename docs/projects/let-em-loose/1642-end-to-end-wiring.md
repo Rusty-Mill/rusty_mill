@@ -32,11 +32,11 @@ One small PR or prompt each. Child cards under #1642.
 1. **This note** (PR #1964) with Nano's design approval.
 2. **Deploy the chosen host** (#1645), as a paste-ready prompt for Nano (D94). Under (a): HTTPS exposure, OAuth and allowed hosts for the inbox board; the guard edit that admits `claims` (D220) so `lel_claims` stops answering "verb refused"; the #1551 anchor guard line and timer only if Nano authorises them in the same step (D224). Every BaileyAi change needs his authorisation by name.
 3. **LEL tab read endpoints: finish.** Mostly done (D220). Left: #1416 slice 5 (PR #1961) and the later #1416 slices. Runs alongside 1 and 2; tracked on #1416, not duplicated here.
-4. **One end-to-end run** (#1646). A separate $0 run in `/srv/lel/bbp` (Nano, 2026-11-28): seed an escalation with `1166-seed-inbox.sh` and the steps in `1166-smoke-run.md`, then Nano approves it with `inbox_act` from claude.ai through the #1645 connector. The #1318 runbook and the D132 guard stay unchanged; the paid toy run stays a separate check. Depends on slices 1 and 2 only.
+4. **One end-to-end run** (#1646). A separate $0 run in `/srv/lel/bbp` (D245): seed an escalation with `1166-seed-inbox.sh` and the steps in `1166-smoke-run.md`, then Nano approves it with `inbox_act` from claude.ai through the #1645 connector. The #1318 runbook and the D132 guard stay unchanged; the paid toy run stays a separate check. Depends on slices 1 and 2 only.
 
 ## 4. Settled points
 
-- Escalation for the run: a separate $0 seeded run in `/srv/lel/bbp` (Nano, 2026-11-28), so the toy run's own BBP dir and its optional escalation no longer matter here.
+- Escalation for the run: a separate $0 seeded run in `/srv/lel/bbp` (D245), so the toy run's own BBP dir and its optional escalation no longer matter here.
 - Paid calls: none on this path. Only the single #1318 toy run is approved (D167); any other paid call is ask-first.
 
 ## 5. Out of scope
