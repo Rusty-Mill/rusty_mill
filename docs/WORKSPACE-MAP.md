@@ -320,6 +320,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_yirp | sessionmgr-protocol | Wire types shared by the sessionmgr daemon, its workers, and its clients. Serde only, no I/O. |
 | apps | rusty_yirp | sessionmgr-pty | PTY adapter for sessionmgr: hosts a session's process on a real terminal (ConPTY or our own console host on Windows) via rustils' platform Pty capability. |
 | apps | rusty_yirp | sessionmgr-tui | The sessionmgr TUI: a grid of session panes over the daemon's public socket. Depends on sessionmgr-protocol only -- never sessionmgr-proc or sessionmgr-agents -- so a UI that cannot name a process type cannot accidentally spawn one. |
+| tools | lel_treegen | lel_treegen | Seeded synthetic dedup test tree for Let Em Loose #1319: pure plan, manifest and digest |
 | tools | rusty_baseline | rusty_baseline | Per-product baseline: binary size, dependency closure, clean and incremental build, startup, idle and peak RSS |
 | tools | rusty_boot | rusty_boot | A #![no_std] + alloc sovereign bootstrapper demonstrating kernel-to-application execution without Rust std |
 | tools | rusty_erosion | rusty_erosion | Code erosion metric: CC concentration and normalized duplication, in basis points |

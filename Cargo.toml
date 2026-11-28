@@ -193,6 +193,7 @@ members = [
     "crates/tools/rusty_boot",
     "crates/tools/rusty_baseline",
     "crates/tools/rusty_erosion",
+    "crates/tools/lel_treegen",
     "crates/libs/ai/rusty_whisper",
     "crates/libs/net/rusty_rdp",
     "crates/apps/rusty_voice",
