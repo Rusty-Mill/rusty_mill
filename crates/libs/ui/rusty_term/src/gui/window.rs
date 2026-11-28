@@ -8517,7 +8517,7 @@ fn quote_remote(path: &str) -> Option<String> {
         return Some(format!("'{}'", path.replace('\'', "'\\''")));
     }
     let path = super::palette::plain_path(path.to_owned());
-    let plain =|c: char| c.is_alphanumeric() || " _.-:\\/()[]".contains(c);
+    let plain = |c: char| c.is_alphanumeric() || " _.-:\\/()[]".contains(c);
     (!path.is_empty() && path.chars().all(plain)).then(|| format!("\"{path}\""))
 }
 
