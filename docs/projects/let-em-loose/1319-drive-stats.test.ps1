@@ -8,6 +8,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '1319-drive-stats.ps1')
 
+# A stream whose second read throws, after the first has consumed bytes.
+class FailingStream : System.IO.MemoryStream {
+    [int]$Calls = 0
+    FailingStream([byte[]]$bytes) : base($bytes) {}
+    [int] Read([byte[]]$buffer, [int]$offset, [int]$count) {
+        $this.Calls++
+        if ($this.Calls -gt 1) { throw [System.IO.IOException]::new('synthetic read failure') }
+        return ([System.IO.MemoryStream]$this).Read($buffer, $offset, $count)
+    }
+}
+
 $script:failures = 0
 function Assert-Equal($actual, $expected, [string]$what) {
     if ($actual -eq $expected) { Write-Host "ok   $what"; return }
@@ -32,13 +43,13 @@ $root = Join-Path ([System.IO.Path]::GetTempPath()) ("lel-1319-test-" + [guid]::
 New-Item -ItemType Directory -Path $root | Out-Null
 try {
     # --- Select-HashBudget: whole groups, never over the budget -------------------------------
-    $groups = New-Groups @{ 100 = 2; 1000 = 3; 10000 = 4; 7 = 1 }   # costs 200, 3000, 40000; size 7 is a singleton
+    $groups = New-Groups @{ 100 = 2; 1000 = 3; 10000 = 4; 7 = 1 }   # costs (size+1) x n: 202, 3003, 40004; 7 is a singleton
     $rng = [System.Random]::new(1)
     $plan = Select-HashBudget -SizeGroups $groups -MaxBytes 3500 -MaxGroups 10 -Rng $rng
     Assert-Equal $plan.GroupsEligible 3 'singletons are not eligible'
     Assert-Equal ($plan.ProjectedBytes -le 3500) $true 'projected bytes stay within the budget'
     Assert-Equal $plan.Sizes.Contains(10000) $false 'a group costing more than the budget is never chosen'
-    Assert-Equal $plan.ProjectedBytes 3200 'smaller groups still fill the budget around a skipped one'
+    Assert-Equal $plan.ProjectedBytes 3205 'smaller groups still fill the budget around a skipped one'
 
     $plan0 = Select-HashBudget -SizeGroups $groups -MaxBytes 0 -MaxGroups 10 -Rng ([System.Random]::new(1))
     Assert-Equal $plan0.Sizes.Count 0 'a zero budget selects nothing'
@@ -58,15 +69,52 @@ try {
     Assert-Equal $m.files_hashed 4 'all four paths hashed'
     Assert-Equal $m.path_duplicate_files 3 'a, b and the hardlink d are path duplicates; c is not'
     Assert-Equal $m.path_duplicate_bytes 2000 'path_duplicate_bytes counts the hardlink, so it is not reclaimable space'
-    Assert-Equal $m.bytes_read 4000 'bytes_read is what was hashed'
+    Assert-Equal $m.bytes_read 4004 'bytes_read is every byte read, growth probes included'
 
     # --- Guard: membership grew between passes ------------------------------------------------
-    $calls = [ref]0
-    $counting = { param([string]$p) $calls.Value++; (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash }.GetNewClosure()
-    $g = Measure-HashGroups -Members $members -MaxBytes 3000 -Hasher $counting
+    $opened = [ref]0
+    $countingOpen = { param([string]$p) $opened.Value++; [System.IO.File]::OpenRead($p) }.GetNewClosure()
+    $g = Measure-HashGroups -Members $members -MaxBytes 3000 -Open $countingOpen
     Assert-Equal $g.groups_skipped_budget 1 'a group that grew past the budget is skipped whole'
-    Assert-Equal $calls.Value 0 'nothing is read from a skipped group'
+    Assert-Equal $opened.Value 0 'nothing is opened in a skipped group'
     Assert-Equal $g.bytes_read 0 'bytes_read stays zero'
+
+    # --- Read-BoundedHash: the cap holds inside the read loop --------------------------------
+    $data = [byte[]]::new(3000)
+    $r = Read-BoundedHash -Stream ([System.IO.MemoryStream]::new($data)) -Expected 3000 -Budget @{ remaining = 3001; read = 0L } -ChunkBytes 1024
+    Assert-Equal $r.Status 'ok' 'exact length within budget hashes'
+
+    $bud = @{ remaining = 3010; read = 0L }
+    $grown = [byte[]]::new(5000)                     # the file grew after the size check
+    $r = Read-BoundedHash -Stream ([System.IO.MemoryStream]::new($grown)) -Expected 3000 -Budget $bud -ChunkBytes 1024
+    Assert-Equal $r.Status 'changed' 'a file that grew during the read is changed, not a match'
+    Assert-Equal $bud.read 3001 'reading stops at expected + 1 byte, however much the file grew'
+
+    $bud = @{ remaining = 2000; read = 0L }
+    $r = Read-BoundedHash -Stream ([System.IO.MemoryStream]::new($grown)) -Expected 3000 -Budget $bud -ChunkBytes 1024
+    Assert-Equal $r.Status 'budget' 'the read stops before it would pass the budget'
+    Assert-Equal ($bud.read -le 2000) $true 'bytes read never exceed the budget'
+
+    $bud = @{ remaining = 10000; read = 0L }
+    $r = Read-BoundedHash -Stream ([System.IO.MemoryStream]::new([byte[]]::new(1500))) -Expected 3000 -Budget $bud -ChunkBytes 1024
+    Assert-Equal $r.Status 'incomplete' 'a file that ends early is incomplete, not a match'
+
+    $bud = @{ remaining = 10000; read = 0L }
+    $r = Read-BoundedHash -Stream ([FailingStream]::new([byte[]]::new(3000))) -Expected 3000 -Budget $bud -ChunkBytes 1024
+    Assert-Equal $r.Status 'failed' 'a read that throws is failed'
+    Assert-Equal $bud.read 2048 'a failed read stays charged: 1024 read plus the 1024 requested when it threw'
+
+    # --- Measure-HashGroups keeps grown, short and failed files out of the matches ----------
+    $f1 = New-Fixture $root 'f1.bin' 2000 4
+    $f2 = New-Fixture $root 'f2.bin' 2000 4
+    $f3 = New-Fixture $root 'f3.bin' 2000 4
+    $streams = @{ $f1 = { [System.IO.MemoryStream]::new([byte[]]::new(2500)) }; $f2 = { [FailingStream]::new([byte[]]::new(2000)) } }
+    $fakeOpen = { param([string]$p) if ($streams.ContainsKey($p)) { & $streams[$p] } else { [System.IO.File]::OpenRead($p) } }.GetNewClosure()
+    $mixed = Measure-HashGroups -Members @{ [long]2000 = [System.Collections.Generic.List[string]]@($f1, $f2, $f3) } -MaxBytes 1000000 -Open $fakeOpen
+    Assert-Equal $mixed.files_changed 1 'grown during read: counted as changed'
+    Assert-Equal $mixed.files_failed 1 'failed read: counted as failed'
+    Assert-Equal $mixed.files_hashed 1 'only the clean read is hashed'
+    Assert-Equal $mixed.path_duplicate_files 0 'grown and failed files are never matched'
 
     # --- Guard: a file changed size between passes -------------------------------------------
     $e1 = New-Fixture $root 'e1.bin' 500 3
@@ -75,7 +123,7 @@ try {
     [System.IO.File]::WriteAllBytes($e3, [byte[]]::new(800))     # grew after "pass 2" found it at 500
     $changed = Measure-HashGroups -Members @{ [long]500 = [System.Collections.Generic.List[string]]@($e1, $e2, $e3) } -MaxBytes 1000000
     Assert-Equal $changed.files_changed 1 'a file whose size changed is not read'
-    Assert-Equal $changed.bytes_read 1000 'only the unchanged files are read'
+    Assert-Equal $changed.bytes_read 1002 'only the unchanged files are read (500 + 1 probe byte each)'
     Assert-Equal $changed.path_duplicate_files 2 'the unchanged pair is still found'
 
     # --- End to end on the fixture tree ------------------------------------------------------

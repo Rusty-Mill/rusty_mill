@@ -10,8 +10,9 @@
   -SampleHash opts in to hashing a random sample of same-size groups, to estimate how many paths have a
   byte-identical sibling. It needs -MaxHashBytes, a read budget the caller picks: whole groups are
   chosen against the metadata from the first pass until the budget is used, the projected read is
-  printed and reported, and every read is checked again against the budget in case files appeared or
-  changed size between the passes. Hashes stay in memory; only counts are written. Nothing on the
+  printed and reported, and the budget is enforced inside the read loop itself: every read is charged
+  before it is issued, including reads that fail, and a file that grows, ends early or fails is counted
+  apart and never matched. Hashes stay in memory; only counts are written. Nothing on the
   scanned roots is modified.
 
   The duplicate figures are path-based: two hardlinks to one file count as two duplicate paths though
@@ -56,7 +57,8 @@ function Select-HashBudget {
     <#
       Pure: picks whole same-size groups at random until the byte budget is used.
       $SizeGroups maps file size to the number of files of that size (first-pass metadata).
-      A group costs size x count; groups over the remaining budget are skipped, smaller ones still fit.
+      A group costs (size + 1) x count (the extra byte per file is the growth probe in Read-BoundedHash);
+      groups over the remaining budget are skipped, smaller ones still fit.
     #>
     param(
         [System.Collections.Generic.Dictionary[long, int]]$SizeGroups,
@@ -75,7 +77,7 @@ function Select-HashBudget {
     $projected = 0L
     foreach ($size in $eligible) {
         if ($chosen.Count -ge $MaxGroups) { break }
-        $cost = $size * $SizeGroups[$size]
+        $cost = ($size + 1) * $SizeGroups[$size]
         if ($projected + $cost -gt $MaxBytes) { continue }
         [void]$chosen.Add($size); $projected += $cost
     }
@@ -105,37 +107,83 @@ function Find-GroupMembers([string[]]$Roots, [System.Collections.Generic.HashSet
     return $members
 }
 
+function Read-BoundedHash {
+    <#
+      Hashes one stream, reading at most $Expected + 1 bytes and never past the shared budget.
+      Every read is charged before it is issued (the whole request), and the unused part refunded after,
+      so a read that throws stays charged. After $Expected bytes it reads 1 more byte to detect growth.
+      Status: ok (exactly $Expected bytes; Hash set), changed (more bytes), incomplete (fewer bytes),
+      failed (a read threw), budget (the budget would be exceeded; nothing more is read).
+    #>
+    param([System.IO.Stream]$Stream, [long]$Expected, [hashtable]$Budget, [int]$ChunkBytes = 1MB)
+    $sha = [System.Security.Cryptography.IncrementalHash]::CreateHash([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $buf = [byte[]]::new($ChunkBytes)
+    $got = 0L
+    try {
+        while ($true) {
+            $probe = $got -ge $Expected
+            $want = if ($probe) { 1 } else { [int][math]::Min($ChunkBytes, $Expected - $got) }
+            if ($Budget.remaining -lt $want) { return @{ Status = 'budget' } }
+            $Budget.remaining -= $want; $Budget.read += $want
+            $n = $Stream.Read($buf, 0, $want)
+            $Budget.remaining += $want - $n; $Budget.read -= $want - $n
+            if ($probe) {
+                if ($n -gt 0) { return @{ Status = 'changed' } }
+                return @{ Status = 'ok'; Hash = [System.Convert]::ToHexString($sha.GetHashAndReset()) }
+            }
+            if ($n -eq 0) { return @{ Status = 'incomplete' } }
+            $sha.AppendData($buf, 0, $n); $got += $n
+        }
+    } catch {
+        return @{ Status = 'failed' }
+    } finally {
+        $sha.Dispose()
+    }
+}
+
 function Measure-HashGroups {
     <#
-      Hashes each group whole, never past the byte budget. A group whose current cost (size x members
-      found now) no longer fits is skipped; a file whose size changed since it was found is not read.
+      Hashes each group whole, never past the byte budget. A group whose current cost ((size + 1) x
+      members found now) no longer fits is skipped. A file whose size changed before opening is not read;
+      one that grows, ends early or fails while being read is counted apart and never matched.
       Returns counts only.
     #>
     param(
         [hashtable]$Members,
         [long]$MaxBytes,
-        [scriptblock]$Hasher = { param([string]$p) (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash }
+        [scriptblock]$Open = { param([string]$p) [System.IO.File]::Open($p, 'Open', 'Read', 'ReadWrite') }
     )
-    $stats = [ordered]@{ groups_hashed = 0; groups_skipped_budget = 0; files_hashed = 0L; files_changed = 0L;
+    $budget = @{ remaining = $MaxBytes; read = 0L }
+    $stats = [ordered]@{ groups_hashed = 0; groups_skipped_budget = 0; budget_exhausted = $false;
+        files_hashed = 0L; files_changed = 0L; files_incomplete = 0L; files_failed = 0L;
         bytes_read = 0L; path_duplicate_files = 0L; path_duplicate_bytes = 0L }
     foreach ($size in ($Members.Keys | Sort-Object)) {
         $paths = $Members[$size]
         if ($paths.Count -lt 2) { continue }
-        if ($stats.bytes_read + $size * $paths.Count -gt $MaxBytes) { $stats.groups_skipped_budget++; continue }
+        if (($size + 1) * $paths.Count -gt $budget.remaining) { $stats.groups_skipped_budget++; continue }
         $byHash = @{}
         foreach ($path in $paths) {
             $now = [System.IO.FileInfo]::new($path)
             if (-not $now.Exists -or $now.Length -ne $size) { $stats.files_changed++; continue }
-            try { $h = & $Hasher $path } catch { $stats.files_changed++; continue }
-            $stats.files_hashed++; $stats.bytes_read += $size
-            Add-Count $byHash $h
+            try { $stream = & $Open $path } catch { $stats.files_failed++; continue }
+            try { $r = Read-BoundedHash -Stream $stream -Expected $size -Budget $budget } finally { $stream.Dispose() }
+            switch ($r.Status) {
+                'ok' { $stats.files_hashed++; Add-Count $byHash $r.Hash }
+                'changed' { $stats.files_changed++ }
+                'incomplete' { $stats.files_incomplete++ }
+                'failed' { $stats.files_failed++ }
+                'budget' { $stats.budget_exhausted = $true }
+            }
+            if ($stats.budget_exhausted) { break }
         }
         $stats.groups_hashed++
         foreach ($count in $byHash.Values) {
             if ($count -lt 2) { continue }
             $stats.path_duplicate_files += $count; $stats.path_duplicate_bytes += $size * ($count - 1)
         }
+        if ($stats.budget_exhausted) { break }
     }
+    $stats.bytes_read = $budget.read
     return $stats
 }
 
