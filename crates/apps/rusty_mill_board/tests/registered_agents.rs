@@ -1,14 +1,16 @@
 //! Registered agents in Settings: the stale marking matches what revoke-stale revokes (#1643),
-//! and revoking an agent releases its card claims (#1644).
+//! and revoking an agent releases its card claims (#1644), with faults injected into the card
+//! store and the registry file to show a failed release is retried without a restart.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use rusty_mill_board::agents::{Grant, MAX_PER_CONNECTOR};
-use rusty_mill_board::api::{Identity, Shared};
+use rusty_mill_board::agents::{Grant, MAX_PER_CONNECTOR, Registry};
+use rusty_mill_board::api::{CallError, Identity, Shared};
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::domain::{Capability, CommentKind};
+use rusty_mill_board::domain::{BoardError, Capability, Card, CommentKind, Event};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::settings::{Files, Settings};
 use rusty_mill_board::store::{MemStore, Store};
@@ -31,9 +33,74 @@ fn at(ms: i64) {
     NOW.with(|n| n.set(ms));
 }
 
+/// Faults to inject into [`Faulty`].
+#[derive(Default)]
+struct Faults {
+    /// Fail this many of the next card listings.
+    lists: AtomicUsize,
+    /// Fail every write to this card.
+    card: Mutex<Option<Uuid>>,
+}
+
+/// A [`MemStore`] that fails on demand.
+struct Faulty {
+    inner: MemStore,
+    faults: Arc<Faults>,
+}
+
+fn injected() -> BoardError {
+    BoardError::Storage("injected fault".into())
+}
+
+impl Store for Faulty {
+    fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+        self.inner.get(id)
+    }
+    fn list(&self) -> Result<Vec<Card>, BoardError> {
+        let armed = self
+            .faults
+            .lists
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok();
+        if armed {
+            Err(injected())
+        } else {
+            self.inner.list()
+        }
+    }
+    fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
+        self.inner.insert(card, event)
+    }
+    fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
+        if *self.faults.card.lock().expect("faults") == Some(card.id) {
+            return Err(injected());
+        }
+        self.inner.replace(card, event)
+    }
+    fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError> {
+        self.inner.events_since(after, limit)
+    }
+    fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+        self.inner.last_event_id()
+    }
+    fn holds_event(&self, id: Uuid) -> Result<bool, BoardError> {
+        self.inner.holds_event(id)
+    }
+    fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+        self.inner.reserve_number(card, floor)
+    }
+    fn highest_reserved(&self) -> Result<u64, BoardError> {
+        self.inner.highest_reserved()
+    }
+    fn keeps_merge_record(&self) -> bool {
+        self.inner.keeps_merge_record()
+    }
+}
+
 struct Rig {
     board: Arc<Shared>,
     settings: Settings,
+    faults: Arc<Faults>,
     dir: std::path::PathBuf,
 }
 
@@ -53,13 +120,16 @@ fn rig(name: &str) -> Rig {
     roles
         .0
         .insert("keeper".into(), [Capability::Admin].into_iter().collect());
+    let faults = Arc::new(Faults::default());
+    let store = Faulty {
+        inner: MemStore::default(),
+        faults: Arc::clone(&faults),
+    };
+    let registry = Registry::open(dir.join("agents.json"), 0).expect("registry");
     let board: Arc<Shared> = Arc::new(
-        Board::with_clock(
-            Box::new(MemStore::default()) as Box<dyn Store>,
-            roles,
-            clock,
-        )
-        .with_projects(Projects::default()),
+        Board::with_clock(Box::new(store) as Box<dyn Store>, roles, clock)
+            .with_projects(Projects::default())
+            .with_agents(registry),
     );
     let settings = Settings::new(
         board.clone(),
@@ -71,12 +141,18 @@ fn rig(name: &str) -> Rig {
     Rig {
         board,
         settings,
+        faults,
         dir,
     }
 }
 
 impl Rig {
     fn admin(&self, op: &str, args: Value) -> Value {
+        self.try_admin(op, args)
+            .unwrap_or_else(|e| panic!("{op}: {e:?}"))
+    }
+
+    fn try_admin(&self, op: &str, args: Value) -> Result<Value, CallError> {
         let keeper = Identity {
             actor: "keeper".into(),
             role: "keeper".into(),
@@ -88,7 +164,14 @@ impl Rig {
         self.settings
             .call(op, Some(&keeper), args)
             .expect("a settings operation")
-            .unwrap_or_else(|e| panic!("{op}: {e:?}"))
+    }
+
+    /// Revoke-stale for real with nothing stale: the retry path for orphaned claims.
+    fn retry(&self) -> Value {
+        self.admin(
+            "settings_registered_agent_revoke_stale",
+            json!({"revoke": true, "ids": []}),
+        )
     }
 
     fn register(&self) -> (String, String) {
@@ -251,4 +334,117 @@ fn the_stale_dry_run_lists_the_claims_the_real_run_releases() {
     );
     assert_eq!(real["not_released"], json!([]));
     assert_eq!((r.holder(a), r.holder(b)), (None, Some(fresh.0.clone())));
+}
+
+#[test]
+fn a_failed_scan_after_a_revoke_is_retried_without_a_restart_or_re_registering() {
+    let r = rig("scan");
+    let gone = r.register();
+    let live = r.register();
+    let a = r.claimed("a", &gone.0);
+    let b = r.claimed("b", &live.0);
+    let c = r.claimed("c", "claude");
+    r.faults.lists.store(1, Ordering::SeqCst);
+    let e = r
+        .try_admin("settings_registered_agent_revoke", json!({"id": gone.0}))
+        .expect_err("the scan fails");
+    assert!(format!("{e:?}").contains("injected"), "{e:?}");
+    assert!(
+        r.board.verify_agent("conn", &gone.0, &gone.1).is_none(),
+        "the revoke itself stands"
+    );
+    assert_eq!(
+        r.holder(a),
+        Some(gone.0.clone()),
+        "its claim is orphaned for now"
+    );
+    // The dry run already shows the orphan, and a real run with nothing stale releases it.
+    let dry = r.admin("settings_registered_agent_revoke_stale", json!({}));
+    assert_eq!(
+        claimed_cards(&dry["claims"]),
+        BTreeMap::from([(a.to_string(), gone.0.clone())])
+    );
+    let out = r.retry();
+    assert_eq!(ids(&out["ids"]), Vec::<String>::new());
+    assert_eq!(
+        claimed_cards(&out["claims"]),
+        BTreeMap::from([(a.to_string(), gone.0.clone())])
+    );
+    assert_eq!(r.holder(a), None);
+    assert_eq!(
+        (r.holder(b), r.holder(c)),
+        (Some(live.0.clone()), Some("claude".to_owned())),
+        "a live agent's and a bearer holder's claims are never released"
+    );
+    assert!(
+        r.retry()["claims"].as_array().expect("claims").is_empty(),
+        "nothing twice"
+    );
+}
+
+#[test]
+fn a_card_that_fails_to_release_is_reported_and_released_by_the_next_run() {
+    let r = rig("card");
+    let gone = r.register();
+    let a = r.claimed("a", &gone.0);
+    let b = r.claimed("b", &gone.0);
+    *r.faults.card.lock().expect("faults") = Some(b);
+    let out = r.admin("settings_registered_agent_revoke", json!({"id": gone.0}));
+    assert_eq!(
+        claimed_cards(&out["released"]),
+        BTreeMap::from([(a.to_string(), gone.0.clone())])
+    );
+    assert_eq!(
+        claimed_cards(&out["not_released"]),
+        BTreeMap::from([(b.to_string(), gone.0.clone())])
+    );
+    assert!(
+        out["not_released"][0]["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("injected")
+    );
+    *r.faults.card.lock().expect("faults") = None;
+    let again = r.retry();
+    assert_eq!(
+        claimed_cards(&again["claims"]),
+        BTreeMap::from([(b.to_string(), gone.0.clone())])
+    );
+    assert_eq!((r.holder(a), r.holder(b)), (None, None));
+}
+
+#[test]
+fn a_failed_registry_write_still_releases_the_claims_and_a_retry_makes_it_durable() {
+    let r = rig("write");
+    let old = r.register();
+    let fresh = r.register();
+    let a = r.claimed("a", &old.0);
+    let b = r.claimed("b", &fresh.0);
+    at(25 * H);
+    r.use_agent(&fresh);
+    at(25 * H + 2);
+    // The registry file cannot be written: its directory is gone.
+    std::fs::remove_dir_all(&r.dir).expect("remove dir");
+    let e = r
+        .try_admin(
+            "settings_registered_agent_revoke_stale",
+            json!({"revoke": true}),
+        )
+        .expect_err("the write fails");
+    assert!(format!("{e:?}").contains("run it again"), "{e:?}");
+    assert_eq!(
+        r.holder(a),
+        None,
+        "revoked in memory, so its claim is released"
+    );
+    assert_eq!(r.holder(b), Some(fresh.0.clone()));
+    std::fs::create_dir_all(&r.dir).expect("restore dir");
+    let out = r.retry();
+    assert_eq!(
+        out["unsaved"],
+        json!(false),
+        "the retry wrote the revocation"
+    );
+    let reopened = Registry::open(r.dir.join("agents.json"), 25 * H + 3).expect("reopen");
+    assert!(!reopened.contains(&old.0) && reopened.contains(&fresh.0));
 }

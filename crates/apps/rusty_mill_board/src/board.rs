@@ -467,28 +467,37 @@ impl<S: Store> Board<S> {
         self.agents().nicknames()
     }
 
-    /// Remove registered agent `id` and release every claim it held (#1644); `None` if it did
-    /// not exist. `by` is the revoking admin, recorded on each released card.
+    /// Remove registered agent `id`, then release every orphaned claim (see
+    /// [`Board::release_orphaned`]), its own included; `None` if it did not exist. `by` is the
+    /// revoking admin, recorded on each released card.
     ///
     /// # Errors
-    /// If the registry file cannot be written; nothing is released then.
+    /// If the registry file cannot be written (the agent is already revoked in memory, so its
+    /// claims are released anyway), or the cards cannot be listed. Either way any later
+    /// revoke-stale run releases what is left.
     pub fn revoke_agent(&self, id: &str, by: &Actor) -> Result<Option<Released>, BoardError> {
-        if !self.agents().revoke(id).map_err(BoardError::Storage)? {
+        let revoked = self.agents().revoke(id);
+        let released = self.release_orphaned(by);
+        if !revoked.map_err(BoardError::Storage)? {
             return Ok(None);
         }
-        Ok(Some(self.release_claims_of(&[id.to_owned()], by)?))
+        released.map(Some)
     }
 
-    /// The cards claimed by any of `holders`, by holder (#1644: a revoke-stale preview).
+    /// The claims a revocation of `revoking` would release: theirs, and every orphaned one.
     ///
     /// # Errors
     /// On storage failure.
-    pub fn claims_of(&self, holders: &[String]) -> Result<Vec<HeldClaim>, BoardError> {
+    pub fn claims_released_by(&self, revoking: &[String]) -> Result<Vec<HeldClaim>, BoardError> {
+        let live: BTreeSet<String> = self.agent_list().into_iter().map(|a| a.id).collect();
         Ok(self
             .cards()?
             .into_iter()
             .filter_map(|c| {
-                let holder = c.claim.clone().filter(|h| holders.contains(h))?;
+                let holder = c.claim.clone().filter(|h| {
+                    crate::agents::is_registered_id(h)
+                        && (!live.contains(h) || revoking.contains(h))
+                })?;
                 Some(HeldClaim {
                     holder,
                     card: c.id,
@@ -499,21 +508,31 @@ impl<S: Store> Board<S> {
             .collect())
     }
 
-    /// Release every claim `holders` (revoked agents) hold, each with a handoff comment by `by`.
-    /// A card that fails (out of `by`'s projects, a storage error) is reported, not fatal: the
-    /// agents are already revoked, so the rest must still be freed.
+    /// Release every orphaned claim: one held by a registered agent id that is no longer in the
+    /// registry (#1644). The state is the cards themselves, so a release that failed (a scan
+    /// error, a card out of `by`'s projects, a store error) is found again by the next call:
+    /// no restart and no re-registration needed. A bearer holder's claim (no `#`) and a live
+    /// agent's are never touched. Each release is one write with a handoff comment by `by`.
     ///
     /// # Errors
-    /// If the cards cannot be listed.
-    fn release_claims_of(&self, holders: &[String], by: &Actor) -> Result<Released, BoardError> {
+    /// If the cards cannot be listed; per-card failures are reported in [`Released::failed`].
+    pub fn release_orphaned(&self, by: &Actor) -> Result<Released, BoardError> {
         let mut out = Released::default();
         let keeps_ids = self.store.keeps_comment_ids();
-        for held in self.claims_of(holders)? {
+        for held in self.claims_released_by(&[])? {
             let freed = std::cell::Cell::new(false);
             let result = self.apply(held.card, by, EventKind::Released, |c, now| {
+                // Re-checked on the card being committed: a holder that is live again (a
+                // registry reloaded from a file the revoke never reached) keeps its claim.
+                if self.agents().contains(&held.holder) {
+                    freed.set(false);
+                    return Ok(c.clone());
+                }
                 let mut next = c.release_revoked(&held.holder, by, now)?;
                 freed.set(next != *c);
-                if !keeps_ids && let Some(added) = next.comments.last_mut().filter(|_| freed.get())
+                if !keeps_ids
+                    && freed.get()
+                    && let Some(added) = next.comments.last_mut()
                 {
                     added.id = None;
                 }
@@ -529,7 +548,7 @@ impl<S: Store> Board<S> {
             }
         }
         if !out.failed.is_empty() {
-            rusty_log::warn!(failed = ?out.failed, "claims of revoked agents not released");
+            rusty_log::warn!(failed = ?out.failed, "orphaned claims not released; the next revoke-stale run retries them");
         }
         Ok(out)
     }
@@ -544,23 +563,24 @@ impl<S: Store> Board<S> {
         self.agents().has_unsaved_revoke()
     }
 
-    /// Remove registered agents unused for more than `age_ms` (only those in `only`, if given)
-    /// and release their claims, recorded as `by`'s: the ids removed and the claims released.
+    /// Remove registered agents unused for more than `age_ms` (only those in `only`, if given),
+    /// then release every orphaned claim, recorded as `by`'s: the ids removed and the claims
+    /// released. With nothing stale it still releases what an earlier revoke left: this is the
+    /// retry path.
     ///
     /// # Errors
-    /// If the registry file cannot be written.
+    /// If the registry file cannot be written (the claims are released anyway: the agents are
+    /// already gone from memory), or the cards cannot be listed.
     pub fn revoke_stale_agents(
         &self,
         age_ms: i64,
         only: Option<&[String]>,
         by: &Actor,
     ) -> Result<(Vec<String>, Released), BoardError> {
-        let ids = self
-            .agents()
-            .revoke_stale(self.now_ms(), age_ms, only)
-            .map_err(BoardError::Storage)?;
-        let released = self.release_claims_of(&ids, by)?;
-        Ok((ids, released))
+        let revoked = self.agents().revoke_stale(self.now_ms(), age_ms, only);
+        let released = self.release_orphaned(by);
+        let ids = revoked.map_err(BoardError::Storage)?;
+        Ok((ids, released?))
     }
 
     /// Registered agents without keys.
