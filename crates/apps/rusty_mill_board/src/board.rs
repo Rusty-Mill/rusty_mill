@@ -484,15 +484,22 @@ impl<S: Store> Board<S> {
         released.map(Some)
     }
 
-    /// The claims a revocation of `revoking` would release: theirs, and every orphaned one.
+    /// The claims a revocation of `revoking` by `by` would release: theirs, and every orphaned
+    /// one, in `by`'s projects only (a card outside them is neither shown nor touched; an admin
+    /// who may work there releases it).
     ///
     /// # Errors
     /// On storage failure.
-    pub fn claims_released_by(&self, revoking: &[String]) -> Result<Vec<HeldClaim>, BoardError> {
+    pub fn claims_released_by(
+        &self,
+        revoking: &[String],
+        by: &Actor,
+    ) -> Result<Vec<HeldClaim>, BoardError> {
         let live: BTreeSet<String> = self.agent_list().into_iter().map(|a| a.id).collect();
         Ok(self
             .cards()?
             .into_iter()
+            .filter(|c| by.may_work_in(&c.project))
             .filter_map(|c| {
                 let holder = c.claim.clone().filter(|h| {
                     crate::agents::is_registered_id(h)
@@ -510,16 +517,17 @@ impl<S: Store> Board<S> {
 
     /// Release every orphaned claim: one held by a registered agent id that is no longer in the
     /// registry (#1644). The state is the cards themselves, so a release that failed (a scan
-    /// error, a card out of `by`'s projects, a store error) is found again by the next call:
+    /// error, a store error) is found again by the next call:
     /// no restart and no re-registration needed. A bearer holder's claim (no `#`) and a live
-    /// agent's are never touched. Each release is one write with a handoff comment by `by`.
+    /// agent's are never touched, nor a card outside `by`'s projects. Each release is one write
+    /// with a handoff comment by `by`.
     ///
     /// # Errors
     /// If the cards cannot be listed; per-card failures are reported in [`Released::failed`].
     pub fn release_orphaned(&self, by: &Actor) -> Result<Released, BoardError> {
         let mut out = Released::default();
         let keeps_ids = self.store.keeps_comment_ids();
-        for held in self.claims_released_by(&[])? {
+        for held in self.claims_released_by(&[], by)? {
             let freed = std::cell::Cell::new(false);
             let result = self.apply(held.card, by, EventKind::Released, |c, now| {
                 // Re-checked on the card being committed: a holder that is live again (a

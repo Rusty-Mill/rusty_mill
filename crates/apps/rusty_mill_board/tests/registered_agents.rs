@@ -153,10 +153,20 @@ impl Rig {
     }
 
     fn try_admin(&self, op: &str, args: Value) -> Result<Value, CallError> {
+        self.try_admin_in(op, args, None)
+    }
+
+    /// As [`Rig::try_admin`], by an admin limited to `projects`.
+    fn try_admin_in(
+        &self,
+        op: &str,
+        args: Value,
+        projects: Option<Vec<String>>,
+    ) -> Result<Value, CallError> {
         let keeper = Identity {
             actor: "keeper".into(),
             role: "keeper".into(),
-            projects: None,
+            projects,
             connector: false,
             provider: None,
             view: Default::default(),
@@ -447,4 +457,41 @@ fn a_failed_registry_write_still_releases_the_claims_and_a_retry_makes_it_durabl
     );
     let reopened = Registry::open(r.dir.join("agents.json"), 25 * H + 3).expect("reopen");
     assert!(!reopened.contains(&old.0) && reopened.contains(&fresh.0));
+}
+
+#[test]
+fn an_admin_limited_to_other_projects_neither_sees_nor_releases_a_claim_outside_them() {
+    let r = rig("scope");
+    let gone = r.register();
+    let a = r.claimed("a", &gone.0);
+    let elsewhere = Some(vec!["elsewhere".to_owned()]);
+    let out = r
+        .try_admin_in(
+            "settings_registered_agent_revoke",
+            json!({"id": gone.0}),
+            elsewhere.clone(),
+        )
+        .expect("revoke");
+    assert_eq!(
+        (out["released"].clone(), out["not_released"].clone()),
+        (json!([]), json!([]))
+    );
+    let dry = r
+        .try_admin_in(
+            "settings_registered_agent_revoke_stale",
+            json!({}),
+            elsewhere,
+        )
+        .expect("dry run");
+    assert_eq!(
+        dry["claims"],
+        json!([]),
+        "no card outside the admin's projects is shown"
+    );
+    assert_eq!(r.holder(a), Some(gone.0.clone()));
+    // An admin who may work in its project releases it.
+    assert_eq!(
+        claimed_cards(&r.retry()["claims"]),
+        BTreeMap::from([(a.to_string(), gone.0.clone())])
+    );
 }

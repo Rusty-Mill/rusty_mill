@@ -1229,7 +1229,7 @@ impl Settings {
             (ids, r.released, r.failed)
         } else {
             let ids = self.board.stale_agents(age_ms);
-            let claims = self.board.claims_released_by(&ids)?;
+            let claims = self.board.claims_released_by(&ids, &by.actor)?;
             (ids, claims, Vec::new())
         };
         Ok(json!({
