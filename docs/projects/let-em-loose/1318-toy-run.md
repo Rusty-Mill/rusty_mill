@@ -4,6 +4,8 @@ Status: 2026-11-26, ready to run from `main` once this runbook and the read-only
 
 The work is a committed script, `1318-toy-run.sh`, plus a small helper, `1318-acp-handshake.py`. Nothing gets pasted into a terminal.
 
+For the order to do it in (a free handshake pass first, then the paid pass) and how to check each done criterion, follow `1318-toy-run-walkthrough.md`.
+
 ## Before you start (Nano)
 - **`claude-code-acp` installed for your user.** Use `npm install -g @zed-industries/claude-code-acp`, and pin the version you want. This is your own install, not a repository dependency (D197 item 5). The script records the version but never installs it.
 - **`claude` logged in** as the account in your assertion.
