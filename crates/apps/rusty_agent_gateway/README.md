@@ -184,7 +184,8 @@ call is still using is never closed for being idle, and an idle one closes on a
 timer, whether or not anyone calls the target again.
 
 A `per_session` stdio target can start each session's child from the verified
-token, so the child runs inside that session's jail:
+token, for example under that session's jail. The gateway only builds the
+command; whether the child is confined depends on what that command enforces:
 
 ```yaml
   - name: sandbox
@@ -199,6 +200,9 @@ token, so the child runs inside that session's jail:
 `session` takes `cmd`, `args` and `env`, each a `{{jwt.<claim>[:n]}}` template
 as in `identity`. **A claim value must be `[A-Za-z0-9._-]+` and not `.` or
 `..`**; anything else, or a missing claim, refuses the call and starts nothing.
+**A launch needs a validated session and a verified token**, even when every
+template is literal text: a stateless call or a call without claims starts
+nothing.
 Claims that fill the launch differently get different children. Nothing in a
 launch comes from the call. A `session` launch on a target that isn't
 `per_session` stops startup.

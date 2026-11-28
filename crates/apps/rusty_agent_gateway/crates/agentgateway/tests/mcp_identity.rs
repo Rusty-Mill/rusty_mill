@@ -108,12 +108,13 @@ impl Harness {
     /// A gateway whose `board` target stamps `actor` from the token, with
     /// `jwtAuth` required, and a client presenting `bearer`.
     async fn start(bearer: &str) -> Harness {
-        Self::start_with(bearer, BOARD).await
+        Self::start_with(bearer, BOARD, false).await
     }
 
     /// A gateway with one target, `target` (YAML under `stdio:`'s parent,
-    /// with `{server}` for the mock's path), behind `jwtAuth`.
-    async fn start_with(bearer: &str, target: &str) -> Harness {
+    /// with `{server}` for the mock's path), behind `jwtAuth`. A `classic`
+    /// client holds an `Mcp-Session-Id`; otherwise it is stateless.
+    async fn start_with(bearer: &str, target: &str, classic: bool) -> Harness {
         let port = free_port();
         let dir = tempfile::tempdir().expect("should create a temp dir");
         let jwks = dir.path().join("jwks.json");
@@ -157,9 +158,12 @@ binds:
 
         let mut config = mcp::HttpConfig::new(format!("http://127.0.0.1:{port}/mcp"));
         config.bearer_token = Some(bearer.to_owned());
-        let client = mcp::connect_with(config)
-            .await
-            .expect("client should complete the MCP handshake");
+        let client = if classic {
+            mcp::connect_classic(config).await
+        } else {
+            mcp::connect_with(config).await
+        }
+        .expect("client should complete the MCP handshake");
         Harness {
             client,
             shutdown,
@@ -230,6 +234,7 @@ async fn a_session_child_is_launched_from_the_token() {
     let harness = Harness::start_with(
         &token(json!({ "sub": "rusty_mill/c-77/builder-rust/1", "lel.claim": "c-77" })),
         LAUNCHED,
+        true,
     )
     .await;
 
@@ -243,10 +248,29 @@ async fn a_session_child_is_launched_from_the_token() {
 }
 
 #[rusty_tokio::test]
+async fn a_stateless_call_launches_nothing() {
+    let harness = Harness::start_with(
+        &token(json!({ "sub": "rusty_mill/c-77/builder-rust/1", "lel.claim": "c-77" })),
+        LAUNCHED,
+        false,
+    )
+    .await;
+
+    let err = harness
+        .comment("{}")
+        .await
+        .expect_err("a launch needs a validated session");
+    assert!(err.contains("validated session"), "got: {err}");
+
+    harness.stop().await;
+}
+
+#[rusty_tokio::test]
 async fn a_claim_that_could_leave_its_segment_launches_nothing() {
     let harness = Harness::start_with(
         &token(json!({ "sub": "someone", "lel.claim": ".." })),
         LAUNCHED,
+        true,
     )
     .await;
 

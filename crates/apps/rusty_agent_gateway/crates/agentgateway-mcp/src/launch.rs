@@ -4,9 +4,12 @@
 //! Each session of a `per_session` target gets its own child. With a
 //! `session` launch configured, that child's command, arguments and
 //! environment come from the token's claims, so the gateway can start it
-//! inside that session's jail. Nothing in a launch comes from the call.
+//! inside that session's jail. Nothing in a launch comes from the call, and
+//! nothing launches without a validated session and a verified token, even
+//! when every template is literal text.
 
 use agentgateway_config::StdioLaunch;
+use rusty_mcp_server::ClassicSession;
 
 use crate::identity::{IdentityError, Template};
 
@@ -81,16 +84,21 @@ impl Launch {
         Ok(Launch { cmd, args, env })
     }
 
-    /// Fill every template from `claims`.
+    /// Fill every template from the verified `claims` of `session`.
     ///
     /// # Errors
+    /// [`IdentityError::Unverified`] without a session or claims,
     /// [`IdentityError::Unresolved`] for a missing claim, or
     /// [`IdentityError::Value`] for one that may not go into a launch.
     pub(crate) fn resolve(
         &self,
+        session: Option<&ClassicSession>,
         claims: Option<&serde_json::Value>,
     ) -> Result<Resolved, IdentityError> {
-        let fill = |t: &Template| t.resolve_checked(claims, allowed);
+        let (Some(_), Some(claims)) = (session, claims) else {
+            return Err(IdentityError::Unverified);
+        };
+        let fill = |t: &Template| t.resolve_checked(Some(claims), allowed);
         Ok(Resolved {
             cmd: fill(&self.cmd)?,
             args: self.args.iter().map(fill).collect::<Result<_, _>>()?,

@@ -314,9 +314,11 @@ impl Pools {
             UpstreamMode::PerSession => {
                 let mut key = format!("{}\u{0}{}", who.session_id(), who.principal).into_bytes();
                 if let Some((launch, timeout)) = &self.launch {
-                    let resolved = launch.resolve(who.claims.as_ref()).map_err(|err| {
-                        ClientError::Io(io::Error::new(io::ErrorKind::PermissionDenied, err))
-                    })?;
+                    let resolved = launch
+                        .resolve(who.session.as_ref(), who.claims.as_ref())
+                        .map_err(|err| {
+                            ClientError::Io(io::Error::new(io::ErrorKind::PermissionDenied, err))
+                        })?;
                     // Claims that launch differently get their own child.
                     key.push(0);
                     key.extend_from_slice(resolved.key().as_bytes());

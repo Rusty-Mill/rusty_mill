@@ -70,6 +70,11 @@ pub enum IdentityError {
         claim: String,
     },
 
+    /// A session launch was asked for without a server-validated session and
+    /// a verified token's claims.
+    #[error("a session launch needs a validated session and a verified token")]
+    Unverified,
+
     /// The call's arguments are not a JSON object, so nothing can be set.
     #[error("tool arguments must be a JSON object")]
     Arguments,
