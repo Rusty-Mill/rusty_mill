@@ -27,7 +27,7 @@ file of aggregates. No names, paths or hashes appear in it (D243; #598 Q6).
 | Top 25 extensions with at least 10 files each; the rest folded into `other` | File kind mix (images, video, other) |
 | Zero-byte files, reparse points (symlinks, junctions), unreadable directories, paths over 259 chars | Edge-case counts |
 | Files and bytes sharing an exact size with another file | Upper bound on duplicates |
-| Only with `-SampleHash` (off by default): for up to 2000 randomly chosen size groups, how many files have a byte-identical sibling and how many bytes are redundant. Hashes stay in memory and are never written | Byte-identical duplicate rate |
+| Only with `-SampleHash -MaxHashBytes <budget>` (off by default; the budget is required): whole same-size groups are chosen at random against first-pass metadata until the budget is used, the projected read is printed and reported, and each read is checked again against the budget (a group that grew is skipped, a file that changed size is not read). Output: files hashed, bytes read, and path-based duplicate counts. Hashes stay in memory and are never written | Byte-identical duplicate rate. Path-based: hardlinks count as duplicates though they share storage, so it is not reclaimable space |
 
 The same-pixels rate can't be measured without decoding images, so it stays a default (section 2)
 unless Nano gives a figure. Until the stats arrive, the generator runs on the built-in default
@@ -39,7 +39,9 @@ Nano runs it in PowerShell 7 on the Windows desktop:
 pwsh -File .\1319-drive-stats.ps1 -Roots 'D:\','\\nas\share' -Out "$HOME\lel-drive-stats.json"
 ```
 
-He reads the JSON before sending it; it is small enough to check by eye.
+He reads the JSON before sending it; it is small enough to check by eye. `1319-drive-stats.test.ps1` tests the
+budget, the between-pass guards, the hardlink case and the no-names rule on a temporary fixture tree
+only.
 
 ## 2. The generator: `lel_treegen`
 
