@@ -9,6 +9,10 @@
 //! and `tools/list` prompt, and it ends early when the caller cancels, so a
 //! timed-out call does not keep this process (and the test's stderr) alive.
 //!
+//! `MOCK_ECHO_ARGS` set makes each tool append its arguments as JSON, so a
+//! test can see exactly what the gateway sent upstream. `MOCK_ECHO_PID` set
+//! appends ` pid=<id>`, so a test can tell which child process answered.
+//!
 //! `MOCK_PROMPTS` and `MOCK_RESOURCES` add prompts and resources. Both default
 //! to empty, and a server with neither advertises neither capability — which
 //! is what lets a test check that the gateway only claims what its targets can
@@ -66,6 +70,9 @@ fn main() -> std::io::Result<()> {
             .unwrap_or(0),
     );
 
+    let echo_args = std::env::var_os("MOCK_ECHO_ARGS").is_some();
+    let echo_pid = std::env::var_os("MOCK_ECHO_PID").is_some();
+
     // Only what this instance actually has is registered, and the server
     // advertises a capability only for what is registered, so a test can
     // check the gateway's own advertisement follows its targets.
@@ -75,12 +82,21 @@ fn main() -> std::io::Result<()> {
         tool.description = Some(format!("{name} on {label}"));
         // The label is what lets a test tell which target served the call.
         let text = format!("{label}:{name}");
-        builder = builder.tool(tool, move |ctx, _call| {
+        builder = builder.tool(tool, move |ctx, call| {
             // Each call runs on a thread of its own, so a sleep here is slow
             // only for this call; startup and `tools/list` stay prompt.
             nap(delay, &ctx.cancel_token());
+            let text = match (echo_args, &call.arguments) {
+                (true, Some(args)) => format!("{text} {}", args.to_json_string()),
+                (true, None) => format!("{text} null"),
+                (false, _) => text.clone(),
+            };
+            let text = match echo_pid {
+                true => format!("{text} pid={}", std::process::id()),
+                false => text,
+            };
             Ok(CallToolResult {
-                content: vec![ContentBlock::text(text.clone())],
+                content: vec![ContentBlock::text(text)],
                 ..CallToolResult::default()
             })
         });

@@ -238,6 +238,39 @@ struct Cli {
     /// The BBP task directory `bbp` serves (its `--dir`).
     #[arg(long, env = "MILL_BOARD_BBP_ROOT", requires = "bbp_bin")]
     bbp_root: Option<PathBuf>,
+    /// Seconds between claim-log anchor passes (#1551): each linked task's head is checked
+    /// with `bbp verify --expect <last anchor>` and recorded as a card comment. 0 (the
+    /// default) is off; needs the BBP host above.
+    #[arg(long, env = "MILL_BOARD_BBP_ANCHOR_SECS", default_value_t = 0)]
+    bbp_anchor_secs: u64,
+}
+
+/// The claim-log anchor timer (#1551), when `--bbp-anchor-secs` is set: one pass per
+/// period on its own thread, each failure logged, never fatal.
+fn start_anchoring(board: &Arc<Shared>, cli: &Cli) -> Result<(), String> {
+    if cli.bbp_anchor_secs == 0 {
+        return Ok(());
+    }
+    if cli.bbp_bin.is_none() {
+        return Err("--bbp-anchor-secs needs --bbp-bin and --bbp-root".into());
+    }
+    let period = Duration::from_secs(cli.bbp_anchor_secs);
+    let board = Arc::clone(board);
+    std::thread::Builder::new()
+        .name("bbp-anchor".into())
+        .spawn(move || {
+            loop {
+                match board.anchor_tick() {
+                    Ok(0) => {}
+                    Ok(n) => rusty_log::info!(written = n, "anchor: comments written"),
+                    Err(e) => rusty_log::warn!(error = %e, "anchor: pass failed"),
+                }
+                std::thread::sleep(period);
+            }
+        })
+        .map_err(|e| format!("could not start the anchor timer: {e}"))?;
+    rusty_log::info!(secs = cli.bbp_anchor_secs, "claim-log anchoring is on");
+    Ok(())
 }
 
 /// The settings files: the directory's, each overridden by its own flag.
@@ -636,6 +669,7 @@ fn run(cli: Cli) -> Result<(), String> {
         board = board.with_escalations(Arc::new(BbpCli::new(bin.clone(), root.clone())));
     }
     let board: Arc<Shared> = Arc::new(board);
+    start_anchoring(&board, &cli)?;
     // Cards made before numbering, or directly in rusty_tick, get their numbers now. A store
     // that is not up yet is not fatal: the next new card numbers them.
     match board.number_cards() {

@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agentgateway_config::{McpTarget, McpTargetKind, StreamableHttpTarget};
-use agentgateway_mcp::{HeaderOverride, Override, Target};
+use agentgateway_config::{McpTarget, McpTargetKind, StreamableHttpTarget, UpstreamMode};
+use agentgateway_mcp::{HeaderOverride, Override, SessionKey, Target};
+use rusty_mcp_server::ClassicSession;
 use rusty_mcp_server::json::Value;
 use rusty_mcp_server::proto::{
     CallToolParams, CallToolResult, ContentBlock, ErrorData, ProtocolVersion, Tool,
@@ -65,6 +66,10 @@ fn serve(builder: ServerBuilder) -> Up {
 }
 
 fn target(up: &Up, connections: usize, timeout: Duration) -> Target {
+    target_in(up, UpstreamMode::Pooled, connections, timeout)
+}
+
+fn target_in(up: &Up, mode: UpstreamMode, connections: usize, timeout: Duration) -> Target {
     let config = McpTarget {
         name: "up".to_owned(),
         kind: McpTargetKind::Mcp(StreamableHttpTarget {
@@ -73,6 +78,9 @@ fn target(up: &Up, connections: usize, timeout: Duration) -> Target {
             path: "/mcp".to_owned(),
         }),
         filters: Vec::new(),
+        identity: None,
+        mode: Some(mode),
+        connections: None,
     };
     Target::connect_with(
         &config,
@@ -98,7 +106,13 @@ fn a_classic_only_upstream_that_rejects_the_stateless_header_is_still_reached() 
             .tool(Tool::new("t", schema()), |_c, _p| Ok(text("classic"))),
     );
     let target = target(&up, 2, Duration::from_secs(5));
-    let result = target.call(&call("t"), &HeaderOverride::default()).unwrap();
+    let result = target
+        .call(
+            &call("t"),
+            &HeaderOverride::default(),
+            &SessionKey::default(),
+        )
+        .unwrap();
     assert!(matches!(&result.content[0], ContentBlock::Text { text, .. } if text == "classic"));
 }
 
@@ -115,11 +129,21 @@ fn waiting_for_a_busy_connection_counts_against_the_same_budget_as_the_call() {
     let target = Arc::new(target(&up, 1, Duration::from_secs(1)));
     let first = {
         let target = Arc::clone(&target);
-        std::thread::spawn(move || target.call(&call("slow"), &HeaderOverride::default()))
+        std::thread::spawn(move || {
+            target.call(
+                &call("slow"),
+                &HeaderOverride::default(),
+                &SessionKey::default(),
+            )
+        })
     };
     std::thread::sleep(Duration::from_millis(100)); // let it take the connection
     let started = Instant::now();
-    let second = target.call(&call("slow"), &HeaderOverride::default());
+    let second = target.call(
+        &call("slow"),
+        &HeaderOverride::default(),
+        &SessionKey::default(),
+    );
     let took = started.elapsed();
     assert!(
         second.is_err(),
@@ -196,7 +220,11 @@ fn every_page_of_a_listing_goes_over_one_session_even_with_competing_traffic() {
         let (target, stop) = (Arc::clone(&target), Arc::clone(&stop));
         std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
-                let _ = target.call(&call("t0"), &HeaderOverride::default());
+                let _ = target.call(
+                    &call("t0"),
+                    &HeaderOverride::default(),
+                    &SessionKey::default(),
+                );
             }
         })
     };
@@ -324,11 +352,21 @@ fn a_lazily_opened_connection_handshakes_within_the_operation_budget() {
     let target = Arc::new(target(&up, 2, Duration::from_secs(1)));
     let busy = {
         let target = Arc::clone(&target);
-        std::thread::spawn(move || target.call(&call("t"), &HeaderOverride::default()))
+        std::thread::spawn(move || {
+            target.call(
+                &call("t"),
+                &HeaderOverride::default(),
+                &SessionKey::default(),
+            )
+        })
     };
     std::thread::sleep(Duration::from_millis(100));
     let started = Instant::now();
-    let second = target.call(&call("t"), &HeaderOverride::default());
+    let second = target.call(
+        &call("t"),
+        &HeaderOverride::default(),
+        &SessionKey::default(),
+    );
     let took = started.elapsed();
     assert!(second.is_err(), "1.2 s of handshake cannot fit in 1 s");
     assert!(
@@ -336,4 +374,264 @@ fn a_lazily_opened_connection_handshakes_within_the_operation_budget() {
         "the handshake must not get a fresh budget per step: {took:?}"
     );
     assert!(busy.join().unwrap().is_ok());
+}
+
+fn as_session(session: &str, sub: &str) -> SessionKey {
+    in_session(&ClassicSession::new(session), sub)
+}
+
+fn in_session(session: &ClassicSession, sub: &str) -> SessionKey {
+    SessionKey::new(
+        Some(session),
+        Some(&serde_json::json!({"iss": "lel-orch@test", "sub": sub})),
+    )
+}
+
+fn plain_builder() -> ServerBuilder {
+    Server::builder("plain", "1").tool(Tool::new("t", schema()), |_c, _p| Ok(text("ok")))
+}
+
+fn plain() -> Up {
+    serve(plain_builder())
+}
+
+#[test]
+fn per_session_gives_each_session_and_principal_its_own_upstream() {
+    let up = plain();
+    let target = target_in(&up, UpstreamMode::PerSession, 8, Duration::from_secs(5));
+    let none = HeaderOverride::default();
+
+    target
+        .call(&call("t"), &none, &as_session("s1", "a"))
+        .unwrap();
+    target
+        .call(&call("t"), &none, &as_session("s1", "a"))
+        .unwrap();
+    assert_eq!(
+        target.sessions(),
+        1,
+        "the same session and principal reuse one"
+    );
+
+    target
+        .call(&call("t"), &none, &as_session("s2", "a"))
+        .unwrap();
+    target
+        .call(&call("t"), &none, &as_session("s1", "b"))
+        .unwrap();
+    assert_eq!(
+        target.sessions(),
+        3,
+        "another session or principal never shares"
+    );
+
+    assert_eq!(target.end_session("s1"), 2, "both of s1's upstreams close");
+    assert_eq!(target.sessions(), 1);
+    assert_eq!(target.end_session("s1"), 0);
+}
+
+#[test]
+fn per_session_upstreams_close_when_idle() {
+    let up = plain();
+    let target = target_in(&up, UpstreamMode::PerSession, 8, Duration::from_secs(5))
+        .with_session_idle(Duration::from_millis(100));
+    let none = HeaderOverride::default();
+    target
+        .call(&call("t"), &none, &as_session("s1", "a"))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    target
+        .call(&call("t"), &none, &as_session("s2", "a"))
+        .unwrap();
+    assert_eq!(target.sessions(), 1, "s1 went idle and was closed");
+}
+
+#[test]
+fn a_call_admitted_before_its_session_ended_opens_nothing_after() {
+    let up = plain();
+    let target = target_in(&up, UpstreamMode::PerSession, 8, Duration::from_secs(5));
+    let none = HeaderOverride::default();
+    // Admitted while live; the session ends before the call reaches a pool.
+    let s1 = ClassicSession::new("s1");
+    let admitted = in_session(&s1, "a");
+    s1.end();
+    assert_eq!(target.end_session("s1"), 0, "nothing was open yet");
+
+    let late = target.call(&call("t"), &none, &admitted);
+    assert!(late.is_err(), "an ended session gets no new upstream");
+    assert_eq!(target.sessions(), 0);
+
+    target
+        .call(&call("t"), &none, &as_session("s2", "a"))
+        .unwrap();
+    let stateless = SessionKey::new(None, Some(&serde_json::json!({"sub": "a"})));
+    target.call(&call("t"), &none, &stateless).unwrap();
+    assert_eq!(
+        target.sessions(),
+        1,
+        "other sessions go on; a stateless call keeps no upstream"
+    );
+}
+
+#[test]
+fn a_pool_in_use_is_not_closed_for_being_idle() {
+    let up = serve(slow_tool(plain_builder(), 500));
+    let target = Arc::new(
+        target_in(&up, UpstreamMode::PerSession, 8, Duration::from_secs(5))
+            .with_session_idle(Duration::from_millis(100)),
+    );
+    let busy = {
+        let target = Arc::clone(&target);
+        std::thread::spawn(move || {
+            target.call(
+                &call("slow"),
+                &HeaderOverride::default(),
+                &as_session("s1", "a"),
+            )
+        })
+    };
+    std::thread::sleep(Duration::from_millis(250)); // past idle, s1 still busy
+    target
+        .call(
+            &call("t"),
+            &HeaderOverride::default(),
+            &as_session("s2", "a"),
+        )
+        .unwrap();
+    assert_eq!(target.sessions(), 2, "s1's call still holds its upstream");
+    assert!(busy.join().unwrap().is_ok());
+}
+
+#[test]
+fn an_idle_upstream_closes_with_no_further_calls() {
+    let up = plain();
+    let target = target_in(&up, UpstreamMode::PerSession, 8, Duration::from_secs(5))
+        .with_session_idle(Duration::from_millis(100));
+    target
+        .call(
+            &call("t"),
+            &HeaderOverride::default(),
+            &as_session("s1", "a"),
+        )
+        .unwrap();
+    assert_eq!(target.sessions(), 1);
+    let until = Instant::now() + Duration::from_secs(3);
+    while target.sessions() > 0 && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(target.sessions(), 0, "the reaper closed it on its own");
+}
+
+#[test]
+fn ending_a_session_refuses_the_calls_queued_on_it() {
+    let up = serve(slow_tool(plain_builder(), 600));
+    let target = Arc::new(target_in(
+        &up,
+        UpstreamMode::PerSession,
+        8,
+        Duration::from_secs(5),
+    ));
+    let on_s1 = |tool: &'static str| {
+        let target = Arc::clone(&target);
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = target.call(
+                &call(tool),
+                &HeaderOverride::default(),
+                &as_session("s1", "a"),
+            );
+            (result, started.elapsed())
+        })
+    };
+    let running = on_s1("slow");
+    std::thread::sleep(Duration::from_millis(150)); // it holds s1's one connection
+    let queued = on_s1("t");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(target.end_session("s1"), 1);
+
+    let (result, took) = queued.join().unwrap();
+    assert!(result.is_err(), "a queued call is refused at teardown");
+    assert!(
+        took < Duration::from_millis(400),
+        "refused at once: {took:?}"
+    );
+    let (result, _) = running.join().unwrap();
+    assert!(
+        result.is_ok(),
+        "the running call finishes within its timeout"
+    );
+    assert_eq!(target.sessions(), 0);
+}
+
+#[test]
+fn a_connection_dialled_after_teardown_is_not_used() {
+    // The first handshake is quick; every later one takes 1.2 s, so s1's
+    // connection is still dialling when its session ends.
+    let up = sluggish_classic_upstream(10);
+    let target = Arc::new(target_in(
+        &up,
+        UpstreamMode::PerSession,
+        8,
+        Duration::from_secs(5),
+    ));
+    let s1 = ClassicSession::new("s1");
+    let dialling = {
+        let target = Arc::clone(&target);
+        let key = in_session(&s1, "a");
+        std::thread::spawn(move || target.call(&call("t"), &HeaderOverride::default(), &key))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    s1.end();
+    assert_eq!(target.end_session("s1"), 1);
+    assert!(
+        dialling.join().unwrap().is_err(),
+        "the call is refused once its dial lands"
+    );
+}
+
+#[test]
+fn pooled_targets_keep_one_shared_pool() {
+    let up = plain();
+    let target = target_in(&up, UpstreamMode::Pooled, 8, Duration::from_secs(5));
+    let none = HeaderOverride::default();
+    target
+        .call(&call("t"), &none, &as_session("s1", "a"))
+        .unwrap();
+    target
+        .call(&call("t"), &none, &as_session("s2", "b"))
+        .unwrap();
+    assert_eq!(target.sessions(), 0);
+}
+
+#[test]
+fn per_credential_keys_on_the_outgoing_authorization() {
+    let up = plain();
+    let target = target_in(&up, UpstreamMode::PerCredential, 8, Duration::from_secs(5));
+    let bearer = |token: &str| HeaderOverride {
+        set: vec![(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )],
+        remove: Vec::new(),
+    };
+    target
+        .call(&call("t"), &bearer("x"), &as_session("s1", "a"))
+        .unwrap();
+    target
+        .call(&call("t"), &bearer("x"), &as_session("s2", "b"))
+        .unwrap();
+    assert_eq!(
+        target.sessions(),
+        1,
+        "one credential, one pool, whoever calls"
+    );
+    target
+        .call(&call("t"), &bearer("y"), &as_session("s1", "a"))
+        .unwrap();
+    assert_eq!(target.sessions(), 2);
+    assert_eq!(
+        target.end_session("s1"),
+        0,
+        "credential pools outlive sessions"
+    );
 }

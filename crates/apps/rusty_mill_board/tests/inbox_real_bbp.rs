@@ -367,3 +367,29 @@ fn the_inbox_drives_a_real_bbp_host() {
     drop(scratch);
     println!("BBP_ACCEPTANCE PASS millboard-inbox");
 }
+
+#[test]
+#[ignore = "requires the built bbp at BBP_TEST_BIN and a working sandbox"]
+fn the_anchor_reads_a_real_bbp_verify() {
+    let bin = bbp();
+    let scratch = Scratch::fresh_in(&std::env::temp_dir(), "anchor");
+    let root = scratch.path().to_path_buf();
+    let cli = BbpCli::new(bin.clone(), root.clone());
+    claims_task(&bin, &root, "V1");
+
+    let first = cli
+        .verify("V1", None)
+        .unwrap()
+        .expect("a fresh log verifies");
+    assert!(first.unchained < first.lines, "{first:?}");
+    let again = cli.verify("V1", Some(&first.head)).unwrap();
+    assert_eq!(
+        again.as_ref().map(|v| v.head.as_str()),
+        Ok(first.head.as_str())
+    );
+
+    // A head the log never had is the host's refusal, not a failure to ask.
+    let other = "0".repeat(64);
+    let refused = cli.verify("V1", Some(&other)).unwrap();
+    assert!(refused.is_err(), "{refused:?}");
+}

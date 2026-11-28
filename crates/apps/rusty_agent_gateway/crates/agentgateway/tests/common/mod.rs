@@ -346,3 +346,14 @@ where
         let _ = send.send_trailers(vec![field("grpc-status", "0")]).await;
     }
 }
+
+/// `Config::lint` without the note every MCP target lacking `mode` earns
+/// (it defaults to `per_session`), for suites whose fixtures predate `mode`.
+#[allow(dead_code, reason = "only some suites check lint")]
+pub fn lint_but_mode(config: &agentgateway_config::Config) -> Vec<String> {
+    config
+        .lint()
+        .into_iter()
+        .filter(|f| !f.contains("no `mode`"))
+        .collect()
+}

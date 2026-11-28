@@ -30,9 +30,10 @@ the paths. Until `rusty-term-design-expert.md` lands, GUI visual-design question
   the pack's DECISIONS.md or remind-me decisions yourself; one writer keeps each answer recorded once.
 - Non-blocking *default*? Take the expert's recommendation, keep going, and let the expert add the
   question to the pack's OPEN_QUESTIONS.md. This never applies to an ESCALATE, or to anything that
-  reverses a `[stated]`/`[agreed]` row: those wait for Nano. A caller's bare "we want" or a relay
-  without an attributable source (his message, a GitHub comment by `baileyrd`, or a remind-me id
-  written from his own words) is not Nano's decision; leave the question open and continue unrelated work.
+  reverses a `[stated]`/`[agreed]` row: those wait for Nano. Verify the original owner-authored
+  wording in a source that distinguishes Nano from his agents. A bare relay, a link, or
+  the shared `baileyrd` GitHub login alone is not proof. If authorship is ambiguous, leave the
+  question open and continue only unrelated work.
 
 ## Memory: rusty-remind-me
 

@@ -62,6 +62,20 @@ impl BackendTarget {
 
 impl Backend {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
+        if let BackendTarget::Mcp(backend) = &self.target {
+            for (i, target) in backend.targets.iter().enumerate() {
+                if target.mode.is_none() {
+                    // Not a fault: a statement about what the gateway does
+                    // with a target it was told nothing about (LEL D102).
+                    findings.push(format!(
+                        "{at}.mcp.targets[{i}] (`{}`): no `mode`, so it is `per_session`: one \
+                         upstream connection per client session; set `mode: pooled` for a \
+                         stateless server",
+                        target.name
+                    ));
+                }
+            }
+        }
         // Not a finding, a warning about what the configuration *does*: a
         // `dynamic` backend turns the route into a forward proxy, and that is
         // worth saying to anyone running `--check` rather than only in the
@@ -170,6 +184,77 @@ pub struct McpTarget {
     /// Optional allow/deny rules over this target's tools.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filters: Vec<ToolFilter>,
+
+    /// Who the gateway acts for on this target, taken from the verified token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<TargetIdentity>,
+
+    /// Who shares this target's upstream connections. Absent means
+    /// [`UpstreamMode::PerSession`], the safe reading for a server nobody has
+    /// said is stateless; `Config::lint` lists every target that took it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<UpstreamMode>,
+
+    /// Most connections open at once to an HTTP target, per pool. Default 8.
+    /// A `stdio` target always has one child per pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<usize>,
+}
+
+impl McpTarget {
+    /// The mode in force: the configured one, or `per_session`.
+    pub fn mode(&self) -> UpstreamMode {
+        self.mode.unwrap_or_default()
+    }
+}
+
+/// Who shares a target's upstream connections.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamMode {
+    /// One pool for every caller; the server keeps no per-caller state, and
+    /// who called travels with each call (`identity`).
+    Pooled,
+    /// One pool per credential the gateway presents upstream: the outgoing
+    /// `authorization` header, as `identity` or a header modifier set it.
+    PerCredential,
+    /// One connection, or one child process, per downstream session and
+    /// principal, closed when the session ends or sits idle.
+    #[default]
+    PerSession,
+}
+
+/// A target's `identity`: arguments and headers on `tools/call` that carry who
+/// the caller is, filled only from the verified token's claims.
+///
+/// The gateway authenticates to the upstream with its own credential and says
+/// whom it acts for here; an agent can't name itself, because what it sends in
+/// those places is stripped first. Values are templates over claims,
+/// `{{jwt.<claim>}}` or `{{jwt.<claim>:<n>}}` for the first `n` characters,
+/// where `<claim>` is a top-level key such as `sub` or `lel.lens`.
+///
+/// ```yaml
+/// identity:
+///   strip: { "*": [actor, role, agent_id, agent_key] }
+///   set: { actor: "lel-gateway/{{jwt.lel.lens}}-{{jwt.lel.claim:8}}" }
+///   headers: { x-lel-sub: "{{jwt.sub}}" }
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetIdentity {
+    /// Tool-name glob (`*` matches any run) to argument names removed from the
+    /// call before it goes upstream.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub strip: BTreeMap<String, Vec<String>>,
+
+    /// Argument name to claim template, set on every call. Overwrites what the
+    /// caller sent under that name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub set: BTreeMap<String, String>,
+
+    /// Header name to claim template, sent on every call. `mcp:` targets only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
 }
 
 one_of_enum! {

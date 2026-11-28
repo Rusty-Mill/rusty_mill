@@ -1,6 +1,6 @@
 # #1551 Anchor the BBP claim-log head outside the host
 
-Status: design draft for the let-em-loose-expert, then Nano. Nothing is built.
+Status: approved by Nano 2026-11-27 (D224); the board side is built (`rusty_mill_board` `anchor.rs`). Installing the guard line and setting the timer on BaileyAi wait for his separate host-change authorisation (D213, D214).
 Follows #722 (PR #1485; D67-D70). Card: Mill Board #1551 (`bbp_factory`).
 
 ## Gap
@@ -82,6 +82,10 @@ another actor is ignored.
   follows, its `prev` is the hash of the whole legacy prefix (`check` in `fs_store.rs`), so the
   prefix is covered like the rest.
 - A task never linked to a card is not anchored. Orch links one when run with `--card`.
+- A stuck `verify` ends the board's call at 120 s, but under the deploy wrapper only `sudo` is
+  killed. A silent `bbp` left behind runs as `orch-runner` until it finishes or the board's unit
+  is stopped (`1092-deploy-layout.md`). A `timeout` in the guard would bound it; that host change
+  is a follow-up.
 - Anchoring is a poll. BBP coordination is meant to be event-based; this poll is the board
   watching the log, not agents coordinating, and never touches BBP's control flow.
 
@@ -92,7 +96,7 @@ another actor is ignored.
    `orch-runner`. An off-machine copy (remind-me or the live board) is added when outside or
    untrusted agents join, the trigger D67 set for signing. Rejected: a) board only with root out
    of scope for good; b) mirror off the machine now, which would put an outside-service write
-   credential on BaileyAi. This settles Q1 only; the design still waits for approval.
+   credential on BaileyAi. This settled Q1 only; the design was approved later (D224).
 
 Settled as defaults by the let-em-loose-expert:
 - The guard admits `verify` with D132's `--dir` rules, `--task` checked as for `inbox`, and
