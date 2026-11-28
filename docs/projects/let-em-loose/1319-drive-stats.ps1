@@ -14,8 +14,12 @@
   charged in full before it is issued and never refunded, including short, probe and failed reads, and a file that grows, ends early or fails is counted
   apart and never matched. The cap counts bytes the script requests; files are opened unbuffered so
   .NET adds no read-ahead, but the operating system may still prefetch beyond a read. Hashes stay in memory; only counts are written. Nothing on the
-  scanned roots is modified: the report must be a new file outside every root (an existing file or
-  a path inside a root is refused, and the file is created exclusively, never overwritten).
+  scanned roots is modified: the report must be a new file in an existing folder outside every root
+  (an existing file or a path inside a root is refused, and the file is created exclusively, never
+  overwritten). "Outside" is checked both as typed and with every symlink and junction along the
+  report folder and the roots resolved, so a link pointing into a root is refused. Not resolved:
+  bind mounts, subst drives, a mapped share of a local folder, and 8.3 short names; give the report
+  an ordinary folder path, not one of those.
 
   The duplicate figures are path-based: two hardlinks to one file count as two duplicate paths though
   they share storage, so they are not reclaimable space.
@@ -84,13 +88,43 @@ function Assert-DisjointRoots([string[]]$Roots) {
     if ($null -ne $pair) { throw "Roots overlap: $($pair[0]) contains $($pair[1]). Give disjoint roots." }
 }
 
+function Get-RealDirectory([string]$Path, [int]$Depth = 0) {
+    # Resolves every symlink and junction along an existing directory path, one component at a time,
+    # so an alias of a root resolves to the root itself. Not resolved: bind mounts, subst drives,
+    # mapped shares of a local folder and 8.3 short names.
+    if ($Depth -gt 40) { throw "Too many links resolving $Path." }
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $real = [System.IO.Path]::GetPathRoot($full)
+    $parts = $full.Substring($real.Length).Split([char[]]@('\', '/'), [System.StringSplitOptions]::RemoveEmptyEntries)
+    foreach ($part in $parts) {
+        $real = Join-Path $real $part
+        $target = [System.IO.DirectoryInfo]::new($real).ResolveLinkTarget($true)
+        if ($null -ne $target) { $real = Get-RealDirectory $target.FullName ($Depth + 1) }
+    }
+    return $real
+}
+
+function Test-UnderAny([string[]]$Keys, [string[]]$Bounds, [System.StringComparison]$Comparison) {
+    # Pure: true when any boundary key starts with any boundary prefix.
+    foreach ($k in $Keys) {
+        if (@($Bounds | Where-Object { $k.StartsWith($_, $Comparison) }).Count -gt 0) { return $true }
+    }
+    return $false
+}
+
 function Assert-OutputOutsideRoots([string]$Out, [string[]]$Roots, [System.StringComparison]$Comparison) {
-    # The scanned roots are never written: the report must land outside every root, in a new file.
-    $outKey = Get-RootBoundary ([System.IO.Path]::GetFullPath($Out))
+    # The scanned roots are never written: the report must land in a new file outside every root,
+    # compared both as typed and with symlinks and junctions on either side resolved.
+    $outFull = [System.IO.Path]::GetFullPath($Out)
+    $parent = [System.IO.Path]::GetDirectoryName($outFull)
+    if (-not [System.IO.Directory]::Exists($parent)) { throw "-Out folder $parent does not exist. Give an existing folder." }
+    $outKeys = @(
+        (Get-RootBoundary $outFull),
+        (Get-RootBoundary (Join-Path (Get-RealDirectory $parent) ([System.IO.Path]::GetFileName($outFull))))
+    )
     foreach ($root in $Roots) {
-        if ($outKey.StartsWith((Get-RootBoundary ([System.IO.Path]::GetFullPath($root))), $Comparison)) {
-            throw "-Out $Out is inside scanned root $root. Write the report outside every root."
-        }
+        $rootKeys = @((Get-RootBoundary ([System.IO.Path]::GetFullPath($root))), (Get-RootBoundary (Get-RealDirectory $root)))
+        if (Test-UnderAny $outKeys $rootKeys $Comparison) { throw "-Out $Out is inside scanned root $root. Write the report outside every root." }
     }
     if (Test-Path -LiteralPath $Out) { throw "-Out $Out already exists. Give a new file name; nothing is overwritten." }
 }
@@ -253,6 +287,8 @@ function Invoke-DriveStats {
         [switch]$SampleHash, [long]$MaxHashBytes, [int]$SampleGroups, [System.Random]$Rng = [System.Random]::new())
     if (-not $Roots) { throw 'Give -Roots, e.g. -Roots D:\,\\nas\share' }
     if ($SampleHash -and $MaxHashBytes -le 0) { throw '-SampleHash needs -MaxHashBytes, a read budget such as 20GB' }
+    $missing = @($Roots | Where-Object { -not [System.IO.Directory]::Exists($_) })
+    if ($missing.Count -gt 0) { throw "Root not found: $($missing[0])" }
     Assert-DisjointRoots $Roots
     $cmp = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
     Assert-OutputOutsideRoots $Out $Roots $cmp

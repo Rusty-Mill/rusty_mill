@@ -208,6 +208,47 @@ try {
     try { Invoke-DriveStats -Roots $root -Out $inside -TopExtensions 25 -MinExtensionCount 1 -SampleGroups 10 } catch { $threw = $true }
     Assert-Equal $threw $true 'an output path inside a scanned root is refused'
     Assert-Equal (Test-Path -LiteralPath $inside) $false 'nothing is written inside the root'
+
+    # --- Aliases: a link outside the root that points into it is still inside -----------------
+    $aliasHome = Join-Path ([System.IO.Path]::GetTempPath()) ("lel-1319-alias-" + [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $aliasHome | Out-Null
+    try {
+        $sub = Join-Path $root 'sub'
+        New-Item -ItemType Directory -Path $sub -Force | Out-Null
+        $link = Join-Path $aliasHome 'into-root'
+        New-Item -ItemType SymbolicLink -Path $link -Target $sub | Out-Null
+        $viaLink = Join-Path $link 'report.json'
+        $threw = $false
+        try { Invoke-DriveStats -Roots $root -Out $viaLink -TopExtensions 25 -MinExtensionCount 1 -SampleGroups 10 } catch { $threw = $true }
+        Assert-Equal $threw $true 'an output folder that links into a root is refused'
+        Assert-Equal (Test-Path -LiteralPath (Join-Path $sub 'report.json')) $false 'nothing is written through the link'
+
+        $nested = Join-Path $link 'deeper'
+        New-Item -ItemType Directory -Path (Join-Path $sub 'deeper') -Force | Out-Null
+        $threw = $false
+        try { Invoke-DriveStats -Roots $root -Out (Join-Path $nested 'r.json') -TopExtensions 25 -MinExtensionCount 1 -SampleGroups 10 } catch { $threw = $true }
+        Assert-Equal $threw $true 'a folder below a link into a root is refused'
+
+        $rootLink = Join-Path $aliasHome 'root-alias'
+        New-Item -ItemType SymbolicLink -Path $rootLink -Target $root | Out-Null
+        $real = Join-Path $root 'real.json'
+        $threw = $false
+        try { Invoke-DriveStats -Roots $rootLink -Out $real -TopExtensions 25 -MinExtensionCount 1 -SampleGroups 10 } catch { $threw = $true }
+        Assert-Equal $threw $true 'a root given as a link is compared by its target'
+        Assert-Equal (Test-Path -LiteralPath $real) $false 'nothing is written inside the linked root'
+
+        $okOut = Join-Path $aliasHome 'ok.json'
+        Invoke-DriveStats -Roots $root -Out $okOut -TopExtensions 25 -MinExtensionCount 1 -SampleGroups 10
+        Assert-Equal (Test-Path -LiteralPath $okOut) $true 'an ordinary folder outside the root is accepted'
+
+        $threw = $false
+        try { Invoke-DriveStats -Roots $root -Out (Join-Path $aliasHome 'missing/r.json') -TopExtensions 25 -MinExtensionCount 1 -SampleGroups 10 } catch { $threw = $true }
+        Assert-Equal $threw $true 'a report folder that does not exist is refused'
+    } finally {
+        # Remove the links first so the recursive delete never walks into the root through them.
+        Get-ChildItem -LiteralPath $aliasHome -Force | Where-Object { $_.LinkType } | ForEach-Object { $_.Delete() }
+        Remove-Item -LiteralPath $aliasHome -Recurse -Force
+    }
 } finally {
     Remove-Item -LiteralPath $root -Recurse -Force
 }

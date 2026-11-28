@@ -39,9 +39,12 @@ Nano runs it in PowerShell 7.2 or later on the Windows desktop:
 pwsh -File .\1319-drive-stats.ps1 -Roots 'D:\','\\nas\share' -Out "$HOME\lel-drive-stats.json"
 ```
 
-The report must be a new file outside every scanned root: an existing file or a path inside a
-root is refused, and the file is created exclusively, so nothing on the roots is written. He reads the JSON before sending it; it is small enough to check by eye. `1319-drive-stats.test.ps1` tests the
-budget, the in-loop cap, grown, short and failing reads, the hardlink case and the no-names rule on a temporary fixture tree
+The report must be a new file in an existing folder outside every scanned root: an existing file or
+a path inside a root is refused, and the file is created exclusively, so nothing on the roots is
+written. "Outside" is checked as typed and with symlinks and junctions along the report folder and the
+roots resolved, so a link into a root is refused. Bind mounts, subst drives, a mapped share of a local
+folder and 8.3 short names are not resolved, so the report goes to an ordinary folder such as `$HOME`. He reads the JSON before sending it; it is small enough to check by eye. `1319-drive-stats.test.ps1` tests the
+budget, the in-loop cap, grown, short and failing reads, the hardlink case, the no-names rule and links into a root on a temporary fixture tree
 only.
 
 ## 2. The generator: `lel_treegen`
