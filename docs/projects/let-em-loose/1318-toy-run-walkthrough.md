@@ -17,8 +17,19 @@ came in: each one needs your own separate OK at the time, and if you don't give 
 send only the excerpt asked for, after checking it holds no account names, email addresses, tokens,
 keys or private paths. Part F lists what the verdict needs.
 
-**Deadline.** The Claude `no_overage` assertion lapses on 2026-12-25. Run before then, or re-date
-it first.
+**Deadline.** The Claude `no_overage` assertion lapses on 2026-12-25. Run before then. A new
+assertion is only written after you re-verify, on the account itself, that it is the account `claude`
+is logged in as and that its plan has no overage billing. Never change just the date to get past the
+gate.
+
+**Leftover sessions.** Before stopping a leftover `toy` tmux session or `lel-toy-1318-mux` unit,
+confirm it belongs to an earlier unpaid pass:
+```bash
+ls -d ~/toy-1318/bbp 2>/dev/null; pgrep -af 'rusty_orch builder run'
+```
+If both print nothing, no paid pass was started, and stopping it is safe. If either prints
+anything, a paid pass has started or is running. Don't stop anything: reattach with
+`tmux attach -t toy` and let it finish (Part C).
 
 ## Part A. Get ready (free)
 
@@ -71,7 +82,8 @@ The script's step 4 starts `claude-code-acp` under `lel-jail` with the builders'
    ```bash
    tmux new -s toy 'bash docs/projects/let-em-loose/1318-toy-run.sh; exec bash'
    ```
-   If tmux says the session already exists, run `tmux kill-session -t toy` first.
+   If tmux says the session already exists, check it as in "Leftover sessions" above. Only if it
+   is from an unpaid pass, run `tmux kill-session -t toy` and start again.
 2. Watch for these lines, in order:
    - `=== 2. assertion and login` then `claude: asserted and logged in`
    - `=== 3. mux server (lel-toy-1318-mux)`
@@ -181,10 +193,10 @@ tmux new -s toy 'TOY_TASK=toy-1318b bash docs/projects/let-em-loose/1318-toy-run
 | `<tool> is not on PATH` | Install that tool, or for `claude-code-acp` see Part A step 4. |
 | `the checkout has local changes` / `HEAD ... is not on origin/main` | Repeat Part A step 3. |
 | `Landlock is not active` | The kernel's LSM list lacks Landlock: `cat /sys/kernel/security/lsm`. Stop and tell Claude. |
-| `no valid Claude no-overage assertion` | The assertion is missing or older than 30 days. Re-date it in `/etc/let-em-loose/assertions.json`. |
+| `no valid Claude no-overage assertion` | The assertion is missing or older than 30 days. Stop. Re-verify the account and its no-overage plan first; write a new assertion only if both still hold (see "Deadline"). Never just change the date. |
 | `claude is not logged in as the asserted account` | Run `claude` and log in as that account, then check `claude auth status`. |
 | `the systemd user manager has an ANTHROPIC_ variable` | `systemctl --user unset-environment ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN` |
-| `lel-toy-1318-mux is already running` | `systemctl --user stop lel-toy-1318-mux` |
+| `lel-toy-1318-mux is already running` | Check it as in "Leftover sessions". Only if it is from an unpaid pass: `systemctl --user stop lel-toy-1318-mux` |
 | `the mux server never bound` | Read `journalctl --user -u lel-toy-1318-mux -n 50` yourself. Send Claude only the error line(s), checked as in "What to share". |
 | `... is not delegated to baileyrd` | Your user manager isn't giving the unit a delegated cgroup. Send Claude just the `STOP:` line. |
 | `the jailed handshake failed` | Read `~/toy-1318/out/handshake.txt` yourself. If `lel-jail stderr` shows a refused write under `~/.claude`, **don't work around it**: a writable `~/.claude` root would change D166, so it comes back to you as a decision. Send Claude only the `STOP:` line and the one error line from `lel-jail stderr` or `jail status`, with any account or private path replaced by `<redacted>`. |
