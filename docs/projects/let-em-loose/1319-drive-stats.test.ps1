@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.2
 <#
   Tests for 1319-drive-stats.ps1 on disposable synthetic fixtures in a temp directory only.
   No real drive is read. No Pester needed:  pwsh -File .\1319-drive-stats.test.ps1

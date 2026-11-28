@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.2
 <#
 .SYNOPSIS
   Read-only aggregate shape of the given roots, for Let Em Loose card #1319.
@@ -19,6 +19,9 @@
 
   The duplicate figures are path-based: two hardlinks to one file count as two duplicate paths though
   they share storage, so they are not reclaimable space.
+.NOTES
+  Needs PowerShell 7.2 or later (.NET 6): Convert.ToHexString and unbuffered FileStream (bufferSize 1)
+  are not available on 7.0/7.1, and both are out of support.
 .EXAMPLE
   pwsh -File .\1319-drive-stats.ps1 -Roots 'D:\','\\nas\share' -Out "$HOME\lel-drive-stats.json"
 .EXAMPLE

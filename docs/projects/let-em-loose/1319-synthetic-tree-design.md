@@ -33,7 +33,7 @@ The same-pixels rate can't be measured without decoding images, so it stays a de
 unless Nano gives a figure. Until the stats arrive, the generator runs on the built-in default
 profile below; the stats file replaces it, and its sha256 goes in the manifest.
 
-Nano runs it in PowerShell 7 on the Windows desktop:
+Nano runs it in PowerShell 7.2 or later on the Windows desktop:
 
 ```powershell
 pwsh -File .\1319-drive-stats.ps1 -Roots 'D:\','\\nas\share' -Out "$HOME\lel-drive-stats.json"
