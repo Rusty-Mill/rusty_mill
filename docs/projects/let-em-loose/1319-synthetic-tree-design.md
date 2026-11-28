@@ -11,8 +11,9 @@ and how. The frozen `perf` profile runs "on a 500 GB synthetic tree, scaled | Li
 (600-builder-session-design.md §2, D66).
 
 Decisions this rests on: D240 (generator location), D241 (protocol), D242 (image fixtures), D243
-(what leaves Nano's machine), all `[default]`. One question is open for Nano: **which machine is the
-reference** (section 4).
+(what leaves Nano's machine), all `[default]`, and D246 (reference machine), `[stated]`: Nano chose
+BaileyAi with a 1/10 slice on 2026-11-28 (section 4). No design question is open; the design itself
+still waits for Nano's approval on the card.
 
 ## 1. Shape: measured from Nano's drives, aggregates only
 
@@ -104,22 +105,20 @@ says.
 | 0.1 | 50 GB | 5 GB | ~60 GB | ~2 min |
 | 1.0 | 500 GB | 50 GB | ~560 GB | ~19 min |
 
-## 4. Reference hardware: open for Nano
+## 4. Reference hardware: decided (D246)
 
-The frozen `perf` profile runs in the Linux sandbox on BaileyAi, "scaled" (D66, D53). Nothing names
-the reference machine, the scale factor, or where the 30 min/TB verdict is judged. The expert
-escalated it:
+The frozen `perf` profile runs in the Linux sandbox on BaileyAi, "scaled" (D66, D53). Nothing named
+the reference machine, the scale factor, or where the 30 min/TB verdict is judged, so the expert
+escalated it. Nano chose (a) on 2026-11-28 (D246):
 
-- **a) Recommended.** BaileyAi and its data disk are the reference. `perf` runs a 1/10 slice from the
+- **a) Chosen.** BaileyAi and its data disk are the reference. `perf` runs a 1/10 slice from the
   same seed (50 GB tree, 5 GB delta), scaled linearly, calibrated by one full 500 GB run on BaileyAi
   that checks linear scaling holds. Windows desktop timings from the shadow run (#1321) are reported
   for information only. Keeps the approved profile set and host decision.
-- **b)** BaileyAi scaled runs for `perf`, but the verdict is judged on the full 500 GB tree on the
-  Windows desktop and NAS in the shadow run. Reverses D66 §2 (perf moves outside the frozen profile set).
-- **c)** The full 500 GB tree on BaileyAi for every `perf` run, no scaling. Roughly 10× the run time
-  per candidate.
+- Not chosen: b) the verdict judged on the full tree on the Windows desktop and NAS (would have
+  changed D66 §2); c) the full 500 GB tree for every `perf` run, no scaling (about 10x the run time).
 
-Under (a) the card records the disk model, filesystem, free space, CPU and RAM of BaileyAi; the
+The card records the disk model, filesystem, free space, CPU and RAM of BaileyAi; the
 generation prompt (section 6) collects them. The NAS portion is served from a second mount on the
 same host.
 
@@ -154,6 +153,6 @@ One PR each, stacked, each building and testing alone; review requested from dot
 ## 7. For Nano
 
 1. Approve this design, or say what changes.
-2. Pick the reference machine (section 4); (a) is recommended.
+2. ~~Pick the reference machine (section 4).~~ Done: (a), BaileyAi with a 1/10 slice, 2026-11-28 (D246).
 3. Optional, any time: run `1319-drive-stats.ps1` and send the JSON. Without it the default profile
    is used and the card says so.
