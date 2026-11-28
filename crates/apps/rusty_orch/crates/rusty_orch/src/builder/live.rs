@@ -18,7 +18,7 @@ use orch_bbp::acp::{Client, Turn, TurnError};
 use orch_bbp::bounded::output_within;
 use orch_bbp::builder::{self as seq, Outcome, Ports, Ran, Refused};
 use orch_bbp::mux::{self, Ctl, Launch, Line, MuxError, Own};
-use orch_jail::spec::{FileLimits, JailFile, JailSpec};
+use orch_jail::spec::{FileLimits, FileToken, JailFile, JailSpec};
 use orch_lens::builder::{self as lens_builder, Session};
 use orch_lens::card::Card;
 use orch_lens::LensConfig;
@@ -27,6 +27,7 @@ use platform_linux::{LinuxChild, LinuxFile, LinuxSpawner};
 use rusty_bbp::ArtId;
 use rusty_worktree::Repo;
 
+use super::token::{self, Seat as TokenSeat, Signer, TokenFile};
 use super::{prompt, replace, row, with_store, Options, AGENT, PROGRAM, SUBMIT};
 use crate::lens::bbp::{run_id, Child as BbpChild, Session as Seat};
 use crate::lens::run::board;
@@ -51,6 +52,12 @@ pub fn run(o: &Options) -> Result<String, String> {
     let text = std::fs::read_to_string(&o.config)
         .map_err(|e| format!("cannot read {}: {e}", o.config.display()))?;
     let config = LensConfig::parse(&text).map_err(|e| format!("{}: {e}", o.config.display()))?;
+    // Before admission, so a bad key or policy admits nothing.
+    let signer = o
+        .token
+        .as_ref()
+        .map(|t| Signer::load(&t.key, &t.kid, &t.policy))
+        .transpose()?;
     let base = Repo::open(&o.repo)?;
     let base = rev_parse(base.root(), &o.base)?;
     let board = board(&o.dir, &o.task)?;
@@ -81,6 +88,7 @@ pub fn run(o: &Options) -> Result<String, String> {
         Ok(admitted)
     })?;
     let mut ports = Live::new(o, board, base, card, seat, &session, limits.wall_secs);
+    ports.signer = signer;
     let Outcome { session, notes } =
         seq::run(&mut ports, session, Duration::from_secs(limits.wall_secs))
             .map_err(|e| e.to_string())?;
@@ -115,6 +123,10 @@ struct Live<'a> {
     wall_secs: u64,
     /// The builder block's program exited during the turn.
     exited: bool,
+    /// Signs the session's gateway token; `None` launches token-less (D233).
+    signer: Option<Signer>,
+    /// The token file once written; removed when the ports drop.
+    token: Option<TokenFile>,
 }
 
 /// The cgroup holder and what orch keeps of it.
@@ -160,7 +172,41 @@ impl<'a> Live<'a> {
             acp: None,
             wall_secs,
             exited: false,
+            signer: None,
+            token: None,
         }
+    }
+
+    /// Mint and write the session's token when orch has a signer; the slot
+    /// for `jail.json`. Logs only `jti` and `sub`.
+    fn write_token(&mut self) -> Result<Option<FileToken>, String> {
+        let Some(signer) = &self.signer else {
+            return Ok(None);
+        };
+        let claim = self.session.claim.0.to_string();
+        let seat = TokenSeat {
+            board: &self.board,
+            task: &self.o.task,
+            claim: &claim,
+            n: self.session.n,
+        };
+        let now = now_ms()? / 1000;
+        let minted = token::mint_for(
+            signer,
+            seat,
+            token::jti()?,
+            now,
+            Duration::from_secs(self.wall_secs),
+        )?;
+        let file = token::acquire(&token::path(&self.o.state, &claim, self.session.n))?;
+        // Held from here, so a failed write still removes what acquire made.
+        let file = self.token.insert(file);
+        file.write(&minted.token)?;
+        eprintln!(
+            "rusty_orch builder: token jti={} sub={}",
+            minted.jti, minted.sub
+        );
+        Ok(Some(token::slot(file.path())))
     }
 
     fn jail_path(&self) -> PathBuf {
@@ -367,6 +413,7 @@ impl Ports for Live<'_> {
         let status = self.paths.run.join("status");
         File::create(&status).map_err(|e| format!("{}: {e}", status.display()))?;
         let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_owned())?;
+        let token = self.write_token()?;
         let file = jail_file(&JailInputs {
             cgroup: &self.paths.cgroup,
             status: &status,
@@ -378,7 +425,9 @@ impl Ports for Live<'_> {
             env: mux::exact_env(|k| std::env::var(k).ok())
                 .into_iter()
                 .collect(),
+            token,
         });
+        // Also refuses a token file under any root, `--read` ones included.
         JailSpec::validate(file.clone())?;
         let json = rusty_serde::json::to_string(&file).map_err(|e| e.to_string())?;
         std::fs::write(self.jail_path(), json).map_err(|e| format!("jail.json: {e}"))
@@ -536,11 +585,14 @@ pub struct JailInputs<'a> {
     pub extra: &'a [PathBuf],
     pub cpu_secs: u64,
     pub env: BTreeMap<String, String>,
+    /// The token slot, when orch minted one (#1382, D232).
+    pub token: Option<FileToken>,
 }
 
 /// The builder's `jail.json` (D107, D166, D187, D189): the worktree is the
 /// only write root; the system roots that exist, `~/.claude` and `extra`
-/// are read roots; no token; `sh` puts ACP on the agent's stdio and closes
+/// are read roots; the token slot only when orch minted one (D232, D233;
+/// none otherwise, as D187 had it); `sh` puts ACP on the agent's stdio and closes
 /// fd 4 so the agent's tools can't reach it.
 pub fn jail_file(i: &JailInputs<'_>) -> JailFile {
     let mut read: Vec<String> = SYSTEM
@@ -565,7 +617,7 @@ pub fn jail_file(i: &JailInputs<'_>) -> JailFile {
             processes: 512,
         },
         env: i.env.clone(),
-        token: None,
+        token: i.token.clone(),
         program: "/bin/sh".into(),
         args: vec!["-c".into(), format!("exec {PROGRAM} <&4 >&4 4>&-")],
     }
@@ -1036,13 +1088,14 @@ mod tests {
             extra: &extra,
             cpu_secs: 10_800,
             env,
+            token: None,
         });
         assert_eq!(file.write, ["/s/wt/7/1"]);
         assert_eq!(file.cwd, "/s/wt/7/1");
         assert!(file.read.contains(&"/home/nano/.claude".to_owned()));
         assert!(file.read.contains(&"/opt/node".to_owned()));
         assert!(file.read.contains(&"/usr".to_owned()));
-        assert_eq!(file.token, None, "no token in v0 (D187)");
+        assert_eq!(file.token, None, "no token without the flags (D187, D233)");
         assert_eq!(file.program, "/bin/sh");
         assert_eq!(file.args[1], "exec claude-code-acp <&4 >&4 4>&-");
         JailSpec::validate(file).expect("lel-jail accepts it");
