@@ -50,7 +50,7 @@ fn the_command_line_parses_with_defaults() {
         [PathBuf::from("/opt/node"), PathBuf::from("/home/n/.cargo")]
     );
     assert_eq!(o.cgroup_parent, PathBuf::from("/sys/fs/cgroup/x"));
-    assert_eq!(o.token, None, "no token flags, no token (D229)");
+    assert_eq!(o.token, None, "no token flags, no token (D233)");
 }
 
 #[test]

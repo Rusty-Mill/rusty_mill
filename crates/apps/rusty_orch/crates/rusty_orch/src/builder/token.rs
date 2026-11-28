@@ -1,4 +1,4 @@
-//! The builder session's gateway token (#1382 slice 2, D228).
+//! The builder session's gateway token (#1382 slice 2, D232).
 //!
 //! At launch orch mints a token with `orch-token` and writes it to
 //! `<state>/tokens/<claim>/<n>/token` (0600, in a 0700 directory); the
@@ -149,30 +149,93 @@ pub fn path(state: &Path, claim: &str, n: u32) -> PathBuf {
         .join("token")
 }
 
-/// Write `token` to `file`: its directory 0700, the file 0600 and new. A
-/// file left by an earlier crash is replaced, never appended to.
-pub fn write(file: &Path, token: &str) -> Result<(), String> {
+/// A session's token directory and file, created by this process and owned
+/// by it alone: dropping it removes exactly what [`acquire`] made, and
+/// nothing that was there before.
+#[derive(Debug)]
+pub struct TokenFile {
+    dir: PathBuf,
+    file: PathBuf,
+}
+
+impl TokenFile {
+    /// The token file's path.
+    pub fn path(&self) -> &Path {
+        &self.file
+    }
+
+    /// Write the token into the file this guard created.
+    pub fn write(&self, token: &str) -> Result<(), String> {
+        let mut out = OpenOptions::new()
+            .write(true)
+            .open(&self.file)
+            .map_err(|e| format!("{}: {e}", self.file.display()))?;
+        out.write_all(token.as_bytes())
+            .map_err(|e| format!("{}: {e}", self.file.display()))
+    }
+}
+
+impl Drop for TokenFile {
+    fn drop(&mut self) {
+        let removed = remove_if_present(&self.file).and_then(|()| {
+            std::fs::remove_dir(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))
+        });
+        if let Err(e) = removed {
+            eprintln!("rusty_orch builder: token file not removed: {e}");
+        }
+    }
+}
+
+/// Claim the session's token directory and create an empty 0600 file in it.
+///
+/// The session directory (`<n>`, 0700) is created exclusively, so two
+/// attempts can never share it. One that already exists is never removed or
+/// reused: it belongs to an earlier run of the same session number, and only
+/// an operator can tell whether that run is still alive, so launch is refused
+/// with its path. Nothing is cleaned up unless this call created it.
+pub fn acquire(file: &Path) -> Result<TokenFile, String> {
     let dir = file
         .parent()
         .ok_or_else(|| format!("{}: no directory", file.display()))?;
+    let claim_dir = dir
+        .parent()
+        .ok_or_else(|| format!("{}: no claim directory", dir.display()))?;
     DirBuilder::new()
         .recursive(true)
         .mode(0o700)
+        .create(claim_dir)
+        .map_err(|e| format!("{}: {e}", claim_dir.display()))?;
+    DirBuilder::new()
+        .mode(0o700)
         .create(dir)
-        .map_err(|e| format!("{}: {e}", dir.display()))?;
-    remove(file)?;
-    let mut out = OpenOptions::new()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => format!(
+                "{} exists from an earlier run of this session; remove it once no session uses it",
+                dir.display()
+            ),
+            _ => format!("{}: {e}", dir.display()),
+        })?;
+    let created = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(file)
-        .map_err(|e| format!("{}: {e}", file.display()))?;
-    out.write_all(token.as_bytes())
-        .map_err(|e| format!("{}: {e}", file.display()))
+        .open(file);
+    if let Err(e) = created {
+        // The directory is ours and empty; leave nothing behind, and say so
+        // if that fails too.
+        let cleanup = std::fs::remove_dir(dir)
+            .err()
+            .map(|c| format!("; {} not removed: {c}", dir.display()))
+            .unwrap_or_default();
+        return Err(format!("{}: {e}{cleanup}", file.display()));
+    }
+    Ok(TokenFile {
+        dir: dir.to_owned(),
+        file: file.to_owned(),
+    })
 }
 
-/// Remove the token file; a missing one is fine.
-pub fn remove(file: &Path) -> Result<(), String> {
+fn remove_if_present(file: &Path) -> Result<(), String> {
     match std::fs::remove_file(file) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),

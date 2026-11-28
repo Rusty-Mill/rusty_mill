@@ -27,7 +27,7 @@ use platform_linux::{LinuxChild, LinuxFile, LinuxSpawner};
 use rusty_bbp::ArtId;
 use rusty_worktree::Repo;
 
-use super::token::{self, Seat as TokenSeat, Signer};
+use super::token::{self, Seat as TokenSeat, Signer, TokenFile};
 use super::{prompt, replace, row, with_store, Options, AGENT, PROGRAM, SUBMIT};
 use crate::lens::bbp::{run_id, Child as BbpChild, Session as Seat};
 use crate::lens::run::board;
@@ -123,22 +123,10 @@ struct Live<'a> {
     wall_secs: u64,
     /// The builder block's program exited during the turn.
     exited: bool,
-    /// Signs the session's gateway token; `None` launches token-less (D229).
+    /// Signs the session's gateway token; `None` launches token-less (D233).
     signer: Option<Signer>,
     /// The token file once written; removed when the ports drop.
     token: Option<TokenFile>,
-}
-
-/// A written token file, removed on drop so no exit path leaves it behind
-/// (prepare and hold failures skip `release`).
-struct TokenFile(PathBuf);
-
-impl Drop for TokenFile {
-    fn drop(&mut self) {
-        if let Err(e) = token::remove(&self.0) {
-            eprintln!("rusty_orch builder: token file not removed: {e}");
-        }
-    }
 }
 
 /// The cgroup holder and what orch keeps of it.
@@ -210,16 +198,15 @@ impl<'a> Live<'a> {
             now,
             Duration::from_secs(self.wall_secs),
         )?;
-        let path = token::path(&self.o.state, &claim, self.session.n);
-        let file = TokenFile(path);
-        token::write(&file.0, &minted.token)?;
+        let file = token::acquire(&token::path(&self.o.state, &claim, self.session.n))?;
+        // Held from here, so a failed write still removes what acquire made.
+        let file = self.token.insert(file);
+        file.write(&minted.token)?;
         eprintln!(
             "rusty_orch builder: token jti={} sub={}",
             minted.jti, minted.sub
         );
-        let slot = token::slot(&file.0);
-        self.token = Some(file);
-        Ok(Some(slot))
+        Ok(Some(token::slot(file.path())))
     }
 
     fn jail_path(&self) -> PathBuf {
@@ -598,13 +585,13 @@ pub struct JailInputs<'a> {
     pub extra: &'a [PathBuf],
     pub cpu_secs: u64,
     pub env: BTreeMap<String, String>,
-    /// The token slot, when orch minted one (#1382, D228).
+    /// The token slot, when orch minted one (#1382, D232).
     pub token: Option<FileToken>,
 }
 
 /// The builder's `jail.json` (D107, D166, D187, D189): the worktree is the
 /// only write root; the system roots that exist, `~/.claude` and `extra`
-/// are read roots; the token slot only when orch minted one (D228, D229;
+/// are read roots; the token slot only when orch minted one (D232, D233;
 /// none otherwise, as D187 had it); `sh` puts ACP on the agent's stdio and closes
 /// fd 4 so the agent's tools can't reach it.
 pub fn jail_file(i: &JailInputs<'_>) -> JailFile {
@@ -1108,7 +1095,7 @@ mod tests {
         assert!(file.read.contains(&"/home/nano/.claude".to_owned()));
         assert!(file.read.contains(&"/opt/node".to_owned()));
         assert!(file.read.contains(&"/usr".to_owned()));
-        assert_eq!(file.token, None, "no token without the flags (D187, D229)");
+        assert_eq!(file.token, None, "no token without the flags (D187, D233)");
         assert_eq!(file.program, "/bin/sh");
         assert_eq!(file.args[1], "exec claude-code-acp <&4 >&4 4>&-");
         JailSpec::validate(file).expect("lel-jail accepts it");

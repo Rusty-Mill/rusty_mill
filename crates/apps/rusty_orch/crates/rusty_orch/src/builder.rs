@@ -69,11 +69,11 @@ pub struct Options {
     pub jail: PathBuf,
     /// Read roots beyond the system ones and `~/.claude`.
     pub read: Vec<PathBuf>,
-    /// The session token's inputs (#1382, D229); `None` launches token-less.
+    /// The session token's inputs (#1382, D233); `None` launches token-less.
     pub token: Option<TokenFlags>,
 }
 
-/// `--token-key`, `--token-kid` and `--lens-policy`, given together (D229).
+/// `--token-key`, `--token-kid` and `--lens-policy`, given together (D233).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenFlags {
     /// orch's P-256 PKCS#8 PEM signing key.
@@ -149,7 +149,7 @@ pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsEr
     })
 }
 
-/// All three token flags or none (D229): a partial set is a usage error, not
+/// All three token flags or none (D233): a partial set is a usage error, not
 /// a silently token-less launch.
 fn token_flags(
     key: Option<String>,

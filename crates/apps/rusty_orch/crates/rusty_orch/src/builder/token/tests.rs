@@ -96,20 +96,78 @@ fn a_policy_without_a_lens_or_not_utf8_is_refused() {
     assert!(policy("x.toml", &[0xff, 0xfe]).is_err());
 }
 
+fn mode(p: &Path) -> u32 {
+    std::fs::metadata(p).expect("meta").permissions().mode() & 0o777
+}
+
 #[test]
-fn the_file_is_0600_in_a_0700_dir_and_replaced_not_appended() {
-    let state = scratch("write");
+fn acquire_makes_a_0600_file_in_a_0700_dir_and_drop_removes_both() {
+    let state = scratch("acquire");
     let file = path(&state, "42", 3);
     assert_eq!(file, state.join("tokens/42/3/token"));
-    write(&file, "first-and-longer").expect("writes");
-    write(&file, "second").expect("rewrites");
-    assert_eq!(std::fs::read_to_string(&file).expect("reads"), "second");
-    let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
-    assert_eq!(mode(&file), 0o600);
-    assert_eq!(mode(file.parent().expect("dir")), 0o700);
-    remove(&file).expect("removes");
-    remove(&file).expect("a missing file is fine");
-    assert!(!file.exists());
+    let dir = file.parent().expect("dir").to_owned();
+    {
+        let held = acquire(&file).expect("acquires");
+        held.write("secret").expect("writes");
+        assert_eq!(std::fs::read_to_string(&file).expect("reads"), "secret");
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+    }
+    assert!(
+        !file.exists() && !dir.exists(),
+        "drop removes what acquire made"
+    );
+    assert!(
+        state.join("tokens/42").exists(),
+        "the claim dir is shared, kept"
+    );
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+#[test]
+fn an_existing_session_dir_is_refused_and_left_untouched() {
+    let state = scratch("occupied");
+    let file = path(&state, "42", 3);
+    let dir = file.parent().expect("dir").to_owned();
+    std::fs::create_dir_all(&dir).expect("earlier run's dir");
+    std::fs::write(&file, "theirs").expect("earlier run's token");
+    let err = acquire(&file).expect_err("refused");
+    assert!(err.contains("earlier run"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("still there"),
+        "theirs"
+    );
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+#[test]
+fn a_failed_create_leaves_nothing_and_touches_nothing_else() {
+    let state = scratch("create-fails");
+    std::fs::create_dir_all(state.join("tokens")).expect("tokens");
+    // The claim "dir" is a file, so neither directory can be made.
+    std::fs::write(state.join("tokens/42"), "not a dir").expect("blocker");
+    let err = acquire(&path(&state, "42", 3)).expect_err("refused");
+    assert!(err.contains("tokens/42"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(state.join("tokens/42")).expect("kept"),
+        "not a dir"
+    );
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+#[test]
+fn a_failed_write_still_cleans_up_on_drop() {
+    let state = scratch("write-fails");
+    let file = path(&state, "42", 3);
+    let dir = file.parent().expect("dir").to_owned();
+    {
+        let held = acquire(&file).expect("acquires");
+        std::fs::remove_file(&file).expect("vanish under the writer");
+        std::fs::create_dir(&file).expect("a dir where the file was");
+        assert!(held.write("t").is_err(), "writing into a dir fails");
+        std::fs::remove_dir(&file).expect("undo the fixture");
+    }
+    assert!(!dir.exists(), "the guard removed its directory");
     let _ = std::fs::remove_dir_all(&state);
 }
 
@@ -123,7 +181,7 @@ fn the_jail_file_with_the_slot_resolves_and_keeps_the_token_out_of_every_root() 
     let home = state.join("home");
     std::fs::create_dir_all(home.join(".claude")).expect("home");
     let file = path(&state, "42", 3);
-    write(&file, "t").expect("writes");
+    let _held = acquire(&file).expect("acquires");
     let jail = jail_file(&JailInputs {
         cgroup: Path::new("/sys/fs/cgroup/lel-store-ab/builder-42-3-10"),
         status: &run.join("status"),
@@ -149,7 +207,7 @@ fn a_read_root_over_the_state_dir_refuses_the_jail() {
     let worktree = state.join("wt/42/3");
     std::fs::create_dir_all(&worktree).expect("wt");
     let file = path(&state, "42", 3);
-    write(&file, "t").expect("writes");
+    let _held = acquire(&file).expect("acquires");
     let extra = [state.clone()];
     let jail = jail_file(&JailInputs {
         cgroup: Path::new("/sys/fs/cgroup/lel-store-ab/builder-42-3-10"),
