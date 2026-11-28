@@ -233,6 +233,7 @@ Precise contracts used by this guide:
 | D225 | #1379: the sandbox fs/shell server is the crate `crates/apps/rusty_orch/crates/orch-fs-shell` (package and binary `orch-fs-shell`) | [default] 2026-11-27 (1379) |
 | D226 | #1379: the gateway launches each per_session stdio child from a new per-target setting that templates its command, args and env from verified token claims | [stated] 2026-11-27 (1379, 1377) |
 | D227 | #1379: orch-fs-shell confines nothing; critic mode withholds only `write`; claiming confinement needs evidence from the jail; no gateway launch in PR #1951 | review constraint (dottiusmaximus), not an owner decision, 2026-11-28 (1379) |
+| D230 | #1381: gateway skill source implementation defaults (startup snapshot, pack digest, file cap, strict `[skills]`, `skills.rs` core) | [default] 2026-11-28 (1381) |
 | D232 | #1382 slice 2: the token is written in rusty_orch's builder launch (`builder/live.rs`), not orch-bbp; token file, claim and logging defaults | [default] 2026-11-28 (1382) |
 | D233 | #1382 slice 2: `builder run` gains `--token-key`, `--token-kid`, `--lens-policy`, optional and all-or-nothing; none keeps token-less launches | [stated] 2026-11-28 (1382) |
 
@@ -2297,6 +2298,15 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1379:critic-confinement-boundary
 **Source.** dottiusmaximus's static review, posted as a GitHub comment under the `baileyrd` account on PR #1951, 2026-11-28T00:33:48Z, https://github.com/Rusty-Mill/rusty_mill/pull/1951#issuecomment-7231012800 ("critic mode removes the `write` tool but still exposes `exec` ... require evidence that the external jail enforces read-only critic execution and owns descendant cleanup before calling the feature confined"). Adds a condition to D225; narrows D226 (the launch waits for a later PR and needs that evidence) without reversing it. Numbered D227 because D226 is taken on branch `claude/project-thread-7bet54-1378-launch` (PR #1952).
 **Provenance correction.** First recorded as `[stated]` (Nano) in `bab10322`. The reviewer corrected that in https://github.com/Rusty-Mill/rusty_mill/pull/1951#issuecomment-7231280899 (2026-11-28T00:54:43Z): the comment was a Dottius static review finding, not owner approval. Comments under `baileyrd` may be dottiusmaximus reviews; check before tagging one `[stated]` (remind-me mem_558280bc058e4a009c456c331a6b9c78).
+
+## D230. #1381: gateway skill source implementation defaults
+
+**Decision.** Inside `726-sandbox-design.md` §8 (D180), the gateway's skill source: (1) loads the catalog once at start into an immutable snapshot; a reload is a restart. (2) A pack's digest is sha256 over its sorted (relative path, sha256(file)) pairs, reported in each Resource's `_meta` as `lel.pack_digest` and on the list. (3) Each file is capped (64 KiB); an oversize file fails gateway start, not the read. (4) A pack named in `skills.packs` but absent from the catalog serves nothing and is logged once, as #723 treats unknown domain tokens. (5) `[skills]` is validated strictly (`packs` only, a list of non-empty strings) and fails closed like `[tools]`. (6) Code: a pure core `agentgateway-mcp/src/skills.rs` over (path, bytes) pairs plus a thin fs adapter; federation serves it next to the targets. Resources only, no prompts or templates, and visibility only through the token's verified lens policy are §8 as written, not defaults. Not covered: what a pack is on disk and where the gateway is told the catalog lives; both were escalated to Nano.
+**Why.** Implementation detail inside an approved design; each choice is reversible and changes no approved behaviour.
+**Rejected.** Hot reload (a moving digest under live tokens); checking file size at read time (fails late).
+**Tag.** [default] · remind-me: mem_f2a1a38c44154bfba467bb334ec69325
+**Key.** lel:1381:skill-source-defaults
+**Source.** let-em-loose-expert, 2026-11-28, answering the #1381 build thread; 726-sandbox-design.md §5.1, §8, §10; `agentgateway-mcp/src/lens_policy.rs` (PR #1949). Numbered D230: main ends at D227 and branch `claude/project-thread-80iya5-slice2` (#1382) holds D228 and D229.
 
 ## D232. #1382 slice 2: the token is written in rusty_orch's builder launch; token file, claim and logging defaults
 
