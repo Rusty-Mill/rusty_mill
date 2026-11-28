@@ -45,7 +45,7 @@
 //! announces no changes.
 
 use crate::changes::ChangeKinds;
-use crate::connection::{Caller, CancelToken, Connection, Notifier, Started};
+use crate::connection::{Caller, CancelToken, ClassicSession, Connection, Notifier, Started};
 use crate::push::Push;
 use crate::replay::{Replay, Shared};
 use crate::server::Server;
@@ -166,9 +166,9 @@ impl HttpHandler {
         let replay = (config.resume_buffer > 0)
             .then(|| Replay::new(config.resume_buffer, config.resume_grace));
         Self {
+            sessions: Sessions::new(Arc::clone(&server)),
             server,
             config,
-            sessions: Sessions::default(),
             replay,
         }
     }
@@ -321,6 +321,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// What a classic session remembers: its revision and the cancel flags of
 /// the requests running under it.
 struct Session {
+    /// Its id, and the flag handlers see turn when it ends.
+    handle: ClassicSession,
     /// Who opened it ([`owner_of`]); only the same owner may use it.
     owner: Option<String>,
     version: ProtocolVersion,
@@ -383,8 +385,13 @@ fn owner_of(principal: Option<&Value>) -> Option<String> {
     }
 }
 
-#[derive(Default)]
-struct Sessions(Mutex<HashMap<String, Arc<Session>>>);
+/// The open classic sessions. Every way a session ends (`DELETE`, going
+/// idle) tells the server, so a source holding per-session state upstream can
+/// let it go ([`crate::ToolSource::session_ended`]).
+struct Sessions {
+    map: Mutex<HashMap<String, Arc<Session>>>,
+    server: Arc<Server>,
+}
 
 /// Why a session could not be opened.
 enum OpenError {
@@ -393,17 +400,35 @@ enum OpenError {
 }
 
 impl Sessions {
+    fn new(server: Arc<Server>) -> Self {
+        Sessions {
+            map: Mutex::new(HashMap::new()),
+            server,
+        }
+    }
+
+    /// Tell the server these sessions are over. Called with no lock held: a
+    /// source may take a while to close what it held for them.
+    fn ended(&self, gone: Vec<Arc<Session>>) {
+        for session in gone {
+            session.handle.end();
+            self.server.session_ended(session.handle.id());
+        }
+    }
+
     /// The live session `id`, refreshed; `None` if unknown, idle too long, or
     /// opened by another owner. The last looks exactly like the first, so a
     /// caller holding someone else's id learns nothing from it.
     fn get(&self, id: &str, idle: Duration, owner: Option<&str>) -> Option<Arc<Session>> {
-        let mut map = lock(&self.0);
+        let mut map = lock(&self.map);
         let session = map.get(id)?;
         if session.owner.as_deref() != owner {
             return None;
         }
         if session.idle_for() > idle {
-            map.remove(id);
+            let gone = map.remove(id);
+            drop(map);
+            self.ended(gone.into_iter().collect());
             return None;
         }
         session.touch();
@@ -419,9 +444,17 @@ impl Sessions {
         max: usize,
         idle: Duration,
     ) -> Result<(String, Arc<Session>), OpenError> {
-        let mut map = lock(&self.0);
+        let mut map = lock(&self.map);
         if map.len() >= max {
-            map.retain(|_, s| s.idle_for() <= idle);
+            let expired: Vec<String> = map
+                .iter()
+                .filter(|(_, s)| s.idle_for() > idle)
+                .map(|(id, _)| id.clone())
+                .collect();
+            let gone = expired.iter().filter_map(|id| map.remove(id)).collect();
+            drop(map);
+            self.ended(gone);
+            map = lock(&self.map);
         }
         if map.len() >= max {
             return Err(OpenError::Full);
@@ -434,6 +467,7 @@ impl Sessions {
             None => (None, None),
         };
         let session = Arc::new(Session {
+            handle: ClassicSession::new(&id),
             owner,
             version,
             client_info,
@@ -448,11 +482,14 @@ impl Sessions {
 
     /// Remove session `id` if `owner` opened it.
     fn end(&self, id: &str, owner: Option<&str>) -> Option<Arc<Session>> {
-        let mut map = lock(&self.0);
+        let mut map = lock(&self.map);
         if map.get(id)?.owner.as_deref() != owner {
             return None;
         }
-        map.remove(id)
+        let session = map.remove(id)?;
+        drop(map);
+        self.ended(vec![Arc::clone(&session)]);
+        Some(session)
     }
 }
 
@@ -1052,7 +1089,9 @@ impl HttpHandler {
                 info,
                 caps,
             )
-            .with_caller(caller),
+            .with_caller(caller)
+            // Only a session the store just validated reaches handlers.
+            .with_session(session.as_ref().map(|s| s.handle.clone())),
         );
         match conn.start(message) {
             Started::Done(None) => Ok(Response::json(StatusCode::ACCEPTED, Vec::new())),

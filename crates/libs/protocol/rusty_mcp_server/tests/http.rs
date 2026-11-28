@@ -1399,3 +1399,160 @@ fn a_host_that_screens_origins_and_hosts_itself_can_open_both() {
         403
     );
 }
+
+/// A tool source that offers nothing and records which sessions ended.
+struct Ended(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl rusty_mcp_server::ToolSource for Ended {
+    fn tools(&self) -> Vec<Tool> {
+        Vec::new()
+    }
+
+    fn call(
+        &self,
+        _ctx: &rusty_mcp_server::CallContext,
+        _call: &rusty_mcp_proto::CallToolParams,
+    ) -> Option<Result<CallToolResult, rusty_mcp_proto::ErrorData>> {
+        None
+    }
+
+    fn session_ended(&self, session: &str) {
+        self.0.lock().unwrap().push(session.to_owned());
+    }
+}
+
+fn start_recording(config: HttpConfig) -> (Fixture, Arc<std::sync::Mutex<Vec<String>>>) {
+    let ended = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let server = Arc::new(
+        Server::builder("ended-fixture", "1")
+            .tool_source(Ended(Arc::clone(&ended)))
+            .build()
+            .unwrap(),
+    );
+    let http = bind_http(
+        server,
+        "127.0.0.1:0".parse().unwrap(),
+        config,
+        Limits::default(),
+    )
+    .unwrap();
+    let addr = http.local_addr().unwrap();
+    let stop = http.shutdown_handle().unwrap();
+    std::thread::spawn(move || http.run().unwrap());
+    let fixture = Fixture {
+        addr,
+        stop,
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    (fixture, ended)
+}
+
+#[test]
+fn the_tool_source_hears_when_a_session_is_deleted() {
+    let (f, ended) = start_recording(fast());
+    let id = open_session(&f);
+    assert!(ended.lock().unwrap().is_empty());
+    let end = request(f.addr, "DELETE", "/mcp", &[("Mcp-Session-Id", &id)], "");
+    assert_eq!(end.status, 200);
+    assert_eq!(*ended.lock().unwrap(), std::slice::from_ref(&id));
+
+    // Ending it again is a 404 and says nothing more.
+    request(f.addr, "DELETE", "/mcp", &[("Mcp-Session-Id", &id)], "");
+    assert_eq!(ended.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn the_tool_source_hears_when_a_session_goes_idle() {
+    let (f, ended) = start_recording(HttpConfig {
+        session_idle: Duration::from_millis(150),
+        ..fast()
+    });
+    let id = open_session(&f);
+    std::thread::sleep(Duration::from_millis(250));
+    let gone = post(f.addr, &[CLASSIC, ("Mcp-Session-Id", &id)], LIST);
+    assert_eq!(gone.status, 404);
+    assert_eq!(*ended.lock().unwrap(), [id]);
+}
+
+#[test]
+fn the_tool_source_hears_of_idle_sessions_swept_to_make_room() {
+    let (f, ended) = start_recording(HttpConfig {
+        max_sessions: 1,
+        session_idle: Duration::from_millis(150),
+        ..fast()
+    });
+    let first = open_session(&f);
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(post(f.addr, &[], INIT).status, 200, "room again");
+    assert_eq!(*ended.lock().unwrap(), [first]);
+}
+
+/// The session the last `whoami` call ran in.
+type Seen = Arc<std::sync::Mutex<Option<rusty_mcp_server::ClassicSession>>>;
+
+/// Answers `whoami` with the session the server validated for the call.
+fn start_whoami() -> (Fixture, Seen) {
+    let seen = Seen::default();
+    let keep = Arc::clone(&seen);
+    let server = Arc::new(
+        Server::builder("whoami-fixture", "1")
+            .tool(Tool::new("whoami", schema()), move |ctx, _c| {
+                (*keep.lock().unwrap()) = ctx.session().cloned();
+                let session = ctx.session();
+                Ok(text(session.map_or("none", |s| s.id())))
+            })
+            .build()
+            .unwrap(),
+    );
+    let http = bind_http(
+        server,
+        "127.0.0.1:0".parse().unwrap(),
+        fast(),
+        Limits::default(),
+    )
+    .unwrap();
+    let addr = http.local_addr().unwrap();
+    let stop = http.shutdown_handle().unwrap();
+    std::thread::spawn(move || http.run().unwrap());
+    let fixture = Fixture {
+        addr,
+        stop,
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    (fixture, seen)
+}
+
+fn answer(r: &Reply) -> String {
+    r.json()
+        .get("result")
+        .and_then(|r| r.get("content"))
+        .and_then(Value::as_array)
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn handlers_see_only_the_session_the_server_validated() {
+    let (f, seen) = start_whoami();
+    let id = open_session(&f);
+    let classic = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"whoami"}}"#;
+    let in_session = post(f.addr, &[CLASSIC, ("Mcp-Session-Id", &id)], classic);
+    assert_eq!(answer(&in_session), id);
+    let handle = seen.lock().unwrap().clone().unwrap();
+    assert!(!handle.has_ended());
+    assert_eq!(answer(&post(f.addr, &[CLASSIC], classic)), "none");
+
+    // A stateless request's session header is ignored, so handlers never see it.
+    let mut headers = modern_headers("tools/call", "whoami");
+    headers.push(("Mcp-Session-Id", "chosen-by-the-client"));
+    let stateless = post(f.addr, &headers, &modern_call(3, "whoami", ""));
+    assert_eq!(stateless.status, 200);
+    assert_eq!(answer(&stateless), "none");
+
+    // A handler still holding the session sees it end.
+    request(f.addr, "DELETE", "/mcp", &[("Mcp-Session-Id", &id)], "");
+    assert!(handle.has_ended(), "every copy shares the flag");
+}

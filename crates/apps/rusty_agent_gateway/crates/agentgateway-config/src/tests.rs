@@ -5,6 +5,21 @@
 use super::*;
 use std::time::Duration;
 
+/// `Config::lint` without the note every target lacking `mode` earns, which
+/// these fixtures predate. That note has its own tests below.
+trait Findings {
+    fn findings(&self) -> Vec<String>;
+}
+
+impl Findings for Config {
+    fn findings(&self) -> Vec<String> {
+        self.lint()
+            .into_iter()
+            .filter(|f| !f.contains("no `mode`"))
+            .collect()
+    }
+}
+
 /// Straight from the agentgateway MCP quickstart.
 const UPSTREAM_MCP_EXAMPLE: &str = r#"
 binds:
@@ -430,7 +445,7 @@ binds:
     )
     .expect("should parse");
 
-    let findings = config.lint();
+    let findings = config.findings();
     assert!(
         !findings.iter().any(|f| f.contains("extAuthz.includeBody")),
         "the body is forwarded to the authorizer now: {findings:?}"
@@ -542,7 +557,7 @@ binds:
     .expect("should parse");
 
     assert_eq!(
-        config.lint(),
+        config.findings(),
         Vec::<String>::new(),
         "rules are evaluated now and must not be reported as parsed-but-inert"
     );
@@ -653,7 +668,7 @@ binds:
     )
     .expect("should parse");
 
-    let findings = config.lint();
+    let findings = config.findings();
     assert!(
         findings
             .iter()
@@ -695,7 +710,7 @@ binds:
     )
     .expect("should parse");
 
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(config.findings(), Vec::<String>::new());
 }
 
 /// A route with the given `urlRewrite` over one Streamable HTTP target.
@@ -724,7 +739,7 @@ binds:
 fn a_full_path_rewrite_over_one_mcp_target_lints_clean() {
     // One target, so there is no ambiguity about whose path is meant.
     assert_eq!(
-        one_target_with_rewrite("                path:\n                  full: /rpc").lint(),
+        one_target_with_rewrite("                path:\n                  full: /rpc").findings(),
         Vec::<String>::new()
     );
 }
@@ -734,7 +749,7 @@ fn an_authority_rewrite_over_one_mcp_target_lints_clean() {
     // Same reasoning as `path.full`: one target, so there is no ambiguity
     // about whose address is meant.
     assert_eq!(
-        one_target_with_rewrite("                authority: elsewhere:8080").lint(),
+        one_target_with_rewrite("                authority: elsewhere:8080").findings(),
         Vec::<String>::new()
     );
 }
@@ -744,7 +759,7 @@ fn a_prefix_rewrite_needs_exactly_one_path_prefix_match() {
     // Which prefix a request matched is not knowable when the target is
     // dialled, which happens once at startup.
     let findings =
-        one_target_with_rewrite("                path:\n                  prefix: /v2").lint();
+        one_target_with_rewrite("                path:\n                  prefix: /v2").findings();
     assert!(
         findings
             .iter()
@@ -778,7 +793,7 @@ binds:
     )
     .expect("should parse");
 
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(config.findings(), Vec::<String>::new());
 }
 
 #[test]
@@ -808,7 +823,7 @@ binds:
     )
     .expect("should parse");
 
-    let findings = config.lint();
+    let findings = config.findings();
     assert!(
         findings.iter().any(|f| f.contains("matches on 2")),
         "{findings:?}"
@@ -841,7 +856,7 @@ binds:
     .expect("should parse");
 
     assert_eq!(
-        config.lint(),
+        config.findings(),
         Vec::<String>::new(),
         "a path rewrite transforms each target's own path, so it generalises"
     );
@@ -873,7 +888,7 @@ binds:
     )
     .expect("should parse");
 
-    let findings = config.lint();
+    let findings = config.findings();
     assert!(
         findings
             .iter()
@@ -908,7 +923,7 @@ binds:
     )
     .expect("should parse");
 
-    let findings = config.lint();
+    let findings = config.findings();
     assert!(
         findings
             .iter()
@@ -935,7 +950,7 @@ binds:
     )
     .expect("should parse");
 
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(config.findings(), Vec::<String>::new());
 }
 
 #[test]
@@ -961,7 +976,7 @@ binds:
     )
     .expect("should parse");
 
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(config.findings(), Vec::<String>::new());
 }
 
 #[test]
@@ -986,7 +1001,7 @@ binds:
     )
     .expect("should parse");
 
-    let findings = config.lint();
+    let findings = config.findings();
     assert!(
         findings
             .iter()
@@ -1022,7 +1037,7 @@ binds:
     )
     .expect("should parse");
 
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(config.findings(), Vec::<String>::new());
 }
 
 #[test]
@@ -1049,7 +1064,7 @@ binds:
     )
     .expect("should parse");
 
-    let findings = config.lint();
+    let findings = config.findings();
     assert!(
         findings
             .iter()
@@ -1079,7 +1094,7 @@ binds:
     )
     .expect("should parse");
 
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(config.findings(), Vec::<String>::new());
 }
 
 #[test]
@@ -1100,7 +1115,7 @@ binds:
     )
     .expect("should parse");
 
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(config.findings(), Vec::<String>::new());
 }
 
 #[test]
@@ -1126,7 +1141,7 @@ binds:
     )
     .expect("should parse");
 
-    let findings = config.lint();
+    let findings = config.findings();
     assert!(
         findings
             .iter()
@@ -1158,7 +1173,7 @@ binds:
     )
     .expect("should parse");
 
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(config.findings(), Vec::<String>::new());
 }
 
 #[test]
@@ -1183,7 +1198,7 @@ binds:
     )
     .expect("should parse");
 
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(config.findings(), Vec::<String>::new());
 }
 
 #[test]
@@ -1210,7 +1225,7 @@ binds:
     )
     .expect("should parse");
 
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(config.findings(), Vec::<String>::new());
 }
 
 /// A federation dialled through `via`, with the given targets.
@@ -1240,7 +1255,7 @@ fn a_via_over_targets_with_distinct_paths_lints_clean() {
             "egress.local:8443",
             "                    - name: a\n                      mcp: { host: a.internal, path: /a }\n             \n                    - name: b\n                      mcp: { host: b.internal, path: /b }"
         )
-        .lint(),
+        .findings(),
         Vec::<String>::new()
     );
 }
@@ -1252,7 +1267,7 @@ fn lint_reports_two_targets_that_via_would_make_identical() {
         "egress.local:8443",
         "                    - name: a\n                      mcp: { host: a.internal, path: /mcp }\n         \n                    - name: b\n                      mcp: { host: b.internal, path: /mcp }",
     )
-    .lint();
+    .findings();
     assert!(
         findings
             .iter()
@@ -1270,7 +1285,7 @@ fn a_via_naming_no_port_keeps_each_targets_own() {
             "egress.local",
             "                    - name: a\n                      mcp: { host: a.internal, port: 3001, path: /mcp }\n             \n                    - name: b\n                      mcp: { host: b.internal, port: 3002, path: /mcp }"
         )
-        .lint(),
+        .findings(),
         Vec::<String>::new()
     );
 }
@@ -1281,7 +1296,7 @@ fn lint_reports_a_via_over_stdio_targets() {
         "egress.local:8443",
         "                    - name: a\n                      stdio: { cmd: /bin/true }",
     )
-    .lint();
+    .findings();
     assert!(
         findings
             .iter()
@@ -1294,7 +1309,7 @@ fn lint_reports_a_via_over_stdio_targets() {
 fn a_clean_config_lints_clean() {
     let config = Config::from_yaml(UPSTREAM_MCP_EXAMPLE).expect("should parse");
     assert_eq!(
-        config.lint(),
+        config.findings(),
         Vec::<String>::new(),
         "the quickstart config is fully supported and should produce no findings"
     );
@@ -1352,7 +1367,7 @@ binds:
     )
     .expect("should parse");
 
-    let findings = config.lint();
+    let findings = config.findings();
     assert!(
         findings.iter().any(|f| f.contains("policies.ai.routes")),
         "{findings:?}"
@@ -1395,7 +1410,7 @@ binds:
     )
     .expect("should parse");
 
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(config.findings(), Vec::<String>::new());
 }
 
 #[test]
@@ -1420,7 +1435,7 @@ binds:
     )
     .expect("should parse");
 
-    assert_eq!(config.lint(), Vec::<String>::new());
+    assert_eq!(config.findings(), Vec::<String>::new());
 }
 
 #[test]
@@ -1478,9 +1493,12 @@ binds:
 
     // It applies now, so it is no longer one of the keys the lint names.
     assert!(
-        !config.lint().iter().any(|f| f.contains("openAIModeration")),
+        !config
+            .findings()
+            .iter()
+            .any(|f| f.contains("openAIModeration")),
         "{:?}",
-        config.lint()
+        config.findings()
     );
 }
 
@@ -1508,7 +1526,7 @@ binds:
     )
     .expect("should parse");
 
-    let findings = config.lint();
+    let findings = config.findings();
     assert!(
         findings
             .iter()
@@ -1567,4 +1585,60 @@ binds:
     assert!(policies.backend_auth.is_none());
     assert!(policies.rest.contains_key("backendTLS"));
     assert!(policies.rest.contains_key("requestHeaderModifier"));
+}
+
+const TWO_TARGETS: &str = r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - backends:
+              - mcp:
+                  targets:
+                    - name: board
+                      mcp: { host: 127.0.0.1, port: 7300 }
+                      mode: pooled
+                      connections: 4
+                    - name: sandbox
+                      stdio: { cmd: sandbox }
+"#;
+
+#[test]
+fn mode_and_connections_parse_and_a_missing_mode_is_per_session() {
+    let config = Config::from_yaml(TWO_TARGETS).expect("fixture parses");
+    let BackendTarget::Mcp(mcp) = &config.binds[0].listeners[0].routes[0].backends[0].target else {
+        panic!("an mcp backend");
+    };
+    assert_eq!(mcp.targets[0].mode(), UpstreamMode::Pooled);
+    assert_eq!(mcp.targets[0].connections, Some(4));
+    assert_eq!(mcp.targets[1].mode, None);
+    assert_eq!(mcp.targets[1].mode(), UpstreamMode::PerSession);
+}
+
+#[test]
+fn a_target_without_mode_is_named_by_lint() {
+    let findings = Config::from_yaml(TWO_TARGETS)
+        .expect("fixture parses")
+        .lint();
+    let notes: Vec<&String> = findings
+        .iter()
+        .filter(|f| f.contains("no `mode`"))
+        .collect();
+    assert_eq!(notes.len(), 1, "{findings:?}");
+    assert!(notes[0].contains("`sandbox`"), "{}", notes[0]);
+    assert!(notes[0].contains("per_session"), "{}", notes[0]);
+}
+
+#[test]
+fn every_mode_spells_as_documented() {
+    for (text, mode) in [
+        ("pooled", UpstreamMode::Pooled),
+        ("per_credential", UpstreamMode::PerCredential),
+        ("per_session", UpstreamMode::PerSession),
+    ] {
+        let parsed: UpstreamMode =
+            serde_json::from_str(&format!("\"{text}\"")).expect("documented spelling");
+        assert_eq!(parsed, mode);
+    }
+    assert!(serde_json::from_str::<UpstreamMode>("\"perSession\"").is_err());
 }

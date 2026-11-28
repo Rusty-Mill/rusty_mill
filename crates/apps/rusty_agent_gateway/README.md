@@ -142,6 +142,47 @@ that is missing, empty or not text refuses the call rather than sending it
 anonymous, and a template that names no claim, or `headers` on a `stdio`
 target, is a startup error.
 
+### Upstream modes
+
+Who shares a target's upstream connections is the target's `mode`:
+
+```yaml
+targets:
+  - name: board                 # stateless: who called travels with each call
+    mcp: { host: 127.0.0.1, port: 7300 }
+    mode: pooled
+    connections: 16             # per pool; default 8; a stdio child is always 1
+  - name: github
+    mcp: { host: 127.0.0.1, port: 7400 }
+    mode: per_credential        # one pool per outgoing `authorization` value
+  - name: sandbox               # no mode: per_session
+    stdio: { cmd: lel-fs-shell }
+```
+
+`per_session` gives each downstream session and token principal its own
+connection, or its own child process, so two agents never share a stateful
+server. It closes when the client ends the session (`DELETE`), when the session
+goes idle, or after 15 minutes unused. **A target with no `mode` is
+`per_session`**: it is the safe reading for a server nobody said is stateless,
+and `--check` lists every target that took it. Calls, prompt gets and resource
+reads are keyed; listings use the target's first connection.
+
+The session is the one the MCP server validated for the request (known, live,
+opened by the same principal), never the raw `Mcp-Session-Id` header. **A call
+with no session** (a stateless 2026-07-28 request, or a classic one that names
+none) gets an upstream of its own for that call alone, opened with the call and
+closed after it. Nothing it leaves behind reaches another call, the same
+principal's included. A client that needs state across calls opens a classic
+session; a server that keeps none should be `mode: pooled` (or
+`per_credential`), which share upstreams on purpose and are never chosen by
+default.
+
+Once a session ends, a call admitted just before the end opens no new upstream
+for it, and calls queued on its upstream are refused; a call already running
+finishes within its timeout, and its connection is then closed. An upstream a
+call is still using is never closed for being idle, and an idle one closes on a
+timer, whether or not anyone calls the target again.
+
 ### Degraded operation
 
 A target that fails to come up does not take the gateway down. Five targets
@@ -160,7 +201,7 @@ Implemented and tested:
 - Hostname matching on listeners and routes, including single-label wildcards
 - `mcp` backends: `stdio` and Streamable HTTP (`mcp:`) targets, federating
   tools, prompts and resources with name and URI qualification, `via` egress,
-  per-target `filters` and `identity` (see [Identity upstream](#identity-upstream)), route-level `mcpAuthorization` — both the `allowTools`/`denyTools`
+  per-target `filters`, `identity` and `mode` (see [Identity upstream](#identity-upstream) and [Upstream modes](#upstream-modes)), route-level `mcpAuthorization` — both the `allowTools`/`denyTools`
   lists and upstream's CEL `rules`, see [Authorization](#authorization)
 - `mcpGuardrails`: external MCP policy processors over gRPC, able to rewrite as
   well as refuse — see [Guardrails](#guardrails)
