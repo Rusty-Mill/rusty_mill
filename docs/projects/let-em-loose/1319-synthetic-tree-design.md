@@ -10,14 +10,14 @@ tree shaped like Nano's drive". This file says how the tree is made, where the t
 and how. The frozen `perf` profile runs "on a 500 GB synthetic tree, scaled | Linux sandbox"
 (600-builder-session-design.md §2, D66).
 
-Decisions this rests on: D228 (generator location), D229 (protocol), D230 (image fixtures), D231
+Decisions this rests on: D240 (generator location), D241 (protocol), D242 (image fixtures), D243
 (what leaves Nano's machine), all `[default]`. One question is open for Nano: **which machine is the
 reference** (section 4).
 
 ## 1. Shape: measured from Nano's drives, aggregates only
 
 `1319-drive-stats.ps1` (beside this file) walks the roots Nano names, read-only, and writes one JSON
-file of aggregates. No names, paths or hashes appear in it (D231; #598 Q6).
+file of aggregates. No names, paths or hashes appear in it (D243; #598 Q6).
 
 | Output | Use in the generator |
 |---|---|
@@ -43,7 +43,7 @@ He reads the JSON before sending it; it is small enough to check by eye.
 
 ## 2. The generator: `lel_treegen`
 
-A small rusty_mill crate, `crates/tools/lel_treegen` (D228). Builders never see rusty_mill (D18,
+A small rusty_mill crate, `crates/tools/lel_treegen` (D240). Builders never see rusty_mill (D18,
 #1234). Only existing workspace dependencies: `sha2`, `serde_json`, `clap`. The PRNG is a hand-written
 SplitMix64/xoshiro256** (about 30 lines) rather than `rand`'s `StdRng`, whose algorithm is not
 promised to stay stable across versions; a seed must give the same bytes forever.
@@ -74,13 +74,13 @@ touching the filesystem.
 | Hardlinks | 20 pairs | One inode, two names: reclaiming one reclaims nothing; must not count as a reclaimable duplicate |
 | Edge files | zero-byte files, an unreadable file and directory, Unicode and 255-byte names, a path over 260 chars, depth 40 | Robustness |
 
-**Images (D230).** PNGs are written with stored (uncompressed) deflate, so identical pixels mean
+**Images (D242).** PNGs are written with stored (uncompressed) deflate, so identical pixels mean
 identical IDAT bytes; metadata variants differ only in `tEXt`/`eXIf` chunks. JPEGs come from a
 DC-only baseline encoder in the crate (each 8x8 block a flat value from the PRNG), about 150 lines:
 valid files with distinct pixels per group and no codec dependency. Group variants differ only in
 their APP1/EXIF segment. Images are a small share of bytes; bulk volume comes from opaque files.
 
-**Manifest (outside the tree, D228).** Written to a harness-only directory, never under the tree root
+**Manifest (outside the tree, D240).** Written to a harness-only directory, never under the tree root
 or any sandbox or builder mount. JSON Lines, one record per file (path, size, content id, kind,
 group id, link target), then one per expected group (match kind, members, suggested keeper for
 same-pixels groups). `manifest.sha256` is the sha256 of the canonical manifest; with the seed, scale
@@ -117,7 +117,7 @@ Under (a) the card records the disk model, filesystem, free space, CPU and RAM o
 generation prompt (section 6) collects them. The NAS portion is served from a second mount on the
 same host.
 
-## 5. Measurement protocol (D229)
+## 5. Measurement protocol (D241)
 
 - **Warm:** a repeat run after one discarded run. **Cold:** the harness drops the page cache on the
   host (needs root, so not inside the sandbox) before each run.

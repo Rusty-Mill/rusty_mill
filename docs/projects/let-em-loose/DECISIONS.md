@@ -233,10 +233,10 @@ Precise contracts used by this guide:
 | D225 | #1379: the sandbox fs/shell server is the crate `crates/apps/rusty_orch/crates/orch-fs-shell` (package and binary `orch-fs-shell`) | [default] 2026-11-27 (1379) |
 | D226 | #1379: the gateway launches each per_session stdio child from a new per-target setting that templates its command, args and env from verified token claims | [stated] 2026-11-27 (1379, 1377) |
 | D227 | #1379: orch-fs-shell confines nothing; critic mode withholds only `write`; claiming confinement needs evidence from the jail; no gateway launch in PR #1951 | review constraint (dottiusmaximus), not an owner decision, 2026-11-28 (1379) |
-| D228 | #1319: the synthetic-tree generator is the rusty_mill crate `crates/tools/lel_treegen`; its answer manifest stays outside the tree and every sandbox | [default] 2026-11-28 (1319) |
-| D229 | #1319: perf measurement protocol (cold/warm, median of 5, crash injection at 10/50/90%, crash loss in minutes, scaled delta) | [default] 2026-11-28 (1319) |
-| D230 | #1319: same-pixels fixtures are codec-free PNG/JPEG byte assemblies; the generator is independent of the #1238 golden set | [default] 2026-11-28 (1319) |
-| D231 | #1319: the real-drive stats pass prints aggregates only; sample hashing is opt-in and only counts leave the machine | [default] 2026-11-28 (1319) |
+| D240 | #1319: the synthetic-tree generator is the rusty_mill crate `crates/tools/lel_treegen`; its answer manifest stays outside the tree and every sandbox | [default] 2026-11-28 (1319) |
+| D241 | #1319: perf measurement protocol (cold/warm, median of 5, crash injection at 10/50/90%, crash loss in minutes, scaled delta) | [default] 2026-11-28 (1319) |
+| D242 | #1319: same-pixels fixtures are codec-free PNG/JPEG byte assemblies; the generator is independent of the #1238 golden set | [default] 2026-11-28 (1319) |
+| D243 | #1319: the real-drive stats pass prints aggregates only; sample hashing is opt-in and only counts leave the machine | [default] 2026-11-28 (1319) |
 
 ## D1. Lenses, not stages
 
@@ -2300,7 +2300,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Source.** dottiusmaximus's static review, posted as a GitHub comment under the `baileyrd` account on PR #1951, 2026-11-28T00:33:48Z, https://github.com/Rusty-Mill/rusty_mill/pull/1951#issuecomment-7231012800 ("critic mode removes the `write` tool but still exposes `exec` ... require evidence that the external jail enforces read-only critic execution and owns descendant cleanup before calling the feature confined"). Adds a condition to D225; narrows D226 (the launch waits for a later PR and needs that evidence) without reversing it. Numbered D227 because D226 is taken on branch `claude/project-thread-7bet54-1378-launch` (PR #1952).
 **Provenance correction.** First recorded as `[stated]` (Nano) in `bab10322`. The reviewer corrected that in https://github.com/Rusty-Mill/rusty_mill/pull/1951#issuecomment-7231280899 (2026-11-28T00:54:43Z): the comment was a Dottius static review finding, not owner approval. Comments under `baileyrd` may be dottiusmaximus reviews; check before tagging one `[stated]` (remind-me mem_558280bc058e4a009c456c331a6b9c78).
 
-## D228. #1319: the synthetic-tree generator is the rusty_mill crate `crates/tools/lel_treegen`
+## D240. #1319: the synthetic-tree generator is the rusty_mill crate `crates/tools/lel_treegen`
 
 **Decision.** The seeded generator for the #1319 test tree is a small rusty_mill crate, `crates/tools/lel_treegen`, using only existing workspace dependencies (`rand`, `sha2`, `serde_json`, `clap`). Its expected-answer manifest is written to a harness-only directory outside the generated tree root and outside every sandbox and builder mount, never into `dedup-manager`. Only the manifest digest is posted on #600. The tree is mounted read-only into `perf` runs.
 **Why.** 600-build-plan.md § Ownership gives the test tree to the experiment harness, outside builders' reach; builders never see rusty_mill (600-build-plan §1, #1234, D18), and Factory holds no code (D19). A manifest beside the tree would be readable by the candidate under test. A crate can be moved later.
@@ -2308,8 +2308,9 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** `[default]` · remind-me: mem_dcdd4b3544ce424dbe785da923bd72f1
 **Key.** lel:1319:treegen-location
 **Source.** Caller question from the #1319 design session, 2026-11-28 (Q2); 600-build-plan.md § Ownership and §1; D18, D19.
+**Numbering.** D240–D243 were first drafted as D228–D231; renumbered on 2026-11-28 because open PRs #1963, #1964, #1966, #1967 and #1968 also add D228–D231 with other meanings. D232–D239 are left free for those PRs.
 
-## D229. #1319: perf measurement protocol
+## D241. #1319: perf measurement protocol
 
 **Decision.** Warm: a repeat run after one discarded run. Cold: the harness drops caches on the host (not inside the sandbox) before each run. Five runs each; the median is reported. Crash injection: SIGKILL (`taskkill /F` on Windows) at 10%, 50% and 90% of files scanned. The crash-loss verdict is the wall time from relaunch until progress regains the pre-kill point, since the intent states loss in minutes; re-hashed bytes are reported beside it. Incremental: apply the seeded delta tree (50 GB at full scale, scaled by the same factor as the tree on scaled runs), then rescan.
 **Why.** Reuses the approved #596 measurement style (warm, median of 5; remind-me mem_864bd999d4ef406893aba1d1a3164367). Measuring loss in time matches the intent's target. Dropping caches needs host root.
@@ -2318,7 +2319,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1319:measurement-protocol
 **Source.** Caller question from the #1319 design session, 2026-11-28 (Q4); #600 intent v0.1-stage1 targets; #596 perf style.
 
-## D230. #1319: same-pixels fixtures are codec-free byte assemblies
+## D242. #1319: same-pixels fixtures are codec-free byte assemblies
 
 **Decision.** Same-pixels-different-metadata groups are generated without a codec dependency: PNGs (stored deflate) sharing identical IDAT and differing only in tEXt/eXIf chunks, and JPEGs assembled from a small fixed set of pre-encoded scan bodies with different APP1/EXIF segments. The generator is independent of the #1238 golden set, which holds real, Nano-signed cases in Factory `golden/dedup-manager/` (D37); nothing settled requires the golden set to reuse the generator.
 **Why.** No new dependency (ask-first avoided); deterministic bytes; no alignment constraint exists.
@@ -2327,7 +2328,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Key.** lel:1319:same-pixels-fixtures
 **Source.** Caller question from the #1319 design session, 2026-11-28 (Q3); D37; card #1238.
 
-## D231. #1319: the real-drive stats pass prints aggregates only
+## D243. #1319: the real-drive stats pass prints aggregates only
 
 **Decision.** The PowerShell stats pass over Nano's drive prints only aggregates: size-bucket histogram, file and directory counts, depth and fan-out histograms, hardlink, symlink and reparse-point counts, top-N extension counts with the rest folded into `other`, and duplicate rate by size class. No paths, names or hashes appear in the output. Hashing a content sample is an opt-in switch, off by default, shown in the design Nano approves; the hashes stay on his machine and only counts leave.
 **Why.** Card #1319 and 600-build-plan §8 allow aggregate stats only, with no file names unless Nano agrees; real names and paths are `sensitive` (card #598 Q6). Rare extensions and file hashes fingerprint real data, so they are folded or kept local. The switch lets Nano choose the extra disk read.

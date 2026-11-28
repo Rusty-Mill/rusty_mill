@@ -4,7 +4,7 @@
   Read-only aggregate shape of the given roots, for Let Em Loose card #1319.
 .DESCRIPTION
   Walks each root without following reparse points (symlinks, junctions) and writes one JSON file of
-  counts and histograms. It writes no file names, paths or hashes (D231). With -SampleHash it hashes
+  counts and histograms. It writes no file names, paths or hashes (D243). With -SampleHash it hashes
   files in a random sample of same-size groups to estimate the byte-identical duplicate rate; the
   hashes stay in memory and only counts are written. Nothing on the scanned roots is modified.
 .EXAMPLE
